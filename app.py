@@ -965,7 +965,7 @@ def map_inventory_current_stock(inv_file_obj):
 
     # Stock quantity column selection
     if actual_date_cols:
-        st.markdown("**📅 Inventory has date-based stock columns**")
+        st.markdown("**📅 Inventory Date Selection**")
         
         # Parse all date columns to find latest
         date_map = {}
@@ -983,21 +983,24 @@ def map_inventory_current_stock(inv_file_obj):
             latest_col = sorted_dates[0][0]
             latest_date = sorted_dates[0][1]
             
-            # NEW: User-friendly calendar date picker
-            st.markdown("**Select Inventory Date:**")
-            
-            # Get available dates
+            # Show available date range
             available_dates = sorted([d for d in date_map.values()], reverse=True)
             min_date = min(available_dates).date()
             max_date = max(available_dates).date()
             
+            st.info(f"""
+            📊 **Inventory File Contains:** {len(date_map)} date snapshots  
+            📅 **Date Range:** {min_date} to {max_date}  
+            ✨ **Latest Date ({max_date}) automatically selected for PO calculations**
+            """)
+            
             # Calendar date input with latest date as default
             selected_date_input = st.date_input(
-                "📅 Pick Inventory Date",
+                "📅 Select Inventory Date (Latest date recommended)",
                 value=latest_date.date(),
                 min_value=min_date,
                 max_value=max_date,
-                help=f"Available range: {min_date} to {max_date}. Latest date selected by default."
+                help=f"System automatically selects the latest date ({max_date}) for most accurate PO recommendations. You can select a historical date if needed."
             )
             
             # Find the column with the closest matching date
@@ -1427,15 +1430,36 @@ with tab_item:
 with tab_po:
     st.subheader("📦 Purchase Order Recommendation Engine")
     
+    # ===== CRITICAL: INVENTORY REQUIREMENT =====
+    if inv_file is None:
+        st.error("### ⚠️ OMS Inventory Required")
+        st.markdown("""
+        **Purchase Order calculations cannot be generated without current inventory data.**
+        
+        Please upload your OMS Inventory file in the sidebar to:
+        - ✅ View current stock levels
+        - ✅ Calculate Days Left at current velocity
+        - ✅ Generate intelligent PO recommendations
+        - ✅ Determine which SKUs need urgent ordering
+        
+        👈 **Upload OMS Inventory in the sidebar** to activate PO recommendations.
+        """)
+        st.info("💡 **Tip:** The system will automatically detect the latest inventory date from your file and use it for calculations.")
+        st.stop()
+    
     # First, load inventory ONCE at the top (outside velocity mode selection)
     # This ensures stock data persists regardless of velocity mode changes
     current_stock_global = pd.Series(dtype=float)
     inv_date_used = None
     inv_meta = None
     
-    if inv_file is not None:
-        with st.expander("🗂️ Inventory Mapping", expanded=True):
-            current_stock_global, inv_date_used, inv_meta = map_inventory_current_stock(inv_file)
+    with st.expander("🗂️ Inventory Mapping", expanded=True):
+        current_stock_global, inv_date_used, inv_meta = map_inventory_current_stock(inv_file)
+        
+        # Show inventory date prominently
+        if inv_date_used:
+            st.success(f"📅 **Inventory Date:** {inv_date_used.strftime('%B %d, %Y')} (Latest available date)")
+            st.caption(f"All PO calculations are based on stock levels as of {inv_date_used.strftime('%Y-%m-%d')}")
     
     st.divider()
     
