@@ -1,1156 +1,946 @@
 #!/usr/bin/env python3
 """
-Yash Gallery Complete ERP System
-- Inventory consolidation with OMS SKU mapping
-- Sales analytics from all marketplaces (ZIP support)
-- PO/Reorder recommendations
-- AI Demand Forecasting
-- Multi-warehouse management
+Progressino / Yash Gallery Complete ERP System (Refactored)
+Merged + Refactored from:
+- Yash Gallery ERP v3.0 (Fixed metrics + panel-wise drilldown)
+- Progressino ERP UI/Theme + PO Engine corrections
+
+Key Fixes Preserved:
+1) Amazon Date Basis selection (Shipment/Invoice/Order)
+2) Sold/Return metrics based on SUM(Quantity) (pieces), not row count
+3) FreeReplacement handling include/exclude
+4) Panel-wise (Marketplace-wise) SKU drilldown (Sold/Return/Net per panel)
+5) PO engine ranges updated (Lead time up to 180, Target up to 180, Safety up to 100, Velocity modes)
 """
 
-import streamlit as st
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
 import io
 import zipfile
+import warnings
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple, List
+
+import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit as st
 from prophet import Prophet
-import warnings
-warnings.filterwarnings('ignore')
 
-# ==========================================
-# PAGE CONFIG
-# ==========================================
-st.set_page_config(
-    page_title="Yash Gallery ERP",
-    page_icon="📊",
-    layout="wide"
+warnings.filterwarnings("ignore")
+
+
+# ==========================================================
+# 1) APP CONFIG + THEME
+# ==========================================================
+APP_TITLE = "Progressino ERP"
+APP_ICON = "🧠"
+DEFAULT_LAYOUT = "wide"
+
+st.set_page_config(page_title=APP_TITLE, layout=DEFAULT_LAYOUT, page_icon=APP_ICON)
+
+# --- PROFESSIONAL NAVY & WHITE CSS ---
+st.markdown(
+    """
+<style>
+    .stApp {
+        background-color: #F8F9FA;
+        font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }
+    section[data-testid="stSidebar"] {
+        background-color: #FFFFFF;
+        border-right: 1px solid #E5E7EB;
+    }
+    div[data-testid="stMetric"] {
+        background-color: #FFFFFF;
+        border: 1px solid #E5E7EB;
+        padding: 15px;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+        border-left: 5px solid #002B5B;
+        transition: transform 0.2s;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #6B7280;
+        font-size: 0.9rem;
+        font-weight: 600;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #111827;
+        font-size: 1.8rem !important;
+        font-weight: 700;
+    }
+    div.stButton > button {
+        background: linear-gradient(135deg, #002B5B 0%, #1e40af 100%);
+        color: white;
+        border: none;
+        padding: 0.5rem 1.2rem;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    div.stButton > button:hover {
+        box-shadow: 0 4px 12px rgba(30, 64, 175, 0.3);
+        transform: translateY(-1px);
+    }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: white;
+        border-radius: 6px;
+        color: #4B5563;
+        font-weight: 600;
+        border: 1px solid #E5E7EB;
+        padding: 8px 20px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #002B5B !important;
+        color: white !important;
+        border: 1px solid #002B5B;
+    }
+    .ai-box {
+        background-color: #FFFFFF;
+        border-left: 4px solid #6366F1;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        margin-bottom: 10px;
+        font-size: 0.95rem;
+    }
+    .success-box { background-color: #ECFDF5; border-left: 4px solid #10B981; padding: 12px; border-radius: 6px; color: #065F46; }
+    .warning-box { background-color: #FFFBEB; border-left: 4px solid #F59E0B; padding: 12px; border-radius: 6px; color: #92400E; }
+    h1, h2, h3 { color: #002B5B !important; letter-spacing: -0.5px; }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
-st.title("📊 Yash Gallery Complete ERP System")
-st.caption("Inventory + Sales + PO Recommendations with OMS SKU Mapping")
+st.title("🚀 Yash Gallery Command Center")
+st.caption("Inventory + Sales + PO Recommendations with OMS SKU Mapping | Refactored Build")
 
-# ==========================================
-# SESSION STATE INITIALIZATION
-# ==========================================
-if 'sku_mapping' not in st.session_state:
-    st.session_state.sku_mapping = {}
-if 'sales_df' not in st.session_state:
-    st.session_state.sales_df = pd.DataFrame()
-if 'inventory_df' not in st.session_state:
-    st.session_state.inventory_df = pd.DataFrame()
 
-# ==========================================
-# HELPER FUNCTIONS - SKU MAPPING
-# ==========================================
+# ==========================================================
+# 2) SESSION STATE
+# ==========================================================
+def _init_state():
+    if "sku_mapping" not in st.session_state:
+        st.session_state.sku_mapping = {}
+    if "sales_df" not in st.session_state:
+        st.session_state.sales_df = pd.DataFrame()
+    if "inventory_df" not in st.session_state:
+        st.session_state.inventory_df = pd.DataFrame()
+    if "transfer_df" not in st.session_state:
+        st.session_state.transfer_df = pd.DataFrame()
+    if "amazon_date_basis" not in st.session_state:
+        st.session_state.amazon_date_basis = "Shipment Date"
+    if "include_replacements" not in st.session_state:
+        st.session_state.include_replacements = False
 
-def load_sku_mapping(mapping_file) -> dict:
-    """Load SKU mapping from Excel with multiple sheets."""
-    mapping_dict = {}
-    
+
+_init_state()
+
+
+# ==========================================================
+# 3) UTILITIES / HELPERS
+# ==========================================================
+@dataclass(frozen=True)
+class SalesLoadConfig:
+    date_basis: str = "Shipment Date"          # Shipment Date / Invoice Date / Order Date
+    include_replacements: bool = False         # include FreeReplacement in sold qty
+
+
+def _clean_sku(x) -> str:
+    return str(x).strip().replace('"""', "").replace("SKU:", "").strip()
+
+
+@st.cache_data(show_spinner=False)
+def load_sku_mapping(mapping_file) -> Dict[str, str]:
+    """
+    Load SKU mapping from Excel with multiple sheets.
+    Tries to auto-detect seller sku column and oms sku column.
+    """
+    mapping_dict: Dict[str, str] = {}
     try:
         xls = pd.ExcelFile(mapping_file)
-        
         for sheet_name in xls.sheet_names:
             df = pd.read_excel(mapping_file, sheet_name=sheet_name)
-            
-            # Find columns
+            if df.empty or len(df.columns) < 2:
+                continue
+
+            # Detect columns
             seller_col = None
             oms_col = None
-            
+
             for col in df.columns:
                 col_lower = str(col).lower()
-                if any(x in col_lower for x in ['seller', 'myntra', 'messho', 'snapdeal', 'sku id']):
-                    if 'sku' in col_lower:
-                        seller_col = col
-                elif 'oms' in col_lower and 'sku' in col_lower:
+                if ("sku" in col_lower) and any(k in col_lower for k in ["seller", "myntra", "meesho", "snapdeal", "sku id"]):
+                    seller_col = col
+                if ("oms" in col_lower) and ("sku" in col_lower):
                     oms_col = col
-            
-            if seller_col is None and len(df.columns) > 1:
-                seller_col = df.columns[1]
+
+            if seller_col is None:
+                seller_col = df.columns[1] if len(df.columns) > 1 else None
             if oms_col is None:
                 oms_col = df.columns[-1]
-            
-            if seller_col and oms_col:
-                for _, row in df.iterrows():
-                    seller_sku = str(row[seller_col]).strip()
-                    oms_sku = str(row[oms_col]).strip()
-                    
-                    if seller_sku and oms_sku and seller_sku != 'nan' and oms_sku != 'nan':
-                        mapping_dict[seller_sku] = oms_sku
-        
+
+            if not seller_col or not oms_col:
+                continue
+
+            for _, row in df.iterrows():
+                k = _clean_sku(row.get(seller_col, ""))
+                v = _clean_sku(row.get(oms_col, ""))
+                if k and v and k.lower() != "nan" and v.lower() != "nan":
+                    mapping_dict[k] = v
+
         return mapping_dict
-        
-    except Exception as e:
-        st.error(f"Error loading SKU mapping: {e}")
+    except Exception:
         return {}
 
 
-def map_to_oms_sku(seller_sku, mapping_dict):
-    """Map seller SKU to OMS SKU with cleaning."""
+def map_to_oms_sku(seller_sku, mapping_dict: Dict[str, str]) -> Optional[str]:
     if pd.isna(seller_sku):
         return None
-    
-    # Clean SKU
-    clean_sku = str(seller_sku).strip().replace('"""', '').replace('SKU:', '').strip()
-    return mapping_dict.get(clean_sku, clean_sku)
+    clean = _clean_sku(seller_sku)
+    return mapping_dict.get(clean, clean)
 
 
-# ==========================================
-# FILE READING HELPERS
-# ==========================================
+def get_parent_sku(oms_sku) -> str:
+    if pd.isna(oms_sku):
+        return oms_sku
+    s = str(oms_sku)
+    for suffix in ["_Myntra", "_Flipkart", "_Amazon", "_Meesho", "_MYNTRA", "_FLIPKART", "_AMAZON", "_MEESHO"]:
+        if s.endswith(suffix):
+            s = s.replace(suffix, "")
+            break
+    return s
 
-def read_zip_or_csv(file_obj, is_zip=False):
-    """Read CSV from ZIP or direct file."""
+
+def read_zip_first_csv(file_obj) -> pd.DataFrame:
+    """Reads first CSV found inside ZIP."""
     try:
-        if is_zip:
-            with zipfile.ZipFile(file_obj, 'r') as zip_ref:
-                csv_files = [f for f in zip_ref.namelist() if f.endswith('.csv')]
-                if csv_files:
-                    with zip_ref.open(csv_files[0]) as f:
-                        return pd.read_csv(f)
+        with zipfile.ZipFile(file_obj, "r") as z:
+            csvs = [f for f in z.namelist() if f.lower().endswith(".csv")]
+            if not csvs:
+                return pd.DataFrame()
+            with z.open(csvs[0]) as f:
+                return pd.read_csv(f)
+    except Exception:
+        return pd.DataFrame()
+
+
+def read_csv_file(file_obj) -> pd.DataFrame:
+    try:
+        file_obj.seek(0)
+        return pd.read_csv(file_obj)
+    except Exception:
+        return pd.DataFrame()
+
+
+def detect_order_id_col(df: pd.DataFrame) -> Optional[str]:
+    for c in df.columns:
+        if str(c).strip().lower() in ["order id", "order-id", "orderid"]:
+            return c
+    return None
+
+
+def build_panel_pivots(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Returns 3 pivots:
+      - Sold pivot: SKU x Panel -> Shipment Qty (pieces)
+      - Return pivot: SKU x Panel -> Return Qty (pieces)
+      - Net pivot: SKU x Panel -> Net Units (Units_Effective)
+    """
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    w = df.copy()
+    w["Panel"] = w["Source"].astype(str)
+
+    sold = (
+        w[w["Transaction Type"] == "Shipment"]
+        .groupby(["Sku", "Panel"])["Quantity"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+    ret = (
+        w[w["Transaction Type"] == "Refund"]
+        .groupby(["Sku", "Panel"])["Quantity"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+    net = (
+        w.groupby(["Sku", "Panel"])["Units_Effective"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+
+    sold.columns = [f"{c} | Sold" for c in sold.columns]
+    ret.columns = [f"{c} | Return" for c in ret.columns]
+    net.columns = [f"{c} | Net" for c in net.columns]
+    return sold, ret, net
+
+
+# ==========================================================
+# 4) DATA LOADERS
+# ==========================================================
+def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, cfg: SalesLoadConfig) -> pd.DataFrame:
+    """
+    Amazon sales loader:
+    - ZIP CSV
+    - date basis selection
+    - replacement include/exclude
+    - Units_Effective: Refund negative, Cancel 0, Shipment positive
+    """
+    df = read_zip_first_csv(zip_file)
+    if df.empty or "Sku" not in df.columns:
+        return pd.DataFrame()
+
+    df["Sku"] = df["Sku"].astype(str)
+    df["OMS_SKU"] = df["Sku"].apply(lambda x: map_to_oms_sku(x, mapping))
+
+    # date basis safe fallback
+    preferred = cfg.date_basis
+    if preferred not in df.columns:
+        if "Shipment Date" in df.columns:
+            preferred = "Shipment Date"
+        elif "Invoice Date" in df.columns:
+            preferred = "Invoice Date"
+        elif "Order Date" in df.columns:
+            preferred = "Order Date"
         else:
-            file_obj.seek(0)
-            return pd.read_csv(file_obj)
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-    return pd.DataFrame()
+            preferred = df.columns[0]
+
+    df["TxnDate"] = pd.to_datetime(df[preferred], errors="coerce")
+    df["Quantity"] = pd.to_numeric(df.get("Quantity", 0), errors="coerce").fillna(0)
+
+    def classify_txn(x) -> str:
+        s = str(x).lower()
+        if "refund" in s or "return" in s:
+            return "Refund"
+        if "cancel" in s:
+            return "Cancel"
+        if "freereplacement" in s or "replacement" in s:
+            return "FreeReplacement"
+        return "Shipment"
+
+    df["TxnType"] = df.get("Transaction Type", "").apply(classify_txn)
+
+    # exclude replacements from sold qty if unchecked
+    if not cfg.include_replacements:
+        df.loc[df["TxnType"] == "FreeReplacement", "Quantity"] = 0
+
+    df["Units_Effective"] = np.where(
+        df["TxnType"] == "Refund",
+        -df["Quantity"],
+        np.where(df["TxnType"] == "Cancel", 0, df["Quantity"]),
+    )
+
+    df["Source"] = source
+
+    # OrderId best effort
+    oid_col = detect_order_id_col(df)
+    df["OrderId"] = df[oid_col] if oid_col else np.nan
+
+    out = df[["OMS_SKU", "TxnDate", "TxnType", "Quantity", "Units_Effective", "Source", "OrderId"]].copy()
+    out.columns = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "Source", "OrderId"]
+    out = out.dropna(subset=["TxnDate"])
+    return out
 
 
-# ==========================================
-# SALES DATA LOADERS
-# ==========================================
-
-def load_amazon_sales(file_obj, sku_mapping, source_name):
-    """Load Amazon sales from ZIP."""
+def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
     try:
-        df = read_zip_or_csv(file_obj, is_zip=True)
-        
-        if df.empty or 'Sku' not in df.columns:
-            return pd.DataFrame()
-        
-        # Map to OMS SKU
-        df['OMS_SKU'] = df['Sku'].apply(lambda x: map_to_oms_sku(x, sku_mapping))
-        df['Order Date'] = pd.to_datetime(df['Order Date'], errors='coerce')
-        df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0)
-        df['Source'] = source_name
-        
-        # Transaction type
-        df['TxnType'] = df['Transaction Type'].apply(
-            lambda x: 'Refund' if 'return' in str(x).lower() or 'refund' in str(x).lower()
-            else 'Cancel' if 'cancel' in str(x).lower()
-            else 'Shipment'
-        )
-        
-        # Calculate units
-        df['Units_Effective'] = df.apply(
-            lambda row: -row['Quantity'] if row['TxnType'] == 'Refund' else row['Quantity'], axis=1
-        )
-        
-        sales = df[['OMS_SKU', 'Order Date', 'TxnType', 'Quantity', 'Units_Effective', 'Source']].copy()
-        sales.columns = ['Sku', 'TxnDate', 'Transaction Type', 'Quantity', 'Units_Effective', 'Source']
-        
-        st.success(f"✅ {source_name}: {len(sales):,} records")
-        return sales
-        
-    except Exception as e:
-        st.error(f"Error loading {source_name}: {e}")
-        return pd.DataFrame()
-
-
-def load_flipkart_sales(file_obj, sku_mapping):
-    """Load Flipkart sales."""
-    try:
-        df = pd.read_excel(file_obj, sheet_name='Sales Report')
-        
-        # Clean and map SKU
-        df['SKU_Clean'] = df['SKU'].astype(str).str.replace('"""', '').str.replace('SKU:', '').str.strip()
-        df['OMS_SKU'] = df['SKU_Clean'].apply(lambda x: map_to_oms_sku(x, sku_mapping))
-        df['Order Date'] = pd.to_datetime(df['Order Date'], errors='coerce')
-        df['Quantity'] = pd.to_numeric(df['Item Quantity'], errors='coerce').fillna(0)
-        df['Source'] = 'Flipkart'
-        
-        df['TxnType'] = df['Event Sub Type'].apply(
-            lambda x: 'Refund' if 'return' in str(x).lower() else 'Shipment'
-        )
-        
-        df['Units_Effective'] = df.apply(
-            lambda row: -row['Quantity'] if row['TxnType'] == 'Refund' else row['Quantity'], axis=1
-        )
-        
-        sales = df[['OMS_SKU', 'Order Date', 'TxnType', 'Quantity', 'Units_Effective', 'Source']].copy()
-        sales.columns = ['Sku', 'TxnDate', 'Transaction Type', 'Quantity', 'Units_Effective', 'Source']
-        
-        st.success(f"✅ Flipkart: {len(sales):,} records")
-        return sales
-        
-    except Exception as e:
-        st.error(f"Error loading Flipkart: {e}")
-        return pd.DataFrame()
-
-
-def load_meesho_sales(file_obj, sku_mapping):
-    """Load Meesho sales from ZIP."""
-    try:
-        with zipfile.ZipFile(file_obj, 'r') as zip_ref:
-            excel_files = [f for f in zip_ref.namelist() if 'tcs_sales.xlsx' in f and 'return' not in f.lower()]
-            
-            if excel_files:
-                with zip_ref.open(excel_files[0]) as f:
-                    df = pd.read_excel(f)
-                    
-                    df['OMS_SKU'] = df['identifier'].apply(lambda x: map_to_oms_sku(x, sku_mapping))
-                    df['Order Date'] = pd.to_datetime(df['order_date'], errors='coerce')
-                    df['Quantity'] = pd.to_numeric(df['quantity'], errors='coerce').fillna(0)
-                    df['Source'] = 'Meesho'
-                    df['TxnType'] = 'Shipment'
-                    df['Units_Effective'] = df['Quantity']
-                    
-                    sales = df[['OMS_SKU', 'Order Date', 'TxnType', 'Quantity', 'Units_Effective', 'Source']].copy()
-                    sales.columns = ['Sku', 'TxnDate', 'Transaction Type', 'Quantity', 'Units_Effective', 'Source']
-                    
-                    st.success(f"✅ Meesho: {len(sales):,} records")
-                    return sales
-        
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Error loading Meesho: {e}")
-        return pd.DataFrame()
-
-
-def load_stock_transfer(file_obj):
-    """Load Amazon Stock Transfer data (FC movements)."""
-    try:
-        df = read_zip_or_csv(file_obj, is_zip=True)
-        
+        df = pd.read_excel(xlsx_file, sheet_name="Sales Report")
         if df.empty:
             return pd.DataFrame()
-        
-        # Get relevant columns
-        transfer_df = df[['Invoice Date', 'Ship From Fc', 'Ship To Fc', 'Quantity', 'Transaction Type']].copy()
-        transfer_df['Invoice Date'] = pd.to_datetime(transfer_df['Invoice Date'], errors='coerce')
-        transfer_df['Quantity'] = pd.to_numeric(transfer_df['Quantity'], errors='coerce').fillna(0)
-        
-        st.success(f"✅ Stock Transfer: {len(transfer_df):,} movements, {transfer_df['Quantity'].sum():,.0f} units")
-        return transfer_df
-        
-    except Exception as e:
-        st.error(f"Error loading Stock Transfer: {e}")
-        return pd.DataFrame()
 
+        df["SKU_Clean"] = df["SKU"].astype(str).apply(_clean_sku)
+        df["OMS_SKU"] = df["SKU_Clean"].apply(lambda x: map_to_oms_sku(x, mapping))
+        df["TxnDate"] = pd.to_datetime(df.get("Order Date"), errors="coerce")
+        df["Quantity"] = pd.to_numeric(df.get("Item Quantity", 0), errors="coerce").fillna(0)
+        df["Source"] = "Flipkart"
 
+        df["TxnType"] = df.get("Event Sub Type", "").apply(
+            lambda x: "Refund" if "return" in str(x).lower() else "Shipment"
+        )
+        df["Units_Effective"] = np.where(df["TxnType"] == "Refund", -df["Quantity"], df["Quantity"])
 
-# ==========================================
-# INVENTORY DATA LOADERS
-# ==========================================
-
-def load_oms_inventory(file_obj):
-    """Load OMS inventory."""
-    try:
-        df = pd.read_csv(file_obj)
-        inv = df[['Item SkuCode', 'Inventory']].copy()
-        inv.columns = ['OMS_SKU', 'OMS_Inventory']
-        inv = inv.drop_duplicates(subset=['OMS_SKU'], keep='first')
-        st.success(f"✅ OMS: {len(inv):,} SKUs, {inv['OMS_Inventory'].sum():,.0f} units")
-        return inv
-    except Exception as e:
-        st.error(f"Error loading OMS: {e}")
-        return pd.DataFrame()
-
-
-def load_flipkart_inventory(file_obj, sku_mapping):
-    """Load Flipkart inventory."""
-    try:
-        df = pd.read_csv(file_obj)
-        df['OMS_SKU'] = df['SKU'].apply(lambda x: map_to_oms_sku(x, sku_mapping))
-        
-        inv = df.groupby('OMS_SKU').agg({
-            'Live on Website': 'sum'
-        }).reset_index()
-        inv.columns = ['OMS_SKU', 'Flipkart_Live']
-        
-        st.success(f"✅ Flipkart Inv: {len(inv):,} SKUs, {inv['Flipkart_Live'].sum():,.0f} live")
-        return inv
-    except Exception as e:
-        st.error(f"Error loading Flipkart inventory: {e}")
-        return pd.DataFrame()
-
-
-def load_myntra_inventory(file_obj, sku_mapping):
-    """Load Myntra inventory."""
-    try:
-        df = pd.read_csv(file_obj)
-        
-        if 'seller sku code' in df.columns:
-            df['OMS_SKU'] = df['seller sku code'].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+        # OrderId
+        if "Order ID" in df.columns:
+            df["OrderId"] = df["Order ID"]
+        elif "Order Id" in df.columns:
+            df["OrderId"] = df["Order Id"]
         else:
-            df['OMS_SKU'] = df['sku code'].apply(lambda x: map_to_oms_sku(x, sku_mapping))
-        
-        inv = df.groupby('OMS_SKU').agg({
-            'sellable inventory count': 'sum'
-        }).reset_index()
-        inv.columns = ['OMS_SKU', 'Myntra_Inventory']
-        
-        st.success(f"✅ Myntra Inv: {len(inv):,} SKUs, {inv['Myntra_Inventory'].sum():,.0f} units")
-        return inv
-    except Exception as e:
-        st.error(f"Error loading Myntra inventory: {e}")
+            df["OrderId"] = np.nan
+
+        out = df[["OMS_SKU", "TxnDate", "TxnType", "Quantity", "Units_Effective", "Source", "OrderId"]].copy()
+        out.columns = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "Source", "OrderId"]
+        return out.dropna(subset=["TxnDate"])
+    except Exception:
         return pd.DataFrame()
 
 
-def load_amazon_inventory(file_obj, sku_mapping):
-    """Load Amazon inventory (excluding ZNNE to avoid OMS duplicates)."""
+def load_meesho_sales(zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
+    """Meesho sales from ZIP (tcs_sales.xlsx)."""
     try:
-        df = pd.read_csv(file_obj)
-        
-        # CRITICAL: Exclude ZNNE location - this is already in OMS inventory (VDN/TTP)
-        # ZNNE = Your own warehouse, not Amazon FC
-        if 'Location' in df.columns:
-            original_count = len(df)
-            df = df[df['Location'] != 'ZNNE']
-            excluded_count = original_count - len(df)
-            if excluded_count > 0:
-                st.info(f"ℹ️ Excluded {excluded_count} ZNNE records (already in OMS inventory)")
-        
-        df['OMS_SKU'] = df['MSKU'].apply(lambda x: map_to_oms_sku(x, sku_mapping))
-        
-        inv = df.groupby('OMS_SKU').agg({
-            'Ending Warehouse Balance': 'sum'
-        }).reset_index()
-        inv.columns = ['OMS_SKU', 'Amazon_Inventory']
-        
-        st.success(f"✅ Amazon Inv: {len(inv):,} SKUs, {inv['Amazon_Inventory'].sum():,.0f} units (FCs only, excluding ZNNE)")
-        return inv
-    except Exception as e:
-        st.error(f"Error loading Amazon inventory: {e}")
+        with zipfile.ZipFile(zip_file, "r") as z:
+            excel_files = [f for f in z.namelist() if "tcs_sales" in f.lower() and f.lower().endswith(".xlsx") and "return" not in f.lower()]
+            if not excel_files:
+                return pd.DataFrame()
+            with z.open(excel_files[0]) as f:
+                df = pd.read_excel(f)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df["OMS_SKU"] = df.get("identifier").apply(lambda x: map_to_oms_sku(x, mapping))
+        df["TxnDate"] = pd.to_datetime(df.get("order_date"), errors="coerce")
+        df["Quantity"] = pd.to_numeric(df.get("quantity", 0), errors="coerce").fillna(0)
+        df["Source"] = "Meesho"
+        df["TxnType"] = "Shipment"
+        df["Units_Effective"] = df["Quantity"]
+        df["OrderId"] = df.get("order_id", np.nan)
+
+        out = df[["OMS_SKU", "TxnDate", "TxnType", "Quantity", "Units_Effective", "Source", "OrderId"]].copy()
+        out.columns = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "Source", "OrderId"]
+        return out.dropna(subset=["TxnDate"])
+    except Exception:
         return pd.DataFrame()
 
 
-# ==========================================
-# SIDEBAR - FILE UPLOADS
-# ==========================================
+def load_stock_transfer(zip_file) -> pd.DataFrame:
+    """Amazon stock transfer data (FC movements)."""
+    df = read_zip_first_csv(zip_file)
+    if df.empty:
+        return pd.DataFrame()
 
-st.sidebar.header("📂 File Uploads")
+    needed = ["Invoice Date", "Ship From Fc", "Ship To Fc", "Quantity", "Transaction Type"]
+    if not all(c in df.columns for c in needed):
+        return pd.DataFrame()
 
-# SKU Mapping
-st.sidebar.markdown("### 1️⃣ SKU Mapping (Required)")
-mapping_file = st.sidebar.file_uploader(
-    "SKU Mapping Excel",
-    type=['xlsx'],
-    key='mapping',
-    help="Copy_of_All_penal_replace_sku.xlsx"
+    t = df[needed].copy()
+    t["Invoice Date"] = pd.to_datetime(t["Invoice Date"], errors="coerce")
+    t["Quantity"] = pd.to_numeric(t["Quantity"], errors="coerce").fillna(0)
+    return t
+
+
+def load_inventory_files(
+    oms_csv,
+    fk_csv,
+    myntra_csv,
+    amz_csv,
+    mapping: Dict[str, str],
+) -> pd.DataFrame:
+    """
+    Consolidated inventory:
+    - OMS (Item SkuCode, Inventory)
+    - Flipkart (SKU, Live on Website)
+    - Myntra (seller sku code / sku code, sellable inventory count)
+    - Amazon (MSKU, Ending Warehouse Balance) excluding ZNNE if present
+    Grouped by Parent SKU.
+    """
+    dfs: List[pd.DataFrame] = []
+
+    if oms_csv:
+        d = read_csv_file(oms_csv)
+        if not d.empty and {"Item SkuCode", "Inventory"}.issubset(d.columns):
+            d = d.rename(columns={"Item SkuCode": "OMS_SKU", "Inventory": "OMS_Stock"})
+            d["OMS_SKU"] = d["OMS_SKU"].astype(str)
+            dfs.append(d[["OMS_SKU", "OMS_Stock"]].groupby("OMS_SKU", as_index=False).sum())
+
+    if fk_csv:
+        d = read_csv_file(fk_csv)
+        if not d.empty and {"SKU", "Live on Website"}.issubset(d.columns):
+            d["OMS_SKU"] = d["SKU"].apply(lambda x: map_to_oms_sku(x, mapping))
+            fk = d.groupby("OMS_SKU", as_index=False)["Live on Website"].sum().rename(columns={"Live on Website": "FK_Stock"})
+            dfs.append(fk)
+
+    if myntra_csv:
+        d = read_csv_file(myntra_csv)
+        if not d.empty:
+            sku_col = None
+            for c in d.columns:
+                cl = str(c).lower()
+                if cl in ["seller sku code", "sku code"] or ("sku" in cl and "code" in cl):
+                    sku_col = c
+                    break
+            inv_col = None
+            for c in d.columns:
+                if str(c).lower().strip() == "sellable inventory count":
+                    inv_col = c
+                    break
+
+            if sku_col and inv_col:
+                d["OMS_SKU"] = d[sku_col].apply(lambda x: map_to_oms_sku(x, mapping))
+                myn = d.groupby("OMS_SKU", as_index=False)[inv_col].sum().rename(columns={inv_col: "MYN_Stock"})
+                dfs.append(myn)
+
+    if amz_csv:
+        d = read_csv_file(amz_csv)
+        if not d.empty and {"MSKU", "Ending Warehouse Balance"}.issubset(d.columns):
+            if "Location" in d.columns:
+                d = d[d["Location"] != "ZNNE"]
+            d["OMS_SKU"] = d["MSKU"].apply(lambda x: map_to_oms_sku(x, mapping))
+            amz = d.groupby("OMS_SKU", as_index=False)["Ending Warehouse Balance"].sum().rename(columns={"Ending Warehouse Balance": "AMZ_Stock"})
+            dfs.append(amz)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    final = dfs[0]
+    for d in dfs[1:]:
+        final = pd.merge(final, d, on="OMS_SKU", how="outer")
+
+    stock_cols = [c for c in final.columns if c.endswith("_Stock")]
+    final[stock_cols] = final[stock_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    # Parent grouping
+    final["Parent"] = final["OMS_SKU"].apply(get_parent_sku)
+    final = final.groupby("Parent", as_index=False)[stock_cols].sum().rename(columns={"Parent": "OMS_SKU"})
+    final["Total_Inventory"] = final[stock_cols].sum(axis=1)
+
+    return final[final["Total_Inventory"] > 0].copy()
+
+
+# ==========================================================
+# 5) SIDEBAR (UPLOADS + LOAD BUTTON)
+# ==========================================================
+col1, col2, col3 = st.sidebar.columns([1, 2, 1])
+with col2:
+    try:
+        st.image("logo.png", use_container_width=True)
+    except Exception:
+        st.markdown("## Yash ERP")
+
+st.sidebar.divider()
+
+map_file = st.sidebar.file_uploader("1) SKU Mapping (Required)", type=["xlsx"], help="e.g., Copy_of_All_penal_replace_sku.xlsx")
+
+st.sidebar.markdown("### ⚙️ Amazon Sales Settings")
+st.session_state.amazon_date_basis = st.sidebar.selectbox(
+    "Amazon Date Basis",
+    ["Shipment Date", "Invoice Date", "Order Date"],
+    index=["Shipment Date", "Invoice Date", "Order Date"].index(st.session_state.amazon_date_basis)
+    if st.session_state.amazon_date_basis in ["Shipment Date", "Invoice Date", "Order Date"]
+    else 0,
+)
+st.session_state.include_replacements = st.sidebar.checkbox(
+    "Include FreeReplacement in Sold Qty",
+    value=bool(st.session_state.include_replacements),
 )
 
-if mapping_file:
-    st.session_state.sku_mapping = load_sku_mapping(mapping_file)
-    st.sidebar.success(f"✅ {len(st.session_state.sku_mapping):,} mappings")
+st.sidebar.markdown("### 2) Sales Data")
+f_b2c = st.sidebar.file_uploader("Amazon B2C (ZIP)", type=["zip"])
+f_b2b = st.sidebar.file_uploader("Amazon B2B (ZIP)", type=["zip"])
+f_transfer = st.sidebar.file_uploader("Amazon Stock Transfer (ZIP)", type=["zip"])
+f_fk = st.sidebar.file_uploader("Flipkart Sales (Excel)", type=["xlsx"])
+f_meesho = st.sidebar.file_uploader("Meesho Sales (ZIP)", type=["zip"])
+
+st.sidebar.markdown("### 3) Inventory Data")
+i_oms = st.sidebar.file_uploader("OMS Inventory (CSV)", type=["csv"])
+i_fk = st.sidebar.file_uploader("Flipkart Inventory (CSV)", type=["csv"])
+i_myntra = st.sidebar.file_uploader("Myntra Inventory (CSV)", type=["csv"])
+i_amz = st.sidebar.file_uploader("Amazon Inventory (CSV)", type=["csv"])
 
 st.sidebar.divider()
 
-# Sales Files
-st.sidebar.markdown("### 2️⃣ Sales Data")
 
-b2c_sales = st.sidebar.file_uploader("Amazon B2C (ZIP)", type=['zip'], key='b2c')
-b2b_sales = st.sidebar.file_uploader("Amazon B2B (ZIP)", type=['zip'], key='b2b')
-transfer_sales = st.sidebar.file_uploader("Amazon Stock Transfer (ZIP)", type=['zip'], key='transfer', 
-                                         help="FC-to-FC movement tracking (optional)")
-flipkart_sales = st.sidebar.file_uploader("Flipkart Sales (Excel)", type=['xlsx'], key='fk_sales')
-meesho_sales = st.sidebar.file_uploader("Meesho Sales (ZIP)", type=['zip'], key='meesho')
+def run_load_pipeline():
+    if not map_file:
+        st.sidebar.error("Please upload SKU Mapping first.")
+        return
 
-st.sidebar.divider()
+    st.session_state.sku_mapping = load_sku_mapping(map_file)
+    if not st.session_state.sku_mapping:
+        st.sidebar.warning("Mapping loaded but looks empty. Check mapping file format.")
+    else:
+        st.sidebar.success(f"✅ Mapping loaded: {len(st.session_state.sku_mapping):,} rows")
 
-# Inventory Files
-st.sidebar.markdown("### 3️⃣ Inventory Data")
+    cfg = SalesLoadConfig(
+        date_basis=st.session_state.amazon_date_basis,
+        include_replacements=st.session_state.include_replacements,
+    )
 
-oms_inv = st.sidebar.file_uploader("OMS Inventory", type=['csv'], key='oms_inv')
-flipkart_inv = st.sidebar.file_uploader("Flipkart Inventory", type=['csv'], key='fk_inv')
-myntra_inv = st.sidebar.file_uploader("Myntra Inventory", type=['csv'], key='myntra_inv')
-amazon_inv = st.sidebar.file_uploader("Amazon Inventory", type=['csv'], key='amz_inv')
+    sales_parts = []
+    if f_b2c:
+        sales_parts.append(load_amazon_sales(f_b2c, st.session_state.sku_mapping, "Amazon B2C", cfg))
+    if f_b2b:
+        sales_parts.append(load_amazon_sales(f_b2b, st.session_state.sku_mapping, "Amazon B2B", cfg))
+    if f_fk:
+        sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
+    if f_meesho:
+        sales_parts.append(load_meesho_sales(f_meesho, st.session_state.sku_mapping))
 
-# ==========================================
-# MAIN APP LOGIC
-# ==========================================
+    if sales_parts:
+        st.session_state.sales_df = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
+    else:
+        st.session_state.sales_df = pd.DataFrame()
 
+    st.session_state.inventory_df = load_inventory_files(i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping)
+
+    st.session_state.transfer_df = load_stock_transfer(f_transfer) if f_transfer else pd.DataFrame()
+
+
+if st.sidebar.button("🚀 Load Data"):
+    run_load_pipeline()
+    st.rerun()
+
+
+# ==========================================================
+# 6) GUARD (REQUIRE MAPPING)
+# ==========================================================
 if not st.session_state.sku_mapping:
-    st.info("""
-    ### 👋 Welcome to Yash Gallery ERP
-    
-    **Step 1:** Upload SKU Mapping file (sidebar)
-    **Step 2:** Upload Sales files (Amazon B2C/B2B, Flipkart, Meesho)
-    **Step 3:** Upload Inventory files (OMS, marketplaces)
-    **Step 4:** View analytics, generate POs, forecast demand!
-    
-    📄 Required: `Copy_of_All_penal_replace_sku.xlsx`
-    """)
+    st.info("👋 Upload **SKU Mapping** and click **Load Data** to initialize the system.")
     st.stop()
 
-st.divider()
 
-# Process Sales Data
-sales_dfs = []
+# ==========================================================
+# 7) TABS
+# ==========================================================
+tab_dashboard, tab_inventory, tab_po, tab_production, tab_forecast, tab_drill = st.tabs(
+    ["📊 Dashboard", "📦 Inventory", "🎯 PO Engine", "🏭 Production", "📈 AI Forecast", "🔍 Deep Drilldown"]
+)
 
-if b2c_sales:
-    sales_dfs.append(load_amazon_sales(b2c_sales, st.session_state.sku_mapping, "Amazon B2C"))
-if b2b_sales:
-    sales_dfs.append(load_amazon_sales(b2b_sales, st.session_state.sku_mapping, "Amazon B2B"))
-if flipkart_sales:
-    sales_dfs.append(load_flipkart_sales(flipkart_sales, st.session_state.sku_mapping))
-if meesho_sales:
-    sales_dfs.append(load_meesho_sales(meesho_sales, st.session_state.sku_mapping))
-
-if sales_dfs:
-    st.session_state.sales_df = pd.concat([df for df in sales_dfs if not df.empty], ignore_index=True)
-
-# Process Stock Transfer Data (optional)
-if 'transfer_df' not in st.session_state:
-    st.session_state.transfer_df = pd.DataFrame()
-
-if transfer_sales:
-    st.session_state.transfer_df = load_stock_transfer(transfer_sales)
-
-# Process Inventory Data
-inv_dfs = []
-
-if oms_inv:
-    inv_dfs.append(load_oms_inventory(oms_inv))
-if flipkart_inv and st.session_state.sku_mapping:
-    inv_dfs.append(load_flipkart_inventory(flipkart_inv, st.session_state.sku_mapping))
-if myntra_inv and st.session_state.sku_mapping:
-    inv_dfs.append(load_myntra_inventory(myntra_inv, st.session_state.sku_mapping))
-if amazon_inv and st.session_state.sku_mapping:
-    inv_dfs.append(load_amazon_inventory(amazon_inv, st.session_state.sku_mapping))
-
-if inv_dfs:
-    # Merge all inventory
-    consolidated_inv = inv_dfs[0]
-    for df in inv_dfs[1:]:
-        consolidated_inv = pd.merge(consolidated_inv, df, on='OMS_SKU', how='outer')
-    
-    # Fill NaN
-    numeric_cols = consolidated_inv.select_dtypes(include=[np.number]).columns
-    consolidated_inv[numeric_cols] = consolidated_inv[numeric_cols].fillna(0)
-    
-    # ===== PARENT SKU GROUPING =====
-    # Remove marketplace suffixes to get parent SKU
-    # Examples: 1001YKBEIGE-3XL_Myntra → 1001YKBEIGE-3XL
-    #           1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL (via mapping)
-    
-    def get_parent_sku(oms_sku):
-        """Remove marketplace suffixes like _Myntra, _Flipkart, etc."""
-        if pd.isna(oms_sku):
-            return oms_sku
-        sku_str = str(oms_sku)
-        # Remove common suffixes
-        for suffix in ['_Myntra', '_Flipkart', '_Amazon', '_Meesho', '_MYNTRA', '_FLIPKART']:
-            if sku_str.endswith(suffix):
-                sku_str = sku_str.replace(suffix, '')
-                break
-        return sku_str
-    
-    consolidated_inv['Parent_SKU'] = consolidated_inv['OMS_SKU'].apply(get_parent_sku)
-    
-    # Group by Parent SKU and sum all inventory
-    inv_cols = [c for c in consolidated_inv.columns if 'Inventory' in c or 'Live' in c]
-    
-    agg_dict = {col: 'sum' for col in inv_cols}
-    consolidated_inv_grouped = consolidated_inv.groupby('Parent_SKU').agg(agg_dict).reset_index()
-    
-    # Rename Parent_SKU back to OMS_SKU for consistency
-    consolidated_inv_grouped = consolidated_inv_grouped.rename(columns={'Parent_SKU': 'OMS_SKU'})
-    
-    # Calculate totals
-    consolidated_inv_grouped['Total_Inventory'] = consolidated_inv_grouped[inv_cols].sum(axis=1)
-    
-    # Remove rows where all inventory is 0
-    consolidated_inv_grouped = consolidated_inv_grouped[consolidated_inv_grouped['Total_Inventory'] > 0]
-    
-    st.session_state.inventory_df = consolidated_inv_grouped
-    
-    st.success(f"✅ Consolidated to {len(consolidated_inv_grouped):,} parent SKUs (removed marketplace duplicates)")
-
-
-# ==========================================
-# TABS
-# ==========================================
-
-tab_dashboard, tab_inventory, tab_po, tab_logistics, tab_forecast, tab_sku = st.tabs([
-    "📊 Sales Dashboard",
-    "📦 Inventory View", 
-    "🎯 PO Recommendations",
-    "🚚 Logistics & Transfers",
-    "🤖 AI Forecast",
-    "🔍 SKU Drilldown"
-])
-
-# ==========================================
-# TAB 1: SALES DASHBOARD
-# ==========================================
-
+# ----------------------------------------------------------
+# TAB 1: DASHBOARD (FIXED METRICS: SUM QUANTITY, RETURN%)
+# ----------------------------------------------------------
 with tab_dashboard:
-    st.subheader("📊 Sales Analytics Dashboard")
-    
-    if st.session_state.sales_df.empty:
-        st.warning("⚠️ No sales data loaded. Upload sales files in sidebar.")
+    df = st.session_state.sales_df
+
+    if df.empty:
+        st.warning("⚠️ No sales data loaded. Upload sales files and click Load Data.")
     else:
-        sales_df = st.session_state.sales_df
-        
-        # Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        shipments = len(sales_df[sales_df['Transaction Type'] == 'Shipment'])
-        returns = len(sales_df[sales_df['Transaction Type'] == 'Refund'])
-        net_units = sales_df['Units_Effective'].sum()
-        return_rate = (returns / shipments * 100) if shipments > 0 else 0
-        
-        col1.metric("📦 Total Transactions", f"{len(sales_df):,}")
-        col2.metric("✅ Shipments", f"{shipments:,}")
-        col3.metric("↩️ Returns", f"{returns:,}")
-        col4.metric("📊 Return Rate", f"{return_rate:.1f}%")
-        
+        df = df.copy()
+        df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+        df["Units_Effective"] = pd.to_numeric(df["Units_Effective"], errors="coerce").fillna(0)
+
+        sold_pcs = df[df["Transaction Type"] == "Shipment"]["Quantity"].sum()
+        ret_pcs = df[df["Transaction Type"] == "Refund"]["Quantity"].sum()
+        net_units = df["Units_Effective"].sum()
+
+        # Orders: prefer OrderId unique if present
+        if "OrderId" in df.columns:
+            ship_orders = df[df["Transaction Type"] == "Shipment"]["OrderId"].nunique()
+            orders = int(ship_orders) if ship_orders and not pd.isna(ship_orders) else int(len(df[df["Transaction Type"] == "Shipment"]))
+        else:
+            orders = int(len(df[df["Transaction Type"] == "Shipment"]))
+
+        rate = (ret_pcs / sold_pcs * 100) if sold_pcs > 0 else 0
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("🛒 Orders", f"{orders:,}")
+        k2.metric("✅ Sold Pieces", f"{int(sold_pcs):,}")
+        k3.metric("↩️ Return Pieces", f"{int(ret_pcs):,}")
+        k4.metric("📊 Return %", f"{rate:.1f}%")
+        k5.metric("📦 Net Units", f"{int(net_units):,}")
+
+        st.info(
+            f"Amazon Date Basis: **{st.session_state.amazon_date_basis}** | "
+            f"Include FreeReplacement: **{st.session_state.include_replacements}**"
+        )
+
         st.divider()
-        
-        # Sales by marketplace
-        st.markdown("### 📊 Sales by Marketplace")
-        
-        source_summary = sales_df.groupby('Source').agg({
-            'Units_Effective': 'sum',
-            'Sku': 'count'
-        }).reset_index()
-        source_summary.columns = ['Marketplace', 'Net Units', 'Orders']
-        source_summary = source_summary.sort_values('Orders', ascending=False)
-        
-        col_chart, col_table = st.columns([1, 1])
-        
-        with col_chart:
-            fig = px.pie(source_summary, values='Orders', names='Marketplace',
-                        title='Orders Distribution')
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col_table:
-            st.dataframe(source_summary, use_container_width=True, hide_index=True)
-        
-        st.divider()
-        
-        # Top SKUs
-        st.markdown("### 🏆 Top 20 Selling SKUs")
-        
-        top_skus = sales_df[sales_df['Transaction Type'] == 'Shipment'].groupby('Sku').agg({
-            'Units_Effective': 'sum'
-        }).reset_index().sort_values('Units_Effective', ascending=False).head(20)
-        
-        fig = px.bar(top_skus, x='Sku', y='Units_Effective', title='Top Sellers')
+
+        # Smart Narrative
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.markdown("#### 🧠 Smart Narrative")
+            max_d = pd.to_datetime(df["TxnDate"]).max()
+            if pd.isna(max_d):
+                max_d = datetime.now()
+
+            last7 = df[df["TxnDate"] > (max_d - timedelta(7))]["Units_Effective"].sum()
+            prev7 = df[(df["TxnDate"] <= (max_d - timedelta(7))) & (df["TxnDate"] > (max_d - timedelta(14)))]["Units_Effective"].sum()
+
+            if prev7 != 0:
+                g = ((last7 - prev7) / abs(prev7)) * 100
+                st.markdown(
+                    f'<div class="ai-box">🚀 <b>Velocity:</b> Net units are <b>{g:.1f}%</b> '
+                    f'{"up" if g > 0 else "down"} vs previous 7 days.</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # top SKU by net units
+            top_sku = df.groupby("Sku")["Units_Effective"].sum().sort_values(ascending=False)
+            if len(top_sku) > 0:
+                st.markdown(
+                    f'<div class="ai-box">🏆 <b>Top Seller:</b> SKU <b>{top_sku.index[0]}</b> is leading net units.</div>',
+                    unsafe_allow_html=True,
+                )
+
+        with c2:
+            src = df.groupby("Source")["Quantity"].sum().reset_index()
+            if not src.empty:
+                fig = px.pie(src, values="Quantity", names="Source", hole=0.4)
+                fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=220)
+                st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("🏆 Top 20 Selling SKUs (Pieces)")
+        top_skus = (
+            df[df["Transaction Type"] == "Shipment"]
+            .groupby("Sku")["Quantity"]
+            .sum()
+            .sort_values(ascending=False)
+            .head(20)
+            .reset_index()
+            .rename(columns={"Quantity": "Sold_Pcs"})
+        )
+        fig = px.bar(top_skus, x="Sku", y="Sold_Pcs", title="Top 20 Sellers (Pieces)")
+        fig.update_xaxes(tickangle=-35)
         st.plotly_chart(fig, use_container_width=True)
 
-# ==========================================
-# TAB 2: INVENTORY VIEW
-# ==========================================
 
+# ----------------------------------------------------------
+# TAB 2: INVENTORY
+# ----------------------------------------------------------
 with tab_inventory:
-    st.subheader("📦 Consolidated Inventory")
-    
-    if st.session_state.inventory_df.empty:
-        st.warning("⚠️ No inventory data loaded. Upload inventory files in sidebar.")
+    inv = st.session_state.inventory_df
+
+    if inv.empty:
+        st.warning("No inventory data loaded.")
     else:
-        inv_df = st.session_state.inventory_df
-        
-        # Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        col1.metric("📦 Total SKUs", f"{len(inv_df):,}")
-        col2.metric("📊 Total Units", f"{inv_df['Total_Inventory'].sum():,.0f}")
-        
-        if 'OMS_Inventory' in inv_df.columns:
-            col3.metric("🏢 OMS Warehouse", f"{inv_df['OMS_Inventory'].sum():,.0f}")
-        
-        marketplace_inv = inv_df['Total_Inventory'].sum() - (inv_df['OMS_Inventory'].sum() if 'OMS_Inventory' in inv_df.columns else 0)
-        col4.metric("🌐 Marketplace Total", f"{marketplace_inv:,.0f}")
-        
-        st.divider()
-        
-        # Search
-        search_sku = st.text_input("🔍 Search SKU", placeholder="e.g., 1065YKBLUE")
-        
-        display_df = inv_df.copy()
-        if search_sku:
-            display_df = display_df[display_df['OMS_SKU'].str.contains(search_sku, case=False, na=False)]
-        
-        st.dataframe(display_df, use_container_width=True, height=500)
+        c1, c2 = st.columns(2)
+        c1.metric("Total SKUs", f"{len(inv):,}")
+        c2.metric("Total Stock", f"{inv['Total_Inventory'].sum():,.0f}")
 
-# ==========================================
-# TAB 3: PO RECOMMENDATIONS
-# ==========================================
+        search = st.text_input("🔍 Search Inventory SKU", placeholder="Type to filter...")
+        show = inv.copy()
+        if search:
+            show = show[show["OMS_SKU"].astype(str).str.contains(search, case=False, na=False)]
 
+        st.dataframe(show, use_container_width=True, height=520)
+
+
+# ----------------------------------------------------------
+# TAB 3: PO ENGINE (CORRECTIONS MERGED)
+# - Lead time up to 180 (default 90)
+# - Target buffer up to 180 (default 0)
+# - Safety up to 100 (default 0)
+# - Velocity modes: 7 / 30 / Full
+# - Search filter added
+# - Uses Net sold (Units_Effective) and current Total_Inventory
+# ----------------------------------------------------------
 with tab_po:
-    st.subheader("🎯 Purchase Order Recommendations")
-    
-    if st.session_state.sales_df.empty or st.session_state.inventory_df.empty:
-        st.error("""
-        ### ⚠️ Missing Required Data
-        
-        PO calculations require:
-        - ✅ **Sales data** (to calculate demand velocity)
-        - ✅ **Inventory data** (to know current stock)
-        
-        📤 Upload both in the sidebar to generate PO recommendations.
-        """)
+    st.subheader("🎯 Purchase Order Engine")
+
+    if st.session_state.sales_df.empty:
+        st.error("Sales data required for POs.")
+    elif st.session_state.inventory_df.empty:
+        st.error("Inventory required for POs.")
     else:
-        # Configuration
-        st.markdown("### ⚙️ Configuration")
-        
-        col_cfg1, col_cfg2, col_cfg3, col_cfg4 = st.columns(4)
-        
-        with col_cfg1:
-            velocity_period = st.selectbox(
-                "Velocity Calculation",
-                ["Last 30 Days", "Last 60 Days", "Last 90 Days"],
-                help="Period to calculate Average Daily Sales (ADS)"
-            )
-            days_back = 30 if "30" in velocity_period else (60 if "60" in velocity_period else 90)
-        
-        with col_cfg2:
-            target_days = st.number_input(
-                "Target Stock (Days)",
-                min_value=30,
-                max_value=180,
-                value=60,
-                help="How many days of stock to maintain"
-            )
-        
-        with col_cfg3:
-            lead_time = st.number_input(
-                "Lead Time (Days)",
-                min_value=1,
-                max_value=90,
-                value=15,
-                help="Days from order to receiving stock"
-            )
-        
-        with col_cfg4:
-            safety_factor = st.slider(
-                "Safety Stock %",
-                min_value=0,
-                max_value=50,
-                value=20,
-                help="Extra buffer stock percentage"
-            )
-        
+        sales = st.session_state.sales_df.copy()
+        inv = st.session_state.inventory_df.copy()
+
+        c1, c2, c3, c4 = st.columns(4)
+        v_mode = c1.selectbox("Velocity Mode", ["Last 7 Days", "Last 30 Days", "Full History"])
+        lead_time = c2.number_input("Lead Time / Production Days", 1, 180, 90)
+        tgt = c3.number_input("Target Buffer (Days)", 0, 180, 0)
+        safe = c4.slider("Safety Stock %", 0, 100, 0)
+
         st.divider()
-        
-        # Calculate demand
-        sales_df = st.session_state.sales_df
-        inv_df = st.session_state.inventory_df
-        
-        max_date = sales_df['TxnDate'].max()
-        cutoff_date = max_date - timedelta(days=days_back)
-        
-        # Filter to velocity period
-        recent_sales = sales_df[sales_df['TxnDate'] >= cutoff_date].copy()
-        
-        # ===== SMART ADS CALCULATION WITH STOCKOUT DETECTION =====
-        
-        # Step 1: Get sales summary
-        recent_sales['Date'] = recent_sales['TxnDate'].dt.date
-        
-        sales_summary = recent_sales.groupby('Sku').agg({
-            'Units_Effective': 'sum',
-            'Quantity': 'count',
-            'Date': 'nunique'  # Days with sales
-        }).reset_index()
-        sales_summary.columns = ['OMS_SKU', 'Total_Units_Sold', 'Transactions', 'Days_With_Sales']
-        
-        # Step 2: Calculate running inventory to detect stockouts
-        # For each SKU, simulate daily inventory backwards from current stock
-        
-        def calculate_available_days(row):
-            """
-            Calculate how many days product was actually available for sale.
-            Works backwards from current inventory using daily sales.
-            """
-            sku = row['OMS_SKU']
-            current_stock = row.get('Total_Inventory', 0)
-            
-            if current_stock <= 0:
-                # Currently out of stock - check if there were any sales
-                sku_sales = recent_sales[recent_sales['Sku'] == sku].copy()
-                if len(sku_sales) > 0:
-                    # Had sales before, now stockout
-                    days_with_sales = len(sku_sales['Date'].unique())
-                    return days_with_sales, 0, days_back - days_with_sales
-                else:
-                    # No sales and no stock - was out of stock entire period
-                    return 0, 0, days_back
-            
-            # Get daily sales for this SKU
-            sku_sales = recent_sales[recent_sales['Sku'] == sku].copy()
-            
-            if len(sku_sales) == 0:
-                # Has stock but no sales in period - available all days
-                return days_back, 0, 0
-            
-            # Group by date and sum sales
-            daily_sales = sku_sales.groupby('Date')['Units_Effective'].sum().sort_index(ascending=False)
-            
-            # Simulate backwards from today
-            running_stock = current_stock
-            available_days = 0
-            stockout_days = 0
-            
-            # Create date range for entire period
-            date_range = pd.date_range(end=max_date, periods=days_back, freq='D')
-            
-            for date in date_range[::-1]:  # Go backwards from most recent
-                date_key = date.date()
-                daily_sale = daily_sales.get(date_key, 0)
-                
-                # Add back the sales that happened on this day
-                running_stock += daily_sale
-                
-                if running_stock > 0:
-                    available_days += 1
-                else:
-                    stockout_days += 1
-            
-            no_sales_days = days_back - available_days - stockout_days
-            return available_days, stockout_days, no_sales_days
-        
-        # Merge with inventory
-        po_df = pd.merge(inv_df, sales_summary, on='OMS_SKU', how='left')
-        po_df['Total_Units_Sold'] = po_df['Total_Units_Sold'].fillna(0)
-        po_df['Transactions'] = po_df['Transactions'].fillna(0)
-        po_df['Days_With_Sales'] = po_df['Days_With_Sales'].fillna(0)
-        
-        # Calculate available days with stockout detection
-        availability_data = po_df.apply(calculate_available_days, axis=1, result_type='expand')
-        availability_data.columns = ['Days_Available', 'Days_Stockout', 'Days_No_Activity']
-        
-        po_df = pd.concat([po_df, availability_data], axis=1)
-        
-        # Calculate smart ADS based on available days only
-        # Use whichever is greater: days with sales or calculated available days
-        po_df['Active_Days'] = po_df[['Days_With_Sales', 'Days_Available']].max(axis=1)
-        
-        # Minimum 7 days to avoid inflated ADS from sporadic sales
-        po_df['Active_Days'] = po_df['Active_Days'].clip(lower=7)
-        
-        # Calculate ADS = Total Sales / Active Available Days
-        po_df['ADS'] = np.where(
-            po_df['Active_Days'] > 0,
-            po_df['Total_Units_Sold'] / po_df['Active_Days'],
-            0
-        )
-        
-        # Add period column and stockout flag
-        po_df['ADS_Period'] = po_df['Active_Days'].astype(int)
-        po_df['Stockout_Flag'] = po_df['Days_Stockout'].apply(
-            lambda x: f'⚠️ {int(x)}d OOS' if x > 0 else ''
-        )
-        
-        # Calculate days left
-        po_df['Days_Left'] = np.where(
-            po_df['ADS'] > 0,
-            po_df['Total_Inventory'] / po_df['ADS'],
-            999
-        )
-        
-        # Calculate requirements
-        po_df['Lead_Time_Demand'] = po_df['ADS'] * lead_time
-        po_df['Safety_Stock'] = po_df['Lead_Time_Demand'] * (safety_factor / 100)
-        po_df['Target_Stock'] = po_df['ADS'] * target_days
-        po_df['Total_Required'] = po_df['Target_Stock'] + po_df['Safety_Stock']
-        po_df['PO_Needed'] = (po_df['Total_Required'] - po_df['Total_Inventory']).clip(lower=0)
-        
-        # Round PO to nearest 5 or 10
-        po_df['PO_Recommended'] = (np.ceil(po_df['PO_Needed'] / 5) * 5).astype(int)
-        
-        # Priority classification
-        def get_priority(row):
-            if row['Days_Left'] < lead_time and row['PO_Recommended'] > 0:
-                return '🔴 URGENT'
-            elif row['Days_Left'] < lead_time + 7 and row['PO_Recommended'] > 0:
-                return '🟡 HIGH'
-            elif row['PO_Recommended'] > 0:
-                return '🟢 MEDIUM'
-            else:
-                return '⚪ OK'
-        
-        po_df['Priority'] = po_df.apply(get_priority, axis=1)
-        
-        # Filter to SKUs needing orders
-        po_needed = po_df[po_df['PO_Recommended'] > 0].copy()
-        po_needed = po_needed.sort_values(['Priority', 'Days_Left'])
-        
-        # Summary metrics
-        st.markdown("### 📊 Summary")
-        
-        sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
-        
-        urgent = len(po_needed[po_needed['Priority'] == '🔴 URGENT'])
-        high = len(po_needed[po_needed['Priority'] == '🟡 HIGH'])
-        medium = len(po_needed[po_needed['Priority'] == '🟢 MEDIUM'])
-        total_po_units = po_needed['PO_Recommended'].sum()
-        
-        sum_col1.metric("🔴 Urgent Orders", urgent)
-        sum_col2.metric("🟡 High Priority", high)
-        sum_col3.metric("🟢 Medium Priority", medium)
-        sum_col4.metric("📦 Total Units to Order", f"{total_po_units:,.0f}")
-        
-        st.divider()
-        
-        # Filters
-        st.markdown("### 🔍 Filter SKUs")
-        
-        filter_col1, filter_col2, filter_col3 = st.columns([2, 1, 1])
-        
-        with filter_col1:
-            sku_search = st.text_input(
-                "Search SKU",
-                placeholder="e.g., 1309YK or RED or -XL",
-                help="Search by SKU code, color, size"
-            )
-        
-        with filter_col2:
-            priority_filter = st.multiselect(
-                "Priority",
-                ['🔴 URGENT', '🟡 HIGH', '🟢 MEDIUM'],
-                default=['🔴 URGENT', '🟡 HIGH', '🟢 MEDIUM']
-            )
-        
-        with filter_col3:
-            warehouse_filter = st.selectbox(
-                "Warehouse View",
-                ["All", "OMS Low Stock", "Marketplace Low Stock"]
-            )
-        
-        # Apply filters
-        display_po = po_needed.copy()
-        
-        if sku_search:
-            display_po = display_po[display_po['OMS_SKU'].str.contains(sku_search, case=False, na=False)]
-        
-        if priority_filter:
-            display_po = display_po[display_po['Priority'].isin(priority_filter)]
-        
-        if warehouse_filter == "OMS Low Stock" and 'OMS_Inventory' in display_po.columns:
-            display_po = display_po[display_po['OMS_Inventory'] < display_po['ADS'] * lead_time]
-        elif warehouse_filter == "Marketplace Low Stock":
-            marketplace_cols = [c for c in display_po.columns if any(x in c for x in ['Flipkart', 'Myntra', 'Amazon']) and 'Inventory' in c]
-            if marketplace_cols:
-                display_po['Marketplace_Stock'] = display_po[marketplace_cols].sum(axis=1)
-                display_po = display_po[display_po['Marketplace_Stock'] < display_po['ADS'] * 7]
-        
-        # Display PO table
-        st.markdown(f"### 📋 Purchase Orders Needed: {len(display_po):,} SKUs")
-        
-        # Info about smart ADS calculation
-        st.info("""
-        **📊 Smart ADS Calculation with Stockout Detection:**
-        - ADS calculated based on **days product was available** for sale (had inventory)
-        - System works backwards from current stock to detect stockout periods
-        - **⚠️ Stockout Flag**: Shows days product was out of stock (e.g., "⚠️ 5d OOS" = out of stock 5 days)
-        - **ADS_Period**: Shows actual available days used for calculation
-        - Products with stockouts get higher priority as demand may be suppressed
-        - Example: If out of stock 10 days, ADS based on remaining 20 available days
-        """)
-        
-        # Select columns to display
-        display_cols = ['Priority', 'OMS_SKU', 'Total_Inventory']
-        
-        # Add warehouse columns if available
-        if 'OMS_Inventory' in display_po.columns:
-            display_cols.append('OMS_Inventory')
-        if 'Flipkart_Live' in display_po.columns:
-            display_cols.append('Flipkart_Live')
-        if 'Myntra_Inventory' in display_po.columns:
-            display_cols.append('Myntra_Inventory')
-        if 'Amazon_Inventory' in display_po.columns:
-            display_cols.append('Amazon_Inventory')
-        
-        display_cols.extend([
-            'Total_Units_Sold',
-            'ADS',
-            'ADS_Period',  # Show how many days used for ADS calculation
-            'Stockout_Flag',  # Show stockout warning
-            'Days_Left',
-            'Target_Stock',
-            'Safety_Stock',
-            'PO_Recommended'
-        ])
-        
-        # Filter to available columns
-        display_cols = [c for c in display_cols if c in display_po.columns]
-        
-        # Style function
-        def highlight_priority(row):
-            colors = []
-            for col in row.index:
-                if col == 'Priority':
-                    if '🔴' in str(row[col]):
-                        colors.append('background-color: #ffcccc; font-weight: bold')
-                    elif '🟡' in str(row[col]):
-                        colors.append('background-color: #fff3cd')
-                    else:
-                        colors.append('background-color: #d4edda')
-                elif col == 'Stockout_Flag':
-                    if '⚠️' in str(row[col]):
-                        colors.append('background-color: #ffcccc; font-weight: bold; color: #dc3545')
-                    else:
-                        colors.append('')
-                elif col == 'Days_Left':
-                    if row[col] < lead_time:
-                        colors.append('background-color: #ffcccc; font-weight: bold')
-                    elif row[col] < lead_time + 7:
-                        colors.append('background-color: #fff3cd')
-                    else:
-                        colors.append('')
-                elif col == 'PO_Recommended':
-                    colors.append('background-color: #e7f3ff; font-weight: bold')
-                else:
-                    colors.append('')
-            return colors
-        
-        # Display table
+        po_search = st.text_input("🔍 Filter PO by SKU", placeholder="Type SKU to find in list...")
+
+        max_d = pd.to_datetime(sales["TxnDate"]).max()
+        min_d = pd.to_datetime(sales["TxnDate"]).min()
+        if pd.isna(max_d) or pd.isna(min_d):
+            st.warning("Sales dates look invalid. Please check TxnDate parsing.")
+            st.stop()
+
+        if "7" in v_mode:
+            days = 7
+        elif "30" in v_mode:
+            days = 30
+        else:
+            days = max((max_d - min_d).days, 1)
+
+        start = max_d - timedelta(days=days)
+        recent = sales[sales["TxnDate"] >= start].copy()
+
+        stats = recent.groupby("Sku", as_index=False)["Units_Effective"].sum().rename(columns={"Sku": "OMS_SKU", "Units_Effective": "Net_Sold"})
+        po = pd.merge(inv, stats, on="OMS_SKU", how="left").fillna(0)
+
+        po["ADS"] = po["Net_Sold"] / float(days)
+        po["Days_Cover"] = np.where(po["ADS"] > 0, po["Total_Inventory"] / po["ADS"], 999)
+
+        po["Required"] = po["ADS"] * (tgt + lead_time) * (1 + safe / 100.0)
+        po["Order_Qty"] = (po["Required"] - po["Total_Inventory"]).clip(lower=0).round(0).astype(int)
+
+        def get_status(row):
+            if row["Order_Qty"] > 0:
+                return "🔴 Critical" if row["Days_Cover"] < lead_time else "🟡 Reorder"
+            return "🟢 OK"
+
+        po["Status"] = po.apply(get_status, axis=1)
+
+        if po_search:
+            po = po[po["OMS_SKU"].astype(str).str.contains(po_search, case=False, na=False)]
+
+        final = po[po["Order_Qty"] > 0].sort_values("Order_Qty", ascending=False)
+
+        st.markdown(f"**{len(final)} SKUs need attention**")
+
+        def color_rows(row):
+            if "Critical" in row["Status"]:
+                return ["background-color: #fee2e2"] * len(row)
+            return ["background-color: #fef3c7"] * len(row)
+
+        cols = ["Status", "OMS_SKU", "Total_Inventory", "ADS", "Days_Cover", "Order_Qty"]
         st.dataframe(
-            display_po[display_cols].head(100).style.apply(highlight_priority, axis=1)
-                                                   .format({
-                                                       'ADS': '{:.2f}',
-                                                       'ADS_Period': '{:.0f} days',
-                                                       'Days_Left': '{:.1f}',
-                                                       'Target_Stock': '{:.0f}',
-                                                       'Safety_Stock': '{:.0f}',
-                                                       'PO_Recommended': '{:.0f}',
-                                                       'Total_Inventory': '{:.0f}',
-                                                       'OMS_Inventory': '{:.0f}',
-                                                       'Total_Units_Sold': '{:.0f}'
-                                                   }),
+            final[cols]
+            .style.apply(color_rows, axis=1)
+            .format("{:.2f}", subset=["ADS", "Days_Cover"]),
             use_container_width=True,
-            height=600
-        )
-        
-        st.caption(f"Showing top 100 of {len(display_po):,} SKUs needing reorder")
-        
-        # Warehouse breakdown
-        if len(display_po) > 0:
-            st.divider()
-            st.markdown("### 🏢 Warehouse-wise Analysis")
-            
-            warehouse_summary = []
-            
-            if 'OMS_Inventory' in display_po.columns:
-                oms_low = len(display_po[display_po['OMS_Inventory'] < display_po['Lead_Time_Demand']])
-                warehouse_summary.append({
-                    'Warehouse': '🏢 OMS (VDN + TTP)',
-                    'SKUs Low Stock': oms_low,
-                    'Total Stock': display_po['OMS_Inventory'].sum(),
-                    'Recommended Action': f'Replenish {oms_low} SKUs'
-                })
-            
-            if 'Flipkart_Live' in display_po.columns:
-                fk_stock = display_po['Flipkart_Live'].sum()
-                warehouse_summary.append({
-                    'Warehouse': '📦 Flipkart FCs',
-                    'SKUs Low Stock': '-',
-                    'Total Stock': fk_stock,
-                    'Recommended Action': f'{fk_stock:,.0f} units at FCs'
-                })
-            
-            if 'Myntra_Inventory' in display_po.columns:
-                myntra_stock = display_po['Myntra_Inventory'].sum()
-                warehouse_summary.append({
-                    'Warehouse': '👔 Myntra',
-                    'SKUs Low Stock': '-',
-                    'Total Stock': myntra_stock,
-                    'Recommended Action': f'{myntra_stock:,.0f} units at warehouse'
-                })
-            
-            if 'Amazon_Inventory' in display_po.columns:
-                amz_stock = display_po['Amazon_Inventory'].sum()
-                warehouse_summary.append({
-                    'Warehouse': '📦 Amazon FCs',
-                    'SKUs Low Stock': '-',
-                    'Total Stock': amz_stock,
-                    'Recommended Action': f'{amz_stock:,.0f} units at FCs (excl. ZNNE)'
-                })
-            
-            if warehouse_summary:
-                st.dataframe(pd.DataFrame(warehouse_summary), use_container_width=True, hide_index=True)
-        
-        # Download options
-        st.divider()
-        st.markdown("### ⬇️ Download PO Recommendations")
-        
-        col_down1, col_down2 = st.columns(2)
-        
-        with col_down1:
-            # CSV download
-            csv_buffer = io.StringIO()
-            display_po[display_cols].to_csv(csv_buffer, index=False)
-            
-            st.download_button(
-                "📥 Download as CSV",
-                data=csv_buffer.getvalue(),
-                file_name=f"PO_Recommendations_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
-        
-        with col_down2:
-            # Excel download with multiple sheets
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                display_po[display_cols].to_excel(writer, sheet_name='PO_Recommendations', index=False)
-                
-                # Summary sheet
-                summary_data = {
-                    'Metric': ['Urgent SKUs', 'High Priority', 'Medium Priority', 'Total Units to Order'],
-                    'Value': [urgent, high, medium, total_po_units]
-                }
-                pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
-            
-            st.download_button(
-                "📥 Download as Excel",
-                data=excel_buffer.getvalue(),
-                file_name=f"PO_Recommendations_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-# ==========================================
-# TAB 4: LOGISTICS & TRANSFERS
-# ==========================================
-
-with tab_logistics:
-    st.subheader("🚚 Amazon Stock Transfers & FC Movements")
-    
-    if st.session_state.transfer_df.empty:
-        st.info("""
-        ### 📦 Stock Transfer Analytics
-        
-        Upload **Amazon Stock Transfer Report** in the sidebar to view:
-        - FC-to-FC movement tracking
-        - Transfer volumes by route
-        - Most active fulfillment centers
-        - Monthly movement trends
-        
-        💡 This helps understand Amazon's inventory distribution network.
-        """)
-    else:
-        transfer_df = st.session_state.transfer_df
-        
-        # Summary metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        total_movements = len(transfer_df)
-        total_units = transfer_df['Quantity'].sum()
-        unique_routes = len(transfer_df.groupby(['Ship From Fc', 'Ship To Fc']))
-        fc_transfers = len(transfer_df[transfer_df['Transaction Type'] == 'FC_TRANSFER'])
-        
-        col1.metric("📦 Total Movements", f"{total_movements:,}")
-        col2.metric("📊 Units Transferred", f"{total_units:,.0f}")
-        col3.metric("🔄 Unique Routes", unique_routes)
-        col4.metric("✅ FC Transfers", f"{fc_transfers:,}")
-        
-        st.divider()
-        
-        # Top routes
-        st.markdown("### 🔝 Top Transfer Routes")
-        
-        route_summary = transfer_df.groupby(['Ship From Fc', 'Ship To Fc']).agg({
-            'Quantity': ['sum', 'count']
-        }).reset_index()
-        route_summary.columns = ['From FC', 'To FC', 'Total Units', 'Transfers']
-        route_summary = route_summary.sort_values('Total Units', ascending=False).head(20)
-        
-        col_chart, col_table = st.columns([1, 1])
-        
-        with col_chart:
-            route_summary['Route'] = route_summary['From FC'] + ' → ' + route_summary['To FC']
-            fig = px.bar(route_summary.head(10), x='Route', y='Total Units',
-                        title='Top 10 Transfer Routes by Volume')
-            fig.update_xaxes(tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col_table:
-            st.dataframe(route_summary, use_container_width=True, hide_index=True, height=400)
-        
-        st.divider()
-        
-        # Most active FCs
-        st.markdown("### 🏢 Most Active Fulfillment Centers")
-        
-        col_from, col_to = st.columns(2)
-        
-        with col_from:
-            st.markdown("**📤 Shipping From (Outbound)**")
-            from_fc = transfer_df.groupby('Ship From Fc').agg({
-                'Quantity': 'sum'
-            }).reset_index().sort_values('Quantity', ascending=False).head(10)
-            from_fc.columns = ['FC', 'Units Shipped']
-            st.dataframe(from_fc, use_container_width=True, hide_index=True)
-        
-        with col_to:
-            st.markdown("**📥 Shipping To (Inbound)**")
-            to_fc = transfer_df.groupby('Ship To Fc').agg({
-                'Quantity': 'sum'
-            }).reset_index().sort_values('Quantity', ascending=False).head(10)
-            to_fc.columns = ['FC', 'Units Received']
-            st.dataframe(to_fc, use_container_width=True, hide_index=True)
-        
-        st.divider()
-        
-        # Transaction types
-        st.markdown("### 📋 Transfer Types")
-        
-        txn_types = transfer_df['Transaction Type'].value_counts().reset_index()
-        txn_types.columns = ['Type', 'Count']
-        
-        fig = px.pie(txn_types, values='Count', names='Type', title='Transfer Type Distribution')
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Download
-        st.divider()
-        csv_buffer = io.StringIO()
-        transfer_df.to_csv(csv_buffer, index=False)
-        
-        st.download_button(
-            "📥 Download Transfer Data (CSV)",
-            data=csv_buffer.getvalue(),
-            file_name=f"stock_transfers_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
+            height=600,
         )
 
-# ==========================================
-# TAB 5: FORECAST
-# ==========================================
+        csv = final[cols].to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Download PO CSV", csv, f"po_recommendations_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
 
+
+# ----------------------------------------------------------
+# TAB 4: PRODUCTION (PLACEHOLDER TOOL)
+# ----------------------------------------------------------
+with tab_production:
+    st.subheader("🏭 Fabric Planning")
+    st.info("Define BOM in 'Item Master' first (Future Module). For now, use the calculator below.")
+
+    with st.form("fabric_calc"):
+        qty = st.number_input("PCS to Make", min_value=0, value=500)
+        cons = st.number_input("Consumption (Mtr)", min_value=0.0, value=2.5, step=0.1)
+        st.markdown(f"**Total Fabric Needed:** {qty * cons:,.2f} Mtr")
+        st.form_submit_button("Calculate")
+
+
+# ----------------------------------------------------------
+# TAB 5: AI FORECAST (Prophet)
+# ----------------------------------------------------------
 with tab_forecast:
-    st.subheader("🤖 AI Demand Forecasting")
-    
-    if st.session_state.sales_df.empty:
-        st.warning("⚠️ Upload sales data to generate forecasts.")
-    else:
-        st.info("AI forecasting will be added here using Prophet...")
+    st.subheader("📈 AI Prediction Engine")
 
-# ==========================================
-# TAB 6: SKU DRILLDOWN
-# ==========================================
-
-with tab_sku:
-    st.subheader("🔍 SKU Drilldown Analysis")
-    
-    if st.session_state.sales_df.empty:
-        st.warning("⚠️ Upload sales data for SKU analysis.")
+    sales = st.session_state.sales_df
+    if sales.empty:
+        st.warning("Upload sales data to generate forecasts.")
     else:
-        search_sku = st.text_input("Search SKU", placeholder="1065YKBLUE", key="sku_search")
-        
-        if search_sku:
-            filtered = st.session_state.sales_df[
-                st.session_state.sales_df['Sku'].str.contains(search_sku, case=False, na=False)
-            ]
-            
-            if not filtered.empty:
-                st.dataframe(filtered, use_container_width=True)
+        sku = st.selectbox("Select SKU", [""] + sorted(sales["Sku"].dropna().astype(str).unique().tolist()))
+        fc_days = st.slider("Forecast Period (Days)", 7, 90, 30)
+
+        if sku:
+            subset = sales[sales["Sku"].astype(str) == str(sku)].copy()
+            subset["ds"] = pd.to_datetime(subset["TxnDate"]).dt.date
+            daily = subset.groupby("ds", as_index=False)["Units_Effective"].sum()
+            daily.columns = ["ds", "y"]
+            daily["ds"] = pd.to_datetime(daily["ds"])
+
+            if len(daily) < 14:
+                st.warning("Need at least 14 days of data for forecasting.")
             else:
-                st.warning(f"No data found for '{search_sku}'")
+                try:
+                    with st.spinner("Forecasting..."):
+                        m = Prophet(
+                            daily_seasonality=False,
+                            weekly_seasonality=True,
+                            yearly_seasonality=False,
+                            changepoint_prior_scale=0.05,
+                        )
+                        m.fit(daily)
+                        future = m.make_future_dataframe(periods=fc_days)
+                        fcst = m.predict(future)
+
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=daily["ds"], y=daily["y"], name="Actual", mode="lines+markers"))
+                    future_only = fcst[fcst["ds"] > daily["ds"].max()]
+                    fig.add_trace(go.Scatter(x=future_only["ds"], y=future_only["yhat"], name="Forecast", mode="lines", line=dict(dash="dash")))
+                    fig.add_trace(
+                        go.Scatter(
+                            x=list(future_only["ds"]) + list(future_only["ds"][::-1]),
+                            y=list(future_only["yhat_upper"]) + list(future_only["yhat_lower"][::-1]),
+                            fill="toself",
+                            name="Confidence Interval",
+                        )
+                    )
+                    fig.update_layout(title=f"Demand Forecast: {sku}", hovermode="x unified")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    total_pred = float(future_only["yhat"].sum())
+                    st.success(f"🤖 Predicted Demand (Next {fc_days} Days): **{int(round(total_pred))} units**")
+
+                except Exception as e:
+                    st.error(f"Forecast error: {e}")
+
+
+# ----------------------------------------------------------
+# TAB 6: DEEP DRILLDOWN (PANEL-WISE)
+# - search SKU (contains)
+# - show sold/returns/net + panel pivots + recent txns
+# ----------------------------------------------------------
+with tab_drill:
+    st.subheader("🔍 Deep Dive & Panel Analysis")
+
+    df = st.session_state.sales_df
+    if df.empty:
+        st.warning("Upload sales data for drilldown.")
+    else:
+        colA, colB = st.columns([3, 1])
+        with colA:
+            drill_sku = st.text_input("Enter SKU for Drilldown", placeholder="e.g. 1065YK")
+        with colB:
+            period = st.selectbox("Time Period", ["Last 7 Days", "Last 30 Days", "Last 90 Days", "All Time"], index=1)
+
+        fdf = df.copy()
+        max_d = pd.to_datetime(fdf["TxnDate"]).max()
+        if period != "All Time" and not pd.isna(max_d):
+            days = 7 if "7" in period else (30 if "30" in period else 90)
+            fdf = fdf[fdf["TxnDate"] >= (max_d - timedelta(days=days))]
+
+        if drill_sku:
+            matches = fdf[fdf["Sku"].astype(str).str.contains(drill_sku, case=False, na=False)].copy()
+
+            if matches.empty:
+                st.warning("No matching SKU found.")
+            else:
+                sold = matches[matches["Transaction Type"] == "Shipment"]["Quantity"].sum()
+                ret = matches[matches["Transaction Type"] == "Refund"]["Quantity"].sum()
+                net = matches["Units_Effective"].sum()
+                rr = (ret / sold * 100) if sold > 0 else 0
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Sold Pieces", f"{int(sold):,}")
+                m2.metric("Return Pieces", f"{int(ret):,}")
+                m3.metric("Net Units", f"{int(net):,}")
+                m4.metric("Return %", f"{rr:.1f}%")
+
+                st.divider()
+
+                st.markdown("### 🏪 Marketplace Breakdown (Panel-wise)")
+                ship_p, ret_p, net_p = build_panel_pivots(matches)
+
+                combined = pd.concat([ship_p, ret_p, net_p], axis=1).fillna(0)
+                combined = combined.reset_index().rename(columns={"Sku": "SKU"})
+                st.dataframe(combined, use_container_width=True, height=420)
+
+                st.markdown("### 📈 Panel Chart (Sold Pieces)")
+                if not ship_p.empty:
+                    chart_df = ship_p.sum(axis=0).reset_index()
+                    chart_df.columns = ["Panel", "Sold_Pcs"]
+                    chart_df["Panel"] = chart_df["Panel"].str.replace(" | Sold", "", regex=False)
+                    fig = px.bar(chart_df.sort_values("Sold_Pcs", ascending=False), x="Panel", y="Sold_Pcs", title="Pieces Sold per Panel")
+                    fig.update_xaxes(tickangle=-25)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("### 📜 Recent Transactions")
+                cols = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "Source"]
+                if "OrderId" in matches.columns:
+                    cols.append("OrderId")
+                st.dataframe(matches.sort_values("TxnDate", ascending=False).head(50)[cols], use_container_width=True, height=420)
+
+        else:
+            st.info("Type SKU in the box above to start drilldown.")
+
 
 st.divider()
-st.caption("💡 All data displayed in OMS SKU format | Yash Gallery ERP v2.0")
+st.caption("💡 All data displayed in OMS SKU format | Refactored ERP (Fixed metrics + Panel-wise drilldown + PO Engine updates)")
