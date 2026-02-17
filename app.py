@@ -41,7 +41,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from prophet import Prophet
+
+# Prophet is optional — imported lazily inside the Forecast tab
+# so a missing install only breaks forecasting, not the whole app
+try:
+    from prophet import Prophet
+    _PROPHET_AVAILABLE = True
+except ImportError:
+    _PROPHET_AVAILABLE = False
 
 warnings.filterwarnings("ignore")
 
@@ -432,7 +439,7 @@ def load_mtr_from_main_zip(main_zip_file) -> pd.DataFrame:
         root_zf = zipfile.ZipFile(main_zip_file)
     except Exception as e:
         st.error(f"Cannot open main ZIP: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), 0
 
     _walk(root_zf)
 
@@ -440,7 +447,7 @@ def load_mtr_from_main_zip(main_zip_file) -> pd.DataFrame:
         st.sidebar.warning(f"⚠️ Skipped {len(skipped)} file(s):\n" + "\n".join(skipped[:5]))
 
     if not parts:
-        return pd.DataFrame()
+        return pd.DataFrame(), 0
 
     combined = pd.concat(parts, ignore_index=True)
 
@@ -1414,7 +1421,9 @@ with tab_logistics:
 with tab_forecast:
     st.subheader("📈 AI Demand Forecasting")
     sales = st.session_state.sales_df
-    if sales.empty:
+    if not _PROPHET_AVAILABLE:
+        st.warning("⚠️ Prophet not installed. Add `prophet` to your `requirements.txt` to enable forecasting.")
+    elif sales.empty:
         st.warning("⚠️ Upload sales data for forecasting.")
     else:
         sku  = st.selectbox("Select SKU", [""]+sorted(sales["Sku"].dropna().unique().tolist()))
