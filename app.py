@@ -448,19 +448,13 @@ def _collect_csv_entries(main_zip_file):
 
 def load_mtr_from_main_zip(main_zip_file):
     """
-    Memory-safe MTR loader.
-
-    Key design:
-    - Processes one CSV at a time — never holds all months in RAM at once
-    - Writes each parsed chunk directly to a temp file on disk
-    - Reads back once at the end for a single low-peak concat
-    - Peak RAM ≈ size of ONE monthly CSV (not all 24+)
+    Memory-safe MTR loader — no temp files, no disk I/O.
+    Processes one CSV at a time, keeps only a running concat.
+    Peak RAM ≈ 2× one monthly CSV at any moment.
     """
-    import tempfile, os
-
     skipped   = []
     csv_count = 0
-    tmp_files = []   # paths of per-CSV parquet temp files
+    combined  = None   # grows one month at a time
 
     try:
         main_zip_file.seek(0)
@@ -473,37 +467,35 @@ def load_mtr_from_main_zip(main_zip_file):
 
     if not entries:
         if skipped:
-            st.sidebar.warning("⚠️ No B2B/B2C CSVs found. Skipped:\n" + "\n".join(skipped[:5]))
+            st.sidebar.warning("⚠️ No B2B/B2C CSVs found. Skipped:\n" +
+                               "\n".join(skipped[:5]))
         return pd.DataFrame(), 0
 
-    # Show progress while loading
-    prog = st.sidebar.progress(0, text="Loading MTR files…")
+    prog  = st.sidebar.progress(0, text="Loading MTR files…")
     total = len(entries)
 
     for idx, (zf, item_name, rtype, base) in enumerate(entries):
         try:
-            data = zf.read(item_name)           # read ONE csv at a time
+            data = zf.read(item_name)
             df   = _parse_mtr_csv(data, rtype, base)
-            del data                             # free bytes immediately
+            del data
 
             if df.empty:
                 skipped.append(f"{base}: empty after parse")
             else:
-                # Write to temp CSV — frees the DataFrame from RAM
-                # (no parquet dependency needed)
-                tmp = tempfile.NamedTemporaryFile(
-                    suffix=".csv", delete=False, mode="w")
-                df.to_csv(tmp.name, index=False)
-                tmp.close()
-                tmp_files.append(tmp.name)
+                # Append to running combined — only 2 DFs in memory at once
+                if combined is None:
+                    combined = df
+                else:
+                    combined = pd.concat([combined, df], ignore_index=True)
+                    del df
                 csv_count += 1
-                del df                           # free DataFrame immediately
 
         except Exception as e:
             skipped.append(f"{base}: {e}")
 
         prog.progress((idx + 1) / total,
-                      text=f"Loaded {idx+1}/{total}: {base}")
+                      text=f"Loaded {idx + 1}/{total}: {base}")
 
     prog.empty()
 
@@ -511,27 +503,13 @@ def load_mtr_from_main_zip(main_zip_file):
         st.sidebar.warning(f"⚠️ Skipped {len(skipped)} file(s):\n" +
                            "\n".join(skipped[:5]))
 
-    if not tmp_files:
+    if combined is None or combined.empty:
         return pd.DataFrame(), 0
 
-    # Read back all temp files and concat once (minimal peak RAM)
-    parts = [pd.read_csv(p) for p in tmp_files]
-    combined = pd.concat(parts, ignore_index=True)
-    del parts
-
-    # Clean up temp files
-    for p in tmp_files:
-        try:
-            os.unlink(p)
-        except Exception:
-            pass
-
-    # Deduplicate
     combined = combined.drop_duplicates(
         subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="first"
     )
 
-    # Re-apply category dtypes lost during parquet round-trip
     for col in _CAT_COLS:
         if col in combined.columns:
             combined[col] = combined[col].astype("category")
