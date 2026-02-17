@@ -28,10 +28,12 @@ Yash Gallery Complete ERP System — app.py (MTR-INTEGRATED VERSION)
 """
 
 import io
+import re
 import zipfile
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -272,7 +274,6 @@ def _detect_period(filename: str):
     n = filename.upper()
     for month_name, month_num in _MONTH_MAP.items():
         if month_name in n:
-            import re
             m = re.search(r"(20\d{2})", n)
             if m:
                 year = m.group(1)
