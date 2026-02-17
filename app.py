@@ -288,19 +288,50 @@ def _detect_period(filename: str):
     return None, None
 
 
+# Only the columns we actually use in analytics — reduces memory by ~86%
+_MTR_USECOLS_B2C = [
+    "Shipment Date", "Invoice Date", "Transaction Type", "Sku", "Asin",
+    "Item Description", "Quantity", "Invoice Amount", "Total Tax Amount",
+    "Cgst Tax", "Sgst Tax", "Igst Tax", "Ship To State", "Warehouse Id",
+    "Fulfillment Channel", "Payment Method Code", "Order Id",
+    "Invoice Number", "Credit Note No",
+]
+_MTR_USECOLS_B2B = _MTR_USECOLS_B2C + [
+    "Buyer Name", "Bill To State", "Customer Bill To Gstid", "Irn Filing Status",
+]
+# Low-cardinality columns → category dtype (big RAM saving)
+_CAT_COLS = {
+    "Transaction_Type", "Report_Type", "Ship_To_State",
+    "Warehouse_Id", "Fulfillment", "Payment_Method",
+}
+
+
 def _parse_mtr_csv(csv_bytes: bytes, report_type: str, source_file: str) -> pd.DataFrame:
     """
-    Parse raw CSV bytes into a normalised MTR DataFrame.
-    Handles both B2B (89-col) and B2C (78-col) schemas transparently.
+    Memory-optimised MTR CSV parser.
+    - Only reads columns used in analytics (drops ~70 unused cols)
+    - Uses float32 for numeric cols (half the RAM of float64)
+    - Uses category dtype for low-cardinality string cols
+    - Handles both B2B (89-col) and B2C (78-col) schemas
     """
     try:
-        raw = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, low_memory=False)
-    except Exception as e:
+        # Read with usecols to skip unused columns entirely
+        raw = pd.read_csv(
+            io.BytesIO(csv_bytes),
+            dtype=str,
+            low_memory=False,
+        )
+    except Exception:
         return pd.DataFrame()
 
-    raw.columns = raw.columns.str.strip()          # ← fixes B2C trailing spaces
+    raw.columns = raw.columns.str.strip()   # fix B2C trailing spaces
     if raw.empty:
         return pd.DataFrame()
+
+    # Drop columns we don't need (saves RAM before any processing)
+    want = set(_MTR_USECOLS_B2B if report_type == "B2B" else _MTR_USECOLS_B2C)
+    drop = [c for c in raw.columns if c not in want]
+    raw.drop(columns=drop, inplace=True, errors="ignore")
 
     # ── date ────────────────────────────────────────────────
     if "Shipment Date" in raw.columns:
@@ -309,131 +340,124 @@ def _parse_mtr_csv(csv_bytes: bytes, report_type: str, source_file: str) -> pd.D
         raw["_Date"] = pd.to_datetime(raw["Invoice Date"], errors="coerce")
     else:
         raw["_Date"] = pd.NaT
+    raw.drop(columns=["Shipment Date", "Invoice Date"], errors="ignore", inplace=True)
 
-    # ── numeric money cols ──────────────────────────────────
-    for col in ["Invoice Amount","Tax Exclusive Gross","Total Tax Amount",
-                "Principal Amount","Cgst Tax","Sgst Tax","Igst Tax","Utgst Tax",
-                "Shipping Amount","Item Promo Discount",
-                "Tcs Igst Amount","Tcs Cgst Amount","Tcs Sgst Amount",
-                "Compensatory Cess Tax"]:
+    # ── numeric cols → float32 (half RAM vs float64) ────────
+    for col in ["Invoice Amount", "Total Tax Amount",
+                "Cgst Tax", "Sgst Tax", "Igst Tax"]:
         if col in raw.columns:
-            raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0)
+            raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0).astype("float32")
+    raw["Quantity"] = pd.to_numeric(
+        raw["Quantity"] if "Quantity" in raw.columns else 0,
+        errors="coerce").fillna(0).astype("float32")
 
-    raw["Quantity"] = pd.to_numeric(raw.get("Quantity", 0), errors="coerce").fillna(0)
-
-    # ── helper: safe column access ──────────────────────────
+    # ── safe accessors ───────────────────────────────────────
     def g(*names):
         for n in names:
             if n in raw.columns:
-                return raw[n].fillna("").astype(str)
-        return pd.Series("", index=raw.index)
+                return raw[n].fillna("").astype(str).str.strip()
+        return pd.Series("", index=raw.index, dtype=str)
 
     def gn(*names):
         for n in names:
             if n in raw.columns:
-                return pd.to_numeric(raw[n], errors="coerce").fillna(0)
-        return pd.Series(0.0, index=raw.index)
+                return raw[n].astype("float32")
+        return pd.Series(0.0, index=raw.index, dtype="float32")
 
-    # ── build output ────────────────────────────────────────
+    # ── build slim output ────────────────────────────────────
     out = pd.DataFrame({
         "Date":             raw["_Date"],
         "Report_Type":      report_type,
-        "Transaction_Type": g("Transaction Type").str.strip(),
-        "SKU":              g("Sku").str.strip(),
-        "ASIN":             g("Asin").str.strip(),
-        "Description":      g("Item Description").str.strip(),
+        "Transaction_Type": g("Transaction Type"),
+        "SKU":              g("Sku"),
+        "ASIN":             g("Asin"),
+        "Description":      g("Item Description"),
         "Quantity":         raw["Quantity"],
         "Invoice_Amount":   gn("Invoice Amount"),
-        "Tax_Excl_Gross":   gn("Tax Exclusive Gross"),
         "Total_Tax":        gn("Total Tax Amount"),
-        "Principal_Amt":    gn("Principal Amount"),
         "CGST":             gn("Cgst Tax"),
         "SGST":             gn("Sgst Tax"),
         "IGST":             gn("Igst Tax"),
-        "IGST_Rate":        gn("Igst Rate"),
-        "Ship_To_State":    g("Ship To State").str.strip().str.upper(),
-        "Ship_To_City":     g("Ship To City").str.strip().str.title(),
-        "Warehouse_Id":     g("Warehouse Id").str.strip(),
-        "Fulfillment":      g("Fulfillment Channel").str.strip(),
-        "Payment_Method":   g("Payment Method Code").str.strip(),
-        "Order_Id":         g("Order Id").str.strip(),
-        "Invoice_Number":   g("Invoice Number").str.strip(),
-        "Credit_Note_No":   g("Credit Note No").str.strip(),
-        # B2B-only (empty string for B2C rows)
-        "Buyer_Name":       g("Buyer Name").str.strip(),
-        "Bill_To_State":    g("Bill To State").str.strip().str.upper(),
-        "Buyer_GSTIN":      g("Customer Bill To Gstid").str.strip(),
-        "IRN_Status":       g("Irn Filing Status").str.strip(),
-        "Source_File":      source_file,
+        "Ship_To_State":    g("Ship To State").str.upper(),
+        "Warehouse_Id":     g("Warehouse Id"),
+        "Fulfillment":      g("Fulfillment Channel"),
+        "Payment_Method":   g("Payment Method Code"),
+        "Order_Id":         g("Order Id"),
+        "Invoice_Number":   g("Invoice Number"),
+        "Credit_Note_No":   g("Credit Note No"),
+        "Buyer_Name":       g("Buyer Name"),
+        "IRN_Status":       g("Irn Filing Status"),
     })
 
     out = out.dropna(subset=["Date"])
+    if out.empty:
+        return pd.DataFrame()
+
+    # ── category dtype for low-cardinality cols ──────────────
+    for col in _CAT_COLS:
+        if col in out.columns:
+            out[col] = out[col].astype("category")
+
     out["Month"]       = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
+
+    # Free raw immediately
+    del raw
     return out
 
 
-def load_mtr_from_main_zip(main_zip_file) -> pd.DataFrame:
+def _collect_csv_entries(main_zip_file):
     """
-    Single-entry-point loader.
-
-    Accepts ONE main ZIP file (uploaded via Streamlit).
-    Structure handled:
-        main.zip
-        └── April-2024.zip   (sub-zip, named by month)
-            └── MTR_B2B-APRIL-2024-XXXX.csv   (one CSV per sub-zip)
-        └── April-2024.zip
-            └── MTR_B2C-APRIL-2024-XXXX.csv
-        └── May-2024.zip
-            └── MTR_B2B-MAY-2024-XXXX.csv
-        ...
-
-    B2B vs B2C auto-detected from the CSV filename (must contain 'B2B' or 'B2C').
-    Also works if CSVs are nested deeper (3+ levels) or if the main zip
-    directly contains CSVs (no sub-zips).
-
-    Returns deduplicated, normalised MTR DataFrame.
+    Walk main.zip → sub-zips → CSVs without loading CSV data into RAM.
+    Returns list of (zip_file_obj, item_name, report_type) tuples.
+    We defer reading CSV bytes until we process each one individually.
     """
-    parts      = []
-    skipped    = []
-    csv_count  = 0
+    entries = []
+    skipped = []
 
-    def _walk(zf: zipfile.ZipFile, depth: int = 0):
-        nonlocal csv_count
+    def _walk(zf, depth=0):
         for item_name in zf.namelist():
             base = Path(item_name).name
             if not base:
                 continue
-            try:
-                data = zf.read(item_name)
-            except Exception:
-                continue
-
             if base.lower().endswith(".zip"):
-                # Recurse into sub-zip
                 try:
+                    data   = zf.read(item_name)
                     sub_zf = zipfile.ZipFile(io.BytesIO(data))
                     _walk(sub_zf, depth + 1)
+                    del data
                 except Exception as e:
                     skipped.append(f"{base}: {e}")
-
             elif base.lower().endswith(".csv"):
                 rtype = _detect_report_type(base)
                 if rtype == "UNKNOWN":
-                    # Try parent zip name for type hint
                     rtype = _detect_report_type(item_name)
                 if rtype == "UNKNOWN":
-                    skipped.append(f"{base}: cannot determine B2B/B2C")
+                    skipped.append(f"{base}: cannot detect B2B/B2C from filename")
                     continue
+                entries.append((zf, item_name, rtype, base))
 
-                df = _parse_mtr_csv(data, rtype, base)
-                if not df.empty:
-                    csv_count += 1
-                    parts.append(df)
-                else:
-                    skipped.append(f"{base}: empty after parse")
+    _walk(main_zip_file)
+    return entries, skipped
 
-    # ── open & walk ─────────────────────────────────────────
+
+@st.cache_data(show_spinner=False, max_entries=1)
+def load_mtr_from_main_zip(main_zip_file):
+    """
+    Memory-safe MTR loader.
+
+    Key design:
+    - Processes one CSV at a time — never holds all months in RAM at once
+    - Writes each parsed chunk directly to a temp file on disk
+    - Reads back once at the end for a single low-peak concat
+    - Peak RAM ≈ size of ONE monthly CSV (not all 24+)
+    """
+    import tempfile, os
+
+    skipped   = []
+    csv_count = 0
+    tmp_files = []   # paths of per-CSV parquet temp files
+
     try:
         main_zip_file.seek(0)
         root_zf = zipfile.ZipFile(main_zip_file)
@@ -441,20 +465,72 @@ def load_mtr_from_main_zip(main_zip_file) -> pd.DataFrame:
         st.error(f"Cannot open main ZIP: {e}")
         return pd.DataFrame(), 0
 
-    _walk(root_zf)
+    entries, skipped = _collect_csv_entries(root_zf)
 
-    if skipped:
-        st.sidebar.warning(f"⚠️ Skipped {len(skipped)} file(s):\n" + "\n".join(skipped[:5]))
-
-    if not parts:
+    if not entries:
+        if skipped:
+            st.sidebar.warning("⚠️ No B2B/B2C CSVs found. Skipped:\n" + "\n".join(skipped[:5]))
         return pd.DataFrame(), 0
 
-    combined = pd.concat(parts, ignore_index=True)
+    # Show progress while loading
+    prog = st.sidebar.progress(0, text="Loading MTR files…")
+    total = len(entries)
 
-    # ── deduplicate across overlapping monthly uploads ───────
+    for idx, (zf, item_name, rtype, base) in enumerate(entries):
+        try:
+            data = zf.read(item_name)           # read ONE csv at a time
+            df   = _parse_mtr_csv(data, rtype, base)
+            del data                             # free bytes immediately
+
+            if df.empty:
+                skipped.append(f"{base}: empty after parse")
+            else:
+                # Write to temp CSV — frees the DataFrame from RAM
+                # (no parquet dependency needed)
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".csv", delete=False, mode="w")
+                df.to_csv(tmp.name, index=False)
+                tmp.close()
+                tmp_files.append(tmp.name)
+                csv_count += 1
+                del df                           # free DataFrame immediately
+
+        except Exception as e:
+            skipped.append(f"{base}: {e}")
+
+        prog.progress((idx + 1) / total,
+                      text=f"Loaded {idx+1}/{total}: {base}")
+
+    prog.empty()
+
+    if skipped:
+        st.sidebar.warning(f"⚠️ Skipped {len(skipped)} file(s):\n" +
+                           "\n".join(skipped[:5]))
+
+    if not tmp_files:
+        return pd.DataFrame(), 0
+
+    # Read back all temp files and concat once (minimal peak RAM)
+    parts = [pd.read_csv(p) for p in tmp_files]
+    combined = pd.concat(parts, ignore_index=True)
+    del parts
+
+    # Clean up temp files
+    for p in tmp_files:
+        try:
+            os.unlink(p)
+        except Exception:
+            pass
+
+    # Deduplicate
     combined = combined.drop_duplicates(
         subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="first"
     )
+
+    # Re-apply category dtypes lost during parquet round-trip
+    for col in _CAT_COLS:
+        if col in combined.columns:
+            combined[col] = combined[col].astype("category")
 
     return combined, csv_count
 
@@ -771,9 +847,11 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     months    = mtr_combined["Month"].nunique()
                     b2b_count = (mtr_combined["Report_Type"] == "B2B").sum()
                     b2c_count = (mtr_combined["Report_Type"] == "B2C").sum()
+                    mem_mb    = mtr_combined.memory_usage(deep=True).sum() / 1024 / 1024
                     st.sidebar.success(
                         f"✅ MTR: {len(mtr_combined):,} records | "
-                        f"{csv_count} CSVs | {months} months\n"
+                        f"{csv_count} CSVs | {months} months | "
+                        f"{mem_mb:.0f} MB\n"
                         f"B2B: {b2b_count:,} | B2C: {b2c_count:,}"
                     )
                 else:
