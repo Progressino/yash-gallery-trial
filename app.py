@@ -1042,167 +1042,146 @@ with tab_mtr:
                 st.divider()
 
                 # ── B2B vs B2C comparison ─────────────────────────
-                st.markdown("### 🔀 B2B vs B2C Comparison")
-                comp_rows = []
-                for rt in ["B2B", "B2C"]:
-                    sub  = mf[mf["Report_Type"] == rt]
-                    sh   = sub["Transaction_Type"] == "Shipment"
-                    rf   = sub["Transaction_Type"] == "Refund"
-                    gr   = sub.loc[sh, "Invoice_Amount"].sum()
-                    ref  = sub.loc[rf, "Invoice_Amount"].abs().sum()
-                    ord_ = sub.loc[sh, "Order_Id"].nunique()
-                    us   = sub.loc[sh, "Quantity"].sum()
-                    comp_rows.append({
-                        "Type":          rt,
-                        "Gross Revenue": fmt_inr(gr),
-                        "Refunds":       fmt_inr(ref),
-                        "Net Revenue":   fmt_inr(gr - ref),
-                        "Tax":           fmt_inr(sub.loc[sh, "Total_Tax"].sum()),
-                        "Orders":        f"{ord_:,}",
-                        "Units Sold":    f"{int(us):,}",
-                        "AOV":           fmt_inr(gr / ord_) if ord_ else "₹0",
-                    })
-                st.dataframe(pd.DataFrame(comp_rows).set_index("Type"), use_container_width=True)
-
-                st.divider()
+                with st.expander("🔀 B2B vs B2C Comparison", expanded=True):
+                    comp_rows = []
+                    for rt in ["B2B", "B2C"]:
+                        sub  = mf[mf["Report_Type"] == rt]
+                        sh   = sub["Transaction_Type"] == "Shipment"
+                        rf   = sub["Transaction_Type"] == "Refund"
+                        gr   = sub.loc[sh, "Invoice_Amount"].sum()
+                        ref  = sub.loc[rf, "Invoice_Amount"].abs().sum()
+                        ord_ = sub.loc[sh, "Order_Id"].nunique()
+                        us   = sub.loc[sh, "Quantity"].sum()
+                        comp_rows.append({
+                            "Type":          rt,
+                            "Gross Revenue": fmt_inr(gr),
+                            "Refunds":       fmt_inr(ref),
+                            "Net Revenue":   fmt_inr(gr - ref),
+                            "Tax":           fmt_inr(sub.loc[sh, "Total_Tax"].sum()),
+                            "Orders":        f"{ord_:,}",
+                            "Units Sold":    f"{int(us):,}",
+                            "AOV":           fmt_inr(gr / ord_) if ord_ else "₹0",
+                        })
+                    st.dataframe(pd.DataFrame(comp_rows).set_index("Type"), use_container_width=True)
 
                 # ── Monthly revenue trend ─────────────────────────
-                st.markdown("### 📈 Monthly Revenue Trend — B2B vs B2C")
-                monthly = (mf[shipped]
-                           .groupby(["Month", "Report_Type"])["Invoice_Amount"]
-                           .sum().reset_index()
-                           .sort_values("Month"))
-                monthly.columns = ["Month", "Report_Type", "Gross_Revenue"]
-                fig = px.line(monthly, x="Month", y="Gross_Revenue", color="Report_Type",
-                              markers=True,
-                              color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
-                              title="Monthly Gross Revenue",
-                              labels={"Gross_Revenue": "Revenue (₹)", "Month": "Month"})
-                fig.update_layout(hovermode="x unified", height=400)
-                fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
-                st.plotly_chart(fig, use_container_width=True)
-
-                # refund % bar
-                monthly_ref = (mf[refunded]
+                with st.expander("📈 Monthly Revenue Trend", expanded=False):
+                    monthly = (mf[shipped]
                                .groupby(["Month", "Report_Type"])["Invoice_Amount"]
-                               .sum().abs().reset_index())
-                monthly_ref.columns = ["Month", "Report_Type", "Refund_Amt"]
-                monthly_comb = fillna_numeric(monthly.merge(monthly_ref, on=["Month", "Report_Type"], how="left"))
-                monthly_comb["Refund_%"] = (
-                    monthly_comb["Refund_Amt"] / monthly_comb["Gross_Revenue"].replace(0, np.nan) * 100
-                ).fillna(0.0).round(2)
-                fig2 = px.bar(monthly_comb, x="Month", y="Refund_%", color="Report_Type",
-                              barmode="group",
-                              color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
-                              title="Monthly Refund %",
-                              labels={"Refund_%": "Refund Rate (%)"})
-                fig2.update_layout(height=350)
-                st.plotly_chart(fig2, use_container_width=True)
+                               .sum().reset_index().sort_values("Month"))
+                    monthly.columns = ["Month", "Report_Type", "Gross_Revenue"]
+                    fig = px.line(monthly, x="Month", y="Gross_Revenue", color="Report_Type",
+                                  markers=True,
+                                  color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
+                                  title="Monthly Gross Revenue",
+                                  labels={"Gross_Revenue": "Revenue (₹)"})
+                    fig.update_layout(hovermode="x unified", height=380)
+                    fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                    st.plotly_chart(fig, use_container_width=True)
 
-                st.divider()
+                    monthly_ref = (mf[refunded]
+                                   .groupby(["Month", "Report_Type"])["Invoice_Amount"]
+                                   .sum().abs().reset_index())
+                    monthly_ref.columns = ["Month", "Report_Type", "Refund_Amt"]
+                    monthly_comb = fillna_numeric(monthly.merge(monthly_ref, on=["Month", "Report_Type"], how="left"))
+                    monthly_comb["Refund_%"] = (
+                        monthly_comb["Refund_Amt"] / monthly_comb["Gross_Revenue"].replace(0, np.nan) * 100
+                    ).fillna(0.0).round(2)
+                    fig2 = px.bar(monthly_comb, x="Month", y="Refund_%", color="Report_Type",
+                                  barmode="group",
+                                  color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
+                                  title="Monthly Refund %")
+                    fig2.update_layout(height=320)
+                    st.plotly_chart(fig2, use_container_width=True)
 
                 # ── State-wise revenue ────────────────────────────
-                st.markdown("### 🗺️ State-wise Revenue")
-                sc1, sc2 = st.columns([1, 3])
-                with sc1:
-                    state_rt = st.radio("Report Type", ["Both", "B2B", "B2C"],
-                                        horizontal=False, key="mtr_state_rt")
-                    top_n    = st.slider("Top N States", 5, 25, 15, key="mtr_topn")
-                state_src = mf[shipped].copy()
-                if state_rt != "Both":
-                    state_src = state_src[state_src["Report_Type"] == state_rt]
-                state_rev = (state_src.groupby("Ship_To_State")["Invoice_Amount"]
-                             .sum().sort_values(ascending=False).head(top_n).reset_index())
-                state_rev.columns = ["State", "Revenue"]
-                with sc2:
-                    fig3 = px.bar(state_rev, x="Revenue", y="State", orientation="h",
-                                  color="Revenue", color_continuous_scale="Blues",
-                                  title=f"Top {top_n} States by Revenue")
-                    fig3.update_layout(height=max(300, top_n * 28), yaxis=dict(autorange="reversed"))
-                    fig3.update_xaxes(tickprefix="₹", tickformat=",.0f")
-                    st.plotly_chart(fig3, use_container_width=True)
-
-                st.divider()
+                with st.expander("🗺️ State-wise Revenue", expanded=False):
+                    sc1, sc2 = st.columns([1, 3])
+                    with sc1:
+                        state_rt = st.radio("Report Type", ["Both", "B2B", "B2C"],
+                                            horizontal=False, key="mtr_state_rt")
+                        top_n    = st.slider("Top N States", 5, 25, 15, key="mtr_topn")
+                    state_src = mf[shipped].copy()
+                    if state_rt != "Both":
+                        state_src = state_src[state_src["Report_Type"] == state_rt]
+                    state_rev = (state_src.groupby("Ship_To_State")["Invoice_Amount"]
+                                 .sum().sort_values(ascending=False).head(top_n).reset_index())
+                    state_rev.columns = ["State", "Revenue"]
+                    with sc2:
+                        fig3 = px.bar(state_rev, x="Revenue", y="State", orientation="h",
+                                      color="Revenue", color_continuous_scale="Blues",
+                                      title=f"Top {top_n} States by Revenue")
+                        fig3.update_layout(height=max(300, top_n * 26), yaxis=dict(autorange="reversed"))
+                        fig3.update_xaxes(tickprefix="₹", tickformat=",.0f")
+                        st.plotly_chart(fig3, use_container_width=True)
 
                 # ── State heatmap ─────────────────────────────────
-                st.markdown("### 🔥 State Revenue Heatmap (Top 12 × Month)")
-                top12 = (mf[shipped].groupby("Ship_To_State")["Invoice_Amount"]
-                         .sum().nlargest(12).index.tolist())
-                heat_src = (mf[shipped & mf["Ship_To_State"].isin(top12)]
-                            .groupby(["Ship_To_State", "Month"])["Invoice_Amount"]
-                            .sum().reset_index()
-                            .pivot(index="Ship_To_State", columns="Month", values="Invoice_Amount")
-                            .fillna(0))
-                if not heat_src.empty:
-                    fig4 = px.imshow(heat_src / 1000, color_continuous_scale="YlOrRd",
-                                     labels=dict(color="Revenue (₹K)"),
-                                     title="Revenue Heatmap (₹ Thousands)", aspect="auto")
-                    fig4.update_layout(height=420)
-                    st.plotly_chart(fig4, use_container_width=True)
-
-                st.divider()
+                with st.expander("🔥 State Revenue Heatmap", expanded=False):
+                    top12 = (mf[shipped].groupby("Ship_To_State")["Invoice_Amount"]
+                             .sum().nlargest(12).index.tolist())
+                    heat_src = (mf[shipped & mf["Ship_To_State"].isin(top12)]
+                                .groupby(["Ship_To_State", "Month"])["Invoice_Amount"]
+                                .sum().reset_index()
+                                .pivot(index="Ship_To_State", columns="Month", values="Invoice_Amount")
+                                .fillna(0))
+                    if not heat_src.empty:
+                        fig4 = px.imshow(heat_src / 1000, color_continuous_scale="YlOrRd",
+                                         labels=dict(color="Revenue (₹K)"),
+                                         title="Revenue Heatmap (₹ Thousands)", aspect="auto")
+                        fig4.update_layout(height=400)
+                        st.plotly_chart(fig4, use_container_width=True)
 
                 # ── Payment methods ───────────────────────────────
-                st.markdown("### 💳 Payment Method Distribution")
-                pm1, pm2 = st.columns(2)
-                with pm1:
-                    pm_df = (mf[shipped].groupby(["Payment_Method", "Report_Type"])["Invoice_Amount"]
-                             .sum().reset_index())
-                    fig5 = px.bar(pm_df, x="Payment_Method", y="Invoice_Amount",
+                with st.expander("💳 Payment Method Distribution", expanded=False):
+                    pm1, pm2 = st.columns(2)
+                    with pm1:
+                        pm_df = (mf[shipped].groupby(["Payment_Method", "Report_Type"])["Invoice_Amount"]
+                                 .sum().reset_index())
+                        fig5 = px.bar(pm_df, x="Payment_Method", y="Invoice_Amount",
+                                      color="Report_Type", barmode="group",
+                                      color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
+                                      title="Payment Methods by Revenue")
+                        fig5.update_xaxes(tickangle=-30)
+                        fig5.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                        st.plotly_chart(fig5, use_container_width=True)
+                    with pm2:
+                        pm_units = (mf[shipped].groupby("Payment_Method")["Quantity"]
+                                    .sum().sort_values(ascending=False).head(10).reset_index())
+                        pm_units.columns = ["Method", "Units"]
+                        fig6 = px.pie(pm_units, values="Units", names="Method",
+                                      title="Payment Split (Units)", hole=0.4)
+                        fig6.update_layout(height=320)
+                        st.plotly_chart(fig6, use_container_width=True)
+
+                # ── Transaction type + Top SKUs + Warehouse ───────
+                with st.expander("📋 Transaction Type / SKUs / Warehouse", expanded=False):
+                    txn_rev = (mf.groupby(["Transaction_Type", "Report_Type"])["Invoice_Amount"]
+                               .sum().reset_index())
+                    fig7 = px.bar(txn_rev, x="Transaction_Type", y="Invoice_Amount",
                                   color="Report_Type", barmode="group",
                                   color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
-                                  title="Payment Methods by Revenue")
-                    fig5.update_xaxes(tickangle=-30)
-                    fig5.update_yaxes(tickprefix="₹", tickformat=",.0f")
-                    st.plotly_chart(fig5, use_container_width=True)
-                with pm2:
-                    pm_units = (mf[shipped].groupby("Payment_Method")["Quantity"]
-                                .sum().sort_values(ascending=False).head(10).reset_index())
-                    pm_units.columns = ["Method", "Units"]
-                    fig6 = px.pie(pm_units, values="Units", names="Method",
-                                  title="Payment Split (Units)", hole=0.4)
-                    fig6.update_layout(height=340)
-                    st.plotly_chart(fig6, use_container_width=True)
+                                  title="Revenue by Transaction Type")
+                    fig7.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                    st.plotly_chart(fig7, use_container_width=True)
 
-                st.divider()
+                    sku_rev = (mf[shipped].groupby(["SKU", "Report_Type"])["Invoice_Amount"]
+                               .sum().reset_index()
+                               .sort_values("Invoice_Amount", ascending=False).head(20))
+                    fig8 = px.bar(sku_rev, x="SKU", y="Invoice_Amount", color="Report_Type",
+                                  color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
+                                  title="Top 20 SKUs by Revenue")
+                    fig8.update_xaxes(tickangle=-45)
+                    fig8.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                    st.plotly_chart(fig8, use_container_width=True)
 
-                # ── Transaction type breakdown ────────────────────
-                st.markdown("### 📋 Transaction Type Breakdown")
-                txn_rev = (mf.groupby(["Transaction_Type", "Report_Type"])["Invoice_Amount"]
-                           .sum().reset_index())
-                fig7 = px.bar(txn_rev, x="Transaction_Type", y="Invoice_Amount",
-                              color="Report_Type", barmode="group",
-                              color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
-                              title="Revenue by Transaction Type")
-                fig7.update_yaxes(tickprefix="₹", tickformat=",.0f")
-                st.plotly_chart(fig7, use_container_width=True)
-
-                st.divider()
-
-                # ── Top SKUs ──────────────────────────────────────
-                st.markdown("### 🏆 Top 20 SKUs by Gross Revenue")
-                sku_rev = (mf[shipped].groupby(["SKU", "Report_Type"])["Invoice_Amount"]
-                           .sum().reset_index()
-                           .sort_values("Invoice_Amount", ascending=False).head(20))
-                fig8 = px.bar(sku_rev, x="SKU", y="Invoice_Amount", color="Report_Type",
-                              color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
-                              title="Top 20 SKUs by Revenue")
-                fig8.update_xaxes(tickangle=-45)
-                fig8.update_yaxes(tickprefix="₹", tickformat=",.0f")
-                st.plotly_chart(fig8, use_container_width=True)
-
-                st.divider()
-
-                # ── Warehouse ─────────────────────────────────────
-                st.markdown("### 🏭 Warehouse / FC Revenue")
-                wh_df = (mf[shipped].groupby(["Warehouse_Id", "Report_Type"])["Invoice_Amount"]
-                         .sum().reset_index().sort_values("Invoice_Amount", ascending=False))
-                fig9 = px.bar(wh_df, x="Warehouse_Id", y="Invoice_Amount", color="Report_Type",
-                              barmode="group",
-                              color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
-                              title="Revenue by Warehouse / FC")
-                fig9.update_yaxes(tickprefix="₹", tickformat=",.0f")
-                st.plotly_chart(fig9, use_container_width=True)
+                    wh_df = (mf[shipped].groupby(["Warehouse_Id", "Report_Type"])["Invoice_Amount"]
+                             .sum().reset_index().sort_values("Invoice_Amount", ascending=False))
+                    fig9 = px.bar(wh_df, x="Warehouse_Id", y="Invoice_Amount", color="Report_Type",
+                                  barmode="group",
+                                  color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
+                                  title="Revenue by Warehouse / FC")
+                    fig9.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                    st.plotly_chart(fig9, use_container_width=True)
 
                 st.divider()
 
