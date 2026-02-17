@@ -446,7 +446,6 @@ def _collect_csv_entries(main_zip_file):
     return entries, skipped
 
 
-@st.cache_data(show_spinner=False, max_entries=1)
 def load_mtr_from_main_zip(main_zip_file):
     """
     Memory-safe MTR loader.
@@ -827,72 +826,77 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
     if not map_file:
         st.sidebar.error("SKU Mapping required!")
     else:
+        _load_error = None
         with st.spinner("Loading data…"):
-            # SKU Mapping
-            st.session_state.sku_mapping = load_sku_mapping(map_file)
-            if st.session_state.sku_mapping:
-                st.sidebar.success(f"✅ Mapping: {len(st.session_state.sku_mapping):,} SKUs")
+            try:
+                # SKU Mapping
+                st.session_state.sku_mapping = load_sku_mapping(map_file)
+                if st.session_state.sku_mapping:
+                    st.sidebar.success(f"✅ Mapping: {len(st.session_state.sku_mapping):,} SKUs")
 
-            config = SalesConfig(
-                date_basis=st.session_state.amazon_date_basis,
-                include_replacements=st.session_state.include_replacements,
-            )
+                config = SalesConfig(
+                    date_basis=st.session_state.amazon_date_basis,
+                    include_replacements=st.session_state.include_replacements,
+                )
 
-            # ── MTR ──────────────────────────────────────────
-            if mtr_main_zip:
-                result = load_mtr_from_main_zip(mtr_main_zip)
-                if isinstance(result, tuple):
-                    mtr_combined, csv_count = result
+                # ── MTR ──────────────────────────────────────────
+                if mtr_main_zip:
+                    result = load_mtr_from_main_zip(mtr_main_zip)
+                    mtr_combined, csv_count = result if isinstance(result, tuple) else (result, 0)
+                    st.session_state.mtr_df = mtr_combined
+                    if not mtr_combined.empty:
+                        months    = mtr_combined["Month"].nunique()
+                        b2b_count = (mtr_combined["Report_Type"] == "B2B").sum()
+                        b2c_count = (mtr_combined["Report_Type"] == "B2C").sum()
+                        mem_mb    = mtr_combined.memory_usage(deep=True).sum() / 1024 / 1024
+                        st.sidebar.success(
+                            f"✅ MTR: {len(mtr_combined):,} rows | {csv_count} CSVs | "
+                            f"{months} months | {mem_mb:.0f} MB | "
+                            f"B2B: {b2b_count:,} B2C: {b2c_count:,}"
+                        )
+                    else:
+                        st.sidebar.warning("⚠️ MTR ZIP loaded but no records found — "
+                                           "check CSV filenames contain B2B or B2C.")
+
+                # ── Sales ─────────────────────────────────────
+                sales_parts = []
+                if f_b2c:    sales_parts.append(load_amazon_sales(f_b2c,   st.session_state.sku_mapping, "Amazon B2C", config))
+                if f_b2b:    sales_parts.append(load_amazon_sales(f_b2b,   st.session_state.sku_mapping, "Amazon B2B", config))
+                if f_fk:     sales_parts.append(load_flipkart_sales(f_fk,  st.session_state.sku_mapping))
+                if f_meesho: sales_parts.append(load_meesho_sales(f_meesho,st.session_state.sku_mapping))
+                if sales_parts:
+                    st.session_state.sales_df = pd.concat(
+                        [d for d in sales_parts if not d.empty], ignore_index=True)
+                    st.sidebar.success(f"✅ Sales: {len(st.session_state.sales_df):,} records")
                 else:
-                    mtr_combined, csv_count = result, 0
+                    st.session_state.sales_df = pd.DataFrame()
 
-                st.session_state.mtr_df = mtr_combined
+                # ── Inventory ─────────────────────────────────
+                st.session_state.inventory_df_variant = load_inventory_consolidated(
+                    i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=False)
+                st.session_state.inventory_df_parent  = load_inventory_consolidated(
+                    i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=True)
+                if not st.session_state.inventory_df_variant.empty:
+                    st.sidebar.success(f"✅ Inventory (Variant): {len(st.session_state.inventory_df_variant):,} SKUs")
+                if not st.session_state.inventory_df_parent.empty:
+                    st.sidebar.success(f"✅ Inventory (Parent): {len(st.session_state.inventory_df_parent):,} Styles")
 
-                if not mtr_combined.empty:
-                    months    = mtr_combined["Month"].nunique()
-                    b2b_count = (mtr_combined["Report_Type"] == "B2B").sum()
-                    b2c_count = (mtr_combined["Report_Type"] == "B2C").sum()
-                    mem_mb    = mtr_combined.memory_usage(deep=True).sum() / 1024 / 1024
-                    st.sidebar.success(
-                        f"✅ MTR: {len(mtr_combined):,} records | "
-                        f"{csv_count} CSVs | {months} months | "
-                        f"{mem_mb:.0f} MB\n"
-                        f"B2B: {b2b_count:,} | B2C: {b2c_count:,}"
-                    )
-                else:
-                    st.sidebar.warning("⚠️ MTR ZIP loaded but no valid records found. "
-                                       "Check that CSV filenames contain 'B2B' or 'B2C'.")
+                # ── Transfers ─────────────────────────────────
+                if f_transfer:
+                    st.session_state.transfer_df = load_stock_transfer(f_transfer)
+                    if not st.session_state.transfer_df.empty:
+                        st.sidebar.success(f"✅ Transfers: {len(st.session_state.transfer_df):,} records")
 
-            # ── Sales ─────────────────────────────────────────
-            sales_parts = []
-            if f_b2c:    sales_parts.append(load_amazon_sales(f_b2c,   st.session_state.sku_mapping, "Amazon B2C", config))
-            if f_b2b:    sales_parts.append(load_amazon_sales(f_b2b,   st.session_state.sku_mapping, "Amazon B2B", config))
-            if f_fk:     sales_parts.append(load_flipkart_sales(f_fk,  st.session_state.sku_mapping))
-            if f_meesho: sales_parts.append(load_meesho_sales(f_meesho,st.session_state.sku_mapping))
-            if sales_parts:
-                st.session_state.sales_df = pd.concat(
-                    [d for d in sales_parts if not d.empty], ignore_index=True)
-                st.sidebar.success(f"✅ Sales: {len(st.session_state.sales_df):,} records")
-            else:
-                st.session_state.sales_df = pd.DataFrame()
+            except Exception as _load_err:
+                import traceback as _tb
+                _load_error = _tb.format_exc()
+                st.sidebar.error(f"❌ Load failed: {_load_err}")
 
-            # ── Inventory ─────────────────────────────────────
-            st.session_state.inventory_df_variant = load_inventory_consolidated(
-                i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=False)
-            st.session_state.inventory_df_parent  = load_inventory_consolidated(
-                i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=True)
-            if not st.session_state.inventory_df_variant.empty:
-                st.sidebar.success(f"✅ Inventory (Variant): {len(st.session_state.inventory_df_variant):,} SKUs")
-            if not st.session_state.inventory_df_parent.empty:
-                st.sidebar.success(f"✅ Inventory (Parent): {len(st.session_state.inventory_df_parent):,} Styles")
-
-            # ── Transfers ─────────────────────────────────────
-            if f_transfer:
-                st.session_state.transfer_df = load_stock_transfer(f_transfer)
-                if not st.session_state.transfer_df.empty:
-                    st.sidebar.success(f"✅ Transfers: {len(st.session_state.transfer_df):,} records")
-
-        st.rerun()
+        if _load_error:
+            st.error("**Loading failed — full traceback:**")
+            st.code(_load_error)
+        else:
+            st.rerun()
 
 # ══════════════════════════════════════════════════════════════
 # 13) GUARD
