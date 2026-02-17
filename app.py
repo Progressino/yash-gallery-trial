@@ -244,29 +244,57 @@ def load_sku_mapping(mapping_file) -> Dict[str, str]:
         return {}
 
 # ══════════════════════════════════════════════════════════════
-# 6) MTR LOADER  ✅ NEW / CORE
+# 6) MTR LOADER  ✅ SINGLE-ZIP RECURSIVE VERSION
 # ══════════════════════════════════════════════════════════════
-def _load_single_mtr(file_obj, report_type: str) -> pd.DataFrame:
+
+# Month name → zero-padded number
+_MONTH_MAP = {
+    "JANUARY":"01","FEBRUARY":"02","MARCH":"03","APRIL":"04",
+    "MAY":"05","JUNE":"06","JULY":"07","AUGUST":"08",
+    "SEPTEMBER":"09","OCTOBER":"10","NOVEMBER":"11","DECEMBER":"12",
+}
+
+def _detect_report_type(filename: str) -> str:
+    """Return 'B2B', 'B2C', or 'UNKNOWN' from the CSV/zip filename."""
+    n = filename.upper()
+    if "B2B" in n:
+        return "B2B"
+    if "B2C" in n:
+        return "B2C"
+    return "UNKNOWN"
+
+def _detect_period(filename: str):
     """
-    Parse one MTR CSV (B2B or B2C).
-    Handles both 89-column (B2B) and 78-column (B2C) schemas.
-    Strips whitespace from all column headers.
-    Returns normalised DataFrame.
+    Return (period_str, label) e.g. ('2024-04', 'April 2024').
+    Looks for MONTHNAME + 4-digit year anywhere in the filename.
+    Falls back to None, None if not found.
+    """
+    n = filename.upper()
+    for month_name, month_num in _MONTH_MAP.items():
+        if month_name in n:
+            import re
+            m = re.search(r"(20\d{2})", n)
+            if m:
+                year = m.group(1)
+                return f"{year}-{month_num}", f"{month_name.title()} {year}"
+    return None, None
+
+
+def _parse_mtr_csv(csv_bytes: bytes, report_type: str, source_file: str) -> pd.DataFrame:
+    """
+    Parse raw CSV bytes into a normalised MTR DataFrame.
+    Handles both B2B (89-col) and B2C (78-col) schemas transparently.
     """
     try:
-        file_obj.seek(0)
-        raw = pd.read_csv(file_obj, dtype=str, low_memory=False)
+        raw = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, low_memory=False)
     except Exception as e:
-        st.warning(f"Could not read MTR file: {e}")
         return pd.DataFrame()
 
-    # ── normalise column names ──────────────────────────────
-    raw.columns = raw.columns.str.strip()
-
+    raw.columns = raw.columns.str.strip()          # ← fixes B2C trailing spaces
     if raw.empty:
         return pd.DataFrame()
 
-    # ── date: prefer Shipment Date, fallback Invoice Date ──
+    # ── date ────────────────────────────────────────────────
     if "Shipment Date" in raw.columns:
         raw["_Date"] = pd.to_datetime(raw["Shipment Date"], errors="coerce")
     elif "Invoice Date" in raw.columns:
@@ -274,114 +302,153 @@ def _load_single_mtr(file_obj, report_type: str) -> pd.DataFrame:
     else:
         raw["_Date"] = pd.NaT
 
-    # ── financial columns → numeric ─────────────────────────
-    money_cols = [
-        "Invoice Amount", "Tax Exclusive Gross", "Total Tax Amount",
-        "Principal Amount", "Cgst Tax", "Sgst Tax", "Igst Tax", "Utgst Tax",
-        "Shipping Amount", "Item Promo Discount",
-        "Tcs Igst Amount", "Tcs Cgst Amount", "Tcs Sgst Amount",
-        "Compensatory Cess Tax",
-    ]
-    for col in money_cols:
+    # ── numeric money cols ──────────────────────────────────
+    for col in ["Invoice Amount","Tax Exclusive Gross","Total Tax Amount",
+                "Principal Amount","Cgst Tax","Sgst Tax","Igst Tax","Utgst Tax",
+                "Shipping Amount","Item Promo Discount",
+                "Tcs Igst Amount","Tcs Cgst Amount","Tcs Sgst Amount",
+                "Compensatory Cess Tax"]:
         if col in raw.columns:
             raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0)
 
     raw["Quantity"] = pd.to_numeric(raw.get("Quantity", 0), errors="coerce").fillna(0)
 
-    # ── safe column getters ─────────────────────────────────
-    def gcol(df, *names, default=""):
+    # ── helper: safe column access ──────────────────────────
+    def g(*names):
         for n in names:
-            if n in df.columns:
-                return df[n]
-        return pd.Series(default, index=df.index)
+            if n in raw.columns:
+                return raw[n].fillna("").astype(str)
+        return pd.Series("", index=raw.index)
 
-    # ── build normalised output ─────────────────────────────
-    out = pd.DataFrame()
-    out["Date"]             = raw["_Date"]
-    out["Report_Type"]      = report_type            # "B2B" or "B2C"
-    out["Transaction_Type"] = gcol(raw, "Transaction Type").str.strip()
-    out["SKU"]              = gcol(raw, "Sku").str.strip()
-    out["ASIN"]             = gcol(raw, "Asin").str.strip()
-    out["Description"]      = gcol(raw, "Item Description").str.strip()
-    out["Quantity"]         = raw["Quantity"]
-    out["Invoice_Amount"]   = raw.get("Invoice Amount",    pd.Series(0, index=raw.index)).fillna(0)
-    out["Tax_Excl_Gross"]   = raw.get("Tax Exclusive Gross", pd.Series(0, index=raw.index)).fillna(0)
-    out["Total_Tax"]        = raw.get("Total Tax Amount", pd.Series(0, index=raw.index)).fillna(0)
-    out["Principal_Amt"]    = raw.get("Principal Amount",  pd.Series(0, index=raw.index)).fillna(0)
-    out["CGST"]             = raw.get("Cgst Tax",  pd.Series(0, index=raw.index)).fillna(0)
-    out["SGST"]             = raw.get("Sgst Tax",  pd.Series(0, index=raw.index)).fillna(0)
-    out["IGST"]             = raw.get("Igst Tax",  pd.Series(0, index=raw.index)).fillna(0)
-    out["IGST_Rate"]        = pd.to_numeric(gcol(raw, "Igst Rate"), errors="coerce").fillna(0)
-    out["Ship_To_State"]    = gcol(raw, "Ship To State").str.strip().str.upper()
-    out["Ship_To_City"]     = gcol(raw, "Ship To City").str.strip().str.title()
-    out["Warehouse_Id"]     = gcol(raw, "Warehouse Id").str.strip()
-    out["Fulfillment"]      = gcol(raw, "Fulfillment Channel").str.strip()
-    out["Payment_Method"]   = gcol(raw, "Payment Method Code").str.strip()
-    out["Order_Id"]         = gcol(raw, "Order Id").str.strip()
-    out["Invoice_Number"]   = gcol(raw, "Invoice Number").str.strip()
-    out["Credit_Note_No"]   = gcol(raw, "Credit Note No").str.strip()
+    def gn(*names):
+        for n in names:
+            if n in raw.columns:
+                return pd.to_numeric(raw[n], errors="coerce").fillna(0)
+        return pd.Series(0.0, index=raw.index)
 
-    # B2B-only columns (absent in B2C)
-    out["Buyer_Name"]       = gcol(raw, "Buyer Name").str.strip()
-    out["Bill_To_State"]    = gcol(raw, "Bill To State").str.strip().str.upper()
-    out["Buyer_GSTIN"]      = gcol(raw, "Customer Bill To Gstid").str.strip()
-    out["IRN_Status"]       = gcol(raw, "Irn Filing Status").str.strip()
+    # ── build output ────────────────────────────────────────
+    out = pd.DataFrame({
+        "Date":             raw["_Date"],
+        "Report_Type":      report_type,
+        "Transaction_Type": g("Transaction Type").str.strip(),
+        "SKU":              g("Sku").str.strip(),
+        "ASIN":             g("Asin").str.strip(),
+        "Description":      g("Item Description").str.strip(),
+        "Quantity":         raw["Quantity"],
+        "Invoice_Amount":   gn("Invoice Amount"),
+        "Tax_Excl_Gross":   gn("Tax Exclusive Gross"),
+        "Total_Tax":        gn("Total Tax Amount"),
+        "Principal_Amt":    gn("Principal Amount"),
+        "CGST":             gn("Cgst Tax"),
+        "SGST":             gn("Sgst Tax"),
+        "IGST":             gn("Igst Tax"),
+        "IGST_Rate":        gn("Igst Rate"),
+        "Ship_To_State":    g("Ship To State").str.strip().str.upper(),
+        "Ship_To_City":     g("Ship To City").str.strip().str.title(),
+        "Warehouse_Id":     g("Warehouse Id").str.strip(),
+        "Fulfillment":      g("Fulfillment Channel").str.strip(),
+        "Payment_Method":   g("Payment Method Code").str.strip(),
+        "Order_Id":         g("Order Id").str.strip(),
+        "Invoice_Number":   g("Invoice Number").str.strip(),
+        "Credit_Note_No":   g("Credit Note No").str.strip(),
+        # B2B-only (empty string for B2C rows)
+        "Buyer_Name":       g("Buyer Name").str.strip(),
+        "Bill_To_State":    g("Bill To State").str.strip().str.upper(),
+        "Buyer_GSTIN":      g("Customer Bill To Gstid").str.strip(),
+        "IRN_Status":       g("Irn Filing Status").str.strip(),
+        "Source_File":      source_file,
+    })
 
     out = out.dropna(subset=["Date"])
-
-    # ── Month label ─────────────────────────────────────────
-    out["Month"]        = out["Date"].dt.to_period("M").astype(str)
-    out["Month_Label"]  = out["Date"].dt.strftime("%b %Y")
-
+    out["Month"]       = out["Date"].dt.to_period("M").astype(str)
+    out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
     return out
 
 
-def load_mtr_reports(b2b_files: List, b2c_files: List) -> pd.DataFrame:
+def load_mtr_from_main_zip(main_zip_file) -> pd.DataFrame:
     """
-    Accept lists of uploaded file objects (ZIP or CSV) for B2B and B2C.
-    Returns combined, normalised MTR DataFrame.
-    """
-    parts = []
+    Single-entry-point loader.
 
-    def _open_file(f):
-        """Return list of (file-like, label) from a ZIP or raw CSV upload."""
-        name = f.name.lower()
-        if name.endswith(".zip"):
+    Accepts ONE main ZIP file (uploaded via Streamlit).
+    Structure handled:
+        main.zip
+        └── April-2024.zip   (sub-zip, named by month)
+            └── MTR_B2B-APRIL-2024-XXXX.csv   (one CSV per sub-zip)
+        └── April-2024.zip
+            └── MTR_B2C-APRIL-2024-XXXX.csv
+        └── May-2024.zip
+            └── MTR_B2B-MAY-2024-XXXX.csv
+        ...
+
+    B2B vs B2C auto-detected from the CSV filename (must contain 'B2B' or 'B2C').
+    Also works if CSVs are nested deeper (3+ levels) or if the main zip
+    directly contains CSVs (no sub-zips).
+
+    Returns deduplicated, normalised MTR DataFrame.
+    """
+    parts      = []
+    skipped    = []
+    csv_count  = 0
+
+    def _walk(zf: zipfile.ZipFile, depth: int = 0):
+        nonlocal csv_count
+        for item_name in zf.namelist():
+            base = Path(item_name).name
+            if not base:
+                continue
             try:
-                zf = zipfile.ZipFile(f)
-                csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-                return [(zf.open(c), c) for c in csvs]
-            except Exception as e:
-                st.warning(f"Cannot open ZIP {f.name}: {e}")
-                return []
-        else:
-            f.seek(0)
-            return [(f, f.name)]
+                data = zf.read(item_name)
+            except Exception:
+                continue
 
-    for f in b2b_files:
-        for fobj, label in _open_file(f):
-            df = _load_single_mtr(fobj, "B2B")
-            if not df.empty:
-                df["Source_File"] = label
-                parts.append(df)
+            if base.lower().endswith(".zip"):
+                # Recurse into sub-zip
+                try:
+                    sub_zf = zipfile.ZipFile(io.BytesIO(data))
+                    _walk(sub_zf, depth + 1)
+                except Exception as e:
+                    skipped.append(f"{base}: {e}")
 
-    for f in b2c_files:
-        for fobj, label in _open_file(f):
-            df = _load_single_mtr(fobj, "B2C")
-            if not df.empty:
-                df["Source_File"] = label
-                parts.append(df)
+            elif base.lower().endswith(".csv"):
+                rtype = _detect_report_type(base)
+                if rtype == "UNKNOWN":
+                    # Try parent zip name for type hint
+                    rtype = _detect_report_type(item_name)
+                if rtype == "UNKNOWN":
+                    skipped.append(f"{base}: cannot determine B2B/B2C")
+                    continue
+
+                df = _parse_mtr_csv(data, rtype, base)
+                if not df.empty:
+                    csv_count += 1
+                    parts.append(df)
+                else:
+                    skipped.append(f"{base}: empty after parse")
+
+    # ── open & walk ─────────────────────────────────────────
+    try:
+        main_zip_file.seek(0)
+        root_zf = zipfile.ZipFile(main_zip_file)
+    except Exception as e:
+        st.error(f"Cannot open main ZIP: {e}")
+        return pd.DataFrame()
+
+    _walk(root_zf)
+
+    if skipped:
+        st.sidebar.warning(f"⚠️ Skipped {len(skipped)} file(s):\n" + "\n".join(skipped[:5]))
 
     if not parts:
         return pd.DataFrame()
 
     combined = pd.concat(parts, ignore_index=True)
 
-    # ── deduplicate: same Order+SKU+TxnType appearing in overlapping files ──
-    dedup_keys = ["Order_Id", "SKU", "Transaction_Type", "Date"]
-    combined = combined.drop_duplicates(subset=dedup_keys, keep="first")
+    # ── deduplicate across overlapping monthly uploads ───────
+    combined = combined.drop_duplicates(
+        subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="first"
+    )
 
-    return combined
+    return combined, csv_count
 
 # ══════════════════════════════════════════════════════════════
 # 7) SALES DATA LOADERS (unchanged)
@@ -636,15 +703,17 @@ st.session_state.include_replacements = st.sidebar.checkbox("Include FreeReplace
 
 st.sidebar.divider()
 
-# ── MTR Reports (NEW) ───────────────────────────────────────
+# ── MTR Reports — single main ZIP ───────────────────────────
 st.sidebar.markdown("### 2️⃣ MTR Reports (Amazon Tax)")
-st.sidebar.caption("Upload one or many B2B/B2C CSV or ZIP files")
-mtr_b2b_files = st.sidebar.file_uploader(
-    "MTR — Amazon B2B (CSV/ZIP, multi)",
-    type=["csv","zip"], accept_multiple_files=True, key="mtr_b2b")
-mtr_b2c_files = st.sidebar.file_uploader(
-    "MTR — Amazon B2C (CSV/ZIP, multi)",
-    type=["csv","zip"], accept_multiple_files=True, key="mtr_b2c")
+st.sidebar.caption(
+    "Upload the **one main ZIP** that contains all monthly sub-zips.\n\n"
+    "Structure: `main.zip → April-2024.zip → MTR_B2B/B2C-APRIL-2024-xxx.csv`\n\n"
+    "B2B / B2C auto-detected from CSV filenames."
+)
+mtr_main_zip = st.sidebar.file_uploader(
+    "MTR — Main ZIP (all months)",
+    type=["zip"], key="mtr_main_zip"
+)
 
 st.sidebar.divider()
 
@@ -681,15 +750,27 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
             )
 
             # ── MTR ──────────────────────────────────────────
-            if mtr_b2b_files or mtr_b2c_files:
-                st.session_state.mtr_df = load_mtr_reports(
-                    mtr_b2b_files or [], mtr_b2c_files or [])
-                if not st.session_state.mtr_df.empty:
-                    n = len(st.session_state.mtr_df)
-                    months = st.session_state.mtr_df["Month"].nunique()
-                    st.sidebar.success(f"✅ MTR: {n:,} records | {months} months")
+            if mtr_main_zip:
+                result = load_mtr_from_main_zip(mtr_main_zip)
+                if isinstance(result, tuple):
+                    mtr_combined, csv_count = result
                 else:
-                    st.sidebar.warning("⚠️ MTR files loaded but no records found")
+                    mtr_combined, csv_count = result, 0
+
+                st.session_state.mtr_df = mtr_combined
+
+                if not mtr_combined.empty:
+                    months    = mtr_combined["Month"].nunique()
+                    b2b_count = (mtr_combined["Report_Type"] == "B2B").sum()
+                    b2c_count = (mtr_combined["Report_Type"] == "B2C").sum()
+                    st.sidebar.success(
+                        f"✅ MTR: {len(mtr_combined):,} records | "
+                        f"{csv_count} CSVs | {months} months\n"
+                        f"B2B: {b2b_count:,} | B2C: {b2c_count:,}"
+                    )
+                else:
+                    st.sidebar.warning("⚠️ MTR ZIP loaded but no valid records found. "
+                                       "Check that CSV filenames contain 'B2B' or 'B2C'.")
 
             # ── Sales ─────────────────────────────────────────
             sales_parts = []
