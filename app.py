@@ -218,6 +218,12 @@ def fmt_inr(val: float) -> str:
         return f"₹{val/1_00_000:.2f} L"
     return f"₹{val:,.0f}"
 
+def fillna_numeric(df, value=0):
+    """fillna only on numeric columns — category columns crash on fillna(scalar)."""
+    num_cols = df.select_dtypes(include="number").columns
+    df[num_cols] = df[num_cols].fillna(value)
+    return df
+
 # ══════════════════════════════════════════════════════════════
 # 5) SKU MAPPING LOADER
 # ══════════════════════════════════════════════════════════════
@@ -300,10 +306,9 @@ _MTR_USECOLS_B2B = _MTR_USECOLS_B2C + [
     "Buyer Name", "Bill To State", "Customer Bill To Gstid", "Irn Filing Status",
 ]
 # Low-cardinality columns → category dtype (big RAM saving)
-_CAT_COLS = {
-    "Transaction_Type", "Report_Type", "Ship_To_State",
-    "Warehouse_Id", "Fulfillment", "Payment_Method",
-}
+# Transaction_Type and Report_Type excluded — they appear in merge results
+# where fillna(0) is called, which crashes on category dtype
+_CAT_COLS = {"Ship_To_State", "Warehouse_Id", "Fulfillment", "Payment_Method"}
 
 
 def _parse_mtr_csv(csv_bytes: bytes, report_type: str, source_file: str) -> pd.DataFrame:
@@ -1100,10 +1105,10 @@ with tab_mtr:
                                .groupby(["Month", "Report_Type"])["Invoice_Amount"]
                                .sum().abs().reset_index())
                 monthly_ref.columns = ["Month", "Report_Type", "Refund_Amt"]
-                monthly_comb = monthly.merge(monthly_ref, on=["Month", "Report_Type"], how="left").fillna(0)
+                monthly_comb = fillna_numeric(monthly.merge(monthly_ref, on=["Month", "Report_Type"], how="left"))
                 monthly_comb["Refund_%"] = (
                     monthly_comb["Refund_Amt"] / monthly_comb["Gross_Revenue"].replace(0, np.nan) * 100
-                ).fillna(0).round(2)
+                ).fillna(0.0).round(2)
                 fig2 = px.bar(monthly_comb, x="Month", y="Refund_%", color="Report_Type",
                               barmode="group",
                               color_discrete_map={"B2B": "#002B5B", "B2C": "#E63946"},
@@ -1265,13 +1270,13 @@ with tab_mtr:
                         .reset_index(),
                         on=["Month", "Report_Type"], how="left"
                     )
-                    .fillna(0)
                 )
+                fillna_numeric(monthly_summary)
                 monthly_summary["Net_Revenue"] = (
                     monthly_summary["Gross_Revenue"] - monthly_summary["Refunds"])
                 monthly_summary["AOV"] = (
                     monthly_summary["Gross_Revenue"] / monthly_summary["Orders"].replace(0, np.nan)
-                ).fillna(0).round(2)
+                ).fillna(0.0).round(2)
 
                 with dl1:
                     st.download_button(
