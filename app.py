@@ -679,33 +679,67 @@ def calculate_po_base(
     demand_units = po_df["Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["Sold_Units"]
     po_df["Recent_ADS"] = (demand_units / denom).fillna(0)
 
-    if use_seasonality and target_days > 0:
-        future_start = max_date + timedelta(days=lead_time)
-        future_end   = future_start + timedelta(days=target_days)
-        ly_start     = future_start - timedelta(days=365)
-        ly_end       = future_end - timedelta(days=365)
+    if use_seasonality:
+        # ── Window A: Same trailing velocity period from exactly 1 year ago ──
+        # e.g. if velocity = last 30 days, look at same 30-day window last year.
+        # This is ALWAYS available as long as you have any historical data.
+        ly_trailing_end   = max_date - timedelta(days=365)
+        ly_trailing_start = ly_trailing_end - timedelta(days=period_days)
 
-        ly_sales = df[(df["TxnDate"] >= ly_start) & (df["TxnDate"] < ly_end)].copy()
+        # ── Window B (optional): The actual forward-looking window from last year ──
+        # e.g. if lead=15 and target=60, look at that Mar–May window last year.
+        # Only meaningful when target_days > 0 AND data exists for that window.
+        ly_fwd_start = (max_date + timedelta(days=lead_time))  - timedelta(days=365)
+        ly_fwd_end   = (max_date + timedelta(days=lead_time + max(target_days, period_days))) - timedelta(days=365)
+
+        # Collect LY sales from both windows combined — gives maximum coverage
+        ly_window_start = min(ly_trailing_start, ly_fwd_start)
+        ly_window_end   = max(ly_trailing_end,   ly_fwd_end)
+
+        ly_sales_all = df[(df["TxnDate"] >= ly_window_start) & (df["TxnDate"] < ly_window_end)].copy()
+
+        # Prefer the trailing window (always available); fall back to forward window if trailing is empty
+        ly_sales_trailing = df[(df["TxnDate"] >= ly_trailing_start) & (df["TxnDate"] < ly_trailing_end)].copy()
+        ly_sales_fwd      = df[(df["TxnDate"] >= ly_fwd_start)      & (df["TxnDate"] < ly_fwd_end)].copy()
+
+        # Use trailing window first; if it's empty use forward window; if both empty use combined
+        if not ly_sales_trailing.empty:
+            ly_sales      = ly_sales_trailing
+            ly_days_count = max((ly_trailing_end - ly_trailing_start).days, min_denominator)
+            ly_window_label = "trailing"
+        elif not ly_sales_fwd.empty:
+            ly_sales      = ly_sales_fwd
+            ly_days_count = max((ly_fwd_end - ly_fwd_start).days, min_denominator)
+            ly_window_label = "forward"
+        else:
+            ly_sales      = ly_sales_all
+            ly_days_count = max((ly_window_end - ly_window_start).days, min_denominator)
+            ly_window_label = "combined"
 
         if not ly_sales.empty:
-            ly_sold = ly_sales[ly_sales["Transaction Type"]=="Shipment"].groupby("Sku")["Quantity"].sum().reset_index()
+            ly_sold = (ly_sales[ly_sales["Transaction Type"]=="Shipment"]
+                       .groupby("Sku")["Quantity"].sum().reset_index())
             ly_sold.columns = ["OMS_SKU", "LY_Sold_Units"]
+
             ly_net = ly_sales.groupby("Sku")["Units_Effective"].sum().reset_index()
             ly_net.columns = ["OMS_SKU", "LY_Net_Units"]
+
             ly_summary = ly_sold.merge(ly_net, on="OMS_SKU", how="outer").fillna(0)
             po_df = pd.merge(po_df, ly_summary, on="OMS_SKU", how="left").fillna(0)
 
-            ly_days_count = (ly_end - ly_start).days
             ly_demand = po_df["LY_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["LY_Sold_Units"]
-            po_df["LY_ADS"] = (ly_demand / ly_days_count).fillna(0)
+            po_df["LY_ADS"] = (ly_demand / ly_days_count).round(3)
+
+            # Blend: if LY data exists for this SKU use blend, else fall back to Recent_ADS only
             po_df["ADS"] = np.where(
                 po_df["LY_ADS"] > 0,
                 (po_df["Recent_ADS"] * (1 - seasonal_weight)) + (po_df["LY_ADS"] * seasonal_weight),
                 po_df["Recent_ADS"]
             )
         else:
+            # No LY data at all in any window — silently fall back to recent ADS
             po_df["ADS"]    = po_df["Recent_ADS"]
-            po_df["LY_ADS"] = 0
+            po_df["LY_ADS"] = 0.0
     else:
         po_df["ADS"]    = po_df["Recent_ADS"]
         po_df["LY_ADS"] = 0
@@ -1164,6 +1198,30 @@ with tab_po:
         if po_df.empty:
             st.warning("No PO calculations available. Check that sales and inventory data overlap.")
         else:
+            # ── Seasonality debug banner ──
+            if use_seasonality:
+                sales_min = sales_for_po["TxnDate"].min()
+                sales_max = sales_for_po["TxnDate"].max()
+                ly_trail_end   = sales_max - timedelta(days=365)
+                ly_trail_start = ly_trail_end - timedelta(days=total_period)
+                skus_with_ly   = (po_df["LY_ADS"] > 0).sum() if "LY_ADS" in po_df.columns else 0
+                skus_total     = len(po_df)
+                if skus_with_ly == 0:
+                    st.error(
+                        f"⚠️ **LY_ADS is 0 for all SKUs.** "
+                        f"Your sales data runs from **{sales_min.strftime('%d %b %Y')}** to **{sales_max.strftime('%d %b %Y')}**. "
+                        f"The LY trailing window needed is **{ly_trail_start.strftime('%d %b %Y')} → {ly_trail_end.strftime('%d %b %Y')}** — "
+                        f"this period has no data in your uploaded sales files. "
+                        f"Upload older sales data to enable YoY blending, or uncheck Seasonality to use Recent ADS only."
+                    )
+                else:
+                    st.info(
+                        f"📅 **Seasonality active** | LY window: "
+                        f"**{ly_trail_start.strftime('%d %b %Y')} → {ly_trail_end.strftime('%d %b %Y')}** | "
+                        f"SKUs with LY data: **{skus_with_ly:,} / {skus_total:,}** | "
+                        f"Blend: {100 - int(seasonal_weight)}% Recent + {int(seasonal_weight)}% LY"
+                    )
+
             po_df["Days_Left"]        = np.where(po_df["ADS"] > 0, po_df["Total_Inventory"] / po_df["ADS"], 999)
             po_df["Lead_Time_Demand"] = po_df["ADS"] * lead_time
             po_df["Target_Stock"]     = po_df["ADS"] * target_days
