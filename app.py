@@ -2234,6 +2234,28 @@ with tab_drill:
 
     period_days = max((max_date - cutoff).days, 1)
 
+    # ── De-categorify slices so merge/fillna work safely ─────
+    # Category dtype breaks fillna(0) and some merges in pandas ≥1.3.
+    # We convert all category columns back to plain str/float on the
+    # per-SKU slices only — the main DataFrames keep their low-RAM dtypes.
+    def _decat(df: pd.DataFrame) -> pd.DataFrame:
+        """Convert every category column to its base dtype (str or numeric)."""
+        out = df.copy()
+        for col in out.columns:
+            if hasattr(out[col], "cat"):          # is categorical
+                if out[col].cat.categories.dtype == "object":
+                    out[col] = out[col].astype(str)
+                else:
+                    out[col] = out[col].astype(out[col].cat.categories.dtype)
+        return out
+
+    if not sku_mtr.empty:
+        sku_mtr   = _decat(sku_mtr)
+        sku_mtr_p = _decat(sku_mtr_p)
+    if not sku_sales.empty:
+        sku_sales   = _decat(sku_sales)
+        sku_sales_p = _decat(sku_sales_p)
+
     # ── KPI calculations ─────────────────────────────────────
     sold_units   = 0
     return_units = 0
