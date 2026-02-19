@@ -642,6 +642,43 @@ def load_stock_transfer(zip_file) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════
 # 11) PO BASE CALCULATOR (SEASONAL INTEGRATED)
 # ══════════════════════════════════════════════════════════════
+
+def _mtr_to_sales_df(mtr_df: pd.DataFrame, sku_mapping: Dict[str, str], group_by_parent: bool = False) -> pd.DataFrame:
+    """
+    Convert loaded MTR data into the same shape as sales_df so it can be
+    used as the historical source for LY seasonality lookups.
+
+    MTR columns used: Date, SKU, Transaction_Type, Quantity
+    Output columns:  Sku, TxnDate, Transaction Type, Quantity, Units_Effective
+    """
+    if mtr_df.empty:
+        return pd.DataFrame()
+
+    m = mtr_df[["Date", "SKU", "Transaction_Type", "Quantity"]].copy()
+    m = m.rename(columns={
+        "Date":             "TxnDate",
+        "SKU":              "Sku",
+        "Transaction_Type": "Transaction Type",
+    })
+    m["TxnDate"]  = pd.to_datetime(m["TxnDate"], errors="coerce")
+    m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
+    m = m.dropna(subset=["TxnDate"])
+
+    # Map MTR native Amazon SKUs → OMS SKUs via the mapping table
+    m["Sku"] = m["Sku"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+
+    if group_by_parent:
+        m["Sku"] = m["Sku"].apply(get_parent_sku)
+
+    # Build Units_Effective: Shipment = +qty, Refund = -qty, Cancel = 0
+    m["Units_Effective"] = np.where(
+        m["Transaction Type"] == "Refund",  -m["Quantity"],
+        np.where(m["Transaction Type"] == "Cancel", 0, m["Quantity"])
+    )
+
+    return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective"]]
+
+
 def calculate_po_base(
     sales_df: pd.DataFrame,
     inv_df: pd.DataFrame,
@@ -651,7 +688,10 @@ def calculate_po_base(
     demand_basis: str = "Sold",
     min_denominator: int = 7,
     use_seasonality: bool = False,
-    seasonal_weight: float = 0.5
+    seasonal_weight: float = 0.5,
+    mtr_df: pd.DataFrame = None,          # ← NEW: MTR historical data for LY lookup
+    sku_mapping: Dict[str, str] = None,   # ← NEW: needed to map MTR SKUs → OMS SKUs
+    group_by_parent: bool = False,        # ← NEW: match PO view mode
 ) -> pd.DataFrame:
 
     if sales_df.empty or inv_df.empty:
@@ -666,11 +706,11 @@ def calculate_po_base(
     recent   = df[df["TxnDate"] >= cutoff].copy()
 
     sold = recent[recent["Transaction Type"]=="Shipment"].groupby("Sku")["Quantity"].sum().reset_index()
-    sold.columns = ["OMS_SKU","Sold_Units"]
+    sold.columns = ["OMS_SKU", "Sold_Units"]
     returns = recent[recent["Transaction Type"]=="Refund"].groupby("Sku")["Quantity"].sum().reset_index()
-    returns.columns = ["OMS_SKU","Return_Units"]
+    returns.columns = ["OMS_SKU", "Return_Units"]
     net = recent.groupby("Sku")["Units_Effective"].sum().reset_index()
-    net.columns = ["OMS_SKU","Net_Units"]
+    net.columns = ["OMS_SKU", "Net_Units"]
 
     summary = sold.merge(returns, on="OMS_SKU", how="outer").merge(net, on="OMS_SKU", how="outer").fillna(0)
     po_df = pd.merge(inv_df, summary, on="OMS_SKU", how="left").fillna({"Sold_Units":0,"Return_Units":0,"Net_Units":0})
@@ -680,44 +720,59 @@ def calculate_po_base(
     po_df["Recent_ADS"] = (demand_units / denom).fillna(0)
 
     if use_seasonality:
+        # ── Build the historical dataset for LY lookups ──
+        # Priority 1: MTR data (covers 2 full years of Amazon history)
+        # Priority 2: regular sales_df (may only cover recent months)
+        mtr_sales = pd.DataFrame()
+        if mtr_df is not None and not mtr_df.empty and sku_mapping is not None:
+            mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping, group_by_parent=group_by_parent)
+
+        if not mtr_sales.empty:
+            # Merge MTR history with sales_df; deduplicate on (Sku, TxnDate, Transaction Type)
+            # so recent sales_df rows win over MTR rows for the current period
+            hist_df = pd.concat([mtr_sales, df], ignore_index=True)
+            hist_df = hist_df.drop_duplicates(
+                subset=["Sku", "TxnDate", "Transaction Type"], keep="last"
+            )
+            ly_source_label = "MTR"
+        else:
+            hist_df = df
+            ly_source_label = "Sales"
+
         # ── Window A: Same trailing velocity period from exactly 1 year ago ──
-        # e.g. if velocity = last 30 days, look at same 30-day window last year.
-        # This is ALWAYS available as long as you have any historical data.
         ly_trailing_end   = max_date - timedelta(days=365)
         ly_trailing_start = ly_trailing_end - timedelta(days=period_days)
 
-        # ── Window B (optional): The actual forward-looking window from last year ──
-        # e.g. if lead=15 and target=60, look at that Mar–May window last year.
-        # Only meaningful when target_days > 0 AND data exists for that window.
-        ly_fwd_start = (max_date + timedelta(days=lead_time))  - timedelta(days=365)
+        # ── Window B: The actual forward-looking seasonal window from last year ──
+        ly_fwd_start = (max_date + timedelta(days=lead_time)) - timedelta(days=365)
         ly_fwd_end   = (max_date + timedelta(days=lead_time + max(target_days, period_days))) - timedelta(days=365)
 
-        # Collect LY sales from both windows combined — gives maximum coverage
-        ly_window_start = min(ly_trailing_start, ly_fwd_start)
-        ly_window_end   = max(ly_trailing_end,   ly_fwd_end)
+        # Prefer trailing window; fall back to forward; then broadest combined
+        ly_sales_trailing = hist_df[(hist_df["TxnDate"] >= ly_trailing_start) & (hist_df["TxnDate"] < ly_trailing_end)].copy()
+        ly_sales_fwd      = hist_df[(hist_df["TxnDate"] >= ly_fwd_start)      & (hist_df["TxnDate"] < ly_fwd_end)].copy()
 
-        ly_sales_all = df[(df["TxnDate"] >= ly_window_start) & (df["TxnDate"] < ly_window_end)].copy()
-
-        # Prefer the trailing window (always available); fall back to forward window if trailing is empty
-        ly_sales_trailing = df[(df["TxnDate"] >= ly_trailing_start) & (df["TxnDate"] < ly_trailing_end)].copy()
-        ly_sales_fwd      = df[(df["TxnDate"] >= ly_fwd_start)      & (df["TxnDate"] < ly_fwd_end)].copy()
-
-        # Use trailing window first; if it's empty use forward window; if both empty use combined
         if not ly_sales_trailing.empty:
             ly_sales      = ly_sales_trailing
             ly_days_count = max((ly_trailing_end - ly_trailing_start).days, min_denominator)
-            ly_window_label = "trailing"
         elif not ly_sales_fwd.empty:
             ly_sales      = ly_sales_fwd
             ly_days_count = max((ly_fwd_end - ly_fwd_start).days, min_denominator)
-            ly_window_label = "forward"
         else:
-            ly_sales      = ly_sales_all
-            ly_days_count = max((ly_window_end - ly_window_start).days, min_denominator)
-            ly_window_label = "combined"
+            # Broadest possible window: full 365-day LY period
+            ly_broad_start = max_date - timedelta(days=730)
+            ly_broad_end   = max_date - timedelta(days=365)
+            ly_sales       = hist_df[(hist_df["TxnDate"] >= ly_broad_start) & (hist_df["TxnDate"] < ly_broad_end)].copy()
+            ly_days_count  = max((ly_broad_end - ly_broad_start).days, min_denominator)
+
+        # Store window info on po_df for the debug banner
+        po_df.attrs["ly_source"]        = ly_source_label
+        po_df.attrs["ly_window_start"]  = ly_trailing_start
+        po_df.attrs["ly_window_end"]    = ly_trailing_end
+        po_df.attrs["hist_date_min"]    = hist_df["TxnDate"].min() if not hist_df.empty else pd.NaT
+        po_df.attrs["hist_date_max"]    = hist_df["TxnDate"].max() if not hist_df.empty else pd.NaT
 
         if not ly_sales.empty:
-            ly_sold = (ly_sales[ly_sales["Transaction Type"]=="Shipment"]
+            ly_sold = (ly_sales[ly_sales["Transaction Type"] == "Shipment"]
                        .groupby("Sku")["Quantity"].sum().reset_index())
             ly_sold.columns = ["OMS_SKU", "LY_Sold_Units"]
 
@@ -730,14 +785,13 @@ def calculate_po_base(
             ly_demand = po_df["LY_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["LY_Sold_Units"]
             po_df["LY_ADS"] = (ly_demand / ly_days_count).round(3)
 
-            # Blend: if LY data exists for this SKU use blend, else fall back to Recent_ADS only
+            # Blend: SKUs with LY data get blended ADS; SKUs without get Recent_ADS only
             po_df["ADS"] = np.where(
                 po_df["LY_ADS"] > 0,
                 (po_df["Recent_ADS"] * (1 - seasonal_weight)) + (po_df["LY_ADS"] * seasonal_weight),
                 po_df["Recent_ADS"]
             )
         else:
-            # No LY data at all in any window — silently fall back to recent ADS
             po_df["ADS"]    = po_df["Recent_ADS"]
             po_df["LY_ADS"] = 0.0
     else:
@@ -1192,7 +1246,10 @@ with tab_po:
             sales_df=sales_for_po, inv_df=inv_for_po, period_days=total_period,
             lead_time=lead_time, target_days=target_days, demand_basis=demand_basis,
             min_denominator=int(min_den), use_seasonality=use_seasonality,
-            seasonal_weight=seasonal_weight / 100.0
+            seasonal_weight=seasonal_weight / 100.0,
+            mtr_df=st.session_state.mtr_df if not st.session_state.mtr_df.empty else None,
+            sku_mapping=st.session_state.sku_mapping,
+            group_by_parent=("Parent" in view_mode),
         )
 
         if po_df.empty:
@@ -1200,24 +1257,38 @@ with tab_po:
         else:
             # ── Seasonality debug banner ──
             if use_seasonality:
-                sales_min = sales_for_po["TxnDate"].min()
-                sales_max = sales_for_po["TxnDate"].max()
-                ly_trail_end   = sales_max - timedelta(days=365)
-                ly_trail_start = ly_trail_end - timedelta(days=total_period)
-                skus_with_ly   = (po_df["LY_ADS"] > 0).sum() if "LY_ADS" in po_df.columns else 0
-                skus_total     = len(po_df)
+                ly_source       = po_df.attrs.get("ly_source", "Sales")
+                ly_win_start    = po_df.attrs.get("ly_window_start", None)
+                ly_win_end      = po_df.attrs.get("ly_window_end",   None)
+                hist_min        = po_df.attrs.get("hist_date_min",   None)
+                hist_max        = po_df.attrs.get("hist_date_max",   None)
+                skus_with_ly    = int((po_df["LY_ADS"] > 0).sum()) if "LY_ADS" in po_df.columns else 0
+                skus_total      = len(po_df)
+
+                win_str  = (f"**{ly_win_start.strftime('%d %b %Y')} → {ly_win_end.strftime('%d %b %Y')}**"
+                            if ly_win_start and ly_win_end else "unknown")
+                hist_str = (f"**{hist_min.strftime('%d %b %Y')}** → **{hist_max.strftime('%d %b %Y')}**"
+                            if hist_min and hist_max else "unknown")
+
                 if skus_with_ly == 0:
                     st.error(
                         f"⚠️ **LY_ADS is 0 for all SKUs.** "
-                        f"Your sales data runs from **{sales_min.strftime('%d %b %Y')}** to **{sales_max.strftime('%d %b %Y')}**. "
-                        f"The LY trailing window needed is **{ly_trail_start.strftime('%d %b %Y')} → {ly_trail_end.strftime('%d %b %Y')}** — "
-                        f"this period has no data in your uploaded sales files. "
-                        f"Upload older sales data to enable YoY blending, or uncheck Seasonality to use Recent ADS only."
+                        f"Historical data source: **{ly_source}** | Date coverage: {hist_str}. "
+                        f"LY window needed: {win_str} — no data found in this range. "
+                        + ("MTR data is loaded but may not cover this window — check MTR year coverage above." 
+                           if ly_source == "MTR" 
+                           else "Upload MTR reports (2-year history) to enable YoY blending.")
+                    )
+                elif skus_with_ly < skus_total * 0.5:
+                    st.warning(
+                        f"⚠️ **Partial LY data** — only **{skus_with_ly:,} / {skus_total:,}** SKUs have LY history. "
+                        f"Source: **{ly_source}** | LY window: {win_str} | History: {hist_str}. "
+                        f"SKUs without LY data will use Recent ADS only."
                     )
                 else:
-                    st.info(
-                        f"📅 **Seasonality active** | LY window: "
-                        f"**{ly_trail_start.strftime('%d %b %Y')} → {ly_trail_end.strftime('%d %b %Y')}** | "
+                    st.success(
+                        f"✅ **Seasonality active** | Source: **{ly_source}** | "
+                        f"LY window: {win_str} | History: {hist_str} | "
                         f"SKUs with LY data: **{skus_with_ly:,} / {skus_total:,}** | "
                         f"Blend: {100 - int(seasonal_weight)}% Recent + {int(seasonal_weight)}% LY"
                     )
