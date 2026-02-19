@@ -105,6 +105,8 @@ def init_session_state():
         "inventory_df_parent":   pd.DataFrame(),
         "transfer_df":           pd.DataFrame(),
         "mtr_df":                pd.DataFrame(),
+        "myntra_df":             pd.DataFrame(),   # Myntra PPMP full history
+        "meesho_df":             pd.DataFrame(),   # Meesho full history
         "amazon_date_basis":     "Shipment Date",
         "include_replacements":  False,
     }
@@ -542,29 +544,295 @@ def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_meesho_sales(zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
-    try:
-        with zipfile.ZipFile(zip_file, "r") as z:
-            excel_files = [f for f in z.namelist() if "tcs_sales" in f.lower() and f.lower().endswith(".xlsx") and "return" not in f.lower()]
-            if not excel_files:
-                return pd.DataFrame()
-            with z.open(excel_files[0]) as f:
-                df = pd.read_excel(f)
-        if df.empty:
-            return pd.DataFrame()
-        df["OMS_SKU"]         = df.get("identifier").apply(lambda x: map_to_oms_sku(x, mapping))
-        df["TxnDate"]         = pd.to_datetime(df.get("order_date"), errors="coerce")
-        df["Quantity"]        = pd.to_numeric(df.get("quantity", 0), errors="coerce").fillna(0)
-        df["Source"]          = "Meesho"
-        df["TxnType"]         = "Shipment"
-        df["Units_Effective"] = df["Quantity"]
-        df["OrderId"]         = df.get("sub_order_num", np.nan)
-        result = df[["OMS_SKU","TxnDate","TxnType","Quantity","Units_Effective","Source","OrderId"]].copy()
-        result.columns = ["Sku","TxnDate","Transaction Type","Quantity","Units_Effective","Source","OrderId"]
-        return result.dropna(subset=["TxnDate"])
-    except Exception as e:
-        st.error(f"Error loading Meesho: {e}")
+def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
+    """
+    Parse one Meesho monthly inner ZIP.
+    Two formats exist:
+      A) Non-GST: ForwardReports.xlsx + Reverse.xlsx  (no per-SKU, units + revenue by order)
+      B) GST:     tcs_sales.xlsx + tcs_sales_return.xlsx (no per-SKU, units + revenue by order)
+
+    Since Meesho provides NO product SKU in any report, we track totals only.
+    Returns a DataFrame with: Date, TxnType, Quantity, Invoice_Amount, State, OrderId
+    """
+    files = {f.lower(): f for f in inner_zf.namelist()}
+    rows  = []
+
+    # ── Format B: GST zips ──
+    if "tcs_sales.xlsx" in files:
+        with inner_zf.open(files["tcs_sales.xlsx"]) as fh:
+            df = pd.read_excel(fh)
+        if not df.empty:
+            df["_Date"]    = pd.to_datetime(df.get("order_date"), errors="coerce")
+            df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
+            df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
+            df["_State"]   = df.get("end_customer_state_new", "")
+            df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_TxnType"] = "Shipment"
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+
+    if "tcs_sales_return.xlsx" in files:
+        with inner_zf.open(files["tcs_sales_return.xlsx"]) as fh:
+            df = pd.read_excel(fh)
+        if not df.empty:
+            df["_Date"]    = pd.to_datetime(df.get("order_date"), errors="coerce")
+            df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
+            df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
+            df["_State"]   = df.get("end_customer_state_new", "")
+            df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_TxnType"] = "Refund"
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+
+    # ── Format A: Non-GST zips ──
+    if "forwardreports.xlsx" in files and not rows:
+        with inner_zf.open(files["forwardreports.xlsx"]) as fh:
+            df = pd.read_excel(fh)
+        if not df.empty:
+            df["_Date"]    = pd.to_datetime(df.get("order_date"), errors="coerce")
+            df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
+            df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
+            df["_State"]   = df.get("end_customer_state", df.get("state", ""))
+            df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            # Map status: Delivered/Shipped = Shipment; Return/rto = Refund; Cancelled = Cancel
+            def _meesho_txn(s):
+                s = str(s).lower()
+                if "return" in s or "rto" in s: return "Refund"
+                if "cancel" in s:               return "Cancel"
+                return "Shipment"
+            df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+
+    if "reverse.xlsx" in files and not any(
+        (r["_TxnType"] == "Refund").any() for r in rows if not r.empty
+    ):
+        with inner_zf.open(files["reverse.xlsx"]) as fh:
+            df = pd.read_excel(fh)
+        if not df.empty:
+            df["_Date"]    = pd.to_datetime(df.get("order_date"), errors="coerce")
+            df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
+            df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
+            df["_State"]   = df.get("end_customer_state", df.get("state", ""))
+            df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_TxnType"] = "Refund"
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+
+    if not rows:
         return pd.DataFrame()
+
+    out = pd.concat(rows, ignore_index=True)
+    out.columns = ["Date","TxnType","Quantity","Invoice_Amount","State","OrderId"]
+    out["Date"]     = pd.to_datetime(out["Date"], errors="coerce")
+    out["Quantity"] = out["Quantity"].astype("float32")
+    out["Invoice_Amount"] = out["Invoice_Amount"].astype("float32")
+    out["State"]    = out["State"].astype(str).str.upper().str.strip()
+    out["Month"]    = out["Date"].dt.to_period("M").astype(str)
+    return out.dropna(subset=["Date"])
+
+
+def load_meesho_full(main_zip_file) -> pd.DataFrame:
+    """
+    Load ALL Meesho monthly zips (both GST and non-GST formats) from the master ZIP.
+    Returns a combined Meesho analytics DataFrame (no per-SKU — totals only).
+    Also returns (sales_df_rows) for the units dashboard (Source=Meesho, Sku=MEESHO_TOTAL).
+    """
+    dfs     = []
+    skipped = []
+    try:
+        main_zip_file.seek(0)
+        root_zf = zipfile.ZipFile(main_zip_file)
+    except Exception as e:
+        st.error(f"Cannot open Meesho ZIP: {e}")
+        return pd.DataFrame()
+
+    prog  = st.sidebar.progress(0, text="Loading Meesho files…")
+    items = [n for n in root_zf.namelist() if n.lower().endswith(".zip")]
+
+    for idx, item_name in enumerate(items):
+        base = Path(item_name).name
+        try:
+            data = root_zf.read(item_name)
+            with zipfile.ZipFile(io.BytesIO(data)) as inner_zf:
+                df = _parse_meesho_inner_zip(inner_zf)
+            if df.empty:
+                skipped.append(f"{base}: No recognised data files")
+            else:
+                dfs.append(df)
+        except Exception as e:
+            skipped.append(f"{base}: {e}")
+        prog.progress((idx + 1) / max(len(items), 1), text=f"Meesho {idx+1}/{len(items)}: {base}")
+
+    prog.empty()
+    if skipped:
+        with st.sidebar.expander(f"⚠️ Meesho: {len(skipped)} files skipped"):
+            for s in skipped: st.write(s)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(dfs, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["OrderId","TxnType","Date"], keep="first")
+    return combined
+
+
+def meesho_to_sales_rows(meesho_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert Meesho analytics df into the standard sales_df format.
+    Since there's no per-SKU data, all units go under Sku='MEESHO_TOTAL'.
+    This contributes to the marketplace units dashboard but NOT to SKU-level PO.
+    """
+    if meesho_df.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "Sku":              "MEESHO_TOTAL",
+        "TxnDate":          meesho_df["Date"],
+        "Transaction Type": meesho_df["TxnType"],
+        "Quantity":         meesho_df["Quantity"],
+        "Units_Effective":  np.where(meesho_df["TxnType"]=="Refund", -meesho_df["Quantity"],
+                            np.where(meesho_df["TxnType"]=="Cancel",  0, meesho_df["Quantity"])),
+        "Source":           "Meesho",
+        "OrderId":          meesho_df["OrderId"],
+    })
+    return out
+
+
+# ──────────────────────────────────────────────────────────────
+# MYNTRA PPMP LOADER
+# ──────────────────────────────────────────────────────────────
+def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Parse one Myntra PPMP monthly CSV.
+    Columns used: sku_id, order_created_date (YYYYMMDD int), order_status,
+                  quantity, invoiceamount/InvoiceAmount, state, payment_method
+    order_status codes: C=Completed/Delivered, SH=Shipped, F=Failed/Cancelled,
+                        RTO=Return-to-Origin, PK=Packed
+    """
+    try:
+        df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, low_memory=False, on_bad_lines="skip")
+    except Exception as e:
+        return pd.DataFrame(), f"CSV parse error: {e}"
+
+    if df.empty:
+        return pd.DataFrame(), "Empty file"
+
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Date: integer YYYYMMDD → datetime
+    date_col = next((c for c in df.columns if "order_created_date" in c or "order_date" in c), None)
+    if not date_col:
+        return pd.DataFrame(), "No date column found"
+
+    df["_Date"] = pd.to_datetime(df[date_col].astype(str), format="%Y%m%d", errors="coerce")
+    df = df.dropna(subset=["_Date"])
+    if df.empty:
+        return pd.DataFrame(), "All dates invalid"
+
+    # SKU mapping: Myntra sku_id → OMS_SKU
+    sku_col = next((c for c in df.columns if c in ["sku_id", "skuid", "sku"]), None)
+    if not sku_col:
+        return pd.DataFrame(), "No SKU column"
+    df["_OMS_SKU"] = df[sku_col].apply(lambda x: map_to_oms_sku(str(x).strip(), mapping))
+
+    # Quantity
+    qty_col = next((c for c in df.columns if c == "quantity"), None)
+    df["_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1) if qty_col else 1.0
+
+    # Revenue
+    rev_col = next((c for c in df.columns if c in ["invoiceamount", "invoice_amount", "net_amount", "shipment_value"]), None)
+    df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
+
+    # Transaction type from order_status
+    # C=Delivered, SH=Shipped → Shipment
+    # F=Failed/Cancelled → Cancel
+    # RTO=Return-to-Origin → Refund
+    status_col = next((c for c in df.columns if "order_status" in c), None)
+    def _myntra_txn(s):
+        s = str(s).strip().upper()
+        if s in ("RTO",):                    return "Refund"
+        if s in ("F", "IC", "FAILED"):       return "Cancel"
+        if s in ("C", "SH", "PK", "SHIPPED","CONFIRMED","DELIVERED"): return "Shipment"
+        return "Shipment"  # default
+    df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
+
+    state_col   = next((c for c in df.columns if c in ["state", "customer_delivery_state_code"]), None)
+    pm_col      = next((c for c in df.columns if "payment_method" in c), None)
+    wh_col      = next((c for c in df.columns if "warehouse_id" in c), None)
+    order_col   = next((c for c in df.columns if c in ["order_id", "packet_id"]), None)
+
+    out = pd.DataFrame({
+        "Date":           df["_Date"],
+        "OMS_SKU":        df["_OMS_SKU"],
+        "TxnType":        df["_TxnType"],
+        "Quantity":       df["_Qty"].astype("float32"),
+        "Invoice_Amount": df["_Rev"].astype("float32"),
+        "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
+        "Payment_Method": df[pm_col].fillna("") if pm_col else "",
+        "Warehouse_Id":   df[wh_col].fillna("") if wh_col else "",
+        "OrderId":        df[order_col].fillna("") if order_col else "",
+    })
+    out["Month"]       = out["Date"].dt.to_period("M").astype(str)
+    out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
+    return out, "OK"
+
+
+def load_myntra_full(main_zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Load ALL Myntra monthly CSVs from the master ZIP.
+    Returns a combined Myntra analytics + SKU-level DataFrame.
+    """
+    dfs     = []
+    skipped = []
+    try:
+        main_zip_file.seek(0)
+        root_zf = zipfile.ZipFile(main_zip_file)
+    except Exception as e:
+        st.error(f"Cannot open Myntra ZIP: {e}")
+        return pd.DataFrame()
+
+    csv_items = [n for n in root_zf.namelist() if n.lower().endswith(".csv")]
+    prog = st.sidebar.progress(0, text="Loading Myntra files…")
+
+    for idx, item_name in enumerate(csv_items):
+        base = Path(item_name).name
+        try:
+            data = root_zf.read(item_name)
+            df, msg = _parse_myntra_csv(data, base, mapping)
+            if df.empty:
+                skipped.append(f"{base}: {msg}")
+            else:
+                dfs.append(df)
+                if msg != "OK":
+                    skipped.append(f"{base}: Partial ({msg})")
+        except Exception as e:
+            skipped.append(f"{base}: {e}")
+        prog.progress((idx + 1) / max(len(csv_items), 1), text=f"Myntra {idx+1}/{len(csv_items)}: {base}")
+
+    prog.empty()
+    if skipped:
+        with st.sidebar.expander(f"⚠️ Myntra: {len(skipped)} files had issues"):
+            for s in skipped: st.write(s)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(dfs, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["OrderId","OMS_SKU","TxnType","Date"], keep="first")
+    return combined
+
+
+def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
+    """Convert Myntra analytics df into standard sales_df format for the dashboard."""
+    if myntra_df.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "Sku":              myntra_df["OMS_SKU"],
+        "TxnDate":          myntra_df["Date"],
+        "Transaction Type": myntra_df["TxnType"],
+        "Quantity":         myntra_df["Quantity"],
+        "Units_Effective":  np.where(myntra_df["TxnType"]=="Refund", -myntra_df["Quantity"],
+                            np.where(myntra_df["TxnType"]=="Cancel",  0, myntra_df["Quantity"])),
+        "Source":           "Myntra",
+        "OrderId":          myntra_df["OrderId"],
+    })
+    return out
 
 # ══════════════════════════════════════════════════════════════
 # 8) INVENTORY LOADERS
@@ -689,9 +957,10 @@ def calculate_po_base(
     min_denominator: int = 7,
     use_seasonality: bool = False,
     seasonal_weight: float = 0.5,
-    mtr_df: pd.DataFrame = None,          # ← NEW: MTR historical data for LY lookup
-    sku_mapping: Dict[str, str] = None,   # ← NEW: needed to map MTR SKUs → OMS SKUs
-    group_by_parent: bool = False,        # ← NEW: match PO view mode
+    mtr_df: pd.DataFrame = None,          # MTR historical data for LY lookup
+    myntra_df: pd.DataFrame = None,       # Myntra historical data for LY lookup
+    sku_mapping: Dict[str, str] = None,
+    group_by_parent: bool = False,
 ) -> pd.DataFrame:
 
     if sales_df.empty or inv_df.empty:
@@ -721,23 +990,37 @@ def calculate_po_base(
 
     if use_seasonality:
         # ── Build the historical dataset for LY lookups ──
-        # Priority 1: MTR data (covers 2 full years of Amazon history)
+        # Priority 1: MTR + Myntra data (covers 2 full years of history)
         # Priority 2: regular sales_df (may only cover recent months)
-        mtr_sales = pd.DataFrame()
+        hist_parts  = [df]
+        source_tags = []
+
         if mtr_df is not None and not mtr_df.empty and sku_mapping is not None:
             mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping, group_by_parent=group_by_parent)
+            if not mtr_sales.empty:
+                hist_parts.append(mtr_sales)
+                source_tags.append("MTR")
 
-        if not mtr_sales.empty:
-            # Merge MTR history with sales_df; deduplicate on (Sku, TxnDate, Transaction Type)
-            # so recent sales_df rows win over MTR rows for the current period
-            hist_df = pd.concat([mtr_sales, df], ignore_index=True)
+        if myntra_df is not None and not myntra_df.empty:
+            myn_sales = myntra_to_sales_rows(myntra_df)
+            if not myn_sales.empty:
+                myn_sales = myn_sales.rename(columns={"TxnDate":"TxnDate"})
+                myn_sales["TxnDate"] = pd.to_datetime(myn_sales["TxnDate"], errors="coerce")
+                # Apply parent grouping if needed
+                if group_by_parent:
+                    myn_sales["Sku"] = myn_sales["Sku"].apply(get_parent_sku)
+                hist_parts.append(myn_sales)
+                source_tags.append("Myntra")
+
+        ly_source_label = "+".join(source_tags) if source_tags else "Sales"
+
+        if len(hist_parts) > 1:
+            hist_df = pd.concat(hist_parts, ignore_index=True)
             hist_df = hist_df.drop_duplicates(
                 subset=["Sku", "TxnDate", "Transaction Type"], keep="last"
             )
-            ly_source_label = "MTR"
         else:
             hist_df = df
-            ly_source_label = "Sales"
 
         # ── Window A: Same trailing velocity period from exactly 1 year ago ──
         ly_trailing_end   = max_date - timedelta(days=365)
@@ -803,34 +1086,153 @@ def calculate_po_base(
     return po_df
 
 # ══════════════════════════════════════════════════════════════
-# 12) SIDEBAR — FILE UPLOADS
+# 12) SIDEBAR — FILE UPLOADS  (3-Tier: Historical / Monthly / Daily)
 # ══════════════════════════════════════════════════════════════
 st.sidebar.markdown("## 📂 Data Upload")
-map_file = st.sidebar.file_uploader("1️⃣ SKU Mapping (Required)", type=["xlsx"])
+
+# ── Always Required ──────────────────────────────────────────
+map_file = st.sidebar.file_uploader(
+    "1️⃣ SKU Mapping (Required)",
+    type=["xlsx"],
+    help="Master SKU mapping table. Required before loading any other data."
+)
 
 st.sidebar.markdown("### ⚙️ Amazon Settings")
-st.session_state.amazon_date_basis    = st.sidebar.selectbox("Date Basis", ["Shipment Date","Invoice Date","Order Date"], index=0)
+st.session_state.amazon_date_basis    = st.sidebar.selectbox(
+    "Date Basis", ["Shipment Date", "Invoice Date", "Order Date"], index=0
+)
 st.session_state.include_replacements = st.sidebar.checkbox("Include FreeReplacement", value=False)
 st.sidebar.divider()
 
-st.sidebar.markdown("### 2️⃣ MTR Reports (Amazon Tax)")
-mtr_main_zip = st.sidebar.file_uploader("MTR — Main ZIP (all months)", type=["zip"], key="mtr_main_zip")
+# ════════════════════════════════════════════════════════════
+# TIER 1 — HISTORICAL  (multi-year archives, used for LY / MTR analytics)
+# Purpose : seasonality lookups, MTR tax analytics, YoY comparisons
+# Cadence : upload once per year or when you want to refresh history
+# ════════════════════════════════════════════════════════════
+with st.sidebar.expander("📚 Tier 1 — Historical Data (Multi-Year)", expanded=True):
+    st.caption(
+        "Upload your full archive files here. These power **YoY seasonality** in the PO Engine "
+        "and the **MTR Analytics** tab. Upload once — they persist across sessions until you reload."
+    )
+
+    mtr_main_zip = st.file_uploader(
+        "Amazon MTR — Master ZIP (all months/years)",
+        type=["zip"], key="mtr_main_zip",
+        help="ZIP containing all monthly Amazon MTR CSVs (B2B + B2C). "
+             "Covers 2+ years. Used for tax analytics AND as the LY source for PO seasonality."
+    )
+    f_meesho = st.file_uploader(
+        "Meesho — Master ZIP (all months/years)",
+        type=["zip"], key="meesho",
+        help="Master ZIP containing all Meesho monthly ZIPs. Both GST and non-GST formats supported."
+    )
+    f_myntra = st.file_uploader(
+        "Myntra PPMP — Master ZIP (all months/years)",
+        type=["zip"], key="myntra_sales",
+        help="Master ZIP containing all Myntra PPMP monthly CSVs."
+    )
+
 st.sidebar.divider()
 
-st.sidebar.markdown("### 3️⃣ Sales Data (Units)")
-f_b2c      = st.sidebar.file_uploader("Amazon B2C (ZIP)", type=["zip"], key="b2c")
-f_b2b      = st.sidebar.file_uploader("Amazon B2B (ZIP)", type=["zip"], key="b2b")
-f_transfer = st.sidebar.file_uploader("Stock Transfer (ZIP)", type=["zip"], key="transfer")
-f_fk       = st.sidebar.file_uploader("Flipkart (Excel)", type=["xlsx"], key="fk")
-f_meesho   = st.sidebar.file_uploader("Meesho (ZIP)", type=["zip"], key="meesho")
+# ════════════════════════════════════════════════════════════
+# TIER 2 — MONTHLY  (recent month sales reports, velocity for PO)
+# Purpose : recent sales velocity (ADS), dashboard, marketplace split
+# Cadence : upload each month after month-close
+# ════════════════════════════════════════════════════════════
+with st.sidebar.expander("📅 Tier 2 — Monthly Sales (Recent Velocity)", expanded=True):
+    st.caption(
+        "Upload this month's (or last month's) sales exports. These drive the **Recent ADS** "
+        "in the PO Engine and the **Sales Dashboard**. Replace with fresh files each month."
+    )
+
+    f_b2c = st.file_uploader(
+        "Amazon B2C Sales (ZIP)",
+        type=["zip"], key="b2c",
+        help="Amazon B2C order-level ZIP export for the current/last month."
+    )
+    f_b2b = st.file_uploader(
+        "Amazon B2B Sales (ZIP)",
+        type=["zip"], key="b2b",
+        help="Amazon B2B order-level ZIP export for the current/last month."
+    )
+    f_fk = st.file_uploader(
+        "Flipkart Sales (Excel)",
+        type=["xlsx"], key="fk",
+        help="Flipkart Sales Report Excel (sheet name: 'Sales Report')."
+    )
+    f_transfer = st.file_uploader(
+        "Amazon Stock Transfer (ZIP)",
+        type=["zip"], key="transfer",
+        help="Amazon inter-FC stock transfer report for the Logistics tab."
+    )
+
 st.sidebar.divider()
 
-st.sidebar.markdown("### 4️⃣ Inventory Data")
-i_oms    = st.sidebar.file_uploader("OMS (CSV)",      type=["csv"], key="oms")
-i_fk     = st.sidebar.file_uploader("Flipkart (CSV)", type=["csv"], key="fk_inv")
-i_myntra = st.sidebar.file_uploader("Myntra (CSV)",   type=["csv"], key="myntra")
-i_amz    = st.sidebar.file_uploader("Amazon (CSV)",   type=["csv"], key="amz")
+# ════════════════════════════════════════════════════════════
+# TIER 3 — DAILY  (today's snapshot files, live inventory)
+# Purpose : current inventory snapshot for PO calculations
+# Cadence : upload fresh daily or before each PO run
+# ════════════════════════════════════════════════════════════
+with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Live Inventory)", expanded=True):
+    st.caption(
+        "Today's inventory snapshots. These are the **current stock levels** used to calculate "
+        "how many units to order. Refresh daily or before each PO run for accurate recommendations."
+    )
+
+    i_oms = st.file_uploader(
+        "OMS Inventory (CSV)",
+        type=["csv"], key="oms",
+        help="OMS warehouse inventory export. Columns: Item SkuCode, Inventory."
+    )
+    i_fk = st.file_uploader(
+        "Flipkart Inventory (CSV)",
+        type=["csv"], key="fk_inv",
+        help="Flipkart listing inventory CSV. Columns: SKU, Live on Website."
+    )
+    i_myntra = st.file_uploader(
+        "Myntra Inventory (CSV)",
+        type=["csv"], key="myntra",
+        help="Myntra sellable inventory CSV. Columns: Seller SKU Code, Sellable Inventory Count."
+    )
+    i_amz = st.file_uploader(
+        "Amazon Inventory (CSV)",
+        type=["csv"], key="amz",
+        help="Amazon inventory ledger CSV. Columns: MSKU, Ending Warehouse Balance."
+    )
+
 st.sidebar.divider()
+
+# ── Data Coverage Summary (shown after load) ─────────────────
+def _show_data_coverage():
+    """Show a compact coverage summary in the sidebar so user knows what's loaded."""
+    rows = []
+    ss   = st.session_state
+
+    def _date_range(df, col="TxnDate"):
+        try:
+            d = pd.to_datetime(df[col], errors="coerce").dropna()
+            if len(d) == 0: return "no dates"
+            return f"{d.min().strftime('%b %y')} → {d.max().strftime('%b %y')}"
+        except Exception:
+            return "loaded"
+
+    if not ss.mtr_df.empty:
+        rows.append(f"✅ MTR: {len(ss.mtr_df):,} rows | {_date_range(ss.mtr_df, 'Date')}")
+    if not ss.sales_df.empty:
+        rows.append(f"✅ Sales: {len(ss.sales_df):,} rows | {_date_range(ss.sales_df)}")
+    if not ss.get("meesho_df", pd.DataFrame()).empty:
+        rows.append(f"✅ Meesho: {len(ss.meesho_df):,} rows | {_date_range(ss.meesho_df, 'Date')}")
+    if not ss.get("myntra_df", pd.DataFrame()).empty:
+        rows.append(f"✅ Myntra: {len(ss.myntra_df):,} rows | {_date_range(ss.myntra_df, 'Date')}")
+    if not ss.inventory_df_variant.empty:
+        rows.append(f"✅ Inventory: {len(ss.inventory_df_variant):,} SKUs")
+    if not ss.transfer_df.empty:
+        rows.append(f"✅ Transfers: {len(ss.transfer_df):,} rows")
+
+    if rows:
+        st.sidebar.markdown("**📊 Loaded Data:**")
+        for r in rows:
+            st.sidebar.caption(r)
 
 if st.sidebar.button("🚀 Load All Data", use_container_width=True):
     if not map_file:
@@ -845,28 +1247,53 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     include_replacements=st.session_state.include_replacements
                 )
 
+                # ── Tier 1: Historical archives ──────────────────────────
                 if mtr_main_zip:
                     mtr_combined, csv_count, mtr_skipped = load_mtr_from_main_zip(mtr_main_zip)
                     st.session_state.mtr_df = mtr_combined
-                    if not mtr_combined.empty:
-                        year_range = f"{mtr_combined['Date'].dt.year.min()}–{mtr_combined['Date'].dt.year.max()}"
-                        st.sidebar.success(f"✅ MTR loaded: {csv_count} files | {len(mtr_combined):,} rows | Years: {year_range}")
                     if mtr_skipped:
-                        st.sidebar.warning(f"⚠️ {len(mtr_skipped)} MTR files had issues. Check logs.")
-                        with st.sidebar.expander("MTR Error Logs"):
+                        with st.sidebar.expander(f"⚠️ MTR: {len(mtr_skipped)} files had issues"):
                             for s in mtr_skipped:
                                 st.write(s)
 
-                sales_parts = []
-                if f_b2c:    sales_parts.append(load_amazon_sales(f_b2c,   st.session_state.sku_mapping, "Amazon B2C", config))
-                if f_b2b:    sales_parts.append(load_amazon_sales(f_b2b,   st.session_state.sku_mapping, "Amazon B2B", config))
-                if f_fk:     sales_parts.append(load_flipkart_sales(f_fk,  st.session_state.sku_mapping))
-                if f_meesho: sales_parts.append(load_meesho_sales(f_meesho,st.session_state.sku_mapping))
-                if sales_parts:
-                    st.session_state.sales_df = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
+                if f_meesho:
+                    meesho_combined = load_meesho_full(f_meesho)
+                    st.session_state.meesho_df = meesho_combined
 
-                st.session_state.inventory_df_variant = load_inventory_consolidated(i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=False)
-                st.session_state.inventory_df_parent  = load_inventory_consolidated(i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=True)
+                if f_myntra:
+                    myntra_combined = load_myntra_full(f_myntra, st.session_state.sku_mapping)
+                    st.session_state.myntra_df = myntra_combined
+
+                # ── Tier 2: Monthly sales → build unified sales_df ───────
+                # Includes Amazon B2C/B2B/Flipkart (monthly files)
+                # PLUS Meesho + Myntra historical rows folded in automatically
+                sales_parts = []
+                if f_b2c:
+                    sales_parts.append(load_amazon_sales(f_b2c, st.session_state.sku_mapping, "Amazon B2C", config))
+                if f_b2b:
+                    sales_parts.append(load_amazon_sales(f_b2b, st.session_state.sku_mapping, "Amazon B2B", config))
+                if f_fk:
+                    sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
+
+                # Auto-fold historical Meesho + Myntra rows into sales_df
+                meesho_df_ss = st.session_state.get("meesho_df", pd.DataFrame())
+                myntra_df_ss = st.session_state.get("myntra_df", pd.DataFrame())
+                if not meesho_df_ss.empty:
+                    sales_parts.append(meesho_to_sales_rows(meesho_df_ss))
+                if not myntra_df_ss.empty:
+                    sales_parts.append(myntra_to_sales_rows(myntra_df_ss))
+
+                if sales_parts:
+                    combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
+                    st.session_state.sales_df = combined_sales
+
+                # ── Tier 3: Daily inventory snapshot ─────────────────────
+                st.session_state.inventory_df_variant = load_inventory_consolidated(
+                    i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=False
+                )
+                st.session_state.inventory_df_parent = load_inventory_consolidated(
+                    i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=True
+                )
 
                 if f_transfer:
                     st.session_state.transfer_df = load_stock_transfer(f_transfer)
@@ -882,6 +1309,9 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
         else:
             st.rerun()
 
+# Always show coverage summary beneath the button
+_show_data_coverage()
+
 if not st.session_state.sku_mapping:
     st.info("👋 **Welcome!** Upload SKU Mapping and click **Load All Data** to begin.")
     st.stop()
@@ -889,8 +1319,9 @@ if not st.session_state.sku_mapping:
 # ══════════════════════════════════════════════════════════════
 # 14) MAIN TABS
 # ══════════════════════════════════════════════════════════════
-tab_dash, tab_mtr, tab_inv, tab_po, tab_logistics, tab_forecast, tab_drill = st.tabs([
-    "📊 Dashboard", "📑 MTR Analytics", "📦 Inventory", "🎯 PO Engine", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
+tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_inv, tab_po, tab_logistics, tab_forecast, tab_drill = st.tabs([
+    "📊 Dashboard", "📑 MTR Analytics", "🛍️ Myntra", "🛒 Meesho",
+    "📦 Inventory", "🎯 PO Engine", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -1188,7 +1619,245 @@ with tab_mtr:
                     )
 
 # ══════════════════════════════════════════════════════════════
-# TAB 3 — INVENTORY
+# TAB 3 — MYNTRA ANALYTICS
+# ══════════════════════════════════════════════════════════════
+with tab_myntra:
+    st.subheader("🛍️ Myntra PPMP Analytics")
+    myn = st.session_state.myntra_df
+    if myn.empty:
+        st.info("📂 Upload Myntra PPMP master ZIP in the Sales Data section and click Load All Data.")
+    else:
+        # Year coverage banner
+        myn_years = sorted(myn["Date"].dt.year.dropna().unique().tolist())
+        st.success(
+            f"✅ Myntra data covers: **{', '.join(str(y) for y in myn_years)}** | "
+            f"Rows: **{len(myn):,}** | "
+            f"Range: **{myn['Date'].min().strftime('%d %b %Y')}** → **{myn['Date'].max().strftime('%d %b %Y')}**"
+        )
+
+        # Filters
+        with st.expander("🔧 Filters", expanded=True):
+            mf1, mf2, mf3 = st.columns(3)
+            _myn_months = sorted(myn["Month"].dropna().unique().tolist())
+            with mf1:
+                _sel_myn_months = st.multiselect("Months", _myn_months, default=_myn_months, key="myn_months")
+            with mf2:
+                _myn_txn_types  = sorted(myn["TxnType"].dropna().unique().tolist())
+                _sel_myn_txn    = st.multiselect("Transaction Type", _myn_txn_types,
+                                                  default=[t for t in ["Shipment","Refund"] if t in _myn_txn_types], key="myn_txn")
+            with mf3:
+                _myn_states = sorted(myn["State"].dropna().unique().tolist())
+                _sel_states = st.multiselect("State", _myn_states, default=_myn_states, key="myn_states")
+
+        mf = myn[
+            myn["Month"].isin(_sel_myn_months) &
+            myn["TxnType"].isin(_sel_myn_txn) &
+            myn["State"].isin(_sel_states)
+        ].copy()
+
+        if mf.empty:
+            st.warning("No data for selected filters.")
+        else:
+            _myn_sh = mf["TxnType"] == "Shipment"
+            _myn_rf = mf["TxnType"] == "Refund"
+
+            gross_rev  = mf.loc[_myn_sh, "Invoice_Amount"].sum()
+            refund_amt = mf.loc[_myn_rf, "Invoice_Amount"].abs().sum()
+            net_rev    = gross_rev - refund_amt
+            units_sold = mf.loc[_myn_sh, "Quantity"].sum()
+            orders     = mf.loc[_myn_sh, "OrderId"].nunique()
+            ret_units  = mf.loc[_myn_rf, "Quantity"].sum()
+            ret_rate   = (ret_units / units_sold * 100) if units_sold > 0 else 0
+            aov        = gross_rev / orders if orders else 0
+
+            st.markdown("### 💰 KPIs")
+            k1,k2,k3,k4,k5,k6,k7 = st.columns(7)
+            k1.metric("💵 Gross Rev",   fmt_inr(gross_rev))
+            k2.metric("↩️ Refunds",     fmt_inr(refund_amt))
+            k3.metric("✅ Net Rev",     fmt_inr(net_rev))
+            k4.metric("📦 Units Sold",  f"{int(units_sold):,}")
+            k5.metric("↩️ Returns",     f"{int(ret_units):,}")
+            k6.metric("📊 Return Rate", f"{ret_rate:.1f}%")
+            k7.metric("💳 AOV",         fmt_inr(aov))
+            st.divider()
+
+            # Monthly revenue trend
+            _myn_monthly = (mf[_myn_sh].groupby("Month")["Invoice_Amount"].sum().reset_index().sort_values("Month"))
+            _myn_monthly_ref = (mf[_myn_rf].groupby("Month")["Invoice_Amount"].sum().abs().reset_index())
+            _myn_monthly_ref.columns = ["Month","Refund_Amt"]
+            _myn_monthly_comb = _myn_monthly.merge(_myn_monthly_ref, on="Month", how="left").fillna(0)
+            _myn_monthly_comb["Refund_%"] = (
+                _myn_monthly_comb["Refund_Amt"] / _myn_monthly_comb["Invoice_Amount"].replace(0,np.nan) * 100
+            ).fillna(0).round(2)
+
+            with st.expander("📈 Monthly Revenue Trend", expanded=True):
+                fig = px.bar(_myn_monthly_comb, x="Month", y="Invoice_Amount",
+                             title="Monthly Gross Revenue — Myntra", color_discrete_sequence=["#E63946"])
+                fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                fig.update_layout(height=340)
+                st.plotly_chart(fig, use_container_width=True)
+
+                fig2 = px.bar(_myn_monthly_comb, x="Month", y="Refund_%",
+                              title="Monthly Refund % — Myntra", color_discrete_sequence=["#F4A261"])
+                fig2.update_layout(height=280)
+                st.plotly_chart(fig2, use_container_width=True)
+
+            with st.expander("🗺️ Top States by Revenue", expanded=False):
+                _myn_state = (mf[_myn_sh].groupby("State")["Invoice_Amount"].sum()
+                              .sort_values(ascending=False).head(20).reset_index())
+                _myn_state.columns = ["State","Revenue"]
+                fig3 = px.bar(_myn_state, x="Revenue", y="State", orientation="h",
+                              color="Revenue", color_continuous_scale="Reds",
+                              title="Top 20 States — Myntra")
+                fig3.update_layout(height=520, yaxis=dict(autorange="reversed"))
+                fig3.update_xaxes(tickprefix="₹", tickformat=",.0f")
+                st.plotly_chart(fig3, use_container_width=True)
+
+            with st.expander("🏆 Top SKUs by Revenue", expanded=False):
+                _myn_sku = (mf[_myn_sh].groupby("OMS_SKU")["Invoice_Amount"].sum()
+                            .sort_values(ascending=False).head(30).reset_index())
+                fig4 = px.bar(_myn_sku, x="OMS_SKU", y="Invoice_Amount",
+                              title="Top 30 SKUs — Myntra Revenue")
+                fig4.update_xaxes(tickangle=-45)
+                fig4.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                fig4.update_layout(height=400)
+                st.plotly_chart(fig4, use_container_width=True)
+
+            with st.expander("💳 Payment Methods", expanded=False):
+                _myn_pm = (mf[_myn_sh].groupby("Payment_Method")["Invoice_Amount"].sum()
+                           .sort_values(ascending=False).reset_index())
+                fig5 = px.pie(_myn_pm, values="Invoice_Amount", names="Payment_Method",
+                              title="Payment Split — Myntra", hole=0.4)
+                st.plotly_chart(fig5, use_container_width=True)
+
+            with st.expander("🔍 Raw Data & Download", expanded=False):
+                _myn_search = st.text_input("Search SKU / State", key="myn_search")
+                _myn_view = mf.copy()
+                if _myn_search:
+                    _q = _myn_search.lower()
+                    _myn_view = _myn_view[
+                        _myn_view["OMS_SKU"].str.lower().str.contains(_q, na=False) |
+                        _myn_view["State"].str.lower().str.contains(_q, na=False)
+                    ]
+                st.dataframe(_myn_view.sort_values("Date", ascending=False).head(300),
+                             use_container_width=True, height=360)
+                st.caption(f"Showing up to 300 of {len(_myn_view):,} records")
+                st.download_button("📥 Download Filtered (CSV)",
+                    _myn_view.to_csv(index=False).encode("utf-8"),
+                    f"myntra_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
+                    "text/csv", use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════
+# TAB 4 — MEESHO ANALYTICS
+# ══════════════════════════════════════════════════════════════
+with tab_meesho:
+    st.subheader("🛒 Meesho Analytics")
+    mee = st.session_state.meesho_df
+    if mee.empty:
+        st.info("📂 Upload Meesho master ZIP in the Sales Data section and click Load All Data.")
+    else:
+        mee_years = sorted(mee["Date"].dt.year.dropna().unique().tolist())
+        st.success(
+            f"✅ Meesho data covers: **{', '.join(str(y) for y in mee_years)}** | "
+            f"Rows: **{len(mee):,}** | "
+            f"Range: **{mee['Date'].min().strftime('%d %b %Y')}** → **{mee['Date'].max().strftime('%d %b %Y')}**"
+        )
+        st.caption("ℹ️ Meesho does not provide per-product SKU data. Analytics shown are store-level totals.")
+
+        with st.expander("🔧 Filters", expanded=True):
+            _mee_months = sorted(mee["Month"].dropna().unique().tolist())
+            _mee_txn_types = sorted(mee["TxnType"].dropna().unique().tolist())
+            ef1, ef2 = st.columns(2)
+            with ef1:
+                _sel_mee_months = st.multiselect("Months", _mee_months, default=_mee_months, key="mee_months")
+            with ef2:
+                _sel_mee_txn = st.multiselect("Transaction Type", _mee_txn_types,
+                                               default=[t for t in ["Shipment","Refund"] if t in _mee_txn_types], key="mee_txn")
+
+        ef = mee[mee["Month"].isin(_sel_mee_months) & mee["TxnType"].isin(_sel_mee_txn)].copy()
+
+        if ef.empty:
+            st.warning("No data for selected filters.")
+        else:
+            _mee_sh = ef["TxnType"] == "Shipment"
+            _mee_rf = ef["TxnType"] == "Refund"
+
+            gross_rev  = ef.loc[_mee_sh, "Invoice_Amount"].sum()
+            refund_amt = ef.loc[_mee_rf, "Invoice_Amount"].abs().sum()
+            net_rev    = gross_rev - refund_amt
+            units_sold = ef.loc[_mee_sh, "Quantity"].sum()
+            orders     = ef.loc[_mee_sh, "OrderId"].nunique()
+            ret_units  = ef.loc[_mee_rf, "Quantity"].sum()
+            ret_rate   = (ret_units / units_sold * 100) if units_sold > 0 else 0
+            aov        = gross_rev / orders if orders else 0
+
+            st.markdown("### 💰 KPIs")
+            k1,k2,k3,k4,k5,k6,k7 = st.columns(7)
+            k1.metric("💵 Gross Rev",   fmt_inr(gross_rev))
+            k2.metric("↩️ Refunds",     fmt_inr(refund_amt))
+            k3.metric("✅ Net Rev",     fmt_inr(net_rev))
+            k4.metric("📦 Units Sold",  f"{int(units_sold):,}")
+            k5.metric("↩️ Returns",     f"{int(ret_units):,}")
+            k6.metric("📊 Return Rate", f"{ret_rate:.1f}%")
+            k7.metric("💳 AOV",         fmt_inr(aov))
+            st.divider()
+
+            _mee_monthly = (ef[_mee_sh].groupby("Month")["Invoice_Amount"].sum().reset_index().sort_values("Month"))
+            _mee_monthly_ref = (ef[_mee_rf].groupby("Month")["Invoice_Amount"].sum().abs().reset_index())
+            _mee_monthly_ref.columns = ["Month","Refund_Amt"]
+            _mee_monthly_comb = _mee_monthly.merge(_mee_monthly_ref, on="Month", how="left").fillna(0)
+            _mee_monthly_comb["Refund_%"] = (
+                _mee_monthly_comb["Refund_Amt"] / _mee_monthly_comb["Invoice_Amount"].replace(0,np.nan) * 100
+            ).fillna(0).round(2)
+            _mee_units_monthly = (ef[_mee_sh].groupby("Month")["Quantity"].sum().reset_index().sort_values("Month"))
+
+            with st.expander("📈 Monthly Revenue & Units Trend", expanded=True):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    fig = px.bar(_mee_monthly_comb, x="Month", y="Invoice_Amount",
+                                 title="Monthly Gross Revenue — Meesho",
+                                 color_discrete_sequence=["#7B2D8B"])
+                    fig.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                    fig.update_layout(height=320)
+                    st.plotly_chart(fig, use_container_width=True)
+                with col_b:
+                    fig2 = px.bar(_mee_units_monthly, x="Month", y="Quantity",
+                                  title="Monthly Units Sold — Meesho",
+                                  color_discrete_sequence=["#A855F7"])
+                    fig2.update_layout(height=320)
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                fig3 = px.bar(_mee_monthly_comb, x="Month", y="Refund_%",
+                              title="Monthly Refund % — Meesho",
+                              color_discrete_sequence=["#F4A261"])
+                fig3.update_layout(height=260)
+                st.plotly_chart(fig3, use_container_width=True)
+
+            with st.expander("🗺️ Top States by Revenue", expanded=False):
+                _mee_state = (ef[_mee_sh].groupby("State")["Invoice_Amount"].sum()
+                              .sort_values(ascending=False).head(20).reset_index())
+                _mee_state.columns = ["State","Revenue"]
+                if not _mee_state.empty and _mee_state["State"].str.strip().ne("").any():
+                    fig4 = px.bar(_mee_state, x="Revenue", y="State", orientation="h",
+                                  color="Revenue", color_continuous_scale="Purples",
+                                  title="Top 20 States — Meesho")
+                    fig4.update_layout(height=520, yaxis=dict(autorange="reversed"))
+                    fig4.update_xaxes(tickprefix="₹", tickformat=",.0f")
+                    st.plotly_chart(fig4, use_container_width=True)
+                else:
+                    st.info("State data not available in this Meesho format.")
+
+            with st.expander("🔍 Raw Data & Download", expanded=False):
+                st.dataframe(ef.sort_values("Date", ascending=False).head(300),
+                             use_container_width=True, height=360)
+                st.caption(f"Showing up to 300 of {len(ef):,} records")
+                st.download_button("📥 Download Filtered (CSV)",
+                    ef.to_csv(index=False).encode("utf-8"),
+                    f"meesho_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
+                    "text/csv", use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════
+# TAB 5 — INVENTORY
 # ══════════════════════════════════════════════════════════════
 with tab_inv:
     st.subheader("📦 Consolidated Inventory")
@@ -1206,7 +1875,7 @@ with tab_inv:
         st.dataframe(inv, use_container_width=True, height=500)
 
 # ══════════════════════════════════════════════════════════════
-# TAB 4 — PO ENGINE
+# TAB 6 — PO ENGINE
 # ══════════════════════════════════════════════════════════════
 with tab_po:
     st.subheader("🎯 Purchase Order Recommendations")
@@ -1248,6 +1917,7 @@ with tab_po:
             min_denominator=int(min_den), use_seasonality=use_seasonality,
             seasonal_weight=seasonal_weight / 100.0,
             mtr_df=st.session_state.mtr_df if not st.session_state.mtr_df.empty else None,
+            myntra_df=st.session_state.myntra_df if not st.session_state.myntra_df.empty else None,
             sku_mapping=st.session_state.sku_mapping,
             group_by_parent=("Parent" in view_mode),
         )
@@ -1370,7 +2040,7 @@ with tab_po:
                 )
 
 # ══════════════════════════════════════════════════════════════
-# TAB 5 — LOGISTICS
+# TAB 7 — LOGISTICS
 # ══════════════════════════════════════════════════════════════
 with tab_logistics:
     st.subheader("🚚 Logistics Information")
@@ -1381,7 +2051,7 @@ with tab_logistics:
         st.dataframe(transfer_df.head(100), use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════
-# TAB 6 — AI FORECAST
+# TAB 8 — AI FORECAST
 # ══════════════════════════════════════════════════════════════
 with tab_forecast:
     st.subheader("📈 AI Demand Forecasting")
@@ -1422,7 +2092,7 @@ with tab_forecast:
                     st.error(f"Forecast error: {e}")
 
 # ══════════════════════════════════════════════════════════════
-# TAB 7 — DEEP DIVE
+# TAB 9 — DEEP DIVE
 # ══════════════════════════════════════════════════════════════
 with tab_drill:
     st.subheader("🔍 Deep Dive & Panel Analysis")
