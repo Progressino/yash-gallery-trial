@@ -2166,5 +2166,335 @@ with tab_forecast:
 # TAB 9 — DEEP DIVE
 # ══════════════════════════════════════════════════════════════
 with tab_drill:
-    st.subheader("🔍 Deep Dive & Panel Analysis")
-    st.info("Utilize this tab for individual SKU breakdown.")
+    st.subheader("🔍 Deep Dive — SKU Panel Analysis")
+
+    sales_df = st.session_state.sales_df
+    mtr_df   = st.session_state.mtr_df
+    inv_df   = st.session_state.inventory_df_variant
+
+    if sales_df.empty and mtr_df.empty:
+        st.warning("⚠️ Load sales or MTR data first to use Deep Dive.")
+        st.stop()
+
+    # ── SKU selector ─────────────────────────────────────────
+    all_skus = set()
+    if not sales_df.empty:
+        all_skus.update(sales_df["Sku"].dropna().astype(str).unique())
+    if not mtr_df.empty:
+        all_skus.update(mtr_df["SKU"].dropna().astype(str).unique())
+    all_skus = sorted(s for s in all_skus if s.strip())
+
+    dd_col1, dd_col2 = st.columns([3, 1])
+    with dd_col1:
+        selected_sku = st.selectbox("🔎 Select SKU", [""] + all_skus, key="drill_sku")
+    with dd_col2:
+        drill_period = st.selectbox(
+            "Period", ["Last 30 Days", "Last 60 Days", "Last 90 Days", "All Time"],
+            index=2, key="drill_period"
+        )
+
+    if not selected_sku:
+        st.info("👆 Select a SKU above to see its full performance panel.")
+        st.stop()
+
+    # ── Build per-SKU filtered frames ────────────────────────
+    sales_df = sales_df.copy()
+    sales_df["TxnDate"] = pd.to_datetime(sales_df["TxnDate"], errors="coerce")
+
+    sku_sales = sales_df[sales_df["Sku"] == selected_sku].copy() if not sales_df.empty else pd.DataFrame()
+    sku_mtr   = mtr_df[mtr_df["SKU"]  == selected_sku].copy()   if not mtr_df.empty   else pd.DataFrame()
+
+    # Determine date range
+    all_dates = []
+    if not sku_sales.empty: all_dates.extend(sku_sales["TxnDate"].dropna().tolist())
+    if not sku_mtr.empty:   all_dates.extend(pd.to_datetime(sku_mtr["Date"], errors="coerce").dropna().tolist())
+
+    if not all_dates:
+        st.warning(f"No data found for SKU **{selected_sku}**.")
+        st.stop()
+
+    max_date = max(all_dates)
+    if drill_period == "All Time":
+        cutoff = min(all_dates)
+    else:
+        days_map = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90}
+        cutoff   = max_date - timedelta(days=days_map[drill_period])
+
+    # Filter to period
+    if not sku_sales.empty:
+        sku_sales_p = sku_sales[sku_sales["TxnDate"] >= cutoff]
+    else:
+        sku_sales_p = pd.DataFrame()
+
+    if not sku_mtr.empty:
+        sku_mtr["Date"] = pd.to_datetime(sku_mtr["Date"], errors="coerce")
+        sku_mtr_p = sku_mtr[sku_mtr["Date"] >= cutoff]
+    else:
+        sku_mtr_p = pd.DataFrame()
+
+    period_days = max((max_date - cutoff).days, 1)
+
+    # ── KPI calculations ─────────────────────────────────────
+    sold_units   = 0
+    return_units = 0
+    net_units    = 0
+    if not sku_sales_p.empty:
+        sku_sales_p["Quantity"]       = pd.to_numeric(sku_sales_p["Quantity"],       errors="coerce").fillna(0)
+        sku_sales_p["Units_Effective"]= pd.to_numeric(sku_sales_p["Units_Effective"],errors="coerce").fillna(0)
+        sold_units   = sku_sales_p[sku_sales_p["Transaction Type"] == "Shipment"]["Quantity"].sum()
+        return_units = sku_sales_p[sku_sales_p["Transaction Type"] == "Refund"]["Quantity"].sum()
+        net_units    = sku_sales_p["Units_Effective"].sum()
+
+    gross_rev  = 0.0
+    refund_rev = 0.0
+    net_rev    = 0.0
+    if not sku_mtr_p.empty:
+        sku_mtr_p["Invoice_Amount"] = pd.to_numeric(sku_mtr_p["Invoice_Amount"], errors="coerce").fillna(0)
+        gross_rev  = sku_mtr_p[sku_mtr_p["Transaction_Type"] == "Shipment"]["Invoice_Amount"].sum()
+        refund_rev = sku_mtr_p[sku_mtr_p["Transaction_Type"] == "Refund"]["Invoice_Amount"].abs().sum()
+        net_rev    = gross_rev - refund_rev
+
+    ads          = net_units / period_days if period_days > 0 else 0
+    return_rate  = (return_units / sold_units * 100) if sold_units > 0 else 0
+    asp          = gross_rev / sold_units if sold_units > 0 else 0
+
+    # Inventory for this SKU
+    curr_inv = 0
+    inv_row  = pd.DataFrame()
+    if not inv_df.empty and "OMS_SKU" in inv_df.columns:
+        inv_row = inv_df[inv_df["OMS_SKU"] == selected_sku]
+        if not inv_row.empty:
+            curr_inv = inv_row["Total_Inventory"].iloc[0]
+
+    days_cover = curr_inv / ads if ads > 0 else 999
+
+    # ── Header KPI row ────────────────────────────────────────
+    st.markdown(f"### 📦 `{selected_sku}` — {drill_period}")
+    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+    k1.metric("✅ Sold Units",   f"{int(sold_units):,}")
+    k2.metric("↩️ Returns",      f"{int(return_units):,}")
+    k3.metric("📊 Return Rate",  f"{return_rate:.1f}%")
+    k4.metric("📦 Net Units",    f"{int(net_units):,}")
+    k5.metric("📈 Daily ADS",    f"{ads:.2f}")
+    k6.metric("💰 Net Revenue",  fmt_inr(net_rev))
+    k7.metric("💳 Avg Price",    fmt_inr(asp))
+    st.divider()
+
+    # ── Row 2: Inventory + Days Cover ─────────────────────────
+    inv1, inv2, inv3, inv4 = st.columns(4)
+    inv1.metric("🏭 Current Stock",  f"{int(curr_inv):,}")
+    inv2.metric("📅 Days Cover",
+                f"{int(days_cover) if days_cover < 999 else '∞'}",
+                delta="⚠️ OOS Risk" if days_cover < 15 and ads > 0 else None,
+                delta_color="inverse")
+    if not inv_row.empty:
+        if "OMS_Inventory" in inv_row.columns:
+            inv3.metric("🏢 OMS Warehouse",   f"{int(inv_row['OMS_Inventory'].iloc[0]):,}")
+        if "Marketplace_Total" in inv_row.columns:
+            inv4.metric("🛒 Marketplace Stock",f"{int(inv_row['Marketplace_Total'].iloc[0]):,}")
+    st.divider()
+
+    # ── Charts row 1: Daily Sales Trend + Marketplace Split ──
+    ch1, ch2 = st.columns([3, 1])
+
+    with ch1:
+        st.markdown("#### 📈 Daily Sales Trend")
+        if not sku_sales_p.empty:
+            daily = (sku_sales_p[sku_sales_p["Transaction Type"] == "Shipment"]
+                     .groupby(sku_sales_p["TxnDate"].dt.date)["Quantity"]
+                     .sum().reset_index())
+            daily.columns = ["Date", "Units"]
+            daily["Date"] = pd.to_datetime(daily["Date"])
+
+            # 7-day rolling average
+            daily = daily.sort_values("Date")
+            daily["Rolling7"] = daily["Units"].rolling(7, min_periods=1).mean()
+
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Bar(
+                x=daily["Date"], y=daily["Units"],
+                name="Daily Units", marker_color="#93c5fd", opacity=0.6
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=daily["Date"], y=daily["Rolling7"],
+                name="7-Day Avg", line=dict(color="#002B5B", width=2)
+            ))
+            fig_trend.update_layout(height=300, margin=dict(t=10, b=10),
+                                    legend=dict(orientation="h"),
+                                    hovermode="x unified")
+            st.plotly_chart(fig_trend, use_container_width=True)
+        else:
+            st.info("No unit-level sales data for this SKU in the selected period.")
+
+    with ch2:
+        st.markdown("#### 🏪 By Marketplace")
+        if not sku_sales_p.empty and "Source" in sku_sales_p.columns:
+            mkt = (sku_sales_p[sku_sales_p["Transaction Type"] == "Shipment"]
+                   .groupby("Source")["Quantity"].sum().reset_index())
+            if not mkt.empty:
+                fig_mkt = px.pie(mkt, values="Quantity", names="Source", hole=0.45,
+                                 color_discrete_sequence=px.colors.qualitative.Set2)
+                fig_mkt.update_layout(height=300, margin=dict(t=10, b=10),
+                                      showlegend=True,
+                                      legend=dict(orientation="v", x=0.0))
+                fig_mkt.update_traces(textposition="inside", textinfo="percent+label")
+                st.plotly_chart(fig_mkt, use_container_width=True)
+            else:
+                st.info("No marketplace data.")
+        else:
+            st.info("No marketplace data.")
+
+    # ── Charts row 2: Monthly Revenue + Return Rate trend ────
+    ch3, ch4 = st.columns(2)
+
+    with ch3:
+        st.markdown("#### 💰 Monthly Revenue (MTR)")
+        if not sku_mtr.empty:
+            sku_mtr["Invoice_Amount"] = pd.to_numeric(sku_mtr["Invoice_Amount"], errors="coerce").fillna(0)
+            monthly_rev = (sku_mtr[sku_mtr["Transaction_Type"] == "Shipment"]
+                           .groupby("Month")["Invoice_Amount"].sum()
+                           .reset_index().sort_values("Month"))
+            monthly_ref = (sku_mtr[sku_mtr["Transaction_Type"] == "Refund"]
+                           .groupby("Month")["Invoice_Amount"].sum().abs()
+                           .reset_index().sort_values("Month"))
+            monthly_ref.columns = ["Month", "Refund_Amount"]
+            monthly_comb = monthly_rev.merge(monthly_ref, on="Month", how="left").fillna(0)
+            monthly_comb["Net_Revenue"] = monthly_comb["Invoice_Amount"] - monthly_comb["Refund_Amount"]
+
+            fig_rev = go.Figure()
+            fig_rev.add_trace(go.Bar(
+                x=monthly_comb["Month"], y=monthly_comb["Invoice_Amount"],
+                name="Gross", marker_color="#002B5B"
+            ))
+            fig_rev.add_trace(go.Bar(
+                x=monthly_comb["Month"], y=monthly_comb["Refund_Amount"],
+                name="Refunds", marker_color="#E63946"
+            ))
+            fig_rev.add_trace(go.Scatter(
+                x=monthly_comb["Month"], y=monthly_comb["Net_Revenue"],
+                name="Net", line=dict(color="#10b981", width=2), mode="lines+markers"
+            ))
+            fig_rev.update_layout(barmode="overlay", height=300,
+                                  margin=dict(t=10, b=10),
+                                  hovermode="x unified",
+                                  legend=dict(orientation="h"))
+            fig_rev.update_yaxes(tickprefix="₹", tickformat=",.0f")
+            st.plotly_chart(fig_rev, use_container_width=True)
+        else:
+            st.info("No MTR revenue data for this SKU.")
+
+    with ch4:
+        st.markdown("#### ↩️ Monthly Return Rate")
+        if not sku_sales.empty:
+            sku_sales["Quantity"] = pd.to_numeric(sku_sales["Quantity"], errors="coerce").fillna(0)
+            sku_sales["Month"]    = sku_sales["TxnDate"].dt.to_period("M").astype(str)
+            m_sold = (sku_sales[sku_sales["Transaction Type"] == "Shipment"]
+                      .groupby("Month")["Quantity"].sum())
+            m_ret  = (sku_sales[sku_sales["Transaction Type"] == "Refund"]
+                      .groupby("Month")["Quantity"].sum())
+            m_rate = (m_ret / m_sold.replace(0, np.nan) * 100).fillna(0).reset_index()
+            m_rate.columns = ["Month", "Return_Rate_%"]
+            m_rate = m_rate.sort_values("Month")
+
+            fig_rr = px.bar(m_rate, x="Month", y="Return_Rate_%",
+                            color="Return_Rate_%",
+                            color_continuous_scale=["#10b981", "#f59e0b", "#E63946"],
+                            range_color=[0, 30])
+            fig_rr.update_layout(height=300, margin=dict(t=10, b=10),
+                                 coloraxis_showscale=False)
+            fig_rr.update_yaxes(ticksuffix="%")
+            fig_rr.add_hline(y=10, line_dash="dash", line_color="orange",
+                             annotation_text="10% threshold")
+            st.plotly_chart(fig_rr, use_container_width=True)
+        else:
+            st.info("No sales data for return rate trend.")
+
+    # ── YoY Comparison ────────────────────────────────────────
+    st.markdown("#### 📅 Year-on-Year Monthly Units")
+    if not sku_sales.empty:
+        sku_sales["Year"]  = sku_sales["TxnDate"].dt.year.astype(str)
+        sku_sales["MonthN"]= sku_sales["TxnDate"].dt.month
+        yoy = (sku_sales[sku_sales["Transaction Type"] == "Shipment"]
+               .groupby(["Year", "MonthN"])["Quantity"].sum().reset_index())
+        yoy["Month_Name"] = pd.to_datetime(yoy["MonthN"], format="%m").dt.strftime("%b")
+        # Sort months correctly
+        month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        yoy["Month_Name"] = pd.Categorical(yoy["Month_Name"], categories=month_order, ordered=True)
+        yoy = yoy.sort_values(["Year", "MonthN"])
+
+        fig_yoy = px.line(yoy, x="Month_Name", y="Quantity", color="Year",
+                          markers=True,
+                          color_discrete_sequence=["#93c5fd","#002B5B","#E63946","#10b981"],
+                          labels={"Quantity": "Units Sold", "Month_Name": "Month"})
+        fig_yoy.update_layout(height=320, hovermode="x unified",
+                              legend=dict(orientation="h"),
+                              margin=dict(t=10, b=10))
+        st.plotly_chart(fig_yoy, use_container_width=True)
+    else:
+        st.info("No sales data for YoY comparison.")
+
+    # ── State-wise breakdown (from MTR) ──────────────────────
+    st.markdown("#### 🗺️ Top States (MTR)")
+    if not sku_mtr_p.empty and "Ship_To_State" in sku_mtr_p.columns:
+        state_data = (sku_mtr_p[sku_mtr_p["Transaction_Type"] == "Shipment"]
+                      .groupby("Ship_To_State").agg(
+                          Units=("Quantity", "sum"),
+                          Revenue=("Invoice_Amount", "sum")
+                      ).reset_index()
+                      .sort_values("Revenue", ascending=False).head(15))
+        state_data["Ship_To_State"] = state_data["Ship_To_State"].astype(str)
+
+        fig_state = px.bar(state_data, x="Revenue", y="Ship_To_State",
+                           orientation="h",
+                           color="Units",
+                           color_continuous_scale="Blues",
+                           labels={"Ship_To_State": "State"},
+                           text=state_data["Units"].astype(int).astype(str) + " units")
+        fig_state.update_traces(textposition="outside")
+        fig_state.update_layout(height=420, margin=dict(t=10, b=10),
+                                yaxis=dict(autorange="reversed"),
+                                coloraxis_showscale=False)
+        fig_state.update_xaxes(tickprefix="₹", tickformat=",.0f")
+        st.plotly_chart(fig_state, use_container_width=True)
+    else:
+        st.info("No MTR state data for this SKU in the selected period.")
+
+    # ── Raw transaction log ───────────────────────────────────
+    with st.expander("🗒️ Raw Transaction Log", expanded=False):
+        tabs_raw = st.tabs(["Sales Transactions", "MTR Transactions"])
+        with tabs_raw[0]:
+            if not sku_sales_p.empty:
+                show_cols = [c for c in ["TxnDate","Transaction Type","Quantity",
+                                          "Units_Effective","Source","OrderId"]
+                             if c in sku_sales_p.columns]
+                st.dataframe(
+                    sku_sales_p[show_cols].sort_values("TxnDate", ascending=False).head(500),
+                    use_container_width=True, height=300
+                )
+                st.download_button(
+                    "📥 Download Sales Log",
+                    sku_sales_p[show_cols].to_csv(index=False).encode("utf-8"),
+                    f"{selected_sku}_sales_{datetime.now().strftime('%Y%m%d')}.csv",
+                    "text/csv"
+                )
+            else:
+                st.info("No sales transactions.")
+
+        with tabs_raw[1]:
+            if not sku_mtr_p.empty:
+                mtr_show = [c for c in ["Date","Report_Type","Transaction_Type","Quantity",
+                                         "Invoice_Amount","Total_Tax","Ship_To_State",
+                                         "Payment_Method","Invoice_Number","Buyer_Name"]
+                            if c in sku_mtr_p.columns]
+                st.dataframe(
+                    sku_mtr_p[mtr_show].sort_values("Date", ascending=False).head(500),
+                    use_container_width=True, height=300
+                )
+                st.download_button(
+                    "📥 Download MTR Log",
+                    sku_mtr_p[mtr_show].to_csv(index=False).encode("utf-8"),
+                    f"{selected_sku}_mtr_{datetime.now().strftime('%Y%m%d')}.csv",
+                    "text/csv"
+                )
+            else:
+                st.info("No MTR transactions.")
