@@ -5,6 +5,7 @@ Yash Gallery Complete ERP System — app.py
 Fixed: MTR date parsing, 2023 ghost data, deduplication on Invoice_Number
 """
 
+import gc
 import io
 import re
 import zipfile
@@ -228,34 +229,30 @@ def load_sku_mapping(mapping_file) -> Dict[str, str]:
         st.error(f"Error loading SKU mapping: {e}")
         return {}
 
+
 # ══════════════════════════════════════════════════════════════
-# 6) BULLETPROOF MTR LOADER (Dynamic Column & B2B/B2C Match)
+# 6) BULLETPROOF MTR LOADER — Memory-Efficient Streaming
 # ══════════════════════════════════════════════════════════════
 _CAT_COLS = {"Ship_To_State", "Warehouse_Id", "Fulfillment", "Payment_Method"}
 
-# ── FIX 1: Robust date parser that tries explicit formats before falling back ──
-def _parse_date_flexible(series: pd.Series) -> pd.Series:
-    """
-    Try explicit date formats in priority order.
-    Returns the first format that successfully parses > 70% of non-null values.
-    Falls back to pandas inference as a last resort.
-    Explicit formats prevent ambiguous day/month swaps that produce ghost years.
-    """
-    # Most Amazon MTR files use DD-MM-YYYY or DD/MM/YYYY
-    priority_formats = [
-        "%d-%m-%Y",    # 15-03-2024
-        "%d/%m/%Y",    # 15/03/2024
-        "%Y-%m-%d",    # 2024-03-15
-        "%d-%b-%Y",    # 15-Mar-2024
-        "%d/%b/%Y",    # 15/Mar/2024
-        "%m/%d/%Y",    # 03/15/2024  (US format, lowest priority)
-        "%d-%m-%Y %H:%M:%S",
-        "%d/%m/%Y %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-    ]
-    non_null = series.dropna()
-    threshold = max(int(len(non_null) * 0.70), 1) if len(non_null) > 0 else 1
+# Minimal columns to keep — drop Description, ASIN, Credit_Note_No to save RAM
+_MTR_KEEP_COLS = [
+    "Date", "Report_Type", "Transaction_Type", "SKU", "Quantity",
+    "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
+    "Ship_To_State", "Warehouse_Id", "Fulfillment", "Payment_Method",
+    "Order_Id", "Invoice_Number", "Buyer_Name", "IRN_Status",
+    "Month", "Month_Label",
+]
 
+def _parse_date_flexible(series: pd.Series) -> pd.Series:
+    """Try explicit date formats in priority order to prevent ghost-year misparses."""
+    priority_formats = [
+        "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d",
+        "%d-%b-%Y", "%d/%b/%Y", "%m/%d/%Y",
+        "%d-%m-%Y %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+    ]
+    non_null  = series.dropna()
+    threshold = max(int(len(non_null) * 0.70), 1) if len(non_null) > 0 else 1
     for fmt in priority_formats:
         try:
             parsed = pd.to_datetime(series, format=fmt, errors="coerce")
@@ -263,17 +260,47 @@ def _parse_date_flexible(series: pd.Series) -> pd.Series:
                 return parsed
         except Exception:
             continue
-
-    # Last resort: pandas inference with dayfirst=True (can misparse ambiguous dates)
     return pd.to_datetime(series, dayfirst=True, errors="coerce")
 
 
+def _downcast_mtr(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggressively shrink a parsed MTR DataFrame in-place.
+    Converts string columns → category, floats → float32, date → date32.
+    Typical saving: 60-75% vs default pandas dtypes.
+    """
+    # Categoricals — very high cardinality string columns NOT categorised
+    cat_cols = ["Report_Type", "Transaction_Type", "Ship_To_State",
+                "Warehouse_Id", "Fulfillment", "Payment_Method",
+                "IRN_Status", "Month", "Month_Label"]
+    for c in cat_cols:
+        if c in df.columns:
+            df[c] = df[c].astype("category")
+
+    # Float columns → float32 (half the size of float64)
+    float_cols = ["Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST"]
+    for c in float_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("float32")
+
+    # High-cardinality strings that must stay as object for search/dedup — keep as-is
+    # (SKU, Order_Id, Invoice_Number, Buyer_Name)
+    return df
+
+
 def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
+    # ── Parse with minimal memory: read only needed columns as str ──
     try:
-        raw = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, low_memory=False, encoding="utf-8", on_bad_lines='skip')
+        raw = pd.read_csv(
+            io.BytesIO(csv_bytes), dtype=str, low_memory=False,
+            encoding="utf-8", on_bad_lines="skip"
+        )
     except UnicodeDecodeError:
         try:
-            raw = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, low_memory=False, encoding="ISO-8859-1", on_bad_lines='skip')
+            raw = pd.read_csv(
+                io.BytesIO(csv_bytes), dtype=str, low_memory=False,
+                encoding="ISO-8859-1", on_bad_lines="skip"
+            )
         except Exception:
             return pd.DataFrame(), "Encoding Error"
     except Exception as e:
@@ -282,80 +309,65 @@ def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
     if raw.empty:
         return pd.DataFrame(), "Empty file"
 
-    # Lowercase and strip everything to make it immune to Amazon column name changes
     raw.columns = raw.columns.astype(str).str.strip().str.lower()
 
-    # Detect B2B dynamically from columns instead of fragile filenames
     is_b2b = "buyer name" in raw.columns or "customer bill to gstid" in raw.columns
     report_type = "B2B" if is_b2b else "B2C"
 
     want_b2c = {
-        "shipment date", "invoice date", "transaction type", "sku", "asin",
-        "item description", "quantity", "invoice amount", "total tax amount",
+        "shipment date", "invoice date", "transaction type", "sku",
+        "quantity", "invoice amount", "total tax amount",
         "cgst tax", "sgst tax", "igst tax", "ship to state", "warehouse id",
         "fulfillment channel", "payment method code", "order id",
-        "invoice number", "credit note no"
+        "invoice number",
     }
-    want_b2b = want_b2c.union({"buyer name", "bill to state", "customer bill to gstid", "irn filing status"})
+    want_b2b = want_b2c | {"buyer name", "irn filing status"}
     want = want_b2b if is_b2b else want_b2c
 
-    # Keep only target columns
-    keep_cols = [c for c in raw.columns if c in want]
-    raw = raw[keep_cols]
+    raw = raw[[c for c in raw.columns if c in want]]
 
-    # Flexible Date Finder — prefer shipment date, then invoice date, etc.
-    date_col = None
-    for d in ["shipment date", "invoice date", "transaction date", "order date"]:
-        if d in raw.columns:
-            date_col = d
-            break
-
-    if date_col:
-        # ── FIX 1 applied: use robust format-aware parser ──
-        raw["_Date"] = _parse_date_flexible(raw[date_col])
-    else:
-        raw["_Date"] = pd.NaT
+    # Date parsing
+    date_col = next(
+        (d for d in ["shipment date", "invoice date", "transaction date", "order date"]
+         if d in raw.columns), None
+    )
+    raw["_Date"] = _parse_date_flexible(raw[date_col]) if date_col else pd.NaT
 
     initial_len = len(raw)
     raw = raw.dropna(subset=["_Date"])
     dropped_dates = initial_len - len(raw)
-
     if raw.empty:
         return pd.DataFrame(), f"All {initial_len} rows had invalid/missing dates."
 
-    # ── FIX 2: Year sanity check — drop rows with implausible years ──
+    # Year sanity
     current_year = datetime.now().year
-    valid_year_mask = raw["_Date"].dt.year.between(2018, current_year + 1)
-    ghost_rows = (~valid_year_mask).sum()
-    if ghost_rows > 0:
-        # Surface a warning but don't crash — just drop the bad rows
-        raw = raw[valid_year_mask]
+    valid_mask = raw["_Date"].dt.year.between(2018, current_year + 1)
+    ghost_rows = (~valid_mask).sum()
+    raw = raw[valid_mask]
     if raw.empty:
-        return pd.DataFrame(), f"All rows had out-of-range years (2018–{current_year+1}). Check source date format."
-
-    for col in ["invoice amount", "total tax amount", "cgst tax", "sgst tax", "igst tax"]:
-        if col in raw.columns:
-            raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0).astype("float32")
-
-    if "quantity" in raw.columns:
-        raw["quantity"] = pd.to_numeric(raw["quantity"], errors="coerce").fillna(0).astype("float32")
-    else:
-        raw["quantity"] = 0.0
+        return pd.DataFrame(), f"All rows had out-of-range years."
 
     def g(name):
-        return raw[name].fillna("").astype(str).str.strip() if name in raw.columns else pd.Series("", index=raw.index, dtype=str)
+        return raw[name].fillna("").astype(str).str.strip() if name in raw.columns \
+               else pd.Series("", index=raw.index, dtype=str)
 
     def gn(name):
-        return raw[name].astype("float32") if name in raw.columns else pd.Series(0.0, index=raw.index, dtype="float32")
+        return pd.to_numeric(raw[name], errors="coerce").fillna(0).astype("float32") \
+               if name in raw.columns \
+               else pd.Series(0.0, index=raw.index, dtype="float32")
+
+    txn_raw = g("transaction type")
+    txn = txn_raw.str.lower()
+    txn_std = pd.Series("Shipment", index=raw.index, dtype=str)
+    txn_std[txn.str.contains("return|refund", na=False)] = "Refund"
+    txn_std[txn.str.contains("cancel", na=False)]        = "Cancel"
 
     out = pd.DataFrame({
         "Date":             raw["_Date"],
         "Report_Type":      report_type,
-        "Transaction_Type": g("transaction type"),
+        "Transaction_Type": txn_std,
         "SKU":              g("sku"),
-        "ASIN":             g("asin"),
-        "Description":      g("item description"),
-        "Quantity":         raw["quantity"],
+        "Quantity":         gn("quantity"),
         "Invoice_Amount":   gn("invoice amount"),
         "Total_Tax":        gn("total tax amount"),
         "CGST":             gn("cgst tax"),
@@ -367,35 +379,26 @@ def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
         "Payment_Method":   g("payment method code"),
         "Order_Id":         g("order id"),
         "Invoice_Number":   g("invoice number"),
-        "Credit_Note_No":   g("credit note no"),
         "Buyer_Name":       g("buyer name"),
         "IRN_Status":       g("irn filing status"),
     })
 
-    # Standardize Transaction Types in case Amazon renamed them
-    out["Transaction_Type"] = out["Transaction_Type"].apply(
-        lambda x: "Refund"   if "return" in str(x).lower() or "refund" in str(x).lower()
-        else ("Cancel"       if "cancel" in str(x).lower()
-        else "Shipment")
-    )
-
-    for col in _CAT_COLS:
-        if col in out.columns:
-            out[col] = out[col].astype("category")
+    # Free the raw DataFrame immediately
+    del raw
 
     out["Month"]       = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
 
+    out = _downcast_mtr(out)
+
     msgs = []
-    if dropped_dates > 0:
-        msgs.append(f"Dropped {dropped_dates} rows missing dates.")
-    if ghost_rows > 0:
-        msgs.append(f"Dropped {ghost_rows} rows with out-of-range years.")
-    msg = "OK" if not msgs else " | ".join(msgs)
-    return out, msg
+    if dropped_dates: msgs.append(f"Dropped {dropped_dates} rows missing dates.")
+    if ghost_rows:    msgs.append(f"Dropped {ghost_rows} rows with out-of-range years.")
+    return out, ("OK" if not msgs else " | ".join(msgs))
 
 
 def _collect_csv_entries(main_zip_file):
+    """Walk nested ZIPs and collect all CSV entries without reading their bytes yet."""
     entries = []
     skipped = []
 
@@ -404,7 +407,7 @@ def _collect_csv_entries(main_zip_file):
             base = Path(item_name).name
             if not base:
                 continue
-            if base.lower().endswith(".zip"):
+            if base.lower().endswith(".zip") and depth < 3:
                 try:
                     data   = zf.read(item_name)
                     sub_zf = zipfile.ZipFile(io.BytesIO(data))
@@ -420,9 +423,15 @@ def _collect_csv_entries(main_zip_file):
 
 
 def load_mtr_from_main_zip(main_zip_file):
+    """
+    Memory-efficient MTR loader.
+    Processes one CSV at a time, frees each after parsing,
+    and does a single pd.concat at the end on already-downcasted frames.
+    """
+    import gc
     skipped   = []
     csv_count = 0
-    dfs       = []
+    dfs: List[pd.DataFrame] = []
 
     try:
         main_zip_file.seek(0)
@@ -442,7 +451,8 @@ def load_mtr_from_main_zip(main_zip_file):
         try:
             data = zf.read(item_name)
             df, msg = _parse_mtr_csv(data, base)
-            del data
+            del data          # free compressed bytes immediately
+            gc.collect()      # force GC after each file
 
             if df.empty:
                 skipped.append(f"{base}: {msg}")
@@ -454,38 +464,50 @@ def load_mtr_from_main_zip(main_zip_file):
         except Exception as e:
             skipped.append(f"{base}: Critical Error - {e}")
 
-        prog.progress((idx + 1) / total, text=f"Loaded {idx + 1}/{total}: {base}")
+        prog.progress((idx + 1) / total, text=f"MTR {idx + 1}/{total}: {base}")
 
     prog.empty()
 
     if not dfs:
         return pd.DataFrame(), 0, skipped
 
+    # Single concat on already-downcasted frames
     combined = pd.concat(dfs, ignore_index=True)
+    del dfs
+    gc.collect()
 
-    # ── FIX 3: Use Invoice_Number for deduplication instead of Order_Id ──
-    # Order_Id can be empty string "" for many B2B rows, causing incorrect deduplication.
-    # Invoice_Number is unique per line item and is far more reliable.
-    dedup_subset = ["Invoice_Number", "SKU", "Transaction_Type", "Date"]
-    # Only deduplicate on rows where Invoice_Number is non-empty to avoid collapsing valid rows
-    has_invoice = combined["Invoice_Number"].str.strip() != ""
-    deduped_with_inv = combined[has_invoice].drop_duplicates(subset=dedup_subset, keep="first")
-    no_invoice       = combined[~has_invoice]
-    # For rows without an Invoice_Number, fall back to Order_Id + SKU + Date
-    deduped_no_inv   = no_invoice.drop_duplicates(
+    # Deduplication — prefer Invoice_Number when available
+    has_inv = combined["Invoice_Number"].str.strip() != ""
+    dedup_a = combined[has_inv].drop_duplicates(
+        subset=["Invoice_Number", "SKU", "Transaction_Type", "Date"], keep="first"
+    )
+    dedup_b = combined[~has_inv].drop_duplicates(
         subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="first"
     )
-    combined = pd.concat([deduped_with_inv, deduped_no_inv], ignore_index=True)
+    combined = pd.concat([dedup_a, dedup_b], ignore_index=True)
+    del dedup_a, dedup_b
+    gc.collect()
 
-    for col in _CAT_COLS:
-        if col in combined.columns:
-            combined[col] = combined[col].astype("category")
+    # Final downcast pass on combined (re-apply categories after concat)
+    combined = _downcast_mtr(combined)
 
     return combined, csv_count, skipped
+
 
 # ══════════════════════════════════════════════════════════════
 # 7) SALES DATA LOADERS
 # ══════════════════════════════════════════════════════════════
+def _downcast_sales(df: pd.DataFrame) -> pd.DataFrame:
+    """Shrink the unified sales_df: category for Source/TxnType, float32 for Quantity."""
+    for c in ["Transaction Type", "Source"]:
+        if c in df.columns:
+            df[c] = df[c].astype("category")
+    for c in ["Quantity", "Units_Effective"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("float32")
+    return df
+
+
 def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, config: SalesConfig) -> pd.DataFrame:
     df = read_zip_csv(zip_file)
     if df.empty or "Sku" not in df.columns:
@@ -521,7 +543,8 @@ def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, config: Sa
 
     result = df[["OMS_SKU","TxnDate","TxnType","Quantity","Units_Effective","Source","OrderId"]].copy()
     result.columns = ["Sku","TxnDate","Transaction Type","Quantity","Units_Effective","Source","OrderId"]
-    return result.dropna(subset=["TxnDate"])
+    del df
+    return _downcast_sales(result.dropna(subset=["TxnDate"]))
 
 
 def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
@@ -538,7 +561,8 @@ def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
         df["OrderId"] = df.get("Order ID", df.get("Order Id", np.nan))
         result = df[["OMS_SKU","TxnDate","TxnType","Quantity","Units_Effective","Source","OrderId"]].copy()
         result.columns = ["Sku","TxnDate","Transaction Type","Quantity","Units_Effective","Source","OrderId"]
-        return result.dropna(subset=["TxnDate"])
+        del df
+        return _downcast_sales(result.dropna(subset=["TxnDate"]))
     except Exception as e:
         st.error(f"Error loading Flipkart: {e}")
         return pd.DataFrame()
@@ -1202,37 +1226,71 @@ with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Live Inventory)", expa
 
 st.sidebar.divider()
 
-# ── Data Coverage Summary (shown after load) ─────────────────
+# ── Data Coverage Summary + RAM monitor ──────────────────────
+def _get_ram_mb() -> float:
+    """Return current process RSS memory in MB."""
+    try:
+        import psutil, os
+        return psutil.Process(os.getpid()).memory_info().rss / 1_048_576
+    except Exception:
+        return 0.0
+
+
+def _df_mb(df: pd.DataFrame) -> float:
+    try:
+        return df.memory_usage(deep=True).sum() / 1_048_576
+    except Exception:
+        return 0.0
+
+
 def _show_data_coverage():
-    """Show a compact coverage summary in the sidebar so user knows what's loaded."""
+    """Compact coverage + RAM summary in the sidebar."""
     rows = []
     ss   = st.session_state
 
     def _date_range(df, col="TxnDate"):
         try:
             d = pd.to_datetime(df[col], errors="coerce").dropna()
-            if len(d) == 0: return "no dates"
-            return f"{d.min().strftime('%b %y')} → {d.max().strftime('%b %y')}"
+            return f"{d.min().strftime('%b %y')} → {d.max().strftime('%b %y')}" if len(d) else "no dates"
         except Exception:
             return "loaded"
 
+    total_mb = 0.0
     if not ss.mtr_df.empty:
-        rows.append(f"✅ MTR: {len(ss.mtr_df):,} rows | {_date_range(ss.mtr_df, 'Date')}")
+        mb = _df_mb(ss.mtr_df); total_mb += mb
+        rows.append(f"📑 MTR: {len(ss.mtr_df):,} rows | {_date_range(ss.mtr_df, 'Date')} | {mb:.0f} MB")
     if not ss.sales_df.empty:
-        rows.append(f"✅ Sales: {len(ss.sales_df):,} rows | {_date_range(ss.sales_df)}")
-    if not ss.get("meesho_df", pd.DataFrame()).empty:
-        rows.append(f"✅ Meesho: {len(ss.meesho_df):,} rows | {_date_range(ss.meesho_df, 'Date')}")
-    if not ss.get("myntra_df", pd.DataFrame()).empty:
-        rows.append(f"✅ Myntra: {len(ss.myntra_df):,} rows | {_date_range(ss.myntra_df, 'Date')}")
+        mb = _df_mb(ss.sales_df); total_mb += mb
+        rows.append(f"📊 Sales: {len(ss.sales_df):,} rows | {_date_range(ss.sales_df)} | {mb:.0f} MB")
+    meesho_df = ss.get("meesho_df", pd.DataFrame())
+    if not meesho_df.empty:
+        mb = _df_mb(meesho_df); total_mb += mb
+        rows.append(f"🛒 Meesho: {len(meesho_df):,} rows | {_date_range(meesho_df, 'Date')} | {mb:.0f} MB")
+    myntra_df = ss.get("myntra_df", pd.DataFrame())
+    if not myntra_df.empty:
+        mb = _df_mb(myntra_df); total_mb += mb
+        rows.append(f"🛍️ Myntra: {len(myntra_df):,} rows | {_date_range(myntra_df, 'Date')} | {mb:.0f} MB")
     if not ss.inventory_df_variant.empty:
-        rows.append(f"✅ Inventory: {len(ss.inventory_df_variant):,} SKUs")
-    if not ss.transfer_df.empty:
-        rows.append(f"✅ Transfers: {len(ss.transfer_df):,} rows")
+        mb = _df_mb(ss.inventory_df_variant); total_mb += mb
+        rows.append(f"📦 Inventory: {len(ss.inventory_df_variant):,} SKUs | {mb:.0f} MB")
 
     if rows:
-        st.sidebar.markdown("**📊 Loaded Data:**")
+        ram = _get_ram_mb()
+        ram_color = "🟢" if ram < 400 else "🟡" if ram < 700 else "🔴"
+        st.sidebar.markdown(f"**📊 Loaded Data** {ram_color} `{ram:.0f} MB` process RAM")
         for r in rows:
             st.sidebar.caption(r)
+        st.sidebar.caption(f"DataFrame total: {total_mb:.0f} MB")
+
+        # One-click clear to free RAM before re-uploading different files
+        if st.sidebar.button("🗑️ Clear All Data (Free RAM)", use_container_width=True):
+            for key in ["mtr_df", "sales_df", "meesho_df", "myntra_df",
+                        "inventory_df_variant", "inventory_df_parent",
+                        "transfer_df", "sku_mapping"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            gc.collect()
+            st.rerun()
 
 if st.sidebar.button("🚀 Load All Data", use_container_width=True):
     if not map_file:
@@ -1251,6 +1309,8 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 if mtr_main_zip:
                     mtr_combined, csv_count, mtr_skipped = load_mtr_from_main_zip(mtr_main_zip)
                     st.session_state.mtr_df = mtr_combined
+                    del mtr_combined
+                    gc.collect()
                     if mtr_skipped:
                         with st.sidebar.expander(f"⚠️ MTR: {len(mtr_skipped)} files had issues"):
                             for s in mtr_skipped:
@@ -1259,10 +1319,14 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 if f_meesho:
                     meesho_combined = load_meesho_full(f_meesho)
                     st.session_state.meesho_df = meesho_combined
+                    del meesho_combined
+                    gc.collect()
 
                 if f_myntra:
                     myntra_combined = load_myntra_full(f_myntra, st.session_state.sku_mapping)
                     st.session_state.myntra_df = myntra_combined
+                    del myntra_combined
+                    gc.collect()
 
                 # ── Tier 2: Monthly sales → build unified sales_df ───────
                 # Includes Amazon B2C/B2B/Flipkart (monthly files)
@@ -1270,10 +1334,13 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 sales_parts = []
                 if f_b2c:
                     sales_parts.append(load_amazon_sales(f_b2c, st.session_state.sku_mapping, "Amazon B2C", config))
+                    gc.collect()
                 if f_b2b:
                     sales_parts.append(load_amazon_sales(f_b2b, st.session_state.sku_mapping, "Amazon B2B", config))
+                    gc.collect()
                 if f_fk:
                     sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
+                    gc.collect()
 
                 # Auto-fold historical Meesho + Myntra rows into sales_df
                 meesho_df_ss = st.session_state.get("meesho_df", pd.DataFrame())
@@ -1285,7 +1352,10 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
 
                 if sales_parts:
                     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
+                    combined_sales = _downcast_sales(combined_sales)
                     st.session_state.sales_df = combined_sales
+                    del sales_parts, combined_sales
+                    gc.collect()
 
                 # ── Tier 3: Daily inventory snapshot ─────────────────────
                 st.session_state.inventory_df_variant = load_inventory_consolidated(
@@ -1294,6 +1364,7 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 st.session_state.inventory_df_parent = load_inventory_consolidated(
                     i_oms, i_fk, i_myntra, i_amz, st.session_state.sku_mapping, group_by_parent=True
                 )
+                gc.collect()
 
                 if f_transfer:
                     st.session_state.transfer_df = load_stock_transfer(f_transfer)
