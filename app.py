@@ -106,10 +106,12 @@ def init_session_state():
         "inventory_df_parent":   pd.DataFrame(),
         "transfer_df":           pd.DataFrame(),
         "mtr_df":                pd.DataFrame(),
-        "myntra_df":             pd.DataFrame(),   # Myntra PPMP full history
-        "meesho_df":             pd.DataFrame(),   # Meesho full history
+        "myntra_df":             pd.DataFrame(),
+        "meesho_df":             pd.DataFrame(),
         "amazon_date_basis":     "Shipment Date",
         "include_replacements":  False,
+        "daily_sales_sources":   [],
+        "daily_sales_rows":      0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -508,7 +510,55 @@ def _downcast_sales(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, config: SalesConfig) -> pd.DataFrame:
+def merge_daily_into_sales(
+    base_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Merge daily sales on top of the monthly base sales_df without duplication.
+
+    Strategy — per (Sku, date, Source):
+      • If daily_df has ANY rows for that combination, those rows win entirely.
+      • Monthly rows for the same (Sku, date, Source) are dropped first.
+      • This means you can safely upload today's daily file on top of a
+        monthly file that already contains today — no double-counting.
+
+    The merge key is (Sku, TxnDate.date, Source) — Source keeps Amazon B2C,
+    Amazon B2B, Flipkart etc. isolated so a Flipkart daily file never
+    accidentally wipes Amazon monthly rows.
+    """
+    if daily_df.empty:
+        return base_df
+    if base_df.empty:
+        return daily_df
+
+    # Normalise TxnDate to date-only for the overlap check
+    base  = base_df.copy()
+    daily = daily_df.copy()
+
+    base["_date"]  = pd.to_datetime(base["TxnDate"],  errors="coerce").dt.normalize()
+    daily["_date"] = pd.to_datetime(daily["TxnDate"], errors="coerce").dt.normalize()
+
+    # Collect the (Sku, _date, Source) tuples that daily covers
+    daily_keys = set(
+        zip(daily["Sku"].astype(str),
+            daily["_date"].astype(str),
+            daily["Source"].astype(str))
+    )
+
+    # Drop those exact combos from base (prevents double-count)
+    overlap_mask = base.apply(
+        lambda r: (str(r["Sku"]), str(r["_date"]), str(r["Source"])) in daily_keys,
+        axis=1,
+    )
+    base_clean = base[~overlap_mask].drop(columns=["_date"])
+    daily_clean = daily.drop(columns=["_date"])
+
+    merged = pd.concat([base_clean, daily_clean], ignore_index=True)
+    del base, daily, base_clean, daily_clean
+    return _downcast_sales(merged)
+
+
     df = read_zip_csv(zip_file)
     if df.empty or "Sku" not in df.columns:
         return pd.DataFrame()
@@ -1193,16 +1243,19 @@ with st.sidebar.expander("📅 Tier 2 — Monthly Sales (Recent Velocity)", expa
 st.sidebar.divider()
 
 # ════════════════════════════════════════════════════════════
-# TIER 3 — DAILY  (today's snapshot files, live inventory)
-# Purpose : current inventory snapshot for PO calculations
+# TIER 3 — DAILY  (today's snapshot files, live inventory + daily sales)
+# Purpose : current inventory snapshot + today's sales for PO calculations
 # Cadence : upload fresh daily or before each PO run
 # ════════════════════════════════════════════════════════════
-with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Live Inventory)", expanded=True):
+with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Inventory + Today's Sales)", expanded=True):
     st.caption(
-        "Today's inventory snapshots. These are the **current stock levels** used to calculate "
-        "how many units to order. Refresh daily or before each PO run for accurate recommendations."
+        "Today's inventory snapshots **and** latest daily sales files. "
+        "Daily sales are merged on top of your monthly files — "
+        "no double-counting: if a day already exists in monthly data, "
+        "the daily file takes priority for that day."
     )
 
+    st.markdown("**📦 Inventory (refresh daily)**")
     i_oms = st.file_uploader(
         "OMS Inventory (CSV)",
         type=["csv"], key="oms",
@@ -1222,6 +1275,34 @@ with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Live Inventory)", expa
         "Amazon Inventory (CSV)",
         type=["csv"], key="amz",
         help="Amazon inventory ledger CSV. Columns: MSKU, Ending Warehouse Balance."
+    )
+
+    st.markdown("**🗓️ Daily Sales (optional — overrides monthly for same dates)**")
+    st.caption("Upload today's order reports. These are merged into the Sales Dashboard and PO Engine automatically.")
+    d_b2c = st.file_uploader(
+        "Amazon B2C — Daily (ZIP)",
+        type=["zip"], key="daily_b2c",
+        help="Today's Amazon B2C order ZIP. Any SKU-date already in the monthly file is replaced by this."
+    )
+    d_b2b = st.file_uploader(
+        "Amazon B2B — Daily (ZIP)",
+        type=["zip"], key="daily_b2b",
+        help="Today's Amazon B2B order ZIP."
+    )
+    d_fk = st.file_uploader(
+        "Flipkart — Daily (Excel)",
+        type=["xlsx"], key="daily_fk",
+        help="Today's Flipkart Sales Report Excel."
+    )
+    d_meesho = st.file_uploader(
+        "Meesho — Daily (ZIP)",
+        type=["zip"], key="daily_meesho",
+        help="Today's Meesho order ZIP."
+    )
+    d_myntra = st.file_uploader(
+        "Myntra — Daily (ZIP)",
+        type=["zip"], key="daily_myntra",
+        help="Today's Myntra PPMP CSV ZIP."
     )
 
 st.sidebar.divider()
@@ -1282,11 +1363,21 @@ def _show_data_coverage():
             st.sidebar.caption(r)
         st.sidebar.caption(f"DataFrame total: {total_mb:.0f} MB")
 
+        # Show daily merge status if any daily files were loaded
+        daily_sources = ss.get("daily_sales_sources", [])
+        daily_rows    = ss.get("daily_sales_rows", 0)
+        if daily_sources:
+            st.sidebar.caption(
+                f"🗓️ Daily merged: **{', '.join(daily_sources)}** "
+                f"({daily_rows:,} rows — overlapping dates replaced)"
+            )
+
         # One-click clear to free RAM before re-uploading different files
         if st.sidebar.button("🗑️ Clear All Data (Free RAM)", use_container_width=True):
             for key in ["mtr_df", "sales_df", "meesho_df", "myntra_df",
                         "inventory_df_variant", "inventory_df_parent",
-                        "transfer_df", "sku_mapping"]:
+                        "transfer_df", "sku_mapping",
+                        "daily_sales_sources", "daily_sales_rows"]:
                 if key in st.session_state:
                     del st.session_state[key]
             gc.collect()
@@ -1355,6 +1446,47 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     combined_sales = _downcast_sales(combined_sales)
                     st.session_state.sales_df = combined_sales
                     del sales_parts, combined_sales
+                    gc.collect()
+
+                # ── Tier 3a: Daily sales — merge on top of monthly ───────
+                # For each daily file: load it, then call merge_daily_into_sales
+                # which drops monthly rows for any (Sku, date, Source) already
+                # covered by the daily file, then appends the daily rows.
+                daily_loaded = []
+                if d_b2c:
+                    _d = load_amazon_sales(d_b2c, st.session_state.sku_mapping, "Amazon B2C", config)
+                    if not _d.empty: daily_loaded.append(("Amazon B2C", _d))
+                    gc.collect()
+                if d_b2b:
+                    _d = load_amazon_sales(d_b2b, st.session_state.sku_mapping, "Amazon B2B", config)
+                    if not _d.empty: daily_loaded.append(("Amazon B2B", _d))
+                    gc.collect()
+                if d_fk:
+                    _d = load_flipkart_sales(d_fk, st.session_state.sku_mapping)
+                    if not _d.empty: daily_loaded.append(("Flipkart", _d))
+                    gc.collect()
+                if d_meesho:
+                    _mc = load_meesho_full(d_meesho)
+                    if not _mc.empty:
+                        _d = meesho_to_sales_rows(_mc); del _mc
+                        if not _d.empty: daily_loaded.append(("Meesho", _d))
+                    gc.collect()
+                if d_myntra:
+                    _mn = load_myntra_full(d_myntra, st.session_state.sku_mapping)
+                    if not _mn.empty:
+                        _d = myntra_to_sales_rows(_mn); del _mn
+                        if not _d.empty: daily_loaded.append(("Myntra", _d))
+                    gc.collect()
+
+                if daily_loaded:
+                    base = st.session_state.sales_df
+                    total_before = len(base)
+                    for source_name, daily_df in daily_loaded:
+                        base = merge_daily_into_sales(base, daily_df)
+                    st.session_state.sales_df    = base
+                    st.session_state.daily_sales_sources = [s for s, _ in daily_loaded]
+                    st.session_state.daily_sales_rows    = sum(len(d) for _, d in daily_loaded)
+                    del base, daily_loaded
                     gc.collect()
 
                 # ── Tier 3: Daily inventory snapshot ─────────────────────
