@@ -561,11 +561,14 @@ def detect_daily_platform(file_obj) -> str:
     Auto-detect which marketplace a daily report belongs to by inspecting
     its column names — no filename matching needed.
 
-    Fingerprints (unique columns per platform):
-      Amazon          → 'merchant sku'  +  'amazon order id'
-      Flipkart/Myntra → 'seller sku code'  +  'store order id'
-      Meesho          → 'reason for credit entry'  +  'sub order no'
-      Myntra Earn More→ 'sku id'  +  'final sale units'  +  'gross units'
+    Fingerprints:
+      Amazon              → 'merchant sku'  +  'amazon order id'
+      Flipkart PPMP order → 'seller sku code'  +  'store order id'
+      Meesho              → 'reason for credit entry'  +  'sub order no'
+      Flipkart Earn More  → 'sku id' + 'final sale units' + 'gross units'
+                            AND 'vertical' column contains 'shopsy' in any row
+      Myntra Earn More    → 'sku id' + 'final sale units' + 'gross units'
+                            AND no 'shopsy' in 'vertical' column
 
     Returns one of: 'amazon' | 'flipkart' | 'meesho' | 'myntra' | 'unknown'
     """
@@ -573,12 +576,12 @@ def detect_daily_platform(file_obj) -> str:
         file_obj.seek(0)
         name = getattr(file_obj, "name", "").lower()
         if name.endswith(".xlsx") or name.endswith(".xls"):
-            df = pd.read_excel(file_obj, nrows=1)
+            df = pd.read_excel(file_obj, nrows=50)   # read enough rows to catch Shopsy
         else:
             for enc in ["utf-8", "latin-1", "cp1252"]:
                 try:
                     file_obj.seek(0)
-                    df = pd.read_csv(file_obj, nrows=1, encoding=enc)
+                    df = pd.read_csv(file_obj, nrows=50, encoding=enc)
                     break
                 except Exception:
                     continue
@@ -586,7 +589,7 @@ def detect_daily_platform(file_obj) -> str:
                 return "unknown"
 
         cols = set(c.strip().lower() for c in df.columns)
-        file_obj.seek(0)  # reset after reading
+        file_obj.seek(0)  # always reset after reading
 
         if "merchant sku" in cols and "amazon order id" in cols:
             return "amazon"
@@ -595,6 +598,13 @@ def detect_daily_platform(file_obj) -> str:
         if "reason for credit entry" in cols and "sub order no" in cols:
             return "meesho"
         if "sku id" in cols and "final sale units" in cols and "gross units" in cols:
+            # Distinguish Flipkart Earn More from Myntra Earn More:
+            # Flipkart's report has 'Shopsy*' verticals; Myntra's does not.
+            if "vertical" in cols:
+                verticals = df["Vertical"].astype(str).str.lower() if "Vertical" in df.columns else \
+                            df[[c for c in df.columns if c.lower() == "vertical"][0]].astype(str).str.lower()
+                if verticals.str.contains("shopsy", na=False).any():
+                    return "flipkart"
             return "myntra"
         return "unknown"
     except Exception:
@@ -730,14 +740,14 @@ def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str], platform: str = "Myntra") -> pd.DataFrame:
     """
-    Parse Myntra Earn More / daily summary report (.xlsx).
-    Columns: SKU ID, Order Date, Gross Units, Final Sale Units, Cancellation Units,
-             Return Units, Final Sale Amount, ...
-    This is an aggregated report (one row per SKU per date), not order-level.
-    We expand into Shipment / Cancel / Refund rows so the standard sales pipeline
-    treats it the same as other sources.
+    Parse Myntra OR Flipkart Earn More / daily summary report (.xlsx).
+    Both platforms share the same column schema:
+        SKU ID, Order Date, Gross Units, Final Sale Units, Cancellation Units,
+        Return Units, Final Sale Amount, ...
+    Pass platform="Flipkart" when detect_daily_platform() identifies it as Flipkart
+    (detected via 'Shopsy' values in the Vertical column).
     """
     try:
         file_obj.seek(0)
@@ -759,11 +769,11 @@ def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
             revenue = pd.to_numeric(r.get("Final Sale Amount", 0),      errors="coerce") or 0
 
             if sold > 0:
-                rows.append(_std_daily(date, oms_sku, "Myntra", "Shipment", sold, revenue))
+                rows.append(_std_daily(date, oms_sku, platform, "Shipment", sold, revenue))
             if cancel > 0:
-                rows.append(_std_daily(date, oms_sku, "Myntra", "Cancel",   cancel, 0))
+                rows.append(_std_daily(date, oms_sku, platform, "Cancel",   cancel, 0))
             if ret > 0:
-                rows.append(_std_daily(date, oms_sku, "Myntra", "Refund",   ret, 0))
+                rows.append(_std_daily(date, oms_sku, platform, "Refund",   ret, 0))
 
         out = pd.DataFrame(rows) if rows else pd.DataFrame()
         if out.empty:
@@ -771,7 +781,7 @@ def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
         out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
         return out.dropna(subset=["Date"])
     except Exception as e:
-        st.warning(f"Myntra daily parse error: {e}")
+        st.warning(f"{platform} Earn More parse error: {e}")
         return pd.DataFrame()
 
 
@@ -2095,14 +2105,21 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     _platform = detect_daily_platform(_f)
                     _daily_detected[_f.name] = _platform
                     try:
+                        _fname_lower = _f.name.lower()
                         if _platform == "amazon":
                             _d = parse_daily_amazon_csv(_f, st.session_state.sku_mapping)
                         elif _platform == "flipkart":
-                            _d = parse_daily_flipkart_csv(_f, st.session_state.sku_mapping)
+                            # Two Flipkart formats:
+                            #   .xlsx  → Flipkart Earn More report (same schema as Myntra earn_more)
+                            #   .csv   → Flipkart PPMP seller orders CSV
+                            if _fname_lower.endswith(".xlsx") or _fname_lower.endswith(".xls"):
+                                _d = parse_daily_myntra_xlsx(_f, st.session_state.sku_mapping, platform="Flipkart")
+                            else:
+                                _d = parse_daily_flipkart_csv(_f, st.session_state.sku_mapping)
                         elif _platform == "meesho":
                             _d = parse_daily_meesho_csv(_f, st.session_state.sku_mapping)
                         elif _platform == "myntra":
-                            _d = parse_daily_myntra_xlsx(_f, st.session_state.sku_mapping)
+                            _d = parse_daily_myntra_xlsx(_f, st.session_state.sku_mapping, platform="Myntra")
                         else:
                             st.sidebar.warning(f"⚠️ Could not detect platform for **{_f.name}** — skipped.")
                             continue
