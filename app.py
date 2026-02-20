@@ -111,6 +111,7 @@ def init_session_state():
         "meesho_df":             pd.DataFrame(),
         "flipkart_df":           pd.DataFrame(),
         "daily_orders_df":       pd.DataFrame(),   # combined daily orders from all platforms
+        "daily_detect_log":      [],               # list of "filename → platform" strings
         "amazon_date_basis":     "Shipment Date",
         "include_replacements":  False,
         "daily_sales_sources":   [],
@@ -553,6 +554,51 @@ def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id="
         "State":     str(state).strip().title(),
         "OrderId":   str(order_id),
     }
+
+
+def detect_daily_platform(file_obj) -> str:
+    """
+    Auto-detect which marketplace a daily report belongs to by inspecting
+    its column names — no filename matching needed.
+
+    Fingerprints (unique columns per platform):
+      Amazon          → 'merchant sku'  +  'amazon order id'
+      Flipkart/Myntra → 'seller sku code'  +  'store order id'
+      Meesho          → 'reason for credit entry'  +  'sub order no'
+      Myntra Earn More→ 'sku id'  +  'final sale units'  +  'gross units'
+
+    Returns one of: 'amazon' | 'flipkart' | 'meesho' | 'myntra' | 'unknown'
+    """
+    try:
+        file_obj.seek(0)
+        name = getattr(file_obj, "name", "").lower()
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            df = pd.read_excel(file_obj, nrows=1)
+        else:
+            for enc in ["utf-8", "latin-1", "cp1252"]:
+                try:
+                    file_obj.seek(0)
+                    df = pd.read_csv(file_obj, nrows=1, encoding=enc)
+                    break
+                except Exception:
+                    continue
+            else:
+                return "unknown"
+
+        cols = set(c.strip().lower() for c in df.columns)
+        file_obj.seek(0)  # reset after reading
+
+        if "merchant sku" in cols and "amazon order id" in cols:
+            return "amazon"
+        if "seller sku code" in cols and "store order id" in cols:
+            return "flipkart"
+        if "reason for credit entry" in cols and "sub order no" in cols:
+            return "meesho"
+        if "sku id" in cols and "final sale units" in cols and "gross units" in cols:
+            return "myntra"
+        return "unknown"
+    except Exception:
+        return "unknown"
 
 
 def parse_daily_amazon_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
@@ -1686,34 +1732,21 @@ with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Inventory + Today's Sa
         help="Amazon inventory ledger CSV. Columns: MSKU, Ending Warehouse Balance."
     )
 
-    st.markdown("**🗓️ Daily Orders — PO Check (upload today's reports)**")
+    st.markdown("**🗓️ Daily Orders — PO Check**")
     st.caption(
-        "Upload each platform's daily order report. "
-        "These feed the **Daily Orders vs PO** tab and also merge into the Sales Dashboard."
+        "Drop any mix of today's daily reports here — Amazon, Flipkart, Meesho, Myntra. "
+        "The platform is detected automatically from the file contents."
     )
-    d_amz_daily = st.file_uploader(
-        "Amazon — Daily Shipment CSV",
-        type=["csv"], key="daily_amz_csv",
-        help="Amazon daily shipped orders CSV. Columns: Customer Shipment Date, Merchant SKU, "
-             "Quantity, Product Amount, Amazon Order Id, Shipment To State."
-    )
-    d_fk_daily = st.file_uploader(
-        "Flipkart/Myntra — Daily Orders CSV",
-        type=["csv"], key="daily_fk_csv",
-        help="Flipkart or Myntra PPMP seller orders CSV. Columns: seller sku code, order status, "
-             "seller price, created on, state. Statuses WP/PK/SH = active; F = cancelled."
-    )
-    d_mee_daily = st.file_uploader(
-        "Meesho — Daily Orders CSV",
-        type=["csv"], key="daily_mee_csv",
-        help="Meesho daily orders CSV. Columns: SKU, Size, Quantity, Reason for Credit Entry, "
-             "Order Date, Supplier Discounted Price, Customer State."
-    )
-    d_myn_daily = st.file_uploader(
-        "Myntra — Daily Earn More Report (XLSX)",
-        type=["xlsx"], key="daily_myn_xlsx",
-        help="Myntra Earn More / daily summary Excel. Columns: SKU ID, Order Date, Gross Units, "
-             "Final Sale Units, Cancellation Units, Return Units, Final Sale Amount."
+    d_daily_files = st.file_uploader(
+        "Daily Order Reports (any platform, any order)",
+        type=["csv", "xlsx"],
+        accept_multiple_files=True,
+        key="daily_auto",
+        help="Accepted formats:\n"
+             "• Amazon: CSV with 'Merchant SKU' + 'Amazon Order Id'\n"
+             "• Flipkart/Myntra PPMP: CSV with 'seller sku code' + 'store order id'\n"
+             "• Meesho: CSV with 'Reason for Credit Entry' + 'Sub Order No'\n"
+             "• Myntra Earn More: XLSX with 'SKU ID' + 'Final Sale Units' + 'Gross Units'"
     )
 
 st.sidebar.divider()
@@ -1859,24 +1892,35 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     del sales_parts, combined_sales
                     gc.collect()
 
-                # ── Daily orders: new platform-specific formats ──────────
-                _daily_parts = []
-                if d_amz_daily:
-                    _d = parse_daily_amazon_csv(d_amz_daily, st.session_state.sku_mapping)
-                    if not _d.empty: _daily_parts.append(_d)
+                # ── Daily orders: auto-detect platform from file contents ──
+                _daily_parts   = []
+                _daily_detected = {}   # fname → detected platform (for UI feedback)
+                for _f in (d_daily_files or []):
+                    _platform = detect_daily_platform(_f)
+                    _daily_detected[_f.name] = _platform
+                    try:
+                        if _platform == "amazon":
+                            _d = parse_daily_amazon_csv(_f, st.session_state.sku_mapping)
+                        elif _platform == "flipkart":
+                            _d = parse_daily_flipkart_csv(_f, st.session_state.sku_mapping)
+                        elif _platform == "meesho":
+                            _d = parse_daily_meesho_csv(_f, st.session_state.sku_mapping)
+                        elif _platform == "myntra":
+                            _d = parse_daily_myntra_xlsx(_f, st.session_state.sku_mapping)
+                        else:
+                            st.sidebar.warning(f"⚠️ Could not detect platform for **{_f.name}** — skipped.")
+                            continue
+                        if not _d.empty:
+                            _daily_parts.append(_d)
+                    except Exception as _pe:
+                        st.sidebar.warning(f"⚠️ Error parsing {_f.name}: {_pe}")
                     gc.collect()
-                if d_fk_daily:
-                    _d = parse_daily_flipkart_csv(d_fk_daily, st.session_state.sku_mapping)
-                    if not _d.empty: _daily_parts.append(_d)
-                    gc.collect()
-                if d_mee_daily:
-                    _d = parse_daily_meesho_csv(d_mee_daily, st.session_state.sku_mapping)
-                    if not _d.empty: _daily_parts.append(_d)
-                    gc.collect()
-                if d_myn_daily:
-                    _d = parse_daily_myntra_xlsx(d_myn_daily, st.session_state.sku_mapping)
-                    if not _d.empty: _daily_parts.append(_d)
-                    gc.collect()
+
+                if _daily_detected:
+                    _icons = {"amazon":"🟠","flipkart":"🟡","meesho":"🔴","myntra":"🟣","unknown":"⚪"}
+                    _lines = [f"{_icons.get(p,'⚪')} **{fn}** → {p.title()}"
+                              for fn, p in _daily_detected.items()]
+                    st.session_state["daily_detect_log"] = _lines
 
                 if _daily_parts:
                     _daily_combined = combine_daily_orders(*_daily_parts)
@@ -1888,7 +1932,7 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                         base = st.session_state.sales_df
                         base = merge_daily_into_sales(base, _daily_sales)
                         st.session_state.sales_df = base
-                        st.session_state.daily_sales_sources = [p for p in _daily_combined["Platform"].unique().tolist()]
+                        st.session_state.daily_sales_sources = _daily_combined["Platform"].unique().tolist()
                         st.session_state.daily_sales_rows    = len(_daily_combined)
                         del base
                     del _daily_parts, _daily_combined
@@ -2696,6 +2740,13 @@ with tab_daily:
             "then click **Load All Data**."
         )
         st.stop()
+
+    # ── Auto-detection log ───────────────────────────────────
+    detect_log = st.session_state.get("daily_detect_log", [])
+    if detect_log:
+        with st.expander("🔍 Auto-detected platforms", expanded=True):
+            for line in detect_log:
+                st.markdown(line)
 
     # ── Header summary ────────────────────────────────────────
     d_active  = daily[daily["TxnType"] == "Shipment"]
