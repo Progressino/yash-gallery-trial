@@ -632,6 +632,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
         with inner_zf.open(files["tcs_sales.xlsx"]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
+            # Use order_date as the transaction Date
             date_col = _best_date_col(df, prefer_return=False)
             df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
@@ -639,13 +640,27 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             df["_TxnType"] = "Shipment"
-            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+            # KEY FIX 1: Build Month from Meesho's own financial_year + month_number
+            # columns instead of deriving it from order_date. This guarantees every
+            # row lands in the exact month Meesho intends, regardless of order_date
+            # edge-cases (e.g. Dec orders placed in Nov due to timezone).
+            if "financial_year" in df.columns and "month_number" in df.columns:
+                df["_Month"] = df.apply(
+                    lambda r: f"{int(r['financial_year'])}-{int(r['month_number']):02d}"
+                    if pd.notna(r.get("financial_year")) and pd.notna(r.get("month_number"))
+                    else None, axis=1
+                )
+            else:
+                df["_Month"] = None  # will fall back to date-derived month below
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
 
     if "tcs_sales_return.xlsx" in files:
         with inner_zf.open(files["tcs_sales_return.xlsx"]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
-            # FIX: use return date for return rows so they land in the right month
+            # KEY FIX 2: Use cancel_return_date (not order_date) as the transaction
+            # Date so returns are time-stamped to when they actually came back,
+            # not when the original order was placed (which can be months earlier).
             date_col = _best_date_col(df, prefer_return=True)
             df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
@@ -653,7 +668,16 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             df["_TxnType"] = "Refund"
-            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+            # KEY FIX 1 (same as above): use Meesho's month_number for Month bucketing
+            if "financial_year" in df.columns and "month_number" in df.columns:
+                df["_Month"] = df.apply(
+                    lambda r: f"{int(r['financial_year'])}-{int(r['month_number']):02d}"
+                    if pd.notna(r.get("financial_year")) and pd.notna(r.get("month_number"))
+                    else None, axis=1
+                )
+            else:
+                df["_Month"] = None
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
 
     # ── Format A: Non-GST zips ──
     if "forwardreports.xlsx" in files and not rows:
@@ -672,7 +696,8 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 if "cancel" in s:               return "Cancel"
                 return "Shipment"
             df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
-            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+            df["_Month"]   = None  # Non-GST has no month_number; will use date
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
 
     if "reverse.xlsx" in files and not any(
         (r["_TxnType"] == "Refund").any() for r in rows if not r.empty
@@ -680,7 +705,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
         with inner_zf.open(files["reverse.xlsx"]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
-            # FIX: use return date for reverse/return rows
+            # Use return date for reverse rows
             date_col = _best_date_col(df, prefer_return=True)
             df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
@@ -688,18 +713,26 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             df["_TxnType"] = "Refund"
-            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId"]])
+            df["_Month"]   = None
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
 
     if not rows:
         return pd.DataFrame()
 
     out = pd.concat(rows, ignore_index=True)
-    out.columns = ["Date","TxnType","Quantity","Invoice_Amount","State","OrderId"]
-    out["Date"]     = pd.to_datetime(out["Date"], errors="coerce")
-    out["Quantity"] = out["Quantity"].astype("float32")
+    out.columns = ["Date","TxnType","Quantity","Invoice_Amount","State","OrderId","_Month"]
+    out["Date"]           = pd.to_datetime(out["Date"], errors="coerce")
+    out["Quantity"]       = out["Quantity"].astype("float32")
     out["Invoice_Amount"] = out["Invoice_Amount"].astype("float32")
-    out["State"]    = out["State"].astype(str).str.upper().str.strip()
-    out["Month"]    = out["Date"].dt.to_period("M").astype(str)
+    out["State"]          = out["State"].astype(str).str.upper().str.strip()
+
+    # KEY FIX 1: Use Meesho's own month_number/financial_year where available
+    # (GST format). Fall back to date-derived period for non-GST format rows.
+    out["Month"] = out["_Month"].where(
+        out["_Month"].notna(),
+        out["Date"].dt.to_period("M").astype(str)
+    )
+    out = out.drop(columns=["_Month"])
     return out.dropna(subset=["Date"])
 
 
@@ -743,9 +776,16 @@ def load_meesho_full(main_zip_file) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(dfs, ignore_index=True)
-    # FIX: dedup on OrderId + TxnType + Date (using the actual transaction date,
-    # not order_date, so returns on different dates are NOT collapsed with their shipments)
-    combined = combined.drop_duplicates(subset=["OrderId","TxnType","Date"], keep="first")
+    # KEY FIX 3: Use full-row dedup instead of (OrderId, TxnType, Date).
+    #
+    # Why: Meesho's tcs_sales.xlsx contains "adjustment pairs" — two rows with
+    # the same sub_order_num, same date, same TxnType, but different invoice
+    # amounts (one positive + one small negative correction). The old 3-column
+    # dedup was collapsing these pairs into one row, dropping the correction
+    # row and silently losing quantity units. Full-row dedup keeps both rows of
+    # a pair (since Invoice_Amount differs) while still removing truly identical
+    # duplicate rows that can appear when the same monthly ZIP is loaded twice.
+    combined = combined.drop_duplicates(keep="first")
     return combined
 
 
@@ -1875,7 +1915,7 @@ with tab_myntra:
                     "text/csv", use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════
-# TAB 4 — MEESHO ANALYTICS  ← FIXED: Grace Period Added
+# TAB 4 — MEESHO ANALYTICS
 # ══════════════════════════════════════════════════════════════
 with tab_meesho:
     st.subheader("🛒 Meesho Analytics")
@@ -1889,14 +1929,20 @@ with tab_meesho:
             f"Rows: **{len(mee):,}** | "
             f"Range: **{mee['Date'].min().strftime('%d %b %Y')}** → **{mee['Date'].max().strftime('%d %b %Y')}**"
         )
-        st.caption("ℹ️ Meesho does not provide per-product SKU data. Analytics shown are store-level totals.")
+        st.caption(
+            "ℹ️ Meesho does not provide per-product SKU data. Analytics shown are store-level totals. "
+            "Month bucketing uses Meesho's own `month_number` field (GST format) so sales and returns "
+            "always land in the exact month Meesho intends, matching the numbers shown in Meesho portal."
+        )
 
-        # ── FIX: Grace period + date-range filter instead of Month-only filter ──
+        # Simple 2-column filter — no grace period needed for GST format because
+        # Month is now sourced from financial_year+month_number (always correct).
+        # For non-GST (ForwardReports) the date-derived Month is used as before.
         with st.expander("🔧 Filters", expanded=True):
             _mee_months_all = sorted(mee["Month"].dropna().astype(str).unique().tolist())
             _mee_txn_types  = sorted(mee["TxnType"].dropna().unique().tolist())
 
-            ef1, ef2, ef3 = st.columns(3)
+            ef1, ef2 = st.columns(2)
             with ef1:
                 _sel_mee_months = st.multiselect(
                     "Months", _mee_months_all,
@@ -1908,50 +1954,13 @@ with tab_meesho:
                     default=[t for t in ["Shipment","Refund"] if t in _mee_txn_types],
                     key="mee_txn"
                 )
-            with ef3:
-                # FIX: Grace period slider — captures late-arriving returns/sales
-                # e.g. Dec 2025 orders that got returned/confirmed in Jan 2026
-                _mee_grace = st.number_input(
-                    "Grace Days for Returns",
-                    min_value=0, max_value=30, value=7,
-                    help=(
-                        "Adds N extra days BEFORE the start of your selected months. "
-                        "This captures returns whose pickup/return date falls slightly "
-                        "outside the strict calendar month boundary. "
-                        "Example: Dec 2025 with 7 grace days includes transactions from 24 Nov 2025 onwards."
-                    ),
-                    key="mee_grace"
-                )
 
-        # Build the date-window for the selected months + grace period
+        # Straight Month filter — correct because parser now uses month_number
         if _sel_mee_months:
-            # Parse the earliest selected month start and latest end
-            _sel_periods    = pd.PeriodIndex(_sel_mee_months, freq="M")
-            _window_start   = _sel_periods.min().start_time - timedelta(days=int(_mee_grace))
-            _window_end     = _sel_periods.max().end_time   + timedelta(days=1)  # inclusive end
-
-            # Filter by date window (catches grace-period rows) + TxnType
             ef = mee[
-                (mee["Date"] >= _window_start) &
-                (mee["Date"] <  _window_end) &
+                mee["Month"].astype(str).isin(_sel_mee_months) &
                 mee["TxnType"].isin(_sel_mee_txn)
             ].copy()
-
-            # For sales (Shipment/Cancel): keep only those whose order Month is selected
-            # For returns: allow the grace-period dates through
-            # This way returns that land in Jan for Dec orders are counted in Dec
-            ef["Month_str"] = ef["Month"].astype(str)
-            is_return  = ef["TxnType"] == "Refund"
-            in_sel_mth = ef["Month_str"].isin(_sel_mee_months)
-            ef = ef[in_sel_mth | is_return]
-
-            if _mee_grace > 0:
-                st.info(
-                    f"📅 Showing **{', '.join(_sel_mee_months)}** "
-                    f"+ **{_mee_grace}-day grace period** for returns "
-                    f"(window opens {_window_start.strftime('%d %b %Y')}). "
-                    f"Total rows in view: **{len(ef):,}**"
-                )
         else:
             ef = pd.DataFrame()
 
