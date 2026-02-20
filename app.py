@@ -109,6 +109,7 @@ def init_session_state():
         "mtr_df":                pd.DataFrame(),
         "myntra_df":             pd.DataFrame(),
         "meesho_df":             pd.DataFrame(),
+        "flipkart_df":           pd.DataFrame(),
         "amazon_date_basis":     "Shipment Date",
         "include_replacements":  False,
         "daily_sales_sources":   [],
@@ -573,16 +574,29 @@ def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, config: Sa
 
 
 def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
+    """Legacy single-file loader used by Tier-2 monthly upload and daily snapshot."""
     try:
         df = pd.read_excel(xlsx_file, sheet_name="Sales Report")
         if df.empty:
             return pd.DataFrame()
+        df.columns = df.columns.str.strip()
         df["OMS_SKU"] = df["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
-        df["TxnDate"]  = pd.to_datetime(df.get("Order Date"), errors="coerce")
+        df["TxnDate"]  = pd.to_datetime(df.get("Buyer Invoice Date", df.get("Order Date")), errors="coerce")
         df["Quantity"] = pd.to_numeric(df.get("Item Quantity", 0), errors="coerce").fillna(0)
         df["Source"]   = "Flipkart"
-        df["TxnType"]  = df.get("Event Sub Type","").apply(lambda x: "Refund" if "return" in str(x).lower() else "Shipment")
-        df["Units_Effective"] = np.where(df["TxnType"] == "Refund", -df["Quantity"], df["Quantity"])
+
+        def _fk_txn(event):
+            e = str(event).strip()
+            if e == "Sale":                return "Shipment"
+            if e == "Return":             return "Refund"
+            if e == "Cancellation":       return "Cancel"
+            if e == "Return Cancellation":return "ReturnCancel"
+            return "Shipment"
+        df["TxnType"] = df.get("Event Sub Type", pd.Series(["Sale"]*len(df))).apply(_fk_txn)
+        df["Units_Effective"] = np.where(df["TxnType"]=="Refund",      -df["Quantity"],
+                                np.where(df["TxnType"]=="Cancel",        0,
+                                np.where(df["TxnType"]=="ReturnCancel",  df["Quantity"],
+                                         df["Quantity"])))
         df["OrderId"] = df.get("Order ID", df.get("Order Id", np.nan))
         result = df[["OMS_SKU","TxnDate","TxnType","Quantity","Units_Effective","Source","OrderId"]].copy()
         result.columns = ["Sku","TxnDate","Transaction Type","Quantity","Units_Effective","Source","OrderId"]
@@ -591,6 +605,175 @@ def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
     except Exception as e:
         st.error(f"Error loading Flipkart: {e}")
         return pd.DataFrame()
+
+
+# ── Month extraction from Flipkart filename ────────────────────
+def _fk_month_from_filename(fname: str):
+    """
+    Parse YYYY-MM from Flipkart monthly filenames.
+    Handles: DEC-2025.xlsx, Jan-2025.xlsx, JAN-2026.xlsx,
+             March-2025.xlsx, July-2025.xlsx, feb-2025.xlsx, etc.
+    Returns e.g. '2025-12' or None if unparseable.
+    """
+    base = Path(fname).stem.upper()
+    _MON = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+            "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12,
+            "MARCH":3,"APRIL":4,"JUNE":6,"JULY":7,"SEPT":9,"AUGUST":8}
+    parts = re.split(r"[-_\s]", base)
+    for i, p in enumerate(parts):
+        mon_num = _MON.get(p[:5]) or _MON.get(p[:4]) or _MON.get(p[:3])
+        if mon_num:
+            # Look for a 4-digit year in same or adjacent part
+            for q in parts:
+                if re.fullmatch(r"20\d{2}", q):
+                    return f"{q}-{mon_num:02d}"
+    return None
+
+
+def _parse_flipkart_xlsx(file_bytes: bytes, fname: str, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Parse one Flipkart monthly Excel file (Sales Report sheet).
+
+    Month bucketing uses Buyer Invoice Date — Flipkart guarantees ALL rows
+    in a monthly file have a Buyer Invoice Date within that calendar month,
+    exactly analogous to Meesho's month_number field. This means we NEVER
+    need a grace period for Flipkart: the file boundary IS the month boundary.
+
+    Event Sub Types handled:
+      Sale              → TxnType='Shipment', qty positive
+      Return            → TxnType='Refund',   qty positive (units returned)
+      Cancellation      → TxnType='Cancel',   qty counted (for reporting) but Units_Effective=0
+      Return Cancellation → TxnType='ReturnCancel', reverses a prior return
+
+    Dedup key: Buyer Invoice ID — unique per transaction event in Flipkart system.
+
+    Revenue: uses Buyer Invoice Amount (correctly signed by Flipkart:
+      positive for Sale/ReturnCancel, negative for Return/Cancellation).
+    """
+    try:
+        xl   = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Sales Report")
+        if xl.empty:
+            return pd.DataFrame()
+
+        # Strip trailing spaces that vary between monthly exports
+        xl.columns = xl.columns.str.strip()
+
+        # ── Month: Buyer Invoice Date (always in the file's calendar month) ──
+        # Fall back to Order Date only if Buyer Invoice Date missing
+        date_col = "Buyer Invoice Date" if "Buyer Invoice Date" in xl.columns else "Order Date"
+        xl["Date"] = pd.to_datetime(xl[date_col], errors="coerce")
+
+        # Month from filename is the authoritative source (like Meesho month_number)
+        file_month = _fk_month_from_filename(fname)
+        if file_month:
+            xl["Month"] = file_month
+        else:
+            xl["Month"] = xl["Date"].dt.to_period("M").astype(str)
+
+        # ── Transaction type ──
+        def _fk_txn(event):
+            e = str(event).strip()
+            if e == "Sale":                return "Shipment"
+            if e == "Return":             return "Refund"
+            if e == "Cancellation":       return "Cancel"
+            if e == "Return Cancellation":return "ReturnCancel"
+            return "Shipment"
+        xl["TxnType"] = xl["Event Sub Type"].apply(_fk_txn)
+
+        # ── Quantity & revenue ──
+        xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
+        xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
+
+        # ── OMS SKU (strip Flipkart triple-quote format) ──
+        xl["OMS_SKU"] = xl["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
+
+        # ── State for geography charts ──
+        state_col = next((c for c in xl.columns if "Delivery State" in c), None)
+        xl["State"] = xl[state_col].fillna("").astype(str).str.upper().str.strip() if state_col else ""
+
+        # ── Order / Invoice IDs for dedup ──
+        xl["OrderId"]         = xl.get("Order ID",         xl.get("Order Id",         "")).astype(str)
+        xl["BuyerInvoiceId"]  = xl.get("Buyer Invoice ID", xl.get("Buyer Invoice Id", "")).astype(str)
+
+        out = xl[["Date","Month","TxnType","Quantity","Invoice_Amount",
+                  "OMS_SKU","State","OrderId","BuyerInvoiceId"]].copy()
+        return out.dropna(subset=["Date"])
+
+    except Exception as e:
+        return pd.DataFrame()  # caller logs the skip
+
+
+def load_flipkart_full(main_zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Load ALL Flipkart monthly Excel files from a master ZIP.
+
+    Each .xlsx inside the ZIP is a monthly Flipkart Sales Report.
+    Month is sourced from the filename (DEC-2025.xlsx → 2025-12), which
+    mirrors how we use Meesho's month_number field — immune to cross-month
+    order dates that would otherwise require a grace period.
+
+    Dedup: full-row drop_duplicates() to remove identical rows from re-uploads
+    while preserving legitimate duplicate Order Item IDs (Return + Return
+    Cancellation pairs that cancel each other out in revenue but both count).
+    """
+    dfs     = []
+    skipped = []
+    try:
+        main_zip_file.seek(0)
+        root_zf = zipfile.ZipFile(main_zip_file)
+    except Exception as e:
+        st.error(f"Cannot open Flipkart ZIP: {e}")
+        return pd.DataFrame()
+
+    xlsx_items = [n for n in root_zf.namelist() if n.lower().endswith(".xlsx")]
+    prog = st.sidebar.progress(0, text="Loading Flipkart files…")
+
+    for idx, item_name in enumerate(xlsx_items):
+        base = Path(item_name).name
+        prog.progress((idx + 1) / max(len(xlsx_items), 1), text=f"Flipkart {idx+1}/{len(xlsx_items)}: {base}")
+        try:
+            file_bytes = root_zf.read(item_name)
+            df = _parse_flipkart_xlsx(file_bytes, base, mapping)
+            if df.empty:
+                skipped.append(f"{base}: no data / unrecognised format")
+            else:
+                dfs.append(df)
+        except Exception as e:
+            skipped.append(f"{base}: {e}")
+
+    prog.empty()
+    if skipped:
+        with st.sidebar.expander(f"⚠️ Flipkart: {len(skipped)} files skipped"):
+            for s in skipped:
+                st.write(s)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(dfs, ignore_index=True)
+    # Full-row dedup: keeps Return+ReturnCancel pairs (differ in TxnType/Invoice_Amount)
+    # while removing exact duplicates from accidental re-uploads of the same file.
+    combined = combined.drop_duplicates(keep="first")
+    return combined
+
+
+def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
+    """Convert Flipkart analytics df into the standard sales_df format."""
+    if fk_df.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "Sku":              fk_df["OMS_SKU"],
+        "TxnDate":          fk_df["Date"],
+        "Transaction Type": fk_df["TxnType"],
+        "Quantity":         fk_df["Quantity"],
+        "Units_Effective":  np.where(fk_df["TxnType"]=="Refund",       -fk_df["Quantity"],
+                            np.where(fk_df["TxnType"]=="Cancel",         0,
+                            np.where(fk_df["TxnType"]=="ReturnCancel",   fk_df["Quantity"],
+                                     fk_df["Quantity"]))),
+        "Source":           "Flipkart",
+        "OrderId":          fk_df["OrderId"],
+    })
+    return out
 
 
 def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
@@ -1201,6 +1384,12 @@ with st.sidebar.expander("📚 Tier 1 — Historical Data (Multi-Year)", expande
         type=["zip"], key="myntra_sales",
         help="Master ZIP containing all Myntra PPMP monthly CSVs."
     )
+    f_flipkart_zip = st.file_uploader(
+        "Flipkart — Master ZIP (all months/years)",
+        type=["zip"], key="flipkart_zip",
+        help="ZIP containing all Flipkart monthly Sales Report Excel files (e.g. DEC-2025.xlsx). "
+             "Month is detected from the filename. Each file must have a 'Sales Report' sheet."
+    )
 
 st.sidebar.divider()
 
@@ -1400,6 +1589,12 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     del myntra_combined
                     gc.collect()
 
+                if f_flipkart_zip:
+                    fk_combined = load_flipkart_full(f_flipkart_zip, st.session_state.sku_mapping)
+                    st.session_state.flipkart_df = fk_combined
+                    del fk_combined
+                    gc.collect()
+
                 sales_parts = []
                 if f_b2c:
                     sales_parts.append(load_amazon_sales(f_b2c, st.session_state.sku_mapping, "Amazon B2C", config))
@@ -1411,12 +1606,15 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
                     gc.collect()
 
-                meesho_df_ss = st.session_state.get("meesho_df", pd.DataFrame())
-                myntra_df_ss = st.session_state.get("myntra_df", pd.DataFrame())
+                meesho_df_ss  = st.session_state.get("meesho_df",   pd.DataFrame())
+                myntra_df_ss  = st.session_state.get("myntra_df",   pd.DataFrame())
+                flipkart_df_ss = st.session_state.get("flipkart_df", pd.DataFrame())
                 if not meesho_df_ss.empty:
                     sales_parts.append(meesho_to_sales_rows(meesho_df_ss))
                 if not myntra_df_ss.empty:
                     sales_parts.append(myntra_to_sales_rows(myntra_df_ss))
+                if not flipkart_df_ss.empty:
+                    sales_parts.append(flipkart_to_sales_rows(flipkart_df_ss))
 
                 if sales_parts:
                     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
@@ -1492,8 +1690,8 @@ if not st.session_state.sku_mapping:
 # ══════════════════════════════════════════════════════════════
 # 14) MAIN TABS
 # ══════════════════════════════════════════════════════════════
-tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_inv, tab_po, tab_logistics, tab_forecast, tab_drill = st.tabs([
-    "📊 Dashboard", "📑 MTR Analytics", "🛍️ Myntra", "🛒 Meesho",
+tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_flipkart, tab_inv, tab_po, tab_logistics, tab_forecast, tab_drill = st.tabs([
+    "📊 Dashboard", "📑 MTR Analytics", "🛍️ Myntra", "🛒 Meesho", "🟡 Flipkart",
     "📦 Inventory", "🎯 PO Engine", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
 ])
 
@@ -2046,7 +2244,211 @@ with tab_meesho:
                     "text/csv", use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════
-# TAB 5 — INVENTORY
+# TAB 5 — FLIPKART ANALYTICS
+# ══════════════════════════════════════════════════════════════
+with tab_flipkart:
+    st.subheader("🟡 Flipkart Analytics")
+    fk = st.session_state.flipkart_df
+    if fk.empty:
+        st.info("📂 Upload the Flipkart master ZIP in the **Tier 1 — Historical Data** section of the sidebar and click **Load All Data**.")
+    else:
+        fk_years = sorted(fk["Date"].dt.year.dropna().unique().tolist())
+        st.success(
+            f"✅ Flipkart data covers: **{', '.join(str(y) for y in fk_years)}** | "
+            f"Rows: **{len(fk):,}** | "
+            f"Range: **{fk['Date'].min().strftime('%d %b %Y')}** → **{fk['Date'].max().strftime('%d %b %Y')}**"
+        )
+        st.caption(
+            "ℹ️ Month bucketing uses **Buyer Invoice Date** — Flipkart guarantees all rows in a monthly "
+            "file carry an invoice date within that calendar month, so numbers always match the Flipkart portal exactly."
+        )
+
+        with st.expander("🔧 Filters", expanded=True):
+            _fk_months_all = sorted(fk["Month"].dropna().astype(str).unique().tolist())
+            _fk_txn_types  = sorted(fk["TxnType"].dropna().unique().tolist())
+            _fk_states_all = sorted(fk["State"].dropna().unique().tolist())
+            _fk_states_all = [s for s in _fk_states_all if s]  # remove empty
+
+            ff1, ff2, ff3 = st.columns(3)
+            with ff1:
+                _sel_fk_months = st.multiselect(
+                    "Months", _fk_months_all,
+                    default=_fk_months_all, key="fk_months"
+                )
+            with ff2:
+                _sel_fk_txn = st.multiselect(
+                    "Transaction Type", _fk_txn_types,
+                    default=[t for t in ["Shipment","Refund","ReturnCancel"] if t in _fk_txn_types],
+                    key="fk_txn"
+                )
+            with ff3:
+                _sel_fk_states = st.multiselect(
+                    "State", _fk_states_all,
+                    default=_fk_states_all, key="fk_states"
+                )
+
+        # Apply filters
+        fkf = fk[
+            fk["Month"].astype(str).isin(_sel_fk_months) &
+            fk["TxnType"].isin(_sel_fk_txn)
+        ].copy()
+        if _sel_fk_states:
+            fkf = fkf[fkf["State"].isin(_sel_fk_states) | (fkf["State"] == "")]
+
+        if fkf.empty:
+            st.warning("No data for selected filters.")
+        else:
+            _fk_sh  = fkf["TxnType"] == "Shipment"
+            _fk_rf  = fkf["TxnType"] == "Refund"
+            _fk_rc  = fkf["TxnType"] == "ReturnCancel"
+            _fk_cn  = fkf["TxnType"] == "Cancel"
+
+            gross_rev   = fkf.loc[_fk_sh,  "Invoice_Amount"].sum()
+            refund_amt  = fkf.loc[_fk_rf,  "Invoice_Amount"].abs().sum()
+            rc_rev      = fkf.loc[_fk_rc,  "Invoice_Amount"].sum()   # positive — reverses returns
+            net_rev     = gross_rev - refund_amt + rc_rev
+            units_sold  = fkf.loc[_fk_sh,  "Quantity"].sum()
+            ret_units   = fkf.loc[_fk_rf,  "Quantity"].sum()
+            rc_units    = fkf.loc[_fk_rc,  "Quantity"].sum()         # return-cancellations
+            cancel_units= fkf.loc[_fk_cn,  "Quantity"].sum()
+            orders      = fkf.loc[_fk_sh,  "OrderId"].nunique()
+            ret_rate    = (ret_units / units_sold * 100) if units_sold > 0 else 0
+            aov         = gross_rev / orders if orders > 0 else 0
+
+            st.markdown("### 💰 KPIs")
+            k1,k2,k3,k4,k5,k6,k7,k8 = st.columns(8)
+            k1.metric("💵 Gross Rev",       fmt_inr(gross_rev))
+            k2.metric("↩️ Refunds",          fmt_inr(refund_amt))
+            k3.metric("✅ Net Rev",          fmt_inr(net_rev))
+            k4.metric("📦 Units Sold",       f"{int(units_sold):,}")
+            k5.metric("↩️ Returns",          f"{int(ret_units):,}")
+            k6.metric("🔄 Return Cancels",   f"{int(rc_units):,}")
+            k7.metric("📊 Return Rate",      f"{ret_rate:.1f}%")
+            k8.metric("💳 AOV",              fmt_inr(aov))
+            st.divider()
+
+            # ── Monthly Revenue & Units Trend ──────────────────
+            with st.expander("📈 Monthly Revenue & Units Trend", expanded=True):
+                _fk_monthly_sale = (
+                    fkf[_fk_sh].groupby("Month")
+                    .agg(Revenue=("Invoice_Amount","sum"), Units=("Quantity","sum"))
+                    .reset_index().sort_values("Month")
+                )
+                _fk_monthly_ret = (
+                    fkf[_fk_rf].groupby("Month")["Quantity"].sum()
+                    .reset_index().rename(columns={"Quantity":"Returns"})
+                )
+                _fk_monthly = _fk_monthly_sale.merge(_fk_monthly_ret, on="Month", how="left").fillna(0)
+                _fk_monthly["Return_%"] = (
+                    _fk_monthly["Returns"] / _fk_monthly["Units"].replace(0, np.nan) * 100
+                ).fillna(0).round(1)
+
+                fig_fk_rev = px.bar(
+                    _fk_monthly, x="Month", y="Revenue",
+                    title="Monthly Gross Revenue — Flipkart",
+                    color_discrete_sequence=["#F7C243"]
+                )
+                fig_fk_rev.update_yaxes(tickprefix="₹", tickformat=",.0f")
+                fig_fk_rev.update_layout(height=320)
+                st.plotly_chart(fig_fk_rev, use_container_width=True)
+
+                col_u, col_r = st.columns(2)
+                with col_u:
+                    fig_fk_units = px.bar(
+                        _fk_monthly, x="Month", y=["Units","Returns"],
+                        barmode="group", title="Units Sold vs Returns",
+                        color_discrete_sequence=["#F7C243","#E63946"]
+                    )
+                    fig_fk_units.update_layout(height=280)
+                    st.plotly_chart(fig_fk_units, use_container_width=True)
+                with col_r:
+                    fig_fk_rr = px.line(
+                        _fk_monthly, x="Month", y="Return_%",
+                        title="Return Rate % by Month",
+                        markers=True, color_discrete_sequence=["#E63946"]
+                    )
+                    fig_fk_rr.update_layout(height=280)
+                    st.plotly_chart(fig_fk_rr, use_container_width=True)
+
+            # ── State-wise breakdown ────────────────────────────
+            with st.expander("🗺️ State-wise Sales Distribution", expanded=False):
+                _fk_state = (
+                    fkf[_fk_sh & (fkf["State"] != "")]
+                    .groupby("State")
+                    .agg(Units=("Quantity","sum"), Revenue=("Invoice_Amount","sum"))
+                    .reset_index().sort_values("Units", ascending=False).head(20)
+                )
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    fig_st_u = px.bar(
+                        _fk_state, x="Units", y="State", orientation="h",
+                        title="Top 20 States by Units", color_discrete_sequence=["#F7C243"]
+                    )
+                    fig_st_u.update_layout(height=420, yaxis={"categoryorder":"total ascending"})
+                    st.plotly_chart(fig_st_u, use_container_width=True)
+                with col_s2:
+                    fig_st_r = px.bar(
+                        _fk_state, x="Revenue", y="State", orientation="h",
+                        title="Top 20 States by Revenue", color_discrete_sequence=["#1e40af"]
+                    )
+                    fig_st_r.update_xaxes(tickprefix="₹", tickformat=",.0f")
+                    fig_st_r.update_layout(height=420, yaxis={"categoryorder":"total ascending"})
+                    st.plotly_chart(fig_st_r, use_container_width=True)
+
+            # ── Event type breakdown ────────────────────────────
+            with st.expander("📋 Transaction Type Breakdown", expanded=False):
+                _fk_events = (
+                    fkf.groupby("TxnType")
+                    .agg(Rows=("Quantity","count"), Units=("Quantity","sum"),
+                         Revenue=("Invoice_Amount","sum"))
+                    .reset_index()
+                )
+                _fk_events["Revenue"] = _fk_events["Revenue"].apply(fmt_inr)
+                st.dataframe(_fk_events, use_container_width=True, hide_index=True)
+
+            # ── SKU-level performance ────────────────────────────
+            with st.expander("🏷️ SKU Performance", expanded=False):
+                if "OMS_SKU" in fkf.columns:
+                    _fk_sku = (
+                        fkf[_fk_sh].groupby("OMS_SKU")
+                        .agg(Units=("Quantity","sum"), Revenue=("Invoice_Amount","sum"))
+                        .reset_index().sort_values("Units", ascending=False)
+                    )
+                    _fk_sku_ret = (
+                        fkf[_fk_rf].groupby("OMS_SKU")["Quantity"].sum()
+                        .reset_index().rename(columns={"Quantity":"Returns"})
+                    )
+                    _fk_sku = _fk_sku.merge(_fk_sku_ret, on="OMS_SKU", how="left").fillna(0)
+                    _fk_sku["Return_%"] = (_fk_sku["Returns"] / _fk_sku["Units"].replace(0,np.nan)*100).fillna(0).round(1)
+                    _fk_sku["Revenue_fmt"] = _fk_sku["Revenue"].apply(fmt_inr)
+
+                    top_n = st.slider("Top N SKUs", 10, 100, 30, key="fk_sku_n")
+                    st.dataframe(
+                        _fk_sku.head(top_n).reset_index(drop=True),
+                        use_container_width=True, hide_index=True
+                    )
+
+                    fig_sku = px.bar(
+                        _fk_sku.head(20), x="OMS_SKU", y="Units",
+                        title="Top 20 SKUs by Units Sold",
+                        color_discrete_sequence=["#F7C243"]
+                    )
+                    fig_sku.update_layout(height=320, xaxis_tickangle=-45)
+                    st.plotly_chart(fig_sku, use_container_width=True)
+                else:
+                    st.info("SKU data not available in this dataset.")
+
+            # ── Download ────────────────────────────────────────
+            st.divider()
+            st.download_button(
+                "⬇️ Download Filtered Data (CSV)",
+                fkf.to_csv(index=False).encode("utf-8"),
+                f"flipkart_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
+                "text/csv", use_container_width=True
+            )
+
+# ══════════════════════════════════════════════════════════════
+# TAB 6 — INVENTORY
 # ══════════════════════════════════════════════════════════════
 with tab_inv:
     st.subheader("📦 Consolidated Inventory")
