@@ -1496,6 +1496,202 @@ def _mtr_to_sales_df(mtr_df: pd.DataFrame, sku_mapping: Dict[str, str], group_by
     return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective"]]
 
 
+def get_indian_fy_quarter(date: pd.Timestamp) -> tuple:
+    """
+    Return (FY_label, Q_label) for an Indian fiscal year date.
+    Indian FY runs Apr-Mar: FY2025 = Apr 2024 – Mar 2025.
+    Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar
+    """
+    m = date.month
+    y = date.year
+    if m >= 4:
+        fy = y + 1          # Apr 2024 → FY2025
+        q  = 1 if m <= 6 else 2 if m <= 9 else 3
+    else:
+        fy = y              # Jan 2025 → FY2025
+        q  = 4
+    return fy, q
+
+
+_Q_LABELS = {
+    1: "Apr–Jun",
+    2: "Jul–Sep",
+    3: "Oct–Dec",
+    4: "Jan–Mar",
+}
+
+
+def quarter_col_name(fy: int, q: int) -> str:
+    """Return human-readable column label using calendar start year.
+    e.g. FY2026 Q1 (Apr-Jun 2025) → 'Apr–Jun 2025'
+         FY2026 Q4 (Jan-Mar 2026) → 'Jan–Mar 2026'
+    """
+    cal_year = fy - 1 if q in (1, 2, 3) else fy
+    return f"{_Q_LABELS[q]} {cal_year}"
+
+
+def calculate_quarterly_history(
+    sales_df: pd.DataFrame,
+    mtr_df: pd.DataFrame = None,
+    myntra_df: pd.DataFrame = None,
+    sku_mapping: Dict[str, str] = None,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+) -> pd.DataFrame:
+    """
+    Build a per-SKU quarterly sales history table (Indian fiscal year quarters).
+
+    Data sources used — in priority order:
+      1. sales_df  — the merged monthly/daily sales DataFrame (Amazon + Flipkart + Meesho already inside)
+      2. mtr_df    — Amazon MTR (adds historical depth if sales_df doesn't go back far enough)
+      3. myntra_df — Myntra historical (same reason)
+
+    Returns a wide DataFrame:
+        OMS_SKU | Apr–Jun 2024 | Jul–Sep 2024 | … | Avg_Monthly | Units_30d | ADS | Status
+
+    Status thresholds (ADS = avg daily sales over last 90 days):
+        🚀 Fast Moving  : ADS ≥ 1.0  (≥30 units/month)
+        ✅ Moderate     : ADS ≥ 0.33 (≥10 units/month)
+        🐢 Slow Selling : ADS ≥ 0.10 (≥ 3 units/month)
+        ❌ Not Moving   : ADS < 0.10
+    """
+    parts = []
+
+    # ── 1. sales_df (already has Amazon + Flipkart + Meesho merged) ──
+    if not sales_df.empty and "Sku" in sales_df.columns:
+        txn_col = "Transaction Type"
+        tmp = sales_df[["Sku", "TxnDate", "Quantity", txn_col]].copy()
+        tmp.columns = ["SKU", "Date", "Qty", "TxnType"]
+        tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
+        tmp["Qty"]  = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
+        parts.append(tmp.dropna(subset=["Date"]))
+
+    # ── 2. MTR (adds deeper Amazon history) ──────────────────────────
+    if mtr_df is not None and not mtr_df.empty:
+        mtr_sku_col  = next((c for c in mtr_df.columns if c in ["SKU","Sku","OMS_SKU"]), None)
+        mtr_date_col = next((c for c in mtr_df.columns if c in ["Date","TxnDate"]),        None)
+        mtr_qty_col  = next((c for c in mtr_df.columns if c in ["Quantity","Qty"]),        None)
+        mtr_txn_col  = next((c for c in mtr_df.columns if c in ["Transaction_Type","Transaction Type","TxnType"]), None)
+        if mtr_sku_col and mtr_date_col and mtr_qty_col:
+            tmp = mtr_df[[mtr_sku_col, mtr_date_col, mtr_qty_col]].copy()
+            tmp.columns = ["SKU", "Date", "Qty"]
+            tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
+            tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
+            tmp["TxnType"] = mtr_df[mtr_txn_col].values if mtr_txn_col else "Shipment"
+            if sku_mapping:
+                tmp["SKU"] = tmp["SKU"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+            parts.append(tmp.dropna(subset=["Date"]))
+
+    # ── 3. Myntra historical (adds deeper Myntra history) ────────────
+    if myntra_df is not None and not myntra_df.empty:
+        myn_sku_col  = next((c for c in myntra_df.columns if c in ["OMS_SKU","Sku","SKU"]),  None)
+        myn_date_col = next((c for c in myntra_df.columns if c in ["Date","TxnDate"]),         None)
+        myn_qty_col  = next((c for c in myntra_df.columns if c in ["Quantity","Qty"]),         None)
+        myn_txn_col  = next((c for c in myntra_df.columns if c in ["TxnType","Transaction Type"]), None)
+        if myn_sku_col and myn_date_col and myn_qty_col:
+            tmp = myntra_df[[myn_sku_col, myn_date_col, myn_qty_col]].copy()
+            tmp.columns = ["SKU", "Date", "Qty"]
+            tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
+            tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
+            tmp["TxnType"] = myntra_df[myn_txn_col].values if myn_txn_col else "Shipment"
+            parts.append(tmp.dropna(subset=["Date"]))
+
+    if not parts:
+        return pd.DataFrame()
+
+    hist = pd.concat(parts, ignore_index=True)
+    hist = hist[hist["TxnType"].astype(str).str.strip() == "Shipment"]
+    hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
+    hist = hist.dropna(subset=["Date"])
+    hist["Qty"] = pd.to_numeric(hist["Qty"], errors="coerce").fillna(0)
+    hist = hist[hist["Qty"] > 0]
+
+    if hist.empty:
+        return pd.DataFrame()
+
+    if group_by_parent:
+        hist["SKU"] = hist["SKU"].apply(get_parent_sku)
+
+    # ── Tag each row with (FY, Q) using vectorised apply ─────────────
+    fy_q = hist["Date"].apply(get_indian_fy_quarter)
+    hist["FY"] = fy_q.apply(lambda x: x[0])
+    hist["QN"] = fy_q.apply(lambda x: x[1])
+
+    # ── Determine which n_quarters to display (oldest → newest) ──────
+    today          = pd.Timestamp.today()
+    cur_fy, cur_q  = get_indian_fy_quarter(today)
+    quarter_seq    = []
+    fy_i, q_i      = cur_fy, cur_q
+    for _ in range(n_quarters):
+        quarter_seq.append((fy_i, q_i))
+        q_i -= 1
+        if q_i == 0:
+            q_i = 4
+            fy_i -= 1
+    quarter_seq = list(reversed(quarter_seq))   # oldest first
+
+    # ── Pivot: SKU × quarter_col ──────────────────────────────────────
+    hist["col"] = hist.apply(
+        lambda r: quarter_col_name(int(r["FY"]), int(r["QN"])), axis=1
+    )
+    grp   = hist.groupby(["SKU", "col"])["Qty"].sum().reset_index()
+    pivot = grp.pivot_table(index="SKU", columns="col", values="Qty",
+                            aggfunc="sum", fill_value=0).reset_index()
+    pivot = pivot.rename(columns={"SKU": "OMS_SKU"})
+    pivot.columns.name = None
+
+    # Ensure every quarter column exists, in order, even if no sales
+    ordered_q_cols = []
+    for fy_j, q_j in quarter_seq:
+        col = quarter_col_name(fy_j, q_j)
+        ordered_q_cols.append(col)
+        if col not in pivot.columns:
+            pivot[col] = 0
+
+    pivot = pivot[["OMS_SKU"] + ordered_q_cols]
+
+    # ── Summary metrics ───────────────────────────────────────────────
+    # Avg Monthly = mean of last 4 full quarters ÷ 3 (quarter→month)
+    last4 = ordered_q_cols[-4:]
+    pivot["Avg_Monthly"] = (pivot[last4].mean(axis=1) / 3).round(1)
+
+    # ADS based on last 90 days actual data
+    cutoff_90 = today - timedelta(days=90)
+    r90 = hist[hist["Date"] >= cutoff_90].groupby("SKU")["Qty"].sum().reset_index()
+    r90.columns = ["OMS_SKU", "Units_90d"]
+    pivot = pivot.merge(r90, on="OMS_SKU", how="left").fillna({"Units_90d": 0})
+    pivot["ADS"] = (pivot["Units_90d"] / 90).round(3)
+
+    # Last 30d units
+    cutoff_30 = today - timedelta(days=30)
+    r30 = hist[hist["Date"] >= cutoff_30].groupby("SKU")["Qty"].sum().reset_index()
+    r30.columns = ["OMS_SKU", "Units_30d"]
+    pivot = pivot.merge(r30, on="OMS_SKU", how="left").fillna({"Units_30d": 0})
+
+    # Frequency = distinct sale days in last 30d (how many days had ≥1 unit sold)
+    f30 = (
+        hist[hist["Date"] >= cutoff_30]
+        .assign(_day=lambda d: d["Date"].dt.normalize())
+        .groupby("SKU")["_day"].nunique()
+        .reset_index()
+    )
+    f30.columns = ["OMS_SKU", "Freq_30d"]
+    pivot = pivot.merge(f30, on="OMS_SKU", how="left").fillna({"Freq_30d": 0})
+    pivot["Freq_30d"] = pivot["Freq_30d"].astype(int)
+
+    # Status classification
+    def _status(ads):
+        if ads >= 1.0:  return "🚀 Fast Moving"
+        if ads >= 0.33: return "✅ Moderate"
+        if ads >= 0.10: return "🐢 Slow Selling"
+        return "❌ Not Moving"
+
+    pivot["Status"]   = pivot["ADS"].apply(_status)
+    pivot["Units_90d"] = pivot["Units_90d"].astype(int)
+    pivot["Units_30d"] = pivot["Units_30d"].astype(int)
+    return pivot
+
+
 def calculate_po_base(
     sales_df: pd.DataFrame,
     inv_df: pd.DataFrame,
@@ -3009,32 +3205,47 @@ with tab_inv:
 # TAB 6 — PO ENGINE
 # ══════════════════════════════════════════════════════════════
 with tab_po:
-    st.subheader("🎯 Purchase Order Recommendations")
-    if st.session_state.sales_df.empty or (st.session_state.inventory_df_variant.empty and st.session_state.inventory_df_parent.empty):
+    st.subheader("🎯 Purchase Order Engine")
+    if st.session_state.sales_df.empty or (
+        st.session_state.inventory_df_variant.empty and
+        st.session_state.inventory_df_parent.empty
+    ):
         st.warning("⚠️ Please load Sales data and Inventory data first, then click Load All Data.")
     else:
-        view_mode = st.radio("Group By", ["By Variant (Size/Color)", "By Parent SKU (Style Only)"], key="po_view_mode")
+        # ── View mode + parameters ────────────────────────────
+        view_mode = st.radio(
+            "Group By",
+            ["By Variant (Size/Color)", "By Parent SKU (Style Only)"],
+            key="po_view_mode", horizontal=True
+        )
+        is_parent = "Parent" in view_mode
         st.divider()
 
-        st.markdown("### ⚙️ PO Parameters")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        velocity    = c1.selectbox("Recent Velocity Period", ["Last 7 Days","Last 30 Days","Last 60 Days","Last 90 Days"], key="po_velocity")
-        base_days   = 7 if "7" in velocity else 30 if "30" in velocity else 60 if "60" in velocity else 90
-        grace_days  = c2.number_input("Grace Days", 0, 14, 7)
-        lead_time   = c3.number_input("Lead Time (Days)", 1, 180, 15)
-        target_days = c4.number_input("Target Stock (Days)", 0, 180, 60)
-        safety_pct  = c5.slider("Safety Stock %", 0, 100, 20)
+        # Two-column layout: parameters left, seasonal right
+        col_params, col_seasonal = st.columns([3, 2])
+        with col_params:
+            st.markdown("#### ⚙️ PO Parameters")
+            p1, p2, p3, p4, p5 = st.columns(5)
+            velocity    = p1.selectbox("Velocity Window", ["Last 7 Days","Last 30 Days","Last 60 Days","Last 90 Days"], key="po_velocity", index=1)
+            base_days   = 7 if "7" in velocity else 30 if "30" in velocity else 60 if "60" in velocity else 90
+            grace_days  = p2.number_input("Grace Days", 0, 14, 7)
+            lead_time   = p3.number_input("Lead Time (Days)", 1, 180, 15)
+            target_days = p4.number_input("Target Stock (Days)", 0, 180, 60)
+            safety_pct  = p5.slider("Safety Stock %", 0, 100, 20)
+            demand_basis = st.selectbox("Demand Basis", ["Sold","Net"], index=0)
+            min_den      = st.number_input("Min ADS Denominator", 1, 60, 7)
 
-        st.markdown("### 📅 Seasonal Forecasting (YoY)")
-        sc1, sc2 = st.columns(2)
-        use_seasonality = sc1.checkbox("Blend with Last Year's Seasonality?", value=False)
-        seasonal_weight = sc2.slider("Historical Weight %", 0, 100, 50) if use_seasonality else 0
+        with col_seasonal:
+            st.markdown("#### 📅 Quarterly History Settings")
+            n_quarters = st.slider("Quarters of history to show", 4, 12, 8,
+                                   help="How many Indian fiscal year quarters to display (Q1=Apr–Jun, Q2=Jul–Sep, Q3=Oct–Dec, Q4=Jan–Mar)")
+            use_seasonality  = st.checkbox("Blend with Last Year's seasonality?", value=False)
+            seasonal_weight  = st.slider("Historical Weight %", 0, 100, 50) if use_seasonality else 0
 
-        demand_basis = st.selectbox("Demand Basis", ["Sold","Net"], index=0)
-        min_den      = st.number_input("Min ADS Denominator", 1, 60, 7)
         total_period = int(base_days + grace_days)
 
-        if "Parent" in view_mode:
+        # ── Inventory & sales prep ────────────────────────────
+        if is_parent:
             inv_for_po   = st.session_state.inventory_df_parent.copy()
             sales_for_po = st.session_state.sales_df.copy()
             sales_for_po["Sku"] = sales_for_po["Sku"].apply(get_parent_sku)
@@ -3042,129 +3253,318 @@ with tab_po:
             inv_for_po   = st.session_state.inventory_df_variant.copy()
             sales_for_po = st.session_state.sales_df.copy()
 
+        # ── Build quarterly history ───────────────────────────
+        with st.spinner("Building quarterly history…"):
+            qhist = calculate_quarterly_history(
+                sales_df        = sales_for_po,
+                mtr_df          = st.session_state.mtr_df    if not st.session_state.mtr_df.empty    else None,
+                myntra_df       = st.session_state.myntra_df if not st.session_state.myntra_df.empty else None,
+                sku_mapping     = st.session_state.sku_mapping,
+                group_by_parent = is_parent,
+                n_quarters      = n_quarters,
+            )
+
+        # ── PO calculation ────────────────────────────────────
         po_df = calculate_po_base(
-            sales_df=sales_for_po, inv_df=inv_for_po, period_days=total_period,
-            lead_time=lead_time, target_days=target_days, demand_basis=demand_basis,
-            min_denominator=int(min_den), use_seasonality=use_seasonality,
-            seasonal_weight=seasonal_weight / 100.0,
-            mtr_df=st.session_state.mtr_df if not st.session_state.mtr_df.empty else None,
-            myntra_df=st.session_state.myntra_df if not st.session_state.myntra_df.empty else None,
-            sku_mapping=st.session_state.sku_mapping,
-            group_by_parent=("Parent" in view_mode),
+            sales_df        = sales_for_po,
+            inv_df          = inv_for_po,
+            period_days     = total_period,
+            lead_time       = lead_time,
+            target_days     = target_days,
+            demand_basis    = demand_basis,
+            min_denominator = int(min_den),
+            use_seasonality = use_seasonality,
+            seasonal_weight = seasonal_weight / 100.0,
+            mtr_df          = st.session_state.mtr_df      if not st.session_state.mtr_df.empty      else None,
+            myntra_df       = st.session_state.myntra_df   if not st.session_state.myntra_df.empty   else None,
+            sku_mapping     = st.session_state.sku_mapping,
+            group_by_parent = is_parent,
         )
 
         if po_df.empty:
             st.warning("No PO calculations available. Check that sales and inventory data overlap.")
         else:
-            if use_seasonality:
-                ly_source       = po_df.attrs.get("ly_source", "Sales")
-                ly_win_start    = po_df.attrs.get("ly_window_start", None)
-                ly_win_end      = po_df.attrs.get("ly_window_end",   None)
-                hist_min        = po_df.attrs.get("hist_date_min",   None)
-                hist_max        = po_df.attrs.get("hist_date_max",   None)
-                skus_with_ly    = int((po_df["LY_ADS"] > 0).sum()) if "LY_ADS" in po_df.columns else 0
-                skus_total      = len(po_df)
-
-                win_str  = (f"**{ly_win_start.strftime('%d %b %Y')} → {ly_win_end.strftime('%d %b %Y')}**"
-                            if ly_win_start and ly_win_end else "unknown")
-                hist_str = (f"**{hist_min.strftime('%d %b %Y')}** → **{hist_max.strftime('%d %b %Y')}**"
-                            if hist_min and hist_max else "unknown")
-
-                if skus_with_ly == 0:
-                    st.error(
-                        f"⚠️ **LY_ADS is 0 for all SKUs.** "
-                        f"Historical data source: **{ly_source}** | Date coverage: {hist_str}. "
-                        f"LY window needed: {win_str} — no data found in this range. "
-                        + ("MTR data is loaded but may not cover this window — check MTR year coverage above."
-                           if ly_source == "MTR"
-                           else "Upload MTR reports (2-year history) to enable YoY blending.")
-                    )
-                elif skus_with_ly < skus_total * 0.5:
-                    st.warning(
-                        f"⚠️ **Partial LY data** — only **{skus_with_ly:,} / {skus_total:,}** SKUs have LY history. "
-                        f"Source: **{ly_source}** | LY window: {win_str} | History: {hist_str}. "
-                        f"SKUs without LY data will use Recent ADS only."
-                    )
-                else:
-                    st.success(
-                        f"✅ **Seasonality active** | Source: **{ly_source}** | "
-                        f"LY window: {win_str} | History: {hist_str} | "
-                        f"SKUs with LY data: **{skus_with_ly:,} / {skus_total:,}** | "
-                        f"Blend: {100 - int(seasonal_weight)}% Recent + {int(seasonal_weight)}% LY"
-                    )
-
+            # ── Compute final PO columns ──────────────────────
             po_df["Days_Left"]        = np.where(po_df["ADS"] > 0, po_df["Total_Inventory"] / po_df["ADS"], 999)
             po_df["Lead_Time_Demand"] = po_df["ADS"] * lead_time
             po_df["Target_Stock"]     = po_df["ADS"] * target_days
             po_df["Base_Requirement"] = po_df["Lead_Time_Demand"] + po_df["Target_Stock"]
             po_df["Safety_Stock"]     = po_df["Base_Requirement"] * (safety_pct / 100)
             po_df["Total_Required"]   = po_df["Base_Requirement"] + po_df["Safety_Stock"]
-            po_df["PO_Recommended"]   = (
+            po_df["PO_Qty"]           = (
                 np.ceil((po_df["Total_Required"] - po_df["Total_Inventory"]).clip(lower=0) / 5) * 5
             ).astype(int)
 
-            def get_priority(row):
-                if row["Days_Left"] < lead_time     and row["PO_Recommended"] > 0: return "🔴 URGENT"
-                if row["Days_Left"] < lead_time + 7 and row["PO_Recommended"] > 0: return "🟡 HIGH"
-                if row["PO_Recommended"] > 0:                                       return "🟢 MEDIUM"
+            def _priority(row):
+                if row["Days_Left"] < lead_time      and row["PO_Qty"] > 0: return "🔴 URGENT"
+                if row["Days_Left"] < lead_time + 7  and row["PO_Qty"] > 0: return "🟡 HIGH"
+                if row["PO_Qty"] > 0:                                        return "🟢 MEDIUM"
                 return "⚪ OK"
+            po_df["Priority"] = po_df.apply(_priority, axis=1)
 
-            po_df["Priority"] = po_df.apply(get_priority, axis=1)
-            po_needed = po_df[po_df["PO_Recommended"] > 0].sort_values(["Priority","Days_Left"])
+            # ── Seasonality banner ────────────────────────────
+            if use_seasonality:
+                ly_source    = po_df.attrs.get("ly_source", "Sales")
+                ly_win_start = po_df.attrs.get("ly_window_start", None)
+                ly_win_end   = po_df.attrs.get("ly_window_end",   None)
+                skus_ly      = int((po_df["LY_ADS"] > 0).sum()) if "LY_ADS" in po_df.columns else 0
+                win_str = (f"{ly_win_start.strftime('%d %b %Y')} → {ly_win_end.strftime('%d %b %Y')}"
+                           if ly_win_start and ly_win_end else "unknown")
+                if skus_ly == 0:
+                    st.error(f"⚠️ LY_ADS = 0 for all SKUs. Source: {ly_source} | Window: {win_str}")
+                else:
+                    st.success(
+                        f"✅ Seasonality active | Source: **{ly_source}** | Window: {win_str} | "
+                        f"SKUs with LY data: **{skus_ly:,}/{len(po_df):,}** | "
+                        f"Blend: {100-int(seasonal_weight)}% Recent + {int(seasonal_weight)}% LY"
+                    )
 
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("🔴 Urgent", len(po_needed[po_needed["Priority"]=="🔴 URGENT"]))
-            m2.metric("🟡 High",   len(po_needed[po_needed["Priority"]=="🟡 HIGH"]))
-            m3.metric("🟢 Medium", len(po_needed[po_needed["Priority"]=="🟢 MEDIUM"]))
-            m4.metric("📦 Total Units", f"{po_needed['PO_Recommended'].sum():,}")
-
+            # ── KPI bar ───────────────────────────────────────
+            urgent = len(po_df[po_df["Priority"]=="🔴 URGENT"])
+            high   = len(po_df[po_df["Priority"]=="🟡 HIGH"])
+            med    = len(po_df[po_df["Priority"]=="🟢 MEDIUM"])
+            total_po_units = po_df["PO_Qty"].sum()
+            k1,k2,k3,k4,k5 = st.columns(5)
+            k1.metric("🔴 Urgent",       urgent)
+            k2.metric("🟡 High",         high)
+            k3.metric("🟢 Medium",       med)
+            k4.metric("📦 Total PO Units", f"{total_po_units:,}")
+            k5.metric("📊 SKUs Analysed",  f"{len(po_df):,}")
             st.divider()
 
-            display_cols = ["Priority","OMS_SKU","Total_Inventory","Recent_ADS"]
-            if use_seasonality:
-                display_cols.append("LY_ADS")
-            display_cols.extend(["ADS","Days_Left","PO_Recommended","Stockout_Flag"])
-            display_cols = [c for c in display_cols if c in po_needed.columns]
+            # ══════════════════════════════════════════════════
+            # MAIN TABLE — exact layout matching your sheet
+            # ══════════════════════════════════════════════════
 
-            def highlight_priority(row):
-                result = []
+            # Join quarterly history onto PO df
+            if not qhist.empty:
+                master = po_df.merge(qhist, on="OMS_SKU", how="left")
+            else:
+                master = po_df.copy()
+                master["Avg_Monthly"] = 0
+                master["Units_30d"]   = 0
+                master["Freq_30d"]    = 0
+                master["Status"]      = "—"
+
+            # Resolve ADS/Status column collisions from merge
+            if "ADS_x" in master.columns:
+                master = master.rename(columns={"ADS_x": "ADS_po", "ADS_y": "ADS_all"})
+                master["ADS"] = master["ADS_all"].fillna(master["ADS_po"])
+            if "Status_x" in master.columns:
+                master = master.rename(columns={"Status_x": "Status_po", "Status_y": "Status"})
+            if "Status" not in master.columns:
+                def _st(ads):
+                    if ads >= 1.0:  return "🚀 Fast Moving"
+                    if ads >= 0.33: return "✅ Moderate"
+                    if ads >= 0.10: return "🐢 Slow Selling"
+                    return "❌ Not Moving"
+                master["Status"] = master["ADS"].apply(_st)
+
+            master["Parent_SKU"] = master["OMS_SKU"].apply(get_parent_sku)
+            master["Days_Left"] = np.where(
+                master["ADS"] > 0, master["Total_Inventory"] / master["ADS"], 999
+            ).round(1)
+            master["Running_Days"] = master["Days_Left"].round(0).astype(int)
+            master["PO_Qty"] = (
+                np.ceil((
+                    (master["ADS"] * lead_time + master["ADS"] * target_days) * (1 + safety_pct / 100)
+                    - master["Total_Inventory"]
+                ).clip(lower=0) / 5) * 5
+            ).astype(int)
+            master["Priority"] = master.apply(_priority, axis=1)
+
+            # ── New derived columns matching the sheet ────────
+            master["PO_Plus_Avail"]   = (master["PO_Qty"] + master["Total_Inventory"].fillna(0)).astype(int)
+            master["OMS_Stock"]       = master["OMS_Inventory"].fillna(0).astype(int) if "OMS_Inventory" in master.columns else 0
+            master["Avail_Inventory"] = master["Total_Inventory"].fillna(0).astype(int)
+
+            for _c in ["Units_30d","Freq_30d","Avg_Monthly","Net_Units","Sold_Units","Return_Units"]:
+                if _c in master.columns:
+                    master[_c] = pd.to_numeric(master[_c], errors="coerce").fillna(0)
+
+            # ── Quarter columns ───────────────────────────────
+            q_cols = [c for c in master.columns if "–" in c and len(c) > 6 and c[-4:].isdigit()]
+
+            # ── Filter controls ───────────────────────────────
+            st.markdown("#### 🔍 Filter & Search")
+            fa, fb, fc, fd = st.columns(4)
+            with fa:
+                _statuses = sorted(master["Status"].dropna().unique().tolist())
+                sel_status = st.multiselect("Status", _statuses, default=_statuses, key="po_status_filter")
+            with fb:
+                sel_priority = st.multiselect("Priority", ["🔴 URGENT","🟡 HIGH","🟢 MEDIUM","⚪ OK"],
+                                               default=["🔴 URGENT","🟡 HIGH","🟢 MEDIUM"], key="po_prio_filter")
+            with fc:
+                po_only = st.checkbox("Show only SKUs needing PO", value=True, key="po_only_flag")
+            with fd:
+                sku_search = st.text_input("Search SKU / Parent", "", key="po_sku_search", placeholder="e.g. 1457YK")
+
+            filtered = master.copy()
+            if sel_status:     filtered = filtered[filtered["Status"].isin(sel_status)]
+            if sel_priority:   filtered = filtered[filtered["Priority"].isin(sel_priority)]
+            if po_only:        filtered = filtered[filtered["PO_Qty"] > 0]
+            if sku_search.strip():
+                _mask = (
+                    filtered["OMS_SKU"].str.contains(sku_search.strip(), case=False, na=False) |
+                    filtered["Parent_SKU"].str.contains(sku_search.strip(), case=False, na=False)
+                )
+                filtered = filtered[_mask]
+            filtered = filtered.sort_values(["Priority", "Days_Left"]).reset_index(drop=True)
+
+            # ── COLUMN ORDER — matches screenshot left → right ─
+            base_left  = ["OMS_SKU","Status","Parent_SKU","Units_30d","Freq_30d","Running_Days"]
+            base_right = []
+            if "Avg_Monthly" in filtered.columns: base_right.append("Avg_Monthly")
+            base_right.append("ADS")
+            if "Net_Units" in filtered.columns:   base_right.append("Net_Units")
+            base_right += ["PO_Qty","PO_Plus_Avail","OMS_Stock","Avail_Inventory"]
+            if use_seasonality and "LY_ADS" in filtered.columns: base_right.append("LY_ADS")
+            base_right.append("Priority")
+
+            disp_cols = base_left + q_cols + base_right
+            disp_cols = [c for c in disp_cols if c in filtered.columns]
+
+            rename_map = {
+                "OMS_SKU":"SKU", "Parent_SKU":"Parent",
+                "Units_30d":"1-Month Sale", "Freq_30d":"Freq (Days)",
+                "Running_Days":"Running Days", "Avg_Monthly":"Avg Monthly",
+                "Net_Units":"Net Sales", "PO_Qty":"PO Qty",
+                "PO_Plus_Avail":"PO + Available", "OMS_Stock":"OMS Stock",
+                "Avail_Inventory":"Available Inventory",
+                "LY_ADS":"LY ADS", "ADS":"Daily Sales (ADS)",
+            }
+            disp_df = filtered[disp_cols].rename(columns=rename_map)
+
+            _Q_COLOUR = {"Apr":"#fef9c3","Jul":"#dcfce7","Oct":"#ffedd5","Jan":"#dbeafe"}
+
+            def _style_po_table(row):
+                styles = []
                 for col in row.index:
                     if col == "Priority":
-                        if   "🔴" in str(row[col]): result.append("background-color:#fee2e2;font-weight:bold")
-                        elif "🟡" in str(row[col]): result.append("background-color:#fef3c7")
-                        else:                        result.append("background-color:#d1fae5")
-                    elif col == "PO_Recommended":
-                        result.append("background-color:#dbeafe;font-weight:bold")
-                    elif col == "Days_Left" and float(row[col]) < float(lead_time):
-                        result.append("background-color:#fee2e2;font-weight:bold")
+                        if   "🔴" in str(row[col]): styles.append("background-color:#fee2e2;font-weight:bold")
+                        elif "🟡" in str(row[col]): styles.append("background-color:#fef3c7;font-weight:bold")
+                        elif "🟢" in str(row[col]): styles.append("background-color:#d1fae5")
+                        else:                        styles.append("")
+                    elif col == "PO Qty":
+                        styles.append("background-color:#dbeafe;font-weight:bold;color:#1e40af")
+                    elif col == "PO + Available":
+                        styles.append("background-color:#e0e7ff;font-weight:bold")
+                    elif col == "OMS Stock":
+                        styles.append("background-color:#fef3c7")
+                    elif col == "Available Inventory":
+                        styles.append("background-color:#d1fae5")
+                    elif col == "Status":
+                        if "Fast"  in str(row[col]): styles.append("background-color:#d1fae5;font-weight:bold")
+                        elif "Mod" in str(row[col]): styles.append("background-color:#fef9c3")
+                        elif "Slow"in str(row[col]): styles.append("background-color:#fde68a")
+                        elif "Not" in str(row[col]): styles.append("background-color:#fee2e2")
+                        else:                         styles.append("")
+                    elif col in q_cols:
+                        val = float(row[col]) if pd.notna(row[col]) else 0
+                        tint = _Q_COLOUR.get(col[:3], "#f3f4f6")
+                        if   val == 0:  styles.append("background-color:#f3f4f6;color:#9ca3af")
+                        elif val <= 5:  styles.append(f"background-color:{tint}")
+                        elif val <= 15: styles.append("background-color:#fde68a")
+                        elif val <= 30: styles.append("background-color:#fbbf24")
+                        else:           styles.append("background-color:#f59e0b;font-weight:bold")
+                    elif col == "Running Days":
+                        val = float(row[col]) if pd.notna(row[col]) else 999
+                        if   val < lead_time:      styles.append("background-color:#fee2e2;font-weight:bold")
+                        elif val < lead_time + 14: styles.append("background-color:#fef3c7")
+                        else:                      styles.append("background-color:#d1fae5")
+                    elif col == "Daily Sales (ADS)":
+                        styles.append("background-color:#f0fdf4;color:#166534")
                     else:
-                        result.append("")
-                return result
+                        styles.append("")
+                return styles
 
-            fmt_dict = {c: "{:.3f}" if "ADS" in c else "{:.1f}" if c == "Days_Left" else "{:.0f}"
-                        for c in display_cols if c not in ["Priority","OMS_SKU","Stockout_Flag"]}
+            fmt_dict = {}
+            for c in disp_df.columns:
+                if   c in ("Daily Sales (ADS)","LY ADS"): fmt_dict[c] = "{:.3f}"
+                elif c == "Avg Monthly":                   fmt_dict[c] = "{:.1f}"
+                elif c in ("PO Qty","PO + Available","OMS Stock","Available Inventory",
+                           "Running Days","1-Month Sale","Net Sales","Freq (Days)"):
+                    fmt_dict[c] = "{:.0f}"
+                elif c in q_cols:                          fmt_dict[c] = "{:.0f}"
 
+            st.markdown(
+                f"**{len(filtered):,} SKUs** | "
+                f"**{len(q_cols)} quarters** of history | "
+                f"{'All platforms combined' if not qhist.empty else 'No quarterly history loaded'}"
+            )
+            st.caption(
+                "🟡 Q1 Apr–Jun  |  🟢 Q2 Jul–Sep  |  🟠 Q3 Oct–Dec  |  🔵 Q4 Jan–Mar  "
+                "| Cell shade = units sold: light = low, amber = mid, orange bold = high"
+            )
             st.dataframe(
-                po_needed[display_cols].head(200).style.apply(highlight_priority, axis=1).format(fmt_dict),
-                use_container_width=True, height=520
+                disp_df.style.apply(_style_po_table, axis=1).format(fmt_dict, na_rep="—"),
+                use_container_width=True,
+                height=620,
+                hide_index=True,
+                column_config={
+                    "SKU":                 st.column_config.TextColumn("SKU", width="medium"),
+                    "Parent":              st.column_config.TextColumn("Parent SKU", width="small"),
+                    "Status":              st.column_config.TextColumn("Status", width="medium"),
+                    "1-Month Sale":        st.column_config.NumberColumn("1-Month Sale",   help="Units sold last 30 days"),
+                    "Freq (Days)":         st.column_config.NumberColumn("Freq",           help="Days with ≥1 sale in last 30 days"),
+                    "Running Days":        st.column_config.NumberColumn("Running Days",   help="Days of stock left at current ADS"),
+                    "Avg Monthly":         st.column_config.NumberColumn("Avg Monthly",    help="Avg monthly sales from last 4 quarters ÷ 3"),
+                    "Daily Sales (ADS)":   st.column_config.NumberColumn("ADS",            help="Avg Daily Sales — last 90 days, all platforms"),
+                    "Net Sales":           st.column_config.NumberColumn("Net Sales",      help=f"Net units sold in last {total_period} days"),
+                    "PO Qty":              st.column_config.NumberColumn("PO Qty",         help="Recommended PO qty (rounded to nearest 5)"),
+                    "PO + Available":      st.column_config.NumberColumn("PO + Available", help="PO Qty + current total inventory"),
+                    "OMS Stock":           st.column_config.NumberColumn("OMS Stock",      help="OMS warehouse stock only"),
+                    "Available Inventory": st.column_config.NumberColumn("Available Inv.", help="Total stock: OMS + all marketplaces"),
+                },
             )
 
-            suffix = "parent" if "Parent" in view_mode else "variant"
+            # ── Quarterly trend chart ─────────────────────────
+            if q_cols:
+                with st.expander("📈 Quarterly Sales Trend", expanded=True):
+                    top_skus = (
+                        master.nlargest(15, "Total_Inventory")["OMS_SKU"].tolist()
+                        if "Total_Inventory" in master.columns else master["OMS_SKU"].head(15).tolist()
+                    )
+                    chart_skus = st.multiselect(
+                        "Select SKUs to chart", master["OMS_SKU"].tolist(),
+                        default=top_skus[:8], key="po_chart_skus"
+                    )
+                    if chart_skus:
+                        chart_df = master[master["OMS_SKU"].isin(chart_skus)][["OMS_SKU"] + q_cols].copy()
+                        chart_melted = chart_df.melt(id_vars="OMS_SKU", var_name="Quarter", value_name="Units")
+                        # Shorten quarter labels for readability
+                        chart_melted["Quarter"] = chart_melted["Quarter"].str.replace(r"^Q\d_", "", regex=True)
+                        fig_q = px.line(
+                            chart_melted, x="Quarter", y="Units", color="OMS_SKU",
+                            title="Quarterly Sales History by SKU",
+                            markers=True,
+                        )
+                        fig_q.update_layout(height=380, xaxis_tickangle=-30)
+                        st.plotly_chart(fig_q, use_container_width=True)
+
+            # ── Downloads ─────────────────────────────────────
+            st.divider()
+            suffix = "parent" if is_parent else "variant"
             c_dl1, c_dl2 = st.columns(2)
             with c_dl1:
                 st.download_button(
-                    "📥 Download PO (CSV)",
-                    po_needed[display_cols].to_csv(index=False).encode("utf-8"),
-                    f"po_{suffix}_{datetime.now().strftime('%Y%m%d')}.csv",
+                    "📥 Download Full PO Table (CSV)",
+                    disp_df.to_csv(index=False).encode("utf-8"),
+                    f"po_quarterly_{suffix}_{datetime.now().strftime('%Y%m%d')}.csv",
                     "text/csv", use_container_width=True
                 )
             with c_dl2:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                    po_needed[display_cols].to_excel(w, sheet_name="PO_Recommendations", index=False)
+                    disp_df.to_excel(w, sheet_name="PO_Quarterly", index=False)
+                    # Second sheet: all SKUs (not filtered)
+                    master[[c for c in disp_cols if c in master.columns]].to_excel(
+                        w, sheet_name="All_SKUs", index=False
+                    )
                 st.download_button(
-                    "📥 Download PO (Excel)", buf.getvalue(),
-                    f"po_{suffix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    "📥 Download PO Table (Excel)",
+                    buf.getvalue(),
+                    f"po_quarterly_{suffix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
