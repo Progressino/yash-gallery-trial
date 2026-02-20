@@ -2748,17 +2748,26 @@ with tab_daily:
             for line in detect_log:
                 st.markdown(line)
 
+    # ── Guard: ensure Date column is datetime with at least one valid value ──
+    daily = daily.copy()
+    daily["Date"] = pd.to_datetime(daily["Date"], errors="coerce")
+    daily = daily.dropna(subset=["Date"])
+    if daily.empty:
+        st.warning("⚠️ Daily data loaded but all rows had unparseable dates. Check files and reload.")
+        st.stop()
+
     # ── Header summary ────────────────────────────────────────
     d_active  = daily[daily["TxnType"] == "Shipment"]
     d_cancel  = daily[daily["TxnType"] == "Cancel"]
     d_pending = daily[daily["TxnType"] == "Pending"]
     d_refund  = daily[daily["TxnType"] == "Refund"]
 
-    date_label = daily["Date"].dt.date.min()
-    platforms  = sorted(daily["Platform"].unique().tolist())
+    _valid_dates = daily["Date"].dropna()
+    date_label   = _valid_dates.dt.date.min() if len(_valid_dates) else "Unknown"
+    platforms    = sorted(daily["Platform"].dropna().unique().tolist())
 
     st.success(
-        f"✅ **{date_label}** | Platforms: **{', '.join(platforms)}** | "
+        f"✅ **{date_label}** | Platforms: **{', '.join(platforms) if platforms else 'None'}** | "
         f"Total rows: **{len(daily):,}**"
     )
 
