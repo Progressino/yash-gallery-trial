@@ -110,6 +110,7 @@ def init_session_state():
         "myntra_df":             pd.DataFrame(),
         "meesho_df":             pd.DataFrame(),
         "flipkart_df":           pd.DataFrame(),
+        "daily_orders_df":       pd.DataFrame(),   # combined daily orders from all platforms
         "amazon_date_basis":     "Shipment Date",
         "include_replacements":  False,
         "daily_sales_sources":   [],
@@ -532,6 +533,239 @@ def merge_daily_into_sales(
     merged = pd.concat([base_clean, daily_clean], ignore_index=True)
     del base, daily, base_clean, daily_clean
     return _downcast_sales(merged)
+
+
+# ══════════════════════════════════════════════════════════════
+# DAILY REPORT PARSERS  (new platform-specific formats)
+# Each returns a unified DataFrame with columns:
+#   Date, SKU, Platform, TxnType, Quantity, Revenue, State, OrderId
+# ══════════════════════════════════════════════════════════════
+
+def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id=""):
+    """Helper: create one standardised daily-order row as a dict."""
+    return {
+        "Date":      pd.to_datetime(date, errors="coerce"),
+        "SKU":       str(sku).strip(),
+        "Platform":  platform,
+        "TxnType":   txn_type,
+        "Quantity":  float(qty),
+        "Revenue":   float(revenue),
+        "State":     str(state).strip().title(),
+        "OrderId":   str(order_id),
+    }
+
+
+def parse_daily_amazon_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Parse Amazon daily shipment CSV (e.g. 937788020504.csv).
+    Columns: Customer Shipment Date, Merchant SKU, Quantity, Product Amount,
+             Amazon Order Id, Shipment To State, ...
+    Every row = 1 shipped unit. No returns in this report format.
+    """
+    try:
+        file_obj.seek(0)
+        df = pd.read_csv(file_obj)
+        if df.empty:
+            return pd.DataFrame()
+
+        rows = []
+        for _, r in df.iterrows():
+            raw_sku = str(r.get("Merchant SKU", "")).strip()
+            oms_sku = map_to_oms_sku(raw_sku, mapping)
+            rows.append(_std_daily(
+                date     = r.get("Customer Shipment Date"),
+                sku      = oms_sku,
+                platform = "Amazon",
+                txn_type = "Shipment",
+                qty      = pd.to_numeric(r.get("Quantity", 1), errors="coerce") or 1,
+                revenue  = pd.to_numeric(r.get("Product Amount", 0), errors="coerce") or 0,
+                state    = r.get("Shipment To State", ""),
+                order_id = r.get("Amazon Order Id", ""),
+            ))
+        out = pd.DataFrame(rows)
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        return out.dropna(subset=["Date"])
+    except Exception as e:
+        st.warning(f"Amazon daily parse error: {e}")
+        return pd.DataFrame()
+
+
+def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Parse Flipkart/Myntra PPMP daily seller orders CSV.
+    Columns: seller sku code, order status, final amount, seller price, state, created on, ...
+    Status codes: WP=Waiting for Pickup, PK=Packed, SH=Shipped, F=Failed/Cancelled
+    WP + PK + SH = active orders that need stock; F = cancelled, excluded.
+    """
+    try:
+        file_obj.seek(0)
+        df = pd.read_csv(file_obj)
+        if df.empty:
+            return pd.DataFrame()
+        df.columns = df.columns.str.strip().str.lower()
+
+        STATUS_TXNTYPE = {
+            "wp": "Shipment",   # waiting for pickup — stock committed
+            "pk": "Shipment",   # packed
+            "sh": "Shipment",   # shipped
+            "f":  "Cancel",     # failed / cancelled
+        }
+        rows = []
+        for _, r in df.iterrows():
+            status  = str(r.get("order status", "")).strip().lower()
+            txn     = STATUS_TXNTYPE.get(status, "Shipment")
+            raw_sku = str(r.get("seller sku code", "")).strip()
+            oms_sku = map_to_oms_sku(raw_sku, mapping)
+            rows.append(_std_daily(
+                date     = r.get("created on"),
+                sku      = oms_sku,
+                platform = "Flipkart/Myntra",
+                txn_type = txn,
+                qty      = 1,
+                revenue  = pd.to_numeric(r.get("seller price", r.get("final amount", 0)), errors="coerce") or 0,
+                state    = r.get("state", ""),
+                order_id = str(r.get("store order id", r.get("order release id", ""))),
+            ))
+        out = pd.DataFrame(rows)
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        return out.dropna(subset=["Date"])
+    except Exception as e:
+        st.warning(f"Flipkart daily parse error: {e}")
+        return pd.DataFrame()
+
+
+def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Parse Meesho daily orders CSV.
+    Columns: Reason for Credit Entry, Sub Order No, SKU, Size, Quantity, Order Date,
+             Supplier Discounted Price, Customer State, ...
+    Reasons: SHIPPED, READY_TO_SHIP → active; CANCELLED → excluded; HOLD/PENDING → pending.
+    Meesho puts SKU + Size separately — combine to get full variant SKU (e.g. 1485PLYKMUSTARD-XL).
+    """
+    try:
+        file_obj.seek(0)
+        df = pd.read_csv(file_obj)
+        if df.empty:
+            return pd.DataFrame()
+
+        REASON_TXNTYPE = {
+            "shipped":        "Shipment",
+            "ready_to_ship":  "Shipment",
+            "cancelled":      "Cancel",
+            "hold":           "Pending",
+            "pending":        "Pending",
+        }
+        rows = []
+        for _, r in df.iterrows():
+            reason  = str(r.get("Reason for Credit Entry", "")).strip().lower()
+            txn     = REASON_TXNTYPE.get(reason, "Shipment")
+            raw_sku = str(r.get("SKU", "")).strip()
+            size    = str(r.get("Size", "")).strip()
+            # Build full variant SKU (same format as monthly files)
+            full_sku = f"{raw_sku}-{size}" if size and size.lower() not in ("nan","") else raw_sku
+            oms_sku  = map_to_oms_sku(full_sku, mapping)
+            qty      = pd.to_numeric(r.get("Quantity", 1), errors="coerce") or 1
+            price    = pd.to_numeric(r.get("Supplier Discounted Price (Incl GST and Commision)", 0), errors="coerce") or 0
+            rows.append(_std_daily(
+                date     = r.get("Order Date"),
+                sku      = oms_sku,
+                platform = "Meesho",
+                txn_type = txn,
+                qty      = qty,
+                revenue  = price * qty,
+                state    = r.get("Customer State", ""),
+                order_id = str(r.get("Sub Order No", "")),
+            ))
+        out = pd.DataFrame(rows)
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        return out.dropna(subset=["Date"])
+    except Exception as e:
+        st.warning(f"Meesho daily parse error: {e}")
+        return pd.DataFrame()
+
+
+def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Parse Myntra Earn More / daily summary report (.xlsx).
+    Columns: SKU ID, Order Date, Gross Units, Final Sale Units, Cancellation Units,
+             Return Units, Final Sale Amount, ...
+    This is an aggregated report (one row per SKU per date), not order-level.
+    We expand into Shipment / Cancel / Refund rows so the standard sales pipeline
+    treats it the same as other sources.
+    """
+    try:
+        file_obj.seek(0)
+        df = pd.read_excel(file_obj)
+        if df.empty:
+            return pd.DataFrame()
+        df.columns = df.columns.str.strip()
+
+        rows = []
+        for _, r in df.iterrows():
+            raw_sku = str(r.get("SKU ID", "")).strip()
+            oms_sku = map_to_oms_sku(raw_sku, mapping)
+            date    = r.get("Order Date")
+
+            gross   = int(pd.to_numeric(r.get("Gross Units", 0),        errors="coerce") or 0)
+            sold    = int(pd.to_numeric(r.get("Final Sale Units", 0),   errors="coerce") or 0)
+            cancel  = int(pd.to_numeric(r.get("Cancellation Units", 0), errors="coerce") or 0)
+            ret     = int(pd.to_numeric(r.get("Return Units", 0),       errors="coerce") or 0)
+            revenue = pd.to_numeric(r.get("Final Sale Amount", 0),      errors="coerce") or 0
+
+            if sold > 0:
+                rows.append(_std_daily(date, oms_sku, "Myntra", "Shipment", sold, revenue))
+            if cancel > 0:
+                rows.append(_std_daily(date, oms_sku, "Myntra", "Cancel",   cancel, 0))
+            if ret > 0:
+                rows.append(_std_daily(date, oms_sku, "Myntra", "Refund",   ret, 0))
+
+        out = pd.DataFrame(rows) if rows else pd.DataFrame()
+        if out.empty:
+            return pd.DataFrame()
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        return out.dropna(subset=["Date"])
+    except Exception as e:
+        st.warning(f"Myntra daily parse error: {e}")
+        return pd.DataFrame()
+
+
+def combine_daily_orders(*dfs) -> pd.DataFrame:
+    """Concatenate parsed daily DataFrames and deduplicate by (SKU, Platform, OrderId, TxnType)."""
+    parts = [d for d in dfs if d is not None and not d.empty]
+    if not parts:
+        return pd.DataFrame()
+    combined = pd.concat(parts, ignore_index=True)
+    combined["Date"]     = pd.to_datetime(combined["Date"], errors="coerce")
+    combined["Quantity"] = pd.to_numeric(combined["Quantity"], errors="coerce").fillna(0)
+    combined["Revenue"]  = pd.to_numeric(combined["Revenue"],  errors="coerce").fillna(0)
+    # Dedup: same order can't appear twice (protects against re-upload)
+    combined = combined.drop_duplicates(
+        subset=["SKU", "Platform", "OrderId", "TxnType"], keep="first"
+    )
+    return combined
+
+
+def daily_to_sales_rows(daily_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert the unified daily_orders_df into the standard sales_df schema
+    (Sku, TxnDate, Transaction Type, Quantity, Units_Effective, Source, OrderId)
+    so it feeds into merge_daily_into_sales and the PO Engine.
+    """
+    if daily_df.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "Sku":              daily_df["SKU"],
+        "TxnDate":          daily_df["Date"],
+        "Transaction Type": daily_df["TxnType"],
+        "Quantity":         daily_df["Quantity"],
+        "Units_Effective":  np.where(daily_df["TxnType"] == "Refund",  -daily_df["Quantity"],
+                            np.where(daily_df["TxnType"] == "Cancel",   0,
+                            np.where(daily_df["TxnType"] == "Pending",  0,
+                                     daily_df["Quantity"]))),
+        "Source":           daily_df["Platform"],
+        "OrderId":          daily_df["OrderId"],
+    })
+    return _downcast_sales(out)
 
 
 def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, config: SalesConfig) -> pd.DataFrame:
@@ -1452,32 +1686,34 @@ with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Inventory + Today's Sa
         help="Amazon inventory ledger CSV. Columns: MSKU, Ending Warehouse Balance."
     )
 
-    st.markdown("**🗓️ Daily Sales (optional — overrides monthly for same dates)**")
-    st.caption("Upload today's order reports. These are merged into the Sales Dashboard and PO Engine automatically.")
-    d_b2c = st.file_uploader(
-        "Amazon B2C — Daily (ZIP)",
-        type=["zip"], key="daily_b2c",
-        help="Today's Amazon B2C order ZIP. Any SKU-date already in the monthly file is replaced by this."
+    st.markdown("**🗓️ Daily Orders — PO Check (upload today's reports)**")
+    st.caption(
+        "Upload each platform's daily order report. "
+        "These feed the **Daily Orders vs PO** tab and also merge into the Sales Dashboard."
     )
-    d_b2b = st.file_uploader(
-        "Amazon B2B — Daily (ZIP)",
-        type=["zip"], key="daily_b2b",
-        help="Today's Amazon B2B order ZIP."
+    d_amz_daily = st.file_uploader(
+        "Amazon — Daily Shipment CSV",
+        type=["csv"], key="daily_amz_csv",
+        help="Amazon daily shipped orders CSV. Columns: Customer Shipment Date, Merchant SKU, "
+             "Quantity, Product Amount, Amazon Order Id, Shipment To State."
     )
-    d_fk = st.file_uploader(
-        "Flipkart — Daily (Excel)",
-        type=["xlsx"], key="daily_fk",
-        help="Today's Flipkart Sales Report Excel."
+    d_fk_daily = st.file_uploader(
+        "Flipkart/Myntra — Daily Orders CSV",
+        type=["csv"], key="daily_fk_csv",
+        help="Flipkart or Myntra PPMP seller orders CSV. Columns: seller sku code, order status, "
+             "seller price, created on, state. Statuses WP/PK/SH = active; F = cancelled."
     )
-    d_meesho = st.file_uploader(
-        "Meesho — Daily (ZIP)",
-        type=["zip"], key="daily_meesho",
-        help="Today's Meesho order ZIP."
+    d_mee_daily = st.file_uploader(
+        "Meesho — Daily Orders CSV",
+        type=["csv"], key="daily_mee_csv",
+        help="Meesho daily orders CSV. Columns: SKU, Size, Quantity, Reason for Credit Entry, "
+             "Order Date, Supplier Discounted Price, Customer State."
     )
-    d_myntra = st.file_uploader(
-        "Myntra — Daily (ZIP)",
-        type=["zip"], key="daily_myntra",
-        help="Today's Myntra PPMP CSV ZIP."
+    d_myn_daily = st.file_uploader(
+        "Myntra — Daily Earn More Report (XLSX)",
+        type=["xlsx"], key="daily_myn_xlsx",
+        help="Myntra Earn More / daily summary Excel. Columns: SKU ID, Order Date, Gross Units, "
+             "Final Sale Units, Cancellation Units, Return Units, Final Sale Amount."
     )
 
 st.sidebar.divider()
@@ -1623,40 +1859,39 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     del sales_parts, combined_sales
                     gc.collect()
 
-                daily_loaded = []
-                if d_b2c:
-                    _d = load_amazon_sales(d_b2c, st.session_state.sku_mapping, "Amazon B2C", config)
-                    if not _d.empty: daily_loaded.append(("Amazon B2C", _d))
+                # ── Daily orders: new platform-specific formats ──────────
+                _daily_parts = []
+                if d_amz_daily:
+                    _d = parse_daily_amazon_csv(d_amz_daily, st.session_state.sku_mapping)
+                    if not _d.empty: _daily_parts.append(_d)
                     gc.collect()
-                if d_b2b:
-                    _d = load_amazon_sales(d_b2b, st.session_state.sku_mapping, "Amazon B2B", config)
-                    if not _d.empty: daily_loaded.append(("Amazon B2B", _d))
+                if d_fk_daily:
+                    _d = parse_daily_flipkart_csv(d_fk_daily, st.session_state.sku_mapping)
+                    if not _d.empty: _daily_parts.append(_d)
                     gc.collect()
-                if d_fk:
-                    _d = load_flipkart_sales(d_fk, st.session_state.sku_mapping)
-                    if not _d.empty: daily_loaded.append(("Flipkart", _d))
+                if d_mee_daily:
+                    _d = parse_daily_meesho_csv(d_mee_daily, st.session_state.sku_mapping)
+                    if not _d.empty: _daily_parts.append(_d)
                     gc.collect()
-                if d_meesho:
-                    _mc = load_meesho_full(d_meesho)
-                    if not _mc.empty:
-                        _d = meesho_to_sales_rows(_mc); del _mc
-                        if not _d.empty: daily_loaded.append(("Meesho", _d))
-                    gc.collect()
-                if d_myntra:
-                    _mn = load_myntra_full(d_myntra, st.session_state.sku_mapping)
-                    if not _mn.empty:
-                        _d = myntra_to_sales_rows(_mn); del _mn
-                        if not _d.empty: daily_loaded.append(("Myntra", _d))
+                if d_myn_daily:
+                    _d = parse_daily_myntra_xlsx(d_myn_daily, st.session_state.sku_mapping)
+                    if not _d.empty: _daily_parts.append(_d)
                     gc.collect()
 
-                if daily_loaded:
-                    base = st.session_state.sales_df
-                    for source_name, daily_df in daily_loaded:
-                        base = merge_daily_into_sales(base, daily_df)
-                    st.session_state.sales_df    = base
-                    st.session_state.daily_sales_sources = [s for s, _ in daily_loaded]
-                    st.session_state.daily_sales_rows    = sum(len(d) for _, d in daily_loaded)
-                    del base, daily_loaded
+                if _daily_parts:
+                    _daily_combined = combine_daily_orders(*_daily_parts)
+                    st.session_state.daily_orders_df = _daily_combined
+
+                    # Also feed into sales_df for PO Engine velocity calculation
+                    _daily_sales = daily_to_sales_rows(_daily_combined)
+                    if not _daily_sales.empty:
+                        base = st.session_state.sales_df
+                        base = merge_daily_into_sales(base, _daily_sales)
+                        st.session_state.sales_df = base
+                        st.session_state.daily_sales_sources = [p for p in _daily_combined["Platform"].unique().tolist()]
+                        st.session_state.daily_sales_rows    = len(_daily_combined)
+                        del base
+                    del _daily_parts, _daily_combined
                     gc.collect()
 
                 st.session_state.inventory_df_variant = load_inventory_consolidated(
@@ -1690,9 +1925,9 @@ if not st.session_state.sku_mapping:
 # ══════════════════════════════════════════════════════════════
 # 14) MAIN TABS
 # ══════════════════════════════════════════════════════════════
-tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_flipkart, tab_inv, tab_po, tab_logistics, tab_forecast, tab_drill = st.tabs([
+tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_flipkart, tab_daily, tab_inv, tab_po, tab_logistics, tab_forecast, tab_drill = st.tabs([
     "📊 Dashboard", "📑 MTR Analytics", "🛍️ Myntra", "🛒 Meesho", "🟡 Flipkart",
-    "📦 Inventory", "🎯 PO Engine", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
+    "📋 Daily Orders", "📦 Inventory", "🎯 PO Engine", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -2446,6 +2681,251 @@ with tab_flipkart:
                 f"flipkart_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
                 "text/csv", use_container_width=True
             )
+
+# ══════════════════════════════════════════════════════════════
+# TAB — DAILY ORDERS vs PO CHECK
+# ══════════════════════════════════════════════════════════════
+with tab_daily:
+    st.subheader("📋 Daily Orders — PO Check")
+
+    daily = st.session_state.daily_orders_df
+    if daily.empty:
+        st.info(
+            "📂 Upload today's daily order reports in the **Tier 3 — Daily Snapshot** section "
+            "of the sidebar (Amazon CSV, Flipkart/Myntra CSV, Meesho CSV, Myntra XLSX), "
+            "then click **Load All Data**."
+        )
+        st.stop()
+
+    # ── Header summary ────────────────────────────────────────
+    d_active  = daily[daily["TxnType"] == "Shipment"]
+    d_cancel  = daily[daily["TxnType"] == "Cancel"]
+    d_pending = daily[daily["TxnType"] == "Pending"]
+    d_refund  = daily[daily["TxnType"] == "Refund"]
+
+    date_label = daily["Date"].dt.date.min()
+    platforms  = sorted(daily["Platform"].unique().tolist())
+
+    st.success(
+        f"✅ **{date_label}** | Platforms: **{', '.join(platforms)}** | "
+        f"Total rows: **{len(daily):,}**"
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📦 Active Orders",   f"{int(d_active['Quantity'].sum()):,}")
+    c2.metric("❌ Cancelled",        f"{int(d_cancel['Quantity'].sum()):,}")
+    c3.metric("⏳ Pending / Hold",   f"{int(d_pending['Quantity'].sum()):,}")
+    c4.metric("↩️ Returns",          f"{int(d_refund['Quantity'].sum()):,}")
+    c5.metric("💰 Revenue (Active)", fmt_inr(d_active["Revenue"].sum()))
+    st.divider()
+
+    # ── Filters ───────────────────────────────────────────────
+    with st.expander("🔧 Filters", expanded=True):
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            _sel_plat = st.multiselect(
+                "Platform", platforms, default=platforms, key="daily_plat"
+            )
+        with fc2:
+            _txn_opts = sorted(daily["TxnType"].unique().tolist())
+            _sel_txn  = st.multiselect(
+                "Status", _txn_opts,
+                default=[t for t in ["Shipment","Pending"] if t in _txn_opts],
+                key="daily_txn"
+            )
+        with fc3:
+            _sku_search = st.text_input("Search SKU", "", key="daily_sku_search",
+                                         placeholder="e.g. 1685YK, PLYK...")
+
+    df_f = daily[daily["Platform"].isin(_sel_plat) & daily["TxnType"].isin(_sel_txn)]
+    if _sku_search:
+        df_f = df_f[df_f["SKU"].str.contains(_sku_search.strip(), case=False, na=False)]
+
+    # ══════════════════════════════════════════════════════════
+    # SECTION A — SKU-level velocity table with PO comparison
+    # ══════════════════════════════════════════════════════════
+    st.markdown("### 📊 Today's Velocity by SKU")
+    st.caption(
+        "Units ordered today per SKU, broken down by platform. "
+        "**PO Suggest** = units the PO Engine recommends ordering based on ADS × lead time. "
+        "**⚠️ Alert** flags SKUs selling today that have zero or low PO recommendation — "
+        "these may need a manual PO review."
+    )
+
+    # Aggregate active orders by SKU + Platform
+    sku_pivot = (
+        df_f[df_f["TxnType"].isin(["Shipment","Pending"])]
+        .groupby(["SKU", "Platform"])["Quantity"]
+        .sum()
+        .reset_index()
+        .pivot_table(index="SKU", columns="Platform", values="Quantity", fill_value=0)
+        .reset_index()
+    )
+    # Total column
+    plat_cols = [c for c in sku_pivot.columns if c != "SKU"]
+    sku_pivot["Today_Total"] = sku_pivot[plat_cols].sum(axis=1)
+
+    # Revenue per SKU (active only)
+    rev_by_sku = (
+        df_f[df_f["TxnType"]=="Shipment"]
+        .groupby("SKU")["Revenue"].sum().reset_index()
+        .rename(columns={"Revenue":"Today_Rev"})
+    )
+    sku_pivot = sku_pivot.merge(rev_by_sku, on="SKU", how="left").fillna({"Today_Rev": 0})
+    sku_pivot["Today_Rev"] = sku_pivot["Today_Rev"].apply(fmt_inr)
+
+    # Pull PO recommendation if available
+    po_available = not st.session_state.sales_df.empty and not (
+        st.session_state.inventory_df_variant.empty and
+        st.session_state.inventory_df_parent.empty
+    )
+    if po_available:
+        try:
+            _po_quick = calculate_po_base(
+                sales_df     = st.session_state.sales_df,
+                inv_df       = st.session_state.inventory_df_variant,
+                period_days  = 37,       # 30 day + 7 grace
+                lead_time    = 15,
+                target_days  = 60,
+                demand_basis = "Sold",
+                min_denominator = 7,
+                use_seasonality = False,
+            )
+            if not _po_quick.empty:
+                _po_cols = [c for c in ["OMS_SKU","PO_Qty","ADS","Total_Inventory","Stockout_Flag"]
+                            if c in _po_quick.columns]
+                _po_quick = _po_quick[_po_cols].copy()
+                _po_quick = _po_quick.rename(columns={
+                    "OMS_SKU":         "SKU",
+                    "PO_Qty":          "PO_Suggest",
+                    "ADS":             "ADS_30d",
+                    "Total_Inventory": "Stock",
+                    "Stockout_Flag":   "OOS",
+                })
+                sku_pivot = sku_pivot.merge(_po_quick, on="SKU", how="left")
+                sku_pivot["PO_Suggest"]  = sku_pivot["PO_Suggest"].fillna(0).astype(int)
+                sku_pivot["Stock"]       = sku_pivot.get("Stock", pd.Series(dtype=float)).fillna(0).astype(int)
+                sku_pivot["ADS_30d"]     = sku_pivot.get("ADS_30d", pd.Series(dtype=float)).fillna(0).round(2)
+                sku_pivot["OOS"]         = sku_pivot.get("OOS", pd.Series(dtype=str)).fillna("")
+
+                # Alert: selling today but PO_Suggest = 0 AND Stock <= Today_Total*3
+                sku_pivot["Alert"] = ""
+                alert_mask = (
+                    (sku_pivot["Today_Total"] > 0) &
+                    (sku_pivot["PO_Suggest"] == 0) &
+                    (sku_pivot.get("Stock", 999) <= sku_pivot["Today_Total"] * 3)
+                )
+                sku_pivot.loc[alert_mask, "Alert"] = "⚠️ Review PO"
+                sku_pivot.loc[sku_pivot["OOS"] != "", "Alert"] = "🔴 OOS"
+        except Exception:
+            pass  # PO calc optional — tab still works without it
+
+    sku_pivot = sku_pivot.sort_values("Today_Total", ascending=False).reset_index(drop=True)
+
+    # Highlight rows with alerts
+    def _highlight_alert(row):
+        if "🔴" in str(row.get("Alert", "")):
+            return ["background-color: #fee2e2"] * len(row)
+        if "⚠️" in str(row.get("Alert", "")):
+            return ["background-color: #fef9c3"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        sku_pivot.style.apply(_highlight_alert, axis=1),
+        use_container_width=True,
+        height=420,
+        hide_index=True,
+    )
+
+    # ══════════════════════════════════════════════════════════
+    # SECTION B — Platform breakdown
+    # ══════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### 🏪 Platform Breakdown")
+    plat_summary = (
+        daily[daily["Platform"].isin(_sel_plat)]
+        .groupby(["Platform","TxnType"])
+        .agg(Units=("Quantity","sum"), Revenue=("Revenue","sum"), SKUs=("SKU","nunique"))
+        .reset_index()
+    )
+    plat_summary["Revenue"] = plat_summary["Revenue"].apply(fmt_inr)
+
+    col_p, col_c = st.columns([2, 1])
+    with col_p:
+        _active_plat = (
+            daily[(daily["Platform"].isin(_sel_plat)) & (daily["TxnType"]=="Shipment")]
+            .groupby("Platform")["Quantity"].sum().reset_index()
+        )
+        if not _active_plat.empty:
+            fig_p = px.bar(
+                _active_plat, x="Platform", y="Quantity",
+                title="Active Orders by Platform",
+                color="Platform",
+                color_discrete_sequence=["#F7C243","#4F46E5","#10B981","#EF4444"],
+            )
+            fig_p.update_layout(height=280, showlegend=False)
+            st.plotly_chart(fig_p, use_container_width=True)
+    with col_c:
+        st.dataframe(plat_summary, use_container_width=True, hide_index=True)
+
+    # ══════════════════════════════════════════════════════════
+    # SECTION C — Top selling SKUs today (chart)
+    # ══════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### 🏆 Top SKUs Today")
+    _top_n = st.slider("Show top N SKUs", 10, 50, 20, key="daily_top_n")
+    _top_skus = (
+        df_f[df_f["TxnType"].isin(["Shipment","Pending"])]
+        .groupby(["SKU","Platform"])["Quantity"].sum()
+        .reset_index().sort_values("Quantity", ascending=False)
+        .head(_top_n)
+    )
+    if not _top_skus.empty:
+        fig_top = px.bar(
+            _top_skus, x="SKU", y="Quantity", color="Platform",
+            title=f"Top {_top_n} SKUs by Units Ordered Today",
+            color_discrete_sequence=["#F7C243","#4F46E5","#10B981","#EF4444"],
+        )
+        fig_top.update_layout(height=340, xaxis_tickangle=-45)
+        st.plotly_chart(fig_top, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════
+    # SECTION D — State distribution
+    # ══════════════════════════════════════════════════════════
+    with st.expander("🗺️ State Distribution", expanded=False):
+        _state_df = (
+            df_f[df_f["TxnType"]=="Shipment"]
+            .groupby("State")["Quantity"].sum()
+            .reset_index().sort_values("Quantity", ascending=False)
+            .head(20)
+        )
+        _state_df = _state_df[_state_df["State"].str.strip() != ""]
+        if not _state_df.empty:
+            fig_st = px.bar(
+                _state_df, x="Quantity", y="State", orientation="h",
+                title="Top 20 States — Today's Active Orders",
+                color_discrete_sequence=["#4F46E5"],
+            )
+            fig_st.update_layout(height=400, yaxis={"categoryorder":"total ascending"})
+            st.plotly_chart(fig_st, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════
+    # SECTION E — Raw order detail
+    # ══════════════════════════════════════════════════════════
+    with st.expander("📄 Raw Order Detail", expanded=False):
+        st.dataframe(
+            df_f.sort_values(["Platform","SKU"]).reset_index(drop=True),
+            use_container_width=True, height=400, hide_index=True
+        )
+
+    # Download
+    st.divider()
+    st.download_button(
+        "⬇️ Download Daily Orders (CSV)",
+        df_f.to_csv(index=False).encode("utf-8"),
+        f"daily_orders_{date_label}.csv",
+        "text/csv", use_container_width=True
+    )
 
 # ══════════════════════════════════════════════════════════════
 # TAB 6 — INVENTORY
