@@ -4,6 +4,8 @@ Yash Gallery Complete ERP System — app.py
 (Bulletproof MTR Loader + Seasonal PO + Prophet Debug)
 Fixed: MTR date parsing, 2023 ghost data, deduplication on Invoice_Number
 Fixed: Meesho grace period, return date parsing for accurate Dec 2025 counts
+Fixed: Daily platform detection (Myntra PPMP vs Flipkart), Myntra return statuses,
+       Deep Dive marketplace split, Parent SKU search in Deep Dive
 """
 
 import gc
@@ -90,6 +92,23 @@ st.markdown("""
         border: 1px solid #002B5B;
     }
     h1, h2, h3 { color: #002B5B !important; }
+
+    /* ── Kanban Board ── */
+    .kanban-card {
+        background: white; padding: 10px; border-radius: 6px;
+        margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        border-left: 4px solid #0ea5e9;
+    }
+    .kanban-header {
+        font-size: 0.85rem; font-weight: 700; color: #002B5B;
+        background: #e0f2fe; padding: 6px 10px; border-radius: 6px;
+        margin-bottom: 8px; text-align: center;
+    }
+    .kanban-detail { font-size: 0.78rem; color: #64748b; margin: 2px 0; }
+    .stage-badge {
+        display: inline-block; font-size: 0.7rem; font-weight: 600;
+        padding: 2px 8px; border-radius: 99px; background: #f1f5f9; color: #475569;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -110,12 +129,13 @@ def init_session_state():
         "myntra_df":             pd.DataFrame(),
         "meesho_df":             pd.DataFrame(),
         "flipkart_df":           pd.DataFrame(),
-        "daily_orders_df":       pd.DataFrame(),   # combined daily orders from all platforms
-        "daily_detect_log":      [],               # list of "filename → platform" strings
+        "daily_orders_df":       pd.DataFrame(),
+        "daily_detect_log":      [],
         "amazon_date_basis":     "Shipment Date",
         "include_replacements":  False,
         "daily_sales_sources":   [],
         "daily_sales_rows":      0,
+        "job_orders":            pd.DataFrame(columns=["Job_ID","SKU","Style_Name","Target_Qty","Current_Stage","Location","Pass_Qty","Reject_Qty","Vendor_Name","Remarks","Date_Updated"]),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -123,9 +143,19 @@ def init_session_state():
 
 init_session_state()
 
-# ══════════════════════════════════════════════════════════════
-# 3) CONFIGURATION DATACLASS
-# ══════════════════════════════════════════════════════════════
+# Seed demo job orders on first run
+if st.session_state.job_orders.empty:
+    _demo_jobs = [
+        {"Job_ID":"JO-1001","SKU":"1065YK",     "Style_Name":"Kurti A",  "Target_Qty":500,"Current_Stage":"Grey Inward",  "Location":"Inhouse",          "Pass_Qty":500,"Reject_Qty":0, "Vendor_Name":"",        "Remarks":"Fresh lot",         "Date_Updated":"2025-12-01"},
+        {"Job_ID":"JO-1002","SKU":"6017SKDRED",  "Style_Name":"Suit B",   "Target_Qty":300,"Current_Stage":"Printing",    "Location":"Vendor (Subcon)",   "Pass_Qty":300,"Reject_Qty":0, "Vendor_Name":"RM Prints","Remarks":"Sent for printing", "Date_Updated":"2025-12-05"},
+        {"Job_ID":"JO-1003","SKU":"1309YKRED",   "Style_Name":"Kurti C",  "Target_Qty":200,"Current_Stage":"Cutting",     "Location":"Inhouse",          "Pass_Qty":195,"Reject_Qty":5, "Vendor_Name":"",        "Remarks":"5 pcs width issue", "Date_Updated":"2025-12-08"},
+        {"Job_ID":"JO-1004","SKU":"5040YKBEIGE", "Style_Name":"Set D",    "Target_Qty":400,"Current_Stage":"Stitching",   "Location":"Vendor (Subcon)",   "Pass_Qty":390,"Reject_Qty":10,"Vendor_Name":"SK Tailor","Remarks":"On track",          "Date_Updated":"2025-12-10"},
+        {"Job_ID":"JO-1005","SKU":"2210GREYFS",  "Style_Name":"Kurti E",  "Target_Qty":250,"Current_Stage":"Finishing",   "Location":"Inhouse",          "Pass_Qty":245,"Reject_Qty":5, "Vendor_Name":"",        "Remarks":"QC in progress",    "Date_Updated":"2025-12-12"},
+        {"Job_ID":"JO-1006","SKU":"3301BLUEXL",  "Style_Name":"Palazzo F","Target_Qty":350,"Current_Stage":"Dispatch",   "Location":"Inhouse",          "Pass_Qty":340,"Reject_Qty":10,"Vendor_Name":"",        "Remarks":"Dispatched to WH",  "Date_Updated":"2025-12-13"},
+    ]
+    st.session_state.job_orders = pd.DataFrame(_demo_jobs)
+
+
 @dataclass(frozen=True)
 class SalesConfig:
     date_basis: str = "Shipment Date"
@@ -241,7 +271,6 @@ def load_sku_mapping(mapping_file) -> Dict[str, str]:
 # ══════════════════════════════════════════════════════════════
 _CAT_COLS = {"Ship_To_State", "Warehouse_Id", "Fulfillment", "Payment_Method"}
 
-# Minimal columns to keep — drop Description, ASIN, Credit_Note_No to save RAM
 _MTR_KEEP_COLS = [
     "Date", "Report_Type", "Transaction_Type", "SKU", "Quantity",
     "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
@@ -251,7 +280,6 @@ _MTR_KEEP_COLS = [
 ]
 
 def _parse_date_flexible(series: pd.Series) -> pd.Series:
-    """Try explicit date formats in priority order to prevent ghost-year misparses."""
     priority_formats = [
         "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d",
         "%d-%b-%Y", "%d/%b/%Y", "%m/%d/%Y",
@@ -270,11 +298,6 @@ def _parse_date_flexible(series: pd.Series) -> pd.Series:
 
 
 def _downcast_mtr(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggressively shrink a parsed MTR DataFrame in-place.
-    Converts string columns → category, floats → float32, date → date32.
-    Typical saving: 60-75% vs default pandas dtypes.
-    """
     cat_cols = ["Report_Type", "Transaction_Type", "Ship_To_State",
                 "Warehouse_Id", "Fulfillment", "Payment_Method",
                 "IRN_Status", "Month", "Month_Label"]
@@ -396,7 +419,6 @@ def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
 
 
 def _collect_csv_entries(main_zip_file):
-    """Walk nested ZIPs and collect all CSV entries without reading their bytes yet."""
     entries = []
     skipped = []
 
@@ -421,11 +443,6 @@ def _collect_csv_entries(main_zip_file):
 
 
 def load_mtr_from_main_zip(main_zip_file):
-    """
-    Memory-efficient MTR loader.
-    Processes one CSV at a time, frees each after parsing,
-    and does a single pd.concat at the end on already-downcasted frames.
-    """
     import gc
     skipped   = []
     csv_count = 0
@@ -493,7 +510,6 @@ def load_mtr_from_main_zip(main_zip_file):
 # 7) SALES DATA LOADERS
 # ══════════════════════════════════════════════════════════════
 def _downcast_sales(df: pd.DataFrame) -> pd.DataFrame:
-    """Shrink the unified sales_df: category for Source/TxnType, float32 for Quantity."""
     for c in ["Transaction Type", "Source"]:
         if c in df.columns:
             df[c] = df[c].astype("category")
@@ -537,13 +553,10 @@ def merge_daily_into_sales(
 
 
 # ══════════════════════════════════════════════════════════════
-# DAILY REPORT PARSERS  (new platform-specific formats)
-# Each returns a unified DataFrame with columns:
-#   Date, SKU, Platform, TxnType, Quantity, Revenue, State, OrderId
+# DAILY REPORT PARSERS
 # ══════════════════════════════════════════════════════════════
 
 def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id=""):
-    """Helper: create one standardised daily-order row as a dict."""
     return {
         "Date":      pd.to_datetime(date, errors="coerce"),
         "SKU":       str(sku).strip(),
@@ -558,25 +571,29 @@ def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id="
 
 def detect_daily_platform(file_obj) -> str:
     """
-    Auto-detect which marketplace a daily report belongs to by inspecting
-    its column names — no filename matching needed.
+    FIX: Properly distinguish Myntra PPMP CSV from Flipkart PPMP CSV.
 
-    Fingerprints:
+    Fingerprints (in priority order):
       Amazon              → 'merchant sku'  +  'amazon order id'
-      Flipkart PPMP order → 'seller sku code'  +  'store order id'
       Meesho              → 'reason for credit entry'  +  'sub order no'
+      Myntra PPMP CSV     → 'sku_id' (with underscore) + 'order_created_date' or 'packet_id'
+                            OR 'skuid' + 'order_created_date'
+                            (Myntra PPMP uses snake_case column names)
+      Flipkart PPMP order → 'seller sku code'  +  'store order id'
+                            (Flipkart PPMP uses space-separated column names)
       Flipkart Earn More  → 'sku id' + 'final sale units' + 'gross units'
                             AND 'vertical' column contains 'shopsy' in any row
       Myntra Earn More    → 'sku id' + 'final sale units' + 'gross units'
                             AND no 'shopsy' in 'vertical' column
 
-    Returns one of: 'amazon' | 'flipkart' | 'meesho' | 'myntra' | 'unknown'
+    Returns one of: 'amazon' | 'flipkart' | 'meesho' | 'myntra' | 'myntra_ppmp' | 'unknown'
+    Note: 'myntra_ppmp' means Myntra PPMP order CSV (not Earn More xlsx)
     """
     try:
         file_obj.seek(0)
         name = getattr(file_obj, "name", "").lower()
         if name.endswith(".xlsx") or name.endswith(".xls"):
-            df = pd.read_excel(file_obj, nrows=50)   # read enough rows to catch Shopsy
+            df = pd.read_excel(file_obj, nrows=50)
         else:
             for enc in ["utf-8", "latin-1", "cp1252"]:
                 try:
@@ -588,36 +605,54 @@ def detect_daily_platform(file_obj) -> str:
             else:
                 return "unknown"
 
-        cols = set(c.strip().lower() for c in df.columns)
-        file_obj.seek(0)  # always reset after reading
+        # Get both original and lowercased column names
+        orig_cols = list(df.columns)
+        cols_lower = set(c.strip().lower() for c in orig_cols)
+        # Also get snake_case versions (replace spaces with underscores)
+        cols_snake = set(c.strip().lower().replace(" ", "_") for c in orig_cols)
 
-        if "merchant sku" in cols and "amazon order id" in cols:
+        file_obj.seek(0)
+
+        # Amazon: has 'merchant sku' AND 'amazon order id'
+        if "merchant sku" in cols_lower and "amazon order id" in cols_lower:
             return "amazon"
-        if "seller sku code" in cols and "store order id" in cols:
-            return "flipkart"
-        if "reason for credit entry" in cols and "sub order no" in cols:
+
+        # Meesho: has 'reason for credit entry' AND 'sub order no'
+        if "reason for credit entry" in cols_lower and "sub order no" in cols_lower:
             return "meesho"
-        if "sku id" in cols and "final sale units" in cols and "gross units" in cols:
-            # Distinguish Flipkart Earn More from Myntra Earn More:
-            # Flipkart's report has 'Shopsy*' verticals; Myntra's does not.
-            if "vertical" in cols:
-                verticals = df["Vertical"].astype(str).str.lower() if "Vertical" in df.columns else \
-                            df[[c for c in df.columns if c.lower() == "vertical"][0]].astype(str).str.lower()
-                if verticals.str.contains("shopsy", na=False).any():
-                    return "flipkart"
+
+        # FIX: Myntra PPMP CSV uses snake_case column names like:
+        # sku_id, order_created_date, packet_id, order_status, etc.
+        # Key distinguisher: 'order_created_date' (snake_case) which Flipkart PPMP does NOT have
+        # Flipkart PPMP uses 'created on' (space, no underscore)
+        myntra_ppmp_signals = (
+            ("sku_id" in cols_lower or "skuid" in cols_lower) and
+            ("order_created_date" in cols_lower or "packet_id" in cols_lower)
+        )
+        if myntra_ppmp_signals:
+            return "myntra_ppmp"
+
+        # Flipkart PPMP: 'seller sku code' + 'store order id' (space-separated)
+        if "seller sku code" in cols_lower and "store order id" in cols_lower:
+            return "flipkart"
+
+        # Earn More reports (xlsx): 'sku id' + 'final sale units' + 'gross units'
+        if "sku id" in cols_lower and "final sale units" in cols_lower and "gross units" in cols_lower:
+            if "vertical" in cols_lower:
+                # Find the actual column name with that lowercased value
+                vert_col = next((c for c in orig_cols if c.strip().lower() == "vertical"), None)
+                if vert_col:
+                    verticals = df[vert_col].astype(str).str.lower()
+                    if verticals.str.contains("shopsy", na=False).any():
+                        return "flipkart"
             return "myntra"
+
         return "unknown"
     except Exception:
         return "unknown"
 
 
 def parse_daily_amazon_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
-    """
-    Parse Amazon daily shipment CSV (e.g. 937788020504.csv).
-    Columns: Customer Shipment Date, Merchant SKU, Quantity, Product Amount,
-             Amazon Order Id, Shipment To State, ...
-    Every row = 1 shipped unit. No returns in this report format.
-    """
     try:
         file_obj.seek(0)
         df = pd.read_csv(file_obj)
@@ -647,12 +682,6 @@ def parse_daily_amazon_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
 
 
 def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
-    """
-    Parse Flipkart/Myntra PPMP daily seller orders CSV.
-    Columns: seller sku code, order status, final amount, seller price, state, created on, ...
-    Status codes: WP=Waiting for Pickup, PK=Packed, SH=Shipped, F=Failed/Cancelled
-    WP + PK + SH = active orders that need stock; F = cancelled, excluded.
-    """
     try:
         file_obj.seek(0)
         df = pd.read_csv(file_obj)
@@ -661,10 +690,10 @@ def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
         df.columns = df.columns.str.strip().str.lower()
 
         STATUS_TXNTYPE = {
-            "wp": "Shipment",   # waiting for pickup — stock committed
-            "pk": "Shipment",   # packed
-            "sh": "Shipment",   # shipped
-            "f":  "Cancel",     # failed / cancelled
+            "wp": "Shipment",
+            "pk": "Shipment",
+            "sh": "Shipment",
+            "f":  "Cancel",
         }
         rows = []
         for _, r in df.iterrows():
@@ -675,7 +704,7 @@ def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
             rows.append(_std_daily(
                 date     = r.get("created on"),
                 sku      = oms_sku,
-                platform = "Flipkart/Myntra",
+                platform = "Flipkart",
                 txn_type = txn,
                 qty      = 1,
                 revenue  = pd.to_numeric(r.get("seller price", r.get("final amount", 0)), errors="coerce") or 0,
@@ -691,13 +720,6 @@ def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
 
 
 def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
-    """
-    Parse Meesho daily orders CSV.
-    Columns: Reason for Credit Entry, Sub Order No, SKU, Size, Quantity, Order Date,
-             Supplier Discounted Price, Customer State, ...
-    Reasons: SHIPPED, READY_TO_SHIP → active; CANCELLED → excluded; HOLD/PENDING → pending.
-    Meesho puts SKU + Size separately — combine to get full variant SKU (e.g. 1485PLYKMUSTARD-XL).
-    """
     try:
         file_obj.seek(0)
         df = pd.read_csv(file_obj)
@@ -717,7 +739,6 @@ def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
             txn     = REASON_TXNTYPE.get(reason, "Shipment")
             raw_sku = str(r.get("SKU", "")).strip()
             size    = str(r.get("Size", "")).strip()
-            # Build full variant SKU (same format as monthly files)
             full_sku = f"{raw_sku}-{size}" if size and size.lower() not in ("nan","") else raw_sku
             oms_sku  = map_to_oms_sku(full_sku, mapping)
             qty      = pd.to_numeric(r.get("Quantity", 1), errors="coerce") or 1
@@ -740,14 +761,121 @@ def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# FIX: Added dedicated Myntra PPMP CSV parser (snake_case columns)
+def parse_daily_myntra_ppmp_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Parse Myntra PPMP daily order CSV.
+    Myntra PPMP uses snake_case column names:
+      sku_id / skuid, order_created_date, packet_id, order_status,
+      quantity, shipment_value / net_amount, state / customer_delivery_state_code
+    """
+    try:
+        file_obj.seek(0)
+        for enc in ["utf-8", "latin-1", "cp1252"]:
+            try:
+                file_obj.seek(0)
+                df = pd.read_csv(file_obj, encoding=enc)
+                break
+            except Exception:
+                continue
+        else:
+            return pd.DataFrame()
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df.columns = df.columns.str.strip().str.lower()
+
+        # Date column
+        date_col = next(
+            (c for c in df.columns if c in ["order_created_date", "order_date", "created_date"]),
+            None
+        )
+        if not date_col:
+            return pd.DataFrame()
+
+        # SKU column
+        sku_col = next(
+            (c for c in df.columns if c in ["sku_id", "skuid", "sku"]),
+            None
+        )
+        if not sku_col:
+            return pd.DataFrame()
+
+        # Quantity
+        qty_col = next((c for c in df.columns if c == "quantity"), None)
+
+        # Revenue
+        rev_col = next(
+            (c for c in df.columns if c in ["shipment_value", "net_amount", "invoice_amount", "invoiceamount"]),
+            None
+        )
+
+        # Order ID
+        order_col = next(
+            (c for c in df.columns if c in ["packet_id", "order_id", "order_release_id"]),
+            None
+        )
+
+        # Status
+        status_col = next((c for c in df.columns if "order_status" in c), None)
+
+        def _myntra_ppmp_txn(s):
+            s = str(s).strip().upper()
+            # Return / RTO statuses
+            if s in ("RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
+                     "RETURN_REQUESTED", "RETURN_PICKUP_INITIATED", "RETURN_PICKED",
+                     "RETURN_RECEIVED", "EXCHANGE_RETURN_REQUESTED"):
+                return "Refund"
+            # Cancel statuses
+            if s in ("CANCELLED", "CANCEL", "F", "IC", "FAILED", "CANCELLATION_REQUESTED"):
+                return "Cancel"
+            # Active / shipped statuses
+            if s in ("SHIPPED", "CONFIRMED", "DELIVERED", "SH", "C", "PK", "WP",
+                     "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
+                     "MANIFESTED", "OUT_FOR_DELIVERY"):
+                return "Shipment"
+            # Default to Shipment for unknown statuses
+            return "Shipment"
+
+        rows = []
+        for _, r in df.iterrows():
+            raw_sku = str(r.get(sku_col, "")).strip()
+            oms_sku = map_to_oms_sku(raw_sku, mapping)
+            txn = _myntra_ppmp_txn(r.get(status_col, "")) if status_col else "Shipment"
+            qty = pd.to_numeric(r.get(qty_col, 1), errors="coerce") or 1 if qty_col else 1
+            rev = pd.to_numeric(r.get(rev_col, 0), errors="coerce") or 0 if rev_col else 0
+            state_col_val = next((c for c in df.columns if c in ["state", "customer_delivery_state_code"]), None)
+            state = str(r.get(state_col_val, "")).strip() if state_col_val else ""
+            oid = str(r.get(order_col, "")) if order_col else ""
+
+            rows.append(_std_daily(
+                date     = r.get(date_col),
+                sku      = oms_sku,
+                platform = "Myntra",
+                txn_type = txn,
+                qty      = qty,
+                revenue  = rev,
+                state    = state,
+                order_id = oid,
+            ))
+
+        if not rows:
+            return pd.DataFrame()
+
+        out = pd.DataFrame(rows)
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        return out.dropna(subset=["Date"])
+    except Exception as e:
+        st.warning(f"Myntra PPMP daily parse error: {e}")
+        return pd.DataFrame()
+
+
 def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str], platform: str = "Myntra") -> pd.DataFrame:
     """
     Parse Myntra OR Flipkart Earn More / daily summary report (.xlsx).
-    Both platforms share the same column schema:
-        SKU ID, Order Date, Gross Units, Final Sale Units, Cancellation Units,
-        Return Units, Final Sale Amount, ...
-    Pass platform="Flipkart" when detect_daily_platform() identifies it as Flipkart
-    (detected via 'Shopsy' values in the Vertical column).
+    Columns: SKU ID, Order Date, Gross Units, Final Sale Units, Cancellation Units,
+             Return Units, Final Sale Amount, ...
     """
     try:
         file_obj.seek(0)
@@ -786,7 +914,6 @@ def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str], platform: str = "
 
 
 def combine_daily_orders(*dfs) -> pd.DataFrame:
-    """Concatenate parsed daily DataFrames and deduplicate by (SKU, Platform, OrderId, TxnType)."""
     parts = [d for d in dfs if d is not None and not d.empty]
     if not parts:
         return pd.DataFrame()
@@ -794,7 +921,6 @@ def combine_daily_orders(*dfs) -> pd.DataFrame:
     combined["Date"]     = pd.to_datetime(combined["Date"], errors="coerce")
     combined["Quantity"] = pd.to_numeric(combined["Quantity"], errors="coerce").fillna(0)
     combined["Revenue"]  = pd.to_numeric(combined["Revenue"],  errors="coerce").fillna(0)
-    # Dedup: same order can't appear twice (protects against re-upload)
     combined = combined.drop_duplicates(
         subset=["SKU", "Platform", "OrderId", "TxnType"], keep="first"
     )
@@ -802,11 +928,6 @@ def combine_daily_orders(*dfs) -> pd.DataFrame:
 
 
 def daily_to_sales_rows(daily_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert the unified daily_orders_df into the standard sales_df schema
-    (Sku, TxnDate, Transaction Type, Quantity, Units_Effective, Source, OrderId)
-    so it feeds into merge_daily_into_sales and the PO Engine.
-    """
     if daily_df.empty:
         return pd.DataFrame()
     out = pd.DataFrame({
@@ -864,7 +985,6 @@ def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, config: Sa
 
 
 def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
-    """Legacy single-file loader used by Tier-2 monthly upload and daily snapshot."""
     try:
         df = pd.read_excel(xlsx_file, sheet_name="Sales Report")
         if df.empty:
@@ -897,14 +1017,7 @@ def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# ── Month extraction from Flipkart filename ────────────────────
 def _fk_month_from_filename(fname: str):
-    """
-    Parse YYYY-MM from Flipkart monthly filenames.
-    Handles: DEC-2025.xlsx, Jan-2025.xlsx, JAN-2026.xlsx,
-             March-2025.xlsx, July-2025.xlsx, feb-2025.xlsx, etc.
-    Returns e.g. '2025-12' or None if unparseable.
-    """
     base = Path(fname).stem.upper()
     _MON = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
             "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12,
@@ -913,7 +1026,6 @@ def _fk_month_from_filename(fname: str):
     for i, p in enumerate(parts):
         mon_num = _MON.get(p[:5]) or _MON.get(p[:4]) or _MON.get(p[:3])
         if mon_num:
-            # Look for a 4-digit year in same or adjacent part
             for q in parts:
                 if re.fullmatch(r"20\d{2}", q):
                     return f"{q}-{mon_num:02d}"
@@ -921,46 +1033,22 @@ def _fk_month_from_filename(fname: str):
 
 
 def _parse_flipkart_xlsx(file_bytes: bytes, fname: str, mapping: Dict[str, str]) -> pd.DataFrame:
-    """
-    Parse one Flipkart monthly Excel file (Sales Report sheet).
-
-    Month bucketing uses Buyer Invoice Date — Flipkart guarantees ALL rows
-    in a monthly file have a Buyer Invoice Date within that calendar month,
-    exactly analogous to Meesho's month_number field. This means we NEVER
-    need a grace period for Flipkart: the file boundary IS the month boundary.
-
-    Event Sub Types handled:
-      Sale              → TxnType='Shipment', qty positive
-      Return            → TxnType='Refund',   qty positive (units returned)
-      Cancellation      → TxnType='Cancel',   qty counted (for reporting) but Units_Effective=0
-      Return Cancellation → TxnType='ReturnCancel', reverses a prior return
-
-    Dedup key: Buyer Invoice ID — unique per transaction event in Flipkart system.
-
-    Revenue: uses Buyer Invoice Amount (correctly signed by Flipkart:
-      positive for Sale/ReturnCancel, negative for Return/Cancellation).
-    """
     try:
         xl   = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Sales Report")
         if xl.empty:
             return pd.DataFrame()
 
-        # Strip trailing spaces that vary between monthly exports
         xl.columns = xl.columns.str.strip()
 
-        # ── Month: Buyer Invoice Date (always in the file's calendar month) ──
-        # Fall back to Order Date only if Buyer Invoice Date missing
         date_col = "Buyer Invoice Date" if "Buyer Invoice Date" in xl.columns else "Order Date"
         xl["Date"] = pd.to_datetime(xl[date_col], errors="coerce")
 
-        # Month from filename is the authoritative source (like Meesho month_number)
         file_month = _fk_month_from_filename(fname)
         if file_month:
             xl["Month"] = file_month
         else:
             xl["Month"] = xl["Date"].dt.to_period("M").astype(str)
 
-        # ── Transaction type ──
         def _fk_txn(event):
             e = str(event).strip()
             if e == "Sale":                return "Shipment"
@@ -970,18 +1058,14 @@ def _parse_flipkart_xlsx(file_bytes: bytes, fname: str, mapping: Dict[str, str])
             return "Shipment"
         xl["TxnType"] = xl["Event Sub Type"].apply(_fk_txn)
 
-        # ── Quantity & revenue ──
         xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
         xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
 
-        # ── OMS SKU (strip Flipkart triple-quote format) ──
         xl["OMS_SKU"] = xl["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
 
-        # ── State for geography charts ──
         state_col = next((c for c in xl.columns if "Delivery State" in c), None)
         xl["State"] = xl[state_col].fillna("").astype(str).str.upper().str.strip() if state_col else ""
 
-        # ── Order / Invoice IDs for dedup ──
         xl["OrderId"]         = xl.get("Order ID",         xl.get("Order Id",         "")).astype(str)
         xl["BuyerInvoiceId"]  = xl.get("Buyer Invoice ID", xl.get("Buyer Invoice Id", "")).astype(str)
 
@@ -990,22 +1074,10 @@ def _parse_flipkart_xlsx(file_bytes: bytes, fname: str, mapping: Dict[str, str])
         return out.dropna(subset=["Date"])
 
     except Exception as e:
-        return pd.DataFrame()  # caller logs the skip
+        return pd.DataFrame()
 
 
 def load_flipkart_full(main_zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
-    """
-    Load ALL Flipkart monthly Excel files from a master ZIP.
-
-    Each .xlsx inside the ZIP is a monthly Flipkart Sales Report.
-    Month is sourced from the filename (DEC-2025.xlsx → 2025-12), which
-    mirrors how we use Meesho's month_number field — immune to cross-month
-    order dates that would otherwise require a grace period.
-
-    Dedup: full-row drop_duplicates() to remove identical rows from re-uploads
-    while preserving legitimate duplicate Order Item IDs (Return + Return
-    Cancellation pairs that cancel each other out in revenue but both count).
-    """
     dfs     = []
     skipped = []
     try:
@@ -1041,14 +1113,11 @@ def load_flipkart_full(main_zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(dfs, ignore_index=True)
-    # Full-row dedup: keeps Return+ReturnCancel pairs (differ in TxnType/Invoice_Amount)
-    # while removing exact duplicates from accidental re-uploads of the same file.
     combined = combined.drop_duplicates(keep="first")
     return combined
 
 
 def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
-    """Convert Flipkart analytics df into the standard sales_df format."""
     if fk_df.empty:
         return pd.DataFrame()
     out = pd.DataFrame({
@@ -1067,45 +1136,25 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
-    """
-    Parse one Meesho monthly inner ZIP.
-
-    KEY FIX: For RETURNS (Refund type rows), use the actual return/refund date
-    column (return_date, return_created_date, return_pickup_date) rather than
-    order_date. This ensures return quantities land in the correct calendar month
-    and aren't lost when filtering by month.
-
-    Two formats exist:
-      A) Non-GST: ForwardReports.xlsx + Reverse.xlsx
-      B) GST:     tcs_sales.xlsx + tcs_sales_return.xlsx
-    """
     files = {f.lower(): f for f in inner_zf.namelist()}
     rows  = []
 
     def _best_date_col(df, prefer_return: bool = False) -> str:
-        """
-        Pick the best available date column.
-        For return rows: prefer return_date > return_created_date > return_pickup_date > order_date.
-        For forward rows: prefer order_date > created_date.
-        """
         cols_lower = {c.lower(): c for c in df.columns}
         if prefer_return:
             for candidate in ["return_date", "return_created_date", "return_pickup_date",
                                "pickup_date", "reverse_pickup_date"]:
                 if candidate in cols_lower:
                     return cols_lower[candidate]
-        # Fall back to order date
         for candidate in ["order_date", "created_date", "order_created_date"]:
             if candidate in cols_lower:
                 return cols_lower[candidate]
         return None
 
-    # ── Format B: GST zips ──
     if "tcs_sales.xlsx" in files:
         with inner_zf.open(files["tcs_sales.xlsx"]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
-            # Use order_date as the transaction Date
             date_col = _best_date_col(df, prefer_return=False)
             df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
@@ -1113,35 +1162,6 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             df["_TxnType"] = "Shipment"
-            # KEY FIX 1: Build Month from Meesho's own financial_year + month_number
-            # columns instead of deriving it from order_date. This guarantees every
-            # row lands in the exact month Meesho intends, regardless of order_date
-            # edge-cases (e.g. Dec orders placed in Nov due to timezone).
-            if "financial_year" in df.columns and "month_number" in df.columns:
-                df["_Month"] = df.apply(
-                    lambda r: f"{int(r['financial_year'])}-{int(r['month_number']):02d}"
-                    if pd.notna(r.get("financial_year")) and pd.notna(r.get("month_number"))
-                    else None, axis=1
-                )
-            else:
-                df["_Month"] = None  # will fall back to date-derived month below
-            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
-
-    if "tcs_sales_return.xlsx" in files:
-        with inner_zf.open(files["tcs_sales_return.xlsx"]) as fh:
-            df = pd.read_excel(fh)
-        if not df.empty:
-            # KEY FIX 2: Use cancel_return_date (not order_date) as the transaction
-            # Date so returns are time-stamped to when they actually came back,
-            # not when the original order was placed (which can be months earlier).
-            date_col = _best_date_col(df, prefer_return=True)
-            df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
-            df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
-            df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
-            df["_State"]   = df.get("end_customer_state_new", "")
-            df["_OrderId"] = df.get("sub_order_num", "").astype(str)
-            df["_TxnType"] = "Refund"
-            # KEY FIX 1 (same as above): use Meesho's month_number for Month bucketing
             if "financial_year" in df.columns and "month_number" in df.columns:
                 df["_Month"] = df.apply(
                     lambda r: f"{int(r['financial_year'])}-{int(r['month_number']):02d}"
@@ -1152,7 +1172,27 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 df["_Month"] = None
             rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
 
-    # ── Format A: Non-GST zips ──
+    if "tcs_sales_return.xlsx" in files:
+        with inner_zf.open(files["tcs_sales_return.xlsx"]) as fh:
+            df = pd.read_excel(fh)
+        if not df.empty:
+            date_col = _best_date_col(df, prefer_return=True)
+            df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
+            df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
+            df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
+            df["_State"]   = df.get("end_customer_state_new", "")
+            df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_TxnType"] = "Refund"
+            if "financial_year" in df.columns and "month_number" in df.columns:
+                df["_Month"] = df.apply(
+                    lambda r: f"{int(r['financial_year'])}-{int(r['month_number']):02d}"
+                    if pd.notna(r.get("financial_year")) and pd.notna(r.get("month_number"))
+                    else None, axis=1
+                )
+            else:
+                df["_Month"] = None
+            rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
+
     if "forwardreports.xlsx" in files and not rows:
         with inner_zf.open(files["forwardreports.xlsx"]) as fh:
             df = pd.read_excel(fh)
@@ -1169,7 +1209,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 if "cancel" in s:               return "Cancel"
                 return "Shipment"
             df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
-            df["_Month"]   = None  # Non-GST has no month_number; will use date
+            df["_Month"]   = None
             rows.append(df[["_Date","_TxnType","_Qty","_Rev","_State","_OrderId","_Month"]])
 
     if "reverse.xlsx" in files and not any(
@@ -1178,7 +1218,6 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
         with inner_zf.open(files["reverse.xlsx"]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
-            # Use return date for reverse rows
             date_col = _best_date_col(df, prefer_return=True)
             df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
@@ -1199,8 +1238,6 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     out["Invoice_Amount"] = out["Invoice_Amount"].astype("float32")
     out["State"]          = out["State"].astype(str).str.upper().str.strip()
 
-    # KEY FIX 1: Use Meesho's own month_number/financial_year where available
-    # (GST format). Fall back to date-derived period for non-GST format rows.
     out["Month"] = out["_Month"].where(
         out["_Month"].notna(),
         out["Date"].dt.to_period("M").astype(str)
@@ -1210,10 +1247,6 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
 
 
 def load_meesho_full(main_zip_file) -> pd.DataFrame:
-    """
-    Load ALL Meesho monthly zips (both GST and non-GST formats) from the master ZIP.
-    Returns a combined Meesho analytics DataFrame (no per-SKU — totals only).
-    """
     dfs     = []
     skipped = []
     try:
@@ -1249,24 +1282,11 @@ def load_meesho_full(main_zip_file) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(dfs, ignore_index=True)
-    # KEY FIX 3: Use full-row dedup instead of (OrderId, TxnType, Date).
-    #
-    # Why: Meesho's tcs_sales.xlsx contains "adjustment pairs" — two rows with
-    # the same sub_order_num, same date, same TxnType, but different invoice
-    # amounts (one positive + one small negative correction). The old 3-column
-    # dedup was collapsing these pairs into one row, dropping the correction
-    # row and silently losing quantity units. Full-row dedup keeps both rows of
-    # a pair (since Invoice_Amount differs) while still removing truly identical
-    # duplicate rows that can appear when the same monthly ZIP is loaded twice.
     combined = combined.drop_duplicates(keep="first")
     return combined
 
 
 def meesho_to_sales_rows(meesho_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert Meesho analytics df into the standard sales_df format.
-    Since there's no per-SKU data, all units go under Sku='MEESHO_TOTAL'.
-    """
     if meesho_df.empty:
         return pd.DataFrame()
     out = pd.DataFrame({
@@ -1283,7 +1303,7 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ──────────────────────────────────────────────────────────────
-# MYNTRA PPMP LOADER
+# MYNTRA PPMP LOADER (Historical ZIP)
 # ──────────────────────────────────────────────────────────────
 def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) -> pd.DataFrame:
     try:
@@ -1317,12 +1337,28 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
 
     status_col = next((c for c in df.columns if "order_status" in c), None)
+
+    # FIX: Comprehensive Myntra return/cancel status mapping
     def _myntra_txn(s):
         s = str(s).strip().upper()
-        if s in ("RTO",):                    return "Refund"
-        if s in ("F", "IC", "FAILED"):       return "Cancel"
-        if s in ("C", "SH", "PK", "SHIPPED","CONFIRMED","DELIVERED"): return "Shipment"
+        # Return / RTO statuses
+        if s in ("RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
+                 "RETURN_REQUESTED", "RETURN_PICKUP_INITIATED", "RETURN_PICKED",
+                 "RETURN_RECEIVED", "EXCHANGE_RETURN_REQUESTED",
+                 "RETURN_IN_TRANSIT", "RETURN_CANCELLED_REFUND_INITIATED"):
+            return "Refund"
+        # Cancel statuses
+        if s in ("F", "IC", "FAILED", "CANCELLED", "CANCEL",
+                 "CANCELLATION_REQUESTED", "CANCELLATION_APPROVED"):
+            return "Cancel"
+        # Active / shipped statuses
+        if s in ("C", "SH", "PK", "SHIPPED", "CONFIRMED", "DELIVERED",
+                 "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
+                 "MANIFESTED", "OUT_FOR_DELIVERY", "WP"):
+            return "Shipment"
+        # Default to Shipment for unknown statuses
         return "Shipment"
+
     df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
 
     state_col   = next((c for c in df.columns if c in ["state", "customer_delivery_state_code"]), None)
@@ -1507,18 +1543,13 @@ def _mtr_to_sales_df(mtr_df: pd.DataFrame, sku_mapping: Dict[str, str], group_by
 
 
 def get_indian_fy_quarter(date: pd.Timestamp) -> tuple:
-    """
-    Return (FY_label, Q_label) for an Indian fiscal year date.
-    Indian FY runs Apr-Mar: FY2025 = Apr 2024 – Mar 2025.
-    Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar
-    """
     m = date.month
     y = date.year
     if m >= 4:
-        fy = y + 1          # Apr 2024 → FY2025
+        fy = y + 1
         q  = 1 if m <= 6 else 2 if m <= 9 else 3
     else:
-        fy = y              # Jan 2025 → FY2025
+        fy = y
         q  = 4
     return fy, q
 
@@ -1532,10 +1563,6 @@ _Q_LABELS = {
 
 
 def quarter_col_name(fy: int, q: int) -> str:
-    """Return human-readable column label using calendar start year.
-    e.g. FY2026 Q1 (Apr-Jun 2025) → 'Apr–Jun 2025'
-         FY2026 Q4 (Jan-Mar 2026) → 'Jan–Mar 2026'
-    """
     cal_year = fy - 1 if q in (1, 2, 3) else fy
     return f"{_Q_LABELS[q]} {cal_year}"
 
@@ -1548,26 +1575,8 @@ def calculate_quarterly_history(
     group_by_parent: bool = False,
     n_quarters: int = 8,
 ) -> pd.DataFrame:
-    """
-    Build a per-SKU quarterly sales history table (Indian fiscal year quarters).
-
-    Data sources used — in priority order:
-      1. sales_df  — the merged monthly/daily sales DataFrame (Amazon + Flipkart + Meesho already inside)
-      2. mtr_df    — Amazon MTR (adds historical depth if sales_df doesn't go back far enough)
-      3. myntra_df — Myntra historical (same reason)
-
-    Returns a wide DataFrame:
-        OMS_SKU | Apr–Jun 2024 | Jul–Sep 2024 | … | Avg_Monthly | Units_30d | ADS | Status
-
-    Status thresholds (ADS = avg daily sales over last 90 days):
-        🚀 Fast Moving  : ADS ≥ 1.0  (≥30 units/month)
-        ✅ Moderate     : ADS ≥ 0.33 (≥10 units/month)
-        🐢 Slow Selling : ADS ≥ 0.10 (≥ 3 units/month)
-        ❌ Not Moving   : ADS < 0.10
-    """
     parts = []
 
-    # ── 1. sales_df (already has Amazon + Flipkart + Meesho merged) ──
     if not sales_df.empty and "Sku" in sales_df.columns:
         txn_col = "Transaction Type"
         tmp = sales_df[["Sku", "TxnDate", "Quantity", txn_col]].copy()
@@ -1576,7 +1585,6 @@ def calculate_quarterly_history(
         tmp["Qty"]  = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
         parts.append(tmp.dropna(subset=["Date"]))
 
-    # ── 2. MTR (adds deeper Amazon history) ──────────────────────────
     if mtr_df is not None and not mtr_df.empty:
         mtr_sku_col  = next((c for c in mtr_df.columns if c in ["SKU","Sku","OMS_SKU"]), None)
         mtr_date_col = next((c for c in mtr_df.columns if c in ["Date","TxnDate"]),        None)
@@ -1592,7 +1600,6 @@ def calculate_quarterly_history(
                 tmp["SKU"] = tmp["SKU"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
             parts.append(tmp.dropna(subset=["Date"]))
 
-    # ── 3. Myntra historical (adds deeper Myntra history) ────────────
     if myntra_df is not None and not myntra_df.empty:
         myn_sku_col  = next((c for c in myntra_df.columns if c in ["OMS_SKU","Sku","SKU"]),  None)
         myn_date_col = next((c for c in myntra_df.columns if c in ["Date","TxnDate"]),         None)
@@ -1622,12 +1629,10 @@ def calculate_quarterly_history(
     if group_by_parent:
         hist["SKU"] = hist["SKU"].apply(get_parent_sku)
 
-    # ── Tag each row with (FY, Q) using vectorised apply ─────────────
     fy_q = hist["Date"].apply(get_indian_fy_quarter)
     hist["FY"] = fy_q.apply(lambda x: x[0])
     hist["QN"] = fy_q.apply(lambda x: x[1])
 
-    # ── Determine which n_quarters to display (oldest → newest) ──────
     today          = pd.Timestamp.today()
     cur_fy, cur_q  = get_indian_fy_quarter(today)
     quarter_seq    = []
@@ -1638,9 +1643,8 @@ def calculate_quarterly_history(
         if q_i == 0:
             q_i = 4
             fy_i -= 1
-    quarter_seq = list(reversed(quarter_seq))   # oldest first
+    quarter_seq = list(reversed(quarter_seq))
 
-    # ── Pivot: SKU × quarter_col ──────────────────────────────────────
     hist["col"] = hist.apply(
         lambda r: quarter_col_name(int(r["FY"]), int(r["QN"])), axis=1
     )
@@ -1650,7 +1654,6 @@ def calculate_quarterly_history(
     pivot = pivot.rename(columns={"SKU": "OMS_SKU"})
     pivot.columns.name = None
 
-    # Ensure every quarter column exists, in order, even if no sales
     ordered_q_cols = []
     for fy_j, q_j in quarter_seq:
         col = quarter_col_name(fy_j, q_j)
@@ -1660,25 +1663,20 @@ def calculate_quarterly_history(
 
     pivot = pivot[["OMS_SKU"] + ordered_q_cols]
 
-    # ── Summary metrics ───────────────────────────────────────────────
-    # Avg Monthly = mean of last 4 full quarters ÷ 3 (quarter→month)
     last4 = ordered_q_cols[-4:]
     pivot["Avg_Monthly"] = (pivot[last4].mean(axis=1) / 3).round(1)
 
-    # ADS based on last 90 days actual data
     cutoff_90 = today - timedelta(days=90)
     r90 = hist[hist["Date"] >= cutoff_90].groupby("SKU")["Qty"].sum().reset_index()
     r90.columns = ["OMS_SKU", "Units_90d"]
     pivot = pivot.merge(r90, on="OMS_SKU", how="left").fillna({"Units_90d": 0})
     pivot["ADS"] = (pivot["Units_90d"] / 90).round(3)
 
-    # Last 30d units
     cutoff_30 = today - timedelta(days=30)
     r30 = hist[hist["Date"] >= cutoff_30].groupby("SKU")["Qty"].sum().reset_index()
     r30.columns = ["OMS_SKU", "Units_30d"]
     pivot = pivot.merge(r30, on="OMS_SKU", how="left").fillna({"Units_30d": 0})
 
-    # Frequency = distinct sale days in last 30d (how many days had ≥1 unit sold)
     f30 = (
         hist[hist["Date"] >= cutoff_30]
         .assign(_day=lambda d: d["Date"].dt.normalize())
@@ -1689,7 +1687,6 @@ def calculate_quarterly_history(
     pivot = pivot.merge(f30, on="OMS_SKU", how="left").fillna({"Freq_30d": 0})
     pivot["Freq_30d"] = pivot["Freq_30d"].astype(int)
 
-    # Status classification
     def _status(ads):
         if ads >= 1.0:  return "🚀 Fast Moving"
         if ads >= 0.33: return "✅ Moderate"
@@ -1830,11 +1827,10 @@ def calculate_po_base(
     return po_df
 
 # ══════════════════════════════════════════════════════════════
-# 12) SIDEBAR — FILE UPLOADS  (3-Tier: Historical / Monthly / Daily)
+# 12) SIDEBAR — FILE UPLOADS
 # ══════════════════════════════════════════════════════════════
 st.sidebar.markdown("## 📂 Data Upload")
 
-# ── Always Required ──────────────────────────────────────────
 map_file = st.sidebar.file_uploader(
     "1️⃣ SKU Mapping (Required)",
     type=["xlsx"],
@@ -1857,13 +1853,12 @@ with st.sidebar.expander("📚 Tier 1 — Historical Data (Multi-Year)", expande
     mtr_main_zip = st.file_uploader(
         "Amazon MTR — Master ZIP (all months/years)",
         type=["zip"], key="mtr_main_zip",
-        help="ZIP containing all monthly Amazon MTR CSVs (B2B + B2C). "
-             "Covers 2+ years. Used for tax analytics AND as the LY source for PO seasonality."
+        help="ZIP containing all monthly Amazon MTR CSVs (B2B + B2C)."
     )
     f_meesho = st.file_uploader(
         "Meesho — Master ZIP (all months/years)",
         type=["zip"], key="meesho",
-        help="Master ZIP containing all Meesho monthly ZIPs. Both GST and non-GST formats supported."
+        help="Master ZIP containing all Meesho monthly ZIPs."
     )
     f_myntra = st.file_uploader(
         "Myntra PPMP — Master ZIP (all months/years)",
@@ -1873,8 +1868,7 @@ with st.sidebar.expander("📚 Tier 1 — Historical Data (Multi-Year)", expande
     f_flipkart_zip = st.file_uploader(
         "Flipkart — Master ZIP (all months/years)",
         type=["zip"], key="flipkart_zip",
-        help="ZIP containing all Flipkart monthly Sales Report Excel files (e.g. DEC-2025.xlsx). "
-             "Month is detected from the filename. Each file must have a 'Sales Report' sheet."
+        help="ZIP containing all Flipkart monthly Sales Report Excel files."
     )
 
 st.sidebar.divider()
@@ -1882,28 +1876,24 @@ st.sidebar.divider()
 with st.sidebar.expander("📅 Tier 2 — Monthly Sales (Recent Velocity)", expanded=True):
     st.caption(
         "Upload this month's (or last month's) sales exports. These drive the **Recent ADS** "
-        "in the PO Engine and the **Sales Dashboard**. Replace with fresh files each month."
+        "in the PO Engine and the **Sales Dashboard**."
     )
 
     f_b2c = st.file_uploader(
         "Amazon B2C Sales (ZIP)",
         type=["zip"], key="b2c",
-        help="Amazon B2C order-level ZIP export for the current/last month."
     )
     f_b2b = st.file_uploader(
         "Amazon B2B Sales (ZIP)",
         type=["zip"], key="b2b",
-        help="Amazon B2B order-level ZIP export for the current/last month."
     )
     f_fk = st.file_uploader(
         "Flipkart Sales (Excel)",
         type=["xlsx"], key="fk",
-        help="Flipkart Sales Report Excel (sheet name: 'Sales Report')."
     )
     f_transfer = st.file_uploader(
         "Amazon Stock Transfer (ZIP)",
         type=["zip"], key="transfer",
-        help="Amazon inter-FC stock transfer report for the Logistics tab."
     )
 
 st.sidebar.divider()
@@ -1911,32 +1901,14 @@ st.sidebar.divider()
 with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Inventory + Today's Sales)", expanded=True):
     st.caption(
         "Today's inventory snapshots **and** latest daily sales files. "
-        "Daily sales are merged on top of your monthly files — "
-        "no double-counting: if a day already exists in monthly data, "
-        "the daily file takes priority for that day."
+        "The platform is detected automatically from the file contents."
     )
 
     st.markdown("**📦 Inventory (refresh daily)**")
-    i_oms = st.file_uploader(
-        "OMS Inventory (CSV)",
-        type=["csv"], key="oms",
-        help="OMS warehouse inventory export. Columns: Item SkuCode, Inventory."
-    )
-    i_fk = st.file_uploader(
-        "Flipkart Inventory (CSV)",
-        type=["csv"], key="fk_inv",
-        help="Flipkart listing inventory CSV. Columns: SKU, Live on Website."
-    )
-    i_myntra = st.file_uploader(
-        "Myntra Inventory (CSV)",
-        type=["csv"], key="myntra",
-        help="Myntra sellable inventory CSV. Columns: Seller SKU Code, Sellable Inventory Count."
-    )
-    i_amz = st.file_uploader(
-        "Amazon Inventory (CSV)",
-        type=["csv"], key="amz",
-        help="Amazon inventory ledger CSV. Columns: MSKU, Ending Warehouse Balance."
-    )
+    i_oms = st.file_uploader("OMS Inventory (CSV)",     type=["csv"], key="oms")
+    i_fk  = st.file_uploader("Flipkart Inventory (CSV)",type=["csv"], key="fk_inv")
+    i_myntra = st.file_uploader("Myntra Inventory (CSV)",type=["csv"], key="myntra")
+    i_amz = st.file_uploader("Amazon Inventory (CSV)",  type=["csv"], key="amz")
 
     st.markdown("**🗓️ Daily Orders — PO Check**")
     st.caption(
@@ -1948,16 +1920,11 @@ with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Inventory + Today's Sa
         type=["csv", "xlsx"],
         accept_multiple_files=True,
         key="daily_auto",
-        help="Accepted formats:\n"
-             "• Amazon: CSV with 'Merchant SKU' + 'Amazon Order Id'\n"
-             "• Flipkart/Myntra PPMP: CSV with 'seller sku code' + 'store order id'\n"
-             "• Meesho: CSV with 'Reason for Credit Entry' + 'Sub Order No'\n"
-             "• Myntra Earn More: XLSX with 'SKU ID' + 'Final Sale Units' + 'Gross Units'"
+        help="Accepted: Amazon CSV, Flipkart PPMP CSV, Meesho CSV, Myntra PPMP CSV, Myntra/Flipkart Earn More XLSX"
     )
 
 st.sidebar.divider()
 
-# ── Data Coverage Summary + RAM monitor ──────────────────────
 def _get_ram_mb() -> float:
     try:
         import psutil, os
@@ -2081,8 +2048,8 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
                     gc.collect()
 
-                meesho_df_ss  = st.session_state.get("meesho_df",   pd.DataFrame())
-                myntra_df_ss  = st.session_state.get("myntra_df",   pd.DataFrame())
+                meesho_df_ss   = st.session_state.get("meesho_df",   pd.DataFrame())
+                myntra_df_ss   = st.session_state.get("myntra_df",   pd.DataFrame())
                 flipkart_df_ss = st.session_state.get("flipkart_df", pd.DataFrame())
                 if not meesho_df_ss.empty:
                     sales_parts.append(meesho_to_sales_rows(meesho_df_ss))
@@ -2099,8 +2066,8 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     gc.collect()
 
                 # ── Daily orders: auto-detect platform from file contents ──
-                _daily_parts   = []
-                _daily_detected = {}   # fname → detected platform (for UI feedback)
+                _daily_parts    = []
+                _daily_detected = {}
                 for _f in (d_daily_files or []):
                     _platform = detect_daily_platform(_f)
                     _daily_detected[_f.name] = _platform
@@ -2109,9 +2076,7 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                         if _platform == "amazon":
                             _d = parse_daily_amazon_csv(_f, st.session_state.sku_mapping)
                         elif _platform == "flipkart":
-                            # Two Flipkart formats:
-                            #   .xlsx  → Flipkart Earn More report (same schema as Myntra earn_more)
-                            #   .csv   → Flipkart PPMP seller orders CSV
+                            # Flipkart Earn More (.xlsx) vs Flipkart PPMP (.csv)
                             if _fname_lower.endswith(".xlsx") or _fname_lower.endswith(".xls"):
                                 _d = parse_daily_myntra_xlsx(_f, st.session_state.sku_mapping, platform="Flipkart")
                             else:
@@ -2119,7 +2084,11 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                         elif _platform == "meesho":
                             _d = parse_daily_meesho_csv(_f, st.session_state.sku_mapping)
                         elif _platform == "myntra":
+                            # Myntra Earn More XLSX
                             _d = parse_daily_myntra_xlsx(_f, st.session_state.sku_mapping, platform="Myntra")
+                        elif _platform == "myntra_ppmp":
+                            # FIX: Myntra PPMP CSV — use dedicated parser
+                            _d = parse_daily_myntra_ppmp_csv(_f, st.session_state.sku_mapping)
                         else:
                             st.sidebar.warning(f"⚠️ Could not detect platform for **{_f.name}** — skipped.")
                             continue
@@ -2130,8 +2099,9 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     gc.collect()
 
                 if _daily_detected:
-                    _icons = {"amazon":"🟠","flipkart":"🟡","meesho":"🔴","myntra":"🟣","unknown":"⚪"}
-                    _lines = [f"{_icons.get(p,'⚪')} **{fn}** → {p.title()}"
+                    _icons = {"amazon":"🟠","flipkart":"🟡","meesho":"🔴",
+                              "myntra":"🟣","myntra_ppmp":"🟣","unknown":"⚪"}
+                    _lines = [f"{_icons.get(p,'⚪')} **{fn}** → {p.replace('_ppmp',' PPMP').title()}"
                               for fn, p in _daily_detected.items()]
                     st.session_state["daily_detect_log"] = _lines
 
@@ -2139,7 +2109,6 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     _daily_combined = combine_daily_orders(*_daily_parts)
                     st.session_state.daily_orders_df = _daily_combined
 
-                    # Also feed into sales_df for PO Engine velocity calculation
                     _daily_sales = daily_to_sales_rows(_daily_combined)
                     if not _daily_sales.empty:
                         base = st.session_state.sales_df
@@ -2182,9 +2151,9 @@ if not st.session_state.sku_mapping:
 # ══════════════════════════════════════════════════════════════
 # 14) MAIN TABS
 # ══════════════════════════════════════════════════════════════
-tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_flipkart, tab_daily, tab_inv, tab_po, tab_logistics, tab_forecast, tab_drill = st.tabs([
+tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_flipkart, tab_daily, tab_inv, tab_po, tab_prod, tab_logistics, tab_forecast, tab_drill = st.tabs([
     "📊 Dashboard", "📑 MTR Analytics", "🛍️ Myntra", "🛒 Meesho", "🟡 Flipkart",
-    "📋 Daily Orders", "📦 Inventory", "🎯 PO Engine", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
+    "📋 Daily Orders", "📦 Inventory", "🎯 PO Engine", "🏭 Production (WIP)", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -2539,6 +2508,11 @@ with tab_myntra:
             k7.metric("💳 AOV",         fmt_inr(aov))
             st.divider()
 
+            # FIX: Show breakdown of return types for transparency
+            if _myn_rf.any():
+                _ret_breakdown = mf[_myn_rf].shape[0]
+                st.caption(f"ℹ️ Returns include RTO, customer returns, and exchange returns. Total return rows: {_ret_breakdown:,}")
+
             _myn_monthly = (mf[_myn_sh].groupby("Month")["Invoice_Amount"].sum().reset_index().sort_values("Month"))
             _myn_monthly_ref = (mf[_myn_rf].groupby("Month")["Invoice_Amount"].sum().abs().reset_index())
             _myn_monthly_ref.columns = ["Month","Refund_Amt"]
@@ -2621,13 +2595,9 @@ with tab_meesho:
         )
         st.caption(
             "ℹ️ Meesho does not provide per-product SKU data. Analytics shown are store-level totals. "
-            "Month bucketing uses Meesho's own `month_number` field (GST format) so sales and returns "
-            "always land in the exact month Meesho intends, matching the numbers shown in Meesho portal."
+            "Month bucketing uses Meesho's own `month_number` field (GST format)."
         )
 
-        # Simple 2-column filter — no grace period needed for GST format because
-        # Month is now sourced from financial_year+month_number (always correct).
-        # For non-GST (ForwardReports) the date-derived Month is used as before.
         with st.expander("🔧 Filters", expanded=True):
             _mee_months_all = sorted(mee["Month"].dropna().astype(str).unique().tolist())
             _mee_txn_types  = sorted(mee["TxnType"].dropna().unique().tolist())
@@ -2645,7 +2615,6 @@ with tab_meesho:
                     key="mee_txn"
                 )
 
-        # Straight Month filter — correct because parser now uses month_number
         if _sel_mee_months:
             ef = mee[
                 mee["Month"].astype(str).isin(_sel_mee_months) &
@@ -2680,7 +2649,6 @@ with tab_meesho:
             k7.metric("💳 AOV",         fmt_inr(aov))
             st.divider()
 
-            # Monthly aggregation uses the transaction's own Month for bucketing
             _mee_monthly = (ef[_mee_sh].groupby("Month")["Invoice_Amount"].sum().reset_index().sort_values("Month"))
             _mee_monthly_ref = (ef[_mee_rf].groupby("Month")["Invoice_Amount"].sum().abs().reset_index())
             _mee_monthly_ref.columns = ["Month","Refund_Amt"]
@@ -2750,16 +2718,12 @@ with tab_flipkart:
             f"Rows: **{len(fk):,}** | "
             f"Range: **{fk['Date'].min().strftime('%d %b %Y')}** → **{fk['Date'].max().strftime('%d %b %Y')}**"
         )
-        st.caption(
-            "ℹ️ Month bucketing uses **Buyer Invoice Date** — Flipkart guarantees all rows in a monthly "
-            "file carry an invoice date within that calendar month, so numbers always match the Flipkart portal exactly."
-        )
 
         with st.expander("🔧 Filters", expanded=True):
             _fk_months_all = sorted(fk["Month"].dropna().astype(str).unique().tolist())
             _fk_txn_types  = sorted(fk["TxnType"].dropna().unique().tolist())
             _fk_states_all = sorted(fk["State"].dropna().unique().tolist())
-            _fk_states_all = [s for s in _fk_states_all if s]  # remove empty
+            _fk_states_all = [s for s in _fk_states_all if s]
 
             ff1, ff2, ff3 = st.columns(3)
             with ff1:
@@ -2779,7 +2743,6 @@ with tab_flipkart:
                     default=_fk_states_all, key="fk_states"
                 )
 
-        # Apply filters
         fkf = fk[
             fk["Month"].astype(str).isin(_sel_fk_months) &
             fk["TxnType"].isin(_sel_fk_txn)
@@ -2797,11 +2760,11 @@ with tab_flipkart:
 
             gross_rev   = fkf.loc[_fk_sh,  "Invoice_Amount"].sum()
             refund_amt  = fkf.loc[_fk_rf,  "Invoice_Amount"].abs().sum()
-            rc_rev      = fkf.loc[_fk_rc,  "Invoice_Amount"].sum()   # positive — reverses returns
+            rc_rev      = fkf.loc[_fk_rc,  "Invoice_Amount"].sum()
             net_rev     = gross_rev - refund_amt + rc_rev
             units_sold  = fkf.loc[_fk_sh,  "Quantity"].sum()
             ret_units   = fkf.loc[_fk_rf,  "Quantity"].sum()
-            rc_units    = fkf.loc[_fk_rc,  "Quantity"].sum()         # return-cancellations
+            rc_units    = fkf.loc[_fk_rc,  "Quantity"].sum()
             cancel_units= fkf.loc[_fk_cn,  "Quantity"].sum()
             orders      = fkf.loc[_fk_sh,  "OrderId"].nunique()
             ret_rate    = (ret_units / units_sold * 100) if units_sold > 0 else 0
@@ -2819,7 +2782,6 @@ with tab_flipkart:
             k8.metric("💳 AOV",              fmt_inr(aov))
             st.divider()
 
-            # ── Monthly Revenue & Units Trend ──────────────────
             with st.expander("📈 Monthly Revenue & Units Trend", expanded=True):
                 _fk_monthly_sale = (
                     fkf[_fk_sh].groupby("Month")
@@ -2862,7 +2824,6 @@ with tab_flipkart:
                     fig_fk_rr.update_layout(height=280)
                     st.plotly_chart(fig_fk_rr, use_container_width=True)
 
-            # ── State-wise breakdown ────────────────────────────
             with st.expander("🗺️ State-wise Sales Distribution", expanded=False):
                 _fk_state = (
                     fkf[_fk_sh & (fkf["State"] != "")]
@@ -2887,7 +2848,6 @@ with tab_flipkart:
                     fig_st_r.update_layout(height=420, yaxis={"categoryorder":"total ascending"})
                     st.plotly_chart(fig_st_r, use_container_width=True)
 
-            # ── Event type breakdown ────────────────────────────
             with st.expander("📋 Transaction Type Breakdown", expanded=False):
                 _fk_events = (
                     fkf.groupby("TxnType")
@@ -2898,7 +2858,6 @@ with tab_flipkart:
                 _fk_events["Revenue"] = _fk_events["Revenue"].apply(fmt_inr)
                 st.dataframe(_fk_events, use_container_width=True, hide_index=True)
 
-            # ── SKU-level performance ────────────────────────────
             with st.expander("🏷️ SKU Performance", expanded=False):
                 if "OMS_SKU" in fkf.columns:
                     _fk_sku = (
@@ -2930,7 +2889,6 @@ with tab_flipkart:
                 else:
                     st.info("SKU data not available in this dataset.")
 
-            # ── Download ────────────────────────────────────────
             st.divider()
             st.download_button(
                 "⬇️ Download Filtered Data (CSV)",
@@ -2954,14 +2912,12 @@ with tab_daily:
         )
         st.stop()
 
-    # ── Auto-detection log ───────────────────────────────────
     detect_log = st.session_state.get("daily_detect_log", [])
     if detect_log:
         with st.expander("🔍 Auto-detected platforms", expanded=True):
             for line in detect_log:
                 st.markdown(line)
 
-    # ── Guard: ensure Date column is datetime with at least one valid value ──
     daily = daily.copy()
     daily["Date"] = pd.to_datetime(daily["Date"], errors="coerce")
     daily = daily.dropna(subset=["Date"])
@@ -2969,7 +2925,6 @@ with tab_daily:
         st.warning("⚠️ Daily data loaded but all rows had unparseable dates. Check files and reload.")
         st.stop()
 
-    # ── Header summary ────────────────────────────────────────
     d_active  = daily[daily["TxnType"] == "Shipment"]
     d_cancel  = daily[daily["TxnType"] == "Cancel"]
     d_pending = daily[daily["TxnType"] == "Pending"]
@@ -2992,7 +2947,6 @@ with tab_daily:
     c5.metric("💰 Revenue (Active)", fmt_inr(d_active["Revenue"].sum()))
     st.divider()
 
-    # ── Filters ───────────────────────────────────────────────
     with st.expander("🔧 Filters", expanded=True):
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
@@ -3014,18 +2968,13 @@ with tab_daily:
     if _sku_search:
         df_f = df_f[df_f["SKU"].str.contains(_sku_search.strip(), case=False, na=False)]
 
-    # ══════════════════════════════════════════════════════════
-    # SECTION A — SKU-level velocity table with PO comparison
-    # ══════════════════════════════════════════════════════════
     st.markdown("### 📊 Today's Velocity by SKU")
     st.caption(
         "Units ordered today per SKU, broken down by platform. "
         "**PO Suggest** = units the PO Engine recommends ordering based on ADS × lead time. "
-        "**⚠️ Alert** flags SKUs selling today that have zero or low PO recommendation — "
-        "these may need a manual PO review."
+        "**⚠️ Alert** flags SKUs selling today that have zero or low PO recommendation."
     )
 
-    # Aggregate active orders by SKU + Platform
     sku_pivot = (
         df_f[df_f["TxnType"].isin(["Shipment","Pending"])]
         .groupby(["SKU", "Platform"])["Quantity"]
@@ -3034,11 +2983,9 @@ with tab_daily:
         .pivot_table(index="SKU", columns="Platform", values="Quantity", fill_value=0)
         .reset_index()
     )
-    # Total column
     plat_cols = [c for c in sku_pivot.columns if c != "SKU"]
     sku_pivot["Today_Total"] = sku_pivot[plat_cols].sum(axis=1)
 
-    # Revenue per SKU (active only)
     rev_by_sku = (
         df_f[df_f["TxnType"]=="Shipment"]
         .groupby("SKU")["Revenue"].sum().reset_index()
@@ -3047,7 +2994,6 @@ with tab_daily:
     sku_pivot = sku_pivot.merge(rev_by_sku, on="SKU", how="left").fillna({"Today_Rev": 0})
     sku_pivot["Today_Rev"] = sku_pivot["Today_Rev"].apply(fmt_inr)
 
-    # Pull PO recommendation if available
     po_available = not st.session_state.sales_df.empty and not (
         st.session_state.inventory_df_variant.empty and
         st.session_state.inventory_df_parent.empty
@@ -3057,7 +3003,7 @@ with tab_daily:
             _po_quick = calculate_po_base(
                 sales_df     = st.session_state.sales_df,
                 inv_df       = st.session_state.inventory_df_variant,
-                period_days  = 37,       # 30 day + 7 grace
+                period_days  = 37,
                 lead_time    = 15,
                 target_days  = 60,
                 demand_basis = "Sold",
@@ -3081,7 +3027,6 @@ with tab_daily:
                 sku_pivot["ADS_30d"]     = sku_pivot.get("ADS_30d", pd.Series(dtype=float)).fillna(0).round(2)
                 sku_pivot["OOS"]         = sku_pivot.get("OOS", pd.Series(dtype=str)).fillna("")
 
-                # Alert: selling today but PO_Suggest = 0 AND Stock <= Today_Total*3
                 sku_pivot["Alert"] = ""
                 alert_mask = (
                     (sku_pivot["Today_Total"] > 0) &
@@ -3091,11 +3036,10 @@ with tab_daily:
                 sku_pivot.loc[alert_mask, "Alert"] = "⚠️ Review PO"
                 sku_pivot.loc[sku_pivot["OOS"] != "", "Alert"] = "🔴 OOS"
         except Exception:
-            pass  # PO calc optional — tab still works without it
+            pass
 
     sku_pivot = sku_pivot.sort_values("Today_Total", ascending=False).reset_index(drop=True)
 
-    # Highlight rows with alerts
     def _highlight_alert(row):
         if "🔴" in str(row.get("Alert", "")):
             return ["background-color: #fee2e2"] * len(row)
@@ -3110,9 +3054,6 @@ with tab_daily:
         hide_index=True,
     )
 
-    # ══════════════════════════════════════════════════════════
-    # SECTION B — Platform breakdown
-    # ══════════════════════════════════════════════════════════
     st.divider()
     st.markdown("### 🏪 Platform Breakdown")
     plat_summary = (
@@ -3141,9 +3082,6 @@ with tab_daily:
     with col_c:
         st.dataframe(plat_summary, use_container_width=True, hide_index=True)
 
-    # ══════════════════════════════════════════════════════════
-    # SECTION C — Top selling SKUs today (chart)
-    # ══════════════════════════════════════════════════════════
     st.divider()
     st.markdown("### 🏆 Top SKUs Today")
     _top_n = st.slider("Show top N SKUs", 10, 50, 20, key="daily_top_n")
@@ -3162,9 +3100,6 @@ with tab_daily:
         fig_top.update_layout(height=340, xaxis_tickangle=-45)
         st.plotly_chart(fig_top, use_container_width=True)
 
-    # ══════════════════════════════════════════════════════════
-    # SECTION D — State distribution
-    # ══════════════════════════════════════════════════════════
     with st.expander("🗺️ State Distribution", expanded=False):
         _state_df = (
             df_f[df_f["TxnType"]=="Shipment"]
@@ -3182,16 +3117,12 @@ with tab_daily:
             fig_st.update_layout(height=400, yaxis={"categoryorder":"total ascending"})
             st.plotly_chart(fig_st, use_container_width=True)
 
-    # ══════════════════════════════════════════════════════════
-    # SECTION E — Raw order detail
-    # ══════════════════════════════════════════════════════════
     with st.expander("📄 Raw Order Detail", expanded=False):
         st.dataframe(
             df_f.sort_values(["Platform","SKU"]).reset_index(drop=True),
             use_container_width=True, height=400, hide_index=True
         )
 
-    # Download
     st.divider()
     st.download_button(
         "⬇️ Download Daily Orders (CSV)",
@@ -3219,7 +3150,7 @@ with tab_inv:
         st.dataframe(inv, use_container_width=True, height=500)
 
 # ══════════════════════════════════════════════════════════════
-# TAB 6 — PO ENGINE
+# TAB 7 — PO ENGINE
 # ══════════════════════════════════════════════════════════════
 with tab_po:
     st.subheader("🎯 Purchase Order Engine")
@@ -3229,7 +3160,6 @@ with tab_po:
     ):
         st.warning("⚠️ Please load Sales data and Inventory data first, then click Load All Data.")
     else:
-        # ── View mode + parameters ────────────────────────────
         view_mode = st.radio(
             "Group By",
             ["By Variant (Size/Color)", "By Parent SKU (Style Only)"],
@@ -3238,7 +3168,6 @@ with tab_po:
         is_parent = "Parent" in view_mode
         st.divider()
 
-        # Two-column layout: parameters left, seasonal right
         col_params, col_seasonal = st.columns([3, 2])
         with col_params:
             st.markdown("#### ⚙️ PO Parameters")
@@ -3254,14 +3183,12 @@ with tab_po:
 
         with col_seasonal:
             st.markdown("#### 📅 Quarterly History Settings")
-            n_quarters = st.slider("Quarters of history to show", 4, 12, 8,
-                                   help="How many Indian fiscal year quarters to display (Q1=Apr–Jun, Q2=Jul–Sep, Q3=Oct–Dec, Q4=Jan–Mar)")
+            n_quarters = st.slider("Quarters of history to show", 4, 12, 8)
             use_seasonality  = st.checkbox("Blend with Last Year's seasonality?", value=False)
             seasonal_weight  = st.slider("Historical Weight %", 0, 100, 50) if use_seasonality else 0
 
         total_period = int(base_days + grace_days)
 
-        # ── Inventory & sales prep ────────────────────────────
         if is_parent:
             inv_for_po   = st.session_state.inventory_df_parent.copy()
             sales_for_po = st.session_state.sales_df.copy()
@@ -3270,7 +3197,6 @@ with tab_po:
             inv_for_po   = st.session_state.inventory_df_variant.copy()
             sales_for_po = st.session_state.sales_df.copy()
 
-        # ── Build quarterly history ───────────────────────────
         with st.spinner("Building quarterly history…"):
             qhist = calculate_quarterly_history(
                 sales_df        = sales_for_po,
@@ -3281,7 +3207,6 @@ with tab_po:
                 n_quarters      = n_quarters,
             )
 
-        # ── PO calculation ────────────────────────────────────
         po_df = calculate_po_base(
             sales_df        = sales_for_po,
             inv_df          = inv_for_po,
@@ -3301,7 +3226,6 @@ with tab_po:
         if po_df.empty:
             st.warning("No PO calculations available. Check that sales and inventory data overlap.")
         else:
-            # ── Compute final PO columns ──────────────────────
             po_df["Days_Left"]        = np.where(po_df["ADS"] > 0, po_df["Total_Inventory"] / po_df["ADS"], 999)
             po_df["Lead_Time_Demand"] = po_df["ADS"] * lead_time
             po_df["Target_Stock"]     = po_df["ADS"] * target_days
@@ -3319,7 +3243,6 @@ with tab_po:
                 return "⚪ OK"
             po_df["Priority"] = po_df.apply(_priority, axis=1)
 
-            # ── Seasonality banner ────────────────────────────
             if use_seasonality:
                 ly_source    = po_df.attrs.get("ly_source", "Sales")
                 ly_win_start = po_df.attrs.get("ly_window_start", None)
@@ -3336,7 +3259,6 @@ with tab_po:
                         f"Blend: {100-int(seasonal_weight)}% Recent + {int(seasonal_weight)}% LY"
                     )
 
-            # ── KPI bar ───────────────────────────────────────
             urgent = len(po_df[po_df["Priority"]=="🔴 URGENT"])
             high   = len(po_df[po_df["Priority"]=="🟡 HIGH"])
             med    = len(po_df[po_df["Priority"]=="🟢 MEDIUM"])
@@ -3349,11 +3271,6 @@ with tab_po:
             k5.metric("📊 SKUs Analysed",  f"{len(po_df):,}")
             st.divider()
 
-            # ══════════════════════════════════════════════════
-            # MAIN TABLE — exact layout matching your sheet
-            # ══════════════════════════════════════════════════
-
-            # Join quarterly history onto PO df
             if not qhist.empty:
                 master = po_df.merge(qhist, on="OMS_SKU", how="left")
             else:
@@ -3363,7 +3280,6 @@ with tab_po:
                 master["Freq_30d"]    = 0
                 master["Status"]      = "—"
 
-            # Resolve ADS/Status column collisions from merge
             if "ADS_x" in master.columns:
                 master = master.rename(columns={"ADS_x": "ADS_po", "ADS_y": "ADS_all"})
                 master["ADS"] = master["ADS_all"].fillna(master["ADS_po"])
@@ -3390,7 +3306,6 @@ with tab_po:
             ).astype(int)
             master["Priority"] = master.apply(_priority, axis=1)
 
-            # ── New derived columns matching the sheet ────────
             master["PO_Plus_Avail"]   = (master["PO_Qty"] + master["Total_Inventory"].fillna(0)).astype(int)
             master["OMS_Stock"]       = master["OMS_Inventory"].fillna(0).astype(int) if "OMS_Inventory" in master.columns else 0
             master["Avail_Inventory"] = master["Total_Inventory"].fillna(0).astype(int)
@@ -3399,10 +3314,8 @@ with tab_po:
                 if _c in master.columns:
                     master[_c] = pd.to_numeric(master[_c], errors="coerce").fillna(0)
 
-            # ── Quarter columns ───────────────────────────────
             q_cols = [c for c in master.columns if "–" in c and len(c) > 6 and c[-4:].isdigit()]
 
-            # ── Filter controls ───────────────────────────────
             st.markdown("#### 🔍 Filter & Search")
             fa, fb, fc, fd = st.columns(4)
             with fa:
@@ -3428,7 +3341,6 @@ with tab_po:
                 filtered = filtered[_mask]
             filtered = filtered.sort_values(["Priority", "Days_Left"]).reset_index(drop=True)
 
-            # ── COLUMN ORDER — matches screenshot left → right ─
             base_left  = ["OMS_SKU","Status","Parent_SKU","Units_30d","Freq_30d","Running_Days"]
             base_right = []
             if "Avg_Monthly" in filtered.columns: base_right.append("Avg_Monthly")
@@ -3535,7 +3447,6 @@ with tab_po:
                 },
             )
 
-            # ── Quarterly trend chart ─────────────────────────
             if q_cols:
                 with st.expander("📈 Quarterly Sales Trend", expanded=True):
                     top_skus = (
@@ -3549,7 +3460,6 @@ with tab_po:
                     if chart_skus:
                         chart_df = master[master["OMS_SKU"].isin(chart_skus)][["OMS_SKU"] + q_cols].copy()
                         chart_melted = chart_df.melt(id_vars="OMS_SKU", var_name="Quarter", value_name="Units")
-                        # Shorten quarter labels for readability
                         chart_melted["Quarter"] = chart_melted["Quarter"].str.replace(r"^Q\d_", "", regex=True)
                         fig_q = px.line(
                             chart_melted, x="Quarter", y="Units", color="OMS_SKU",
@@ -3559,7 +3469,6 @@ with tab_po:
                         fig_q.update_layout(height=380, xaxis_tickangle=-30)
                         st.plotly_chart(fig_q, use_container_width=True)
 
-            # ── Downloads ─────────────────────────────────────
             st.divider()
             suffix = "parent" if is_parent else "variant"
             c_dl1, c_dl2 = st.columns(2)
@@ -3574,7 +3483,6 @@ with tab_po:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as w:
                     disp_df.to_excel(w, sheet_name="PO_Quarterly", index=False)
-                    # Second sheet: all SKUs (not filtered)
                     master[[c for c in disp_cols if c in master.columns]].to_excel(
                         w, sheet_name="All_SKUs", index=False
                     )
@@ -3587,7 +3495,214 @@ with tab_po:
                 )
 
 # ══════════════════════════════════════════════════════════════
-# TAB 7 — LOGISTICS
+# TAB 9 — PRODUCTION & WIP
+# ══════════════════════════════════════════════════════════════
+with tab_prod:
+    st.header("🏭 Production & WIP Management")
+    st.caption("Dynamic Job Card routing: Inhouse → Subcon → Mixed. Track every stage from Grey Inward to Dispatch.")
+
+    _STAGES = ["Grey Inward", "Printing", "Printed Receive", "Cutting", "Stitching", "Finishing", "Dispatch"]
+    _STAGE_EMOJI = {"Grey Inward":"🧵","Printing":"🖨️","Printed Receive":"📦","Cutting":"✂️","Stitching":"🪡","Finishing":"✨","Dispatch":"🚚"}
+
+    job_df = st.session_state.job_orders.copy()
+
+    # ── KPI Bar ──────────────────────────────────────────────
+    _active = job_df[job_df["Current_Stage"] != "Dispatch"]
+    _dispatched = job_df[job_df["Current_Stage"] == "Dispatch"]
+    _total_wip = int(_active["Pass_Qty"].sum())
+    _total_reject = int(job_df["Reject_Qty"].sum())
+
+    kc1, kc2, kc3, kc4 = st.columns(4)
+    kc1.metric("Active Job Orders", len(_active))
+    kc2.metric("Units in WIP", f"{_total_wip:,}")
+    kc3.metric("Dispatched Orders", len(_dispatched))
+    kc4.metric("Total Rejected Units", f"{_total_reject:,}", delta=f"-{_total_reject}" if _total_reject else None, delta_color="inverse")
+
+    st.divider()
+
+    # ── Stage Distribution Bar Chart ─────────────────────────
+    _stage_summary = job_df.groupby("Current_Stage")["Pass_Qty"].sum().reindex(_STAGES, fill_value=0).reset_index()
+    _stage_summary.columns = ["Stage", "Units"]
+    _stage_fig = px.bar(
+        _stage_summary, x="Stage", y="Units", color="Stage",
+        color_discrete_sequence=px.colors.sequential.Blues_r,
+        title="Units per Production Stage", height=260,
+        labels={"Units": "Pass Qty"}
+    )
+    _stage_fig.update_layout(showlegend=False, margin=dict(t=40, b=10), plot_bgcolor="white")
+    _stage_fig.update_xaxes(title=None)
+    st.plotly_chart(_stage_fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Create + Update Forms ─────────────────────────────────
+    col_create, col_update = st.columns(2, gap="large")
+
+    with col_create:
+        st.subheader("➕ Create Job Order")
+        with st.form("prod_create_jo", clear_on_submit=True):
+            f_sku    = st.text_input("Style / SKU Code *", placeholder="e.g. 1065YK")
+            f_style  = st.text_input("Style Name", placeholder="e.g. Kurti A")
+            f_qty    = st.number_input("Target Quantity", min_value=1, value=500, step=50)
+            f_rem    = st.text_input("Remarks", placeholder="Optional notes")
+            _create  = st.form_submit_button("🆕 Generate Job Order", use_container_width=True)
+            if _create:
+                if not f_sku.strip():
+                    st.error("SKU is required.")
+                else:
+                    _all_ids = st.session_state.job_orders["Job_ID"].tolist()
+                    _nums = [int(x.split("-")[1]) for x in _all_ids if x.startswith("JO-") and x.split("-")[1].isdigit()]
+                    _new_num = max(_nums) + 1 if _nums else 1001
+                    _new_row = {
+                        "Job_ID": f"JO-{_new_num}", "SKU": f_sku.strip(), "Style_Name": f_style.strip(),
+                        "Target_Qty": f_qty, "Current_Stage": "Grey Inward", "Location": "Inhouse",
+                        "Pass_Qty": f_qty, "Reject_Qty": 0, "Vendor_Name": "",
+                        "Remarks": f_rem.strip(), "Date_Updated": datetime.now().strftime("%Y-%m-%d")
+                    }
+                    st.session_state.job_orders = pd.concat(
+                        [st.session_state.job_orders, pd.DataFrame([_new_row])], ignore_index=True
+                    )
+                    st.success(f"✅ Job Order JO-{_new_num} created for **{f_sku.strip()}** ({f_qty} units)")
+                    st.rerun()
+
+    with col_update:
+        st.subheader("🔄 Update Stage / Location")
+        _active_jobs = st.session_state.job_orders[st.session_state.job_orders["Current_Stage"] != "Dispatch"]["Job_ID"].tolist()
+        if not _active_jobs:
+            st.info("No active jobs to update.")
+        else:
+            with st.form("prod_update_jo"):
+                _sel_job = st.selectbox("Select Job Order", _active_jobs)
+                # Show current status of selected job
+                _cur_row = st.session_state.job_orders[st.session_state.job_orders["Job_ID"] == _sel_job].iloc[0]
+                st.caption(f"Current: **{_cur_row['Current_Stage']}** @ {_cur_row['Location']} | Pass: {_cur_row['Pass_Qty']} | Reject: {_cur_row['Reject_Qty']}")
+
+                _u_stage    = st.selectbox("Move to Stage", _STAGES, index=_STAGES.index(_cur_row["Current_Stage"]))
+                _u_assign   = st.radio("Assigned To", ["Inhouse", "Vendor (Subcon)"], horizontal=True)
+                _u_vendor   = st.text_input("Vendor Name (if Subcon)", value=str(_cur_row["Vendor_Name"] or ""))
+                _u_pass     = st.number_input("QC Pass Qty", min_value=0, value=int(_cur_row["Pass_Qty"]))
+                _u_reject   = st.number_input("QC Reject Qty", min_value=0, value=int(_cur_row["Reject_Qty"]))
+                _u_rem      = st.text_input("Remarks", value=str(_cur_row["Remarks"] or ""))
+                _do_update  = st.form_submit_button("💾 Save Update", use_container_width=True)
+
+                if _do_update:
+                    _loc = f"Vendor: {_u_vendor.strip()}" if _u_assign == "Vendor (Subcon)" and _u_vendor.strip() else _u_assign
+                    _idx = st.session_state.job_orders.index[st.session_state.job_orders["Job_ID"] == _sel_job][0]
+                    st.session_state.job_orders.at[_idx, "Current_Stage"] = _u_stage
+                    st.session_state.job_orders.at[_idx, "Location"]      = _loc
+                    st.session_state.job_orders.at[_idx, "Vendor_Name"]   = _u_vendor.strip()
+                    st.session_state.job_orders.at[_idx, "Pass_Qty"]      = _u_pass
+                    st.session_state.job_orders.at[_idx, "Reject_Qty"]    = _u_reject
+                    st.session_state.job_orders.at[_idx, "Remarks"]       = _u_rem.strip()
+                    st.session_state.job_orders.at[_idx, "Date_Updated"]  = datetime.now().strftime("%Y-%m-%d")
+                    st.success(f"✅ {_sel_job} → **{_u_stage}** @ {_loc}")
+                    st.rerun()
+
+    st.divider()
+
+    # ── Kanban Board ──────────────────────────────────────────
+    st.subheader("📋 Live WIP Kanban Board")
+    _kanban_stages = ["Grey Inward", "Printing", "Printed Receive", "Cutting", "Stitching", "Finishing"]
+    _k_cols = st.columns(len(_kanban_stages), gap="small")
+
+    _latest_jobs = st.session_state.job_orders  # re-read after any updates
+
+    for _ki, _kstage in enumerate(_kanban_stages):
+        with _k_cols[_ki]:
+            _s_jobs = _latest_jobs[_latest_jobs["Current_Stage"] == _kstage]
+            _s_units = int(_s_jobs["Pass_Qty"].sum())
+            _emoji = _STAGE_EMOJI.get(_kstage, "⚙️")
+            st.markdown(f"<div class='kanban-header'>{_emoji} {_kstage}<br><small>{len(_s_jobs)} jobs · {_s_units:,} units</small></div>", unsafe_allow_html=True)
+
+            if _s_jobs.empty:
+                st.markdown("<p style='color:#94a3b8;font-size:0.8rem;text-align:center;margin-top:20px;'>— Empty —</p>", unsafe_allow_html=True)
+            else:
+                for _, _jr in _s_jobs.iterrows():
+                    _border = SUCCESS if "Inhouse" in str(_jr["Location"]) else WARNING
+                    _loc_label = "🏠 Inhouse" if "Inhouse" in str(_jr["Location"]) else f"🏭 {_jr['Location']}"
+                    st.markdown(f"""
+<div class='kanban-card' style='border-left-color:{_border};'>
+  <strong style='font-size:0.82rem;color:#002B5B;'>{_jr['Job_ID']}</strong><br>
+  <span style='font-size:0.78rem;font-weight:600;color:#374151;'>{_jr['SKU']}</span>
+  {f"<br><span style='font-size:0.73rem;color:#6b7280;'>{_jr['Style_Name']}</span>" if _jr.get('Style_Name') else ""}
+  <p class='kanban-detail'>✅ Pass: {int(_jr['Pass_Qty'])} | ❌ Reject: {int(_jr['Reject_Qty'])}</p>
+  <p class='kanban-detail'>{_loc_label}</p>
+  <p class='kanban-detail'>🗓 {_jr['Date_Updated']}</p>
+  {f"<p class='kanban-detail'>💬 {_jr['Remarks']}</p>" if _jr.get('Remarks') else ""}
+</div>""", unsafe_allow_html=True)
+
+    # Dispatched section collapsed
+    with st.expander(f"🚚 Dispatched Orders ({len(_dispatched)})", expanded=False):
+        if _dispatched.empty:
+            st.info("No dispatched orders yet.")
+        else:
+            _disp_show = _dispatched[["Job_ID","SKU","Style_Name","Target_Qty","Pass_Qty","Reject_Qty","Vendor_Name","Remarks","Date_Updated"]]
+            st.dataframe(_disp_show, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Full Database Table ───────────────────────────────────
+    st.subheader("🗄️ All Job Orders")
+
+    _col_filter1, _col_filter2 = st.columns(2)
+    with _col_filter1:
+        _filt_stage = st.multiselect("Filter by Stage", options=_STAGES, default=[], key="prod_filt_stage")
+    with _col_filter2:
+        _filt_sku   = st.text_input("Filter by SKU / Style", key="prod_filt_sku", placeholder="Leave blank for all")
+
+    _disp_df = st.session_state.job_orders.copy()
+    if _filt_stage:
+        _disp_df = _disp_df[_disp_df["Current_Stage"].isin(_filt_stage)]
+    if _filt_sku.strip():
+        _mask = (
+            _disp_df["SKU"].str.contains(_filt_sku.strip(), case=False, na=False) |
+            _disp_df["Style_Name"].str.contains(_filt_sku.strip(), case=False, na=False) |
+            _disp_df["Job_ID"].str.contains(_filt_sku.strip(), case=False, na=False)
+        )
+        _disp_df = _disp_df[_mask]
+
+    st.dataframe(_disp_df, use_container_width=True, hide_index=True, height=350)
+
+    _dl_csv = _disp_df.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 Export Job Orders CSV", _dl_csv,
+                       f"job_orders_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+
+    st.divider()
+
+    # ── Stage Transition History (Reject Heatmap) ─────────────
+    st.subheader("📊 Quality Analytics")
+    _qa_df = st.session_state.job_orders.copy()
+    _qa_df["Rejection_%"] = np.where(
+        _qa_df["Target_Qty"] > 0,
+        (_qa_df["Reject_Qty"] / _qa_df["Target_Qty"] * 100).round(1), 0
+    )
+    _qa_grouped = _qa_df.groupby("Current_Stage").agg(
+        Jobs=("Job_ID","count"),
+        Total_Target=("Target_Qty","sum"),
+        Total_Pass=("Pass_Qty","sum"),
+        Total_Reject=("Reject_Qty","sum"),
+    ).reindex(_STAGES).fillna(0).reset_index()
+    _qa_grouped["Rejection_%"] = np.where(
+        _qa_grouped["Total_Target"] > 0,
+        (_qa_grouped["Total_Reject"] / _qa_grouped["Total_Target"] * 100).round(1), 0
+    )
+    _qa_grouped.columns = ["Stage","Jobs","Target Units","Pass Units","Reject Units","Rejection %"]
+
+    _qa_fig = px.bar(
+        _qa_grouped, x="Stage", y=["Pass Units","Reject Units"],
+        barmode="stack", color_discrete_map={"Pass Units":SUCCESS, "Reject Units":DANGER},
+        title="Pass vs Reject by Stage", height=280
+    )
+    _qa_fig.update_layout(margin=dict(t=40,b=10), plot_bgcolor="white", legend_title=None)
+    _qa_fig.update_xaxes(title=None)
+
+    _qcol1, _qcol2 = st.columns([3, 2])
+    with _qcol1:
+        st.plotly_chart(_qa_fig, use_container_width=True)
+    with _qcol2:
+        st.dataframe(_qa_grouped.style.format({"Rejection %":"{:.1f}%"}), use_container_width=True, hide_index=True)
+
+# TAB 8 — LOGISTICS
 # ══════════════════════════════════════════════════════════════
 with tab_logistics:
     st.subheader("🚚 Logistics Information")
@@ -3598,7 +3713,7 @@ with tab_logistics:
         st.dataframe(transfer_df.head(100), use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════
-# TAB 8 — AI FORECAST
+# TAB 9 — AI FORECAST
 # ══════════════════════════════════════════════════════════════
 with tab_forecast:
     st.subheader("📈 AI Demand Forecasting")
@@ -3639,7 +3754,7 @@ with tab_forecast:
                     st.error(f"Forecast error: {e}")
 
 # ══════════════════════════════════════════════════════════════
-# TAB 9 — DEEP DIVE
+# TAB 10 — DEEP DIVE (FIXED)
 # ══════════════════════════════════════════════════════════════
 with tab_drill:
     st.subheader("🔍 Deep Dive — SKU Panel Analysis")
@@ -3652,6 +3767,7 @@ with tab_drill:
         st.warning("⚠️ Load sales or MTR data first to use Deep Dive.")
         st.stop()
 
+    # Build full SKU list from all sources
     all_skus = set()
     if not sales_df.empty:
         all_skus.update(sales_df["Sku"].dropna().astype(str).unique())
@@ -3659,14 +3775,44 @@ with tab_drill:
         all_skus.update(mtr_df["SKU"].dropna().astype(str).unique())
     all_skus = sorted(s for s in all_skus if s.strip())
 
-    dd_col1, dd_col2 = st.columns([3, 1])
+    # FIX: Add Parent SKU search + variant SKU selector in two columns
+    dd_col0, dd_col1, dd_col2 = st.columns([2, 3, 1])
+
+    with dd_col0:
+        # Parent SKU search box — filters the variant dropdown
+        parent_search = st.text_input(
+            "🔎 Filter by Parent SKU",
+            value="",
+            key="drill_parent_search",
+            placeholder="e.g. 1457YK, 1685PL…",
+            help="Type a parent SKU code to filter the variant SKU dropdown below"
+        )
+
+    # Apply parent filter to variant list
+    if parent_search.strip():
+        filtered_skus = [s for s in all_skus
+                         if parent_search.strip().lower() in get_parent_sku(s).lower()
+                         or parent_search.strip().lower() in s.lower()]
+    else:
+        filtered_skus = all_skus
+
     with dd_col1:
-        selected_sku = st.selectbox("🔎 Select SKU", [""] + all_skus, key="drill_sku")
+        selected_sku = st.selectbox(
+            "🔎 Select SKU",
+            [""] + filtered_skus,
+            key="drill_sku",
+            help=f"Showing {len(filtered_skus):,} SKUs{' (filtered)' if parent_search.strip() else ''}"
+        )
+
     with dd_col2:
         drill_period = st.selectbox(
             "Period", ["Last 30 Days", "Last 60 Days", "Last 90 Days", "All Time"],
             index=2, key="drill_period"
         )
+
+    # Show how many SKUs match the parent filter
+    if parent_search.strip():
+        st.caption(f"🔍 Parent filter `{parent_search.strip()}` matched **{len(filtered_skus):,}** SKUs out of {len(all_skus):,} total")
 
     if not selected_sku:
         st.info("👆 Select a SKU above to see its full performance panel.")
@@ -3755,7 +3901,12 @@ with tab_drill:
 
     days_cover = curr_inv / ads if ads > 0 else 999
 
+    # Show parent SKU info
+    parent_of_selected = get_parent_sku(selected_sku)
     st.markdown(f"### 📦 `{selected_sku}` — {drill_period}")
+    if parent_of_selected != selected_sku:
+        st.caption(f"Parent SKU: **{parent_of_selected}**")
+
     k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
     k1.metric("✅ Sold Units",   f"{int(sold_units):,}")
     k2.metric("↩️ Returns",      f"{int(return_units):,}")
@@ -3810,10 +3961,14 @@ with tab_drill:
             st.info("No unit-level sales data for this SKU in the selected period.")
 
     with ch2:
+        # FIX: Marketplace split — show all platforms correctly
         st.markdown("#### 🏪 By Marketplace")
         if not sku_sales_p.empty and "Source" in sku_sales_p.columns:
-            mkt = (sku_sales_p[sku_sales_p["Transaction Type"] == "Shipment"]
-                   .groupby("Source")["Quantity"].sum().reset_index())
+            # Decode category dtype before groupby
+            _mkt_df = sku_sales_p[sku_sales_p["Transaction Type"] == "Shipment"].copy()
+            _mkt_df["Source"] = _mkt_df["Source"].astype(str)
+            mkt = _mkt_df.groupby("Source")["Quantity"].sum().reset_index()
+            mkt = mkt[mkt["Quantity"] > 0]
             if not mkt.empty:
                 fig_mkt = px.pie(mkt, values="Quantity", names="Source", hole=0.45,
                                  color_discrete_sequence=px.colors.qualitative.Set2)
@@ -3822,8 +3977,16 @@ with tab_drill:
                                       legend=dict(orientation="v", x=0.0))
                 fig_mkt.update_traces(textposition="inside", textinfo="percent+label")
                 st.plotly_chart(fig_mkt, use_container_width=True)
+
+                # Also show numeric breakdown
+                st.dataframe(
+                    mkt.rename(columns={"Source":"Platform","Quantity":"Units"})
+                       .sort_values("Units", ascending=False)
+                       .reset_index(drop=True),
+                    use_container_width=True, hide_index=True
+                )
             else:
-                st.info("No marketplace data.")
+                st.info("No shipment data for this period.")
         else:
             st.info("No marketplace data.")
 
@@ -3942,16 +4105,21 @@ with tab_drill:
         tabs_raw = st.tabs(["Sales Transactions", "MTR Transactions"])
         with tabs_raw[0]:
             if not sku_sales_p.empty:
+                # FIX: decode category columns before display
+                _raw_sales = sku_sales_p.copy()
+                for _col in _raw_sales.columns:
+                    if hasattr(_raw_sales[_col], "cat"):
+                        _raw_sales[_col] = _raw_sales[_col].astype(str)
                 show_cols = [c for c in ["TxnDate","Transaction Type","Quantity",
                                           "Units_Effective","Source","OrderId"]
-                             if c in sku_sales_p.columns]
+                             if c in _raw_sales.columns]
                 st.dataframe(
-                    sku_sales_p[show_cols].sort_values("TxnDate", ascending=False).head(500),
+                    _raw_sales[show_cols].sort_values("TxnDate", ascending=False).head(500),
                     use_container_width=True, height=300
                 )
                 st.download_button(
                     "📥 Download Sales Log",
-                    sku_sales_p[show_cols].to_csv(index=False).encode("utf-8"),
+                    _raw_sales[show_cols].to_csv(index=False).encode("utf-8"),
                     f"{selected_sku}_sales_{datetime.now().strftime('%Y%m%d')}.csv",
                     "text/csv"
                 )
@@ -3964,13 +4132,18 @@ with tab_drill:
                                          "Invoice_Amount","Total_Tax","Ship_To_State",
                                          "Payment_Method","Invoice_Number","Buyer_Name"]
                             if c in sku_mtr_p.columns]
+                # Decode category columns
+                _raw_mtr = sku_mtr_p.copy()
+                for _col in _raw_mtr.columns:
+                    if hasattr(_raw_mtr[_col], "cat"):
+                        _raw_mtr[_col] = _raw_mtr[_col].astype(str)
                 st.dataframe(
-                    sku_mtr_p[mtr_show].sort_values("Date", ascending=False).head(500),
+                    _raw_mtr[mtr_show].sort_values("Date", ascending=False).head(500),
                     use_container_width=True, height=300
                 )
                 st.download_button(
                     "📥 Download MTR Log",
-                    sku_mtr_p[mtr_show].to_csv(index=False).encode("utf-8"),
+                    _raw_mtr[mtr_show].to_csv(index=False).encode("utf-8"),
                     f"{selected_sku}_mtr_{datetime.now().strftime('%Y%m%d')}.csv",
                     "text/csv"
                 )
