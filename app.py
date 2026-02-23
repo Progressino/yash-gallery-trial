@@ -1770,10 +1770,9 @@ def calculate_quarterly_history(
     hist = pd.concat(parts, ignore_index=True)
     hist = hist[hist["TxnType"].astype(str).str.strip() == "Shipment"]
     # Force Date to proper datetime — strip timezone, coerce bad values
-    hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce", utc=False)
+    hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
     if hasattr(hist["Date"].dtype, "tz") and hist["Date"].dtype.tz is not None:
         hist["Date"] = hist["Date"].dt.tz_localize(None)
-    hist["Date"] = hist["Date"].astype("datetime64[ns]")
     hist = hist.dropna(subset=["Date"])
     hist["Qty"] = pd.to_numeric(hist["Qty"], errors="coerce").fillna(0)
     hist = hist[hist["Qty"] > 0]
@@ -1822,7 +1821,7 @@ def calculate_quarterly_history(
     pivot["Avg_Monthly"] = (pivot[last4].mean(axis=1) / 3).round(1)
 
     # Final safety cast before date comparison
-    hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce").astype("datetime64[ns]")
+    hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
     hist = hist.dropna(subset=["Date"])
 
     cutoff_90 = today - timedelta(days=90)
@@ -3358,12 +3357,12 @@ with tab_po:
             inv_for_po   = st.session_state.inventory_df_variant.copy()
             sales_for_po = st.session_state.sales_df.copy()
 
-        # Guarantee TxnDate is datetime64[ns] — category/object dtype causes comparison TypeError
+        # Guarantee TxnDate is datetime — category/object dtype causes comparison TypeError
         if "TxnDate" in sales_for_po.columns:
             _td = sales_for_po["TxnDate"]
             if hasattr(_td, "cat"):
                 _td = _td.astype(str)
-            sales_for_po["TxnDate"] = pd.to_datetime(_td, errors="coerce").astype("datetime64[ns]")
+            sales_for_po["TxnDate"] = pd.to_datetime(_td, errors="coerce")
 
         with st.spinner("Building quarterly history…"):
             qhist = calculate_quarterly_history(
