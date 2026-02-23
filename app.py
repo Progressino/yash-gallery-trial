@@ -3677,6 +3677,172 @@ with tab_po:
                 )
 
             # ══════════════════════════════════════════════════════
+            # SIZE BREAK TABLE — always visible, no steps needed
+            # ══════════════════════════════════════════════════════
+            st.divider()
+            st.markdown("## 📐 Size Break by Parent SKU")
+            st.caption("Units to prepare per style per size, based on current PO Qty recommendations.")
+
+            _SIZE_ORDER_SB = ["XS","S","M","L","XL","XXL","2XL","3XL","4XL",
+                               "5XL","6XL","7XL","8XL","XXXL","FS","FREE","ONESIZE"]
+
+            def _extract_size_from_sku(sku):
+                s = str(sku)
+                if "-" not in s: return "N/A"
+                last = s.split("-")[-1].upper().strip()
+                if (last in set(_SIZE_ORDER_SB) or last.isdigit()
+                        or last.endswith("XL") or (len(last)<=4 and last.startswith("X"))):
+                    return last
+                return "N/A"
+
+            # Use the filtered master table (all SKUs with PO_Qty > 0)
+            _sb_source = filtered[filtered["PO_Qty"] > 0].copy() if "PO_Qty" in filtered.columns else pd.DataFrame()
+
+            if _sb_source.empty:
+                st.info("No SKUs with PO Qty > 0 in current filter.")
+            else:
+                # --- Controls row ---
+                _sbc1, _sbc2, _sbc3 = st.columns([2, 1, 1])
+                with _sbc1:
+                    _sb_parent_search = st.text_input(
+                        "Filter by Parent SKU / Style", "", key="sb_parent_search",
+                        placeholder="e.g. 1065YK"
+                    )
+                with _sbc2:
+                    _sb_priority_filter = st.multiselect(
+                        "Priority", ["🔴 URGENT","🟡 HIGH","🟢 MEDIUM"],
+                        default=["🔴 URGENT","🟡 HIGH","🟢 MEDIUM"],
+                        key="sb_priority_filter"
+                    )
+                with _sbc3:
+                    _sb_min_qty = st.number_input("Min Total Qty", 0, 9999, 0, 10, key="sb_min_qty")
+
+                _sb_df = _sb_source.copy()
+                if _sb_priority_filter:
+                    _sb_df = _sb_df[_sb_df["Priority"].isin(_sb_priority_filter)]
+
+                _sb_df["Size"]   = _sb_df["OMS_SKU"].apply(_extract_size_from_sku)
+                _sb_df["Parent"] = _sb_df["Parent_SKU"].fillna(_sb_df["OMS_SKU"].apply(get_parent_sku))
+
+                if _sb_parent_search.strip():
+                    _sb_df = _sb_df[_sb_df["Parent"].str.contains(
+                        _sb_parent_search.strip(), case=False, na=False)]
+
+                # Build pivot
+                _sb_pivot = (
+                    _sb_df.groupby(["Parent", "Size"])["PO_Qty"]
+                    .sum().reset_index()
+                    .pivot_table(index="Parent", columns="Size",
+                                 values="PO_Qty", fill_value=0)
+                    .reset_index()
+                )
+                _sb_pivot.columns.name = None
+
+                # Order size columns properly
+                _sb_size_cols   = [c for c in _SIZE_ORDER_SB if c in _sb_pivot.columns]
+                _sb_other_cols  = [c for c in _sb_pivot.columns
+                                   if c not in _SIZE_ORDER_SB and c != "Parent"]
+                _sb_ordered     = ["Parent"] + _sb_size_cols + _sb_other_cols
+                _sb_pivot       = _sb_pivot[[c for c in _sb_ordered if c in _sb_pivot.columns]]
+                _sb_num_cols    = [c for c in _sb_pivot.columns if c != "Parent"]
+                _sb_pivot["TOTAL"] = _sb_pivot[_sb_num_cols].sum(axis=1).astype(int)
+
+                if _sb_min_qty > 0:
+                    _sb_pivot = _sb_pivot[_sb_pivot["TOTAL"] >= _sb_min_qty]
+
+                _sb_pivot = _sb_pivot.sort_values("TOTAL", ascending=False).reset_index(drop=True)
+
+                # Totals row
+                _sb_total_row = {"Parent": "⬛ GRAND TOTAL"}
+                for _c in _sb_num_cols + ["TOTAL"]:
+                    _sb_total_row[_c] = int(_sb_pivot[_c].sum()) if _c in _sb_pivot.columns else 0
+                _sb_display = pd.concat([_sb_pivot, pd.DataFrame([_sb_total_row])], ignore_index=True)
+
+                # Styling
+                def _sb_style(row):
+                    if "GRAND TOTAL" in str(row.get("Parent","")):
+                        return ["background:#002B5B;color:white;font-weight:700"] * len(row)
+                    out = []
+                    for col, val in row.items():
+                        if col == "Parent":
+                            out.append("font-weight:600;color:#1e3a5f")
+                        elif col == "TOTAL":
+                            out.append("background:#dbeafe;font-weight:700;color:#1e40af;font-size:1.05em")
+                        elif isinstance(val,(int,float)) and val == 0:
+                            out.append("color:#d1d5db;background:#f9fafb")
+                        else:
+                            out.append("background:#f0fdf4;font-weight:600;color:#166534")
+                    return out
+
+                # KPI row
+                _sb_k1, _sb_k2, _sb_k3, _sb_k4 = st.columns(4)
+                _sb_k1.metric("Styles (Parents)", len(_sb_pivot))
+                _sb_k2.metric("Total SKUs",       len(_sb_df))
+                _sb_k3.metric("Total Units to PO",f"{int(_sb_pivot['TOTAL'].sum()):,}")
+                _sb_k4.metric("Sizes",            len(_sb_size_cols + _sb_other_cols))
+
+                st.dataframe(
+                    _sb_display.style.apply(_sb_style, axis=1),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(100 + len(_sb_display) * 36, 600),
+                )
+
+                # Size totals bar chart + table side by side
+                _sb_size_sum = (
+                    _sb_pivot[_sb_size_cols + _sb_other_cols].sum()
+                    .reset_index()
+                )
+                _sb_size_sum.columns = ["Size","Units"]
+                _sb_size_sum = _sb_size_sum[_sb_size_sum["Units"] > 0].reset_index(drop=True)
+
+                _sc1, _sc2 = st.columns([3, 1])
+                with _sc1:
+                    if not _sb_size_sum.empty:
+                        _fig_sb = px.bar(
+                            _sb_size_sum, x="Size", y="Units",
+                            title="Total Units by Size (all styles)",
+                            color="Units",
+                            color_continuous_scale=["#bfdbfe","#1d4ed8"],
+                            text="Units",
+                        )
+                        _fig_sb.update_layout(
+                            height=300, showlegend=False,
+                            plot_bgcolor="white", coloraxis_showscale=False,
+                            margin=dict(t=40,b=10),
+                        )
+                        _fig_sb.update_traces(textposition="outside")
+                        _fig_sb.update_xaxes(
+                            categoryorder="array", categoryarray=_SIZE_ORDER_SB, title=None)
+                        st.plotly_chart(_fig_sb, use_container_width=True)
+                with _sc2:
+                    st.markdown("**Units per Size**")
+                    st.dataframe(_sb_size_sum, use_container_width=True,
+                                 hide_index=True, height=300)
+
+                # Downloads
+                _dl1, _dl2 = st.columns(2)
+                with _dl1:
+                    st.download_button(
+                        "📥 Download Size Break (CSV)",
+                        _sb_display.to_csv(index=False).encode("utf-8"),
+                        f"size_break_{datetime.now().strftime('%Y%m%d')}.csv",
+                        "text/csv", use_container_width=True,
+                    )
+                with _dl2:
+                    _sb_buf = io.BytesIO()
+                    with pd.ExcelWriter(_sb_buf, engine="openpyxl") as _sbw:
+                        _sb_display.to_excel(_sbw, sheet_name="Size Break", index=False)
+                        _sb_size_sum.to_excel(_sbw, sheet_name="Size Summary", index=False)
+                    st.download_button(
+                        "📥 Download Size Break (Excel)",
+                        _sb_buf.getvalue(),
+                        f"size_break_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+
+            # ══════════════════════════════════════════════════════
             # GENERATE PURCHASE ORDER
             # ══════════════════════════════════════════════════════
             st.divider()
