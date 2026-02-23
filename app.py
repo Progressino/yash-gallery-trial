@@ -636,6 +636,15 @@ def detect_daily_platform(file_obj) -> str:
         if "seller sku code" in cols_lower and "store order id" in cols_lower:
             return "flipkart"
 
+        # Flipkart Seller Orders Report: 'order id' + 'seller sku code' or 'sku' + 'order date'
+        # Also catches variants: 'fsn', 'order item id', 'buyer city'
+        if ("order id" in cols_lower or "order item id" in cols_lower) and            ("seller sku code" in cols_lower or "sku" in cols_lower) and            ("order date" in cols_lower or "created on" in cols_lower):
+            return "flipkart"
+
+        # Flipkart Seller Orders Report (alternate): fsn + order_id style
+        if "fsn" in cols_lower and ("order id" in cols_lower or "order_id" in cols_lower):
+            return "flipkart"
+
         # Earn More reports (xlsx): 'sku id' + 'final sale units' + 'gross units'
         if "sku id" in cols_lower and "final sale units" in cols_lower and "gross units" in cols_lower:
             if "vertical" in cols_lower:
@@ -682,37 +691,99 @@ def parse_daily_amazon_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
 
 
 def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Handles two Flipkart CSV formats:
+      1. PPMP format      → columns: 'seller sku code', 'store order id', 'created on', 'order status'
+      2. Seller Orders Report → columns: 'seller sku code'/'sku', 'order id', 'order date', 'order status', 'selling price'/'final sale price'
+    """
     try:
         file_obj.seek(0)
-        df = pd.read_csv(file_obj)
+        for enc in ["utf-8", "latin-1", "cp1252"]:
+            try:
+                file_obj.seek(0)
+                df = pd.read_csv(file_obj, encoding=enc)
+                break
+            except Exception:
+                continue
+        else:
+            return pd.DataFrame()
+
         if df.empty:
             return pd.DataFrame()
-        df.columns = df.columns.str.strip().str.lower()
 
-        STATUS_TXNTYPE = {
-            "wp": "Shipment",
-            "pk": "Shipment",
-            "sh": "Shipment",
-            "f":  "Cancel",
+        # Normalise column names
+        orig_cols = list(df.columns)
+        df.columns = df.columns.str.strip().str.lower()
+        cols = set(df.columns)
+
+        # ── Status → TxnType mapping (covers both formats) ──
+        STATUS_MAP = {
+            # PPMP codes
+            "wp": "Shipment", "pk": "Shipment", "sh": "Shipment",
+            "f": "Cancel", "rto": "Refund",
+            # Seller Orders Report full-text statuses
+            "approved": "Shipment", "shipped": "Shipment",
+            "delivered": "Shipment", "packing": "Shipment",
+            "processing": "Pending", "pending": "Pending",
+            "ready_to_dispatch": "Shipment", "dispatched": "Shipment",
+            "cancelled": "Cancel", "cancellation_requested": "Cancel",
+            "return_requested": "Refund", "returned": "Refund",
         }
+
+        # ── Detect format by presence of key columns ──
+        is_ppmp = "store order id" in cols or "created on" in cols
+
         rows = []
         for _, r in df.iterrows():
-            status  = str(r.get("order status", "")).strip().lower()
-            txn     = STATUS_TXNTYPE.get(status, "Shipment")
-            raw_sku = str(r.get("seller sku code", "")).strip()
+            status_raw = str(r.get("order status", "")).strip().lower()
+            txn = STATUS_MAP.get(status_raw, "Shipment")
+
+            # SKU: try PPMP col first, then Seller Orders Report col
+            raw_sku = ""
+            for sku_col in ["seller sku code", "sku", "seller_sku_code", "item sku"]:
+                v = str(r.get(sku_col, "")).strip()
+                if v and v.lower() not in ("nan", ""):
+                    raw_sku = v
+                    break
             oms_sku = map_to_oms_sku(raw_sku, mapping)
+
+            # Date
+            if is_ppmp:
+                date_val = r.get("created on", r.get("order date", ""))
+            else:
+                date_val = r.get("order date", r.get("created on", r.get("date", "")))
+
+            # Revenue
+            rev = 0.0
+            for rev_col in ["selling price", "final sale price", "seller price",
+                            "mrp", "total amount", "final amount", "item total"]:
+                v = pd.to_numeric(r.get(rev_col, None), errors="coerce")
+                if v is not None and not pd.isna(v):
+                    rev = float(v)
+                    break
+
+            # State
+            state = str(r.get("state", r.get("buyer state", r.get("shipping state", "")))).strip()
+            if state.lower() == "nan":
+                state = ""
+
+            # Order ID
+            order_id = str(r.get("store order id",
+                           r.get("order id",
+                           r.get("order release id", "")))).strip()
+
+            # Quantity
+            qty = pd.to_numeric(r.get("quantity", r.get("qty", 1)), errors="coerce")
+            qty = int(qty) if not pd.isna(qty) and qty > 0 else 1
+
             rows.append(_std_daily(
-                date     = r.get("created on"),
-                sku      = oms_sku,
-                platform = "Flipkart",
-                txn_type = txn,
-                qty      = 1,
-                revenue  = pd.to_numeric(r.get("seller price", r.get("final amount", 0)), errors="coerce") or 0,
-                state    = r.get("state", ""),
-                order_id = str(r.get("store order id", r.get("order release id", ""))),
+                date=date_val, sku=oms_sku, platform="Flipkart",
+                txn_type=txn, qty=qty, revenue=rev,
+                state=state, order_id=order_id,
             ))
+
         out = pd.DataFrame(rows)
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Date"] = pd.to_datetime(out["Date"], dayfirst=True, errors="coerce")
         return out.dropna(subset=["Date"])
     except Exception as e:
         st.warning(f"Flipkart daily parse error: {e}")
@@ -720,41 +791,93 @@ def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
 
 
 def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Handles Meesho Orders CSV exports.
+    Columns vary by export type — uses flexible column lookup (case-insensitive).
+    """
     try:
         file_obj.seek(0)
-        df = pd.read_csv(file_obj)
+        for enc in ["utf-8", "latin-1", "cp1252"]:
+            try:
+                file_obj.seek(0)
+                df = pd.read_csv(file_obj, encoding=enc)
+                break
+            except Exception:
+                continue
+        else:
+            return pd.DataFrame()
+
         if df.empty:
             return pd.DataFrame()
 
-        REASON_TXNTYPE = {
-            "shipped":        "Shipment",
-            "ready_to_ship":  "Shipment",
-            "cancelled":      "Cancel",
-            "hold":           "Pending",
-            "pending":        "Pending",
+        # Build case-insensitive column lookup: {lower_name: actual_col}
+        col_map = {c.strip().lower(): c for c in df.columns}
+
+        def gcol(df, *candidates):
+            """Get first matching column value (case-insensitive), returns Series of empty strings if none found."""
+            for c in candidates:
+                if c.lower() in col_map:
+                    return df[col_map[c.lower()]]
+            return pd.Series([""] * len(df), index=df.index)
+
+        STATUS_MAP = {
+            # Reason for Credit Entry values
+            "shipped": "Shipment", "ready_to_ship": "Shipment",
+            "delivered": "Shipment", "bag_delivered": "Shipment",
+            "cancelled": "Cancel", "bag_cancelled": "Cancel",
+            "cancellation_requested": "Cancel",
+            "hold": "Pending", "pending": "Pending",
+            "return_requested": "Refund", "bag_returned": "Refund",
+            "return_in_transit": "Refund",
+            # Order Status values (alternate column)
+            "processing": "Pending", "rto": "Refund",
         }
+
+        # Status column — try multiple possible names
+        status_series = gcol(df, "Reason for Credit Entry", "Order Status",
+                             "Sub Order Status", "Status", "order_status")
+        sku_series    = gcol(df, "SKU", "Sku", "Product SKU", "seller_sku")
+        size_series   = gcol(df, "Size", "size")
+        qty_series    = gcol(df, "Quantity", "qty", "Ordered Quantity")
+        date_series   = gcol(df, "Order Date", "Created On", "order_date", "Date")
+        state_series  = gcol(df, "Customer State", "State", "Delivery State", "customer_state")
+        sub_order     = gcol(df, "Sub Order No", "Sub Order Number", "Order ID", "sub_order_no")
+
+        # Price: try several possible column names
+        price_series  = None
+        for pc in ["Supplier Discounted Price (Incl GST and Commision)",
+                   "Supplier Discounted Price", "Price", "Selling Price",
+                   "Final Amount", "Net Amount", "Amount"]:
+            if pc.lower() in col_map:
+                price_series = pd.to_numeric(df[col_map[pc.lower()]], errors="coerce").fillna(0)
+                break
+        if price_series is None:
+            price_series = pd.Series([0.0] * len(df), index=df.index)
+
         rows = []
-        for _, r in df.iterrows():
-            reason  = str(r.get("Reason for Credit Entry", "")).strip().lower()
-            txn     = REASON_TXNTYPE.get(reason, "Shipment")
-            raw_sku = str(r.get("SKU", "")).strip()
-            size    = str(r.get("Size", "")).strip()
-            full_sku = f"{raw_sku}-{size}" if size and size.lower() not in ("nan","") else raw_sku
+        for i in range(len(df)):
+            status  = str(status_series.iloc[i]).strip().lower()
+            txn     = STATUS_MAP.get(status, "Shipment")
+            raw_sku = str(sku_series.iloc[i]).strip()
+            size    = str(size_series.iloc[i]).strip()
+            full_sku = f"{raw_sku}-{size}" if size and size.lower() not in ("nan", "") else raw_sku
             oms_sku  = map_to_oms_sku(full_sku, mapping)
-            qty      = pd.to_numeric(r.get("Quantity", 1), errors="coerce") or 1
-            price    = pd.to_numeric(r.get("Supplier Discounted Price (Incl GST and Commision)", 0), errors="coerce") or 0
+            qty      = pd.to_numeric(qty_series.iloc[i], errors="coerce")
+            qty      = int(qty) if not pd.isna(qty) and qty > 0 else 1
+            price    = float(price_series.iloc[i])
             rows.append(_std_daily(
-                date     = r.get("Order Date"),
+                date     = date_series.iloc[i],
                 sku      = oms_sku,
                 platform = "Meesho",
                 txn_type = txn,
                 qty      = qty,
                 revenue  = price * qty,
-                state    = r.get("Customer State", ""),
-                order_id = str(r.get("Sub Order No", "")),
+                state    = str(state_series.iloc[i]).strip(),
+                order_id = str(sub_order.iloc[i]).strip(),
             ))
+
         out = pd.DataFrame(rows)
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Date"] = pd.to_datetime(out["Date"], dayfirst=True, errors="coerce")
         return out.dropna(subset=["Date"])
     except Exception as e:
         st.warning(f"Meesho daily parse error: {e}")
