@@ -3677,6 +3677,122 @@ with tab_po:
                 )
 
             # ══════════════════════════════════════════════════════
+            # SKU RESEARCH DIALOG
+            # ══════════════════════════════════════════════════════
+            @st.dialog("🔍 SKU Research", width="large")
+            def _show_sku_research(parent_sku: str):
+                st.markdown(f"### {parent_sku}")
+                _sales = st.session_state.sales_df
+                _inv_v = st.session_state.inventory_df_variant
+                _inv_p = st.session_state.inventory_df_parent
+
+                # ── Variant rows for this parent ──────────────────
+                _variants = _inv_v[
+                    _inv_v["OMS_SKU"].str.startswith(parent_sku, na=False)
+                ] if not _inv_v.empty and "OMS_SKU" in _inv_v.columns else pd.DataFrame()
+
+                # ── Sales rows ────────────────────────────────────
+                _sku_sales = pd.DataFrame()
+                if not _sales.empty and "Sku" in _sales.columns:
+                    _sku_sales = _sales[
+                        _sales["Sku"].str.startswith(parent_sku, na=False)
+                    ].copy()
+                    _sku_sales["TxnDate"] = pd.to_datetime(_sku_sales["TxnDate"], errors="coerce")
+
+                # ── KPIs ──────────────────────────────────────────
+                _k1, _k2, _k3, _k4 = st.columns(4)
+                _total_inv = int(_variants["Total_Inventory"].sum()) if not _variants.empty and "Total_Inventory" in _variants.columns else 0
+                _sold_30 = int(_sku_sales[
+                    (_sku_sales["TxnDate"] >= pd.Timestamp.today() - pd.Timedelta(days=30)) &
+                    (_sku_sales["Transaction Type"] == "Shipment")
+                ]["Quantity"].sum()) if not _sku_sales.empty else 0
+                _sold_90 = int(_sku_sales[
+                    (_sku_sales["TxnDate"] >= pd.Timestamp.today() - pd.Timedelta(days=90)) &
+                    (_sku_sales["Transaction Type"] == "Shipment")
+                ]["Quantity"].sum()) if not _sku_sales.empty else 0
+                _variants_count = len(_variants) if not _variants.empty else 0
+                _k1.metric("Total Stock",    f"{_total_inv:,}")
+                _k2.metric("Sold (30 days)", f"{_sold_30:,}")
+                _k3.metric("Sold (90 days)", f"{_sold_90:,}")
+                _k4.metric("Variants",       f"{_variants_count}")
+
+                st.divider()
+
+                # ── Size-wise inventory ───────────────────────────
+                if not _variants.empty:
+                    st.markdown("**📦 Stock by Size**")
+                    _size_inv = _variants[["OMS_SKU","Total_Inventory"]].copy()
+                    _size_inv["Size"] = _size_inv["OMS_SKU"].apply(
+                        lambda x: x.split("-")[-1] if "-" in str(x) else x)
+                    _size_inv = _size_inv.sort_values("Total_Inventory", ascending=False)
+                    _size_inv.columns = ["SKU","Stock","Size"]
+                    _size_inv["Stock"] = _size_inv["Stock"].fillna(0).astype(int)
+                    _si_fig = px.bar(
+                        _size_inv, x="Size", y="Stock",
+                        color="Stock",
+                        color_continuous_scale=["#fecaca","#16a34a"],
+                        text="Stock",
+                        height=220,
+                    )
+                    _si_fig.update_layout(
+                        margin=dict(t=20,b=10), plot_bgcolor="white",
+                        coloraxis_showscale=False, showlegend=False,
+                    )
+                    _si_fig.update_traces(textposition="outside")
+                    _si_fig.update_xaxes(title=None, categoryorder="array",
+                        categoryarray=["XS","S","M","L","XL","XXL","2XL","3XL","4XL","5XL","6XL"])
+                    st.plotly_chart(_si_fig, use_container_width=True)
+
+                # ── Sales trend (monthly) ─────────────────────────
+                if not _sku_sales.empty:
+                    st.markdown("**📈 Monthly Sales Trend**")
+                    _ms = _sku_sales[_sku_sales["Transaction Type"]=="Shipment"].copy()
+                    if not _ms.empty:
+                        _ms["Month"] = _ms["TxnDate"].dt.to_period("M").astype(str)
+                        _mt = _ms.groupby("Month")["Quantity"].sum().reset_index()
+                        _mt = _mt.sort_values("Month").tail(12)
+                        _mt_fig = px.bar(
+                            _mt, x="Month", y="Quantity",
+                            color_discrete_sequence=["#4f46e5"],
+                            text="Quantity", height=220,
+                        )
+                        _mt_fig.update_layout(
+                            margin=dict(t=20,b=10), plot_bgcolor="white", showlegend=False)
+                        _mt_fig.update_traces(textposition="outside")
+                        _mt_fig.update_xaxes(title=None, tickangle=-30)
+                        st.plotly_chart(_mt_fig, use_container_width=True)
+
+                    # Platform split
+                    st.markdown("**🏪 Sales by Platform (last 90 days)**")
+                    _p90 = _sku_sales[
+                        (_sku_sales["TxnDate"] >= pd.Timestamp.today()-pd.Timedelta(days=90)) &
+                        (_sku_sales["Transaction Type"]=="Shipment")
+                    ]
+                    if not _p90.empty and "Source" in _p90.columns:
+                        _plat = _p90.groupby("Source")["Quantity"].sum().reset_index()
+                        _plat.columns = ["Platform","Units"]
+                        _plat = _plat.sort_values("Units", ascending=False)
+                        _pf = px.pie(_plat, names="Platform", values="Units",
+                                     color_discrete_sequence=["#f59e0b","#4f46e5","#10b981","#ef4444"],
+                                     height=220)
+                        _pf.update_layout(margin=dict(t=10,b=10))
+                        st.plotly_chart(_pf, use_container_width=True)
+
+                # ── SKU list table ────────────────────────────────
+                if not _variants.empty:
+                    st.divider()
+                    st.markdown("**All Variants**")
+                    _vdisp = _variants.copy()
+                    for _nc in _vdisp.select_dtypes(include="number").columns:
+                        _vdisp[_nc] = _vdisp[_nc].fillna(0)
+                    st.dataframe(_vdisp, use_container_width=True, hide_index=True, height=200)
+
+            # ── Trigger research dialog ───────────────────────────
+            if "sku_research_target" in st.session_state and st.session_state["sku_research_target"]:
+                _show_sku_research(st.session_state["sku_research_target"])
+                st.session_state["sku_research_target"] = None
+
+            # ══════════════════════════════════════════════════════
             # SIZE BREAK TABLE — always visible, no steps needed
             # ══════════════════════════════════════════════════════
             st.divider()
@@ -3781,12 +3897,81 @@ with tab_po:
                 _sb_k3.metric("Total Units to PO",f"{int(_sb_pivot['TOTAL'].sum()):,}")
                 _sb_k4.metric("Sizes",            len(_sb_size_cols + _sb_other_cols))
 
-                st.dataframe(
-                    _sb_display.style.apply(_sb_style, axis=1),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(100 + len(_sb_display) * 36, 600),
-                )
+                # Force all numeric cols to int (no decimals)
+                for _ic in [c for c in _sb_display.columns if c != "Parent"]:
+                    _sb_display[_ic] = pd.to_numeric(_sb_display[_ic], errors="coerce").fillna(0).astype(int)
+
+                # ── Clickable table header ────────────────────────
+                _all_cols = list(_sb_display.columns)  # Parent + sizes + TOTAL
+                _size_disp_cols = [c for c in _all_cols if c != "Parent"]
+                # Column widths: button col (2) + each size col (1 each), max 10 sizes shown
+                _show_cols = _size_disp_cols[:12]  # cap at 12 columns for readability
+                _col_widths = [2] + [1]*len(_show_cols)
+                _hdr_cols = st.columns(_col_widths)
+                _hdr_cols[0].markdown("**Parent SKU** &nbsp; 🔍 *click to research*",
+                                      unsafe_allow_html=True)
+                for _hi, _hc in enumerate(_show_cols):
+                    _hdr_cols[_hi+1].markdown(
+                        f"<div style='text-align:center;font-weight:700;font-size:0.8rem;"
+                        f"color:#374151'>{_hc}</div>", unsafe_allow_html=True)
+
+                st.markdown("<hr style='margin:4px 0 8px 0;border-color:#e5e7eb'>",
+                            unsafe_allow_html=True)
+
+                # ── Clickable rows ────────────────────────────────
+                for _ri, _rrow in _sb_display.iterrows():
+                    _parent_val = str(_rrow["Parent"])
+                    _is_total   = "GRAND TOTAL" in _parent_val
+                    _row_cols   = st.columns(_col_widths)
+
+                    if _is_total:
+                        # Total row — styled differently, no button
+                        _row_cols[0].markdown(
+                            f"<div style='background:#002B5B;color:white;font-weight:700;"
+                            f"padding:6px 8px;border-radius:4px;font-size:0.85rem'>{_parent_val}</div>",
+                            unsafe_allow_html=True)
+                    else:
+                        # Clickable button for each parent SKU
+                        if _row_cols[0].button(
+                            f"🔍 {_parent_val}",
+                            key=f"sb_btn_{_ri}_{_parent_val}",
+                            use_container_width=True,
+                            type="secondary",
+                        ):
+                            st.session_state["sku_research_target"] = _parent_val
+                            st.rerun()
+
+                    for _ci, _cn in enumerate(_show_cols):
+                        _val = int(_rrow.get(_cn, 0))
+                        if _is_total:
+                            _bg = "#1e40af" if _cn == "TOTAL" else "#003580"
+                            _row_cols[_ci+1].markdown(
+                                f"<div style='text-align:center;color:white;font-weight:700;"
+                                f"background:{_bg};padding:5px 2px;border-radius:3px;"
+                                f"font-size:0.85rem'>{_val:,}</div>",
+                                unsafe_allow_html=True)
+                        elif _val == 0:
+                            _row_cols[_ci+1].markdown(
+                                f"<div style='text-align:center;color:#d1d5db;"
+                                f"font-size:0.85rem;padding:5px'>—</div>",
+                                unsafe_allow_html=True)
+                        elif _cn == "TOTAL":
+                            _row_cols[_ci+1].markdown(
+                                f"<div style='text-align:center;font-weight:700;color:#1e40af;"
+                                f"background:#dbeafe;padding:5px 2px;border-radius:3px;"
+                                f"font-size:0.9rem'>{_val:,}</div>",
+                                unsafe_allow_html=True)
+                        else:
+                            _row_cols[_ci+1].markdown(
+                                f"<div style='text-align:center;font-weight:600;color:#166534;"
+                                f"background:#f0fdf4;padding:5px 2px;border-radius:3px;"
+                                f"font-size:0.85rem'>{_val:,}</div>",
+                                unsafe_allow_html=True)
+
+                    if not _is_total:
+                        st.markdown(
+                            "<hr style='margin:2px 0;border-color:#f3f4f6'>",
+                            unsafe_allow_html=True)
 
                 # Size totals bar chart + table side by side
                 _sb_size_sum = (
