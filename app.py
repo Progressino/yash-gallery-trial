@@ -557,8 +557,9 @@ def merge_daily_into_sales(
 # ══════════════════════════════════════════════════════════════
 
 def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id=""):
+    # Keep date as raw string — each parser handles pd.to_datetime with correct dayfirst setting
     return {
-        "Date":      pd.to_datetime(date, errors="coerce"),
+        "Date":      date,
         "SKU":       str(sku).strip(),
         "Platform":  platform,
         "TxnType":   txn_type,
@@ -567,6 +568,27 @@ def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id="
         "State":     str(state).strip().title(),
         "OrderId":   str(order_id),
     }
+
+
+def _parse_daily_dates(series):
+    """
+    Try to parse a Series of date strings robustly.
+    Handles: DD-MM-YYYY, DD/MM/YYYY, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, 
+             DD MMM YYYY, MMM DD YYYY, epoch ms, etc.
+    Always tries dayfirst=True first (Indian date format).
+    """
+    # Try dayfirst (handles DD-MM-YYYY, DD/MM/YYYY)
+    parsed = pd.to_datetime(series, dayfirst=True, errors="coerce")
+    null_mask = parsed.isna()
+    if null_mask.any():
+        # Try ISO format (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        parsed2 = pd.to_datetime(series[null_mask], format="%Y-%m-%d", errors="coerce")
+        parsed.loc[null_mask] = parsed2
+    null_mask = parsed.isna()
+    if null_mask.any():
+        parsed3 = pd.to_datetime(series[null_mask], infer_datetime_format=True, errors="coerce")
+        parsed.loc[null_mask] = parsed3
+    return parsed
 
 
 def detect_daily_platform(file_obj) -> str:
@@ -683,7 +705,7 @@ def parse_daily_amazon_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
                 order_id = r.get("Amazon Order Id", ""),
             ))
         out = pd.DataFrame(rows)
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Date"] = _parse_daily_dates(out["Date"])
         return out.dropna(subset=["Date"])
     except Exception as e:
         st.warning(f"Amazon daily parse error: {e}")
@@ -783,7 +805,7 @@ def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
             ))
 
         out = pd.DataFrame(rows)
-        out["Date"] = pd.to_datetime(out["Date"], dayfirst=True, errors="coerce")
+        out["Date"] = _parse_daily_dates(out["Date"])
         return out.dropna(subset=["Date"])
     except Exception as e:
         st.warning(f"Flipkart daily parse error: {e}")
@@ -877,7 +899,7 @@ def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
             ))
 
         out = pd.DataFrame(rows)
-        out["Date"] = pd.to_datetime(out["Date"], dayfirst=True, errors="coerce")
+        out["Date"] = _parse_daily_dates(out["Date"])
         return out.dropna(subset=["Date"])
     except Exception as e:
         st.warning(f"Meesho daily parse error: {e}")
@@ -987,7 +1009,7 @@ def parse_daily_myntra_ppmp_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFra
             return pd.DataFrame()
 
         out = pd.DataFrame(rows)
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Date"] = _parse_daily_dates(out["Date"])
         return out.dropna(subset=["Date"])
     except Exception as e:
         st.warning(f"Myntra PPMP daily parse error: {e}")
@@ -1029,7 +1051,7 @@ def parse_daily_myntra_xlsx(file_obj, mapping: Dict[str, str], platform: str = "
         out = pd.DataFrame(rows) if rows else pd.DataFrame()
         if out.empty:
             return pd.DataFrame()
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Date"] = _parse_daily_dates(out["Date"])
         return out.dropna(subset=["Date"])
     except Exception as e:
         st.warning(f"{platform} Earn More parse error: {e}")
@@ -2224,8 +2246,13 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 if _daily_detected:
                     _icons = {"amazon":"🟠","flipkart":"🟡","meesho":"🔴",
                               "myntra":"🟣","myntra_ppmp":"🟣","unknown":"⚪"}
-                    _lines = [f"{_icons.get(p,'⚪')} **{fn}** → {p.replace('_ppmp',' PPMP').title()}"
-                              for fn, p in _daily_detected.items()]
+                    _lines = []
+                    for fn, p in _daily_detected.items():
+                        # find matching parsed df for row count
+                        _matching = [d for d in _daily_parts if not d.empty and d["Platform"].iloc[0].lower() == p.replace("myntra_ppmp","myntra")]
+                        _rows = sum(len(d) for d in _matching) if _matching else 0
+                        _row_info = f" | **{_rows:,} rows parsed**" if _rows else " | ⚠️ 0 rows parsed"
+                        _lines.append(f"{_icons.get(p,'⚪')} **{fn}** → {p.replace('_ppmp',' PPMP').title()}{_row_info}")
                     st.session_state["daily_detect_log"] = _lines
 
                 if _daily_parts:
@@ -3613,6 +3640,270 @@ with tab_po:
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
+
+            # ══════════════════════════════════════════════════════
+            # GENERATE PURCHASE ORDER
+            # ══════════════════════════════════════════════════════
+            st.divider()
+            st.markdown("## 📋 Generate Purchase Order")
+            st.caption("Select SKUs from the filtered list above, adjust quantities if needed, then generate a formatted PO.")
+
+            _po_skus_available = filtered[filtered["PO_Qty"] > 0]["OMS_SKU"].tolist() if "OMS_SKU" in filtered.columns else []
+
+            if not _po_skus_available:
+                st.info("No SKUs with PO quantity > 0 in the current filter. Adjust filters above to see SKUs needing replenishment.")
+            else:
+                # ── Step 1: SKU Selection ──────────────────────────────
+                st.markdown("#### Step 1 — Select SKUs for this PO")
+
+                _sel_col1, _sel_col2, _sel_col3 = st.columns([2, 1, 1])
+                with _sel_col1:
+                    _po_sku_search = st.text_input(
+                        "Search & narrow SKU list", "", key="gen_po_search",
+                        placeholder="Type to filter the list below…"
+                    )
+                with _sel_col2:
+                    if st.button("✅ Select All Urgent + High", key="po_sel_urgent"):
+                        _urgent_high = filtered[
+                            filtered["Priority"].isin(["🔴 URGENT", "🟡 HIGH"]) & (filtered["PO_Qty"] > 0)
+                        ]["OMS_SKU"].tolist()
+                        st.session_state["_po_selected_skus"] = _urgent_high
+                with _sel_col3:
+                    if st.button("🔄 Select All Filtered", key="po_sel_all"):
+                        st.session_state["_po_selected_skus"] = _po_skus_available
+
+                # Filter the SKU list
+                _sku_list_display = _po_skus_available
+                if _po_sku_search.strip():
+                    _sku_list_display = [s for s in _po_skus_available
+                                         if _po_sku_search.strip().lower() in s.lower()]
+
+                _default_selected = st.session_state.get("_po_selected_skus", [])
+                _default_selected = [s for s in _default_selected if s in _sku_list_display]
+
+                _selected_skus = st.multiselect(
+                    f"SKUs to include in PO ({len(_sku_list_display)} available)",
+                    options=_sku_list_display,
+                    default=_default_selected,
+                    key="po_sku_multiselect",
+                    help="These are filtered SKUs with PO Qty > 0"
+                )
+                st.session_state["_po_selected_skus"] = _selected_skus
+
+                if not _selected_skus:
+                    st.warning("Select at least one SKU to generate a PO.")
+                else:
+                    # ── Step 2: PO Header Details ──────────────────────
+                    st.markdown("#### Step 2 — PO Details")
+                    _hc1, _hc2, _hc3, _hc4 = st.columns(4)
+                    with _hc1:
+                        _po_vendor    = st.text_input("Vendor / Supplier Name", key="po_vendor", placeholder="e.g. Shree Textiles")
+                    with _hc2:
+                        _po_number    = st.text_input("PO Number", value=f"PO-{datetime.now().strftime('%Y%m%d')}-001", key="po_number")
+                    with _hc3:
+                        _po_date      = st.date_input("PO Date", value=datetime.now().date(), key="po_date")
+                    with _hc4:
+                        _po_due_date  = st.date_input("Expected Delivery", value=(datetime.now() + timedelta(days=lead_time)).date(), key="po_due_date")
+
+                    _hc5, _hc6 = st.columns(2)
+                    with _hc5:
+                        _po_notes = st.text_area("Notes / Terms", key="po_notes",
+                                                  placeholder="e.g. Delivery to OMS Warehouse. All goods to be packed size-wise.",
+                                                  height=80)
+                    with _hc6:
+                        _po_currency = st.selectbox("Currency", ["INR (₹)", "USD ($)", "EUR (€)"], key="po_currency")
+                        _po_discount = st.number_input("Discount %", 0.0, 50.0, 0.0, 0.5, key="po_discount")
+
+                    _currency_sym = {"INR (₹)": "₹", "USD ($)": "$", "EUR (€)": "€"}.get(_po_currency, "₹")
+
+                    # ── Step 3: Editable PO Line Items ─────────────────
+                    st.markdown("#### Step 3 — Review & Edit Quantities")
+
+                    # Build initial PO lines from filtered data
+                    _po_lines_data = []
+                    for _sk in _selected_skus:
+                        _row = filtered[filtered["OMS_SKU"] == _sk]
+                        if _row.empty:
+                            continue
+                        _row = _row.iloc[0]
+                        _unit_cost = st.session_state.get("cost_mapping", {}).get(_sk, 0.0)
+                        _po_lines_data.append({
+                            "SKU":           _sk,
+                            "Parent":        str(_row.get("Parent_SKU", get_parent_sku(_sk))),
+                            "Priority":      str(_row.get("Priority", "")),
+                            "ADS":           round(float(_row.get("ADS", 0)), 3),
+                            "Stock":         int(_row.get("Avail_Inventory", _row.get("Total_Inventory", 0))),
+                            "Running Days":  int(_row.get("Running_Days", 0)),
+                            "Suggested Qty": int(_row.get("PO_Qty", 0)),
+                            "Order Qty":     int(_row.get("PO_Qty", 0)),
+                            "Unit Cost":     float(_unit_cost),
+                        })
+
+                    _po_lines_df = pd.DataFrame(_po_lines_data)
+
+                    _edited = st.data_editor(
+                        _po_lines_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        num_rows="fixed",
+                        key="po_line_editor",
+                        column_config={
+                            "SKU":           st.column_config.TextColumn("SKU", disabled=True),
+                            "Parent":        st.column_config.TextColumn("Parent", disabled=True),
+                            "Priority":      st.column_config.TextColumn("Priority", disabled=True, width="small"),
+                            "ADS":           st.column_config.NumberColumn("ADS", disabled=True, format="%.3f"),
+                            "Stock":         st.column_config.NumberColumn("Stock", disabled=True),
+                            "Running Days":  st.column_config.NumberColumn("Days Left", disabled=True),
+                            "Suggested Qty": st.column_config.NumberColumn("Suggested Qty", disabled=True),
+                            "Order Qty":     st.column_config.NumberColumn("✏️ Order Qty", help="Edit this column to override the suggested quantity"),
+                            "Unit Cost":     st.column_config.NumberColumn(f"Unit Cost ({_currency_sym})", format="%.2f", help="Enter cost price per unit"),
+                        },
+                        disabled=["SKU","Parent","Priority","ADS","Stock","Running Days","Suggested Qty"],
+                    )
+
+                    # ── Live PO Summary ────────────────────────────────
+                    _edited["Line Total"] = _edited["Order Qty"] * _edited["Unit Cost"]
+                    _edited["Line Total After Disc"] = _edited["Line Total"] * (1 - _po_discount / 100)
+                    _total_units = int(_edited["Order Qty"].sum())
+                    _subtotal    = _edited["Line Total"].sum()
+                    _disc_amt    = _subtotal * (_po_discount / 100)
+                    _grand_total = _subtotal - _disc_amt
+
+                    _sc1, _sc2, _sc3, _sc4 = st.columns(4)
+                    _sc1.metric("SKUs in PO",    len(_edited))
+                    _sc2.metric("Total Units",   f"{_total_units:,}")
+                    _sc3.metric("Subtotal",      f"{_currency_sym}{_subtotal:,.0f}" if _subtotal else "—")
+                    _sc4.metric("Grand Total",   f"{_currency_sym}{_grand_total:,.0f}" if _grand_total else "—")
+
+                    # ── Step 4: Generate PO Document ───────────────────
+                    st.markdown("#### Step 4 — Generate PO Document")
+                    _gen_col1, _gen_col2 = st.columns(2)
+
+                    # ── CSV Export ─────────────────────────────────────
+                    with _gen_col1:
+                        _po_export = _edited.copy()
+                        _po_export.insert(0, "PO Number",       _po_number)
+                        _po_export.insert(1, "Vendor",          _po_vendor)
+                        _po_export.insert(2, "PO Date",         str(_po_date))
+                        _po_export.insert(3, "Delivery Date",   str(_po_due_date))
+                        _po_export["Discount %"] = _po_discount
+                        st.download_button(
+                            "📥 Download PO (CSV)",
+                            _po_export.to_csv(index=False).encode("utf-8"),
+                            f"{_po_number}_PO.csv",
+                            "text/csv",
+                            use_container_width=True,
+                        )
+
+                    # ── Excel Export ───────────────────────────────────
+                    with _gen_col2:
+                        _po_buf = io.BytesIO()
+                        with pd.ExcelWriter(_po_buf, engine="openpyxl") as _po_w:
+                            # Sheet 1: PO Lines
+                            _sheet_df = _edited.copy()
+                            _sheet_df.insert(0, "PO Number",     _po_number)
+                            _sheet_df.insert(1, "Vendor",        _po_vendor)
+                            _sheet_df.insert(2, "PO Date",       str(_po_date))
+                            _sheet_df.insert(3, "Delivery Date", str(_po_due_date))
+                            _sheet_df["Discount %"]   = _po_discount
+                            _sheet_df["Grand Total"]  = _grand_total
+                            _sheet_df.to_excel(_po_w, sheet_name="Purchase Order", index=False)
+
+                            # Sheet 2: PO Summary
+                            _summary_rows = {
+                                "PO Number":        _po_number,
+                                "Vendor":           _po_vendor,
+                                "PO Date":          str(_po_date),
+                                "Expected Delivery":str(_po_due_date),
+                                "Total SKUs":       len(_edited),
+                                "Total Units":      _total_units,
+                                "Subtotal":         round(_subtotal, 2),
+                                "Discount (%)":     _po_discount,
+                                "Discount Amount":  round(_disc_amt, 2),
+                                "Grand Total":      round(_grand_total, 2),
+                                "Currency":         _po_currency,
+                                "Notes":            _po_notes,
+                            }
+                            pd.DataFrame(
+                                list(_summary_rows.items()), columns=["Field", "Value"]
+                            ).to_excel(_po_w, sheet_name="PO Summary", index=False)
+
+                        st.download_button(
+                            "📊 Download PO (Excel)",
+                            _po_buf.getvalue(),
+                            f"{_po_number}_PO.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+
+                    # ── PO Preview ─────────────────────────────────────
+                    with st.expander("👁️ PO Preview", expanded=True):
+                        st.markdown(f"""
+<div style='background:white; padding:24px; border-radius:10px; border:1px solid #e5e7eb; font-family:DM Sans,sans-serif;'>
+
+<div style='display:flex; justify-content:space-between; align-items:flex-start;'>
+  <div>
+    <h2 style='color:#002B5B; margin:0;'>PURCHASE ORDER</h2>
+    <p style='color:#6b7280; margin:4px 0 0;'>Yash Gallery</p>
+  </div>
+  <div style='text-align:right;'>
+    <p style='font-size:1.1rem; font-weight:700; color:#002B5B; margin:0;'>{_po_number}</p>
+    <p style='color:#6b7280; margin:2px 0;'>Date: {_po_date.strftime("%d %b %Y")}</p>
+    <p style='color:#6b7280; margin:2px 0;'>Delivery by: {_po_due_date.strftime("%d %b %Y")}</p>
+  </div>
+</div>
+
+<hr style='border:1px solid #e5e7eb; margin:16px 0;'>
+
+<div style='background:#f8fafc; padding:12px; border-radius:6px; margin-bottom:16px;'>
+  <strong>Vendor:</strong> {_po_vendor if _po_vendor else "—"}<br>
+  <strong>Currency:</strong> {_po_currency}&nbsp;&nbsp;
+  <strong>Discount:</strong> {_po_discount:.1f}%
+  {"<br><strong>Notes:</strong> " + _po_notes if _po_notes else ""}
+</div>
+
+<table style='width:100%; border-collapse:collapse; font-size:0.85rem;'>
+  <thead>
+    <tr style='background:#002B5B; color:white;'>
+      <th style='padding:8px; text-align:left;'>#</th>
+      <th style='padding:8px; text-align:left;'>SKU</th>
+      <th style='padding:8px; text-align:left;'>Parent</th>
+      <th style='padding:8px; text-align:center;'>Priority</th>
+      <th style='padding:8px; text-align:right;'>Order Qty</th>
+      <th style='padding:8px; text-align:right;'>Unit Cost</th>
+      <th style='padding:8px; text-align:right;'>Line Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {"".join([
+        f"<tr style='background:{'#f8fafc' if i%2==0 else 'white'};'>"
+        f"<td style='padding:7px;'>{i+1}</td>"
+        f"<td style='padding:7px; font-weight:600;'>{row['SKU']}</td>"
+        f"<td style='padding:7px; color:#6b7280;'>{row['Parent']}</td>"
+        f"<td style='padding:7px; text-align:center;'>{row['Priority']}</td>"
+        f"<td style='padding:7px; text-align:right;'>{int(row['Order Qty']):,}</td>"
+        f"<td style='padding:7px; text-align:right;'>{_currency_sym}{row['Unit Cost']:,.2f}</td>"
+        f"<td style='padding:7px; text-align:right; font-weight:600;'>{_currency_sym}{row['Line Total']:,.0f}</td>"
+        f"</tr>"
+        for i, (_, row) in enumerate(_edited.iterrows())
+    ])}
+  </tbody>
+</table>
+
+<div style='display:flex; justify-content:flex-end; margin-top:16px;'>
+  <table style='font-size:0.9rem;'>
+    <tr><td style='padding:4px 16px; color:#6b7280;'>Subtotal</td>
+        <td style='padding:4px; text-align:right;'>{_currency_sym}{_subtotal:,.0f}</td></tr>
+    <tr><td style='padding:4px 16px; color:#6b7280;'>Discount ({_po_discount:.1f}%)</td>
+        <td style='padding:4px; text-align:right; color:#ef4444;'>- {_currency_sym}{_disc_amt:,.0f}</td></tr>
+    <tr style='font-size:1.05rem; font-weight:700; border-top:2px solid #002B5B;'>
+        <td style='padding:8px 16px; color:#002B5B;'>GRAND TOTAL</td>
+        <td style='padding:8px; text-align:right; color:#002B5B;'>{_currency_sym}{_grand_total:,.0f}</td></tr>
+  </table>
+</div>
+
+</div>
+""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
 # TAB 9 — PRODUCTION & WIP
