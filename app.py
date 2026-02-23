@@ -3615,7 +3615,7 @@ with tab_prod:
                 st.markdown("<p style='color:#94a3b8;font-size:0.8rem;text-align:center;margin-top:20px;'>— Empty —</p>", unsafe_allow_html=True)
             else:
                 for _, _jr in _s_jobs.iterrows():
-                    _border = SUCCESS if "Inhouse" in str(_jr["Location"]) else WARNING
+                    _border = "#10b981" if "Inhouse" in str(_jr["Location"]) else "#f59e0b"
                     _loc_label = "🏠 Inhouse" if "Inhouse" in str(_jr["Location"]) else f"🏭 {_jr['Location']}"
                     st.markdown(f"""
 <div class='kanban-card' style='border-left-color:{_border};'>
@@ -3687,7 +3687,7 @@ with tab_prod:
 
     _qa_fig = px.bar(
         _qa_grouped, x="Stage", y=["Pass Units","Reject Units"],
-        barmode="stack", color_discrete_map={"Pass Units":SUCCESS, "Reject Units":DANGER},
+        barmode="stack", color_discrete_map={"Pass Units":"#10b981", "Reject Units":"#ef4444"},
         title="Pass vs Reject by Stage", height=280
     )
     _qa_fig.update_layout(margin=dict(t=40,b=10), plot_bgcolor="white", legend_title=None)
