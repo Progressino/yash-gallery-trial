@@ -2144,9 +2144,6 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
 
 _show_data_coverage()
 
-if not st.session_state.sku_mapping:
-    st.info("👋 **Welcome!** Upload SKU Mapping and click **Load All Data** to begin.")
-    st.stop()
 
 # ══════════════════════════════════════════════════════════════
 # 14) MAIN TABS
