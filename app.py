@@ -24,6 +24,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+# Google Drive integration (optional — only active if secrets configured)
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+    _GDRIVE_AVAILABLE = True
+except ImportError:
+    _GDRIVE_AVAILABLE = False
+
 # Prophet is optional - Catch explicit errors if it fails to load
 try:
     from prophet import Prophet
@@ -2179,6 +2188,23 @@ def _show_data_coverage():
             gc.collect()
             st.rerun()
 
+# ── Auto-load from Google Drive on startup ───────────────────
+if _gdrive_configured() and not st.session_state.get("_gdrive_autoloaded"):
+    _svc = _get_gdrive_service()
+    try:
+        _folder = st.secrets.get("gdrive_folder_id", "")
+    except Exception:
+        _folder = ""
+    if _svc and _folder:
+        with st.sidebar.status("☁️ Loading from Google Drive…", expanded=False) as _gs:
+            _cloud_files = _gdrive_auto_load(_svc, _folder)
+            if _cloud_files:
+                st.session_state["_gdrive_files"]      = _cloud_files
+                st.session_state["_gdrive_autoloaded"] = True
+                _gs.update(label=f"☁️ {len(_cloud_files)} files ready from Drive", state="complete")
+            else:
+                _gs.update(label="☁️ Drive connected — no files found yet", state="complete")
+
 if st.sidebar.button("🚀 Load All Data", use_container_width=True):
     if not map_file:
         st.sidebar.error("SKU Mapping required!")
@@ -2192,6 +2218,10 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     include_replacements=st.session_state.include_replacements
                 )
 
+                # Fall back to Drive file if no local upload
+                _cf = st.session_state.get("_gdrive_files", {})
+                if not mtr_main_zip and "mtr_zip" in _cf:
+                    mtr_main_zip = _cf["mtr_zip"]["buf"]
                 if mtr_main_zip:
                     mtr_combined, csv_count, mtr_skipped = load_mtr_from_main_zip(mtr_main_zip)
                     st.session_state.mtr_df = mtr_combined
@@ -2202,12 +2232,16 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                             for s in mtr_skipped:
                                 st.write(s)
 
+                if not f_meesho and "meesho_zip" in _cf:
+                    f_meesho = _cf["meesho_zip"]["buf"]
                 if f_meesho:
                     meesho_combined = load_meesho_full(f_meesho)
                     st.session_state.meesho_df = meesho_combined
                     del meesho_combined
                     gc.collect()
 
+                if not f_myntra and "myntra_zip" in _cf:
+                    f_myntra = _cf["myntra_zip"]["buf"]
                 if f_myntra:
                     myntra_combined = load_myntra_full(f_myntra, st.session_state.sku_mapping)
                     st.session_state.myntra_df = myntra_combined
@@ -2215,6 +2249,8 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     gc.collect()
 
                 if f_flipkart_zip:
+                    if not f_flipkart_zip and "flipkart_zip" in _cf:
+                        f_flipkart_zip = _cf["flipkart_zip"]["buf"]
                     fk_combined = load_flipkart_full(f_flipkart_zip, st.session_state.sku_mapping)
                     st.session_state.flipkart_df = fk_combined
                     del fk_combined
@@ -2336,9 +2372,126 @@ _show_data_coverage()
 # ══════════════════════════════════════════════════════════════
 # 14) MAIN TABS
 # ══════════════════════════════════════════════════════════════
-tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_flipkart, tab_daily, tab_inv, tab_po, tab_prod, tab_logistics, tab_forecast, tab_drill = st.tabs([
+# ══════════════════════════════════════════════════════════════
+# GOOGLE DRIVE HELPERS
+# ══════════════════════════════════════════════════════════════
+@st.cache_resource
+def _get_gdrive_service():
+    """Build and cache Google Drive API service from Streamlit secrets."""
+    if not _GDRIVE_AVAILABLE:
+        return None
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    except Exception:
+        return None
+
+def _gdrive_configured() -> bool:
+    try:
+        return "gcp_service_account" in st.secrets and _GDRIVE_AVAILABLE
+    except Exception:
+        return False
+
+def _gdrive_list_folder(service, folder_id: str) -> list:
+    """List all files in a Drive folder. Returns list of {id, name, size, modifiedTime}."""
+    try:
+        results = service.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="files(id,name,size,modifiedTime,mimeType)",
+            orderBy="modifiedTime desc"
+        ).execute()
+        return results.get("files", [])
+    except Exception as e:
+        st.error(f"Drive list error: {e}")
+        return []
+
+def _gdrive_download(service, file_id: str) -> io.BytesIO:
+    """Download a file from Drive into a BytesIO buffer."""
+    try:
+        req  = service.files().get_media(fileId=file_id)
+        buf  = io.BytesIO()
+        dl   = MediaIoBaseDownload(buf, req)
+        done = False
+        while not done:
+            _, done = dl.next_chunk()
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        st.error(f"Drive download error: {e}")
+        return None
+
+def _gdrive_upload(service, folder_id: str, filename: str, buf: io.BytesIO,
+                   mime: str = "application/octet-stream") -> str:
+    """Upload/overwrite a file in Drive. Returns file ID."""
+    try:
+        buf.seek(0)
+        # Check if file already exists (to update instead of duplicate)
+        existing = service.files().list(
+            q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
+            fields="files(id,name)"
+        ).execute().get("files", [])
+        media = MediaIoBaseUpload(buf, mimetype=mime, resumable=True)
+        if existing:
+            file_id = existing[0]["id"]
+            service.files().update(fileId=file_id, media_body=media).execute()
+            return file_id
+        else:
+            meta = {"name": filename, "parents": [folder_id]}
+            f    = service.files().create(body=meta, media_body=media,
+                                          fields="id").execute()
+            return f["id"]
+    except Exception as e:
+        st.error(f"Drive upload error: {e}")
+        return None
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _gdrive_load_file(file_id: str, filename: str):
+    """Download and cache a Drive file — returns BytesIO. Cached for 5 min."""
+    svc = _get_gdrive_service()
+    if not svc:
+        return None
+    return _gdrive_download(svc, file_id)
+
+def _gdrive_auto_load(service, folder_id: str):
+    """
+    Scan the Drive folder and auto-load all recognised data files into session state.
+    File naming convention:
+      sku_mapping.xlsx        → SKU mapping
+      mtr_main.zip            → MTR historical ZIP
+      flipkart_main.zip       → Flipkart historical ZIP
+      meesho_main.zip         → Meesho historical ZIP
+      myntra_main.zip         → Myntra historical ZIP
+      cost_master.xlsx        → Cost/price master
+    """
+    if not service or not folder_id:
+        return {}
+    files = _gdrive_list_folder(service, folder_id)
+    loaded = {}
+    FILE_MAP = {
+        "sku_mapping.xlsx":   "sku_mapping",
+        "mtr_main.zip":       "mtr_zip",
+        "flipkart_main.zip":  "flipkart_zip",
+        "meesho_main.zip":    "meesho_zip",
+        "myntra_main.zip":    "myntra_zip",
+        "cost_master.xlsx":   "cost_master",
+    }
+    for f in files:
+        key = FILE_MAP.get(f["name"])
+        if key:
+            buf = _gdrive_download(service, f["id"])
+            if buf:
+                loaded[key] = {"buf": buf, "name": f["name"],
+                               "modified": f.get("modifiedTime",""),
+                               "size": int(f.get("size", 0))}
+    return loaded
+
+tab_dash, tab_mtr, tab_myntra, tab_meesho, tab_flipkart, tab_daily, tab_inv, tab_po, tab_prod, tab_logistics, tab_forecast, tab_drill, tab_cloud = st.tabs([
     "📊 Dashboard", "📑 MTR Analytics", "🛍️ Myntra", "🛒 Meesho", "🟡 Flipkart",
-    "📋 Daily Orders", "📦 Inventory", "🎯 PO Engine", "🏭 Production (WIP)", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive",
+    "📋 Daily Orders", "📦 Inventory", "🎯 PO Engine", "🏭 Production (WIP)", "🚚 Logistics", "📈 AI Forecast", "🔍 Deep Dive", "☁️ Cloud Storage",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -3827,239 +3980,239 @@ with tab_po:
                 st.session_state["sku_research_target"] = None
 
             # ══════════════════════════════════════════════════════
-            # SIZE BREAK TABLE — always visible, no steps needed
+            # SIZE BREAK TABLE — collapsible
             # ══════════════════════════════════════════════════════
             st.divider()
-            st.markdown("## 📐 Size Break by Parent SKU")
-            st.caption("Units to prepare per style per size, based on current PO Qty recommendations.")
+            with st.expander("📐 Size Break by Parent SKU", expanded=False):
+                 st.caption("Units to prepare per style per size, based on current PO Qty recommendations.")
 
-            _SIZE_ORDER_SB = ["XS","S","M","L","XL","XXL","2XL","3XL","4XL",
-                               "5XL","6XL","7XL","8XL","XXXL","FS","FREE","ONESIZE"]
+                 _SIZE_ORDER_SB = ["XS","S","M","L","XL","XXL","2XL","3XL","4XL",
+                                   "5XL","6XL","7XL","8XL","XXXL","FS","FREE","ONESIZE"]
 
-            def _extract_size_from_sku(sku):
-                s = str(sku)
-                if "-" not in s: return "N/A"
-                last = s.split("-")[-1].upper().strip()
-                if (last in set(_SIZE_ORDER_SB) or last.isdigit()
-                        or last.endswith("XL") or (len(last)<=4 and last.startswith("X"))):
-                    return last
-                return "N/A"
+                def _extract_size_from_sku(sku):
+                    s = str(sku)
+                    if "-" not in s: return "N/A"
+                    last = s.split("-")[-1].upper().strip()
+                    if (last in set(_SIZE_ORDER_SB) or last.isdigit()
+                            or last.endswith("XL") or (len(last)<=4 and last.startswith("X"))):
+                        return last
+                    return "N/A"
 
-            # Use the filtered master table (all SKUs with PO_Qty > 0)
-            _sb_source = filtered[filtered["PO_Qty"] > 0].copy() if "PO_Qty" in filtered.columns else pd.DataFrame()
+                # Use the filtered master table (all SKUs with PO_Qty > 0)
+                _sb_source = filtered[filtered["PO_Qty"] > 0].copy() if "PO_Qty" in filtered.columns else pd.DataFrame()
 
-            if _sb_source.empty:
-                st.info("No SKUs with PO Qty > 0 in current filter.")
-            else:
-                # --- Controls row ---
-                _sbc1, _sbc2, _sbc3 = st.columns([2, 1, 1])
-                with _sbc1:
-                    _sb_parent_search = st.text_input(
-                        "Filter by Parent SKU / Style", "", key="sb_parent_search",
-                        placeholder="e.g. 1065YK"
+                if _sb_source.empty:
+                    st.info("No SKUs with PO Qty > 0 in current filter.")
+                else:
+                    # --- Controls row ---
+                    _sbc1, _sbc2, _sbc3 = st.columns([2, 1, 1])
+                    with _sbc1:
+                        _sb_parent_search = st.text_input(
+                            "Filter by Parent SKU / Style", "", key="sb_parent_search",
+                            placeholder="e.g. 1065YK"
+                        )
+                    with _sbc2:
+                        _sb_priority_filter = st.multiselect(
+                            "Priority", ["🔴 URGENT","🟡 HIGH","🟢 MEDIUM"],
+                            default=["🔴 URGENT","🟡 HIGH","🟢 MEDIUM"],
+                            key="sb_priority_filter"
+                        )
+                    with _sbc3:
+                        _sb_min_qty = st.number_input("Min Total Qty", 0, 9999, 0, 10, key="sb_min_qty")
+
+                    _sb_df = _sb_source.copy()
+                    if _sb_priority_filter:
+                        _sb_df = _sb_df[_sb_df["Priority"].isin(_sb_priority_filter)]
+
+                    _sb_df["Size"]   = _sb_df["OMS_SKU"].apply(_extract_size_from_sku)
+                    _sb_df["Parent"] = _sb_df["Parent_SKU"].fillna(_sb_df["OMS_SKU"].apply(get_parent_sku))
+
+                    if _sb_parent_search.strip():
+                        _sb_df = _sb_df[_sb_df["Parent"].str.contains(
+                            _sb_parent_search.strip(), case=False, na=False)]
+
+                    # Build pivot
+                    _sb_pivot = (
+                        _sb_df.groupby(["Parent", "Size"])["PO_Qty"]
+                        .sum().reset_index()
+                        .pivot_table(index="Parent", columns="Size",
+                                     values="PO_Qty", fill_value=0)
+                        .reset_index()
                     )
-                with _sbc2:
-                    _sb_priority_filter = st.multiselect(
-                        "Priority", ["🔴 URGENT","🟡 HIGH","🟢 MEDIUM"],
-                        default=["🔴 URGENT","🟡 HIGH","🟢 MEDIUM"],
-                        key="sb_priority_filter"
-                    )
-                with _sbc3:
-                    _sb_min_qty = st.number_input("Min Total Qty", 0, 9999, 0, 10, key="sb_min_qty")
+                    _sb_pivot.columns.name = None
 
-                _sb_df = _sb_source.copy()
-                if _sb_priority_filter:
-                    _sb_df = _sb_df[_sb_df["Priority"].isin(_sb_priority_filter)]
+                    # Order size columns properly
+                    _sb_size_cols   = [c for c in _SIZE_ORDER_SB if c in _sb_pivot.columns]
+                    _sb_other_cols  = [c for c in _sb_pivot.columns
+                                       if c not in _SIZE_ORDER_SB and c != "Parent"]
+                    _sb_ordered     = ["Parent"] + _sb_size_cols + _sb_other_cols
+                    _sb_pivot       = _sb_pivot[[c for c in _sb_ordered if c in _sb_pivot.columns]]
+                    _sb_num_cols    = [c for c in _sb_pivot.columns if c != "Parent"]
+                    _sb_pivot["TOTAL"] = _sb_pivot[_sb_num_cols].sum(axis=1).astype(int)
 
-                _sb_df["Size"]   = _sb_df["OMS_SKU"].apply(_extract_size_from_sku)
-                _sb_df["Parent"] = _sb_df["Parent_SKU"].fillna(_sb_df["OMS_SKU"].apply(get_parent_sku))
+                    if _sb_min_qty > 0:
+                        _sb_pivot = _sb_pivot[_sb_pivot["TOTAL"] >= _sb_min_qty]
 
-                if _sb_parent_search.strip():
-                    _sb_df = _sb_df[_sb_df["Parent"].str.contains(
-                        _sb_parent_search.strip(), case=False, na=False)]
+                    _sb_pivot = _sb_pivot.sort_values("TOTAL", ascending=False).reset_index(drop=True)
 
-                # Build pivot
-                _sb_pivot = (
-                    _sb_df.groupby(["Parent", "Size"])["PO_Qty"]
-                    .sum().reset_index()
-                    .pivot_table(index="Parent", columns="Size",
-                                 values="PO_Qty", fill_value=0)
-                    .reset_index()
-                )
-                _sb_pivot.columns.name = None
+                    # Totals row
+                    _sb_total_row = {"Parent": "⬛ GRAND TOTAL"}
+                    for _c in _sb_num_cols + ["TOTAL"]:
+                        _sb_total_row[_c] = int(_sb_pivot[_c].sum()) if _c in _sb_pivot.columns else 0
+                    _sb_display = pd.concat([_sb_pivot, pd.DataFrame([_sb_total_row])], ignore_index=True)
 
-                # Order size columns properly
-                _sb_size_cols   = [c for c in _SIZE_ORDER_SB if c in _sb_pivot.columns]
-                _sb_other_cols  = [c for c in _sb_pivot.columns
-                                   if c not in _SIZE_ORDER_SB and c != "Parent"]
-                _sb_ordered     = ["Parent"] + _sb_size_cols + _sb_other_cols
-                _sb_pivot       = _sb_pivot[[c for c in _sb_ordered if c in _sb_pivot.columns]]
-                _sb_num_cols    = [c for c in _sb_pivot.columns if c != "Parent"]
-                _sb_pivot["TOTAL"] = _sb_pivot[_sb_num_cols].sum(axis=1).astype(int)
+                    # Styling
+                    def _sb_style(row):
+                        if "GRAND TOTAL" in str(row.get("Parent","")):
+                            return ["background:#002B5B;color:white;font-weight:700"] * len(row)
+                        out = []
+                        for col, val in row.items():
+                            if col == "Parent":
+                                out.append("font-weight:600;color:#1e3a5f")
+                            elif col == "TOTAL":
+                                out.append("background:#dbeafe;font-weight:700;color:#1e40af;font-size:1.05em")
+                            elif isinstance(val,(int,float)) and val == 0:
+                                out.append("color:#d1d5db;background:#f9fafb")
+                            else:
+                                out.append("background:#f0fdf4;font-weight:600;color:#166534")
+                        return out
 
-                if _sb_min_qty > 0:
-                    _sb_pivot = _sb_pivot[_sb_pivot["TOTAL"] >= _sb_min_qty]
+                    # KPI row
+                    _sb_k1, _sb_k2, _sb_k3, _sb_k4 = st.columns(4)
+                    _sb_k1.metric("Styles (Parents)", len(_sb_pivot))
+                    _sb_k2.metric("Total SKUs",       len(_sb_df))
+                    _sb_k3.metric("Total Units to PO",f"{int(_sb_pivot['TOTAL'].sum()):,}")
+                    _sb_k4.metric("Sizes",            len(_sb_size_cols + _sb_other_cols))
 
-                _sb_pivot = _sb_pivot.sort_values("TOTAL", ascending=False).reset_index(drop=True)
+                    # Force all numeric cols to int (no decimals)
+                    for _ic in [c for c in _sb_display.columns if c != "Parent"]:
+                        _sb_display[_ic] = pd.to_numeric(_sb_display[_ic], errors="coerce").fillna(0).astype(int)
 
-                # Totals row
-                _sb_total_row = {"Parent": "⬛ GRAND TOTAL"}
-                for _c in _sb_num_cols + ["TOTAL"]:
-                    _sb_total_row[_c] = int(_sb_pivot[_c].sum()) if _c in _sb_pivot.columns else 0
-                _sb_display = pd.concat([_sb_pivot, pd.DataFrame([_sb_total_row])], ignore_index=True)
+                    # ── Clickable table header ────────────────────────
+                    _all_cols = list(_sb_display.columns)  # Parent + sizes + TOTAL
+                    _size_disp_cols = [c for c in _all_cols if c != "Parent"]
+                    # Column widths: button col (2) + each size col (1 each), max 10 sizes shown
+                    _show_cols = _size_disp_cols[:12]  # cap at 12 columns for readability
+                    _col_widths = [2] + [1]*len(_show_cols)
+                    _hdr_cols = st.columns(_col_widths)
+                    _hdr_cols[0].markdown("**Parent SKU** &nbsp; 🔍 *click to research*",
+                                          unsafe_allow_html=True)
+                    for _hi, _hc in enumerate(_show_cols):
+                        _hdr_cols[_hi+1].markdown(
+                            f"<div style='text-align:center;font-weight:700;font-size:0.8rem;"
+                            f"color:#374151'>{_hc}</div>", unsafe_allow_html=True)
 
-                # Styling
-                def _sb_style(row):
-                    if "GRAND TOTAL" in str(row.get("Parent","")):
-                        return ["background:#002B5B;color:white;font-weight:700"] * len(row)
-                    out = []
-                    for col, val in row.items():
-                        if col == "Parent":
-                            out.append("font-weight:600;color:#1e3a5f")
-                        elif col == "TOTAL":
-                            out.append("background:#dbeafe;font-weight:700;color:#1e40af;font-size:1.05em")
-                        elif isinstance(val,(int,float)) and val == 0:
-                            out.append("color:#d1d5db;background:#f9fafb")
-                        else:
-                            out.append("background:#f0fdf4;font-weight:600;color:#166534")
-                    return out
+                    st.markdown("<hr style='margin:4px 0 8px 0;border-color:#e5e7eb'>",
+                                unsafe_allow_html=True)
 
-                # KPI row
-                _sb_k1, _sb_k2, _sb_k3, _sb_k4 = st.columns(4)
-                _sb_k1.metric("Styles (Parents)", len(_sb_pivot))
-                _sb_k2.metric("Total SKUs",       len(_sb_df))
-                _sb_k3.metric("Total Units to PO",f"{int(_sb_pivot['TOTAL'].sum()):,}")
-                _sb_k4.metric("Sizes",            len(_sb_size_cols + _sb_other_cols))
+                    # ── Clickable rows ────────────────────────────────
+                    for _ri, _rrow in _sb_display.iterrows():
+                        _parent_val = str(_rrow["Parent"])
+                        _is_total   = "GRAND TOTAL" in _parent_val
+                        _row_cols   = st.columns(_col_widths)
 
-                # Force all numeric cols to int (no decimals)
-                for _ic in [c for c in _sb_display.columns if c != "Parent"]:
-                    _sb_display[_ic] = pd.to_numeric(_sb_display[_ic], errors="coerce").fillna(0).astype(int)
-
-                # ── Clickable table header ────────────────────────
-                _all_cols = list(_sb_display.columns)  # Parent + sizes + TOTAL
-                _size_disp_cols = [c for c in _all_cols if c != "Parent"]
-                # Column widths: button col (2) + each size col (1 each), max 10 sizes shown
-                _show_cols = _size_disp_cols[:12]  # cap at 12 columns for readability
-                _col_widths = [2] + [1]*len(_show_cols)
-                _hdr_cols = st.columns(_col_widths)
-                _hdr_cols[0].markdown("**Parent SKU** &nbsp; 🔍 *click to research*",
-                                      unsafe_allow_html=True)
-                for _hi, _hc in enumerate(_show_cols):
-                    _hdr_cols[_hi+1].markdown(
-                        f"<div style='text-align:center;font-weight:700;font-size:0.8rem;"
-                        f"color:#374151'>{_hc}</div>", unsafe_allow_html=True)
-
-                st.markdown("<hr style='margin:4px 0 8px 0;border-color:#e5e7eb'>",
-                            unsafe_allow_html=True)
-
-                # ── Clickable rows ────────────────────────────────
-                for _ri, _rrow in _sb_display.iterrows():
-                    _parent_val = str(_rrow["Parent"])
-                    _is_total   = "GRAND TOTAL" in _parent_val
-                    _row_cols   = st.columns(_col_widths)
-
-                    if _is_total:
-                        # Total row — styled differently, no button
-                        _row_cols[0].markdown(
-                            f"<div style='background:#002B5B;color:white;font-weight:700;"
-                            f"padding:6px 8px;border-radius:4px;font-size:0.85rem'>{_parent_val}</div>",
-                            unsafe_allow_html=True)
-                    else:
-                        # Clickable button for each parent SKU
-                        if _row_cols[0].button(
-                            f"🔍 {_parent_val}",
-                            key=f"sb_btn_{_ri}_{_parent_val}",
-                            use_container_width=True,
-                            type="secondary",
-                        ):
-                            st.session_state["sku_research_target"] = _parent_val
-                            st.rerun()
-
-                    for _ci, _cn in enumerate(_show_cols):
-                        _val = int(_rrow.get(_cn, 0))
                         if _is_total:
-                            _bg = "#1e40af" if _cn == "TOTAL" else "#003580"
-                            _row_cols[_ci+1].markdown(
-                                f"<div style='text-align:center;color:white;font-weight:700;"
-                                f"background:{_bg};padding:5px 2px;border-radius:3px;"
-                                f"font-size:0.85rem'>{_val:,}</div>",
-                                unsafe_allow_html=True)
-                        elif _val == 0:
-                            _row_cols[_ci+1].markdown(
-                                f"<div style='text-align:center;color:#d1d5db;"
-                                f"font-size:0.85rem;padding:5px'>—</div>",
-                                unsafe_allow_html=True)
-                        elif _cn == "TOTAL":
-                            _row_cols[_ci+1].markdown(
-                                f"<div style='text-align:center;font-weight:700;color:#1e40af;"
-                                f"background:#dbeafe;padding:5px 2px;border-radius:3px;"
-                                f"font-size:0.9rem'>{_val:,}</div>",
+                            # Total row — styled differently, no button
+                            _row_cols[0].markdown(
+                                f"<div style='background:#002B5B;color:white;font-weight:700;"
+                                f"padding:6px 8px;border-radius:4px;font-size:0.85rem'>{_parent_val}</div>",
                                 unsafe_allow_html=True)
                         else:
-                            _row_cols[_ci+1].markdown(
-                                f"<div style='text-align:center;font-weight:600;color:#166534;"
-                                f"background:#f0fdf4;padding:5px 2px;border-radius:3px;"
-                                f"font-size:0.85rem'>{_val:,}</div>",
+                            # Clickable button for each parent SKU
+                            if _row_cols[0].button(
+                                f"🔍 {_parent_val}",
+                                key=f"sb_btn_{_ri}_{_parent_val}",
+                                use_container_width=True,
+                                type="secondary",
+                            ):
+                                st.session_state["sku_research_target"] = _parent_val
+                                st.rerun()
+
+                        for _ci, _cn in enumerate(_show_cols):
+                            _val = int(_rrow.get(_cn, 0))
+                            if _is_total:
+                                _bg = "#1e40af" if _cn == "TOTAL" else "#003580"
+                                _row_cols[_ci+1].markdown(
+                                    f"<div style='text-align:center;color:white;font-weight:700;"
+                                    f"background:{_bg};padding:5px 2px;border-radius:3px;"
+                                    f"font-size:0.85rem'>{_val:,}</div>",
+                                    unsafe_allow_html=True)
+                            elif _val == 0:
+                                _row_cols[_ci+1].markdown(
+                                    f"<div style='text-align:center;color:#d1d5db;"
+                                    f"font-size:0.85rem;padding:5px'>—</div>",
+                                    unsafe_allow_html=True)
+                            elif _cn == "TOTAL":
+                                _row_cols[_ci+1].markdown(
+                                    f"<div style='text-align:center;font-weight:700;color:#1e40af;"
+                                    f"background:#dbeafe;padding:5px 2px;border-radius:3px;"
+                                    f"font-size:0.9rem'>{_val:,}</div>",
+                                    unsafe_allow_html=True)
+                            else:
+                                _row_cols[_ci+1].markdown(
+                                    f"<div style='text-align:center;font-weight:600;color:#166534;"
+                                    f"background:#f0fdf4;padding:5px 2px;border-radius:3px;"
+                                    f"font-size:0.85rem'>{_val:,}</div>",
+                                    unsafe_allow_html=True)
+
+                        if not _is_total:
+                            st.markdown(
+                                "<hr style='margin:2px 0;border-color:#f3f4f6'>",
                                 unsafe_allow_html=True)
 
-                    if not _is_total:
-                        st.markdown(
-                            "<hr style='margin:2px 0;border-color:#f3f4f6'>",
-                            unsafe_allow_html=True)
-
-                # Size totals bar chart + table side by side
-                _sb_size_sum = (
-                    _sb_pivot[_sb_size_cols + _sb_other_cols].sum()
-                    .reset_index()
-                )
-                _sb_size_sum.columns = ["Size","Units"]
-                _sb_size_sum = _sb_size_sum[_sb_size_sum["Units"] > 0].reset_index(drop=True)
-
-                _sc1, _sc2 = st.columns([3, 1])
-                with _sc1:
-                    if not _sb_size_sum.empty:
-                        _fig_sb = px.bar(
-                            _sb_size_sum, x="Size", y="Units",
-                            title="Total Units by Size (all styles)",
-                            color="Units",
-                            color_continuous_scale=["#bfdbfe","#1d4ed8"],
-                            text="Units",
-                        )
-                        _fig_sb.update_layout(
-                            height=300, showlegend=False,
-                            plot_bgcolor="white", coloraxis_showscale=False,
-                            margin=dict(t=40,b=10),
-                        )
-                        _fig_sb.update_traces(textposition="outside")
-                        _fig_sb.update_xaxes(
-                            categoryorder="array", categoryarray=_SIZE_ORDER_SB, title=None)
-                        st.plotly_chart(_fig_sb, use_container_width=True)
-                with _sc2:
-                    st.markdown("**Units per Size**")
-                    st.dataframe(_sb_size_sum, use_container_width=True,
-                                 hide_index=True, height=300)
-
-                # Downloads
-                _dl1, _dl2 = st.columns(2)
-                with _dl1:
-                    st.download_button(
-                        "📥 Download Size Break (CSV)",
-                        _sb_display.to_csv(index=False).encode("utf-8"),
-                        f"size_break_{datetime.now().strftime('%Y%m%d')}.csv",
-                        "text/csv", use_container_width=True,
+                    # Size totals bar chart + table side by side
+                    _sb_size_sum = (
+                        _sb_pivot[_sb_size_cols + _sb_other_cols].sum()
+                        .reset_index()
                     )
-                with _dl2:
-                    _sb_buf = io.BytesIO()
-                    with pd.ExcelWriter(_sb_buf, engine="openpyxl") as _sbw:
-                        _sb_display.to_excel(_sbw, sheet_name="Size Break", index=False)
-                        _sb_size_sum.to_excel(_sbw, sheet_name="Size Summary", index=False)
-                    st.download_button(
-                        "📥 Download Size Break (Excel)",
-                        _sb_buf.getvalue(),
-                        f"size_break_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
+                    _sb_size_sum.columns = ["Size","Units"]
+                    _sb_size_sum = _sb_size_sum[_sb_size_sum["Units"] > 0].reset_index(drop=True)
+
+                    _sc1, _sc2 = st.columns([3, 1])
+                    with _sc1:
+                        if not _sb_size_sum.empty:
+                            _fig_sb = px.bar(
+                                _sb_size_sum, x="Size", y="Units",
+                                title="Total Units by Size (all styles)",
+                                color="Units",
+                                color_continuous_scale=["#bfdbfe","#1d4ed8"],
+                                text="Units",
+                            )
+                            _fig_sb.update_layout(
+                                height=300, showlegend=False,
+                                plot_bgcolor="white", coloraxis_showscale=False,
+                                margin=dict(t=40,b=10),
+                            )
+                            _fig_sb.update_traces(textposition="outside")
+                            _fig_sb.update_xaxes(
+                                categoryorder="array", categoryarray=_SIZE_ORDER_SB, title=None)
+                            st.plotly_chart(_fig_sb, use_container_width=True)
+                    with _sc2:
+                        st.markdown("**Units per Size**")
+                        st.dataframe(_sb_size_sum, use_container_width=True,
+                                     hide_index=True, height=300)
+
+                    # Downloads
+                    _dl1, _dl2 = st.columns(2)
+                    with _dl1:
+                        st.download_button(
+                            "📥 Download Size Break (CSV)",
+                            _sb_display.to_csv(index=False).encode("utf-8"),
+                            f"size_break_{datetime.now().strftime('%Y%m%d')}.csv",
+                            "text/csv", use_container_width=True,
+                        )
+                    with _dl2:
+                        _sb_buf = io.BytesIO()
+                        with pd.ExcelWriter(_sb_buf, engine="openpyxl") as _sbw:
+                            _sb_display.to_excel(_sbw, sheet_name="Size Break", index=False)
+                            _sb_size_sum.to_excel(_sbw, sheet_name="Size Summary", index=False)
+                        st.download_button(
+                            "📥 Download Size Break (Excel)",
+                            _sb_buf.getvalue(),
+                            f"size_break_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
 
             # ══════════════════════════════════════════════════════
             # GENERATE PURCHASE ORDER
@@ -5104,3 +5257,178 @@ with tab_drill:
                 )
             else:
                 st.info("No MTR transactions.")
+
+# ══════════════════════════════════════════════════════════════
+# TAB 13 — CLOUD STORAGE (Google Drive)
+# ══════════════════════════════════════════════════════════════
+with tab_cloud:
+    st.subheader("☁️ Cloud Storage — Google Drive")
+
+    if not _GDRIVE_AVAILABLE:
+        st.error("Google Drive libraries not installed. Add to requirements.txt:\n```\ngoogle-auth\ngoogle-api-python-client\n```")
+    elif not _gdrive_configured():
+        # ── Setup instructions ────────────────────────────────
+        st.info("Google Drive is not configured yet. Follow the steps below to set it up **once** — after that the app loads your data automatically on every startup.")
+
+        st.markdown("### 🔧 One-Time Setup (5 minutes)")
+
+        with st.expander("**Step 1 — Create Google Service Account**", expanded=True):
+            st.markdown("""
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) → Create a new project (e.g. `yash-gallery-erp`)
+2. Go to **APIs & Services → Library** → Enable **Google Drive API**
+3. Go to **APIs & Services → Credentials** → Click **Create Credentials → Service Account**
+4. Name it `yash-gallery-erp` → Click Done
+5. Click on the service account → **Keys** tab → **Add Key → Create New Key → JSON**
+6. Download the JSON file — you'll need its contents in Step 3
+""")
+
+        with st.expander("**Step 2 — Create Google Drive Folder**", expanded=True):
+            st.markdown("""
+1. Go to [drive.google.com](https://drive.google.com) → Create a new folder called `Yash Gallery ERP`
+2. Right-click the folder → **Share** → paste the service account email (looks like `yash-gallery-erp@project.iam.gserviceaccount.com`) → Give **Editor** access
+3. Open the folder → copy the folder ID from the URL: `drive.google.com/drive/folders/**THIS_PART**`
+""")
+
+        with st.expander("**Step 3 — Add Secrets to Streamlit Cloud**", expanded=True):
+            st.markdown("""
+1. Go to your Streamlit Cloud dashboard → your app → **⋮ menu → Settings → Secrets**
+2. Paste the following (replace values from your JSON key file):
+```toml
+gdrive_folder_id = "your_folder_id_from_step_2"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "abc123..."
+private_key = "-----BEGIN RSA PRIVATE KEY-----\\nMIIE...\\n-----END RSA PRIVATE KEY-----\\n"
+client_email = "yash-gallery-erp@your-project.iam.gserviceaccount.com"
+client_id = "123456789"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+```
+3. Click **Save** — the app will restart automatically
+""")
+
+        with st.expander("**Step 4 — Upload Your Files**", expanded=True):
+            st.markdown("""
+Upload files to your Drive folder with **exactly these names**:
+
+| File Name | What it is |
+|-----------|-----------|
+| `sku_mapping.xlsx` | Your SKU mapping file |
+| `mtr_main.zip` | Amazon MTR historical ZIP |
+| `flipkart_main.zip` | Flipkart historical ZIP |
+| `meesho_main.zip` | Meesho historical ZIP |
+| `myntra_main.zip` | Myntra historical ZIP |
+| `cost_master.xlsx` | Cost/price master (optional) |
+
+After uploading, come back and click **Load All Data** — files load from Drive automatically, no sidebar upload needed!
+""")
+
+    else:
+        # ── Drive is configured ───────────────────────────────
+        _svc    = _get_gdrive_service()
+        try:
+            _folder = st.secrets.get("gdrive_folder_id", "")
+        except Exception:
+            _folder = ""
+
+        if not _svc:
+            st.error("Could not connect to Google Drive. Check your service account credentials in Streamlit Secrets.")
+        else:
+            st.success("✅ Connected to Google Drive")
+
+            # ── Refresh button ────────────────────────────────
+            _cl1, _cl2, _cl3 = st.columns([1,1,2])
+            with _cl1:
+                if st.button("🔄 Refresh File List", use_container_width=True):
+                    st.cache_data.clear()
+                    st.session_state.pop("_gdrive_autoloaded", None)
+                    st.session_state.pop("_gdrive_files", None)
+                    st.rerun()
+            with _cl2:
+                if st.button("⬇️ Auto-Load into App", use_container_width=True, type="primary"):
+                    with st.spinner("Loading files from Drive…"):
+                        _cf = _gdrive_auto_load(_svc, _folder)
+                        if _cf:
+                            st.session_state["_gdrive_files"]      = _cf
+                            st.session_state["_gdrive_autoloaded"] = True
+                            st.success(f"✅ {len(_cf)} files loaded — click **Load All Data** in sidebar to process them")
+                        else:
+                            st.warning("No recognised files found in Drive folder.")
+
+            st.divider()
+
+            # ── Current files in Drive ────────────────────────
+            st.markdown("### 📁 Files in Drive Folder")
+            _drive_files = _gdrive_list_folder(_svc, _folder)
+
+            KNOWN_FILES = {
+                "sku_mapping.xlsx":  ("SKU Mapping",     "🗺️"),
+                "mtr_main.zip":      ("MTR Historical",  "📑"),
+                "flipkart_main.zip": ("Flipkart Data",   "🟡"),
+                "meesho_main.zip":   ("Meesho Data",     "🛒"),
+                "myntra_main.zip":   ("Myntra Data",     "🛍️"),
+                "cost_master.xlsx":  ("Cost Master",     "💰"),
+            }
+
+            if not _drive_files:
+                st.info("No files found in your Drive folder yet. Upload files below.")
+            else:
+                _loaded_names = {v["name"] for v in st.session_state.get("_gdrive_files", {}).values()}
+                for _f in _drive_files:
+                    _label, _icon = KNOWN_FILES.get(_f["name"], ("Other file", "📄"))
+                    _size_kb = int(_f.get("size", 0)) // 1024
+                    _size_str = f"{_size_kb/1024:.1f} MB" if _size_kb > 1024 else f"{_size_kb} KB"
+                    _loaded  = "✅ Loaded" if _f["name"] in _loaded_names else "⬜ Not loaded"
+                    _mod     = _f.get("modifiedTime","")[:10]
+                    _fcol1, _fcol2, _fcol3, _fcol4 = st.columns([3,1,1,1])
+                    _fcol1.markdown(f"{_icon} **{_f['name']}** — {_label}")
+                    _fcol2.caption(f"📅 {_mod}")
+                    _fcol3.caption(f"💾 {_size_str}")
+                    _fcol4.caption(_loaded)
+
+            st.divider()
+
+            # ── Upload new files to Drive ─────────────────────
+            st.markdown("### ⬆️ Upload / Update Files in Drive")
+            st.caption("Upload a file here to save it to Drive — it will be available next time automatically.")
+
+            _up_col1, _up_col2 = st.columns([2,1])
+            with _up_col1:
+                _upload_type = st.selectbox("File type", list(KNOWN_FILES.keys()),
+                                             format_func=lambda x: f"{KNOWN_FILES[x][1]} {x} — {KNOWN_FILES[x][0]}",
+                                             key="cloud_upload_type")
+            with _up_col2:
+                _uploaded_cloud = st.file_uploader("Choose file", key="cloud_uploader",
+                                                    label_visibility="collapsed")
+
+            if _uploaded_cloud and st.button("⬆️ Save to Drive", type="primary", use_container_width=True):
+                with st.spinner(f"Uploading {_upload_type} to Drive…"):
+                    _buf = io.BytesIO(_uploaded_cloud.read())
+                    _mime = ("application/zip" if _upload_type.endswith(".zip")
+                             else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    _fid = _gdrive_upload(_svc, _folder, _upload_type, _buf, _mime)
+                    if _fid:
+                        st.success(f"✅ **{_upload_type}** saved to Drive! It will auto-load next time you open the app.")
+                        st.session_state.pop("_gdrive_autoloaded", None)
+                    else:
+                        st.error("Upload failed — check Drive permissions.")
+
+            st.divider()
+
+            # ── What gets auto-loaded ─────────────────────────
+            st.markdown("### ℹ️ How it works")
+            st.markdown("""
+| When | What happens |
+|------|-------------|
+| **App starts** | Automatically downloads all recognised files from Drive |
+| **Click Load All Data** | Uses Drive files if no local file uploaded in sidebar |
+| **Upload new monthly ZIP** | Drag into sidebar → Load All Data → then save to Drive to update |
+| **Daily files** | Always upload fresh in sidebar (small, changes daily) |
+
+**Workflow going forward:**
+1. At month-end, upload new MTR/Flipkart/Meesho/Myntra ZIPs here → they're saved to Drive
+2. Next time you open the app → data loads automatically in ~20 seconds
+3. For daily orders → just upload in sidebar as usual (takes 5 seconds)
+""")
