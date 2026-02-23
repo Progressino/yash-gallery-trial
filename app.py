@@ -572,22 +572,34 @@ def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id="
 
 def _parse_daily_dates(series):
     """
-    Try to parse a Series of date strings robustly.
-    Handles: DD-MM-YYYY, DD/MM/YYYY, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, 
-             DD MMM YYYY, MMM DD YYYY, epoch ms, etc.
-    Always tries dayfirst=True first (Indian date format).
+    Robustly parse date strings. Handles:
+    - DD-MM-YYYY, DD/MM/YYYY  (Indian format, dayfirst)
+    - YYYY-MM-DD, YYYY-MM-DD HH:MM:SS  (ISO)
+    - 2026-02-19T23:58:49+05:30  (ISO with timezone — Amazon)
     """
-    # Try dayfirst (handles DD-MM-YYYY, DD/MM/YYYY)
-    parsed = pd.to_datetime(series, dayfirst=True, errors="coerce")
+    s = pd.Series(series).copy()
+
+    # Step 1: Try with timezone awareness (handles Amazon ISO+TZ strings)
+    try:
+        parsed = pd.to_datetime(s, errors="coerce", utc=True)
+        if parsed.notna().any():
+            # Strip timezone info to get naive datetime
+            parsed = parsed.dt.tz_localize(None)
+            # Fill any NaT with fallback
+            null_mask = parsed.isna()
+            if null_mask.any():
+                fallback = pd.to_datetime(s[null_mask], dayfirst=True, errors="coerce")
+                parsed.loc[null_mask] = fallback
+            return parsed
+    except Exception:
+        pass
+
+    # Step 2: dayfirst for Indian dates (DD-MM-YYYY, DD/MM/YYYY)
+    parsed = pd.to_datetime(s, dayfirst=True, errors="coerce")
     null_mask = parsed.isna()
     if null_mask.any():
-        # Try ISO format (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
-        parsed2 = pd.to_datetime(series[null_mask], format="%Y-%m-%d", errors="coerce")
+        parsed2 = pd.to_datetime(s[null_mask], errors="coerce")
         parsed.loc[null_mask] = parsed2
-    null_mask = parsed.isna()
-    if null_mask.any():
-        parsed3 = pd.to_datetime(series[null_mask], infer_datetime_format=True, errors="coerce")
-        parsed.loc[null_mask] = parsed3
     return parsed
 
 
@@ -643,10 +655,12 @@ def detect_daily_platform(file_obj) -> str:
         if "reason for credit entry" in cols_lower and "sub order no" in cols_lower:
             return "meesho"
 
-        # FIX: Myntra PPMP CSV uses snake_case column names like:
-        # sku_id, order_created_date, packet_id, order_status, etc.
-        # Key distinguisher: 'order_created_date' (snake_case) which Flipkart PPMP does NOT have
-        # Flipkart PPMP uses 'created on' (space, no underscore)
+        # Myntra PPMP: has 'myntra sku code' — definitive Myntra signal
+        # Must check BEFORE generic Flipkart PPMP check since both have 'seller sku code' + 'store order id'
+        if "myntra sku code" in cols_lower:
+            return "myntra_ppmp"
+
+        # Myntra PPMP CSV (alternate snake_case format)
         myntra_ppmp_signals = (
             ("sku_id" in cols_lower or "skuid" in cols_lower) and
             ("order_created_date" in cols_lower or "packet_id" in cols_lower)
@@ -658,12 +672,10 @@ def detect_daily_platform(file_obj) -> str:
         if "seller sku code" in cols_lower and "store order id" in cols_lower:
             return "flipkart"
 
-        # Flipkart Seller Orders Report: 'order id' + 'seller sku code' or 'sku' + 'order date'
-        # Also catches variants: 'fsn', 'order item id', 'buyer city'
+        # Flipkart Seller Orders Report
         if ("order id" in cols_lower or "order item id" in cols_lower) and            ("seller sku code" in cols_lower or "sku" in cols_lower) and            ("order date" in cols_lower or "created on" in cols_lower):
             return "flipkart"
 
-        # Flipkart Seller Orders Report (alternate): fsn + order_id style
         if "fsn" in cols_lower and ("order id" in cols_lower or "order_id" in cols_lower):
             return "flipkart"
 
@@ -910,9 +922,9 @@ def parse_daily_meesho_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
 def parse_daily_myntra_ppmp_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
     """
     Parse Myntra PPMP daily order CSV.
-    Myntra PPMP uses snake_case column names:
-      sku_id / skuid, order_created_date, packet_id, order_status,
-      quantity, shipment_value / net_amount, state / customer_delivery_state_code
+    Real column names (from actual file):
+      seller sku code, myntra sku code, created on, order status,
+      seller price, final amount, state, store order id, order release id
     """
     try:
         file_obj.seek(0)
@@ -931,82 +943,58 @@ def parse_daily_myntra_ppmp_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFra
 
         df.columns = df.columns.str.strip().str.lower()
 
-        # Date column
-        date_col = next(
-            (c for c in df.columns if c in ["order_created_date", "order_date", "created_date"]),
-            None
-        )
-        if not date_col:
-            return pd.DataFrame()
-
-        # SKU column
-        sku_col = next(
-            (c for c in df.columns if c in ["sku_id", "skuid", "sku"]),
-            None
-        )
-        if not sku_col:
-            return pd.DataFrame()
-
-        # Quantity
-        qty_col = next((c for c in df.columns if c == "quantity"), None)
-
-        # Revenue
-        rev_col = next(
-            (c for c in df.columns if c in ["shipment_value", "net_amount", "invoice_amount", "invoiceamount"]),
-            None
-        )
-
-        # Order ID
-        order_col = next(
-            (c for c in df.columns if c in ["packet_id", "order_id", "order_release_id"]),
-            None
-        )
-
-        # Status
-        status_col = next((c for c in df.columns if "order_status" in c), None)
-
-        def _myntra_ppmp_txn(s):
-            s = str(s).strip().upper()
-            # Return / RTO statuses
-            if s in ("RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
-                     "RETURN_REQUESTED", "RETURN_PICKUP_INITIATED", "RETURN_PICKED",
-                     "RETURN_RECEIVED", "EXCHANGE_RETURN_REQUESTED"):
-                return "Refund"
-            # Cancel statuses
-            if s in ("CANCELLED", "CANCEL", "F", "IC", "FAILED", "CANCELLATION_REQUESTED"):
-                return "Cancel"
-            # Active / shipped statuses
-            if s in ("SHIPPED", "CONFIRMED", "DELIVERED", "SH", "C", "PK", "WP",
-                     "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
-                     "MANIFESTED", "OUT_FOR_DELIVERY"):
-                return "Shipment"
-            # Default to Shipment for unknown statuses
-            return "Shipment"
+        STATUS_MAP = {
+            "wp":  "Shipment",   # Warehouse Packed
+            "pk":  "Shipment",   # Packed
+            "sh":  "Shipment",   # Shipped
+            "del": "Shipment",   # Delivered
+            "f":   "Cancel",     # Failed
+            "c":   "Cancel",     # Cancelled
+            "rto": "Refund",
+            "r":   "Refund",
+            "return_requested":            "Refund",
+            "return_pickup_initiated":     "Refund",
+            "return_picked":               "Refund",
+            "return_received":             "Refund",
+            "return_in_transit":           "Refund",
+            "exchange_return_requested":   "Refund",
+            "cancellation_requested":      "Cancel",
+            "cancellation_approved":       "Cancel",
+        }
 
         rows = []
         for _, r in df.iterrows():
-            raw_sku = str(r.get(sku_col, "")).strip()
+            # SKU: prefer seller sku code, fallback to myntra sku code
+            raw_sku = str(r.get("seller sku code", r.get("myntra sku code", r.get("sku_id", "")))).strip()
+            # Strip leading apostrophe (Myntra sometimes prefixes with ')
+            raw_sku = raw_sku.lstrip("'")
             oms_sku = map_to_oms_sku(raw_sku, mapping)
-            txn = _myntra_ppmp_txn(r.get(status_col, "")) if status_col else "Shipment"
-            qty = pd.to_numeric(r.get(qty_col, 1), errors="coerce") or 1 if qty_col else 1
-            rev = pd.to_numeric(r.get(rev_col, 0), errors="coerce") or 0 if rev_col else 0
-            state_col_val = next((c for c in df.columns if c in ["state", "customer_delivery_state_code"]), None)
-            state = str(r.get(state_col_val, "")).strip() if state_col_val else ""
-            oid = str(r.get(order_col, "")) if order_col else ""
+
+            status  = str(r.get("order status", "")).strip().lower()
+            txn     = STATUS_MAP.get(status, "Shipment")
+
+            revenue = 0.0
+            for rc in ["seller price", "final amount", "total mrp"]:
+                v = pd.to_numeric(r.get(rc, None), errors="coerce")
+                if v is not None and not pd.isna(v) and v > 0:
+                    revenue = float(v)
+                    break
+
+            state = str(r.get("state", "")).strip()
+            if state.lower() == "nan": state = ""
+
+            order_id = str(r.get("store order id", r.get("order release id", ""))).strip().lstrip("'")
 
             rows.append(_std_daily(
-                date     = r.get(date_col),
+                date     = r.get("created on", r.get("order_created_date", "")),
                 sku      = oms_sku,
                 platform = "Myntra",
                 txn_type = txn,
-                qty      = qty,
-                revenue  = rev,
+                qty      = 1,
+                revenue  = revenue,
                 state    = state,
-                order_id = oid,
+                order_id = order_id,
             ))
-
-        if not rows:
-            return pd.DataFrame()
 
         out = pd.DataFrame(rows)
         out["Date"] = _parse_daily_dates(out["Date"])
