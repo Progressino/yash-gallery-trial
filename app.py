@@ -225,6 +225,15 @@ def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
     c = clean_sku(seller_sku)
     return mapping.get(c, c)
 
+
+def _map_oms_series(series: pd.Series, mapping: Dict[str, str]) -> pd.Series:
+    """Vectorized bulk map_to_oms_sku — replaces .pipe(_map_oms_series, mapping)"""
+    cleaned = series.fillna("").astype(str).str.strip().str.upper()
+    # build reverse lookup once
+    mapped = cleaned.map(mapping)
+    # where mapping has no entry, keep the cleaned value
+    return mapped.where(mapped.notna(), cleaned)
+
 def read_zip_csv(zip_file) -> pd.DataFrame:
     try:
         with zipfile.ZipFile(zip_file, "r") as z:
@@ -278,11 +287,11 @@ def load_sku_mapping(mapping_file) -> Dict[str, str]:
             if oms_col is None:
                 oms_col = df.columns[-1]
             if seller_col and oms_col:
-                for _, row in df.iterrows():
-                    s = clean_sku(row.get(seller_col, ""))
-                    o = clean_sku(row.get(oms_col, ""))
-                    if s and o and s != "nan" and o != "nan":
-                        mapping_dict[s] = o
+                # Vectorized — no iterrows
+                _s = df[seller_col].fillna("").astype(str).str.strip().str.upper()
+                _o = df[oms_col].fillna("").astype(str).str.strip().str.upper()
+                _mask = (_s != "") & (_o != "") & (_s != "NAN") & (_o != "NAN")
+                mapping_dict.update(dict(zip(_s[_mask], _o[_mask])))
         return mapping_dict
     except Exception as e:
         st.error(f"Error loading SKU mapping: {e}")
@@ -465,6 +474,7 @@ def _collect_csv_entries(main_zip_file):
     return entries, skipped
 
 
+@st.cache_data(show_spinner=False)
 def load_mtr_from_main_zip(main_zip_file):
     import gc
     skipped   = []
@@ -721,22 +731,17 @@ def parse_daily_amazon_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
         df = pd.read_csv(file_obj)
         if df.empty:
             return pd.DataFrame()
-
-        rows = []
-        for _, r in df.iterrows():
-            raw_sku = str(r.get("Merchant SKU", "")).strip()
-            oms_sku = map_to_oms_sku(raw_sku, mapping)
-            rows.append(_std_daily(
-                date     = r.get("Customer Shipment Date"),
-                sku      = oms_sku,
-                platform = "Amazon",
-                txn_type = "Shipment",
-                qty      = pd.to_numeric(r.get("Quantity", 1), errors="coerce") or 1,
-                revenue  = pd.to_numeric(r.get("Product Amount", 0), errors="coerce") or 0,
-                state    = r.get("Shipment To State", ""),
-                order_id = r.get("Amazon Order Id", ""),
-            ))
-        out = pd.DataFrame(rows)
+        # Vectorized — no iterrows
+        out = pd.DataFrame({
+            "Date":     df.get("Customer Shipment Date", pd.Series(dtype=str)),
+            "SKU":      df.get("Merchant SKU", pd.Series(dtype=str)).fillna("").astype(str).str.strip().pipe(_map_oms_series, mapping),
+            "Platform": "Amazon",
+            "TxnType":  "Shipment",
+            "Quantity": pd.to_numeric(df.get("Quantity", 1), errors="coerce").fillna(1),
+            "Revenue":  pd.to_numeric(df.get("Product Amount", 0), errors="coerce").fillna(0),
+            "State":    df.get("Shipment To State", pd.Series(dtype=str)).fillna("").str.strip().str.title(),
+            "OrderId":  df.get("Amazon Order Id", pd.Series(dtype=str)).fillna("").astype(str),
+        })
         out["Date"] = _parse_daily_dates(out["Date"])
         return out.dropna(subset=["Date"])
     except Exception as e:
@@ -1103,7 +1108,7 @@ def load_amazon_sales(zip_file, mapping: Dict[str, str], source: str, config: Sa
     df = read_zip_csv(zip_file)
     if df.empty or "Sku" not in df.columns:
         return pd.DataFrame()
-    df["OMS_SKU"] = df["Sku"].apply(lambda x: map_to_oms_sku(x, mapping))
+    df["OMS_SKU"] = df["Sku"].pipe(_map_oms_series, mapping)
 
     date_col = config.date_basis
     if date_col not in df.columns:
@@ -1144,7 +1149,7 @@ def load_flipkart_sales(xlsx_file, mapping: Dict[str, str]) -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame()
         df.columns = df.columns.str.strip()
-        df["OMS_SKU"] = df["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
+        df["OMS_SKU"] = df["SKU"].apply(clean_sku).pipe(_map_oms_series, mapping)
         df["TxnDate"]  = pd.to_datetime(df.get("Buyer Invoice Date", df.get("Order Date")), errors="coerce")
         df["Quantity"] = pd.to_numeric(df.get("Item Quantity", 0), errors="coerce").fillna(0)
         df["Source"]   = "Flipkart"
@@ -1215,7 +1220,7 @@ def _parse_flipkart_xlsx(file_bytes: bytes, fname: str, mapping: Dict[str, str])
         xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
         xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
 
-        xl["OMS_SKU"] = xl["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
+        xl["OMS_SKU"] = xl["SKU"].apply(clean_sku).pipe(_map_oms_series, mapping)
 
         state_col = next((c for c in xl.columns if "Delivery State" in c), None)
         xl["State"] = xl[state_col].fillna("").astype(str).str.upper().str.strip() if state_col else ""
@@ -1231,6 +1236,7 @@ def _parse_flipkart_xlsx(file_bytes: bytes, fname: str, mapping: Dict[str, str])
         return pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False)
 def load_flipkart_full(main_zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
     dfs     = []
     skipped = []
@@ -1400,6 +1406,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     return out.dropna(subset=["Date"])
 
 
+@st.cache_data(show_spinner=False)
 def load_meesho_full(main_zip_file) -> pd.DataFrame:
     dfs     = []
     skipped = []
@@ -1482,7 +1489,7 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     sku_col = next((c for c in df.columns if c in ["sku_id", "skuid", "sku"]), None)
     if not sku_col:
         return pd.DataFrame(), "No SKU column"
-    df["_OMS_SKU"] = df[sku_col].apply(lambda x: map_to_oms_sku(str(x).strip(), mapping))
+    df["_OMS_SKU"] = df[sku_col].pipe(_map_oms_series, mapping)
 
     qty_col = next((c for c in df.columns if c == "quantity"), None)
     df["_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1) if qty_col else 1.0
@@ -1536,6 +1543,7 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     return out, "OK"
 
 
+@st.cache_data(show_spinner=False)
 def load_myntra_full(main_zip_file, mapping: Dict[str, str]) -> pd.DataFrame:
     dfs     = []
     skipped = []
@@ -1608,7 +1616,7 @@ def load_inventory_consolidated(oms_file, fk_file, myntra_file, amz_file, mappin
     if fk_file:
         df = read_csv_safe(fk_file)
         if not df.empty and {"SKU","Live on Website"}.issubset(df.columns):
-            df["OMS_SKU"]       = df["SKU"].apply(lambda x: map_to_oms_sku(x, mapping))
+            df["OMS_SKU"]       = df["SKU"].pipe(_map_oms_series, mapping)
             df["Flipkart_Live"] = pd.to_numeric(df["Live on Website"], errors="coerce").fillna(0)
             inv_dfs.append(df.groupby("OMS_SKU")["Flipkart_Live"].sum().reset_index())
 
@@ -1618,7 +1626,7 @@ def load_inventory_consolidated(oms_file, fk_file, myntra_file, amz_file, mappin
             sku_col = next((c for c in df.columns if "seller sku code" in c.lower() or "sku code" in c.lower()), None)
             inv_col = next((c for c in df.columns if "sellable inventory count" in c.lower()), None)
             if sku_col and inv_col:
-                df["OMS_SKU"]          = df[sku_col].apply(lambda x: map_to_oms_sku(x, mapping))
+                df["OMS_SKU"]          = df[sku_col].pipe(_map_oms_series, mapping)
                 df["Myntra_Inventory"] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
                 inv_dfs.append(df.groupby("OMS_SKU")["Myntra_Inventory"].sum().reset_index())
 
@@ -1627,7 +1635,7 @@ def load_inventory_consolidated(oms_file, fk_file, myntra_file, amz_file, mappin
         if not df.empty and {"MSKU","Ending Warehouse Balance"}.issubset(df.columns):
             if "Location" in df.columns:
                 df = df[df["Location"] != "ZNNE"]
-            df["OMS_SKU"]          = df["MSKU"].apply(lambda x: map_to_oms_sku(x, mapping))
+            df["OMS_SKU"]          = df["MSKU"].pipe(_map_oms_series, mapping)
             df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
             inv_dfs.append(df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index())
 
@@ -1646,7 +1654,7 @@ def load_inventory_consolidated(oms_file, fk_file, myntra_file, amz_file, mappin
     consolidated["Total_Inventory"]   = consolidated.get("OMS_Inventory", 0) + consolidated["Marketplace_Total"]
 
     if group_by_parent:
-        consolidated["Parent_SKU"] = consolidated["OMS_SKU"].apply(get_parent_sku)
+        consolidated["Parent_SKU"] = _vectorized_get_parent_sku(consolidated["OMS_SKU"])
         consolidated = (consolidated.groupby("Parent_SKU")[inv_cols + ["Marketplace_Total","Total_Inventory"]]
                         .sum().reset_index().rename(columns={"Parent_SKU":"OMS_SKU"}))
 
@@ -1683,7 +1691,7 @@ def _mtr_to_sales_df(mtr_df: pd.DataFrame, sku_mapping: Dict[str, str], group_by
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
     m = m.dropna(subset=["TxnDate"])
 
-    m["Sku"] = m["Sku"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+    m["Sku"] = m["Sku"].pipe(_map_oms_series, sku_mapping)
 
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
@@ -1721,6 +1729,7 @@ def quarter_col_name(fy: int, q: int) -> str:
     return f"{_Q_LABELS[q]} {cal_year}"
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def calculate_quarterly_history(
     sales_df: pd.DataFrame,
     mtr_df: pd.DataFrame = None,
@@ -1756,7 +1765,7 @@ def calculate_quarterly_history(
             tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
             tmp["TxnType"] = mtr_df[mtr_txn_col].values if mtr_txn_col else "Shipment"
             if sku_mapping:
-                tmp["SKU"] = tmp["SKU"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+                tmp["SKU"] = tmp["SKU"].pipe(_map_oms_series, sku_mapping)
             parts.append(tmp.dropna(subset=["Date"]))
 
     if myntra_df is not None and not myntra_df.empty:
@@ -1872,6 +1881,7 @@ def calculate_quarterly_history(
     return pivot
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def calculate_po_base(
     sales_df: pd.DataFrame,
     inv_df: pd.DataFrame,
@@ -3367,7 +3377,7 @@ with tab_po:
         if is_parent:
             inv_for_po   = st.session_state.inventory_df_parent.copy()
             sales_for_po = st.session_state.sales_df.copy()
-            sales_for_po["Sku"] = sales_for_po["Sku"].apply(get_parent_sku)
+            sales_for_po["Sku"] = _vectorized_get_parent_sku(sales_for_po["Sku"])
         else:
             inv_for_po   = st.session_state.inventory_df_variant.copy()
             sales_for_po = st.session_state.sales_df.copy()
@@ -3379,15 +3389,23 @@ with tab_po:
                 _td = _td.astype(str)
             sales_for_po["TxnDate"] = pd.to_datetime(_td, errors="coerce")
 
-        with st.spinner("Building quarterly history…"):
-            qhist = calculate_quarterly_history(
-                sales_df        = sales_for_po,
-                mtr_df          = st.session_state.mtr_df    if not st.session_state.mtr_df.empty    else None,
-                myntra_df       = st.session_state.myntra_df if not st.session_state.myntra_df.empty else None,
-                sku_mapping     = st.session_state.sku_mapping,
-                group_by_parent = is_parent,
-                n_quarters      = n_quarters,
-            )
+        # Cache key: recalculate only when inputs change
+        _po_cache_key = f"{is_parent}_{base_days}_{grace_days}_{n_quarters}_{len(st.session_state.sales_df)}"
+        if (st.session_state.get("_po_cache_key") != _po_cache_key or
+                "qhist_cached" not in st.session_state):
+            with st.spinner("Building quarterly history…"):
+                qhist = calculate_quarterly_history(
+                    sales_df        = sales_for_po,
+                    mtr_df          = st.session_state.mtr_df    if not st.session_state.mtr_df.empty    else None,
+                    myntra_df       = st.session_state.myntra_df if not st.session_state.myntra_df.empty else None,
+                    sku_mapping     = st.session_state.sku_mapping,
+                    group_by_parent = is_parent,
+                    n_quarters      = n_quarters,
+                )
+                st.session_state["qhist_cached"]  = qhist
+                st.session_state["_po_cache_key"] = _po_cache_key
+        else:
+            qhist = st.session_state["qhist_cached"]
 
         po_df = calculate_po_base(
             sales_df        = sales_for_po,
@@ -3423,7 +3441,13 @@ with tab_po:
                 if row["Days_Left"] < lead_time + 7  and row["PO_Qty"] > 0: return "🟡 HIGH"
                 if row["PO_Qty"] > 0:                                        return "🟢 MEDIUM"
                 return "⚪ OK"
-            po_df["Priority"] = po_df.apply(_priority, axis=1)
+            # Vectorized priority assignment
+            po_df["Priority"] = np.select(
+                [(po_df["Days_Left"] < lead_time) & (po_df["PO_Qty"] > 0),
+                 (po_df["Days_Left"] < lead_time + 7) & (po_df["PO_Qty"] > 0),
+                 po_df["PO_Qty"] > 0],
+                ["🔴 URGENT", "🟡 HIGH", "🟢 MEDIUM"], default="⚪ OK"
+            )
 
             if use_seasonality:
                 ly_source    = po_df.attrs.get("ly_source", "Sales")
@@ -3473,9 +3497,13 @@ with tab_po:
                     if ads >= 0.33: return "✅ Moderate"
                     if ads >= 0.10: return "🐢 Slow Selling"
                     return "❌ Not Moving"
-                master["Status"] = master["ADS"].apply(_st)
+                master["Status"] = np.select(
+                    [master["ADS"] >= 1.0, master["ADS"] >= 0.33, master["ADS"] >= 0.10],
+                    ["🚀 Fast Moving", "✅ Moderate", "🐢 Slow Selling"],
+                    default="❌ Not Moving"
+                )
 
-            master["Parent_SKU"] = master["OMS_SKU"].apply(get_parent_sku)
+            master["Parent_SKU"] = _vectorized_get_parent_sku(master["OMS_SKU"])
             master["Days_Left"] = np.where(
                 master["ADS"] > 0, master["Total_Inventory"] / master["ADS"], 999
             ).round(1)
@@ -3486,7 +3514,13 @@ with tab_po:
                     - master["Total_Inventory"]
                 ).clip(lower=0) / 5) * 5
             ).astype(int)
-            master["Priority"] = master.apply(_priority, axis=1)
+            # Vectorized priority assignment
+            master["Priority"] = np.select(
+                [(master["Days_Left"] < lead_time) & (master["PO_Qty"] > 0),
+                 (master["Days_Left"] < lead_time + 7) & (master["PO_Qty"] > 0),
+                 master["PO_Qty"] > 0],
+                ["🔴 URGENT", "🟡 HIGH", "🟢 MEDIUM"], default="⚪ OK"
+            )
 
             master["PO_Plus_Avail"]   = (master["PO_Qty"] + master["Total_Inventory"].fillna(0)).astype(int)
             master["OMS_Stock"]       = master["OMS_Inventory"].fillna(0).astype(int) if "OMS_Inventory" in master.columns else 0
