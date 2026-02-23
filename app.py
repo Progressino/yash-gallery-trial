@@ -1075,9 +1075,10 @@ def combine_daily_orders(*dfs) -> pd.DataFrame:
 def daily_to_sales_rows(daily_df: pd.DataFrame) -> pd.DataFrame:
     if daily_df.empty:
         return pd.DataFrame()
+    _dates = _parse_daily_dates(pd.Series(daily_df["Date"].values))
     out = pd.DataFrame({
-        "Sku":              daily_df["SKU"],
-        "TxnDate":          daily_df["Date"],
+        "Sku":              daily_df["SKU"].values,
+        "TxnDate":          _dates.values,
         "Transaction Type": daily_df["TxnType"],
         "Quantity":         daily_df["Quantity"],
         "Units_Effective":  np.where(daily_df["TxnType"] == "Refund",  -daily_df["Quantity"],
@@ -1721,6 +1722,11 @@ def calculate_quarterly_history(
     n_quarters: int = 8,
 ) -> pd.DataFrame:
     parts = []
+
+    # Ensure TxnDate is datetime in sales_df before using it
+    if not sales_df.empty and "TxnDate" in sales_df.columns:
+        sales_df = sales_df.copy()
+        sales_df["TxnDate"] = pd.to_datetime(sales_df["TxnDate"], errors="coerce")
 
     if not sales_df.empty and "Sku" in sales_df.columns:
         txn_col = "Transaction Type"
