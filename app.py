@@ -22,7 +22,17 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import json
 import streamlit as st
+
+# Google Drive cache libraries (optional — only active when secrets are configured)
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+    from google.oauth2 import service_account
+    _GDRIVE_LIBS_OK = True
+except ImportError:
+    _GDRIVE_LIBS_OK = False
 
 # Prophet is optional - Catch explicit errors if it fails to load
 try:
@@ -230,6 +240,301 @@ def fillna_numeric(df, value=0):
     num_cols = df.select_dtypes(include="number").columns
     df[num_cols] = df[num_cols].fillna(value)
     return df
+
+# ══════════════════════════════════════════════════════════════
+# 5b) GOOGLE DRIVE CACHE
+# ══════════════════════════════════════════════════════════════
+
+_GDRIVE_SCOPES       = ["https://www.googleapis.com/auth/drive"]
+_CACHE_MANIFEST_NAME = "_manifest.json"
+# Maps session_state key → filename stored in Google Drive
+_CACHE_FILES = {
+    "sales_df":     "sales_df.parquet",
+    "mtr_df":       "mtr_df.parquet",
+    "meesho_df":    "meesho_df.parquet",
+    "myntra_df":    "myntra_df.parquet",
+    "flipkart_df":  "flipkart_df.parquet",
+    "sku_mapping":  "sku_mapping.json",   # dict, stored as JSON
+}
+
+
+@st.cache_resource(show_spinner=False)
+def _get_drive_service():
+    """
+    Authenticate with Google Drive using a service account stored in st.secrets.
+    Cached once per server process. Returns None silently if secrets are missing
+    or the google libraries are not installed (graceful degradation for local dev).
+    """
+    if not _GDRIVE_LIBS_OK:
+        return None
+    try:
+        creds_dict = dict(st.secrets["gdrive"]["credentials"])
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=_GDRIVE_SCOPES
+        )
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    except Exception:
+        return None
+
+
+def _drive_folder_id() -> str:
+    try:
+        return st.secrets["gdrive"]["folder_id"]
+    except Exception:
+        return ""
+
+
+def _drive_list_files(service, folder_id: str) -> dict:
+    """Returns {filename: file_id} for all non-trashed files in the folder."""
+    try:
+        result = service.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="files(id, name)",
+            pageSize=100,
+        ).execute()
+        return {f["name"]: f["id"] for f in result.get("files", [])}
+    except Exception:
+        return {}
+
+
+def _drive_download_bytes(service, file_id: str) -> bytes:
+    """Download a Drive file and return its raw bytes."""
+    buf = io.BytesIO()
+    request = service.files().get_media(fileId=file_id)
+    downloader = MediaIoBaseDownload(buf, request, chunksize=10 * 1024 * 1024)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buf.getvalue()
+
+
+def _drive_upload_bytes(
+    service, folder_id: str, filename: str,
+    data: bytes, existing_file_id, mime_type: str = "application/octet-stream"
+) -> str:
+    """
+    Upload bytes to Drive. If existing_file_id is given, updates the file
+    in-place (keeps the same file ID). Returns the file ID.
+    """
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type, resumable=True)
+    if existing_file_id:
+        result = service.files().update(
+            fileId=existing_file_id, media_body=media
+        ).execute()
+        return result["id"]
+    else:
+        result = service.files().create(
+            body={"name": filename, "parents": [folder_id]},
+            media_body=media,
+            fields="id",
+        ).execute()
+        return result["id"]
+
+
+def _drive_delete_file(service, file_id: str) -> bool:
+    try:
+        service.files().delete(fileId=file_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _read_manifest(service, folder_id: str):
+    """
+    Read and return the cache manifest dict, or None if it doesn't exist.
+    The manifest records the save timestamp, Drive file IDs, and row counts.
+    """
+    file_map = _drive_list_files(service, folder_id)
+    if _CACHE_MANIFEST_NAME not in file_map:
+        return None
+    try:
+        raw = _drive_download_bytes(service, file_map[_CACHE_MANIFEST_NAME])
+        manifest = json.loads(raw.decode("utf-8"))
+        manifest.setdefault("files", {})[_CACHE_MANIFEST_NAME] = file_map[_CACHE_MANIFEST_NAME]
+        return manifest
+    except Exception:
+        return None
+
+
+def _write_manifest(service, folder_id: str, manifest: dict, existing_file_id):
+    data = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    _drive_upload_bytes(
+        service, folder_id, _CACHE_MANIFEST_NAME,
+        data, existing_file_id, mime_type="application/json"
+    )
+
+
+@st.cache_resource(ttl=300, show_spinner=False)
+def _get_cached_manifest():
+    """
+    Check Google Drive for a cache manifest. Cached for 5 minutes per server
+    process to avoid excessive API calls on every Streamlit rerun.
+    Returns the manifest dict, or None if no cache exists / Drive not configured.
+    """
+    service = _get_drive_service()
+    if service is None:
+        return None
+    folder_id = _drive_folder_id()
+    if not folder_id:
+        return None
+    return _read_manifest(service, folder_id)
+
+
+def _coerce_df_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cast object-typed columns to string before writing to parquet.
+    Prevents ArrowInvalid errors from mixed-type object columns.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].astype(str)
+        else:
+            try:
+                if pd.api.types.is_period_dtype(df[col]):
+                    df[col] = df[col].astype(str)
+            except Exception:
+                pass
+    return df
+
+
+def save_cache_to_drive(progress_callback=None):
+    """
+    Serialize DataFrames in session state to parquet and sku_mapping to JSON,
+    then upload all files to the configured Google Drive folder.
+
+    progress_callback: optional callable(step, total, label)
+    Returns: (success: bool, message: str)
+    """
+    service = _get_drive_service()
+    if service is None:
+        return False, "Google Drive not configured (check st.secrets)."
+    folder_id = _drive_folder_id()
+    if not folder_id:
+        return False, "gdrive.folder_id not set in secrets."
+
+    existing_files = _drive_list_files(service, folder_id)
+    manifest = {
+        "saved_at":         datetime.utcnow().isoformat(timespec="seconds"),
+        "saved_at_display": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "files":            {},
+        "row_counts":       {},
+    }
+
+    items = list(_CACHE_FILES.items())
+    total = len(items) + 1  # +1 for writing the manifest
+
+    for step, (ss_key, drive_filename) in enumerate(items):
+        if progress_callback:
+            progress_callback(step, total, f"Uploading {drive_filename}…")
+
+        data_obj = st.session_state.get(ss_key)
+        if data_obj is None:
+            continue
+
+        try:
+            if isinstance(data_obj, pd.DataFrame):
+                if data_obj.empty:
+                    continue
+                clean = _coerce_df_for_parquet(data_obj)
+                buf = io.BytesIO()
+                clean.to_parquet(buf, index=False, engine="pyarrow", compression="snappy")
+                file_bytes = buf.getvalue()
+                mime = "application/octet-stream"
+                manifest["row_counts"][ss_key] = len(data_obj)
+            elif isinstance(data_obj, dict):
+                file_bytes = json.dumps(data_obj, ensure_ascii=False).encode("utf-8")
+                mime = "application/json"
+                manifest["row_counts"][ss_key] = len(data_obj)
+            else:
+                continue
+
+            new_id = _drive_upload_bytes(
+                service, folder_id, drive_filename,
+                file_bytes, existing_files.get(drive_filename), mime_type=mime
+            )
+            manifest["files"][drive_filename] = new_id
+
+        except Exception as e:
+            return False, f"Failed uploading {drive_filename}: {e}"
+
+    if progress_callback:
+        progress_callback(total - 1, total, "Writing cache manifest…")
+    try:
+        _write_manifest(service, folder_id, manifest, existing_files.get(_CACHE_MANIFEST_NAME))
+    except Exception as e:
+        return False, f"Failed writing manifest: {e}"
+
+    _get_cached_manifest.clear()
+    n = len(manifest["files"])
+    return True, f"Saved {n} files to Drive ({manifest['saved_at_display']})."
+
+
+def load_cache_from_drive(progress_callback=None):
+    """
+    Download cached parquet/JSON files from Drive and populate session state.
+
+    Returns: (success: bool, message: str)
+    """
+    service = _get_drive_service()
+    if service is None:
+        return False, "Google Drive not configured."
+    folder_id = _drive_folder_id()
+    manifest = _read_manifest(service, folder_id)
+    if manifest is None:
+        return False, "No cache found in Drive."
+
+    file_map = manifest.get("files", {})
+    items = list(_CACHE_FILES.items())
+    loaded_keys = []
+
+    for step, (ss_key, drive_filename) in enumerate(items):
+        if progress_callback:
+            progress_callback(step, len(items), f"Downloading {drive_filename}…")
+
+        file_id = file_map.get(drive_filename)
+        if file_id is None:
+            continue
+        try:
+            raw = _drive_download_bytes(service, file_id)
+            if drive_filename.endswith(".parquet"):
+                df = pd.read_parquet(io.BytesIO(raw), engine="pyarrow")
+                st.session_state[ss_key] = df
+                loaded_keys.append(ss_key)
+            elif drive_filename.endswith(".json"):
+                st.session_state[ss_key] = json.loads(raw.decode("utf-8"))
+                loaded_keys.append(ss_key)
+        except Exception as e:
+            return False, f"Failed loading {drive_filename}: {e}"
+
+    if not loaded_keys:
+        return False, "Cache files were empty. Run 'Load All Data' first."
+
+    row_counts = manifest.get("row_counts", {})
+    summary = ", ".join(
+        f"{k}: {row_counts[k]:,} rows"
+        for k in loaded_keys if k != "sku_mapping" and k in row_counts
+    )
+    return True, f"Loaded from Drive ({manifest.get('saved_at_display', '?')}). {summary}."
+
+
+def clear_drive_cache():
+    """Delete all cached files from the Drive folder. Returns (success, message)."""
+    service = _get_drive_service()
+    if service is None:
+        return False, "Google Drive not configured."
+    folder_id = _drive_folder_id()
+    existing = _drive_list_files(service, folder_id)
+    all_names = set(_CACHE_FILES.values()) | {_CACHE_MANIFEST_NAME}
+    deleted, failed = [], []
+    for fname, fid in existing.items():
+        if fname in all_names:
+            (deleted if _drive_delete_file(service, fid) else failed).append(fname)
+    _get_cached_manifest.clear()
+    if failed:
+        return False, f"Deleted {len(deleted)} files but failed on: {', '.join(failed)}"
+    return True, f"Cleared {len(deleted)} cached files from Drive."
+
 
 @st.cache_data(show_spinner=False)
 def load_sku_mapping(mapping_file) -> Dict[str, str]:
@@ -1931,6 +2236,67 @@ with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Inventory + Today's Sa
 
 st.sidebar.divider()
 
+# ── Google Drive Cache Controls ──────────────────────────────
+def _render_drive_cache_sidebar():
+    """Render Drive cache status and action buttons in the sidebar."""
+    if _get_drive_service() is None:
+        return  # Secrets not configured — hide entire section for local dev
+
+    st.sidebar.markdown("### ☁️ Drive Cache")
+    manifest = _get_cached_manifest()
+    data_is_loaded = bool(st.session_state.get("sku_mapping"))
+
+    if manifest is None:
+        st.sidebar.caption("No cache in Drive yet.")
+    else:
+        row_counts = manifest.get("row_counts", {})
+        total_rows = sum(v for k, v in row_counts.items() if k != "sku_mapping")
+        st.sidebar.success(
+            f"Saved **{manifest.get('saved_at_display', '?')}**\n\n"
+            f"{total_rows:,} rows across {len([k for k in row_counts if k != 'sku_mapping'])} datasets"
+        )
+
+    if manifest is not None:
+        if st.sidebar.button("⚡ Load from Drive Cache", use_container_width=True):
+            prog = st.sidebar.progress(0, text="Connecting…")
+            def _cb(step, total, label):
+                prog.progress(step / max(total, 1), text=label)
+            with st.spinner("Downloading from Drive…"):
+                ok, msg = load_cache_from_drive(progress_callback=_cb)
+            prog.empty()
+            if ok:
+                st.sidebar.success(msg)
+                st.rerun()
+            else:
+                st.sidebar.error(msg)
+
+    if data_is_loaded:
+        if st.sidebar.button("💾 Save to Drive Cache", use_container_width=True):
+            prog = st.sidebar.progress(0, text="Connecting…")
+            def _cb(step, total, label):
+                prog.progress(step / max(total, 1), text=label)
+            with st.spinner("Uploading to Drive…"):
+                ok, msg = save_cache_to_drive(progress_callback=_cb)
+            prog.empty()
+            if ok:
+                st.sidebar.success(msg)
+            else:
+                st.sidebar.error(msg)
+
+    if manifest is not None:
+        if st.sidebar.button("🗑️ Clear Drive Cache", use_container_width=True):
+            with st.spinner("Clearing…"):
+                ok, msg = clear_drive_cache()
+            if ok:
+                st.sidebar.success(msg)
+            else:
+                st.sidebar.error(msg)
+
+    st.sidebar.divider()
+
+
+_render_drive_cache_sidebar()
+
 def _get_ram_mb() -> float:
     try:
         import psutil, os
@@ -2154,6 +2520,14 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
             st.error("**Loading failed — full traceback:**")
             st.code(_load_error)
         else:
+            # Auto-save to Google Drive after a successful full load
+            if _get_drive_service() is not None:
+                with st.spinner("Auto-saving to Drive cache…"):
+                    _save_ok, _save_msg = save_cache_to_drive()
+                if _save_ok:
+                    st.sidebar.success(f"☁️ Auto-saved: {_save_msg}")
+                else:
+                    st.sidebar.warning(f"⚠️ Auto-save failed: {_save_msg}")
             st.rerun()
 
 _show_data_coverage()
