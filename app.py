@@ -287,12 +287,15 @@ def _drive_folder_id() -> str:
 
 
 def _drive_list_files(service, folder_id: str) -> dict:
-    """Returns {filename: file_id} for all non-trashed files in the folder."""
+    """Returns {filename: file_id} for all non-trashed files in the folder.
+    Works with both regular folders and Shared Drives."""
     try:
         result = service.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
             fields="files(id, name)",
             pageSize=100,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
         ).execute()
         return {f["name"]: f["id"] for f in result.get("files", [])}
     except Exception:
@@ -302,7 +305,8 @@ def _drive_list_files(service, folder_id: str) -> dict:
 def _drive_download_bytes(service, file_id: str) -> bytes:
     """Download a Drive file and return its raw bytes."""
     buf = io.BytesIO()
-    request = service.files().get_media(fileId=file_id)
+    request = service.files().get_media(fileId=file_id,
+                                        supportsAllDrives=True)
     downloader = MediaIoBaseDownload(buf, request, chunksize=10 * 1024 * 1024)
     done = False
     while not done:
@@ -315,13 +319,15 @@ def _drive_upload_bytes(
     data: bytes, existing_file_id, mime_type: str = "application/octet-stream"
 ) -> str:
     """
-    Upload bytes to Drive. If existing_file_id is given, updates the file
-    in-place (keeps the same file ID). Returns the file ID.
+    Upload bytes to Drive (supports Shared Drives via supportsAllDrives=True).
+    If existing_file_id is given, updates in-place. Returns the file ID.
     """
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type, resumable=True)
     if existing_file_id:
         result = service.files().update(
-            fileId=existing_file_id, media_body=media
+            fileId=existing_file_id,
+            media_body=media,
+            supportsAllDrives=True,
         ).execute()
         return result["id"]
     else:
@@ -329,13 +335,15 @@ def _drive_upload_bytes(
             body={"name": filename, "parents": [folder_id]},
             media_body=media,
             fields="id",
+            supportsAllDrives=True,
         ).execute()
         return result["id"]
 
 
 def _drive_delete_file(service, file_id: str) -> bool:
     try:
-        service.files().delete(fileId=file_id).execute()
+        service.files().delete(fileId=file_id,
+                               supportsAllDrives=True).execute()
         return True
     except Exception:
         return False
