@@ -2134,9 +2134,9 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 )
                 gc.collect()
 
-                if f_transfer:
+if f_transfer:
                     st.session_state.transfer_df = load_stock_transfer(f_transfer)
-                       if f_existing_po:
+                if f_existing_po:
                     st.session_state.existing_po_df = load_existing_po(f_existing_po)
                     n_po = len(st.session_state.existing_po_df)
                     total_pipeline = st.session_state.existing_po_df["PO_Pipeline_Total"].sum()
