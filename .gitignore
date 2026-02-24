@@ -18,3 +18,6 @@ Thumbs.db
 
 # Data cache (large files)
 data_cache/
+
+# Claude Code internal files
+.claude/
