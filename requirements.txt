@@ -5,4 +5,4 @@ plotly
 prophet
 openpyxl
 pyarrow>=14.0.0
-google-cloud-storage>=2.10.0
+requests>=2.28.0
