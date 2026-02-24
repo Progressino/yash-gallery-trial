@@ -3598,24 +3598,6 @@ with tab_po:
 # ══════════════════════════════════════════════════════════════
 # TAB 8 — PRODUCTION (WIP)
 # ══════════════════════════════════════════════════════════════
-"""
-Production (WIP) Tab — Full Implementation
-==========================================
-Paste this code block to REPLACE the existing `with tab_prod:` section in app.py.
-
-Features:
-- Create Job Orders with auto-generated JO IDs
-- Update stages with QC Pass/Reject tracking
-- Live Kanban Board (Inhouse=green, Vendor=yellow)
-- Dispatched Orders archive
-- Quality Analytics (pass/reject by stage)
-- Export to CSV
-- All data stored in st.session_state (no DB needed)
-"""
-
-# ══════════════════════════════════════════════════════════════
-# TAB 8 — PRODUCTION (WIP)
-# ══════════════════════════════════════════════════════════════
 with tab_prod:
     st.subheader("🏭 Production & WIP Management")
 
