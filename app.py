@@ -3601,10 +3601,512 @@ with tab_po:
 # ══════════════════════════════════════════════════════════════
 # TAB 8 — PRODUCTION (WIP)
 # ══════════════════════════════════════════════════════════════
+"""
+Production (WIP) Tab — Full Implementation
+==========================================
+Paste this code block to REPLACE the existing `with tab_prod:` section in app.py.
+
+Features:
+- Create Job Orders with auto-generated JO IDs
+- Update stages with QC Pass/Reject tracking
+- Live Kanban Board (Inhouse=green, Vendor=yellow)
+- Dispatched Orders archive
+- Quality Analytics (pass/reject by stage)
+- Export to CSV
+- All data stored in st.session_state (no DB needed)
+"""
+
+# ══════════════════════════════════════════════════════════════
+# TAB 8 — PRODUCTION (WIP)
+# ══════════════════════════════════════════════════════════════
 with tab_prod:
     st.subheader("🏭 Production & WIP Management")
-    st.info("Production management module — coming soon. Track job orders, WIP stages, and quality checks here.")
 
+    # ── Session state init ──────────────────────────────────────
+    if "job_orders" not in st.session_state:
+        st.session_state["job_orders"] = []          # list of dicts
+    if "wip_updates" not in st.session_state:
+        st.session_state["wip_updates"] = []         # list of stage-update dicts
+    if "_jo_counter" not in st.session_state:
+        st.session_state["_jo_counter"] = 1000
+
+    STAGES = [
+        "Grey Inward",
+        "Printing",
+        "Printed Receive",
+        "Cutting",
+        "Stitching",
+        "Finishing",
+        "Dispatch",
+    ]
+
+    # Helpers
+    def _next_jo_id():
+        st.session_state["_jo_counter"] += 1
+        return f"JO-{st.session_state['_jo_counter']}"
+
+    def _get_jo(jo_id):
+        for jo in st.session_state["job_orders"]:
+            if jo["jo_id"] == jo_id:
+                return jo
+        return None
+
+    def _latest_update(jo_id):
+        """Return the most recent update record for a JO."""
+        relevant = [u for u in st.session_state["wip_updates"] if u["jo_id"] == jo_id]
+        return relevant[-1] if relevant else None
+
+    def _current_stage(jo_id):
+        u = _latest_update(jo_id)
+        if u:
+            return u["stage"]
+        jo = _get_jo(jo_id)
+        return jo["start_stage"] if jo else "Grey Inward"
+
+    # ── Top-level layout ───────────────────────────────────────
+    prod_tab1, prod_tab2, prod_tab3, prod_tab4 = st.tabs([
+        "📋 Kanban Board",
+        "➕ Create Job Order",
+        "🔄 Update Stage",
+        "📊 Analytics & Export",
+    ])
+
+    # ══════════════════════════════════════════════════════════
+    # SUB-TAB 1 — KANBAN BOARD
+    # ══════════════════════════════════════════════════════════
+    with prod_tab1:
+        active_jobs = [jo for jo in st.session_state["job_orders"]
+                       if _current_stage(jo["jo_id"]) != "Dispatch"]
+        dispatched  = [jo for jo in st.session_state["job_orders"]
+                       if _current_stage(jo["jo_id"]) == "Dispatch"]
+
+        if not st.session_state["job_orders"]:
+            st.info("No job orders yet. Go to **➕ Create Job Order** to get started.")
+        else:
+            st.markdown(f"**{len(active_jobs)} active job(s)** in production | "
+                        f"**{len(dispatched)} dispatched**")
+            st.divider()
+
+            # Build kanban columns (all stages except Dispatch)
+            kanban_stages = STAGES[:-1]   # exclude Dispatch from board
+            cols = st.columns(len(kanban_stages))
+
+            for col_idx, stage in enumerate(kanban_stages):
+                with cols[col_idx]:
+                    jobs_here = [jo for jo in active_jobs
+                                 if _current_stage(jo["jo_id"]) == stage]
+
+                    stage_icon = {
+                        "Grey Inward":    "🧵",
+                        "Printing":       "🖨️",
+                        "Printed Receive":"📦",
+                        "Cutting":        "✂️",
+                        "Stitching":      "🧷",
+                        "Finishing":      "✨",
+                    }.get(stage, "📋")
+
+                    st.markdown(
+                        f"<div style='background:#1e3a5f;color:white;padding:6px 10px;"
+                        f"border-radius:6px;text-align:center;font-weight:700;font-size:0.78rem;'>"
+                        f"{stage_icon} {stage}<br><span style='font-size:0.65rem;opacity:0.8;'>"
+                        f"{len(jobs_here)} job(s)</span></div>",
+                        unsafe_allow_html=True
+                    )
+                    st.markdown("")
+
+                    if not jobs_here:
+                        st.markdown(
+                            "<div style='border:2px dashed #d1d5db;border-radius:8px;"
+                            "padding:16px;text-align:center;color:#9ca3af;font-size:0.75rem;'>"
+                            "Empty</div>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        for jo in jobs_here:
+                            u = _latest_update(jo["jo_id"])
+                            assigned_to = u["assigned_to"] if u else "—"
+                            vendor_name = u.get("vendor_name", "") if u else ""
+                            pass_qty    = u["pass_qty"]    if u else jo["target_qty"]
+                            reject_qty  = u["reject_qty"]  if u else 0
+                            updated_dt  = u["timestamp"]   if u else jo["created_at"]
+                            is_vendor   = assigned_to == "Subcon / Vendor"
+
+                            border_color = "#f59e0b" if is_vendor else "#10b981"
+                            bg_color     = "#fffbeb" if is_vendor else "#f0fdf4"
+                            badge_color  = "#d97706" if is_vendor else "#065f46"
+                            badge_label  = f"🏭 {vendor_name}" if (is_vendor and vendor_name) else ("🏭 Vendor" if is_vendor else "🏠 Inhouse")
+
+                            st.markdown(
+                                f"<div style='border-left:4px solid {border_color};"
+                                f"background:{bg_color};border-radius:6px;"
+                                f"padding:10px 12px;margin-bottom:8px;'>"
+                                f"<div style='font-weight:700;color:#1e3a5f;font-size:0.82rem;'>"
+                                f"{jo['jo_id']}</div>"
+                                f"<div style='color:#374151;font-size:0.75rem;margin-top:2px;'>"
+                                f"🧶 {jo['sku_code']}"
+                                f"{'  |  ' + jo['style_name'] if jo.get('style_name') else ''}</div>"
+                                f"<div style='margin-top:5px;font-size:0.72rem;'>"
+                                f"✅ Pass: <b>{int(pass_qty)}</b> &nbsp; "
+                                f"❌ Reject: <b style='color:#ef4444;'>{int(reject_qty)}</b></div>"
+                                f"<div style='margin-top:4px;'>"
+                                f"<span style='background:{badge_color};color:white;"
+                                f"border-radius:4px;padding:1px 6px;font-size:0.68rem;'>"
+                                f"{badge_label}</span></div>"
+                                f"<div style='color:#6b7280;font-size:0.66rem;margin-top:4px;'>"
+                                f"📅 {updated_dt[:10] if updated_dt else '—'}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+
+        # ── Dispatched Orders ────────────────────────────────────
+        if dispatched:
+            with st.expander(f"🚚 Dispatched Orders ({len(dispatched)})", expanded=False):
+                disp_rows = []
+                for jo in dispatched:
+                    u = _latest_update(jo["jo_id"])
+                    disp_rows.append({
+                        "JO ID":       jo["jo_id"],
+                        "SKU":         jo["sku_code"],
+                        "Style":       jo.get("style_name", ""),
+                        "Target Qty":  jo["target_qty"],
+                        "Pass Qty":    u["pass_qty"]    if u else "—",
+                        "Reject Qty":  u["reject_qty"]  if u else "—",
+                        "Dispatched":  u["timestamp"][:10] if u else "—",
+                        "Remarks":     u.get("remarks", "") if u else "",
+                    })
+                st.dataframe(pd.DataFrame(disp_rows), use_container_width=True,
+                             hide_index=True)
+
+    # ══════════════════════════════════════════════════════════
+    # SUB-TAB 2 — CREATE JOB ORDER
+    # ══════════════════════════════════════════════════════════
+    with prod_tab2:
+        st.markdown("### ➕ Create New Job Order")
+        st.caption("Fill in the details below to open a new production lot.")
+
+        with st.form("create_jo_form", clear_on_submit=True):
+            cj1, cj2 = st.columns(2)
+            with cj1:
+                jo_sku = st.text_input("Style / SKU Code *",
+                                       placeholder="e.g. 1065YK",
+                                       help="Required. Use the OMS SKU code.")
+                jo_style = st.text_input("Style Name (optional)",
+                                         placeholder="e.g. Anarkali Kurti A")
+                jo_target = st.number_input("Target Quantity (pieces) *",
+                                            min_value=1, max_value=100000, value=100, step=10)
+            with cj2:
+                jo_fabric = st.text_input("Fabric / Material",
+                                          placeholder="e.g. Pure Cotton Grey Fabric")
+                jo_remarks = st.text_area("Remarks / Notes", height=100,
+                                          placeholder="e.g. Fresh grey fabric received. Rush order for Q4.")
+                jo_priority = st.selectbox("Priority", ["Normal", "🔴 Urgent", "🟡 High"])
+
+            submitted_create = st.form_submit_button("🆕 Generate Job Order",
+                                                      use_container_width=True)
+
+        if submitted_create:
+            if not jo_sku.strip():
+                st.error("SKU Code is required.")
+            else:
+                new_jo = {
+                    "jo_id":       _next_jo_id(),
+                    "sku_code":    jo_sku.strip().upper(),
+                    "style_name":  jo_style.strip(),
+                    "target_qty":  int(jo_target),
+                    "fabric":      jo_fabric.strip(),
+                    "remarks":     jo_remarks.strip(),
+                    "priority":    jo_priority,
+                    "start_stage": "Grey Inward",
+                    "created_at":  datetime.now().strftime("%Y-%m-%d %H:%M"),
+                }
+                st.session_state["job_orders"].append(new_jo)
+                st.success(
+                    f"✅ Job Order **{new_jo['jo_id']}** created for **{new_jo['sku_code']}** "
+                    f"({int(jo_target)} pcs) — starts at **Grey Inward**"
+                )
+                st.balloons()
+
+        # ── Existing JOs summary ─────────────────────────────────
+        if st.session_state["job_orders"]:
+            st.divider()
+            st.markdown("#### 📋 All Job Orders")
+            all_rows = []
+            for jo in reversed(st.session_state["job_orders"]):
+                u = _latest_update(jo["jo_id"])
+                all_rows.append({
+                    "JO ID":        jo["jo_id"],
+                    "SKU":          jo["sku_code"],
+                    "Style":        jo.get("style_name", ""),
+                    "Priority":     jo.get("priority", "Normal"),
+                    "Target":       jo["target_qty"],
+                    "Current Stage":_current_stage(jo["jo_id"]),
+                    "Pass Qty":     u["pass_qty"]    if u else jo["target_qty"],
+                    "Reject Qty":   u["reject_qty"]  if u else 0,
+                    "Created":      jo["created_at"][:10],
+                })
+            st.dataframe(pd.DataFrame(all_rows), use_container_width=True,
+                         hide_index=True, height=300)
+
+    # ══════════════════════════════════════════════════════════
+    # SUB-TAB 3 — UPDATE STAGE
+    # ══════════════════════════════════════════════════════════
+    with prod_tab3:
+        st.markdown("### 🔄 Update Stage / Location")
+
+        active_jo_ids = [jo["jo_id"] for jo in st.session_state["job_orders"]
+                         if _current_stage(jo["jo_id"]) != "Dispatch"]
+
+        if not active_jo_ids:
+            st.info("No active job orders. Create one first in **➕ Create Job Order**.")
+        else:
+            sel_jo_id = st.selectbox("Select Job Order", active_jo_ids, key="update_jo_sel")
+            jo_data   = _get_jo(sel_jo_id)
+            last_u    = _latest_update(sel_jo_id)
+            cur_stage = _current_stage(sel_jo_id)
+            cur_idx   = STAGES.index(cur_stage) if cur_stage in STAGES else 0
+
+            # Show current state
+            uc1, uc2, uc3, uc4 = st.columns(4)
+            uc1.metric("JO ID",           sel_jo_id)
+            uc2.metric("SKU",             jo_data["sku_code"])
+            uc3.metric("Current Stage",   cur_stage)
+            uc4.metric("Target Qty",      jo_data["target_qty"])
+
+            if last_u:
+                lc1, lc2, lc3 = st.columns(3)
+                lc1.metric("Last Pass Qty",   int(last_u["pass_qty"]))
+                lc2.metric("Last Reject Qty", int(last_u["reject_qty"]))
+                lc3.metric("Last Updated",    last_u["timestamp"][:10])
+            st.divider()
+
+            # Determine available next stages
+            next_stages = STAGES[cur_idx + 1:] if cur_idx + 1 < len(STAGES) else []
+            if not next_stages:
+                st.success(f"✅ **{sel_jo_id}** is at the final stage: **{cur_stage}**. "
+                           "No further updates possible.")
+            else:
+                with st.form("update_stage_form", clear_on_submit=True):
+                    uf1, uf2 = st.columns(2)
+                    with uf1:
+                        move_to   = st.selectbox("Move to Stage", next_stages)
+                        assigned  = st.selectbox("Assigned To",
+                                                 ["Inhouse", "Subcon / Vendor"],
+                                                 index=1 if move_to == "Printing" else 0)
+                        vendor_nm = st.text_input("Vendor Name",
+                                                  placeholder="e.g. RM Prints",
+                                                  disabled=(assigned == "Inhouse"))
+                    with uf2:
+                        last_pass = int(last_u["pass_qty"]) if last_u else jo_data["target_qty"]
+                        pass_qty   = st.number_input("QC Pass Qty",
+                                                     min_value=0,
+                                                     max_value=jo_data["target_qty"],
+                                                     value=last_pass,
+                                                     step=1)
+                        reject_qty = st.number_input("QC Reject Qty",
+                                                     min_value=0,
+                                                     max_value=jo_data["target_qty"],
+                                                     value=0, step=1)
+                        upd_remarks = st.text_input("Remarks",
+                                                    placeholder="e.g. Sent to RM Prints for screen print")
+
+                    submitted_update = st.form_submit_button("💾 Save Update",
+                                                              use_container_width=True)
+
+                if submitted_update:
+                    update_rec = {
+                        "jo_id":       sel_jo_id,
+                        "stage":       move_to,
+                        "assigned_to": assigned,
+                        "vendor_name": vendor_nm.strip() if assigned != "Inhouse" else "",
+                        "pass_qty":    int(pass_qty),
+                        "reject_qty":  int(reject_qty),
+                        "remarks":     upd_remarks.strip(),
+                        "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    }
+                    st.session_state["wip_updates"].append(update_rec)
+                    if move_to == "Dispatch":
+                        st.success(f"🚚 **{sel_jo_id}** marked as **Dispatched**! "
+                                   f"Pass: {int(pass_qty)} pcs | Reject: {int(reject_qty)} pcs")
+                    else:
+                        loc_label = (f"**{vendor_nm}** (Subcon)" if assigned != "Inhouse" and vendor_nm
+                                     else assigned)
+                        st.success(f"✅ **{sel_jo_id}** moved to **{move_to}** → {loc_label} | "
+                                   f"Pass: {int(pass_qty)} | Reject: {int(reject_qty)}")
+
+            # ── Stage history for selected JO ───────────────────
+            history = [u for u in st.session_state["wip_updates"] if u["jo_id"] == sel_jo_id]
+            if history:
+                st.divider()
+                st.markdown(f"#### 📜 Stage History — {sel_jo_id}")
+                hist_rows = []
+                for h in history:
+                    loc = h["vendor_name"] if (h["assigned_to"] != "Inhouse" and h["vendor_name"]) \
+                          else h["assigned_to"]
+                    hist_rows.append({
+                        "Stage":      h["stage"],
+                        "Location":   loc,
+                        "Pass Qty":   int(h["pass_qty"]),
+                        "Reject Qty": int(h["reject_qty"]),
+                        "Remarks":    h.get("remarks", ""),
+                        "Updated":    h["timestamp"],
+                    })
+                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True,
+                             hide_index=True)
+
+    # ══════════════════════════════════════════════════════════
+    # SUB-TAB 4 — ANALYTICS & EXPORT
+    # ══════════════════════════════════════════════════════════
+    with prod_tab4:
+        st.markdown("### 📊 Quality Analytics & Export")
+
+        if not st.session_state["job_orders"]:
+            st.info("No job orders to analyse yet.")
+        else:
+            updates = st.session_state["wip_updates"]
+            jobs    = st.session_state["job_orders"]
+
+            # ── Filter bar ─────────────────────────────────────
+            fa1, fa2 = st.columns(2)
+            with fa1:
+                all_skus_prod = sorted(set(jo["sku_code"] for jo in jobs))
+                sel_sku_f = st.multiselect("Filter by SKU", all_skus_prod,
+                                           default=all_skus_prod, key="prod_sku_filter")
+            with fa2:
+                sel_stage_f = st.multiselect("Filter by Stage", STAGES,
+                                             default=STAGES, key="prod_stage_filter")
+
+            # Master table
+            master_rows = []
+            for jo in jobs:
+                if jo["sku_code"] not in sel_sku_f:
+                    continue
+                history_all = [u for u in updates if u["jo_id"] == jo["jo_id"]]
+                for h in history_all:
+                    if h["stage"] not in sel_stage_f:
+                        continue
+                    loc = h["vendor_name"] if (h["assigned_to"] != "Inhouse"
+                                               and h["vendor_name"]) else h["assigned_to"]
+                    master_rows.append({
+                        "JO ID":        jo["jo_id"],
+                        "SKU":          jo["sku_code"],
+                        "Style":        jo.get("style_name", ""),
+                        "Priority":     jo.get("priority", "Normal"),
+                        "Stage":        h["stage"],
+                        "Location":     loc,
+                        "Pass Qty":     int(h["pass_qty"]),
+                        "Reject Qty":   int(h["reject_qty"]),
+                        "Reject %":     round(h["reject_qty"] / max(h["pass_qty"] + h["reject_qty"], 1) * 100, 1),
+                        "Remarks":      h.get("remarks", ""),
+                        "Timestamp":    h["timestamp"],
+                    })
+
+            master_df = pd.DataFrame(master_rows) if master_rows else pd.DataFrame()
+
+            if master_df.empty:
+                st.info("No update records match the current filters.")
+            else:
+                # KPI row
+                total_pass   = master_df["Pass Qty"].sum()
+                total_reject = master_df["Reject Qty"].sum()
+                overall_rr   = total_reject / max(total_pass + total_reject, 1) * 100
+
+                kp1, kp2, kp3, kp4 = st.columns(4)
+                kp1.metric("Total JOs",    len(jobs))
+                kp2.metric("✅ Total Pass",  f"{int(total_pass):,}")
+                kp3.metric("❌ Total Reject",f"{int(total_reject):,}")
+                kp4.metric("📊 Overall Reject %", f"{overall_rr:.1f}%",
+                            delta_color="inverse",
+                            delta=("⚠️ High" if overall_rr > 10 else None))
+                st.divider()
+
+                # Stage quality chart
+                if len(master_df["Stage"].unique()) > 1:
+                    stage_grp = (master_df.groupby("Stage")
+                                 .agg(Pass=("Pass Qty","sum"), Reject=("Reject Qty","sum"))
+                                 .reset_index())
+                    stage_grp["Reject %"] = (stage_grp["Reject"] /
+                                             (stage_grp["Pass"] + stage_grp["Reject"]).replace(0, np.nan) * 100
+                                             ).fillna(0).round(1)
+
+                    ch_c1, ch_c2 = st.columns(2)
+                    with ch_c1:
+                        fig_qa = go.Figure()
+                        fig_qa.add_trace(go.Bar(name="Pass",   x=stage_grp["Stage"],
+                                                y=stage_grp["Pass"],   marker_color="#10b981"))
+                        fig_qa.add_trace(go.Bar(name="Reject", x=stage_grp["Stage"],
+                                                y=stage_grp["Reject"], marker_color="#ef4444"))
+                        fig_qa.update_layout(barmode="group", height=320,
+                                             title="Pass vs Reject by Stage",
+                                             margin=dict(t=40, b=10),
+                                             legend=dict(orientation="h"))
+                        st.plotly_chart(fig_qa, use_container_width=True)
+                    with ch_c2:
+                        fig_rr2 = px.bar(stage_grp, x="Stage", y="Reject %",
+                                         color="Reject %",
+                                         color_continuous_scale=["#10b981","#f59e0b","#ef4444"],
+                                         range_color=[0, 20],
+                                         title="Rejection % by Stage",
+                                         text=stage_grp["Reject %"].astype(str) + "%")
+                        fig_rr2.update_traces(textposition="outside")
+                        fig_rr2.update_layout(height=320, margin=dict(t=40, b=10),
+                                              coloraxis_showscale=False)
+                        fig_rr2.add_hline(y=5, line_dash="dash", line_color="orange",
+                                          annotation_text="5% threshold")
+                        st.plotly_chart(fig_rr2, use_container_width=True)
+
+                    # Vendor vs Inhouse quality
+                    loc_grp = (master_df.groupby("Location")
+                               .agg(Pass=("Pass Qty","sum"), Reject=("Reject Qty","sum"))
+                               .reset_index())
+                    loc_grp["Reject %"] = (loc_grp["Reject"] /
+                                           (loc_grp["Pass"] + loc_grp["Reject"]).replace(0, np.nan) * 100
+                                           ).fillna(0).round(1)
+                    fig_loc = px.bar(loc_grp, x="Location", y="Reject %",
+                                     color="Reject %",
+                                     color_continuous_scale=["#10b981","#f59e0b","#ef4444"],
+                                     range_color=[0, 20],
+                                     title="Rejection % by Location / Vendor",
+                                     text=loc_grp["Reject %"].astype(str) + "%")
+                    fig_loc.update_traces(textposition="outside")
+                    fig_loc.update_layout(height=300, coloraxis_showscale=False, margin=dict(t=40))
+                    st.plotly_chart(fig_loc, use_container_width=True)
+
+                st.divider()
+                st.markdown("#### 📄 Full Job Order Log")
+                st.dataframe(master_df, use_container_width=True, hide_index=True, height=340)
+
+                # Export
+                ex1, ex2 = st.columns(2)
+                with ex1:
+                    st.download_button(
+                        "📥 Export Job Orders CSV",
+                        master_df.to_csv(index=False).encode("utf-8"),
+                        f"production_wip_{datetime.now().strftime('%Y%m%d')}.csv",
+                        "text/csv", use_container_width=True
+                    )
+                with ex2:
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                        master_df.to_excel(writer, sheet_name="WIP Log", index=False)
+                        if "stage_grp" in dir():
+                            stage_grp.to_excel(writer, sheet_name="Stage Quality", index=False)
+                    st.download_button(
+                        "📊 Export to Excel",
+                        buf.getvalue(),
+                        f"production_wip_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+
+            # ── Clear all production data ─────────────────────
+            st.divider()
+            with st.expander("⚠️ Danger Zone", expanded=False):
+                if st.button("🗑️ Clear All Production Data", type="secondary"):
+                    st.session_state["job_orders"]  = []
+                    st.session_state["wip_updates"] = []
+                    st.session_state["_jo_counter"] = 1000
+                    st.success("All production data cleared.")
+                    st.rerun()
 # ══════════════════════════════════════════════════════════════
 # TAB 9 — LOGISTICS
 # ══════════════════════════════════════════════════════════════
