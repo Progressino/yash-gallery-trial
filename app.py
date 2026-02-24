@@ -262,19 +262,21 @@ _CACHE_FILES = {
 def _get_drive_service():
     """
     Authenticate with Google Drive using a service account stored in st.secrets.
-    Cached once per server process. Returns None silently if secrets are missing
-    or the google libraries are not installed (graceful degradation for local dev).
+    Cached once per server process. Returns (service, error_msg) tuple.
     """
     if not _GDRIVE_LIBS_OK:
-        return None
+        return None, "Google libraries not installed"
     try:
-        creds_dict = dict(st.secrets["gdrive"]["credentials"])
+        raw = st.secrets["gdrive"]["credentials"]
+        # Convert nested AttrDict fully to plain dict with string values
+        creds_dict = {k: str(v) if not isinstance(v, str) else v for k, v in raw.items()}
         creds = service_account.Credentials.from_service_account_info(
             creds_dict, scopes=_GDRIVE_SCOPES
         )
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
-    except Exception:
-        return None
+        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return svc, None
+    except Exception as e:
+        return None, str(e)
 
 
 def _drive_folder_id() -> str:
@@ -371,7 +373,7 @@ def _get_cached_manifest():
     process to avoid excessive API calls on every Streamlit rerun.
     Returns the manifest dict, or None if no cache exists / Drive not configured.
     """
-    service = _get_drive_service()
+    service, _err = _get_drive_service()
     if service is None:
         return None
     folder_id = _drive_folder_id()
@@ -406,9 +408,9 @@ def save_cache_to_drive(progress_callback=None):
     progress_callback: optional callable(step, total, label)
     Returns: (success: bool, message: str)
     """
-    service = _get_drive_service()
+    service, _err = _get_drive_service()
     if service is None:
-        return False, "Google Drive not configured (check st.secrets)."
+        return False, f"Google Drive not configured: {_err}"
     folder_id = _drive_folder_id()
     if not folder_id:
         return False, "gdrive.folder_id not set in secrets."
@@ -476,9 +478,9 @@ def load_cache_from_drive(progress_callback=None):
 
     Returns: (success: bool, message: str)
     """
-    service = _get_drive_service()
+    service, _err = _get_drive_service()
     if service is None:
-        return False, "Google Drive not configured."
+        return False, f"Google Drive not configured: {_err}"
     folder_id = _drive_folder_id()
     manifest = _read_manifest(service, folder_id)
     if manifest is None:
@@ -520,9 +522,9 @@ def load_cache_from_drive(progress_callback=None):
 
 def clear_drive_cache():
     """Delete all cached files from the Drive folder. Returns (success, message)."""
-    service = _get_drive_service()
+    service, _err = _get_drive_service()
     if service is None:
-        return False, "Google Drive not configured."
+        return False, f"Google Drive not configured: {_err}"
     folder_id = _drive_folder_id()
     existing = _drive_list_files(service, folder_id)
     all_names = set(_CACHE_FILES.values()) | {_CACHE_MANIFEST_NAME}
@@ -2248,8 +2250,9 @@ def _render_drive_cache_sidebar():
     except Exception:
         st.sidebar.warning("⚙️ Add Google Drive secrets in Streamlit Cloud → Settings → Secrets to enable caching.")
         return
-    if _get_drive_service() is None:
-        st.sidebar.error("❌ Drive auth failed — check your secrets (private_key format).")
+    _svc, _auth_err = _get_drive_service()
+    if _svc is None:
+        st.sidebar.error(f"❌ Drive auth failed: {_auth_err}")
         return
 
     st.sidebar.markdown("### ☁️ Drive Cache")
@@ -2531,7 +2534,8 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
             st.code(_load_error)
         else:
             # Auto-save to Google Drive after a successful full load
-            if _get_drive_service() is not None:
+            _autosave_svc, _ = _get_drive_service()
+            if _autosave_svc is not None:
                 with st.spinner("Auto-saving to Drive cache…"):
                     _save_ok, _save_msg = save_cache_to_drive()
                 if _save_ok:
