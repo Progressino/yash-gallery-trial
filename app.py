@@ -2239,8 +2239,18 @@ st.sidebar.divider()
 # ── Google Drive Cache Controls ──────────────────────────────
 def _render_drive_cache_sidebar():
     """Render Drive cache status and action buttons in the sidebar."""
+    st.sidebar.markdown("### ☁️ Drive Cache")
+    if not _GDRIVE_LIBS_OK:
+        st.sidebar.error("❌ Google libraries not installed. Check requirements.txt.")
+        return
+    try:
+        _ = st.secrets["gdrive"]["folder_id"]
+    except Exception:
+        st.sidebar.warning("⚙️ Add Google Drive secrets in Streamlit Cloud → Settings → Secrets to enable caching.")
+        return
     if _get_drive_service() is None:
-        return  # Secrets not configured — hide entire section for local dev
+        st.sidebar.error("❌ Drive auth failed — check your secrets (private_key format).")
+        return
 
     st.sidebar.markdown("### ☁️ Drive Cache")
     manifest = _get_cached_manifest()
