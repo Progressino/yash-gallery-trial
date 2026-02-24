@@ -1,0 +1,20 @@
+# Streamlit secrets — NEVER commit these
+.streamlit/secrets.toml
+
+# Google service account key files — NEVER commit these
+*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data cache (large files)
+data_cache/
