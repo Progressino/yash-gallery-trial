@@ -3940,10 +3940,13 @@ with tab_po:
                 with _sc1: _po_search = st.text_input("Search SKUs","",key="gen_po_search",placeholder="Filter SKU list…")
                 with _sc2:
                     if st.button("✅ Select Urgent+High",key="po_sel_urgent"):
-                        st.session_state["_po_selected_skus"]=filtered[filtered["Priority"].isin(["🔴 URGENT","🟡 HIGH"])&(filtered["PO_Qty"]>0)]["OMS_SKU"].tolist()
+                        _uh = filtered[filtered["Priority"].isin(["🔴 URGENT","🟡 HIGH"])&(filtered["PO_Qty"]>0)]["OMS_SKU"].tolist()
+                        st.session_state["_po_selected_skus"] = _uh
+                        st.session_state["po_sku_multiselect"] = _uh
                 with _sc3:
                     if st.button("🔄 Select All",key="po_sel_all"):
-                        st.session_state["_po_selected_skus"]=_po_skus_available
+                        st.session_state["_po_selected_skus"] = _po_skus_available
+                        st.session_state["po_sku_multiselect"] = _po_skus_available
                 _sku_disp = [s for s in _po_skus_available if not _po_search.strip() or _po_search.strip().lower() in s.lower()]
                 _def_sel  = [s for s in st.session_state.get("_po_selected_skus",[]) if s in _sku_disp]
                 _selected_skus = st.multiselect(f"SKUs for PO ({len(_sku_disp)} available)",options=_sku_disp,default=_def_sel,key="po_sku_multiselect")
