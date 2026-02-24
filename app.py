@@ -109,6 +109,7 @@ def init_session_state():
         "inventory_df_parent":   pd.DataFrame(),
         "transfer_df":           pd.DataFrame(),
         "mtr_df":                pd.DataFrame(),
+           "existing_po_df": pd.DataFrame(),
         "myntra_df":             pd.DataFrame(),
         "meesho_df":             pd.DataFrame(),
         "flipkart_df":           pd.DataFrame(),
@@ -1446,7 +1447,65 @@ def load_stock_transfer(zip_file) -> pd.DataFrame:
     result["Invoice Date"] = pd.to_datetime(result["Invoice Date"], errors="coerce")
     result["Quantity"]     = pd.to_numeric(result["Quantity"], errors="coerce").fillna(0)
     return result
+@st.cache_data(show_spinner=False)
+def load_existing_po(po_file) -> pd.DataFrame:
+    """Parse team's existing PO tracking sheet and return pipeline quantities per SKU."""
+    try:
+        po_file.seek(0)
+        raw = pd.read_excel(po_file, sheet_name=0, dtype=str)
+        raw.columns = [str(c).strip() for c in raw.columns]
 
+        def _find_col(df, *candidates):
+            lower_map = {c.lower(): c for c in df.columns}
+            for cand in candidates:
+                if cand.lower() in lower_map:
+                    return lower_map[cand.lower()]
+                for lk, orig in lower_map.items():
+                    if cand.lower() in lk:
+                        return orig
+            return None
+
+        sku_col      = _find_col(raw, "SKU")
+        balance_col  = _find_col(raw, "TOTAL BALANCE", "Total Balance", "Balance")
+        pend_col     = _find_col(raw, "Pending Cutting", "Pending")
+        disp_col     = _find_col(raw, "Balance to dispatch", "Dispatch")
+        merchant_col = _find_col(raw, "Marchant Name", "Merchant", "Vendor")
+        status_col   = _find_col(raw, "STATUS", "Status")
+
+        if not sku_col or not balance_col:
+            st.sidebar.warning("⚠️ Existing PO: Could not find SKU or Balance columns.")
+            return pd.DataFrame()
+
+        keep = [c for c in [sku_col, balance_col, pend_col, disp_col, merchant_col, status_col] if c]
+        df = raw[keep].copy()
+        rename_map = {sku_col: "OMS_SKU", balance_col: "PO_Pipeline_Total"}
+        if merchant_col: rename_map[merchant_col] = "PO_Merchant"
+        if status_col:   rename_map[status_col]   = "PO_SKU_Status"
+        if pend_col:     rename_map[pend_col]      = "PO_Pending_Cutting"
+        if disp_col:     rename_map[disp_col]      = "PO_Balance_Dispatch"
+        df = df.rename(columns=rename_map)
+
+        df = df[df["OMS_SKU"].notna()]
+        df = df[~df["OMS_SKU"].str.lower().isin(["sku", "total", "", "nan"])]
+
+        def _safe_int(x):
+            try:
+                v = float(str(x).strip())
+                return max(0, int(v)) if not pd.isna(v) else 0
+            except:
+                return 0
+
+        for col in ["PO_Pipeline_Total", "PO_Pending_Cutting", "PO_Balance_Dispatch"]:
+            if col in df.columns:
+                df[col] = df[col].apply(_safe_int)
+
+        df["OMS_SKU"] = df["OMS_SKU"].astype(str).str.strip()
+        df = df[df["PO_Pipeline_Total"] > 0].drop_duplicates(subset=["OMS_SKU"], keep="first")
+        return df.reset_index(drop=True)
+
+    except Exception as e:
+        st.sidebar.error(f"❌ Error loading existing PO file: {e}")
+        return pd.DataFrame()
 # ══════════════════════════════════════════════════════════════
 # 11) PO BASE CALCULATOR (SEASONAL INTEGRATED)
 # ══════════════════════════════════════════════════════════════
@@ -1833,7 +1892,16 @@ with st.sidebar.expander("📅 Tier 2 — Monthly Sales (Recent Velocity)", expa
         "Amazon Stock Transfer (ZIP)",
         type=["zip"], key="transfer",
     )
-
+f_existing_po = st.file_uploader(
+        "📋 Existing PO Sheet (Excel) — Pipeline Check",
+        type=["xlsx"],
+        key="existing_po",
+        help=(
+            "Upload your current PO tracking sheet (e.g. Po_Sheet_23-Feb-2026.xlsx). "
+            "The system reads the Total Balance column per SKU and deducts it from "
+            "the suggested PO quantity so you don't double-order."
+        )
+)
 st.sidebar.divider()
 
 with st.sidebar.expander("📦 Tier 3 — Daily Snapshot (Inventory + Today's Sales)", expanded=True):
@@ -2068,6 +2136,14 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
 
                 if f_transfer:
                     st.session_state.transfer_df = load_stock_transfer(f_transfer)
+                       if f_existing_po:
+                    st.session_state.existing_po_df = load_existing_po(f_existing_po)
+                    n_po = len(st.session_state.existing_po_df)
+                    total_pipeline = st.session_state.existing_po_df["PO_Pipeline_Total"].sum()
+                    st.sidebar.success(
+                        f"📋 Existing PO loaded: **{n_po:,} SKUs** | "
+                        f"**{int(total_pipeline):,}** units already in pipeline"
+                    )
 
             except Exception as _load_err:
                 import traceback as _tb
@@ -3164,16 +3240,55 @@ with tab_po:
         if po_df.empty:
             st.warning("No PO calculations available. Check that sales and inventory data overlap.")
         else:
+          # ── Merge existing PO pipeline ──────────────────────────
+            existing_po = st.session_state.get("existing_po_df", pd.DataFrame())
+            has_existing_po = not existing_po.empty
+
+            if has_existing_po:
+                po_df = po_df.merge(
+                    existing_po[["OMS_SKU", "PO_Pipeline_Total"] +
+                                 [c for c in ["PO_Pending_Cutting", "PO_Balance_Dispatch", "PO_Merchant", "PO_SKU_Status"]
+                                  if c in existing_po.columns]],
+                    on="OMS_SKU", how="left"
+                )
+                po_df["PO_Pipeline_Total"] = po_df["PO_Pipeline_Total"].fillna(0).astype(int)
+                if "PO_Pending_Cutting"  in po_df.columns: po_df["PO_Pending_Cutting"]  = po_df["PO_Pending_Cutting"].fillna(0).astype(int)
+                if "PO_Balance_Dispatch" in po_df.columns: po_df["PO_Balance_Dispatch"] = po_df["PO_Balance_Dispatch"].fillna(0).astype(int)
+
+                # Show pipeline info banner
+                skus_with_pipeline = (po_df["PO_Pipeline_Total"] > 0).sum()
+                total_pipeline_units = po_df["PO_Pipeline_Total"].sum()
+                st.info(
+                    f"📋 **Existing PO loaded:** {skus_with_pipeline:,} SKUs have "
+                    f"**{int(total_pipeline_units):,} units** already in the production pipeline. "
+                    f"PO Qty below is **NET of pipeline** — only what still needs to be ordered."
+                )
+            else:
+                po_df["PO_Pipeline_Total"] = 0
+                st.caption("💡 *Upload your existing PO sheet in the sidebar (Tier 2) to auto-deduct pipeline quantities.*")
+
             po_df["Days_Left"]        = np.where(po_df["ADS"] > 0, po_df["Total_Inventory"] / po_df["ADS"], 999)
             po_df["Lead_Time_Demand"] = po_df["ADS"] * lead_time
             po_df["Target_Stock"]     = po_df["ADS"] * target_days
             po_df["Base_Requirement"] = po_df["Lead_Time_Demand"] + po_df["Target_Stock"]
             po_df["Safety_Stock"]     = po_df["Base_Requirement"] * (safety_pct / 100)
             po_df["Total_Required"]   = po_df["Base_Requirement"] + po_df["Safety_Stock"]
-            po_df["PO_Qty"]           = (
+
+            # KEY CHANGE: Deduct pipeline from gross PO need
+            po_df["Gross_PO_Qty"] = (
                 np.ceil((po_df["Total_Required"] - po_df["Total_Inventory"]).clip(lower=0) / 5) * 5
             ).astype(int)
+            po_df["PO_Qty"] = (
+                np.ceil((po_df["Gross_PO_Qty"] - po_df["PO_Pipeline_Total"]).clip(lower=0) / 5) * 5
+            ).astype(int)
 
+            def _priority(row):
+                if row["Days_Left"] < lead_time      and row["PO_Qty"] > 0: return "🔴 URGENT"
+                if row["Days_Left"] < lead_time + 7  and row["PO_Qty"] > 0: return "🟡 HIGH"
+                if row["PO_Qty"] > 0:                                        return "🟢 MEDIUM"
+                if row.get("PO_Pipeline_Total", 0) > 0:                      return "🔄 In Pipeline"
+                return "⚪ OK"
+            po_df["Priority"] = po_df.apply(_priority, axis=1)
             def _priority(row):
                 if row["Days_Left"] < lead_time      and row["PO_Qty"] > 0: return "🔴 URGENT"
                 if row["Days_Left"] < lead_time + 7  and row["PO_Qty"] > 0: return "🟡 HIGH"
@@ -3382,6 +3497,8 @@ with tab_po:
                     "PO + Available":      st.column_config.NumberColumn("PO + Available", help="PO Qty + current total inventory"),
                     "OMS Stock":           st.column_config.NumberColumn("OMS Stock",      help="OMS warehouse stock only"),
                     "Available Inventory": st.column_config.NumberColumn("Available Inv.", help="Total stock: OMS + all marketplaces"),
+                       "Gross PO":            st.column_config.NumberColumn("Gross PO",    help="PO needed before deducting existing pipeline"),
+                    "In Pipeline":         st.column_config.NumberColumn("In Pipeline", help="Units already ordered with manufacturer"),
                 },
             )
 
