@@ -585,23 +585,7 @@ def _std_daily(date, sku, platform, txn_type, qty, revenue, state="", order_id="
 
 def detect_daily_platform(file_obj) -> str:
     """
-    FIX: Properly distinguish Myntra PPMP CSV from Flipkart PPMP CSV.
-
-    Fingerprints (in priority order):
-      Amazon              → 'merchant sku'  +  'amazon order id'
-      Meesho              → 'reason for credit entry'  +  'sub order no'
-      Myntra PPMP CSV     → 'sku_id' (with underscore) + 'order_created_date' or 'packet_id'
-                            OR 'skuid' + 'order_created_date'
-                            (Myntra PPMP uses snake_case column names)
-      Flipkart PPMP order → 'seller sku code'  +  'store order id'
-                            (Flipkart PPMP uses space-separated column names)
-      Flipkart Earn More  → 'sku id' + 'final sale units' + 'gross units'
-                            AND 'vertical' column contains 'shopsy' in any row
-      Myntra Earn More    → 'sku id' + 'final sale units' + 'gross units'
-                            AND no 'shopsy' in 'vertical' column
-
-    Returns one of: 'amazon' | 'flipkart' | 'meesho' | 'myntra' | 'myntra_ppmp' | 'unknown'
-    Note: 'myntra_ppmp' means Myntra PPMP order CSV (not Earn More xlsx)
+    Detects the e-commerce platform of a daily report based on column signatures.
     """
     try:
         file_obj.seek(0)
@@ -619,41 +603,42 @@ def detect_daily_platform(file_obj) -> str:
             else:
                 return "unknown"
 
-        # Get both original and lowercased column names
         orig_cols = list(df.columns)
         cols_lower = set(c.strip().lower() for c in orig_cols)
-        # Also get snake_case versions (replace spaces with underscores)
-        cols_snake = set(c.strip().lower().replace(" ", "_") for c in orig_cols)
 
         file_obj.seek(0)
 
-        # Amazon: has 'merchant sku' AND 'amazon order id'
+        # Amazon
         if "merchant sku" in cols_lower and "amazon order id" in cols_lower:
             return "amazon"
 
-        # Meesho: has 'reason for credit entry' AND 'sub order no'
+        # Meesho
         if "reason for credit entry" in cols_lower and "sub order no" in cols_lower:
             return "meesho"
 
-        # FIX: Myntra PPMP CSV uses snake_case column names like:
-        # sku_id, order_created_date, packet_id, order_status, etc.
-        # Key distinguisher: 'order_created_date' (snake_case) which Flipkart PPMP does NOT have
-        # Flipkart PPMP uses 'created on' (space, no underscore)
+        # Myntra PPMP
+        # Captures both snake_case (sku_id) and space-separated (store order id)
         myntra_ppmp_signals = (
             ("sku_id" in cols_lower or "skuid" in cols_lower) and
             ("order_created_date" in cols_lower or "packet_id" in cols_lower)
         )
-        if myntra_ppmp_signals:
+        myntra_space_signals = (
+            "seller sku code" in cols_lower and 
+            ("store order id" in cols_lower or "myntra sku code" in cols_lower)
+        )
+        if myntra_ppmp_signals or myntra_space_signals:
             return "myntra_ppmp"
 
-        # Flipkart PPMP: 'seller sku code' + 'store order id' (space-separated)
-        if "seller sku code" in cols_lower and "store order id" in cols_lower:
+        # Flipkart PPMP
+        # Real Flipkart files usually have 'order item id', 'order id', or 'fsn'
+        if "order item id" in cols_lower or "fsn" in cols_lower:
+            return "flipkart"
+        if "seller sku" in cols_lower and "order id" in cols_lower:
             return "flipkart"
 
-        # Earn More reports (xlsx): 'sku id' + 'final sale units' + 'gross units'
+        # Earn More reports (xlsx)
         if "sku id" in cols_lower and "final sale units" in cols_lower and "gross units" in cols_lower:
             if "vertical" in cols_lower:
-                # Find the actual column name with that lowercased value
                 vert_col = next((c for c in orig_cols if c.strip().lower() == "vertical"), None)
                 if vert_col:
                     verticals = df[vert_col].astype(str).str.lower()
@@ -664,7 +649,6 @@ def detect_daily_platform(file_obj) -> str:
         return "unknown"
     except Exception:
         return "unknown"
-
 
 def parse_daily_amazon_csv(file_obj, mapping):
     try:
@@ -692,33 +676,46 @@ def parse_daily_flipkart_csv(file_obj, mapping: Dict[str, str]) -> pd.DataFrame:
         df = pd.read_csv(file_obj)
         if df.empty:
             return pd.DataFrame()
+        
         df.columns = df.columns.str.strip().str.lower()
 
-        STATUS_TXNTYPE = {
-            "wp": "Shipment",
-            "pk": "Shipment",
-            "sh": "Shipment",
-            "f":  "Cancel",
-        }
         rows = []
         for _, r in df.iterrows():
-            status  = str(r.get("order status", "")).strip().lower()
-            txn     = STATUS_TXNTYPE.get(status, "Shipment")
-            raw_sku = str(r.get("seller sku code", "")).strip()
+            status = str(r.get("order status", r.get("status", ""))).strip().upper()
+
+            # Map Flipkart statuses
+            if status in ["CANCELLED", "CANCEL"]:
+                txn = "Cancel"
+            elif "RETURN" in status:
+                txn = "Refund"
+            else:
+                txn = "Shipment" # Covers APPROVED, PACKED, READY_TO_DISPATCH, SHIPPED, DELIVERED
+
+            # Fallbacks for common Flipkart column naming conventions
+            raw_sku = str(r.get("seller sku", r.get("seller sku code", ""))).strip()
             oms_sku = map_to_oms_sku(raw_sku, mapping)
+
+            date = r.get("order date", r.get("order item date", r.get("created on", "")))
+            qty = pd.to_numeric(r.get("quantity", 1), errors="coerce") or 1
+            revenue = pd.to_numeric(r.get("selling price", r.get("total amount", r.get("seller price", 0))), errors="coerce") or 0
+            state = str(r.get("delivery state", r.get("state", ""))).strip()
+            order_id = str(r.get("order item id", r.get("order id", ""))).strip()
+
             rows.append(_std_daily(
-                date     = r.get("created on"),
+                date     = date,
                 sku      = oms_sku,
                 platform = "Flipkart",
                 txn_type = txn,
-                qty      = 1,
-                revenue  = pd.to_numeric(r.get("seller price", r.get("final amount", 0)), errors="coerce") or 0,
-                state    = r.get("state", ""),
-                order_id = str(r.get("store order id", r.get("order release id", ""))),
+                qty      = qty,
+                revenue  = revenue,
+                state    = state,
+                order_id = order_id,
             ))
+            
         out = pd.DataFrame(rows)
         out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
         return out.dropna(subset=["Date"])
+        
     except Exception as e:
         st.warning(f"Flipkart daily parse error: {e}")
         return pd.DataFrame()
