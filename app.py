@@ -2355,12 +2355,21 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 meesho_df_ss   = st.session_state.get("meesho_df",   pd.DataFrame())
                 myntra_df_ss   = st.session_state.get("myntra_df",   pd.DataFrame())
                 flipkart_df_ss = st.session_state.get("flipkart_df", pd.DataFrame())
+                mtr_df_ss      = st.session_state.get("mtr_df",      pd.DataFrame())
                 if not meesho_df_ss.empty:
                     sales_parts.append(meesho_to_sales_rows(meesho_df_ss))
                 if not myntra_df_ss.empty:
                     sales_parts.append(myntra_to_sales_rows(myntra_df_ss))
                 if not flipkart_df_ss.empty:
                     sales_parts.append(flipkart_to_sales_rows(flipkart_df_ss))
+                if not mtr_df_ss.empty and st.session_state.sku_mapping:
+                    _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
+                    if not _mtr_sales.empty:
+                        _mtr_sales["Source"]  = "Amazon"
+                        _mtr_sales["OrderId"] = np.nan
+                        sales_parts.append(_mtr_sales)
+                    del _mtr_sales
+                    gc.collect()
 
                 if sales_parts:
                     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
