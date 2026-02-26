@@ -2226,9 +2226,13 @@ with st.sidebar.expander("📅 Tier 2 — Monthly Sales (Recent Velocity)", expa
         type=["xlsx"], key="fk",
     )
     f_meesho_monthly = st.file_uploader(
-        "Meesho Payment Sheet (Excel)",
-        type=["xlsx"], key="meesho_monthly",
-        help="Meesho monthly payment report — 'Order Payments' tab with SKU, status and quantity columns.",
+        "Meesho Monthly Report (Excel or ZIP)",
+        type=["xlsx", "zip"], key="meesho_monthly",
+        help=(
+            "Meesho monthly payment report — either:\n"
+            "• XLSX: 'Order Payments' tab with SKU, status and quantity columns.\n"
+            "• ZIP: monthly ZIP containing tcs_sales.xlsx, tcs_sales_return.xlsx, etc."
+        ),
     )
     f_myntra_monthly = st.file_uploader(
         "Myntra Monthly Report ZIP (PPMP / SJIT / TP)",
@@ -2455,33 +2459,8 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     del fk_combined
                     gc.collect()
 
+                # ── Tier 1 (historical master) goes first so Tier 2 can override ──
                 sales_parts = []
-                if f_b2c:
-                    sales_parts.append(load_amazon_sales(f_b2c, st.session_state.sku_mapping, "Amazon B2C", config))
-                    gc.collect()
-                if f_b2b:
-                    sales_parts.append(load_amazon_sales(f_b2b, st.session_state.sku_mapping, "Amazon B2B", config))
-                    gc.collect()
-                if f_fk:
-                    sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
-                    gc.collect()
-                if f_meesho_monthly:
-                    _ms, _ms_msg = load_meesho_monthly_payment(f_meesho_monthly, st.session_state.sku_mapping)
-                    if _ms.empty:
-                        _load_warns.append(f"Meesho Payment Sheet: {_ms_msg}")
-                    else:
-                        sales_parts.append(_ms)
-                        st.sidebar.caption(f"🛒 Meesho monthly: {_ms_msg}")
-                    del _ms; gc.collect()
-                if f_myntra_monthly:
-                    _my, _my_msg = load_myntra_monthly_zip(f_myntra_monthly, st.session_state.sku_mapping)
-                    if _my.empty:
-                        _load_warns.append(f"Myntra Monthly ZIP: {_my_msg}")
-                    else:
-                        sales_parts.append(_my)
-                        st.sidebar.caption(f"🛍️ Myntra monthly: {_my_msg}")
-                    del _my; gc.collect()
-
                 meesho_df_ss   = st.session_state.get("meesho_df",   pd.DataFrame())
                 myntra_df_ss   = st.session_state.get("myntra_df",   pd.DataFrame())
                 flipkart_df_ss = st.session_state.get("flipkart_df", pd.DataFrame())
@@ -2501,11 +2480,71 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     del _mtr_sales
                     gc.collect()
 
+                # ── Tier 2 (monthly uploads) appended after Tier 1 so they win dedup ──
+                if f_b2c:
+                    sales_parts.append(load_amazon_sales(f_b2c, st.session_state.sku_mapping, "Amazon B2C", config))
+                    gc.collect()
+                if f_b2b:
+                    sales_parts.append(load_amazon_sales(f_b2b, st.session_state.sku_mapping, "Amazon B2B", config))
+                    gc.collect()
+                if f_fk:
+                    sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
+                    gc.collect()
+                if f_meesho_monthly:
+                    _fname_lower = f_meesho_monthly.name.lower()
+                    if _fname_lower.endswith(".zip"):
+                        _ms = pd.DataFrame()
+                        try:
+                            import zipfile as _zf
+                            f_meesho_monthly.seek(0)
+                            with _zf.ZipFile(f_meesho_monthly) as _inner_zf:
+                                _ms = _parse_meesho_inner_zip(_inner_zf)
+                            if not _ms.empty:
+                                _ms = meesho_to_sales_rows(_ms)
+                                _ms["Source"] = "Meesho"
+                                sales_parts.append(_ms)
+                                st.sidebar.caption(f"🛒 Meesho monthly ZIP: {len(_ms):,} rows")
+                            else:
+                                _load_warns.append("Meesho Monthly ZIP: No data extracted")
+                        except Exception as _ze:
+                            _load_warns.append(f"Meesho Monthly ZIP: {_ze}")
+                        del _ms; gc.collect()
+                    else:
+                        _ms, _ms_msg = load_meesho_monthly_payment(f_meesho_monthly, st.session_state.sku_mapping)
+                        if _ms.empty:
+                            _load_warns.append(f"Meesho Payment Sheet: {_ms_msg}")
+                        else:
+                            sales_parts.append(_ms)
+                            st.sidebar.caption(f"🛒 Meesho monthly: {_ms_msg}")
+                        del _ms; gc.collect()
+                if f_myntra_monthly:
+                    _my, _my_msg = load_myntra_monthly_zip(f_myntra_monthly, st.session_state.sku_mapping)
+                    if _my.empty:
+                        _load_warns.append(f"Myntra Monthly ZIP: {_my_msg}")
+                    else:
+                        sales_parts.append(_my)
+                        st.sidebar.caption(f"🛍️ Myntra monthly: {_my_msg}")
+                    del _my; gc.collect()
+
                 if sales_parts:
                     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
+                    # ── Deduplication: Tier 2 (appended last) wins over Tier 1 ──
+                    # Rows with a valid OrderId: deduplicate by (OrderId, Source, Transaction Type)
+                    _oid_valid = (
+                        combined_sales["OrderId"].notna()
+                        & ~combined_sales["OrderId"].astype(str).str.strip().str.lower().isin(["", "nan", "none"])
+                    )
+                    _with_oid    = combined_sales[_oid_valid].drop_duplicates(
+                        subset=["OrderId", "Source", "Transaction Type"], keep="last"
+                    )
+                    # Rows without a valid OrderId: deduplicate by (Sku, TxnDate, Source, Transaction Type)
+                    _without_oid = combined_sales[~_oid_valid].drop_duplicates(
+                        subset=["Sku", "TxnDate", "Source", "Transaction Type"], keep="last"
+                    )
+                    combined_sales = pd.concat([_with_oid, _without_oid], ignore_index=True)
                     combined_sales = _downcast_sales(combined_sales)
                     st.session_state.sales_df = combined_sales
-                    del sales_parts, combined_sales
+                    del sales_parts, combined_sales, _with_oid, _without_oid
                     gc.collect()
 
                 # ── Daily orders: auto-detect platform from file contents ──
@@ -2597,7 +2636,7 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
             # Auto-save to GitHub Releases after a successful full load
             _autosave_id, _, _autosave_err = _get_gh_release()
             if _autosave_id is not None:
-                with st.spinner("Auto-saving to Drive cache…"):
+                with st.spinner("Auto-saving to GitHub Releases cache…"):
                     _save_ok, _save_msg = save_cache_to_drive()
                 if _save_ok:
                     st.sidebar.success(f"☁️ Auto-saved: {_save_msg}")
