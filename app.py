@@ -1609,27 +1609,36 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     rev_col = next((c for c in df.columns if c in ["invoiceamount", "invoice_amount", "net_amount", "shipment_value"]), None)
     df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
 
-    status_col = next((c for c in df.columns if "order_status" in c), None)
+    # Widen status column search: prefer "order_status" but fall back to "status",
+    # "packet_status", "shipment_status", "sub_order_status" etc.
+    status_col = (
+        next((c for c in df.columns if "order_status" in c), None)
+        or next((c for c in df.columns if c in [
+            "status", "packet_status", "shipment_status",
+            "sub_order_status", "current_status"
+        ]), None)
+    )
 
-    # FIX: Comprehensive Myntra return/cancel status mapping
+    # Catch-all Myntra return/cancel/shipment mapping
+    # Uses substring matching so unknown new codes (RS, RD, RTOD, etc.) are
+    # still classified correctly instead of silently falling to "Shipment".
     def _myntra_txn(s):
         s = str(s).strip().upper()
-        # Return / RTO statuses
-        if s in ("R", "RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
-                 "RETURN_REQUESTED", "RETURN_PICKUP_INITIATED", "RETURN_PICKED",
-                 "RETURN_RECEIVED", "EXCHANGE_RETURN_REQUESTED",
-                 "RETURN_IN_TRANSIT", "RETURN_CANCELLED_REFUND_INITIATED"):
+        # ── RETURNS: any substring "RETURN", starts-with "RTO"/"RTD", or short codes ──
+        if ("RETURN" in s
+                or s.startswith("RTO")
+                or s.startswith("RTD")
+                or s in ("R", "RS", "RD", "RTOD")):
             return "Refund"
-        # Cancel statuses
-        if s in ("F", "IC", "FAILED", "CANCELLED", "CANCEL",
-                 "CANCELLATION_REQUESTED", "CANCELLATION_APPROVED"):
+        # ── CANCELS: any substring "CANCEL" or explicit failed codes ──
+        if "CANCEL" in s or s in ("F", "IC", "FAILED"):
             return "Cancel"
-        # Active / shipped statuses
-        if s in ("C", "SH", "PK", "SHIPPED", "CONFIRMED", "DELIVERED",
+        # ── SHIPMENTS: known active / delivered statuses ──
+        if s in ("C", "SH", "PK", "D", "S", "SHIPPED", "CONFIRMED", "DELIVERED",
                  "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
                  "MANIFESTED", "OUT_FOR_DELIVERY", "WP"):
             return "Shipment"
-        # Default to Shipment for unknown statuses
+        # Default — treat unknown as Shipment
         return "Shipment"
 
     df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
@@ -3847,19 +3856,21 @@ with tab_po:
                 master["Status"] = master["ADS"].apply(_st)
 
             master["Parent_SKU"] = master["OMS_SKU"].apply(get_parent_sku)
+            # Guard against NaN inventory (SKUs not matched in inventory file)
+            _inv = master["Total_Inventory"].fillna(0)
             master["Days_Left"] = np.where(
-                master["ADS"] > 0, master["Total_Inventory"] / master["ADS"], 999
+                master["ADS"] > 0, _inv / master["ADS"], 999
             ).round(1)
-            master["Running_Days"] = master["Days_Left"].round(0).astype(int)
+            master["Running_Days"] = master["Days_Left"].fillna(999).round(0).astype(int)
             master["PO_Qty"] = (
                 np.ceil((
                     (master["ADS"] * lead_time + master["ADS"] * target_days) * (1 + safety_pct / 100)
-                    - master["Total_Inventory"]
+                    - _inv
                 ).clip(lower=0) / 5) * 5
             ).astype(int)
             master["Priority"] = master.apply(_priority, axis=1)
 
-            master["PO_Plus_Avail"]   = (master["PO_Qty"] + master["Total_Inventory"].fillna(0)).astype(int)
+            master["PO_Plus_Avail"]   = (master["PO_Qty"] + _inv).astype(int)
             master["OMS_Stock"]       = master["OMS_Inventory"].fillna(0).astype(int) if "OMS_Inventory" in master.columns else 0
             master["Avail_Inventory"] = master["Total_Inventory"].fillna(0).astype(int)
 
