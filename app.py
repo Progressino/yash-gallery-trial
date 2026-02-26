@@ -1645,36 +1645,53 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     rev_col = next((c for c in df.columns if c in ["invoiceamount", "invoice_amount", "net_amount", "shipment_value"]), None)
     df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
 
-    # Widen status column search: prefer "order_status" but fall back to "status",
-    # "packet_status", "shipment_status", "sub_order_status" etc.
-    status_col = (
-        next((c for c in df.columns if "order_status" in c), None)
-        or next((c for c in df.columns if c in [
+    # ── Status / transaction-type column detection (priority order) ──
+    # Many Myntra report layouts use different names; try from most specific to broadest.
+    _status_candidates = (
+        # 1. Anything containing "order_status"
+        [c for c in df.columns if "order_status" in c]
+        # 2. Common exact names (status, packet_status, …)
+        + [c for c in df.columns if c in (
             "status", "packet_status", "shipment_status",
-            "sub_order_status", "current_status"
-        ]), None)
+            "sub_order_status", "current_status", "item_status",
+            "article_status", "delivery_status",
+        )]
+        # 3. "forward_or_reverse" / "forward_reverse" style columns (very common in Myntra)
+        + [c for c in df.columns if "forward" in c or "reverse" in c]
+        # 4. Any remaining column whose name contains "status"
+        + [c for c in df.columns if "status" in c]
+        # 5. Generic transaction-type columns as last resort
+        + [c for c in df.columns if c in (
+            "transaction_type", "txn_type", "return_type", "order_type", "type",
+        )]
     )
+    # Deduplicate while preserving order
+    status_col = next(iter(dict.fromkeys(_status_candidates)), None)
 
-    # Catch-all Myntra return/cancel/shipment mapping
-    # Uses substring matching so unknown new codes (RS, RD, RTOD, etc.) are
-    # still classified correctly instead of silently falling to "Shipment".
+    # ── Comprehensive Myntra transaction classifier ──
     def _myntra_txn(s):
         s = str(s).strip().upper()
-        # ── RETURNS: any substring "RETURN", starts-with "RTO"/"RTD", or short codes ──
+        # "Forward / Reverse" terminology used in many Myntra seller reports
+        if s in ("FORWARD", "FWD"):
+            return "Shipment"
+        if s in ("REVERSE", "REV"):
+            return "Refund"
+        # RETURNS: any status containing "RETURN", starting with "RTO"/"RTD", or short codes
         if ("RETURN" in s
+                or "REVERSE" in s
                 or s.startswith("RTO")
                 or s.startswith("RTD")
                 or s in ("R", "RS", "RD", "RTOD")):
             return "Refund"
-        # ── CANCELS: any substring "CANCEL" or explicit failed codes ──
+        # CANCELS: any status containing "CANCEL", or explicit failed codes
         if "CANCEL" in s or s in ("F", "IC", "FAILED"):
             return "Cancel"
-        # ── SHIPMENTS: known active / delivered statuses ──
+        # SHIPMENTS: known active / delivered codes
         if s in ("C", "SH", "PK", "D", "S", "SHIPPED", "CONFIRMED", "DELIVERED",
                  "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
                  "MANIFESTED", "OUT_FOR_DELIVERY", "WP"):
             return "Shipment"
-        # Default — treat unknown as Shipment
+        # Default — unknown codes treated as Shipment
         return "Shipment"
 
     df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
@@ -3067,7 +3084,22 @@ with tab_myntra:
             k7.metric("💳 AOV",         fmt_inr(aov))
             st.divider()
 
-            # FIX: Show breakdown of return types for transparency
+            # ── Diagnostic: warn if return rate looks suspiciously low ──
+            if ret_rate < 5.0:
+                with st.expander("⚠️ Return rate looks too low — click to diagnose", expanded=True):
+                    st.warning(
+                        "**Return rate is under 5%** which is unusually low for Myntra. "
+                        "This usually means your loaded data was saved in the Drive Cache **before** "
+                        "the return-classification fix was deployed.\n\n"
+                        "**Fix:** Clear the Drive Cache, re-upload the Myntra ZIP, and click **Load All Data** "
+                        "(do NOT use 'Load from Drive Cache' — that restores the old misclassified data)."
+                    )
+                    _txn_dist = myn["TxnType"].value_counts().reset_index()
+                    _txn_dist.columns = ["Transaction Type", "Row Count"]
+                    st.caption("Current TxnType distribution in session data:")
+                    st.dataframe(_txn_dist, use_container_width=True, hide_index=True)
+
+            # Returns breakdown caption
             if _myn_rf.any():
                 _ret_breakdown = mf[_myn_rf].shape[0]
                 st.caption(f"ℹ️ Returns include RTO, customer returns, and exchange returns. Total return rows: {_ret_breakdown:,}")
