@@ -122,6 +122,7 @@ def init_session_state():
         "include_replacements":  False,
         "daily_sales_sources":   [],
         "daily_sales_rows":      0,
+        "_load_warnings":        [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1472,6 +1473,103 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def load_meesho_monthly_payment(xlsx_file, mapping: Dict[str, str]):
+    """Parse Meesho Payment Sheet XLSX (Order Payments tab, 2-row merged header)."""
+    try:
+        df = pd.read_excel(xlsx_file, sheet_name="Order Payments", header=1)
+    except Exception as e:
+        return pd.DataFrame(), f"Cannot read 'Order Payments' sheet: {e}"
+    if df.empty:
+        return pd.DataFrame(), "Empty sheet"
+
+    df.columns = df.columns.astype(str).str.strip()
+
+    sku_col    = next((c for c in df.columns if "supplier sku" in c.lower()), None)
+    date_col   = next((c for c in df.columns if "order date"   in c.lower()), None)
+    status_col = next((c for c in df.columns if "order status" in c.lower()), None)
+    qty_col    = next((c for c in df.columns if c.lower() == "quantity"),     None)
+    order_col  = next((c for c in df.columns if "sub order"    in c.lower()), None)
+
+    if not sku_col:
+        return pd.DataFrame(), "No 'Supplier SKU' column found"
+
+    def _meesho_status(s):
+        s = str(s).strip().lower()
+        if "return" in s or "rto" in s: return "Refund"
+        if "cancel" in s:               return "Cancel"
+        return "Shipment"
+
+    df["_OMS_SKU"]  = df[sku_col].astype(str).str.strip().apply(lambda x: map_to_oms_sku(x, mapping))
+    df["_Date"]     = pd.to_datetime(df[date_col],   errors="coerce") if date_col   else pd.NaT
+    df["_Qty"]      = pd.to_numeric(df[qty_col],     errors="coerce").fillna(1)    if qty_col    else 1.0
+    df["_TxnType"]  = df[status_col].apply(_meesho_status)                          if status_col else "Shipment"
+    df["_OrderId"]  = df[order_col].astype(str).str.strip()                         if order_col  else ""
+
+    df["_Units_Eff"] = np.where(df["_TxnType"]=="Refund", -df["_Qty"],
+                       np.where(df["_TxnType"]=="Cancel",  0,           df["_Qty"]))
+
+    result = pd.DataFrame({
+        "Sku":              df["_OMS_SKU"],
+        "TxnDate":          df["_Date"],
+        "Transaction Type": df["_TxnType"],
+        "Quantity":         df["_Qty"].astype("float32"),
+        "Units_Effective":  df["_Units_Eff"].astype("float32"),
+        "Source":           "Meesho",
+        "OrderId":          df["_OrderId"],
+    })
+    result = result.dropna(subset=["TxnDate"])
+    n = len(result)
+    return _downcast_sales(result), f"OK — {n:,} rows"
+
+
+def load_myntra_monthly_zip(zip_file, mapping: Dict[str, str]):
+    """Parse Myntra monthly report ZIP (PPMP / SJIT / TP folders with CSVs)."""
+    dfs     = []
+    skipped = []
+    try:
+        zip_file.seek(0)
+        root_zf = zipfile.ZipFile(zip_file)
+    except Exception as e:
+        return pd.DataFrame(), f"Cannot open ZIP: {e}"
+
+    csv_items = [n for n in root_zf.namelist() if n.lower().endswith(".csv")]
+    if not csv_items:
+        return pd.DataFrame(), "No CSV files found in ZIP"
+
+    for item_name in csv_items:
+        base = Path(item_name).name
+        try:
+            data = root_zf.read(item_name)
+            df, msg = _parse_myntra_csv(data, base, mapping)
+            if df.empty:
+                skipped.append(f"{base}: {msg}")
+            else:
+                dfs.append(df)
+        except Exception as e:
+            skipped.append(f"{base}: {e}")
+
+    if not dfs:
+        return pd.DataFrame(), f"No valid CSVs. Issues: {'; '.join(skipped[:5])}"
+
+    combined = pd.concat(dfs, ignore_index=True)
+    combined = combined.drop_duplicates(
+        subset=["OrderId", "OMS_SKU", "TxnType", "Date"], keep="first"
+    )
+
+    result = pd.DataFrame({
+        "Sku":              combined["OMS_SKU"],
+        "TxnDate":          combined["Date"],
+        "Transaction Type": combined["TxnType"],
+        "Quantity":         combined["Quantity"],
+        "Units_Effective":  np.where(combined["TxnType"]=="Refund", -combined["Quantity"],
+                            np.where(combined["TxnType"]=="Cancel",  0, combined["Quantity"])),
+        "Source":           "Myntra",
+        "OrderId":          combined["OrderId"],
+    })
+    msg = f"OK — {len(result):,} rows" if not skipped else f"OK — {len(result):,} rows ({len(skipped)} files skipped)"
+    return _downcast_sales(result), msg
+
+
 # ──────────────────────────────────────────────────────────────
 # MYNTRA PPMP LOADER (Historical ZIP)
 # ──────────────────────────────────────────────────────────────
@@ -1490,7 +1588,12 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     if not date_col:
         return pd.DataFrame(), "No date column found"
 
-    df["_Date"] = pd.to_datetime(df[date_col].astype(str), format="%Y%m%d", errors="coerce")
+    df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    null_mask = df["_Date"].isna()
+    if null_mask.any():
+        df.loc[null_mask, "_Date"] = pd.to_datetime(
+            df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
+        )
     df = df.dropna(subset=["_Date"])
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
@@ -1512,7 +1615,7 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     def _myntra_txn(s):
         s = str(s).strip().upper()
         # Return / RTO statuses
-        if s in ("RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
+        if s in ("R", "RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
                  "RETURN_REQUESTED", "RETURN_PICKUP_INITIATED", "RETURN_PICKED",
                  "RETURN_RECEIVED", "EXCHANGE_RETURN_REQUESTED",
                  "RETURN_IN_TRANSIT", "RETURN_CANCELLED_REFUND_INITIATED"):
@@ -2122,6 +2225,16 @@ with st.sidebar.expander("📅 Tier 2 — Monthly Sales (Recent Velocity)", expa
         "Flipkart Sales (Excel)",
         type=["xlsx"], key="fk",
     )
+    f_meesho_monthly = st.file_uploader(
+        "Meesho Payment Sheet (Excel)",
+        type=["xlsx"], key="meesho_monthly",
+        help="Meesho monthly payment report — 'Order Payments' tab with SKU, status and quantity columns.",
+    )
+    f_myntra_monthly = st.file_uploader(
+        "Myntra Monthly Report ZIP (PPMP / SJIT / TP)",
+        type=["zip"], key="myntra_monthly",
+        help="ZIP containing PPMP, SJIT and/or TP folders, each with CSV files inside.",
+    )
     f_transfer = st.file_uploader(
         "Amazon Stock Transfer (ZIP)",
         type=["zip"], key="transfer",
@@ -2305,6 +2418,7 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
         st.sidebar.error("SKU Mapping required!")
     else:
         _load_error = None
+        _load_warns: list = []
         with st.spinner("Loading data…"):
             try:
                 st.session_state.sku_mapping = load_sku_mapping(map_file)
@@ -2351,6 +2465,22 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                 if f_fk:
                     sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
                     gc.collect()
+                if f_meesho_monthly:
+                    _ms, _ms_msg = load_meesho_monthly_payment(f_meesho_monthly, st.session_state.sku_mapping)
+                    if _ms.empty:
+                        _load_warns.append(f"Meesho Payment Sheet: {_ms_msg}")
+                    else:
+                        sales_parts.append(_ms)
+                        st.sidebar.caption(f"🛒 Meesho monthly: {_ms_msg}")
+                    del _ms; gc.collect()
+                if f_myntra_monthly:
+                    _my, _my_msg = load_myntra_monthly_zip(f_myntra_monthly, st.session_state.sku_mapping)
+                    if _my.empty:
+                        _load_warns.append(f"Myntra Monthly ZIP: {_my_msg}")
+                    else:
+                        sales_parts.append(_my)
+                        st.sidebar.caption(f"🛍️ Myntra monthly: {_my_msg}")
+                    del _my; gc.collect()
 
                 meesho_df_ss   = st.session_state.get("meesho_df",   pd.DataFrame())
                 myntra_df_ss   = st.session_state.get("myntra_df",   pd.DataFrame())
@@ -2455,7 +2585,10 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
             except Exception as _load_err:
                 import traceback as _tb
                 _load_error = _tb.format_exc()
+                _load_warns.append(f"❌ Load failed: {_load_err}")
                 st.sidebar.error(f"❌ Load failed: {_load_err}")
+
+        st.session_state["_load_warnings"] = _load_warns
 
         if _load_error:
             st.error("**Loading failed — full traceback:**")
@@ -2473,6 +2606,13 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
             st.rerun()
 
 _show_data_coverage()
+
+# ── Load warnings / errors log ────────────────────────────────
+_sidebar_warns = st.session_state.get("_load_warnings", [])
+if _sidebar_warns:
+    with st.sidebar.expander(f"⚠️ Load Issues ({len(_sidebar_warns)})", expanded=True):
+        for _w in _sidebar_warns:
+            st.caption(_w)
 
 if not st.session_state.sku_mapping:
     st.info("👋 **Welcome!** Upload SKU Mapping and click **Load All Data** to begin.")
