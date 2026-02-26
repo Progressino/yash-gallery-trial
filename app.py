@@ -1490,7 +1490,12 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     if not date_col:
         return pd.DataFrame(), "No date column found"
 
-    df["_Date"] = pd.to_datetime(df[date_col].astype(str), format="%Y%m%d", errors="coerce")
+    df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    null_mask = df["_Date"].isna()
+    if null_mask.any():
+        df.loc[null_mask, "_Date"] = pd.to_datetime(
+            df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
+        )
     df = df.dropna(subset=["_Date"])
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
@@ -1512,7 +1517,7 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     def _myntra_txn(s):
         s = str(s).strip().upper()
         # Return / RTO statuses
-        if s in ("RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
+        if s in ("R", "RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
                  "RETURN_REQUESTED", "RETURN_PICKUP_INITIATED", "RETURN_PICKED",
                  "RETURN_RECEIVED", "EXCHANGE_RETURN_REQUESTED",
                  "RETURN_IN_TRANSIT", "RETURN_CANCELLED_REFUND_INITIATED"):
