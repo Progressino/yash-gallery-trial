@@ -588,6 +588,41 @@ def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
     )
     raw["_Date"] = _parse_date_flexible(raw[date_col]) if date_col else pd.NaT
 
+    # ── Fallback 1: try other date columns for rows still missing a date ──
+    for _alt in ["invoice date", "shipment date", "transaction date",
+                 "order date", "return date", "credit note date"]:
+        if _alt in raw.columns and _alt != date_col:
+            _null = raw["_Date"].isna()
+            if _null.any():
+                raw.loc[_null, "_Date"] = _parse_date_flexible(raw.loc[_null, _alt])
+
+    # ── Fallback 2: infer month/year from filename (e.g. MTR_B2C-JULY-2024-…) ──
+    _MONTH_MAP = {
+        "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+        "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
+    }
+    import re as _re
+    _fn_lower = source_file.lower()
+    _fn_match = _re.search(
+        r"-(january|february|march|april|may|june|july|august|september|october|november|december)-(\d{4})",
+        _fn_lower,
+    )
+    _fallback_ts = pd.NaT
+    if _fn_match:
+        try:
+            _fallback_ts = pd.Timestamp(year=int(_fn_match.group(2)),
+                                         month=_MONTH_MAP[_fn_match.group(1)], day=1)
+        except Exception:
+            pass
+
+    filled_dates = 0
+    if _fallback_ts is not pd.NaT:
+        _still_null = raw["_Date"].isna()
+        filled_dates = int(_still_null.sum())
+        if filled_dates:
+            raw.loc[_still_null, "_Date"] = _fallback_ts
+
+    # ── Drop only rows that still have no date even after fallbacks ──
     initial_len = len(raw)
     raw = raw.dropna(subset=["_Date"])
     dropped_dates = initial_len - len(raw)
@@ -645,7 +680,8 @@ def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
     out = _downcast_mtr(out)
 
     msgs = []
-    if dropped_dates: msgs.append(f"Dropped {dropped_dates} rows missing dates.")
+    if filled_dates:  msgs.append(f"Filled {filled_dates} rows using filename date ({_fallback_ts.strftime('%b %Y') if _fallback_ts is not pd.NaT else '?'}).")
+    if dropped_dates: msgs.append(f"Dropped {dropped_dates} rows — no date even after fallback.")
     if ghost_rows:    msgs.append(f"Dropped {ghost_rows} rows with out-of-range years.")
     return out, ("OK" if not msgs else " | ".join(msgs))
 
