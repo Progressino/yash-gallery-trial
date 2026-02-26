@@ -2460,23 +2460,24 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     gc.collect()
 
                 # ── Tier 1 (historical master) goes first so Tier 2 can override ──
+                # Downcast immediately to reduce memory while building the list
                 sales_parts = []
                 meesho_df_ss   = st.session_state.get("meesho_df",   pd.DataFrame())
                 myntra_df_ss   = st.session_state.get("myntra_df",   pd.DataFrame())
                 flipkart_df_ss = st.session_state.get("flipkart_df", pd.DataFrame())
                 mtr_df_ss      = st.session_state.get("mtr_df",      pd.DataFrame())
                 if not meesho_df_ss.empty:
-                    sales_parts.append(meesho_to_sales_rows(meesho_df_ss))
+                    sales_parts.append(_downcast_sales(meesho_to_sales_rows(meesho_df_ss)))
                 if not myntra_df_ss.empty:
-                    sales_parts.append(myntra_to_sales_rows(myntra_df_ss))
+                    sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df_ss)))
                 if not flipkart_df_ss.empty:
-                    sales_parts.append(flipkart_to_sales_rows(flipkart_df_ss))
+                    sales_parts.append(_downcast_sales(flipkart_to_sales_rows(flipkart_df_ss)))
                 if not mtr_df_ss.empty and st.session_state.sku_mapping:
                     _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
                     if not _mtr_sales.empty:
                         _mtr_sales["Source"]  = "Amazon"
                         _mtr_sales["OrderId"] = np.nan
-                        sales_parts.append(_mtr_sales)
+                        sales_parts.append(_downcast_sales(_mtr_sales))
                     del _mtr_sales
                     gc.collect()
 
@@ -2528,12 +2529,14 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
 
                 if sales_parts:
                     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
+                    del sales_parts; gc.collect()  # Free parts list before dedup
+
                     # ── Deduplication: Tier 2 (appended last) wins over Tier 1 ──
+                    # Build the valid-OrderId mask once, reuse for both splits
+                    _oid_str   = combined_sales["OrderId"].astype(str).str.strip()
+                    _oid_valid = combined_sales["OrderId"].notna() & ~_oid_str.str.lower().isin(["", "nan", "none"])
+                    del _oid_str
                     # Rows with a valid OrderId: deduplicate by (OrderId, Source, Transaction Type)
-                    _oid_valid = (
-                        combined_sales["OrderId"].notna()
-                        & ~combined_sales["OrderId"].astype(str).str.strip().str.lower().isin(["", "nan", "none"])
-                    )
                     _with_oid    = combined_sales[_oid_valid].drop_duplicates(
                         subset=["OrderId", "Source", "Transaction Type"], keep="last"
                     )
@@ -2541,11 +2544,13 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     _without_oid = combined_sales[~_oid_valid].drop_duplicates(
                         subset=["Sku", "TxnDate", "Source", "Transaction Type"], keep="last"
                     )
+                    # Free original + mask before final concat to avoid 3× peak
+                    del combined_sales, _oid_valid; gc.collect()
                     combined_sales = pd.concat([_with_oid, _without_oid], ignore_index=True)
+                    del _with_oid, _without_oid; gc.collect()
                     combined_sales = _downcast_sales(combined_sales)
                     st.session_state.sales_df = combined_sales
-                    del sales_parts, combined_sales, _with_oid, _without_oid
-                    gc.collect()
+                    del combined_sales; gc.collect()
 
                 # ── Daily orders: auto-detect platform from file contents ──
                 _daily_parts    = []
