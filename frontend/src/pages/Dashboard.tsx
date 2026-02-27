@@ -33,10 +33,10 @@ export default function Dashboard() {
 
   const refresh = async () => { const c = await getCoverage(); setCoverage(c); qc.invalidateQueries() }
 
-  const handle = (key: string, fn: () => Promise<{ ok: boolean; message: string }>) => async () => {
+  const handle = (key: string, fn: (file: File) => Promise<{ ok: boolean; message: string }>) => async (file: File) => {
     setL(key, true)
     try {
-      const res = await fn()
+      const res = await fn(file)
       if (res.ok) { showToast('success', res.message); await refresh() }
       else showToast('error', res.message)
     } catch (e: unknown) {
