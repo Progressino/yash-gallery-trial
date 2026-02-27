@@ -2479,61 +2479,43 @@ def _show_data_coverage():
             gc.collect()
             st.rerun()
 
+# ... (around line 1250)
 if st.sidebar.button("🚀 Load All Data", use_container_width=True):
     if not map_file:
         st.sidebar.error("SKU Mapping required!")
     else:
         _load_error = None
-        _load_warns: list = []
-        with st.spinner("Loading data…"):
+        _load_warns = []
+        with st.spinner("Loading data..."):
             try:
+                # 1. SKU Mapping
                 st.session_state.sku_mapping = load_sku_mapping(map_file)
-                config = SalesConfig(
-                    date_basis=st.session_state.amazon_date_basis,
-                    include_replacements=st.session_state.include_replacements
-                )
-
+                
+                # 2. Historical MTR Data
                 if mtr_main_zip:
                     mtr_combined, csv_count, mtr_skipped = load_mtr_from_main_zip(mtr_main_zip)
                     st.session_state.mtr_df = mtr_combined
-                    del mtr_combined
-                    gc.collect()
-                    if mtr_skipped:
-                        with st.sidebar.expander(f"⚠️ MTR: {len(mtr_skipped)} files had issues"):
-                            for s in mtr_skipped:
-                                st.write(s)
+                    
+                # ... (Other loaders like Meesho, Myntra, etc.)
 
-                if f_meesho:
-                    meesho_combined = load_meesho_full(f_meesho)
-                    st.session_state.meesho_df = meesho_combined
-                    del meesho_combined
-                    gc.collect()
+                # 3. Processing MTR for Sales Dashboard (The specific area you were editing)
+                mtr_df_ss = st.session_state.get("mtr_df", pd.DataFrame())
+                if not mtr_df_ss.empty and st.session_state.sku_mapping:
+                    _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
+                    if not _mtr_sales.empty:
+                        # FIX: Using Report_Type to match monthly labels
+                        _mtr_sales["Source"] = "Amazon " + mtr_df_ss["Report_Type"].astype(str)
+                        _mtr_sales["OrderId"] = np.nan
+                        sales_parts.append(_downcast_sales(_mtr_sales))
 
-                if f_myntra:
-                    myntra_combined = load_myntra_full(f_myntra, st.session_state.sku_mapping)
-                    st.session_state.myntra_df = myntra_combined
-                    del myntra_combined
-                    gc.collect()
+            except Exception as _load_err:
+                import traceback
+                _load_error = traceback.format_exc()
+                _load_warns.append(f"❌ Load failed: {_load_err}")
+                st.sidebar.error(f"❌ Load failed: {_load_err}")
 
-                if f_flipkart_zip:
-                    fk_combined = load_flipkart_full(f_flipkart_zip, st.session_state.sku_mapping)
-                    st.session_state.flipkart_df = fk_combined
-                    del fk_combined
-                    gc.collect()
-
-                # ── Tier 1 (historical master) goes first so Tier 2 can override ──
-                # Downcast immediately to reduce memory while building the list
-                sales_parts = []
-                meesho_df_ss   = st.session_state.get("meesho_df",   pd.DataFrame())
-                myntra_df_ss   = st.session_state.get("myntra_df",   pd.DataFrame())
-                flipkart_df_ss = st.session_state.get("flipkart_df", pd.DataFrame())
-                mtr_df_ss      = st.session_state.get("mtr_df",      pd.DataFrame())
-                if not meesho_df_ss.empty:
-                    sales_parts.append(_downcast_sales(meesho_to_sales_rows(meesho_df_ss)))
-                if not myntra_df_ss.empty:
-                    sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df_ss)))
-                if not flipkart_df_ss.empty:
-                    sales_parts.append(_downcast_sales(flipkart_to_sales_rows(flipkart_df_ss)))
+        # This part is outside the try/except but inside the "else"
+        st.session_state["_load_warnings"] = _load_warns
 if not mtr_df_ss.empty and st.session_state.sku_mapping:
     # We need Report_Type to distinguish B2B/B2C, so we pass it through
     _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
