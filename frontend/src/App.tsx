@@ -2,7 +2,13 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
-import Placeholder from './pages/Placeholder'
+import MTR from './pages/MTR'
+import Myntra from './pages/Myntra'
+import Meesho from './pages/Meesho'
+import Flipkart from './pages/Flipkart'
+import Inventory from './pages/Inventory'
+import POEngine from './pages/POEngine'
+import Forecast from './pages/Forecast'
 
 const qc = new QueryClient()
 
@@ -13,13 +19,13 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Layout />}>
             <Route index element={<Dashboard />} />
-            <Route path="mtr"       element={<Placeholder title="📑 MTR Analytics" />} />
-            <Route path="myntra"    element={<Placeholder title="🛍️ Myntra" />} />
-            <Route path="meesho"    element={<Placeholder title="🛒 Meesho" />} />
-            <Route path="flipkart"  element={<Placeholder title="🟡 Flipkart" />} />
-            <Route path="inventory" element={<Placeholder title="📦 Inventory" />} />
-            <Route path="po"        element={<Placeholder title="🎯 PO Engine" />} />
-            <Route path="forecast"  element={<Placeholder title="📈 AI Forecast" />} />
+            <Route path="mtr"       element={<MTR />} />
+            <Route path="myntra"    element={<Myntra />} />
+            <Route path="meesho"    element={<Meesho />} />
+            <Route path="flipkart"  element={<Flipkart />} />
+            <Route path="inventory" element={<Inventory />} />
+            <Route path="po"        element={<POEngine />} />
+            <Route path="forecast"  element={<Forecast />} />
           </Route>
         </Routes>
       </BrowserRouter>

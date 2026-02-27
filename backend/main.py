@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .session import store
-from .routers import upload, data, cache
+from .routers import upload, data, cache, po
 
 app = FastAPI(
     title="Yash Gallery ERP API",
@@ -55,6 +55,7 @@ async def session_middleware(request: Request, call_next):
 app.include_router(upload.router, prefix="/api/upload", tags=["upload"])
 app.include_router(data.router,   prefix="/api/data",   tags=["data"])
 app.include_router(cache.router,  prefix="/api/cache",  tags=["cache"])
+app.include_router(po.router,     prefix="/api/po",     tags=["po"])
 
 
 @app.get("/api/health")
