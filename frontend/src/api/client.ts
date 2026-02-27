@@ -31,6 +31,7 @@ export interface CoverageResponse {
   flipkart: boolean
   inventory: boolean
   daily_orders: boolean
+  existing_po: boolean
   mtr_rows: number
   sales_rows: number
   myntra_rows: number
@@ -55,6 +56,9 @@ export const uploadMtr        = (file: File) => uploadFile('/upload/mtr', file)
 export const uploadMyntra     = (file: File) => uploadFile('/upload/myntra', file)
 export const uploadMeesho     = (file: File) => uploadFile('/upload/meesho', file)
 export const uploadFlipkart   = (file: File) => uploadFile('/upload/flipkart', file)
+export const uploadAmazonB2C  = (file: File) => uploadFile('/upload/amazon-b2c', file)
+export const uploadAmazonB2B  = (file: File) => uploadFile('/upload/amazon-b2b', file)
+export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po', file)
 
 export async function uploadInventory(files: {
   oms?: File; fk?: File; myntra?: File; amz?: File
@@ -65,6 +69,21 @@ export async function uploadInventory(files: {
   if (files.myntra) fd.append('myntra_file', files.myntra)
   if (files.amz)    fd.append('amz_file',    files.amz)
   const { data } = await api.post('/upload/inventory', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export async function uploadDailyOrders(files: {
+  amz_b2c?: File; amz_b2b?: File; myntra?: File; meesho?: File; flipkart?: File
+}): Promise<{ ok: boolean; message: string; detected_platforms?: string[] }> {
+  const fd = new FormData()
+  if (files.amz_b2c)  fd.append('amz_b2c',  files.amz_b2c)
+  if (files.amz_b2b)  fd.append('amz_b2b',  files.amz_b2b)
+  if (files.myntra)   fd.append('myntra',   files.myntra)
+  if (files.meesho)   fd.append('meesho',   files.meesho)
+  if (files.flipkart) fd.append('flipkart', files.flipkart)
+  const { data } = await api.post('/upload/daily', fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
   return data

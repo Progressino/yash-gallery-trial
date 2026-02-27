@@ -19,6 +19,8 @@ class PORequest(BaseModel):
     seasonal_weight:  float = 0.5
     group_by_parent:  bool  = False
     min_denominator:  int   = 7
+    grace_days:       int   = 7
+    safety_pct:       float = 20.0
 
 
 @router.post("/calculate")
@@ -44,12 +46,15 @@ def po_calculate(request: Request, body: PORequest):
             target_days=body.target_days,
             demand_basis=body.demand_basis,
             min_denominator=body.min_denominator,
+            grace_days=body.grace_days,
+            safety_pct=body.safety_pct,
             use_seasonality=body.use_seasonality,
             seasonal_weight=body.seasonal_weight,
             mtr_df=sess.mtr_df if not sess.mtr_df.empty else None,
             myntra_df=sess.myntra_df if not sess.myntra_df.empty else None,
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=body.group_by_parent,
+            existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
