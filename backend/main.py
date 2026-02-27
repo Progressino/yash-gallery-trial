@@ -19,13 +19,21 @@ app = FastAPI(
 )
 
 # ── CORS (allow Vite dev server + production domain) ─────────
+import os as _os
+_extra = _os.environ.get("EXTRA_CORS_ORIGIN", "").strip()
+_origins = [
+    "http://localhost:5173",        # Vite dev
+    "http://localhost:3000",        # alternate dev
+    "https://progressino.com",      # production root
+    "https://www.progressino.com",  # www
+    "https://app.progressino.com",  # app subdomain
+]
+if _extra:
+    _origins.append(_extra)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",   # Vite dev
-        "http://localhost:3000",   # alternate dev
-        "https://app.yashgallery.in",  # production (update as needed)
-    ],
+    allow_origins=_origins,
     allow_credentials=True,       # needed for the session cookie
     allow_methods=["*"],
     allow_headers=["*"],
