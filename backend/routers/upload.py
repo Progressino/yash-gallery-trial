@@ -2,21 +2,21 @@
 Upload router — all file ingestion endpoints.
 """
 import gc
-import traceback
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Request, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
 from ..session import store
 from ..models.schemas import UploadResponse
 from ..services.sku_mapping import parse_sku_mapping
-from ..services.mtr import load_mtr_from_zip
+from ..services.mtr import load_mtr_from_zip, parse_mtr_csv
 from ..services.myntra import load_myntra_from_zip
 from ..services.meesho import load_meesho_from_zip
 from ..services.flipkart import load_flipkart_from_zip
 from ..services.inventory import load_inventory_consolidated
 from ..services.sales import build_sales_df
+from ..services.existing_po import parse_existing_po
 
 router = APIRouter()
 
@@ -204,6 +204,179 @@ async def upload_inventory(
         "ok": True,
         "message": f"Inventory loaded: {len(df_variant):,} SKUs.",
         "rows": len(df_variant),
+    })
+
+
+# ── Amazon B2C (single CSV) ────────────────────────────────────
+
+@router.post("/amazon-b2c", response_model=UploadResponse)
+async def upload_amazon_b2c(request: Request, file: UploadFile = File(...)):
+    sess = _get_session(request)
+    try:
+        csv_bytes = await file.read()
+        df, msg = parse_mtr_csv(csv_bytes, file.filename or "b2c.csv")
+        del csv_bytes
+        gc.collect()
+
+        if df.empty:
+            return UploadResponse(ok=False, message=f"B2C parse failed: {msg}")
+
+        import pandas as pd
+        sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+        return UploadResponse(
+            ok=True,
+            message=f"Amazon B2C loaded: {len(df):,} rows. {msg if msg != 'OK' else ''}".strip(),
+            rows=len(df),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to parse B2C CSV: {e}")
+
+
+# ── Amazon B2B (single CSV) ────────────────────────────────────
+
+@router.post("/amazon-b2b", response_model=UploadResponse)
+async def upload_amazon_b2b(request: Request, file: UploadFile = File(...)):
+    sess = _get_session(request)
+    try:
+        csv_bytes = await file.read()
+        df, msg = parse_mtr_csv(csv_bytes, file.filename or "b2b.csv")
+        del csv_bytes
+        gc.collect()
+
+        if df.empty:
+            return UploadResponse(ok=False, message=f"B2B parse failed: {msg}")
+
+        import pandas as pd
+        sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+        return UploadResponse(
+            ok=True,
+            message=f"Amazon B2B loaded: {len(df):,} rows. {msg if msg != 'OK' else ''}".strip(),
+            rows=len(df),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to parse B2B CSV: {e}")
+
+
+# ── Existing PO Sheet ──────────────────────────────────────────
+
+@router.post("/existing-po", response_model=UploadResponse)
+async def upload_existing_po(request: Request, file: UploadFile = File(...)):
+    sess = _get_session(request)
+    try:
+        file_bytes = await file.read()
+        df = parse_existing_po(file_bytes, file.filename or "existing_po.xlsx")
+        sess.existing_po_df = df
+        return UploadResponse(
+            ok=True,
+            message=f"Existing PO loaded: {len(df):,} SKUs with pipeline quantities.",
+            rows=len(df),
+        )
+    except ValueError as e:
+        return UploadResponse(ok=False, message=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to parse Existing PO: {e}")
+
+
+# ── Daily Orders (multi-platform CSVs) ────────────────────────
+
+@router.post("/daily")
+async def upload_daily(
+    request: Request,
+    amz_b2c:  Optional[UploadFile] = File(None),
+    amz_b2b:  Optional[UploadFile] = File(None),
+    myntra:   Optional[UploadFile] = File(None),
+    meesho:   Optional[UploadFile] = File(None),
+    flipkart: Optional[UploadFile] = File(None),
+):
+    """
+    Upload daily order report CSVs from one or more platforms.
+    Each is parsed and appended to existing session data.
+    """
+    sess = _get_session(request)
+    import pandas as pd
+
+    detected: list[str] = []
+    warnings: list[str] = []
+
+    # Amazon B2C / B2B
+    for fobj, label in [(amz_b2c, "Amazon B2C"), (amz_b2b, "Amazon B2B")]:
+        if fobj is not None:
+            try:
+                raw = await fobj.read()
+                df, msg = parse_mtr_csv(raw, fobj.filename or f"{label}.csv")
+                del raw
+                if not df.empty:
+                    sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+                    detected.append(label)
+                    if msg != "OK":
+                        warnings.append(f"{label}: {msg}")
+                else:
+                    warnings.append(f"{label}: {msg}")
+            except Exception as e:
+                warnings.append(f"{label}: {e}")
+
+    # Myntra (single-file PPMP CSV)
+    if myntra is not None:
+        try:
+            from ..services.myntra import _parse_myntra_csv
+            raw = await myntra.read()
+            df, msg = _parse_myntra_csv(raw, myntra.filename or "myntra.csv", sess.sku_mapping)
+            del raw
+            if not df.empty:
+                sess.myntra_df = pd.concat([sess.myntra_df, df], ignore_index=True) if not sess.myntra_df.empty else df
+                detected.append("Myntra")
+                if msg != "OK":
+                    warnings.append(f"Myntra: {msg}")
+            else:
+                warnings.append(f"Myntra: {msg}")
+        except Exception as e:
+            warnings.append(f"Myntra: {e}")
+
+    # Meesho (single monthly ZIP)
+    if meesho is not None:
+        try:
+            from ..services.meesho import load_meesho_from_zip
+            raw = await meesho.read()
+            df, _count, _skipped = load_meesho_from_zip(raw)
+            del raw
+            if not df.empty:
+                sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
+                detected.append("Meesho")
+                if _skipped:
+                    warnings.append(f"Meesho: {'; '.join(_skipped[:3])}")
+            else:
+                warnings.append(f"Meesho: No data. {'; '.join(_skipped[:3])}")
+        except Exception as e:
+            warnings.append(f"Meesho: {e}")
+
+    # Flipkart (single-file XLSX)
+    if flipkart is not None:
+        try:
+            from ..services.flipkart import _parse_flipkart_xlsx
+            raw = await flipkart.read()
+            df = _parse_flipkart_xlsx(raw, flipkart.filename or "flipkart.xlsx", sess.sku_mapping)
+            del raw
+            if not df.empty:
+                sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
+                detected.append("Flipkart")
+            else:
+                warnings.append("Flipkart: No data extracted")
+        except Exception as e:
+            warnings.append(f"Flipkart: {e}")
+
+    gc.collect()
+
+    if not detected:
+        warn_str = "; ".join(warnings) if warnings else "No valid files provided."
+        return JSONResponse(content={"ok": False, "message": warn_str})
+
+    msg_parts = [f"Daily data loaded — {', '.join(detected)}."]
+    if warnings:
+        msg_parts.append(f"Warnings: {'; '.join(warnings)}")
+    return JSONResponse(content={
+        "ok": True,
+        "message": " ".join(msg_parts),
+        "detected_platforms": detected,
     })
 
 

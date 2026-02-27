@@ -185,12 +185,15 @@ def calculate_po_base(
     target_days: int,
     demand_basis: str = "Sold",
     min_denominator: int = 7,
+    grace_days: int = 7,
+    safety_pct: float = 20.0,
     use_seasonality: bool = False,
     seasonal_weight: float = 0.5,
     mtr_df: Optional[pd.DataFrame] = None,
     myntra_df: Optional[pd.DataFrame] = None,
     sku_mapping: Optional[Dict[str, str]] = None,
     group_by_parent: bool = False,
+    existing_po_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -291,12 +294,53 @@ def calculate_po_base(
         po_df["ADS"]    = po_df["Recent_ADS"]
         po_df["LY_ADS"] = 0
 
-    # PO quantity = (ADS × (lead_time + target_days)) - total_inventory
     inv_col = "Total_Inventory" if "Total_Inventory" in po_df.columns else po_df.columns[1]
-    po_df["PO_Qty"] = (
-        (po_df["ADS"] * (lead_time + target_days)) - po_df[inv_col]
-    ).clip(lower=0).round(0).astype(int)
 
-    po_df["Stockout_Flag"] = ""
-    po_df.loc[(po_df["ADS"] > 0) & (po_df.get("Total_Inventory", 0) <= 0), "Stockout_Flag"] = "OOS"
+    # Days of stock remaining
+    po_df["Days_Left"] = np.where(
+        po_df["ADS"] > 0,
+        (po_df[inv_col] / po_df["ADS"]).round(1),
+        999.0,
+    )
+
+    # Safety-stock-aware PO calculation, rounded up to nearest 5
+    lead_demand  = po_df["ADS"] * lead_time
+    target_stock = po_df["ADS"] * target_days
+    base_req     = lead_demand + target_stock
+    safety       = base_req * (safety_pct / 100.0)
+    total_req    = base_req + safety
+    gross_po     = (total_req - po_df[inv_col]).clip(lower=0)
+    po_df["Gross_PO_Qty"] = (np.ceil(gross_po / 5) * 5).astype(int)
+
+    # Pipeline deduction from existing PO sheet
+    if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
+        po_df = pd.merge(
+            po_df,
+            existing_po_df[["OMS_SKU", "PO_Pipeline_Total"]],
+            on="OMS_SKU", how="left",
+        )
+        po_df["PO_Pipeline_Total"] = pd.to_numeric(
+            po_df["PO_Pipeline_Total"], errors="coerce"
+        ).fillna(0).astype(int)
+    else:
+        po_df["PO_Pipeline_Total"] = 0
+
+    net_po = (po_df["Gross_PO_Qty"] - po_df["PO_Pipeline_Total"]).clip(lower=0)
+    po_df["PO_Qty"] = (np.ceil(net_po / 5) * 5).astype(int)
+
+    # Stockout flag
+    po_df["Stockout_Flag"] = np.where(
+        (po_df["ADS"] > 0) & (po_df[inv_col] <= 0), "OOS", ""
+    )
+
+    # Priority classification (vectorised)
+    conditions = [
+        (po_df["Days_Left"] < lead_time) & (po_df["PO_Qty"] > 0),
+        (po_df["Days_Left"] < (lead_time + grace_days)) & (po_df["PO_Qty"] > 0),
+        po_df["PO_Qty"] > 0,
+        po_df["PO_Pipeline_Total"] > 0,
+    ]
+    choices = ["🔴 URGENT", "🟡 HIGH", "🟢 MEDIUM", "🔄 In Pipeline"]
+    po_df["Priority"] = np.select(conditions, choices, default="⚪ OK")
+
     return po_df

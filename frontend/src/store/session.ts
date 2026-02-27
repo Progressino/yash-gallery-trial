@@ -18,6 +18,7 @@ const empty: CoverageResponse = {
   flipkart: false,
   inventory: false,
   daily_orders: false,
+  existing_po: false,
   mtr_rows: 0,
   sales_rows: 0,
   myntra_rows: 0,

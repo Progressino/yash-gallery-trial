@@ -21,6 +21,7 @@ class CoverageResponse(BaseModel):
     flipkart: bool
     inventory: bool
     daily_orders: bool
+    existing_po: bool = False
     # row counts for loaded datasets
     mtr_rows: int = 0
     sales_rows: int = 0

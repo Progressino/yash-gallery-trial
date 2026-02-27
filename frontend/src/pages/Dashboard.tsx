@@ -4,6 +4,7 @@ import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadInventory, buildSales, getCoverage,
+  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyOrders,
 } from '../api/client'
 import { useSession } from '../store/session'
 
@@ -54,6 +55,21 @@ export default function Dashboard() {
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Build failed')
     } finally { setL('build', false); setBuildingMsg('') }
+  }
+
+  const [dailyFiles, setDailyFiles] = useState<{
+    amz_b2c?: File; amz_b2b?: File; myntra?: File; meesho?: File; flipkart?: File
+  }>({})
+
+  const handleDailyUpload = async () => {
+    setL('daily', true)
+    try {
+      const res = await uploadDailyOrders(dailyFiles)
+      if (res.ok) { showToast('success', res.message); await refresh() }
+      else showToast('error', res.message)
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Upload failed')
+    } finally { setL('daily', false) }
   }
 
   const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
@@ -155,6 +171,77 @@ export default function Dashboard() {
             }}
           />
         </UploadCard>
+      </Section>
+
+      {/* Tier 2 — Amazon Individual CSVs + Existing PO */}
+      <Section title="Tier 2 — Amazon Orders & PO Pipeline">
+        <UploadCard title="📄 Amazon B2C CSV" subtitle="Single-month B2C report CSV" loaded={false}>
+          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
+          <FileUpload
+            label="Upload B2C .csv"
+            accept={{ 'text/csv': ['.csv'] }}
+            onUpload={handle('b2c', (file: File) => uploadAmazonB2C(file))}
+            uploading={loading['b2c']}
+          />
+        </UploadCard>
+
+        <UploadCard title="📋 Amazon B2B CSV" subtitle="Single-month B2B report CSV" loaded={false}>
+          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
+          <FileUpload
+            label="Upload B2B .csv"
+            accept={{ 'text/csv': ['.csv'] }}
+            onUpload={handle('b2b', (file: File) => uploadAmazonB2B(file))}
+            uploading={loading['b2b']}
+          />
+        </UploadCard>
+
+        <UploadCard title="📦 Existing PO Sheet" subtitle="Open/pending POs (XLSX or CSV)" loaded={coverage.existing_po}>
+          <FileUpload
+            label="Upload PO Sheet"
+            accept={{
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+              'text/csv': ['.csv'],
+            }}
+            onUpload={handle('existingpo', (file: File) => uploadExistingPO(file))}
+            uploading={loading['existingpo']}
+          />
+        </UploadCard>
+      </Section>
+
+      {/* Tier 3 — Daily Orders */}
+      <Section title="Tier 3 — Daily Orders (multi-platform)">
+        <div className="col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-3">
+          <div>
+            <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily Order Upload</h3>
+            <p className="text-xs text-gray-400">Upload one or more daily report files. Data is appended to existing historical data.</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {([
+              { key: 'amz_b2c',  label: 'Amazon B2C', accept: '.csv' },
+              { key: 'amz_b2b',  label: 'Amazon B2B', accept: '.csv' },
+              { key: 'myntra',   label: 'Myntra CSV',  accept: '.csv' },
+              { key: 'meesho',   label: 'Meesho ZIP',  accept: '.zip' },
+              { key: 'flipkart', label: 'Flipkart',    accept: '.xlsx,.csv' },
+            ] as const).map(({ key, label, accept }) => (
+              <div key={key} className="space-y-1">
+                <label className="text-xs font-semibold text-gray-500 block">{label}</label>
+                <input
+                  type="file" accept={accept}
+                  onChange={e => setDailyFiles(prev => ({ ...prev, [key]: e.target.files?.[0] }))}
+                  className="text-xs text-gray-600 w-full file:mr-1 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100"
+                />
+                {dailyFiles[key] && <p className="text-xs text-green-600 truncate">✓ {dailyFiles[key]?.name}</p>}
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={handleDailyUpload}
+            disabled={!Object.values(dailyFiles).some(Boolean) || loading['daily']}
+            className="mt-1 px-5 py-2 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
+          >
+            {loading['daily'] ? 'Uploading…' : '⬆ Upload Daily Data'}
+          </button>
+        </div>
       </Section>
 
       {/* Build Sales */}

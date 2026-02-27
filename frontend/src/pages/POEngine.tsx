@@ -10,7 +10,11 @@ interface PORow {
   Recent_ADS?: number
   ADS?: number
   LY_ADS?: number
+  Days_Left?: number
+  Gross_PO_Qty?: number
+  PO_Pipeline_Total?: number
   PO_Qty?: number
+  Priority?: string
   Stockout_Flag?: string
   [key: string]: string | number | undefined
 }
@@ -22,21 +26,32 @@ interface POResult {
   columns?: string[]
 }
 
-const DISPLAY_COLS = ['OMS_SKU','Total_Inventory','Sold_Units','Return_Units','ADS','PO_Qty','Stockout_Flag']
+const DISPLAY_COLS = [
+  'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
+  'Sold_Units', 'Return_Units', 'ADS',
+  'Gross_PO_Qty', 'PO_Pipeline_Total', 'PO_Qty',
+]
+
+const PRIORITY_ORDER: Record<string, number> = {
+  '🔴 URGENT': 0, '🟡 HIGH': 1, '🟢 MEDIUM': 2, '🔄 In Pipeline': 3, '⚪ OK': 4,
+}
 
 export default function POEngine() {
   const [params, setParams] = useState({
-    period_days: 90,
-    lead_time: 30,
-    target_days: 60,
-    demand_basis: 'Sold',
+    period_days:     90,
+    lead_time:       30,
+    target_days:     60,
+    demand_basis:    'Sold',
     use_seasonality: false,
     seasonal_weight: 0.5,
     group_by_parent: false,
+    grace_days:      7,
+    safety_pct:      20,
   })
   const [result, setResult]   = useState<POResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [search, setSearch]   = useState('')
+  const [sortByPriority, setSortByPriority] = useState(true)
 
   const run = async () => {
     setLoading(true)
@@ -50,11 +65,22 @@ export default function POEngine() {
     }
   }
 
-  const rows = (result?.rows ?? []).filter(r =>
+  const allRows = result?.rows ?? []
+  const filtered = allRows.filter(r =>
     !search || String(r['OMS_SKU'] ?? '').toLowerCase().includes(search.toLowerCase())
   )
-  const poRows = rows.filter(r => (r['PO_Qty'] ?? 0) > 0)
-  const oos    = rows.filter(r => r['Stockout_Flag'] === 'OOS')
+  const rows = sortByPriority
+    ? [...filtered].sort((a, b) =>
+        (PRIORITY_ORDER[a['Priority'] as string] ?? 9) -
+        (PRIORITY_ORDER[b['Priority'] as string] ?? 9)
+      )
+    : filtered
+
+  const urgent     = allRows.filter(r => r['Priority'] === '🔴 URGENT').length
+  const high       = allRows.filter(r => r['Priority'] === '🟡 HIGH').length
+  const medium     = allRows.filter(r => r['Priority'] === '🟢 MEDIUM').length
+  const pipeline   = allRows.filter(r => r['Priority'] === '🔄 In Pipeline').length
+  const totalPOUnits = allRows.reduce((s, r) => s + (Number(r['PO_Qty']) || 0), 0)
 
   return (
     <div className="p-6 space-y-6">
@@ -86,9 +112,28 @@ export default function POEngine() {
           </div>
         </div>
 
-        <div className="flex items-center gap-6 mt-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+          <Param label="Grace Days (urgency buffer)" type="number"
+            value={params.grace_days} onChange={v => setParams(p => ({ ...p, grace_days: +v }))} />
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">
+              Safety Stock % ({params.safety_pct}%)
+            </label>
+            <input
+              type="range" min={0} max={100} step={5}
+              value={params.safety_pct}
+              onChange={e => setParams(p => ({ ...p, safety_pct: +e.target.value }))}
+              className="w-full accent-[#002B5B]"
+            />
+            <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+              <span>0%</span><span>50%</span><span>100%</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-6 mt-4 flex-wrap">
           <Toggle
-            label="Use YoY Seasonality"
+            label="YoY Seasonality"
             checked={params.use_seasonality}
             onChange={v => setParams(p => ({ ...p, use_seasonality: v }))}
           />
@@ -106,7 +151,7 @@ export default function POEngine() {
 
         <button
           onClick={run} disabled={loading}
-          className="mt-4 px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
+          className="mt-5 px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
         >
           {loading ? 'Calculating…' : '🎯 Calculate PO'}
         </button>
@@ -117,19 +162,27 @@ export default function POEngine() {
       </div>
 
       {/* Results */}
-      {result?.ok && (result.rows ?? []).length > 0 && (
+      {result?.ok && allRows.length > 0 && (
         <>
-          <div className="grid grid-cols-3 gap-4">
-            <KpiCard label="SKUs Needing PO" value={poRows.length} accent="border-l-orange-500" />
-            <KpiCard label="Out of Stock"     value={oos.length}   accent="border-l-red-500" />
-            <KpiCard label="Total SKUs"       value={rows.length} />
+          {/* Priority KPIs */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <KpiCard label="🔴 URGENT"      value={urgent}      accent="border-l-red-500" />
+            <KpiCard label="🟡 HIGH"        value={high}        accent="border-l-yellow-400" />
+            <KpiCard label="🟢 MEDIUM"      value={medium}      accent="border-l-green-500" />
+            <KpiCard label="🔄 In Pipeline" value={pipeline}    accent="border-l-blue-400" />
+            <KpiCard label="Total PO Units" value={totalPOUnits} accent="border-l-[#002B5B]" />
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <input
               value={search} onChange={e => setSearch(e.target.value)}
               placeholder="Search SKU…"
               className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-blue-300"
+            />
+            <Toggle
+              label="Sort by Priority"
+              checked={sortByPriority}
+              onChange={setSortByPriority}
             />
             <span className="text-xs text-gray-400">{rows.length} SKUs</span>
             <button
@@ -145,30 +198,35 @@ export default function POEngine() {
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
                   {DISPLAY_COLS.map(c => (
-                    <th key={c} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">{c}</th>
+                    <th key={c} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">{c.replace(/_/g,' ')}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {rows.slice(0, 300).map((row, i) => {
-                  const isOos = row['Stockout_Flag'] === 'OOS'
-                  const needsPo = (row['PO_Qty'] ?? 0) > 0
+                  const priority = String(row['Priority'] ?? '')
+                  const rowBg =
+                    priority === '🔴 URGENT'      ? 'bg-red-50' :
+                    priority === '🟡 HIGH'        ? 'bg-yellow-50' :
+                    priority === '🟢 MEDIUM'      ? 'bg-amber-50' :
+                    priority === '🔄 In Pipeline' ? 'bg-blue-50' : ''
                   return (
-                    <tr key={i} className={`border-b border-gray-100 hover:bg-blue-50
-                      ${isOos ? 'bg-red-50' : needsPo ? 'bg-amber-50' : ''}`}>
+                    <tr key={i} className={`border-b border-gray-100 hover:brightness-95 ${rowBg}`}>
                       {DISPLAY_COLS.map(col => (
                         <td key={col} className="px-4 py-2 whitespace-nowrap text-gray-700">
-                          {col === 'Stockout_Flag'
-                            ? (row[col] ? <span className="text-red-600 font-bold">⚠ OOS</span> : '—')
+                          {col === 'Priority'
+                            ? <span className="font-semibold text-xs">{row[col] ?? '⚪ OK'}</span>
                             : col === 'OMS_SKU'
                               ? <span className="font-medium text-gray-900">{row[col]}</span>
                               : col === 'PO_Qty'
                                 ? <span className={`font-bold ${(row[col] ?? 0) > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
                                     {row[col]}
                                   </span>
-                                : typeof row[col] === 'number'
-                                  ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
-                                  : row[col] ?? '—'
+                                : col === 'Days_Left'
+                                  ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
+                                  : typeof row[col] === 'number'
+                                    ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
+                                    : row[col] ?? '—'
                           }
                         </td>
                       ))}
@@ -188,6 +246,12 @@ export default function POEngine() {
 }
 
 // ── Helpers ───────────────────────────────────────────────────
+
+function DaysLeftBadge({ days }: { days: number }) {
+  if (days >= 999) return <span className="text-gray-400">∞</span>
+  const color = days < 14 ? 'text-red-600 font-bold' : days < 30 ? 'text-yellow-600 font-semibold' : 'text-gray-700'
+  return <span className={color}>{days}</span>
+}
 
 function KpiCard({ label, value, accent }: { label: string; value: number; accent?: string }) {
   return (
