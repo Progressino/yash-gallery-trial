@@ -10,11 +10,20 @@ import pandas as pd
 
 
 def _find_col(cols: list[str], candidates: list[str]) -> Optional[str]:
-    """Case-insensitive column finder."""
+    """Case-insensitive exact column finder."""
     lower = {c.lower().strip(): c for c in cols}
     for cand in candidates:
         if cand.lower() in lower:
             return lower[cand.lower()]
+    return None
+
+
+def _find_col_fuzzy(cols: list[str], keywords: list[str]) -> Optional[str]:
+    """Find a column whose name *contains* any of the given keywords (case-insensitive)."""
+    for col in cols:
+        col_l = col.lower()
+        if any(kw in col_l for kw in keywords):
+            return col
     return None
 
 
@@ -63,8 +72,16 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
         ["Balance Qty", "Balance Quantity", "Open Qty", "Open Quantity",
          "PO Qty", "PO Quantity", "Pending Qty", "Pending Quantity",
          "Ordered Qty", "Ordered Quantity", "Quantity", "Units", "Balance",
-         "Qty"],
+         "Qty", "Balance to dispatch", "TOTAL BALANCE From Latest Status",
+         "Total Balance", "Dispatch Balance", "Pending dispatch",
+         "New Order", "NEW ORDER"],
     )
+    # Fuzzy fallback: any column containing balance/dispatch/pending/order keywords
+    if qty_col is None:
+        qty_col = _find_col_fuzzy(
+            list(raw.columns),
+            ["balance", "dispatch", "pending", "open qty", "po qty", "new order"],
+        )
     if qty_col is None:
         raise ValueError(
             f"Cannot find a quantity/balance column. Available columns: {list(raw.columns)[:20]}"
