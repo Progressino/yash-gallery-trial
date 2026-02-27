@@ -1,0 +1,36 @@
+version: "3.9"
+
+# Production compose — used on the VPS.
+# Cloudflare sits in front and handles HTTPS → this server serves HTTP on port 80.
+#
+# Usage:
+#   cp .env.example .env   # fill in secrets
+#   docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+
+  # ── FastAPI backend ──────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    expose:
+      - "8000"          # internal only, nginx proxies to it
+    restart: unless-stopped
+
+  # ── React frontend + nginx reverse proxy ────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    volumes:
+      # Override default nginx config with our custom one (SPA routing + API proxy)
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
