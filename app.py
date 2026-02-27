@@ -2534,12 +2534,21 @@ if st.sidebar.button("🚀 Load All Data", use_container_width=True):
                     sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df_ss)))
                 if not flipkart_df_ss.empty:
                     sales_parts.append(_downcast_sales(flipkart_to_sales_rows(flipkart_df_ss)))
-                if not mtr_df_ss.empty and st.session_state.sku_mapping:
-                    _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
-                    if not _mtr_sales.empty:
-                        _mtr_sales["Source"]  = "Amazon"
-                        _mtr_sales["OrderId"] = np.nan
-                        sales_parts.append(_downcast_sales(_mtr_sales))
+if not mtr_df_ss.empty and st.session_state.sku_mapping:
+    # We need Report_Type to distinguish B2B/B2C, so we pass it through
+    _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
+    
+    # Merge Report_Type back from the original MTR dataframe to set the correct Source
+    _mtr_sales["Report_Type"] = mtr_df_ss["Report_Type"].values
+    
+    if not _mtr_sales.empty:
+        # Standardize the naming: "Amazon B2B" or "Amazon B2C"
+        _mtr_sales["Source"] = "Amazon " + _mtr_sales["Report_Type"].astype(str)
+        _mtr_sales["OrderId"] = np.nan
+        
+        # Drop the temporary column before appending
+        _mtr_sales = _mtr_sales.drop(columns=["Report_Type"])
+        sales_parts.append(_downcast_sales(_mtr_sales))
                     del _mtr_sales
                     gc.collect()
 
