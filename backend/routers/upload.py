@@ -6,7 +6,8 @@ import io
 import re
 from typing import List, Optional
 
-from fastapi import APIRouter, Request, UploadFile, File, HTTPException
+import logging
+from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
 from ..session import store
@@ -19,8 +20,28 @@ from ..services.flipkart import load_flipkart_from_zip
 from ..services.inventory import load_inventory_consolidated
 from ..services.sales import build_sales_df
 from ..services.existing_po import parse_existing_po
+from ..services.github_cache import save_cache_to_drive
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
+
+
+def _auto_save_cache(sess) -> None:
+    """Run in background after build-sales: silently push session to GitHub Releases."""
+    session_data = {
+        "sales_df":    sess.sales_df,
+        "mtr_df":      sess.mtr_df,
+        "meesho_df":   sess.meesho_df,
+        "myntra_df":   sess.myntra_df,
+        "flipkart_df": sess.flipkart_df,
+        "sku_mapping": sess.sku_mapping,
+    }
+    ok, msg = save_cache_to_drive(session_data)
+    if ok:
+        _log.info("Auto-save cache succeeded: %s", msg)
+    else:
+        _log.warning("Auto-save cache skipped/failed: %s", msg)
 
 
 def _get_session(request: Request):
@@ -580,7 +601,7 @@ async def upload_daily(
 # ── Build Sales (merge all platforms into unified sales_df) ───
 
 @router.post("/build-sales")
-async def build_sales(request: Request):
+async def build_sales(request: Request, background_tasks: BackgroundTasks):
     sess = _get_session(request)
     if not sess.sku_mapping:
         return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
@@ -597,8 +618,9 @@ async def build_sales(request: Request):
         return JSONResponse(content={"ok": False, "message": f"Build error: {e}"})
 
     sess.sales_df = sales_df
+    background_tasks.add_task(_auto_save_cache, sess)
     return JSONResponse(content={
         "ok": True,
-        "message": f"Sales built: {len(sales_df):,} rows.",
+        "message": f"Sales built: {len(sales_df):,} rows. Saving to cache in background…",
         "rows": len(sales_df),
     })

@@ -3,6 +3,9 @@ Yash Gallery ERP — FastAPI backend
 Serves all business logic as a REST API.
 Session state is stored server-side keyed by a UUID cookie.
 """
+from dotenv import load_dotenv
+load_dotenv()   # loads .env from cwd (run from repo root or backend/)
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
