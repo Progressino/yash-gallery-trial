@@ -122,7 +122,6 @@ def init_session_state():
         "include_replacements":  False,
         "daily_sales_sources":   [],
         "daily_sales_rows":      0,
-        "_load_warnings":        [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -588,41 +587,6 @@ def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
     )
     raw["_Date"] = _parse_date_flexible(raw[date_col]) if date_col else pd.NaT
 
-    # ── Fallback 1: try other date columns for rows still missing a date ──
-    for _alt in ["invoice date", "shipment date", "transaction date",
-                 "order date", "return date", "credit note date"]:
-        if _alt in raw.columns and _alt != date_col:
-            _null = raw["_Date"].isna()
-            if _null.any():
-                raw.loc[_null, "_Date"] = _parse_date_flexible(raw.loc[_null, _alt])
-
-    # ── Fallback 2: infer month/year from filename (e.g. MTR_B2C-JULY-2024-…) ──
-    _MONTH_MAP = {
-        "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
-        "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
-    }
-    import re as _re
-    _fn_lower = source_file.lower()
-    _fn_match = _re.search(
-        r"-(january|february|march|april|may|june|july|august|september|october|november|december)-(\d{4})",
-        _fn_lower,
-    )
-    _fallback_ts = pd.NaT
-    if _fn_match:
-        try:
-            _fallback_ts = pd.Timestamp(year=int(_fn_match.group(2)),
-                                         month=_MONTH_MAP[_fn_match.group(1)], day=1)
-        except Exception:
-            pass
-
-    filled_dates = 0
-    if _fallback_ts is not pd.NaT:
-        _still_null = raw["_Date"].isna()
-        filled_dates = int(_still_null.sum())
-        if filled_dates:
-            raw.loc[_still_null, "_Date"] = _fallback_ts
-
-    # ── Drop only rows that still have no date even after fallbacks ──
     initial_len = len(raw)
     raw = raw.dropna(subset=["_Date"])
     dropped_dates = initial_len - len(raw)
@@ -680,8 +644,7 @@ def _parse_mtr_csv(csv_bytes: bytes, source_file: str):
     out = _downcast_mtr(out)
 
     msgs = []
-    if filled_dates:  msgs.append(f"Filled {filled_dates} rows using filename date ({_fallback_ts.strftime('%b %Y') if _fallback_ts is not pd.NaT else '?'}).")
-    if dropped_dates: msgs.append(f"Dropped {dropped_dates} rows — no date even after fallback.")
+    if dropped_dates: msgs.append(f"Dropped {dropped_dates} rows missing dates.")
     if ghost_rows:    msgs.append(f"Dropped {ghost_rows} rows with out-of-range years.")
     return out, ("OK" if not msgs else " | ".join(msgs))
 
@@ -1509,103 +1472,6 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_meesho_monthly_payment(xlsx_file, mapping: Dict[str, str]):
-    """Parse Meesho Payment Sheet XLSX (Order Payments tab, 2-row merged header)."""
-    try:
-        df = pd.read_excel(xlsx_file, sheet_name="Order Payments", header=1)
-    except Exception as e:
-        return pd.DataFrame(), f"Cannot read 'Order Payments' sheet: {e}"
-    if df.empty:
-        return pd.DataFrame(), "Empty sheet"
-
-    df.columns = df.columns.astype(str).str.strip()
-
-    sku_col    = next((c for c in df.columns if "supplier sku" in c.lower()), None)
-    date_col   = next((c for c in df.columns if "order date"   in c.lower()), None)
-    status_col = next((c for c in df.columns if "order status" in c.lower()), None)
-    qty_col    = next((c for c in df.columns if c.lower() == "quantity"),     None)
-    order_col  = next((c for c in df.columns if "sub order"    in c.lower()), None)
-
-    if not sku_col:
-        return pd.DataFrame(), "No 'Supplier SKU' column found"
-
-    def _meesho_status(s):
-        s = str(s).strip().lower()
-        if "return" in s or "rto" in s: return "Refund"
-        if "cancel" in s:               return "Cancel"
-        return "Shipment"
-
-    df["_OMS_SKU"]  = df[sku_col].astype(str).str.strip().apply(lambda x: map_to_oms_sku(x, mapping))
-    df["_Date"]     = pd.to_datetime(df[date_col],   errors="coerce") if date_col   else pd.NaT
-    df["_Qty"]      = pd.to_numeric(df[qty_col],     errors="coerce").fillna(1)    if qty_col    else 1.0
-    df["_TxnType"]  = df[status_col].apply(_meesho_status)                          if status_col else "Shipment"
-    df["_OrderId"]  = df[order_col].astype(str).str.strip()                         if order_col  else ""
-
-    df["_Units_Eff"] = np.where(df["_TxnType"]=="Refund", -df["_Qty"],
-                       np.where(df["_TxnType"]=="Cancel",  0,           df["_Qty"]))
-
-    result = pd.DataFrame({
-        "Sku":              df["_OMS_SKU"],
-        "TxnDate":          df["_Date"],
-        "Transaction Type": df["_TxnType"],
-        "Quantity":         df["_Qty"].astype("float32"),
-        "Units_Effective":  df["_Units_Eff"].astype("float32"),
-        "Source":           "Meesho",
-        "OrderId":          df["_OrderId"],
-    })
-    result = result.dropna(subset=["TxnDate"])
-    n = len(result)
-    return _downcast_sales(result), f"OK — {n:,} rows"
-
-
-def load_myntra_monthly_zip(zip_file, mapping: Dict[str, str]):
-    """Parse Myntra monthly report ZIP (PPMP / SJIT / TP folders with CSVs)."""
-    dfs     = []
-    skipped = []
-    try:
-        zip_file.seek(0)
-        root_zf = zipfile.ZipFile(zip_file)
-    except Exception as e:
-        return pd.DataFrame(), f"Cannot open ZIP: {e}"
-
-    csv_items = [n for n in root_zf.namelist() if n.lower().endswith(".csv")]
-    if not csv_items:
-        return pd.DataFrame(), "No CSV files found in ZIP"
-
-    for item_name in csv_items:
-        base = Path(item_name).name
-        try:
-            data = root_zf.read(item_name)
-            df, msg = _parse_myntra_csv(data, base, mapping)
-            if df.empty:
-                skipped.append(f"{base}: {msg}")
-            else:
-                dfs.append(df)
-        except Exception as e:
-            skipped.append(f"{base}: {e}")
-
-    if not dfs:
-        return pd.DataFrame(), f"No valid CSVs. Issues: {'; '.join(skipped[:5])}"
-
-    combined = pd.concat(dfs, ignore_index=True)
-    combined = combined.drop_duplicates(
-        subset=["OrderId", "OMS_SKU", "TxnType", "Date"], keep="first"
-    )
-
-    result = pd.DataFrame({
-        "Sku":              combined["OMS_SKU"],
-        "TxnDate":          combined["Date"],
-        "Transaction Type": combined["TxnType"],
-        "Quantity":         combined["Quantity"],
-        "Units_Effective":  np.where(combined["TxnType"]=="Refund", -combined["Quantity"],
-                            np.where(combined["TxnType"]=="Cancel",  0, combined["Quantity"])),
-        "Source":           "Myntra",
-        "OrderId":          combined["OrderId"],
-    })
-    msg = f"OK — {len(result):,} rows" if not skipped else f"OK — {len(result):,} rows ({len(skipped)} files skipped)"
-    return _downcast_sales(result), msg
-
-
 # ──────────────────────────────────────────────────────────────
 # MYNTRA PPMP LOADER (Historical ZIP)
 # ──────────────────────────────────────────────────────────────
@@ -1624,12 +1490,7 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     if not date_col:
         return pd.DataFrame(), "No date column found"
 
-    df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
-    null_mask = df["_Date"].isna()
-    if null_mask.any():
-        df.loc[null_mask, "_Date"] = pd.to_datetime(
-            df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
-        )
+    df["_Date"] = pd.to_datetime(df[date_col].astype(str), format="%Y%m%d", errors="coerce")
     df = df.dropna(subset=["_Date"])
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
@@ -1645,53 +1506,27 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     rev_col = next((c for c in df.columns if c in ["invoiceamount", "invoice_amount", "net_amount", "shipment_value"]), None)
     df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
 
-    # ── Status / transaction-type column detection (priority order) ──
-    # Many Myntra report layouts use different names; try from most specific to broadest.
-    _status_candidates = (
-        # 1. Anything containing "order_status"
-        [c for c in df.columns if "order_status" in c]
-        # 2. Common exact names (status, packet_status, …)
-        + [c for c in df.columns if c in (
-            "status", "packet_status", "shipment_status",
-            "sub_order_status", "current_status", "item_status",
-            "article_status", "delivery_status",
-        )]
-        # 3. "forward_or_reverse" / "forward_reverse" style columns (very common in Myntra)
-        + [c for c in df.columns if "forward" in c or "reverse" in c]
-        # 4. Any remaining column whose name contains "status"
-        + [c for c in df.columns if "status" in c]
-        # 5. Generic transaction-type columns as last resort
-        + [c for c in df.columns if c in (
-            "transaction_type", "txn_type", "return_type", "order_type", "type",
-        )]
-    )
-    # Deduplicate while preserving order
-    status_col = next(iter(dict.fromkeys(_status_candidates)), None)
+    status_col = next((c for c in df.columns if "order_status" in c), None)
 
-    # ── Comprehensive Myntra transaction classifier ──
+    # FIX: Comprehensive Myntra return/cancel status mapping
     def _myntra_txn(s):
         s = str(s).strip().upper()
-        # "Forward / Reverse" terminology used in many Myntra seller reports
-        if s in ("FORWARD", "FWD"):
-            return "Shipment"
-        if s in ("REVERSE", "REV"):
+        # Return / RTO statuses
+        if s in ("RTO", "RETURN", "RETURNED", "RTO_DELIVERED", "RTO_INTRANSIT",
+                 "RETURN_REQUESTED", "RETURN_PICKUP_INITIATED", "RETURN_PICKED",
+                 "RETURN_RECEIVED", "EXCHANGE_RETURN_REQUESTED",
+                 "RETURN_IN_TRANSIT", "RETURN_CANCELLED_REFUND_INITIATED"):
             return "Refund"
-        # RETURNS: any status containing "RETURN", starting with "RTO"/"RTD", or short codes
-        if ("RETURN" in s
-                or "REVERSE" in s
-                or s.startswith("RTO")
-                or s.startswith("RTD")
-                or s in ("R", "RS", "RD", "RTOD")):
-            return "Refund"
-        # CANCELS: any status containing "CANCEL", or explicit failed codes
-        if "CANCEL" in s or s in ("F", "IC", "FAILED"):
+        # Cancel statuses
+        if s in ("F", "IC", "FAILED", "CANCELLED", "CANCEL",
+                 "CANCELLATION_REQUESTED", "CANCELLATION_APPROVED"):
             return "Cancel"
-        # SHIPMENTS: known active / delivered codes
-        if s in ("C", "SH", "PK", "D", "S", "SHIPPED", "CONFIRMED", "DELIVERED",
+        # Active / shipped statuses
+        if s in ("C", "SH", "PK", "SHIPPED", "CONFIRMED", "DELIVERED",
                  "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
                  "MANIFESTED", "OUT_FOR_DELIVERY", "WP"):
             return "Shipment"
-        # Default — unknown codes treated as Shipment
+        # Default to Shipment for unknown statuses
         return "Shipment"
 
     df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
@@ -1701,14 +1536,10 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     wh_col      = next((c for c in df.columns if "warehouse_id" in c), None)
     order_col   = next((c for c in df.columns if c in ["order_id", "packet_id"]), None)
 
-    # Store the raw status value for diagnostic purposes
-    _raw_status = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
-
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "OMS_SKU":        df["_OMS_SKU"],
         "TxnType":        df["_TxnType"],
-        "RawStatus":      _raw_status,        # raw value before classification
         "Quantity":       df["_Qty"].astype("float32"),
         "Invoice_Amount": df["_Rev"].astype("float32"),
         "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
@@ -1718,8 +1549,7 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     })
     out["Month"]       = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
-    _col_info = f"status_col={status_col!r}"
-    return out, f"OK | {_col_info}"
+    return out, "OK"
 
 
 @st.cache_data(show_spinner=False)
@@ -2292,20 +2122,6 @@ with st.sidebar.expander("📅 Tier 2 — Monthly Sales (Recent Velocity)", expa
         "Flipkart Sales (Excel)",
         type=["xlsx"], key="fk",
     )
-    f_meesho_monthly = st.file_uploader(
-        "Meesho Monthly Report (Excel or ZIP)",
-        type=["xlsx", "zip"], key="meesho_monthly",
-        help=(
-            "Meesho monthly payment report — either:\n"
-            "• XLSX: 'Order Payments' tab with SKU, status and quantity columns.\n"
-            "• ZIP: monthly ZIP containing tcs_sales.xlsx, tcs_sales_return.xlsx, etc."
-        ),
-    )
-    f_myntra_monthly = st.file_uploader(
-        "Myntra Monthly Report ZIP (PPMP / SJIT / TP)",
-        type=["zip"], key="myntra_monthly",
-        help="ZIP containing PPMP, SJIT and/or TP folders, each with CSV files inside.",
-    )
     f_transfer = st.file_uploader(
         "Amazon Stock Transfer (ZIP)",
         type=["zip"], key="transfer",
@@ -2484,62 +2300,48 @@ def _show_data_coverage():
             gc.collect()
             st.rerun()
 
-# ... (around line 1250)
 if st.sidebar.button("🚀 Load All Data", use_container_width=True):
     if not map_file:
         st.sidebar.error("SKU Mapping required!")
     else:
         _load_error = None
-        _load_warns = []
-        with st.spinner("Loading data..."):
+        with st.spinner("Loading data…"):
             try:
-                # 1. SKU Mapping
                 st.session_state.sku_mapping = load_sku_mapping(map_file)
-                
-                # 2. Historical MTR Data
+                config = SalesConfig(
+                    date_basis=st.session_state.amazon_date_basis,
+                    include_replacements=st.session_state.include_replacements
+                )
+
                 if mtr_main_zip:
                     mtr_combined, csv_count, mtr_skipped = load_mtr_from_main_zip(mtr_main_zip)
                     st.session_state.mtr_df = mtr_combined
-                    
-                # ... (Other loaders like Meesho, Myntra, etc.)
+                    del mtr_combined
+                    gc.collect()
+                    if mtr_skipped:
+                        with st.sidebar.expander(f"⚠️ MTR: {len(mtr_skipped)} files had issues"):
+                            for s in mtr_skipped:
+                                st.write(s)
 
-                # 3. Processing MTR for Sales Dashboard (The specific area you were editing)
-                mtr_df_ss = st.session_state.get("mtr_df", pd.DataFrame())
-                if not mtr_df_ss.empty and st.session_state.sku_mapping:
-                    _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
-                    if not _mtr_sales.empty:
-                        # FIX: Using Report_Type to match monthly labels
-                        _mtr_sales["Source"] = "Amazon " + mtr_df_ss["Report_Type"].astype(str)
-                        _mtr_sales["OrderId"] = np.nan
-                        sales_parts.append(_downcast_sales(_mtr_sales))
-
-            except Exception as _load_err:
-                import traceback
-                _load_error = traceback.format_exc()
-                _load_warns.append(f"❌ Load failed: {_load_err}")
-                st.sidebar.error(f"❌ Load failed: {_load_err}")
-
-        # This part is outside the try/except but inside the "else"
-        st.session_state["_load_warnings"] = _load_warns
-if not mtr_df_ss.empty and st.session_state.sku_mapping:
-    # We need Report_Type to distinguish B2B/B2C, so we pass it through
-    _mtr_sales = _mtr_to_sales_df(mtr_df_ss, st.session_state.sku_mapping)
-    
-    # Merge Report_Type back from the original MTR dataframe to set the correct Source
-    _mtr_sales["Report_Type"] = mtr_df_ss["Report_Type"].values
-    
-    if not _mtr_sales.empty:
-        # Standardize the naming: "Amazon B2B" or "Amazon B2C"
-        _mtr_sales["Source"] = "Amazon " + _mtr_sales["Report_Type"].astype(str)
-        _mtr_sales["OrderId"] = np.nan
-        
-        # Drop the temporary column before appending
-        _mtr_sales = _mtr_sales.drop(columns=["Report_Type"])
-        sales_parts.append(_downcast_sales(_mtr_sales))
-                    del _mtr_sales
+                if f_meesho:
+                    meesho_combined = load_meesho_full(f_meesho)
+                    st.session_state.meesho_df = meesho_combined
+                    del meesho_combined
                     gc.collect()
 
-                # ── Tier 2 (monthly uploads) appended after Tier 1 so they win dedup ──
+                if f_myntra:
+                    myntra_combined = load_myntra_full(f_myntra, st.session_state.sku_mapping)
+                    st.session_state.myntra_df = myntra_combined
+                    del myntra_combined
+                    gc.collect()
+
+                if f_flipkart_zip:
+                    fk_combined = load_flipkart_full(f_flipkart_zip, st.session_state.sku_mapping)
+                    st.session_state.flipkart_df = fk_combined
+                    del fk_combined
+                    gc.collect()
+
+                sales_parts = []
                 if f_b2c:
                     sales_parts.append(load_amazon_sales(f_b2c, st.session_state.sku_mapping, "Amazon B2C", config))
                     gc.collect()
@@ -2549,66 +2351,23 @@ if not mtr_df_ss.empty and st.session_state.sku_mapping:
                 if f_fk:
                     sales_parts.append(load_flipkart_sales(f_fk, st.session_state.sku_mapping))
                     gc.collect()
-                if f_meesho_monthly:
-                    _fname_lower = f_meesho_monthly.name.lower()
-                    if _fname_lower.endswith(".zip"):
-                        _ms = pd.DataFrame()
-                        try:
-                            import zipfile as _zf
-                            f_meesho_monthly.seek(0)
-                            with _zf.ZipFile(f_meesho_monthly) as _inner_zf:
-                                _ms = _parse_meesho_inner_zip(_inner_zf)
-                            if not _ms.empty:
-                                _ms = meesho_to_sales_rows(_ms)
-                                _ms["Source"] = "Meesho"
-                                sales_parts.append(_ms)
-                                st.sidebar.caption(f"🛒 Meesho monthly ZIP: {len(_ms):,} rows")
-                            else:
-                                _load_warns.append("Meesho Monthly ZIP: No data extracted")
-                        except Exception as _ze:
-                            _load_warns.append(f"Meesho Monthly ZIP: {_ze}")
-                        del _ms; gc.collect()
-                    else:
-                        _ms, _ms_msg = load_meesho_monthly_payment(f_meesho_monthly, st.session_state.sku_mapping)
-                        if _ms.empty:
-                            _load_warns.append(f"Meesho Payment Sheet: {_ms_msg}")
-                        else:
-                            sales_parts.append(_ms)
-                            st.sidebar.caption(f"🛒 Meesho monthly: {_ms_msg}")
-                        del _ms; gc.collect()
-                if f_myntra_monthly:
-                    _my, _my_msg = load_myntra_monthly_zip(f_myntra_monthly, st.session_state.sku_mapping)
-                    if _my.empty:
-                        _load_warns.append(f"Myntra Monthly ZIP: {_my_msg}")
-                    else:
-                        sales_parts.append(_my)
-                        st.sidebar.caption(f"🛍️ Myntra monthly: {_my_msg}")
-                    del _my; gc.collect()
+
+                meesho_df_ss   = st.session_state.get("meesho_df",   pd.DataFrame())
+                myntra_df_ss   = st.session_state.get("myntra_df",   pd.DataFrame())
+                flipkart_df_ss = st.session_state.get("flipkart_df", pd.DataFrame())
+                if not meesho_df_ss.empty:
+                    sales_parts.append(meesho_to_sales_rows(meesho_df_ss))
+                if not myntra_df_ss.empty:
+                    sales_parts.append(myntra_to_sales_rows(myntra_df_ss))
+                if not flipkart_df_ss.empty:
+                    sales_parts.append(flipkart_to_sales_rows(flipkart_df_ss))
 
                 if sales_parts:
                     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
-                    del sales_parts; gc.collect()  # Free parts list before dedup
-
-                    # ── Deduplication: Tier 2 (appended last) wins over Tier 1 ──
-                    # Build the valid-OrderId mask once, reuse for both splits
-                    _oid_str   = combined_sales["OrderId"].astype(str).str.strip()
-                    _oid_valid = combined_sales["OrderId"].notna() & ~_oid_str.str.lower().isin(["", "nan", "none"])
-                    del _oid_str
-                    # Rows with a valid OrderId: deduplicate by (OrderId, Source, Transaction Type)
-                    _with_oid    = combined_sales[_oid_valid].drop_duplicates(
-                        subset=["OrderId", "Source", "Transaction Type"], keep="last"
-                    )
-                    # Rows without a valid OrderId: deduplicate by (Sku, TxnDate, Source, Transaction Type)
-                    _without_oid = combined_sales[~_oid_valid].drop_duplicates(
-                        subset=["Sku", "TxnDate", "Source", "Transaction Type"], keep="last"
-                    )
-                    # Free original + mask before final concat to avoid 3× peak
-                    del combined_sales, _oid_valid; gc.collect()
-                    combined_sales = pd.concat([_with_oid, _without_oid], ignore_index=True)
-                    del _with_oid, _without_oid; gc.collect()
                     combined_sales = _downcast_sales(combined_sales)
                     st.session_state.sales_df = combined_sales
-                    del combined_sales; gc.collect()
+                    del sales_parts, combined_sales
+                    gc.collect()
 
                 # ── Daily orders: auto-detect platform from file contents ──
                 _daily_parts    = []
@@ -2687,10 +2446,7 @@ if not mtr_df_ss.empty and st.session_state.sku_mapping:
             except Exception as _load_err:
                 import traceback as _tb
                 _load_error = _tb.format_exc()
-                _load_warns.append(f"❌ Load failed: {_load_err}")
                 st.sidebar.error(f"❌ Load failed: {_load_err}")
-
-        st.session_state["_load_warnings"] = _load_warns
 
         if _load_error:
             st.error("**Loading failed — full traceback:**")
@@ -2699,7 +2455,7 @@ if not mtr_df_ss.empty and st.session_state.sku_mapping:
             # Auto-save to GitHub Releases after a successful full load
             _autosave_id, _, _autosave_err = _get_gh_release()
             if _autosave_id is not None:
-                with st.spinner("Auto-saving to GitHub Releases cache…"):
+                with st.spinner("Auto-saving to Drive cache…"):
                     _save_ok, _save_msg = save_cache_to_drive()
                 if _save_ok:
                     st.sidebar.success(f"☁️ Auto-saved: {_save_msg}")
@@ -2708,13 +2464,6 @@ if not mtr_df_ss.empty and st.session_state.sku_mapping:
             st.rerun()
 
 _show_data_coverage()
-
-# ── Load warnings / errors log ────────────────────────────────
-_sidebar_warns = st.session_state.get("_load_warnings", [])
-if _sidebar_warns:
-    with st.sidebar.expander(f"⚠️ Load Issues ({len(_sidebar_warns)})", expanded=True):
-        for _w in _sidebar_warns:
-            st.caption(_w)
 
 if not st.session_state.sku_mapping:
     st.info("👋 **Welcome!** Upload SKU Mapping and click **Load All Data** to begin.")
@@ -3080,39 +2829,7 @@ with tab_myntra:
             k7.metric("💳 AOV",         fmt_inr(aov))
             st.divider()
 
-            # ── Diagnostic: always show when return rate looks suspiciously low ──
-            if ret_rate < 5.0:
-                with st.expander("⚠️ Return rate looks too low — click to diagnose", expanded=True):
-                    _has_raw = "RawStatus" in myn.columns
-                    if _has_raw and myn["RawStatus"].str.len().sum() == 0:
-                        st.error(
-                            "**No status column was found in your Myntra CSV files.** "
-                            "All rows defaulted to 'Shipment'.\n\n"
-                            "Share the column names from your Myntra PPMP CSV so we can add the correct one."
-                        )
-                    elif _has_raw:
-                        st.warning(
-                            "**A status column was found, but returns are still low.** "
-                            "The table below shows every unique value in that column — "
-                            "share this with the developer so the mapping can be fixed."
-                        )
-                        _raw_dist = (
-                            myn["RawStatus"].value_counts()
-                            .reset_index()
-                            .rename(columns={"RawStatus": "Raw Status Value", "count": "Row Count"})
-                        )
-                        st.dataframe(_raw_dist, use_container_width=True, hide_index=True)
-                    else:
-                        st.warning(
-                            "Data was loaded from an older cache before the diagnostic was added. "
-                            "**Clear Drive Cache → re-upload Myntra ZIP → Load All Data** to see the diagnostic."
-                        )
-                    st.caption("TxnType distribution after classification:")
-                    _txn_dist = myn["TxnType"].value_counts().reset_index()
-                    _txn_dist.columns = ["Transaction Type", "Row Count"]
-                    st.dataframe(_txn_dist, use_container_width=True, hide_index=True)
-
-            # Returns breakdown caption
+            # FIX: Show breakdown of return types for transparency
             if _myn_rf.any():
                 _ret_breakdown = mf[_myn_rf].shape[0]
                 st.caption(f"ℹ️ Returns include RTO, customer returns, and exchange returns. Total return rows: {_ret_breakdown:,}")
@@ -3937,21 +3654,19 @@ with tab_po:
                 master["Status"] = master["ADS"].apply(_st)
 
             master["Parent_SKU"] = master["OMS_SKU"].apply(get_parent_sku)
-            # Guard against NaN inventory (SKUs not matched in inventory file)
-            _inv = master["Total_Inventory"].fillna(0)
             master["Days_Left"] = np.where(
-                master["ADS"] > 0, _inv / master["ADS"], 999
+                master["ADS"] > 0, master["Total_Inventory"] / master["ADS"], 999
             ).round(1)
-            master["Running_Days"] = master["Days_Left"].fillna(999).round(0).astype(int)
+            master["Running_Days"] = master["Days_Left"].round(0).astype(int)
             master["PO_Qty"] = (
                 np.ceil((
                     (master["ADS"] * lead_time + master["ADS"] * target_days) * (1 + safety_pct / 100)
-                    - _inv
+                    - master["Total_Inventory"]
                 ).clip(lower=0) / 5) * 5
             ).astype(int)
             master["Priority"] = master.apply(_priority, axis=1)
 
-            master["PO_Plus_Avail"]   = (master["PO_Qty"] + _inv).astype(int)
+            master["PO_Plus_Avail"]   = (master["PO_Qty"] + master["Total_Inventory"].fillna(0)).astype(int)
             master["OMS_Stock"]       = master["OMS_Inventory"].fillna(0).astype(int) if "OMS_Inventory" in master.columns else 0
             master["Avail_Inventory"] = master["Total_Inventory"].fillna(0).astype(int)
 
