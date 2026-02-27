@@ -249,6 +249,7 @@ def load_mtr_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]]:
     if not dfs:
         return pd.DataFrame(), 0, skipped
 
+    csv_count = len(dfs)
     combined = pd.concat(dfs, ignore_index=True)
     del dfs
     gc.collect()
@@ -265,4 +266,4 @@ def load_mtr_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]]:
     gc.collect()
     combined = _downcast_mtr(combined)
 
-    return combined, len(dfs) + len(dfs), skipped  # csv_count is len(dfs) before concat
+    return combined, csv_count, skipped
