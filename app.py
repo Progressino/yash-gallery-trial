@@ -1701,10 +1701,14 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     wh_col      = next((c for c in df.columns if "warehouse_id" in c), None)
     order_col   = next((c for c in df.columns if c in ["order_id", "packet_id"]), None)
 
+    # Store the raw status value for diagnostic purposes
+    _raw_status = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
+
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "OMS_SKU":        df["_OMS_SKU"],
         "TxnType":        df["_TxnType"],
+        "RawStatus":      _raw_status,        # raw value before classification
         "Quantity":       df["_Qty"].astype("float32"),
         "Invoice_Amount": df["_Rev"].astype("float32"),
         "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
@@ -1714,7 +1718,8 @@ def _parse_myntra_csv(csv_bytes: bytes, filename: str, mapping: Dict[str, str]) 
     })
     out["Month"]       = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
-    return out, "OK"
+    _col_info = f"status_col={status_col!r}"
+    return out, f"OK | {_col_info}"
 
 
 @st.cache_data(show_spinner=False)
@@ -3075,19 +3080,36 @@ with tab_myntra:
             k7.metric("💳 AOV",         fmt_inr(aov))
             st.divider()
 
-            # ── Diagnostic: warn if return rate looks suspiciously low ──
+            # ── Diagnostic: always show when return rate looks suspiciously low ──
             if ret_rate < 5.0:
                 with st.expander("⚠️ Return rate looks too low — click to diagnose", expanded=True):
-                    st.warning(
-                        "**Return rate is under 5%** which is unusually low for Myntra. "
-                        "This usually means your loaded data was saved in the Drive Cache **before** "
-                        "the return-classification fix was deployed.\n\n"
-                        "**Fix:** Clear the Drive Cache, re-upload the Myntra ZIP, and click **Load All Data** "
-                        "(do NOT use 'Load from Drive Cache' — that restores the old misclassified data)."
-                    )
+                    _has_raw = "RawStatus" in myn.columns
+                    if _has_raw and myn["RawStatus"].str.len().sum() == 0:
+                        st.error(
+                            "**No status column was found in your Myntra CSV files.** "
+                            "All rows defaulted to 'Shipment'.\n\n"
+                            "Share the column names from your Myntra PPMP CSV so we can add the correct one."
+                        )
+                    elif _has_raw:
+                        st.warning(
+                            "**A status column was found, but returns are still low.** "
+                            "The table below shows every unique value in that column — "
+                            "share this with the developer so the mapping can be fixed."
+                        )
+                        _raw_dist = (
+                            myn["RawStatus"].value_counts()
+                            .reset_index()
+                            .rename(columns={"RawStatus": "Raw Status Value", "count": "Row Count"})
+                        )
+                        st.dataframe(_raw_dist, use_container_width=True, hide_index=True)
+                    else:
+                        st.warning(
+                            "Data was loaded from an older cache before the diagnostic was added. "
+                            "**Clear Drive Cache → re-upload Myntra ZIP → Load All Data** to see the diagnostic."
+                        )
+                    st.caption("TxnType distribution after classification:")
                     _txn_dist = myn["TxnType"].value_counts().reset_index()
                     _txn_dist.columns = ["Transaction Type", "Row Count"]
-                    st.caption("Current TxnType distribution in session data:")
                     st.dataframe(_txn_dist, use_container_width=True, hide_index=True)
 
             # Returns breakdown caption
