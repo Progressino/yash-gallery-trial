@@ -2,6 +2,8 @@
 Upload router — all file ingestion endpoints.
 """
 import gc
+import io
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, Request, UploadFile, File, HTTPException
@@ -281,7 +283,7 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
 
 def _detect_platform(filename: str, header_bytes: bytes) -> str:
     """
-    Guess platform from filename + first ~2 KB of content.
+    Guess platform from filename + first ~3 KB of content.
     Returns one of: 'amazon_b2c', 'amazon_b2b', 'myntra', 'meesho', 'flipkart', 'unknown'
     """
     fn = (filename or "").lower()
@@ -295,7 +297,7 @@ def _detect_platform(filename: str, header_bytes: bytes) -> str:
         return "flipkart"
 
     # CSV — filename hints first
-    if "myntra" in fn or "ppmp" in fn:
+    if "myntra" in fn or "ppmp" in fn or "seller_orders" in fn or "seller orders" in fn:
         return "myntra"
     if "b2b" in fn:
         return "amazon_b2b"
@@ -303,13 +305,29 @@ def _detect_platform(filename: str, header_bytes: bytes) -> str:
         return "amazon_b2c"
     if "meesho" in fn:
         return "meesho_csv"
+    # Purely numeric filename (e.g. 937788020504.csv) → Amazon FBA/MTR export
+    if re.match(r"^\d+\.csv$", fn):
+        return "amazon_b2c"
 
     # Content-based detection (first 3 KB)
     try:
         text = header_bytes[:3000].decode("utf-8", errors="ignore").lower()
         if "buyer name" in text or "customer bill to gstid" in text:
             return "amazon_b2b"
+        # Meesho daily CSV report ("Orders_..." filenames from Meesho Supplier Panel)
+        if "reason for credit entry" in text or (
+                "sub order no" in text and "customer state" in text):
+            return "meesho_csv"
+        # Amazon FBA Shipment Report
+        if "customer shipment date" in text and "merchant sku" in text:
+            return "amazon_b2c"
+        # Amazon Order Report format (dash-separated headers)
+        if "amazon-order-id" in text or "purchase-date" in text or "merchant-order-id" in text:
+            return "amazon_b2c"
         if "order_created_date" in text or "product_mrp" in text or "sub_order_no" in text:
+            return "myntra"
+        # Myntra Seller Orders Report (space-separated headers)
+        if "sub order id" in text and ("myntra" in text or "sku id" in text):
             return "myntra"
         if "sub_order_num" in text and "meesho" in text:
             return "meesho_csv"
@@ -348,7 +366,7 @@ async def upload_daily_auto(
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
                     sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
-                    detected.append(f"Amazon B2C ({fname})")
+                    detected.append(f"Amazon ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
                 else:
@@ -385,14 +403,36 @@ async def upload_daily_auto(
                 else:
                     warnings.append(f"{fname}: No data extracted")
 
+            elif platform == "meesho_csv":
+                from ..services.meesho import parse_meesho_csv
+                df, msg = parse_meesho_csv(raw)
+                if not df.empty:
+                    sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
+                    detected.append(f"Meesho ({fname})")
+                    if msg != "OK":
+                        warnings.append(f"{fname}: {msg}")
+                else:
+                    warnings.append(f"{fname}: {msg}")
+
             elif platform == "flipkart":
-                from ..services.flipkart import _parse_flipkart_xlsx
-                df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
+                from ..services.flipkart import _parse_flipkart_xlsx, _parse_flipkart_orders_sheet
+                try:
+                    import pandas as _pd
+                    xl_sheets = _pd.ExcelFile(io.BytesIO(raw)).sheet_names
+                except Exception:
+                    xl_sheets = []
+                if "Sales Report" in xl_sheets:
+                    df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
+                elif "Orders" in xl_sheets:
+                    df = _parse_flipkart_orders_sheet(raw, fname, sess.sku_mapping)
+                else:
+                    warnings.append(f"{fname}: Skipped — no Sales Report or Orders sheet (sheets: {', '.join(xl_sheets[:4])})")
+                    continue
                 if not df.empty:
                     sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
                     detected.append(f"Flipkart ({fname})")
                 else:
-                    warnings.append(f"{fname}: No data extracted")
+                    warnings.append(f"{fname}: No data extracted from Flipkart file")
 
             else:
                 warnings.append(f"{fname}: Could not detect platform (unknown format)")

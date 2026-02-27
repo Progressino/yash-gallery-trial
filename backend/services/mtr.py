@@ -20,6 +20,8 @@ def _parse_date_flexible(series: pd.Series) -> pd.Series:
         "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d",
         "%d-%b-%Y", "%d/%b/%Y", "%m/%d/%Y",
         "%d-%m-%Y %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",       # ISO 8601 without tz
+        "%d %b %Y", "%d %B %Y",    # "12 Dec 2025", "12 December 2025"
     ]
     non_null = series.dropna()
     threshold = max(int(len(non_null) * 0.70), 1) if len(non_null) > 0 else 1
@@ -30,6 +32,13 @@ def _parse_date_flexible(series: pd.Series) -> pd.Series:
                 return parsed
         except Exception:
             continue
+    # Fallback: handle ISO 8601 with timezone (e.g. "2026-02-19T23:58:49+05:30")
+    try:
+        parsed = pd.to_datetime(series, utc=True, errors="coerce")
+        if parsed.notna().sum() >= threshold:
+            return parsed.dt.tz_convert(None)   # strip tz → tz-naive datetime
+    except Exception:
+        pass
     return pd.to_datetime(series, dayfirst=True, errors="coerce")
 
 
@@ -75,7 +84,8 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     if raw.empty:
         return pd.DataFrame(), "Empty file"
 
-    raw.columns = raw.columns.astype(str).str.strip().str.lower()
+    # Normalize: strip, lowercase, replace dashes with spaces (handles Amazon Order Report format)
+    raw.columns = raw.columns.astype(str).str.strip().str.lower().str.replace("-", " ", regex=False)
     is_b2b = "buyer name" in raw.columns or "customer bill to gstid" in raw.columns
     report_type = "B2B" if is_b2b else "B2C"
 
@@ -84,12 +94,23 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "quantity", "invoice amount", "total tax amount",
         "cgst tax", "sgst tax", "igst tax", "ship to state", "warehouse id",
         "fulfillment channel", "payment method code", "order id", "invoice number",
+        # Amazon Order Report (after dash → space normalization):
+        "amazon order id", "merchant order id", "purchase date", "last updated date",
+        "order status", "order total", "item price", "ship date", "ship state",
+        "buyer name", "product name",
+        # Amazon FBA Shipment Report (numeric-named files):
+        "customer shipment date", "merchant sku", "product amount", "shipping amount",
+        "shipment to state", "shipment to city", "fnsku", "asin", "fc",
     }
-    want = (want_b2c | {"buyer name", "irn filing status"}) if is_b2b else want_b2c
+    want = (want_b2c | {"irn filing status", "customer bill to gstid"}) if is_b2b else want_b2c
     raw = raw[[c for c in raw.columns if c in want]]
 
     date_col = next(
-        (d for d in ["shipment date", "invoice date", "transaction date", "order date"]
+        (d for d in [
+            "shipment date", "invoice date", "transaction date", "order date",
+            "purchase date", "ship date", "last updated date",
+            "customer shipment date",   # Amazon FBA Shipment Report
+        ]
          if d in raw.columns), None,
     )
     raw["_Date"] = _parse_date_flexible(raw[date_col]) if date_col else pd.NaT
@@ -153,22 +174,28 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     txn_std[txn.str.contains("return|refund", na=False)] = "Refund"
     txn_std[txn.str.contains("cancel", na=False)] = "Cancel"
 
+    # Resolve column aliases (MTR / Order Report / FBA Shipment Report)
+    _sku_col      = next((c for c in ["sku", "merchant sku"] if c in raw.columns), None)
+    _order_id_col = next((c for c in ["order id", "amazon order id", "merchant order id"] if c in raw.columns), None)
+    _inv_amt_col  = next((c for c in ["invoice amount", "product amount", "order total", "item price"] if c in raw.columns), None)
+    _state_col    = next((c for c in ["ship to state", "shipment to state", "ship state"] if c in raw.columns), None)
+
     out = pd.DataFrame({
         "Date":             raw["_Date"],
         "Report_Type":      report_type,
         "Transaction_Type": txn_std,
-        "SKU":              g("sku"),
+        "SKU":              g(_sku_col) if _sku_col else pd.Series("", index=raw.index, dtype=str),
         "Quantity":         gn("quantity"),
-        "Invoice_Amount":   gn("invoice amount"),
+        "Invoice_Amount":   gn(_inv_amt_col) if _inv_amt_col else pd.Series(0.0, index=raw.index, dtype="float32"),
         "Total_Tax":        gn("total tax amount"),
         "CGST":             gn("cgst tax"),
         "SGST":             gn("sgst tax"),
         "IGST":             gn("igst tax"),
-        "Ship_To_State":    g("ship to state").str.upper(),
+        "Ship_To_State":    g(_state_col).str.upper() if _state_col else pd.Series("", index=raw.index, dtype=str),
         "Warehouse_Id":     g("warehouse id"),
         "Fulfillment":      g("fulfillment channel"),
         "Payment_Method":   g("payment method code"),
-        "Order_Id":         g("order id"),
+        "Order_Id":         g(_order_id_col) if _order_id_col else pd.Series("", index=raw.index, dtype=str),
         "Invoice_Number":   g("invoice number"),
         "Buyer_Name":       g("buyer name"),
         "IRN_Status":       g("irn filing status"),

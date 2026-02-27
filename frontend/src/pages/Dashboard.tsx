@@ -179,10 +179,10 @@ export default function Dashboard() {
 
       {/* Tier 2 — Amazon Individual CSVs + Existing PO */}
       <Section title="Tier 2 — Amazon Orders & PO Pipeline">
-        <UploadCard title="📄 Amazon B2C CSV" subtitle="Single-month B2C report CSV" loaded={false}>
+        <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
-            label="Upload B2C .csv"
+            label="Upload MTR .csv"
             accept={{ 'text/csv': ['.csv'] }}
             onUpload={handle('b2c', (file: File) => uploadAmazonB2C(file))}
             uploading={loading['b2c']}
@@ -219,7 +219,7 @@ export default function Dashboard() {
             <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily Order Upload</h3>
             <p className="text-xs text-gray-400">
               Drop <strong>any mix</strong> of daily report files — platform is auto-detected from each file.
-              Accepted: Amazon MTR CSV, Myntra PPMP CSV, Meesho monthly ZIP, Flipkart XLSX.
+              Accepted: Amazon MTR/FBA CSV, Myntra PPMP CSV, Meesho CSV or ZIP, Flipkart Sales Report or Payment XLSX.
               Sales dataset is rebuilt automatically after upload.
             </p>
           </div>

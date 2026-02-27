@@ -120,6 +120,77 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     return out.dropna(subset=["Date"])
 
 
+def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
+    """
+    Parse a Meesho daily orders CSV report (non-ZIP format).
+    Handles columns: Reason for Credit Entry, Sub Order No, Order Date,
+    Customer State, SKU, Quantity, Supplier Discounted Price, etc.
+    Returns (df, status_message) with columns matching meesho_df schema.
+    """
+    for enc in ("utf-8", "ISO-8859-1"):
+        try:
+            df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, low_memory=False,
+                             on_bad_lines="skip", encoding=enc)
+            break
+        except UnicodeDecodeError:
+            continue
+        except Exception as e:
+            return pd.DataFrame(), f"Parse error: {e}"
+    else:
+        return pd.DataFrame(), "Encoding error"
+
+    if df.empty:
+        return pd.DataFrame(), "Empty file"
+
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Date column: "order date"
+    date_col = next((c for c in df.columns if "order date" in c or c == "date"), None)
+    if not date_col:
+        return pd.DataFrame(), "No date column found"
+    df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.dropna(subset=["_Date"])
+    if df.empty:
+        return pd.DataFrame(), "All dates invalid"
+
+    # Status: "reason for credit entry" (SHIPPED/CANCELLED/RETURNED) or "order status"
+    status_col = next((c for c in df.columns if "reason" in c or "order status" in c
+                       or c == "status"), None)
+    def _txn(s):
+        s = str(s).strip().upper()
+        if "RETURN" in s or "RTO" in s: return "Refund"
+        if "CANCEL" in s: return "Cancel"
+        return "Shipment"
+    df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"
+
+    # Quantity
+    qty_col = next((c for c in df.columns if c == "quantity"), None)
+    df["_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1) if qty_col else 1.0
+
+    # Revenue: prefer discounted price
+    rev_col = next((c for c in df.columns if "discounted price" in c
+                    or "selling price" in c or "listed price" in c), None)
+    df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
+
+    # State
+    state_col = next((c for c in df.columns if "customer state" in c or c == "state"), None)
+
+    # Order ID
+    order_col = next((c for c in df.columns if "sub order" in c or "order no" in c
+                      or "packet id" in c or "packet" in c), None)
+
+    out = pd.DataFrame({
+        "Date":           df["_Date"],
+        "TxnType":        df["_TxnType"],
+        "Quantity":       df["_Qty"].astype("float32"),
+        "Invoice_Amount": df["_Rev"].astype("float32"),
+        "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
+        "OrderId":        df[order_col].fillna("").astype(str) if order_col else "",
+    })
+    out["Month"] = out["Date"].dt.to_period("M").astype(str)
+    return out.dropna(subset=["Date"]), "OK"
+
+
 def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]]:
     """
     Parse Meesho master ZIP (ZIP of ZIPs).
