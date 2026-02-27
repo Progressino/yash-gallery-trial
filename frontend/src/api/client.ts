@@ -5,13 +5,13 @@
  */
 import axios from 'axios'
 
-const api = axios.create({
+export const api = axios.create({
   baseURL: '/api',
-  withCredentials: true,   // send session_id cookie
+  withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 })
 
-// ── Typed API functions ───────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────
 
 export interface UploadResponse {
   ok: boolean
@@ -38,29 +38,62 @@ export interface CoverageResponse {
   flipkart_rows: number
 }
 
-/** Upload SKU Mapping Excel file */
-export async function uploadSkuMapping(file: File): Promise<UploadResponse> {
+// ── Upload helpers ────────────────────────────────────────────
+
+async function uploadFile(endpoint: string, file: File, extraFields?: Record<string, string>): Promise<UploadResponse> {
   const fd = new FormData()
   fd.append('file', file)
-  const { data } = await api.post<UploadResponse>('/upload/sku-mapping', fd, {
+  if (extraFields) Object.entries(extraFields).forEach(([k, v]) => fd.append(k, v))
+  const { data } = await api.post<UploadResponse>(endpoint, fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
   return data
 }
 
-/** Upload Amazon MTR ZIP */
-export async function uploadMtr(file: File): Promise<UploadResponse> {
+export const uploadSkuMapping = (file: File) => uploadFile('/upload/sku-mapping', file)
+export const uploadMtr        = (file: File) => uploadFile('/upload/mtr', file)
+export const uploadMyntra     = (file: File) => uploadFile('/upload/myntra', file)
+export const uploadMeesho     = (file: File) => uploadFile('/upload/meesho', file)
+export const uploadFlipkart   = (file: File) => uploadFile('/upload/flipkart', file)
+
+export async function uploadInventory(files: {
+  oms?: File; fk?: File; myntra?: File; amz?: File
+}): Promise<{ ok: boolean; message: string; rows?: number }> {
   const fd = new FormData()
-  fd.append('file', file)
-  const { data } = await api.post<UploadResponse>('/upload/mtr', fd, {
+  if (files.oms)    fd.append('oms_file',    files.oms)
+  if (files.fk)     fd.append('fk_file',     files.fk)
+  if (files.myntra) fd.append('myntra_file', files.myntra)
+  if (files.amz)    fd.append('amz_file',    files.amz)
+  const { data } = await api.post('/upload/inventory', fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
   return data
 }
 
-/** Get what data is loaded in the current session */
+export async function buildSales(): Promise<{ ok: boolean; message: string; rows?: number }> {
+  const { data } = await api.post('/upload/build-sales')
+  return data
+}
+
+// ── Coverage ──────────────────────────────────────────────────
+
 export async function getCoverage(): Promise<CoverageResponse> {
   const { data } = await api.get<CoverageResponse>('/data/coverage')
+  return data
+}
+
+// ── Cache ─────────────────────────────────────────────────────
+
+export async function cacheStatus() {
+  const { data } = await api.get('/cache/status')
+  return data
+}
+export async function cacheSave() {
+  const { data } = await api.post('/cache/save')
+  return data
+}
+export async function cacheLoad() {
+  const { data } = await api.post('/cache/load')
   return data
 }
 
