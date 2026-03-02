@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
+import { useDropzone } from 'react-dropzone'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadInventory, buildSales, getCoverage,
-  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyOrders,
+  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
 } from '../api/client'
 import { useSession } from '../store/session'
 
@@ -57,16 +58,19 @@ export default function Dashboard() {
     } finally { setL('build', false); setBuildingMsg('') }
   }
 
-  const [dailyFiles, setDailyFiles] = useState<{
-    amz_b2c?: File; amz_b2b?: File; myntra?: File; meesho?: File; flipkart?: File
-  }>({})
+  const [dailyDetected, setDailyDetected] = useState<string[]>([])
 
-  const handleDailyUpload = async () => {
+  const handleDailyAuto = async (files: File[]) => {
     setL('daily', true)
     try {
-      const res = await uploadDailyOrders(dailyFiles)
-      if (res.ok) { showToast('success', res.message); await refresh() }
-      else showToast('error', res.message)
+      const res = await uploadDailyAuto(files)
+      if (res.ok) {
+        setDailyDetected(res.detected_platforms ?? [])
+        showToast('success', res.message)
+        await refresh()
+      } else {
+        showToast('error', res.message)
+      }
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Upload failed')
     } finally { setL('daily', false) }
@@ -175,10 +179,10 @@ export default function Dashboard() {
 
       {/* Tier 2 — Amazon Individual CSVs + Existing PO */}
       <Section title="Tier 2 — Amazon Orders & PO Pipeline">
-        <UploadCard title="📄 Amazon B2C CSV" subtitle="Single-month B2C report CSV" loaded={false}>
+        <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
-            label="Upload B2C .csv"
+            label="Upload MTR .csv"
             accept={{ 'text/csv': ['.csv'] }}
             onUpload={handle('b2c', (file: File) => uploadAmazonB2C(file))}
             uploading={loading['b2c']}
@@ -209,38 +213,28 @@ export default function Dashboard() {
       </Section>
 
       {/* Tier 3 — Daily Orders */}
-      <Section title="Tier 3 — Daily Orders (multi-platform)">
+      <Section title="Tier 3 — Daily Orders (auto-detect)">
         <div className="col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-3">
           <div>
             <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily Order Upload</h3>
-            <p className="text-xs text-gray-400">Upload one or more daily report files. Data is appended to existing historical data.</p>
+            <p className="text-xs text-gray-400">
+              Drop <strong>any mix</strong> of daily report files — platform is auto-detected from each file.
+              Accepted: Amazon MTR/FBA CSV, Myntra PPMP CSV, Meesho CSV or ZIP, Flipkart Sales Report or Payment XLSX.
+              Sales dataset is rebuilt automatically after upload.
+            </p>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            {([
-              { key: 'amz_b2c',  label: 'Amazon B2C', accept: '.csv' },
-              { key: 'amz_b2b',  label: 'Amazon B2B', accept: '.csv' },
-              { key: 'myntra',   label: 'Myntra CSV',  accept: '.csv' },
-              { key: 'meesho',   label: 'Meesho ZIP',  accept: '.zip' },
-              { key: 'flipkart', label: 'Flipkart',    accept: '.xlsx,.csv' },
-            ] as const).map(({ key, label, accept }) => (
-              <div key={key} className="space-y-1">
-                <label className="text-xs font-semibold text-gray-500 block">{label}</label>
-                <input
-                  type="file" accept={accept}
-                  onChange={e => setDailyFiles(prev => ({ ...prev, [key]: e.target.files?.[0] }))}
-                  className="text-xs text-gray-600 w-full file:mr-1 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100"
-                />
-                {dailyFiles[key] && <p className="text-xs text-green-600 truncate">✓ {dailyFiles[key]?.name}</p>}
-              </div>
-            ))}
-          </div>
-          <button
-            onClick={handleDailyUpload}
-            disabled={!Object.values(dailyFiles).some(Boolean) || loading['daily']}
-            className="mt-1 px-5 py-2 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
-          >
-            {loading['daily'] ? 'Uploading…' : '⬆ Upload Daily Data'}
-          </button>
+          <DailyDropzone
+            uploading={loading['daily']}
+            onUpload={handleDailyAuto}
+          />
+          {dailyDetected.length > 0 && (
+            <p className="text-xs text-green-600">
+              ✓ Last upload detected: {dailyDetected.map(d => d.split('(')[0].trim()).join(', ')}
+            </p>
+          )}
+          {coverage.daily_orders && (
+            <p className="text-xs text-blue-600">Daily orders loaded ✓ — included in sales dataset.</p>
+          )}
         </div>
       </Section>
 
@@ -307,6 +301,80 @@ function UploadCard({
 
 function Warn({ children }: { children: React.ReactNode }) {
   return <p className="text-xs text-amber-600 bg-amber-50 rounded p-2">{children}</p>
+}
+
+function DailyDropzone({ uploading, onUpload }: {
+  uploading: boolean
+  onUpload: (files: File[]) => Promise<void>
+}) {
+  const [queued, setQueued] = useState<File[]>([])
+
+  const onDrop = useCallback((accepted: File[]) => {
+    setQueued(prev => {
+      const names = new Set(prev.map(f => f.name))
+      return [...prev, ...accepted.filter(f => !names.has(f.name))]
+    })
+  }, [])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'text/csv': ['.csv'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/zip': ['.zip'],
+    },
+    multiple: true,
+    disabled: uploading,
+  })
+
+  const remove = (name: string) => setQueued(prev => prev.filter(f => f.name !== name))
+
+  const submit = async () => {
+    if (!queued.length) return
+    await onUpload(queued)
+    setQueued([])
+  }
+
+  return (
+    <div className="space-y-2">
+      <div
+        {...getRootProps()}
+        className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors
+          ${isDragActive ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-gray-400 bg-white'}
+          ${uploading ? 'opacity-50 cursor-not-allowed' : ''}`}
+      >
+        <input {...getInputProps()} />
+        {uploading
+          ? <p className="text-sm text-blue-600 animate-pulse">Uploading & detecting…</p>
+          : isDragActive
+            ? <p className="text-sm text-blue-600">Drop files here</p>
+            : <p className="text-sm text-gray-500">
+                Drag & drop daily report files here, or{' '}
+                <span className="text-blue-600 underline">browse</span>
+                <br />
+                <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .zip — platform auto-detected</span>
+              </p>
+        }
+      </div>
+      {queued.length > 0 && (
+        <div className="space-y-1">
+          {queued.map(f => (
+            <div key={f.name} className="flex items-center justify-between bg-gray-50 rounded px-3 py-1.5 text-xs">
+              <span className="text-gray-700 truncate max-w-xs">{f.name}</span>
+              <button onClick={() => remove(f.name)} className="text-gray-400 hover:text-red-500 ml-2 shrink-0">✕</button>
+            </div>
+          ))}
+          <button
+            onClick={submit}
+            disabled={uploading}
+            className="w-full mt-1 py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
+          >
+            {uploading ? 'Uploading…' : `⬆ Upload ${queued.length} file${queued.length > 1 ? 's' : ''}`}
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function InventoryUploader({

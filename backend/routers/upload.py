@@ -2,9 +2,12 @@
 Upload router — all file ingestion endpoints.
 """
 import gc
+import io
+import re
 from typing import List, Optional
 
-from fastapi import APIRouter, Request, UploadFile, File, HTTPException
+import logging
+from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
 from ..session import store
@@ -17,8 +20,28 @@ from ..services.flipkart import load_flipkart_from_zip
 from ..services.inventory import load_inventory_consolidated
 from ..services.sales import build_sales_df
 from ..services.existing_po import parse_existing_po
+from ..services.github_cache import save_cache_to_drive
 
 router = APIRouter()
+
+_log = logging.getLogger(__name__)
+
+
+def _auto_save_cache(sess) -> None:
+    """Run in background after build-sales: silently push session to GitHub Releases."""
+    session_data = {
+        "sales_df":    sess.sales_df,
+        "mtr_df":      sess.mtr_df,
+        "meesho_df":   sess.meesho_df,
+        "myntra_df":   sess.myntra_df,
+        "flipkart_df": sess.flipkart_df,
+        "sku_mapping": sess.sku_mapping,
+    }
+    ok, msg = save_cache_to_drive(session_data)
+    if ok:
+        _log.info("Auto-save cache succeeded: %s", msg)
+    else:
+        _log.warning("Auto-save cache skipped/failed: %s", msg)
 
 
 def _get_session(request: Request):
@@ -277,6 +300,201 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=422, detail=f"Failed to parse Existing PO: {e}")
 
 
+# ── Daily Orders — Auto-detect (drop all files, we figure it out) ─
+
+def _detect_platform(filename: str, header_bytes: bytes) -> str:
+    """
+    Guess platform from filename + first ~3 KB of content.
+    Returns one of: 'amazon_b2c', 'amazon_b2b', 'myntra', 'meesho', 'flipkart', 'unknown'
+    """
+    fn = (filename or "").lower()
+
+    # ZIP → Meesho monthly ZIP
+    if fn.endswith(".zip"):
+        return "meesho"
+
+    # XLSX → Flipkart Sales Report
+    if fn.endswith((".xlsx", ".xls")):
+        return "flipkart"
+
+    # CSV — filename hints first
+    if "myntra" in fn or "ppmp" in fn or "seller_orders" in fn or "seller orders" in fn:
+        return "myntra"
+    if "b2b" in fn:
+        return "amazon_b2b"
+    if "b2c" in fn or "mtr" in fn or "merchant" in fn or "tax report" in fn:
+        return "amazon_b2c"
+    if "meesho" in fn:
+        return "meesho_csv"
+    # Purely numeric filename (e.g. 937788020504.csv) → Amazon FBA/MTR export
+    if re.match(r"^\d+\.csv$", fn):
+        return "amazon_b2c"
+
+    # Content-based detection (first 3 KB)
+    try:
+        text = header_bytes[:3000].decode("utf-8", errors="ignore").lower()
+        if "buyer name" in text or "customer bill to gstid" in text:
+            return "amazon_b2b"
+        # Meesho daily CSV report ("Orders_..." filenames from Meesho Supplier Panel)
+        if "reason for credit entry" in text or (
+                "sub order no" in text and "customer state" in text):
+            return "meesho_csv"
+        # Amazon FBA Shipment Report
+        if "customer shipment date" in text and "merchant sku" in text:
+            return "amazon_b2c"
+        # Amazon Order Report format (dash-separated headers)
+        if "amazon-order-id" in text or "purchase-date" in text or "merchant-order-id" in text:
+            return "amazon_b2c"
+        if "order_created_date" in text or "product_mrp" in text or "sub_order_no" in text:
+            return "myntra"
+        # Myntra Seller Orders Report (space-separated headers)
+        if "sub order id" in text and ("myntra" in text or "sku id" in text):
+            return "myntra"
+        if "sub_order_num" in text and "meesho" in text:
+            return "meesho_csv"
+        if "shipment date" in text or "invoice date" in text or "transaction type" in text:
+            return "amazon_b2c"
+        if "sales report" in text or "buyer invoice date" in text:
+            return "flipkart"
+    except Exception:
+        pass
+
+    return "unknown"
+
+
+@router.post("/daily-auto")
+async def upload_daily_auto(
+    request: Request,
+    files: List[UploadFile] = File(...),
+):
+    """
+    Drop any mix of daily report files — platform is auto-detected per file.
+    Appends to existing session data and rebuilds sales_df automatically.
+    """
+    sess = _get_session(request)
+    import pandas as pd
+
+    detected: list[str] = []
+    warnings: list[str] = []
+
+    for fobj in files:
+        fname = fobj.filename or "upload"
+        raw = await fobj.read()
+        platform = _detect_platform(fname, raw)
+
+        try:
+            if platform == "amazon_b2c":
+                df, msg = parse_mtr_csv(raw, fname)
+                if not df.empty:
+                    sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+                    detected.append(f"Amazon ({fname})")
+                    if msg != "OK":
+                        warnings.append(f"{fname}: {msg}")
+                else:
+                    warnings.append(f"{fname}: {msg}")
+
+            elif platform == "amazon_b2b":
+                df, msg = parse_mtr_csv(raw, fname)
+                if not df.empty:
+                    sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+                    detected.append(f"Amazon B2B ({fname})")
+                    if msg != "OK":
+                        warnings.append(f"{fname}: {msg}")
+                else:
+                    warnings.append(f"{fname}: {msg}")
+
+            elif platform == "myntra":
+                from ..services.myntra import _parse_myntra_csv
+                df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
+                if not df.empty:
+                    sess.myntra_df = pd.concat([sess.myntra_df, df], ignore_index=True) if not sess.myntra_df.empty else df
+                    detected.append(f"Myntra ({fname})")
+                    if msg != "OK":
+                        warnings.append(f"{fname}: {msg}")
+                else:
+                    warnings.append(f"{fname}: {msg}")
+
+            elif platform == "meesho":
+                df, _count, _skipped = load_meesho_from_zip(raw)
+                if not df.empty:
+                    sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
+                    detected.append(f"Meesho ({fname})")
+                    if _skipped:
+                        warnings.append(f"{fname}: {'; '.join(_skipped[:2])}")
+                else:
+                    warnings.append(f"{fname}: No data extracted")
+
+            elif platform == "meesho_csv":
+                from ..services.meesho import parse_meesho_csv
+                df, msg = parse_meesho_csv(raw)
+                if not df.empty:
+                    sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
+                    detected.append(f"Meesho ({fname})")
+                    if msg != "OK":
+                        warnings.append(f"{fname}: {msg}")
+                else:
+                    warnings.append(f"{fname}: {msg}")
+
+            elif platform == "flipkart":
+                from ..services.flipkart import _parse_flipkart_xlsx, _parse_flipkart_orders_sheet
+                try:
+                    import pandas as _pd
+                    xl_sheets = _pd.ExcelFile(io.BytesIO(raw)).sheet_names
+                except Exception:
+                    xl_sheets = []
+                if "Sales Report" in xl_sheets:
+                    df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
+                elif "Orders" in xl_sheets:
+                    df = _parse_flipkart_orders_sheet(raw, fname, sess.sku_mapping)
+                else:
+                    warnings.append(f"{fname}: Skipped — no Sales Report or Orders sheet (sheets: {', '.join(xl_sheets[:4])})")
+                    continue
+                if not df.empty:
+                    sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
+                    detected.append(f"Flipkart ({fname})")
+                else:
+                    warnings.append(f"{fname}: No data extracted from Flipkart file")
+
+            else:
+                warnings.append(f"{fname}: Could not detect platform (unknown format)")
+
+        except Exception as e:
+            warnings.append(f"{fname}: {e}")
+        finally:
+            del raw
+            gc.collect()
+
+    if not detected:
+        warn_str = "; ".join(warnings) if warnings else "No valid files found."
+        return JSONResponse(content={"ok": False, "message": warn_str})
+
+    # Track loaded platforms & auto-rebuild sales_df
+    sess.daily_sales_sources = list(set(sess.daily_sales_sources + detected))
+
+    if sess.sku_mapping:
+        try:
+            sess.sales_df = build_sales_df(
+                mtr_df=sess.mtr_df,
+                myntra_df=sess.myntra_df,
+                meesho_df=sess.meesho_df,
+                flipkart_df=sess.flipkart_df,
+                sku_mapping=sess.sku_mapping,
+            )
+        except Exception as e:
+            warnings.append(f"Sales rebuild warning: {e}")
+
+    msg_parts = [f"Loaded {len(detected)} file(s): {', '.join(d.split('(')[0].strip() for d in detected)}."]
+    if sess.sku_mapping:
+        msg_parts.append(f"Sales rebuilt ({len(sess.sales_df):,} rows).")
+    if warnings:
+        msg_parts.append(f"Warnings: {'; '.join(warnings)}")
+    return JSONResponse(content={
+        "ok": True,
+        "message": " ".join(msg_parts),
+        "detected_platforms": detected,
+    })
+
+
 # ── Daily Orders (multi-platform CSVs) ────────────────────────
 
 @router.post("/daily")
@@ -383,7 +601,7 @@ async def upload_daily(
 # ── Build Sales (merge all platforms into unified sales_df) ───
 
 @router.post("/build-sales")
-async def build_sales(request: Request):
+async def build_sales(request: Request, background_tasks: BackgroundTasks):
     sess = _get_session(request)
     if not sess.sku_mapping:
         return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
@@ -400,8 +618,9 @@ async def build_sales(request: Request):
         return JSONResponse(content={"ok": False, "message": f"Build error: {e}"})
 
     sess.sales_df = sales_df
+    background_tasks.add_task(_auto_save_cache, sess)
     return JSONResponse(content={
         "ok": True,
-        "message": f"Sales built: {len(sales_df):,} rows.",
+        "message": f"Sales built: {len(sales_df):,} rows. Saving to cache in background…",
         "rows": len(sales_df),
     })

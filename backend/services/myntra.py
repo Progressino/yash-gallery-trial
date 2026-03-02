@@ -25,7 +25,14 @@ def _parse_myntra_csv(
 
     df.columns = df.columns.str.strip().str.lower()
 
-    date_col = next((c for c in df.columns if "order_created_date" in c or "order_date" in c), None)
+    # PPMP: "order_created_date"; Seller Orders Report: "created on" or "order date"
+    date_col = next((c for c in df.columns if
+                     "order_created_date" in c or "order_date" in c or
+                     c in ("created date", "created_date", "order date", "purchase date",
+                           "created on")), None)
+    # Generic fallback: any column whose name ends with "date" or "on" containing "creat"
+    if not date_col:
+        date_col = next((c for c in df.columns if c.endswith("date") or c.endswith("_date")), None)
     if not date_col:
         return pd.DataFrame(), "No date column found"
 
@@ -39,7 +46,8 @@ def _parse_myntra_csv(
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
 
-    sku_col = next((c for c in df.columns if c in ["sku_id", "skuid", "sku"]), None)
+    # PPMP: "sku_id"; Seller Orders Report: "sku id" or "sku"
+    sku_col = next((c for c in df.columns if c in ["sku_id", "skuid", "sku", "sku id", "seller sku"]), None)
     if not sku_col:
         return pd.DataFrame(), "No SKU column"
     df["_OMS_SKU"] = df[sku_col].apply(lambda x: map_to_oms_sku(str(x).strip(), mapping))
@@ -54,12 +62,14 @@ def _parse_myntra_csv(
     df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
 
     # Status column detection (priority order)
+    # Handles both PPMP (underscore_separated) and Seller Orders Report (space separated)
     _status_candidates = (
-        [c for c in df.columns if "order_status" in c]
+        [c for c in df.columns if "order_status" in c or "order status" in c]
         + [c for c in df.columns if c in (
             "status", "packet_status", "shipment_status",
             "sub_order_status", "current_status", "item_status",
             "article_status", "delivery_status",
+            "order status", "item status", "shipment status",
         )]
         + [c for c in df.columns if "forward" in c or "reverse" in c]
         + [c for c in df.columns if "status" in c]
@@ -88,10 +98,16 @@ def _parse_myntra_csv(
 
     df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
 
-    state_col  = next((c for c in df.columns if c in ["state", "customer_delivery_state_code"]), None)
-    pm_col     = next((c for c in df.columns if "payment_method" in c), None)
-    wh_col     = next((c for c in df.columns if "warehouse_id" in c), None)
-    order_col  = next((c for c in df.columns if c in ["order_id", "packet_id"]), None)
+    state_col  = next((c for c in df.columns if c in [
+        "state", "customer_delivery_state_code", "buyer state", "ship state",
+    ]), None)
+    pm_col     = next((c for c in df.columns if "payment_method" in c or "payment method" in c), None)
+    wh_col     = next((c for c in df.columns if "warehouse_id" in c or "warehouse id" in c), None)
+    # PPMP: "order_id" / "packet_id"; Seller Orders Report: "order id" / "seller order id"
+    order_col  = next((c for c in df.columns if c in [
+        "order_id", "packet_id", "order id", "sub order id", "suborder id",
+        "seller order id", "order id fk", "store order id",
+    ]), None)
     _raw_status = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
 
     out = pd.DataFrame({

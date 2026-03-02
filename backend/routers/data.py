@@ -31,7 +31,7 @@ def get_coverage(request: Request):
         meesho=not sess.meesho_df.empty,
         flipkart=not sess.flipkart_df.empty,
         inventory=not sess.inventory_df_variant.empty,
-        daily_orders=not sess.daily_orders_df.empty,
+        daily_orders=len(sess.daily_sales_sources) > 0,
         existing_po=not sess.existing_po_df.empty,
         mtr_rows=len(sess.mtr_df),
         sales_rows=len(sess.sales_df),

@@ -3,6 +3,9 @@ Yash Gallery ERP — FastAPI backend
 Serves all business logic as a REST API.
 Session state is stored server-side keyed by a UUID cookie.
 """
+from dotenv import load_dotenv
+load_dotenv()   # loads .env from cwd (run from repo root or backend/)
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -16,13 +19,24 @@ app = FastAPI(
 )
 
 # ── CORS (allow Vite dev server + production domain) ─────────
+import os as _os
+_extra = _os.environ.get("EXTRA_CORS_ORIGIN", "").strip()
+_origins = [
+    "http://localhost:5173",        # Vite dev
+    "http://localhost:3000",        # alternate dev
+    "https://progressino.com",      # production root
+    "https://www.progressino.com",  # www
+    "https://app.progressino.com",  # app subdomain
+    "https://yashgallery.com",      # yashgallery production
+    "https://www.yashgallery.com",  # www
+    "https://app.yashgallery.com",  # app subdomain
+]
+if _extra:
+    _origins.append(_extra)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",   # Vite dev
-        "http://localhost:3000",   # alternate dev
-        "https://app.yashgallery.in",  # production (update as needed)
-    ],
+    allow_origins=_origins,
     allow_credentials=True,       # needed for the session cookie
     allow_methods=["*"],
     allow_headers=["*"],

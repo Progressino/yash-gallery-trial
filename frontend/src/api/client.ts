@@ -74,16 +74,12 @@ export async function uploadInventory(files: {
   return data
 }
 
-export async function uploadDailyOrders(files: {
-  amz_b2c?: File; amz_b2b?: File; myntra?: File; meesho?: File; flipkart?: File
-}): Promise<{ ok: boolean; message: string; detected_platforms?: string[] }> {
+export async function uploadDailyAuto(
+  files: File[]
+): Promise<{ ok: boolean; message: string; detected_platforms?: string[] }> {
   const fd = new FormData()
-  if (files.amz_b2c)  fd.append('amz_b2c',  files.amz_b2c)
-  if (files.amz_b2b)  fd.append('amz_b2b',  files.amz_b2b)
-  if (files.myntra)   fd.append('myntra',   files.myntra)
-  if (files.meesho)   fd.append('meesho',   files.meesho)
-  if (files.flipkart) fd.append('flipkart', files.flipkart)
-  const { data } = await api.post('/upload/daily', fd, {
+  files.forEach(f => fd.append('files', f))
+  const { data } = await api.post('/upload/daily-auto', fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
   return data

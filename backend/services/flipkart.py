@@ -113,6 +113,84 @@ def load_flipkart_from_zip(
     return combined, len(xlsx_items), skipped
 
 
+def _parse_flipkart_orders_sheet(
+    file_bytes: bytes, fname: str, mapping: Dict[str, str]
+) -> pd.DataFrame:
+    """
+    Parse the 'Orders' sheet from Flipkart Seller Hub payment/settlement reports
+    (UUID-named XLSX files).  Header structure has 3 lead rows:
+      row 0 = group labels, row 1 = column names, row 2 = sub-headers / blanks.
+    Data starts at row 3.
+    """
+    try:
+        raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Orders", header=None, dtype=str)
+        if len(raw) < 4:
+            return pd.DataFrame()
+
+        # Row 1 (0-indexed) has the actual column names
+        col_names = raw.iloc[1].fillna("").astype(str).tolist()
+        df = raw.iloc[3:].reset_index(drop=True)
+        df.columns = col_names
+
+        # Strip whitespace from column names
+        df.columns = [c.strip() for c in df.columns]
+
+        # Date: use Order Date (not Due Date which is payment settlement date)
+        date_col = next((c for c in df.columns if "order date" in c.lower()), None)
+        if not date_col:
+            return pd.DataFrame()
+        df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.dropna(subset=["_Date"])
+        if df.empty:
+            return pd.DataFrame()
+
+        # SKU
+        sku_col = next((c for c in df.columns if "seller sku" in c.lower()), None)
+        if not sku_col:
+            return pd.DataFrame()
+        df["_OMS_SKU"] = df[sku_col].apply(lambda x: map_to_oms_sku(clean_sku(str(x)), mapping))
+
+        # Quantity
+        qty_col = next((c for c in df.columns if c.strip().lower() == "quantity"), None)
+        df["_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1).astype("float32") if qty_col else 1.0
+
+        # Revenue
+        rev_col = next((c for c in df.columns if "sale amount" in c.lower()), None)
+        df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0).astype("float32") if rev_col else 0.0
+
+        # Transaction type: Return Type not-null → Refund, else Shipment
+        ret_col = next((c for c in df.columns if "return type" in c.lower()), None)
+        if ret_col:
+            df["_TxnType"] = df[ret_col].apply(
+                lambda x: "Refund" if pd.notna(x) and str(x).strip() not in ("", "nan") else "Shipment"
+            )
+        else:
+            df["_TxnType"] = "Shipment"
+
+        # Order ID
+        order_col = next((c for c in df.columns if c.strip().lower() == "order id"), None)
+        df["_OrderId"] = df[order_col].fillna("").astype(str) if order_col else ""
+
+        # State (not available in this format)
+        file_month = _fk_month_from_filename(fname)
+
+        out = pd.DataFrame({
+            "Date":           df["_Date"],
+            "Month":          file_month if file_month else df["_Date"].dt.to_period("M").astype(str),
+            "TxnType":        df["_TxnType"],
+            "Quantity":       df["_Qty"],
+            "Invoice_Amount": df["_Rev"],
+            "OMS_SKU":        df["_OMS_SKU"],
+            "State":          "",
+            "OrderId":        df["_OrderId"],
+            "BuyerInvoiceId": "",
+        })
+        return out.dropna(subset=["Date"])
+
+    except Exception:
+        return pd.DataFrame()
+
+
 def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
     if fk_df.empty:
         return pd.DataFrame()

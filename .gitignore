@@ -1,4 +1,5 @@
-# Streamlit secrets — NEVER commit these
+# Secrets — NEVER commit these
+.env
 .streamlit/secrets.toml
 
 # Google service account key files — NEVER commit these

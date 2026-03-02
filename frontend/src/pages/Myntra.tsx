@@ -36,7 +36,7 @@ export default function Myntra() {
   })
 
   if (isLoading) return <Loading />
-  if (!data?.loaded) return <Empty name="Myntra PPMP" emoji="🛍️" path="myntra" />
+  if (!data?.loaded) return <Empty name="Myntra PPMP" emoji="🛍️" />
 
   const monthly = (data.monthly ?? []).map(r => ({
     ...r, shipments: r.shipments ?? 0, refunds: r.refunds ?? 0,
@@ -123,7 +123,7 @@ function Loading() {
   return <div className="flex items-center justify-center h-full text-gray-400">Loading…</div>
 }
 
-function Empty({ name, emoji, path }: { name: string; emoji: string; path: string }) {
+function Empty({ name, emoji }: { name: string; emoji: string }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-4 text-center p-8">
       <p className="text-5xl">{emoji}</p>
