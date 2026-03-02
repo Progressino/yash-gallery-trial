@@ -21,6 +21,7 @@ export default function Layout() {
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const flash = (type: 'ok' | 'err', text: string) => {
     setCacheMsg({ type, text })
@@ -63,15 +64,39 @@ export default function Layout() {
     }
   }
 
+  const closeSidebar = () => setSidebarOpen(false)
+
   return (
     <div className="flex h-screen overflow-hidden">
+      {/* Mobile backdrop */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/40 z-20 md:hidden"
+          onClick={closeSidebar}
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="w-56 bg-white border-r border-gray-200 flex flex-col shrink-0">
-        <div className="px-4 py-5 border-b border-gray-100">
+      <aside
+        className={`
+          fixed md:static inset-y-0 left-0 z-30
+          w-56 bg-white border-r border-gray-200 flex flex-col shrink-0
+          transition-transform duration-200 ease-in-out
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+        `}
+      >
+        <div className="px-4 py-5 border-b border-gray-100 flex items-center justify-between">
           <h1 className="text-sm font-bold text-[#002B5B] leading-tight">
             🚀 Yash Gallery<br />
             <span className="font-normal text-gray-500 text-xs">ERP Command Center</span>
           </h1>
+          {/* Close button — mobile only */}
+          <button
+            className="md:hidden text-gray-400 hover:text-gray-600 text-lg leading-none"
+            onClick={closeSidebar}
+          >
+            ✕
+          </button>
         </div>
 
         <nav className="flex-1 overflow-y-auto py-2">
@@ -80,6 +105,7 @@ export default function Layout() {
               key={to}
               to={to}
               end={to === '/'}
+              onClick={closeSidebar}
               className={({ isActive }) =>
                 `block px-4 py-2 text-sm transition-colors ${
                   isActive
@@ -138,10 +164,25 @@ export default function Layout() {
         </div>
       </aside>
 
-      {/* Main area */}
-      <main className="flex-1 overflow-y-auto bg-gray-50 p-6">
-        <Outlet />
-      </main>
+      {/* Main column */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Mobile top bar */}
+        <header className="md:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="text-[#002B5B] text-xl font-bold leading-none"
+            aria-label="Open menu"
+          >
+            ☰
+          </button>
+          <span className="text-sm font-bold text-[#002B5B]">🚀 Yash Gallery ERP</span>
+        </header>
+
+        {/* Page content */}
+        <main className="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-6">
+          <Outlet />
+        </main>
+      </div>
     </div>
   )
 }
