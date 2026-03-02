@@ -85,11 +85,11 @@ export default function Layout() {
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
         `}
       >
-        <div className="px-4 py-5 border-b border-gray-100 flex items-center justify-between">
-          <h1 className="text-sm font-bold text-[#002B5B] leading-tight">
-            🚀 Yash Gallery<br />
-            <span className="font-normal text-gray-500 text-xs">ERP Command Center</span>
-          </h1>
+        <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <img src="/logo.png" alt="Progressino" className="h-8 w-auto" />
+            <p className="text-[10px] text-gray-400 font-medium mt-0.5 tracking-wide">Yash Gallery ERP</p>
+          </div>
           {/* Close button — mobile only */}
           <button
             className="md:hidden text-gray-400 hover:text-gray-600 text-lg leading-none"
@@ -161,6 +161,12 @@ export default function Layout() {
               {cacheMsg.text}
             </p>
           )}
+        </div>
+
+        {/* Built by Progressino */}
+        <div className="px-3 py-3 border-t border-gray-100 flex items-center justify-center gap-1.5">
+          <img src="/logo.png" alt="Progressino" className="h-4 w-auto opacity-40" />
+          <span className="text-[10px] text-gray-300 font-medium">Built by Progressino</span>
         </div>
       </aside>
 
