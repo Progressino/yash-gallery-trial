@@ -10,7 +10,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .session import store
-from .routers import upload, data, cache, po
+from .routers import upload, data, cache, po, auth as auth_router
+from .routers.auth import verify_token
 
 app = FastAPI(
     title="Yash Gallery ERP API",
@@ -42,6 +43,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Auth middleware (outermost — runs first) ──────────────────
+_AUTH_EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/health"}
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if request.url.path in _AUTH_EXEMPT or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    token = request.cookies.get("auth_token")
+    if not token or not verify_token(token):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+    return await call_next(request)
+
+
 # ── Session cookie middleware ─────────────────────────────────
 SESSION_COOKIE = "session_id"
 
@@ -66,10 +81,11 @@ async def session_middleware(request: Request, call_next):
 
 
 # ── Routers ───────────────────────────────────────────────────
-app.include_router(upload.router, prefix="/api/upload", tags=["upload"])
-app.include_router(data.router,   prefix="/api/data",   tags=["data"])
-app.include_router(cache.router,  prefix="/api/cache",  tags=["cache"])
-app.include_router(po.router,     prefix="/api/po",     tags=["po"])
+app.include_router(auth_router.router, prefix="/api/auth",   tags=["auth"])
+app.include_router(upload.router,      prefix="/api/upload", tags=["upload"])
+app.include_router(data.router,        prefix="/api/data",   tags=["data"])
+app.include_router(cache.router,       prefix="/api/cache",  tags=["cache"])
+app.include_router(po.router,          prefix="/api/po",     tags=["po"])
 
 
 @app.get("/api/health")
