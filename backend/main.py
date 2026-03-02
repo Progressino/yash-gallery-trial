@@ -27,6 +27,9 @@ _origins = [
     "https://progressino.com",      # production root
     "https://www.progressino.com",  # www
     "https://app.progressino.com",  # app subdomain
+    "https://yashgallery.com",      # yashgallery production
+    "https://www.yashgallery.com",  # www
+    "https://app.yashgallery.com",  # app subdomain
 ]
 if _extra:
     _origins.append(_extra)
