@@ -29,8 +29,11 @@ services:
     volumes:
       # Override default nginx config with our custom one (SPA routing + API proxy)
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Let's Encrypt certificates (obtained via certbot on the host)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     ports:
       - "80:80"
+      - "443:443"
     depends_on:
       - backend
     restart: unless-stopped
