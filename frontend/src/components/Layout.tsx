@@ -3,6 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
 import { cacheLoad, cacheSave, getCoverage } from '../api/client'
+import api from '../api/client'
 
 const NAV_ITEMS = [
   { to: '/',          label: '📊 Dashboard' },
@@ -43,6 +44,11 @@ export default function Layout() {
     } finally {
       setCacheLoading(null)
     }
+  }
+
+  const handleLogout = async () => {
+    await api.post('/auth/logout')
+    window.location.href = '/login'
   }
 
   const handleSave = async () => {
@@ -96,6 +102,16 @@ export default function Layout() {
           <Badge label="Myntra"   active={myntra} />
           <Badge label="Meesho"   active={meesho} />
           <Badge label="Flipkart" active={flipkart} />
+        </div>
+
+        {/* Logout */}
+        <div className="px-3 pb-2">
+          <button
+            onClick={handleLogout}
+            className="w-full py-1.5 rounded text-xs font-semibold text-gray-500 hover:text-red-600 hover:bg-red-50 border border-gray-200 transition-colors"
+          >
+            🚪 Sign Out
+          </button>
         </div>
 
         {/* Cache controls */}

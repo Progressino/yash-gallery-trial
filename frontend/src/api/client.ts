@@ -112,4 +112,20 @@ export async function cacheLoad() {
   return data
 }
 
+// ── 401 interceptor — redirect to /login on expired/missing token ─────────────
+api.interceptors.response.use(
+  res => res,
+  err => {
+    const url: string = err.config?.url ?? ''
+    if (
+      err.response?.status === 401 &&
+      !url.includes('/auth/') &&
+      !window.location.pathname.startsWith('/login')
+    ) {
+      window.location.href = '/login'
+    }
+    return Promise.reject(err)
+  }
+)
+
 export default api
