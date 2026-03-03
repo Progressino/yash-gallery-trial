@@ -343,4 +343,7 @@ def calculate_po_base(
     choices = ["🔴 URGENT", "🟡 HIGH", "🟢 MEDIUM", "🔄 In Pipeline"]
     po_df["Priority"] = np.select(conditions, choices, default="⚪ OK")
 
+    # Parent SKU — strip marketplace suffix + size/colour suffix
+    po_df["Parent_SKU"] = po_df["OMS_SKU"].apply(get_parent_sku)
+
     return po_df

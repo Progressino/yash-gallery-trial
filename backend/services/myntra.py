@@ -79,14 +79,25 @@ def _parse_myntra_csv(
     )
     status_col = next(iter(dict.fromkeys(_status_candidates)), None)
 
+    # ── Dedicated reverse_order_status column (Myntra PPMP key return signal) ──
+    # PPMP files have BOTH forward_order_status AND reverse_order_status.
+    # A row with a non-empty reverse_order_status means it is a return —
+    # regardless of what forward_order_status says (often "DELIVERED").
+    reverse_col = next(
+        (c for c in df.columns if c == "reverse_order_status"
+         or ("reverse" in c and "order" in c and "status" in c)),
+        None,
+    )
+
     def _myntra_txn(s):
         s = str(s).strip().upper()
         if s in ("FORWARD", "FWD"):
             return "Shipment"
-        if s in ("REVERSE", "REV"):
+        if s in ("REVERSE", "REV", "RVP"):                    # RVP = Reverse Pickup
             return "Refund"
         if ("RETURN" in s or "REVERSE" in s or s.startswith("RTO")
-                or s.startswith("RTD") or s in ("R", "RS", "RD", "RTOD")):
+                or s.startswith("RTD") or s.startswith("RVP")
+                or s in ("R", "RS", "RD", "RTOD", "RVP", "RTN", "RSHIP")):
             return "Refund"
         if "CANCEL" in s or s in ("F", "IC", "FAILED"):
             return "Cancel"
@@ -96,7 +107,24 @@ def _parse_myntra_csv(
             return "Shipment"
         return "Shipment"
 
+    # Step 1: classify from the detected forward status column
     df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
+
+    # Step 2: if reverse_order_status column exists, override rows where it is
+    # populated with a non-trivial value → those are returns
+    if reverse_col is not None:
+        _rev_vals = (
+            df[reverse_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        _empty_markers = {"", "NAN", "NONE", "NULL", "-", "N/A", "NA", "NO"}
+        _is_return = ~_rev_vals.isin(_empty_markers)
+        # Also exclude reverse statuses that indicate the return was cancelled
+        _cancelled_reverse = _rev_vals.str.contains("CANCEL", na=False)
+        df.loc[_is_return & ~_cancelled_reverse, "_TxnType"] = "Refund"
 
     state_col  = next((c for c in df.columns if c in [
         "state", "customer_delivery_state_code", "buyer state", "ship state",

@@ -16,7 +16,24 @@ interface PORow {
   PO_Qty?: number
   Priority?: string
   Stockout_Flag?: string
+  Parent_SKU?: string
   [key: string]: string | number | undefined
+}
+
+interface ParentGroup {
+  parentSku: string
+  variants: Array<PORow & { finalQty: number }>
+  worstPriority: string
+  totalInventory: number
+  worstDaysLeft: number
+  totalSoldUnits: number
+  totalADS: number
+  totalGrossQty: number
+  totalPipeline: number
+  totalFinalQty: number
+  quarterTotals: Record<string, number>
+  avgMonthly: number
+  worstStatus: string
 }
 
 interface POResult {
@@ -83,6 +100,8 @@ export default function POEngine() {
   const [selected, setSelected]       = useState<Set<string>>(new Set())
   const [raiseModal, setRaiseModal]   = useState(false)
   const [qSearch, setQSearch]         = useState('')
+  const [groupedView, setGroupedView] = useState(true)
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set())
 
   // ── Calculate PO + quarterly in parallel ──
   const run = async () => {
@@ -179,6 +198,63 @@ export default function POEngine() {
     .filter(r => r.Final_PO_Qty > 0)
 
   const totalRaiseUnits = selectedRows.reduce((s, r) => s + r.Final_PO_Qty, 0)
+
+  // ── Parent groups (for size-grouped view) ──
+  const parentGroups = useMemo((): ParentGroup[] => {
+    const groupMap = new Map<string, ParentGroup>()
+    for (const row of rows) {
+      const parentSku = String(row['Parent_SKU'] || row['OMS_SKU'])
+      const sku       = String(row['OMS_SKU'])
+      const finalQty  = editedQty[sku] !== undefined ? editedQty[sku] : Number(row['PO_Qty'] ?? 0)
+      if (!groupMap.has(parentSku)) {
+        groupMap.set(parentSku, {
+          parentSku, variants: [],
+          worstPriority: '⚪ OK', totalInventory: 0, worstDaysLeft: 999,
+          totalSoldUnits: 0, totalADS: 0, totalGrossQty: 0,
+          totalPipeline: 0, totalFinalQty: 0, quarterTotals: {}, avgMonthly: 0, worstStatus: '',
+        })
+      }
+      const g = groupMap.get(parentSku)!
+      g.variants.push({ ...row, finalQty })
+      g.totalInventory  += Number(row['Total_Inventory'] ?? 0)
+      g.worstDaysLeft    = Math.min(g.worstDaysLeft, Number(row['Days_Left'] ?? 999))
+      g.totalSoldUnits  += Number(row['Sold_Units'] ?? 0)
+      g.totalADS        += Number(row['ADS'] ?? 0)
+      g.totalGrossQty   += Number(row['Gross_PO_Qty'] ?? 0)
+      g.totalPipeline   += Number(row['PO_Pipeline_Total'] ?? 0)
+      g.totalFinalQty   += finalQty
+      const p = String(row['Priority'] ?? '')
+      if ((PRIORITY_ORDER[p] ?? 9) < (PRIORITY_ORDER[g.worstPriority] ?? 9)) g.worstPriority = p
+      const qRow = quarterMap[sku] ?? {}
+      for (const c of quarterCols) {
+        g.quarterTotals[c] = (g.quarterTotals[c] ?? 0) + Number(qRow[c] ?? 0)
+      }
+      g.avgMonthly += Number(qRow['Avg_Monthly'] ?? 0)
+      // Track worst status (Fast Moving > Moderate > Slow Selling > Not Moving)
+      const sOrder: Record<string, number> = { 'Fast Moving': 0, 'Moderate': 1, 'Slow Selling': 2, 'Not Moving': 3 }
+      const rs = String(qRow['Status'] ?? '')
+      if (rs && (g.worstStatus === '' || (sOrder[rs] ?? 9) > (sOrder[g.worstStatus] ?? 9))) g.worstStatus = rs
+    }
+    return Array.from(groupMap.values())
+  }, [rows, editedQty, quarterMap, quarterCols])
+
+  const toggleCollapse = (parentSku: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev)
+      next.has(parentSku) ? next.delete(parentSku) : next.add(parentSku)
+      return next
+    })
+  }
+
+  const toggleParentSelect = (group: ParentGroup) => {
+    const childSkus  = group.variants.map(r => String(r['OMS_SKU']))
+    const allChecked = childSkus.every(s => selected.has(s))
+    setSelected(prev => {
+      const next = new Set(prev)
+      allChecked ? childSkus.forEach(s => next.delete(s)) : childSkus.forEach(s => next.add(s))
+      return next
+    })
+  }
 
   // ── Quarterly tab rows ──
   const qAllRows  = quarterly?.rows ?? []
@@ -297,6 +373,14 @@ export default function POEngine() {
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-blue-300"
                 />
                 <Toggle label="Sort by Priority" checked={sortByPriority} onChange={setSortByPriority} />
+                <button
+                  onClick={() => setGroupedView(v => !v)}
+                  className={`text-xs px-3 py-1.5 rounded border font-medium transition-colors ${
+                    groupedView ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  📐 Size Families
+                </button>
                 <span className="text-xs text-gray-400">{rows.length} SKUs</span>
                 {quarterCols.length > 0 && (
                   <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded-full">
@@ -331,7 +415,8 @@ export default function POEngine() {
                 </span>
               </div>
 
-              {/* ── Main Table ── */}
+              {/* ── Flat Table ── */}
+              {!groupedView && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
                 <table className="w-full text-sm border-collapse">
                   <thead>
@@ -477,6 +562,209 @@ export default function POEngine() {
                   <p className="text-xs text-gray-400 text-center py-2">Showing 500 of {rows.length}</p>
                 )}
               </div>
+              )}
+
+              {/* ── Grouped (Size Families) Table ── */}
+              {groupedView && (
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-20 w-14" />
+                      {PO_DISPLAY_COLS.map(c => (
+                        <th key={c}
+                          className={`text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap
+                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-20 shadow-sm' : ''}`}
+                        >
+                          {c === 'PO_Pipeline_Total'
+                            ? <span className="flex items-center gap-1">🏭 In Production</span>
+                            : c === 'PO_Qty'
+                              ? <span className="text-orange-600">PO Qty ✏️</span>
+                              : c.replace(/_/g, ' ')}
+                        </th>
+                      ))}
+                      {quarterCols.length > 0 && (
+                        <>
+                          <th className="px-2 py-3 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-indigo-100">
+                            ── QUARTERLY HISTORY ──
+                          </th>
+                          {quarterCols.map(c => (
+                            <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">
+                              {c}
+                            </th>
+                          ))}
+                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">Avg/Mo</th>
+                          <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50">Status</th>
+                        </>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {parentGroups.flatMap(group => {
+                      const isCollapsed = collapsedParents.has(group.parentSku)
+                      const childSkus   = group.variants.map(r => String(r['OMS_SKU']))
+                      const allChecked  = childSkus.every(s => selected.has(s))
+                      const someChecked = childSkus.some(s => selected.has(s))
+                      const gSClass     = STATUS_COLORS[group.worstStatus] ?? 'text-gray-400 bg-gray-50'
+
+                      const parentRow = (
+                        <tr key={group.parentSku + '-hdr'} className="bg-slate-100 border-b border-slate-200 hover:bg-slate-200/60 transition-colors">
+                          <td className="px-3 py-2.5 sticky left-0 bg-slate-100 z-10 w-14">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => toggleCollapse(group.parentSku)}
+                                className="text-gray-500 text-[10px] w-3 text-center font-mono leading-none"
+                              >
+                                {isCollapsed ? '▶' : '▼'}
+                              </button>
+                              <input
+                                type="checkbox"
+                                checked={allChecked}
+                                onChange={() => toggleParentSelect(group)}
+                                className={`rounded cursor-pointer accent-[#002B5B] ${someChecked && !allChecked ? 'opacity-60' : ''}`}
+                              />
+                            </div>
+                          </td>
+                          {PO_DISPLAY_COLS.map(c => (
+                            <td key={c}
+                              className={`px-4 py-2.5 whitespace-nowrap font-semibold text-gray-800
+                                ${c === 'OMS_SKU' ? 'sticky left-14 bg-slate-100 z-10 shadow-sm' : ''}`}
+                            >
+                              {c === 'Priority'
+                                ? <PriorityBadge priority={group.worstPriority} />
+                                : c === 'OMS_SKU'
+                                  ? <span className="font-bold text-[#002B5B]">
+                                      {group.parentSku}
+                                      <span className="ml-1.5 text-xs text-gray-400 font-normal">
+                                        ({group.variants.length} size{group.variants.length > 1 ? 's' : ''})
+                                      </span>
+                                    </span>
+                                  : c === 'Total_Inventory'  ? group.totalInventory.toLocaleString()
+                                  : c === 'Days_Left'        ? <DaysLeftBadge days={group.worstDaysLeft} />
+                                  : c === 'Sold_Units'       ? group.totalSoldUnits.toLocaleString()
+                                  : c === 'ADS'              ? group.totalADS.toFixed(3)
+                                  : c === 'Gross_PO_Qty'     ? group.totalGrossQty.toLocaleString()
+                                  : c === 'PO_Pipeline_Total'
+                                    ? group.totalPipeline > 0
+                                      ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-full">
+                                          🏭 {group.totalPipeline.toLocaleString()}
+                                        </span>
+                                      : <span className="text-gray-300">—</span>
+                                  : c === 'PO_Qty'
+                                    ? <span className={`font-bold text-base ${group.totalFinalQty > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
+                                        {group.totalFinalQty.toLocaleString()}
+                                      </span>
+                                  : '—'
+                              }
+                            </td>
+                          ))}
+                          {quarterCols.length > 0 && (
+                            <>
+                              <td className="px-2 py-2.5 bg-indigo-50 border-l border-r border-indigo-100" />
+                              {quarterCols.map(c => {
+                                const v = group.quarterTotals[c] ?? 0
+                                return (
+                                  <td key={c} className="px-3 py-2.5 text-right whitespace-nowrap bg-indigo-50/70 border-r border-indigo-100/60 font-semibold text-indigo-800">
+                                    {v > 0 ? v.toLocaleString() : <span className="text-gray-300">—</span>}
+                                  </td>
+                                )
+                              })}
+                              <td className="px-3 py-2.5 text-right whitespace-nowrap bg-indigo-50/70 border-r border-indigo-100/60 font-bold text-indigo-800">
+                                {group.avgMonthly > 0 ? group.avgMonthly.toFixed(1) : '—'}
+                              </td>
+                              <td className="px-3 py-2.5 whitespace-nowrap bg-indigo-50/70">
+                                {group.worstStatus
+                                  ? <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${gSClass}`}>{group.worstStatus}</span>
+                                  : <span className="text-gray-300">—</span>}
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      )
+
+                      const childRows = isCollapsed ? [] : group.variants.map((variant, vi) => {
+                        const sku         = String(variant['OMS_SKU'])
+                        const sizeLabel   = sku.startsWith(group.parentSku)
+                          ? sku.slice(group.parentSku.length).replace(/^[-_]/, '').trim()
+                          : sku
+                        const isSelected  = selected.has(sku)
+                        const priority    = String(variant['Priority'] ?? '')
+                        const qRow        = quarterMap[sku] ?? {}
+                        const vstatus     = String(qRow['Status'] ?? '')
+                        const vSClass     = STATUS_COLORS[vstatus] ?? 'text-gray-400 bg-gray-50'
+                        const computedQty = Number(variant['PO_Qty'] ?? 0)
+                        const finalQty    = variant.finalQty
+
+                        return (
+                          <tr key={sku + '-' + vi}
+                            className={`border-b border-gray-100 hover:brightness-[0.97] transition-colors ${isSelected ? 'bg-blue-50' : 'bg-white'}`}
+                          >
+                            <td className={`px-3 py-2 sticky left-0 z-10 w-14 ${isSelected ? 'bg-blue-50' : 'bg-white'}`}>
+                              <div className="pl-5 flex items-center">
+                                <input type="checkbox" checked={isSelected} onChange={() => toggleRow(sku)}
+                                  className="rounded cursor-pointer accent-[#002B5B]" />
+                              </div>
+                            </td>
+                            {PO_DISPLAY_COLS.map(col => (
+                              <td key={col}
+                                className={`px-4 py-2 whitespace-nowrap text-gray-700
+                                  ${col === 'OMS_SKU' ? 'sticky left-14 z-10 ' + (isSelected ? 'bg-blue-50' : 'bg-white') + ' shadow-sm' : ''}`}
+                              >
+                                {col === 'Priority' ? <PriorityBadge priority={priority} />
+                                  : col === 'OMS_SKU'
+                                    ? <span>
+                                        <span className="inline-block w-12 text-xs font-bold text-gray-600 uppercase mr-1">{sizeLabel || sku}</span>
+                                        <span className="text-gray-400 text-xs">{sku}</span>
+                                      </span>
+                                  : col === 'PO_Pipeline_Total'
+                                    ? Number(variant[col] ?? 0) > 0
+                                      ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                                          🏭 {Number(variant[col]).toLocaleString()}
+                                        </span>
+                                      : <span className="text-gray-300">—</span>
+                                  : col === 'PO_Qty'
+                                    ? <QtyInput value={finalQty} computed={computedQty}
+                                        onChange={v => setEditedQty(prev => ({ ...prev, [sku]: v }))}
+                                        onReset={() => setEditedQty(prev => { const n = {...prev}; delete n[sku]; return n })} />
+                                  : col === 'Days_Left' ? <DaysLeftBadge days={Number(variant[col] ?? 999)} />
+                                  : typeof variant[col] === 'number'
+                                    ? Number(variant[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
+                                    : variant[col] ?? '—'
+                                }
+                              </td>
+                            ))}
+                            {quarterCols.length > 0 && (
+                              <>
+                                <td className="px-2 py-2 bg-indigo-50 border-l border-r border-indigo-100" />
+                                {quarterCols.map(c => {
+                                  const v = Number(qRow[c] ?? 0)
+                                  return (
+                                    <td key={c} className="px-3 py-2 text-right whitespace-nowrap bg-indigo-50/50 border-r border-indigo-100/60">
+                                      {v > 0 ? <span className="font-medium text-indigo-700">{v.toLocaleString()}</span> : <span className="text-gray-300">—</span>}
+                                    </td>
+                                  )
+                                })}
+                                <td className="px-3 py-2 text-right whitespace-nowrap bg-indigo-50/50 border-r border-indigo-100/60 font-semibold text-indigo-800 text-xs">
+                                  {qRow['Avg_Monthly'] ? Number(qRow['Avg_Monthly']).toFixed(1) : '—'}
+                                </td>
+                                <td className="px-3 py-2 whitespace-nowrap bg-indigo-50/50">
+                                  {vstatus ? <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${vSClass}`}>{vstatus}</span> : <span className="text-gray-300">—</span>}
+                                </td>
+                              </>
+                            )}
+                          </tr>
+                        )
+                      })
+
+                      return [parentRow, ...childRows]
+                    })}
+                  </tbody>
+                </table>
+                {parentGroups.length === 0 && (
+                  <p className="text-xs text-gray-400 text-center py-4">No data</p>
+                )}
+              </div>
+              )}
             </>
           )}
         </>
