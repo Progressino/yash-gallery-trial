@@ -108,7 +108,7 @@ export default function Dashboard() {
   const [deepDiveTab, setDeepDiveTab] = useState<'Amazon' | 'Myntra' | 'Meesho' | 'Flipkart'>('Amazon')
   const [heatmapPlatform, setHeatmapPlatform] = useState('Myntra')
 
-  const { data: coverage } = useQuery({
+  useQuery({
     queryKey: ['coverage'],
     queryFn: async () => { const c = await getCoverage(); setCoverage(c); return c },
     refetchInterval: 30_000,
@@ -293,7 +293,7 @@ export default function Dashboard() {
                 <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                  formatter={(val: number) => [val.toLocaleString(), '']}
+                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), '']}
                 />
                 <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
                 {platforms.filter(p => p.loaded).map(p => (
@@ -383,7 +383,7 @@ export default function Dashboard() {
                 />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                  formatter={(val: number) => [val.toLocaleString(), 'Units']}
+                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), 'Units']}
                 />
                 <Bar dataKey="units" radius={[0, 4, 4, 0]}>
                   {topSkusRaw.map((_, index) => (
@@ -481,7 +481,7 @@ export default function Dashboard() {
               <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
               <Tooltip
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                formatter={(val: number) => [val.toLocaleString(), '']}
+                formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), '']}
               />
               <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="shipments" name="Shipments" fill={PLATFORM_COLORS[deepDiveTab]} radius={[3, 3, 0, 0]} />
