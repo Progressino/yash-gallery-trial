@@ -260,13 +260,23 @@ export default function POEngine() {
                 </button>
               </div>
 
+              <div className="flex items-center gap-2 text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg px-4 py-2">
+                <span>💡</span>
+                <span>
+                  <strong className="text-blue-700">🏭 In Production</strong> = units already ordered &amp; in pipeline (from your PO sheet).{' '}
+                  <strong>Gross PO Qty</strong> − <strong>In Production</strong> = <strong className="text-orange-600">PO Qty</strong> (net new order needed).
+                </span>
+              </div>
+
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">
-                          {c.replace(/_/g, ' ')}
+                          {c === 'PO_Pipeline_Total'
+                            ? <span className="flex items-center gap-1">🏭 In Production</span>
+                            : c.replace(/_/g, ' ')}
                         </th>
                       ))}
                     </tr>
@@ -287,15 +297,26 @@ export default function POEngine() {
                                 ? <span className="font-semibold text-xs">{row[col] ?? '⚪ OK'}</span>
                                 : col === 'OMS_SKU'
                                   ? <span className="font-medium text-gray-900">{row[col]}</span>
-                                  : col === 'PO_Qty'
-                                    ? <span className={`font-bold ${(row[col] ?? 0) > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
-                                        {row[col]}
-                                      </span>
-                                    : col === 'Days_Left'
-                                      ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
-                                      : typeof row[col] === 'number'
-                                        ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
-                                        : row[col] ?? '—'
+                                  : col === 'PO_Pipeline_Total'
+                                    ? Number(row[col] ?? 0) > 0
+                                      ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                                          🏭 {Number(row[col]).toLocaleString()} already ordered
+                                        </span>
+                                      : <span className="text-gray-300">—</span>
+                                    : col === 'PO_Qty'
+                                      ? <div className="flex flex-col">
+                                          <span className={`font-bold ${(row[col] ?? 0) > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
+                                            {row[col]}
+                                          </span>
+                                          {Number(row['PO_Pipeline_Total'] ?? 0) > 0 && Number(row[col] ?? 0) === 0 && (
+                                            <span className="text-xs text-blue-500 font-medium">covered by pipeline</span>
+                                          )}
+                                        </div>
+                                      : col === 'Days_Left'
+                                        ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
+                                        : typeof row[col] === 'number'
+                                          ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
+                                          : row[col] ?? '—'
                               }
                             </td>
                           ))}
