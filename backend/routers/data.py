@@ -6,7 +6,7 @@ mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 from typing import List, Optional
 from fastapi import APIRouter, Request, HTTPException
 from ..models.schemas import CoverageResponse
-from ..services.sales import get_sales_summary, get_sales_by_source, get_top_skus
+from ..services.sales import get_sales_summary, get_sales_by_source, get_top_skus, get_platform_summary, get_anomalies
 
 router = APIRouter()
 
@@ -280,6 +280,23 @@ def get_inventory(request: Request):
         "rows":     df.fillna(0).to_dict("records"),
         "columns":  ["OMS_SKU"] + cols,
     }
+
+
+# ── AI Dashboard Endpoints ────────────────────────────────────
+
+@router.get("/platform-summary")
+def platform_summary(request: Request):
+    sess = _sess(request)
+    return get_platform_summary(sess.mtr_df, sess.myntra_df, sess.meesho_df, sess.flipkart_df)
+
+
+@router.get("/anomalies")
+def anomalies_endpoint(request: Request):
+    sess = _sess(request)
+    return get_anomalies(
+        sess.mtr_df, sess.myntra_df, sess.meesho_df, sess.flipkart_df,
+        sess.inventory_df_variant, sess.sales_df,
+    )
 
 
 # ── Quarterly History (for PO Engine) ────────────────────────

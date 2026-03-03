@@ -6,7 +6,8 @@ import { cacheLoad, cacheSave, getCoverage } from '../api/client'
 import api from '../api/client'
 
 const NAV_ITEMS = [
-  { to: '/',          label: '📊 Dashboard' },
+  { to: '/',          label: '📊 Intelligence' },
+  { to: '/upload',    label: '📁 Upload Data' },
   { to: '/mtr',       label: '📑 MTR Analytics' },
   { to: '/myntra',    label: '🛍️ Myntra' },
   { to: '/meesho',    label: '🛒 Meesho' },

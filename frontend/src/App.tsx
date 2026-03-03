@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
+import Upload from './pages/Upload'
 import MTR from './pages/MTR'
 import Myntra from './pages/Myntra'
 import Meesho from './pages/Meesho'
@@ -45,6 +46,7 @@ export default function App() {
           <Route element={<ProtectedRoute />}>
             <Route path="/" element={<Layout />}>
               <Route index element={<Dashboard />} />
+              <Route path="upload"    element={<Upload />} />
               <Route path="mtr"       element={<MTR />} />
               <Route path="myntra"    element={<Myntra />} />
               <Route path="meesho"    element={<Meesho />} />

@@ -1,414 +1,505 @@
-import { useState, useCallback } from 'react'
-import { useDropzone } from 'react-dropzone'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import FileUpload from '../components/FileUpload'
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import {
-  uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
-  uploadFlipkart, uploadInventory, buildSales, getCoverage,
-  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
-} from '../api/client'
+  LineChart, Line, BarChart, Bar, XAxis, YAxis,
+  CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell,
+} from 'recharts'
+import api, { getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 
-type Toast = { type: 'success' | 'error'; msg: string }
+// ── Types ───────────────────────────────────────────────────────
+interface PlatformSummaryItem {
+  platform: string
+  loaded: boolean
+  total_units: number
+  total_returns: number
+  return_rate: number
+  top_sku: string
+  trend_direction: 'up' | 'down' | 'flat'
+  monthly: { month: string; shipments: number; refunds: number }[]
+  by_state: { state: string; units: number }[]
+}
+interface AnomalyItem {
+  type: string
+  severity: 'critical' | 'warning' | 'info'
+  platform: string
+  message: string
+  sku?: string
+}
+interface SalesSummary {
+  total_units: number
+  total_returns: number
+  net_units: number
+  return_rate: number
+  active_months: number
+}
+interface TopSku {
+  sku: string
+  units: number
+}
 
+// ── Constants ───────────────────────────────────────────────────
+const PLATFORM_COLORS: Record<string, string> = {
+  Amazon: '#002B5B',
+  Myntra: '#E91E63',
+  Meesho: '#9C27B0',
+  Flipkart: '#F7971D',
+}
+
+const SKU_COLORS = [
+  '#002B5B', '#1565C0', '#1976D2', '#1E88E5', '#2196F3',
+  '#42A5F5', '#64B5F6', '#0D47A1', '#0277BD', '#01579B',
+]
+
+// Fully spelled-out Tailwind classes — no dynamic interpolation
+const INTENSITY_CLASSES = [
+  'bg-gray-100 text-gray-400',
+  'bg-blue-100 text-blue-700',
+  'bg-blue-200 text-blue-800',
+  'bg-blue-400 text-white',
+  'bg-blue-700 text-white',
+]
+
+const INDIAN_STATES = [
+  'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh',
+  'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand',
+  'Karnataka', 'Kerala', 'Madhya Pradesh', 'Maharashtra', 'Manipur',
+  'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Punjab',
+  'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura',
+  'Uttar Pradesh', 'Uttarakhand', 'West Bengal', 'Delhi', 'Jammu & Kashmir',
+  'Ladakh', 'Puducherry', 'Chandigarh', 'Lakshadweep', 'Dadra & NH', 'Andaman & Nicobar',
+]
+
+// ── Helpers ─────────────────────────────────────────────────────
+function fmtMonth(m: string) {
+  try {
+    const [y, mon] = m.split('-')
+    return new Date(+y, +mon - 1).toLocaleString('default', { month: 'short', year: '2-digit' })
+  } catch { return m }
+}
+
+function mergePlatformMonthly(platforms: PlatformSummaryItem[]) {
+  const monthMap: Record<string, Record<string, number>> = {}
+  for (const p of platforms) {
+    if (!p.loaded) continue
+    for (const row of p.monthly) {
+      if (!monthMap[row.month]) monthMap[row.month] = {}
+      monthMap[row.month][p.platform] = row.shipments
+    }
+  }
+  return Object.entries(monthMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([month, vals]) => ({ month: fmtMonth(month), ...vals }))
+}
+
+function getIntensityClass(units: number, max: number) {
+  if (max === 0 || units === 0) return INTENSITY_CLASSES[0]
+  const ratio = units / max
+  if (ratio < 0.1) return INTENSITY_CLASSES[1]
+  if (ratio < 0.3) return INTENSITY_CLASSES[2]
+  if (ratio < 0.6) return INTENSITY_CLASSES[3]
+  return INTENSITY_CLASSES[4]
+}
+
+// ── Main Dashboard ──────────────────────────────────────────────
 export default function Dashboard() {
   const setCoverage = useSession((s) => s.setCoverage)
-  const coverage    = useSession()
-  const qc          = useQueryClient()
+  const [timeFilter, setTimeFilter] = useState<'1m' | '3m' | '6m'>('3m')
+  const [deepDiveTab, setDeepDiveTab] = useState<'Amazon' | 'Myntra' | 'Meesho' | 'Flipkart'>('Amazon')
+  const [heatmapPlatform, setHeatmapPlatform] = useState('Myntra')
 
-  const [toast, setToast]           = useState<Toast | null>(null)
-  const [loading, setLoading]       = useState<Record<string, boolean>>({})
-  const [buildingMsg, setBuildingMsg] = useState('')
-
-  useQuery({
+  const { data: coverage } = useQuery({
     queryKey: ['coverage'],
     queryFn: async () => { const c = await getCoverage(); setCoverage(c); return c },
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   })
 
-  const showToast = (type: 'success' | 'error', msg: string) => {
-    setToast({ type, msg })
-    setTimeout(() => setToast(null), 5000)
-  }
+  const { data: salesSummary, isLoading: loadingSales } = useQuery<SalesSummary>({
+    queryKey: ['sales-summary', 3],
+    queryFn: async () => { const { data } = await api.get('/data/sales-summary?months=3'); return data },
+    staleTime: 5 * 60 * 1000,
+  })
 
-  const setL = (key: string, v: boolean) => setLoading(prev => ({ ...prev, [key]: v }))
+  const { data: topSkusRaw, isLoading: loadingSkus } = useQuery<TopSku[]>({
+    queryKey: ['top-skus', 10],
+    queryFn: async () => { const { data } = await api.get('/data/top-skus?limit=10'); return data },
+    staleTime: 5 * 60 * 1000,
+  })
 
-  const refresh = async () => { const c = await getCoverage(); setCoverage(c); qc.invalidateQueries() }
+  const { data: platformSummary, isLoading: loadingPlatforms } = useQuery<PlatformSummaryItem[]>({
+    queryKey: ['platform-summary'],
+    queryFn: async () => { const { data } = await api.get('/data/platform-summary'); return data },
+    staleTime: 5 * 60 * 1000,
+  })
 
-  const handle = (key: string, fn: (file: File) => Promise<{ ok: boolean; message: string }>) => async (file: File) => {
-    setL(key, true)
-    try {
-      const res = await fn(file)
-      if (res.ok) { showToast('success', res.message); await refresh() }
-      else showToast('error', res.message)
-    } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : 'Upload failed')
-    } finally { setL(key, false) }
-  }
+  const { data: anomalies, isLoading: loadingAnomalies } = useQuery<AnomalyItem[]>({
+    queryKey: ['anomalies'],
+    queryFn: async () => { const { data } = await api.get('/data/anomalies'); return data },
+    staleTime: 2 * 60 * 1000,
+  })
 
-  const handleBuildSales = async () => {
-    setL('build', true)
-    setBuildingMsg('Building combined sales dataset…')
-    try {
-      const res = await buildSales()
-      if (res.ok) { showToast('success', res.message); await refresh() }
-      else showToast('error', res.message)
-    } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : 'Build failed')
-    } finally { setL('build', false); setBuildingMsg('') }
-  }
+  const platforms = platformSummary ?? []
+  const activePlatforms = platforms.filter(p => p.loaded).length
+  const totalUnits = salesSummary?.total_units ?? 0
+  const totalReturns = salesSummary?.total_returns ?? 0
+  const netUnits = salesSummary?.net_units ?? 0
+  const returnRate = salesSummary?.return_rate ?? 0
 
-  const [dailyDetected, setDailyDetected] = useState<string[]>([])
+  // Sliced monthly data based on filter
+  const monthsToShow = timeFilter === '1m' ? 1 : timeFilter === '3m' ? 3 : 6
+  const slicedPlatforms = platforms.map(p => ({
+    ...p,
+    monthly: p.monthly.slice(-monthsToShow),
+  }))
+  const chartData = mergePlatformMonthly(slicedPlatforms)
 
-  const handleDailyAuto = async (files: File[]) => {
-    setL('daily', true)
-    try {
-      const res = await uploadDailyAuto(files)
-      if (res.ok) {
-        setDailyDetected(res.detected_platforms ?? [])
-        showToast('success', res.message)
-        await refresh()
-      } else {
-        showToast('error', res.message)
-      }
-    } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : 'Upload failed')
-    } finally { setL('daily', false) }
-  }
+  // Heatmap data
+  const heatmapData = platforms.find(p => p.platform === heatmapPlatform)?.by_state ?? []
+  const stateMap: Record<string, number> = {}
+  for (const s of heatmapData) stateMap[s.state] = s.units
+  const maxUnits = Math.max(...heatmapData.map(s => s.units), 0)
 
-  const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
+  // Deep dive
+  const deepPlatform = platforms.find(p => p.platform === deepDiveTab)
+  const deepChartData = (deepPlatform?.monthly ?? []).map(r => ({
+    month: fmtMonth(r.month),
+    shipments: r.shipments,
+    refunds: r.refunds,
+  }))
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-[#002B5B]">📊 Dashboard</h2>
-        <p className="text-gray-500 text-sm mt-1">Upload your data files to get started.</p>
-      </div>
-
-      {/* Toast */}
-      {toast && (
-        <div className={`fixed top-4 right-4 z-50 rounded-lg px-5 py-3 shadow-lg text-sm text-white max-w-sm
-          ${toast.type === 'success' ? 'bg-green-600' : 'bg-red-600'}`}>
-          {toast.msg}
-        </div>
-      )}
-
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <KpiCard label="SKU Mapping"  value={coverage.sku_mapping ? '✅ Loaded' : '— Not loaded'} />
-        <KpiCard label="MTR Rows"     value={coverage.mtr_rows > 0 ? coverage.mtr_rows.toLocaleString() : '—'} />
-        <KpiCard label="Sales Rows"   value={coverage.sales_rows > 0 ? coverage.sales_rows.toLocaleString() : '—'} />
-        <KpiCard label="Platforms"    value={[
-          coverage.myntra && 'Myntra',
-          coverage.meesho && 'Meesho',
-          coverage.flipkart && 'Flipkart',
-        ].filter(Boolean).join(', ') || '—'} />
-      </div>
-
-      {/* Tier 1 — Required */}
-      <Section title="Tier 1 — Required">
-        <UploadCard title="1️⃣ SKU Mapping" subtitle="Upload Excel (.xlsx)" loaded={coverage.sku_mapping}>
-          <FileUpload
-            label="Upload .xlsx"
-            accept={{ 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }}
-            onUpload={handle('sku', (file: File) => uploadSkuMapping(file))}
-            uploading={loading['sku']}
-          />
-        </UploadCard>
-
-        <UploadCard title="2️⃣ Amazon MTR" subtitle="Historical ZIP (all months)" loaded={coverage.mtr}>
-          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <FileUpload
-            label="Upload .zip"
-            accept={{ 'application/zip': ['.zip'] }}
-            onUpload={handle('mtr', (file: File) => uploadMtr(file))}
-            uploading={loading['mtr']}
-          />
-        </UploadCard>
-      </Section>
-
-      {/* Tier 1 — Platforms */}
-      <Section title="Tier 1 — Platform History">
-        <UploadCard title="🛍️ Myntra PPMP" subtitle="Master ZIP (all months)" loaded={coverage.myntra}>
-          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <FileUpload
-            label="Upload .zip"
-            accept={{ 'application/zip': ['.zip'] }}
-            onUpload={handle('myntra', (file: File) => uploadMyntra(file))}
-            uploading={loading['myntra']}
-          />
-        </UploadCard>
-
-        <UploadCard title="🛒 Meesho" subtitle="Master ZIP (all months)" loaded={coverage.meesho}>
-          <FileUpload
-            label="Upload .zip"
-            accept={{ 'application/zip': ['.zip'] }}
-            onUpload={handle('meesho', (file: File) => uploadMeesho(file))}
-            uploading={loading['meesho']}
-          />
-        </UploadCard>
-
-        <UploadCard title="🟡 Flipkart" subtitle="Master ZIP (all months)" loaded={coverage.flipkart}>
-          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <FileUpload
-            label="Upload .zip"
-            accept={{ 'application/zip': ['.zip'] }}
-            onUpload={handle('flipkart', (file: File) => uploadFlipkart(file))}
-            uploading={loading['flipkart']}
-          />
-        </UploadCard>
-
-        <UploadCard title="📦 Inventory" subtitle="Upload OMS + platform CSVs" loaded={coverage.inventory}>
-          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <InventoryUploader
-            skuLoaded={coverage.sku_mapping}
-            uploading={loading['inv']}
-            onUpload={async (files) => {
-              setL('inv', true)
-              try {
-                const res = await uploadInventory(files)
-                if (res.ok) { showToast('success', res.message); await refresh() }
-                else showToast('error', res.message)
-              } catch (e: unknown) {
-                showToast('error', e instanceof Error ? e.message : 'Upload failed')
-              } finally { setL('inv', false) }
-            }}
-          />
-        </UploadCard>
-      </Section>
-
-      {/* Tier 2 — Amazon Individual CSVs + Existing PO */}
-      <Section title="Tier 2 — Amazon Orders & PO Pipeline">
-        <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false}>
-          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <FileUpload
-            label="Upload MTR .csv"
-            accept={{ 'text/csv': ['.csv'] }}
-            onUpload={handle('b2c', (file: File) => uploadAmazonB2C(file))}
-            uploading={loading['b2c']}
-          />
-        </UploadCard>
-
-        <UploadCard title="📋 Amazon B2B CSV" subtitle="Single-month B2B report CSV" loaded={false}>
-          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <FileUpload
-            label="Upload B2B .csv"
-            accept={{ 'text/csv': ['.csv'] }}
-            onUpload={handle('b2b', (file: File) => uploadAmazonB2B(file))}
-            uploading={loading['b2b']}
-          />
-        </UploadCard>
-
-        <UploadCard title="📦 Existing PO Sheet" subtitle="Open/pending POs (XLSX or CSV)" loaded={coverage.existing_po}>
-          <FileUpload
-            label="Upload PO Sheet"
-            accept={{
-              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-              'text/csv': ['.csv'],
-            }}
-            onUpload={handle('existingpo', (file: File) => uploadExistingPO(file))}
-            uploading={loading['existingpo']}
-          />
-        </UploadCard>
-      </Section>
-
-      {/* Tier 3 — Daily Orders */}
-      <Section title="Tier 3 — Daily Orders (auto-detect)">
-        <div className="col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-3">
-          <div>
-            <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily Order Upload</h3>
-            <p className="text-xs text-gray-400">
-              Drop <strong>any mix</strong> of daily report files — platform is auto-detected from each file.
-              Accepted: Amazon MTR/FBA CSV, Myntra PPMP CSV, Meesho CSV or ZIP, Flipkart Sales Report or Payment XLSX.
-              Sales dataset is rebuilt automatically after upload.
-            </p>
-          </div>
-          <DailyDropzone
-            uploading={loading['daily']}
-            onUpload={handleDailyAuto}
-          />
-          {dailyDetected.length > 0 && (
-            <p className="text-xs text-green-600">
-              ✓ Last upload detected: {dailyDetected.map(d => d.split('(')[0].trim()).join(', ')}
-            </p>
-          )}
-          {coverage.daily_orders && (
-            <p className="text-xs text-blue-600">Daily orders loaded ✓ — included in sales dataset.</p>
-          )}
-        </div>
-      </Section>
-
-      {/* Build Sales */}
-      {anyLoaded && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5 flex items-center justify-between">
-          <div>
-            <h3 className="font-semibold text-[#002B5B]">🔄 Build Combined Sales Dataset</h3>
-            <p className="text-sm text-gray-400 mt-0.5">
-              Merges MTR + Myntra + Meesho + Flipkart into a single deduplicated sales_df.
-              {coverage.sales && ` (${coverage.sales_rows.toLocaleString()} rows currently loaded)`}
-            </p>
-            {buildingMsg && <p className="text-xs text-blue-600 mt-1">{buildingMsg}</p>}
-          </div>
-          <button
-            onClick={handleBuildSales}
-            disabled={loading['build']}
-            className="ml-4 px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50 shrink-0"
-          >
-            {loading['build'] ? 'Building…' : coverage.sales ? '↻ Rebuild' : 'Build Sales'}
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Sub-components ─────────────────────────────────────────────
-
-function KpiCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-white rounded-xl border-l-4 border-[#002B5B] border border-gray-200 p-4 shadow-sm">
-      <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">{label}</p>
-      <p className="text-lg font-bold text-gray-800 mt-0.5 truncate">{value}</p>
-    </div>
-  )
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">{title}</h3>
-      <div className="grid grid-cols-2 gap-4">{children}</div>
-    </div>
-  )
-}
-
-function UploadCard({
-  title, subtitle, loaded, children,
-}: { title: string; subtitle: string; loaded: boolean; children: React.ReactNode }) {
-  return (
-    <div className={`bg-white rounded-xl border p-5 space-y-3 shadow-sm ${loaded ? 'border-green-300' : 'border-gray-200'}`}>
-      <div className="flex items-start justify-between">
+    <div className="max-w-7xl mx-auto space-y-6">
+      {/* ── Header ── */}
+      <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
-          <h3 className="font-semibold text-[#002B5B] text-sm">{title}</h3>
-          <p className="text-xs text-gray-400">{subtitle}</p>
+          <h2 className="text-2xl font-bold text-[#002B5B]">📊 Intelligence Dashboard</h2>
+          <p className="text-gray-500 text-sm mt-1">Real-time cross-platform analytics &amp; insights</p>
         </div>
-        {loaded && <span className="text-green-600 text-xs font-medium bg-green-50 px-2 py-0.5 rounded-full">✓ Loaded</span>}
+        <div className="flex flex-wrap gap-2">
+          {(['Amazon', 'Myntra', 'Meesho', 'Flipkart'] as const).map(name => {
+            const p = platforms.find(x => x.platform === name)
+            const loaded = p?.loaded ?? false
+            return (
+              <span
+                key={name}
+                className={`text-xs font-medium px-3 py-1 rounded-full border ${
+                  loaded
+                    ? 'bg-green-50 border-green-300 text-green-700'
+                    : 'bg-gray-50 border-gray-200 text-gray-400'
+                }`}
+              >
+                {loaded ? '● ' : '○ '}{name}
+              </span>
+            )
+          })}
+        </div>
       </div>
-      {children}
-    </div>
-  )
-}
 
-function Warn({ children }: { children: React.ReactNode }) {
-  return <p className="text-xs text-amber-600 bg-amber-50 rounded p-2">{children}</p>
-}
-
-function DailyDropzone({ uploading, onUpload }: {
-  uploading: boolean
-  onUpload: (files: File[]) => Promise<void>
-}) {
-  const [queued, setQueued] = useState<File[]>([])
-
-  const onDrop = useCallback((accepted: File[]) => {
-    setQueued(prev => {
-      const names = new Set(prev.map(f => f.name))
-      return [...prev, ...accepted.filter(f => !names.has(f.name))]
-    })
-  }, [])
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: {
-      'text/csv': ['.csv'],
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-      'application/zip': ['.zip'],
-    },
-    multiple: true,
-    disabled: uploading,
-  })
-
-  const remove = (name: string) => setQueued(prev => prev.filter(f => f.name !== name))
-
-  const submit = async () => {
-    if (!queued.length) return
-    await onUpload(queued)
-    setQueued([])
-  }
-
-  return (
-    <div className="space-y-2">
-      <div
-        {...getRootProps()}
-        className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors
-          ${isDragActive ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-gray-400 bg-white'}
-          ${uploading ? 'opacity-50 cursor-not-allowed' : ''}`}
-      >
-        <input {...getInputProps()} />
-        {uploading
-          ? <p className="text-sm text-blue-600 animate-pulse">Uploading & detecting…</p>
-          : isDragActive
-            ? <p className="text-sm text-blue-600">Drop files here</p>
-            : <p className="text-sm text-gray-500">
-                Drag & drop daily report files here, or{' '}
-                <span className="text-blue-600 underline">browse</span>
-                <br />
-                <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .zip — platform auto-detected</span>
-              </p>
-        }
+      {/* ── KPI Strip ── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <KpiCard label="Total Units Sold" value={loadingSales ? '…' : totalUnits.toLocaleString()} accent="#002B5B" />
+        <KpiCard label="Total Returns"    value={loadingSales ? '…' : totalReturns.toLocaleString()} accent="#EF4444" />
+        <KpiCard label="Return Rate"      value={loadingSales ? '…' : `${returnRate.toFixed(1)}%`} accent={returnRate > 30 ? '#EF4444' : returnRate > 15 ? '#F59E0B' : '#10B981'} />
+        <KpiCard label="Net Units"        value={loadingSales ? '…' : netUnits.toLocaleString()} accent="#10B981" />
+        <KpiCard label="Active Platforms" value={loadingPlatforms ? '…' : `${activePlatforms} / 4`} accent="#6366F1" />
       </div>
-      {queued.length > 0 && (
-        <div className="space-y-1">
-          {queued.map(f => (
-            <div key={f.name} className="flex items-center justify-between bg-gray-50 rounded px-3 py-1.5 text-xs">
-              <span className="text-gray-700 truncate max-w-xs">{f.name}</span>
-              <button onClick={() => remove(f.name)} className="text-gray-400 hover:text-red-500 ml-2 shrink-0">✕</button>
+
+      {/* ── Platform Comparison Row ── */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Platform Overview</h3>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {(['Amazon', 'Myntra', 'Meesho', 'Flipkart'] as const).map(name => {
+            const p = platforms.find(x => x.platform === name)
+            const color = PLATFORM_COLORS[name]
+            if (loadingPlatforms && !p) {
+              return (
+                <div key={name} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm animate-pulse">
+                  <div className="h-1.5 w-full" style={{ backgroundColor: color }} />
+                  <div className="p-4 space-y-2">
+                    <div className="h-4 bg-gray-200 rounded w-1/2" />
+                    <div className="h-8 bg-gray-200 rounded w-3/4" />
+                  </div>
+                </div>
+              )
+            }
+            const loaded = p?.loaded ?? false
+            const rr = p?.return_rate ?? 0
+            const rrColor = rr > 30 ? 'text-red-600' : rr > 15 ? 'text-amber-500' : 'text-green-600'
+            const trendIcon = p?.trend_direction === 'up' ? '↑' : p?.trend_direction === 'down' ? '↓' : '→'
+            const trendColor = p?.trend_direction === 'up' ? 'text-green-600' : p?.trend_direction === 'down' ? 'text-red-500' : 'text-gray-400'
+            return (
+              <div key={name} className={`bg-white rounded-xl border overflow-hidden shadow-sm relative ${loaded ? 'border-gray-200' : 'border-gray-100'}`}>
+                <div className="h-1.5 w-full" style={{ backgroundColor: color }} />
+                {!loaded && (
+                  <div className="absolute inset-0 top-1.5 bg-white/80 flex items-center justify-center">
+                    <span className="text-gray-400 text-xs font-medium">Not Loaded</span>
+                  </div>
+                )}
+                <div className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-gray-500">{name}</span>
+                    <span className={`text-lg font-bold ${trendColor}`}>{trendIcon}</span>
+                  </div>
+                  <p className="text-2xl font-bold text-gray-800">{(p?.total_units ?? 0).toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">units shipped</p>
+                  <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
+                    <span className={`text-sm font-semibold ${rrColor}`}>{rr.toFixed(1)}% return</span>
+                    {p?.top_sku && (
+                      <span className="text-xs text-gray-400 truncate max-w-[100px]" title={p.top_sku}>
+                        {p.top_sku}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ── Sales Trend + Anomalies ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Sales Trend Panel */}
+        <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-gray-700">Sales Trend by Platform</h3>
+            <div className="flex gap-1">
+              {(['1m', '3m', '6m'] as const).map(f => (
+                <button
+                  key={f}
+                  onClick={() => setTimeFilter(f)}
+                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                    timeFilter === f
+                      ? 'bg-[#002B5B] text-white'
+                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                  }`}
+                >
+                  {f === '1m' ? '1 Mo' : f === '3m' ? '3 Mo' : '6 Mo'}
+                </button>
+              ))}
             </div>
-          ))}
-          <button
-            onClick={submit}
-            disabled={uploading}
-            className="w-full mt-1 py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
-          >
-            {uploading ? 'Uploading…' : `⬆ Upload ${queued.length} file${queued.length > 1 ? 's' : ''}`}
-          </button>
+          </div>
+          {loadingPlatforms ? (
+            <div className="h-64 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
+          ) : chartData.length === 0 ? (
+            <div className="h-64 flex items-center justify-center text-gray-400 text-sm">
+              No data loaded — <a href="/upload" className="text-blue-600 ml-1 hover:underline">upload files</a>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={280}>
+              <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+                <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+                <Tooltip
+                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
+                  formatter={(val: number) => [val.toLocaleString(), '']}
+                />
+                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                {platforms.filter(p => p.loaded).map(p => (
+                  <Line
+                    key={p.platform}
+                    type="monotone"
+                    dataKey={p.platform}
+                    stroke={PLATFORM_COLORS[p.platform]}
+                    strokeWidth={2}
+                    dot={{ r: 3 }}
+                    activeDot={{ r: 5 }}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
         </div>
-      )}
+
+        {/* Anomaly Alerts */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm overflow-y-auto max-h-[380px]">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">⚡ Anomaly Alerts</h3>
+          {loadingAnomalies ? (
+            <div className="space-y-2">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="h-14 bg-gray-100 rounded-lg animate-pulse" />
+              ))}
+            </div>
+          ) : !anomalies || anomalies.length === 0 ? (
+            <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-lg p-3">
+              <span className="text-2xl">✅</span>
+              <div>
+                <p className="text-sm font-medium text-green-800">All Clear</p>
+                <p className="text-xs text-green-600">No anomalies detected</p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {anomalies.map((a, i) => {
+                const borderColor = a.severity === 'critical' ? 'border-red-400' : a.severity === 'warning' ? 'border-amber-400' : 'border-blue-400'
+                const bgColor = a.severity === 'critical' ? 'bg-red-50' : a.severity === 'warning' ? 'bg-amber-50' : 'bg-blue-50'
+                const badgeColor = a.severity === 'critical' ? 'bg-red-100 text-red-700' : a.severity === 'warning' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'
+                return (
+                  <div key={i} className={`border-l-4 ${borderColor} ${bgColor} rounded-r-lg p-3`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${badgeColor}`}>
+                        {a.severity.toUpperCase()}
+                      </span>
+                      <span className="text-xs text-gray-500">{a.platform}</span>
+                    </div>
+                    <p className="text-xs text-gray-700">{a.message}</p>
+                    {a.sku && (
+                      <code className="text-xs bg-white border border-gray-200 px-1.5 py-0.5 rounded mt-1 inline-block text-gray-600">
+                        {a.sku}
+                      </code>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Top SKUs + State Heatmap ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Top SKUs */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+          <h3 className="text-sm font-semibold text-gray-700 mb-4">🏆 Top 10 SKUs</h3>
+          {loadingSkus ? (
+            <div className="h-64 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
+          ) : !topSkusRaw || topSkusRaw.length === 0 ? (
+            <div className="h-64 flex items-center justify-center text-gray-400 text-sm">No SKU data</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart
+                data={topSkusRaw}
+                layout="vertical"
+                margin={{ top: 0, right: 20, left: 0, bottom: 0 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F3F4F6" />
+                <XAxis type="number" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+                <YAxis
+                  type="category"
+                  dataKey="sku"
+                  width={140}
+                  tick={{ fontSize: 10, fill: '#4B5563' }}
+                />
+                <Tooltip
+                  contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                  formatter={(val: number) => [val.toLocaleString(), 'Units']}
+                />
+                <Bar dataKey="units" radius={[0, 4, 4, 0]}>
+                  {topSkusRaw.map((_, index) => (
+                    <Cell key={index} fill={SKU_COLORS[index % SKU_COLORS.length]} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {/* State Heatmap */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-gray-700">🗺️ Geographic Distribution</h3>
+            <select
+              value={heatmapPlatform}
+              onChange={e => setHeatmapPlatform(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-300"
+            >
+              {['Myntra', 'Meesho', 'Flipkart'].map(p => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          </div>
+
+          {loadingPlatforms ? (
+            <div className="h-48 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-4 sm:grid-cols-6 gap-1 mb-3">
+                {INDIAN_STATES.map(state => {
+                  const units = stateMap[state] ?? 0
+                  const cls = getIntensityClass(units, maxUnits)
+                  return (
+                    <div
+                      key={state}
+                      className={`rounded text-center py-1 px-0.5 text-[9px] font-medium leading-tight truncate ${cls}`}
+                      title={`${state}: ${units.toLocaleString()} units`}
+                    >
+                      {state.length > 8 ? state.slice(0, 7) + '…' : state}
+                    </div>
+                  )
+                })}
+              </div>
+              {/* Legend */}
+              <div className="flex items-center gap-2 mt-2">
+                <span className="text-xs text-gray-400">Intensity:</span>
+                {['0', 'Low', 'Mid', 'High', 'Peak'].map((label, i) => (
+                  <div key={label} className="flex items-center gap-1">
+                    <div className={`w-3 h-3 rounded ${INTENSITY_CLASSES[i].split(' ')[0]}`} />
+                    <span className="text-xs text-gray-500">{label}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ── Platform Deep Dive ── */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h3 className="text-sm font-semibold text-gray-700">🔍 Platform Deep Dive</h3>
+          <div className="flex border-b border-gray-200">
+            {(['Amazon', 'Myntra', 'Meesho', 'Flipkart'] as const).map(name => (
+              <button
+                key={name}
+                onClick={() => setDeepDiveTab(name)}
+                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                  deepDiveTab === name
+                    ? 'border-b-2 border-[#002B5B] text-[#002B5B] -mb-px'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {!deepPlatform?.loaded ? (
+          <div className="h-48 flex flex-col items-center justify-center gap-2 text-gray-400">
+            <span className="text-3xl">📭</span>
+            <p className="text-sm">No {deepDiveTab} data loaded</p>
+            <a href="/upload" className="text-xs text-blue-600 hover:underline">Go to Upload →</a>
+          </div>
+        ) : deepChartData.length === 0 ? (
+          <div className="h-48 flex items-center justify-center text-gray-400 text-sm">No monthly data available</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={deepChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+              <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+              <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+              <Tooltip
+                contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
+                formatter={(val: number) => [val.toLocaleString(), '']}
+              />
+              <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="shipments" name="Shipments" fill={PLATFORM_COLORS[deepDiveTab]} radius={[3, 3, 0, 0]} />
+              <Bar dataKey="refunds"   name="Refunds"   fill="#F87171" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </div>
     </div>
   )
 }
 
-function InventoryUploader({
-  skuLoaded, uploading, onUpload,
-}: {
-  skuLoaded: boolean
-  uploading: boolean
-  onUpload: (files: { oms?: File; fk?: File; myntra?: File; amz?: File }) => Promise<void>
-}) {
-  const [files, setFiles] = useState<{ oms?: File; fk?: File; myntra?: File; amz?: File }>({})
-  const set = (key: keyof typeof files) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFiles(prev => ({ ...prev, [key]: e.target.files?.[0] }))
-  }
-  const hasAny = Object.values(files).some(Boolean)
-
+// ── Sub-components ──────────────────────────────────────────────
+function KpiCard({ label, value, accent }: { label: string; value: string; accent: string }) {
   return (
-    <div className="space-y-2">
-      {(['oms', 'fk', 'myntra', 'amz'] as const).map(k => (
-        <div key={k} className="flex items-center gap-2">
-          <label className="text-xs text-gray-500 w-16 shrink-0">{k.toUpperCase()}</label>
-          <input
-            type="file" accept=".csv"
-            onChange={set(k)}
-            className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100"
-          />
-        </div>
-      ))}
-      <button
-        onClick={() => onUpload(files)}
-        disabled={!hasAny || !skuLoaded || uploading}
-        className="w-full mt-1 py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
-      >
-        {uploading ? 'Uploading…' : 'Upload Inventory'}
-      </button>
+    <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm" style={{ borderLeftColor: accent, borderLeftWidth: 4 }}>
+      <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide leading-tight">{label}</p>
+      <p className="text-xl font-bold text-gray-800 mt-1 truncate">{value}</p>
     </div>
   )
 }
