@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { api } from '../api/client'
 
 interface PORow {
@@ -45,8 +45,7 @@ interface QuarterlyResult {
 
 const PO_DISPLAY_COLS = [
   'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
-  'Sold_Units', 'Return_Units', 'ADS',
-  'Gross_PO_Qty', 'PO_Pipeline_Total', 'PO_Qty',
+  'Sold_Units', 'ADS', 'Gross_PO_Qty', 'PO_Pipeline_Total', 'PO_Qty',
 ]
 
 const PRIORITY_ORDER: Record<string, number> = {
@@ -63,8 +62,8 @@ const STATUS_COLORS: Record<string, string> = {
 type Tab = 'po' | 'quarterly'
 
 export default function POEngine() {
-  const [activeTab, setActiveTab]   = useState<Tab>('po')
-  const [params, setParams]         = useState({
+  const [activeTab, setActiveTab]     = useState<Tab>('po')
+  const [params, setParams]           = useState({
     period_days:     90,
     lead_time:       30,
     target_days:     60,
@@ -75,19 +74,30 @@ export default function POEngine() {
     grace_days:      7,
     safety_pct:      20,
   })
-  const [result, setResult]         = useState<POResult | null>(null)
-  const [quarterly, setQuarterly]   = useState<QuarterlyResult | null>(null)
-  const [loading, setLoading]       = useState(false)
-  const [qLoading, setQLoading]     = useState(false)
-  const [search, setSearch]         = useState('')
-  const [qSearch, setQSearch]       = useState('')
+  const [result, setResult]           = useState<POResult | null>(null)
+  const [quarterly, setQuarterly]     = useState<QuarterlyResult | null>(null)
+  const [loading, setLoading]         = useState(false)
+  const [search, setSearch]           = useState('')
   const [sortByPriority, setSortByPriority] = useState(true)
+  const [editedQty, setEditedQty]     = useState<Record<string, number>>({})
+  const [selected, setSelected]       = useState<Set<string>>(new Set())
+  const [raiseModal, setRaiseModal]   = useState(false)
+  const [qSearch, setQSearch]         = useState('')
 
+  // ── Calculate PO + quarterly in parallel ──
   const run = async () => {
     setLoading(true)
+    setEditedQty({})
+    setSelected(new Set())
     try {
-      const { data } = await api.post<POResult>('/po/calculate', params)
-      setResult(data)
+      const [poRes, qRes] = await Promise.all([
+        api.post<POResult>('/po/calculate', params),
+        api.get<QuarterlyResult>('/po/quarterly', {
+          params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
+        }),
+      ])
+      setResult(poRes.data)
+      setQuarterly(qRes.data)
     } catch (e: unknown) {
       setResult({ ok: false, message: e instanceof Error ? e.message : 'Error' })
     } finally {
@@ -95,21 +105,28 @@ export default function POEngine() {
     }
   }
 
-  const loadQuarterly = async () => {
-    setQLoading(true)
-    try {
-      const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
-        params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
-      })
-      setQuarterly(data)
-    } catch {
-      setQuarterly({ loaded: false })
-    } finally {
-      setQLoading(false)
-    }
-  }
+  // ── Quarterly columns (non-metadata) ──
+  const qCols = quarterly?.columns ?? []
+  const quarterCols = useMemo(() =>
+    qCols.filter(c => !['OMS_SKU','Avg_Monthly','ADS','Units_90d','Units_30d','Freq_30d','Status'].includes(c)),
+    [qCols]
+  )
 
-  // PO tab
+  // ── Quarter lookup map ──
+  const quarterMap = useMemo(() => {
+    const map: Record<string, Record<string, number | string>> = {}
+    for (const row of quarterly?.rows ?? []) {
+      map[String(row.OMS_SKU)] = {}
+      for (const c of quarterCols) {
+        map[String(row.OMS_SKU)][c] = Number(row[c] ?? 0)
+      }
+      map[String(row.OMS_SKU)]['Status'] = row['Status'] as string
+      map[String(row.OMS_SKU)]['Avg_Monthly'] = Number(row['Avg_Monthly'] ?? 0)
+    }
+    return map
+  }, [quarterly, quarterCols])
+
+  // ── PO tab rows ──
   const allRows = result?.rows ?? []
   const filtered = allRows.filter(r =>
     !search || String(r['OMS_SKU'] ?? '').toLowerCase().includes(search.toLowerCase())
@@ -125,14 +142,46 @@ export default function POEngine() {
   const high         = allRows.filter(r => r['Priority'] === '🟡 HIGH').length
   const medium       = allRows.filter(r => r['Priority'] === '🟢 MEDIUM').length
   const pipeline     = allRows.filter(r => r['Priority'] === '🔄 In Pipeline').length
-  const totalPOUnits = allRows.reduce((s, r) => s + (Number(r['PO_Qty']) || 0), 0)
+  const totalPOUnits = allRows.reduce((s, r) => {
+    const sku = String(r['OMS_SKU'])
+    const qty = editedQty[sku] !== undefined ? editedQty[sku] : Number(r['PO_Qty'] || 0)
+    return s + qty
+  }, 0)
 
-  // Quarterly tab
-  const qAllRows    = quarterly?.rows ?? []
-  const qCols       = quarterly?.columns ?? []
-  const quarterCols = qCols.filter(c =>
-    !['OMS_SKU', 'Avg_Monthly', 'ADS', 'Units_90d', 'Units_30d', 'Freq_30d', 'Status'].includes(c)
-  )
+  // ── Selection helpers ──
+  const visibleSkus = rows.map(r => String(r['OMS_SKU']))
+  const allVisibleSelected = visibleSkus.length > 0 && visibleSkus.every(s => selected.has(s))
+  const someSelected = selected.size > 0
+
+  const toggleRow = (sku: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      next.has(sku) ? next.delete(sku) : next.add(sku)
+      return next
+    })
+  }
+  const toggleAll = () => {
+    if (allVisibleSelected) {
+      setSelected(prev => { const n = new Set(prev); visibleSkus.forEach(s => n.delete(s)); return n })
+    } else {
+      setSelected(prev => new Set([...prev, ...visibleSkus]))
+    }
+  }
+
+  // ── Selected rows for raise PO ──
+  const selectedRows = allRows
+    .filter(r => selected.has(String(r['OMS_SKU'])))
+    .map(r => {
+      const sku = String(r['OMS_SKU'])
+      const finalQty = editedQty[sku] !== undefined ? editedQty[sku] : Number(r['PO_Qty'] || 0)
+      return { ...r, Final_PO_Qty: finalQty }
+    })
+    .filter(r => r.Final_PO_Qty > 0)
+
+  const totalRaiseUnits = selectedRows.reduce((s, r) => s + r.Final_PO_Qty, 0)
+
+  // ── Quarterly tab rows ──
+  const qAllRows  = quarterly?.rows ?? []
   const qFiltered = qAllRows.filter(r =>
     !qSearch || String(r['OMS_SKU'] ?? '').toLowerCase().includes(qSearch.toLowerCase())
   )
@@ -141,7 +190,7 @@ export default function POEngine() {
     <div className="p-6 space-y-6">
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">🎯 PO Engine</h2>
-        <p className="text-gray-400 text-sm mt-1">Calculate purchase orders based on sales velocity and inventory.</p>
+        <p className="text-gray-400 text-sm mt-1">Calculate purchase orders with quarterly history inline.</p>
       </div>
 
       {/* Tabs */}
@@ -163,6 +212,7 @@ export default function POEngine() {
       {/* ── PO Recommendation Tab ── */}
       {activeTab === 'po' && (
         <>
+          {/* Parameters */}
           <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
             <h3 className="font-semibold text-[#002B5B] mb-4">Parameters</h3>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -205,28 +255,22 @@ export default function POEngine() {
             </div>
 
             <div className="flex items-center gap-6 mt-4 flex-wrap">
-              <Toggle
-                label="YoY Seasonality"
-                checked={params.use_seasonality}
-                onChange={v => setParams(p => ({ ...p, use_seasonality: v }))}
-              />
+              <Toggle label="YoY Seasonality" checked={params.use_seasonality}
+                onChange={v => setParams(p => ({ ...p, use_seasonality: v }))} />
               {params.use_seasonality && (
                 <Param label={`Seasonal Weight (${Math.round(params.seasonal_weight * 100)}%)`} type="range"
                   value={params.seasonal_weight} min={0} max={1} step={0.05}
                   onChange={v => setParams(p => ({ ...p, seasonal_weight: +v }))} />
               )}
-              <Toggle
-                label="Group by Parent SKU"
-                checked={params.group_by_parent}
-                onChange={v => setParams(p => ({ ...p, group_by_parent: v }))}
-              />
+              <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
+                onChange={v => setParams(p => ({ ...p, group_by_parent: v }))} />
             </div>
 
             <button
               onClick={run} disabled={loading}
               className="mt-5 px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
             >
-              {loading ? 'Calculating…' : '🎯 Calculate PO'}
+              {loading ? '⏳ Calculating…' : '🎯 Calculate PO'}
             </button>
 
             {result && !result.ok && (
@@ -236,6 +280,7 @@ export default function POEngine() {
 
           {result?.ok && allRows.length > 0 && (
             <>
+              {/* KPI Strip */}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <KpiCard label="🔴 URGENT"      value={urgent}       accent="border-l-red-500" />
                 <KpiCard label="🟡 HIGH"        value={high}         accent="border-l-yellow-400" />
@@ -244,6 +289,7 @@ export default function POEngine() {
                 <KpiCard label="Total PO Units" value={totalPOUnits} accent="border-l-[#002B5B]" />
               </div>
 
+              {/* Toolbar */}
               <div className="flex items-center gap-3 flex-wrap">
                 <input
                   value={search} onChange={e => setSearch(e.target.value)}
@@ -252,66 +298,143 @@ export default function POEngine() {
                 />
                 <Toggle label="Sort by Priority" checked={sortByPriority} onChange={setSortByPriority} />
                 <span className="text-xs text-gray-400">{rows.length} SKUs</span>
-                <button
-                  onClick={() => downloadCsv(result.rows ?? [], result.columns ?? [])}
-                  className="ml-auto text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
-                >
-                  ⬇ Export CSV
-                </button>
+                {quarterCols.length > 0 && (
+                  <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded-full">
+                    ✓ {quarterCols.length} quarters loaded
+                  </span>
+                )}
+                <div className="ml-auto flex gap-2">
+                  {someSelected && (
+                    <button
+                      onClick={() => setRaiseModal(true)}
+                      className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 shadow-sm"
+                    >
+                      🚀 Raise PO ({selected.size} SKU{selected.size > 1 ? 's' : ''}, {totalRaiseUnits.toLocaleString()} units)
+                    </button>
+                  )}
+                  <button
+                    onClick={() => exportPOCsv(rows, editedQty, quarterCols, quarterMap)}
+                    className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+                  >
+                    ⬇ Export CSV
+                  </button>
+                </div>
               </div>
 
+              {/* Pipeline info banner */}
               <div className="flex items-center gap-2 text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg px-4 py-2">
                 <span>💡</span>
                 <span>
-                  <strong className="text-blue-700">🏭 In Production</strong> = units already ordered &amp; in pipeline (from your PO sheet).{' '}
-                  <strong>Gross PO Qty</strong> − <strong>In Production</strong> = <strong className="text-orange-600">PO Qty</strong> (net new order needed).
+                  <strong className="text-blue-700">🏭 In Production</strong> = units already ordered (from your PO sheet). {' '}
+                  <strong>Gross PO Qty</strong> − <strong>In Production</strong> = <strong className="text-orange-600">PO Qty</strong> (net new order). {' '}
+                  Edit <strong className="text-orange-600">PO Qty</strong> cells directly, then select SKUs and click <strong className="text-green-700">Raise PO</strong>.
                 </span>
               </div>
 
+              {/* ── Main Table ── */}
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-sm border-collapse">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
+                      {/* Checkbox */}
+                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-20">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          onChange={toggleAll}
+                          className="rounded cursor-pointer accent-[#002B5B]"
+                          title="Select all visible"
+                        />
+                      </th>
+                      {/* PO columns */}
                       {PO_DISPLAY_COLS.map(c => (
-                        <th key={c} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">
+                        <th key={c}
+                          className={`text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap
+                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-20 shadow-sm' : ''}`}
+                        >
                           {c === 'PO_Pipeline_Total'
                             ? <span className="flex items-center gap-1">🏭 In Production</span>
-                            : c.replace(/_/g, ' ')}
+                            : c === 'PO_Qty'
+                              ? <span className="text-orange-600">PO Qty ✏️</span>
+                              : c.replace(/_/g, ' ')}
                         </th>
                       ))}
+                      {/* Quarter history divider + columns */}
+                      {quarterCols.length > 0 && (
+                        <>
+                          <th className="px-2 py-3 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-indigo-100">
+                            ── QUARTERLY HISTORY ──
+                          </th>
+                          {quarterCols.map(c => (
+                            <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">
+                              {c}
+                            </th>
+                          ))}
+                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">
+                            Avg/Mo
+                          </th>
+                          <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50">
+                            Status
+                          </th>
+                        </>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.slice(0, 300).map((row, i) => {
+                    {rows.slice(0, 500).map((row, i) => {
+                      const sku      = String(row['OMS_SKU'])
                       const priority = String(row['Priority'] ?? '')
+                      const isSelected = selected.has(sku)
                       const rowBg =
-                        priority === '🔴 URGENT'      ? 'bg-red-50' :
-                        priority === '🟡 HIGH'        ? 'bg-yellow-50' :
-                        priority === '🟢 MEDIUM'      ? 'bg-amber-50' :
-                        priority === '🔄 In Pipeline' ? 'bg-blue-50' : ''
+                        isSelected
+                          ? 'bg-blue-50'
+                          : priority === '🔴 URGENT'      ? 'bg-red-50'
+                          : priority === '🟡 HIGH'        ? 'bg-yellow-50'
+                          : priority === '🟢 MEDIUM'      ? 'bg-amber-50'
+                          : priority === '🔄 In Pipeline' ? 'bg-blue-50/40'
+                          : ''
+
+                      const computedQty  = Number(row['PO_Qty'] ?? 0)
+                      const finalQty     = editedQty[sku] !== undefined ? editedQty[sku] : computedQty
+                      const qRow         = quarterMap[sku] ?? {}
+                      const status       = String(qRow['Status'] ?? '')
+                      const statusClass  = STATUS_COLORS[status] ?? 'text-gray-400 bg-gray-50'
+
                       return (
-                        <tr key={i} className={`border-b border-gray-100 hover:brightness-95 ${rowBg}`}>
+                        <tr key={i} className={`border-b border-gray-100 hover:brightness-[0.97] transition-colors ${rowBg}`}>
+                          {/* Checkbox */}
+                          <td className={`px-3 py-2 sticky left-0 z-10 ${isSelected ? 'bg-blue-50' : 'bg-white'}`}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleRow(sku)}
+                              className="rounded cursor-pointer accent-[#002B5B]"
+                            />
+                          </td>
+
+                          {/* PO Columns */}
                           {PO_DISPLAY_COLS.map(col => (
-                            <td key={col} className="px-4 py-2 whitespace-nowrap text-gray-700">
+                            <td key={col}
+                              className={`px-4 py-2 whitespace-nowrap text-gray-700
+                                ${col === 'OMS_SKU' ? 'sticky left-9 z-10 font-medium text-gray-900 ' + (isSelected ? 'bg-blue-50' : 'bg-white') + ' shadow-sm' : ''}`}
+                            >
                               {col === 'Priority'
-                                ? <span className="font-semibold text-xs">{row[col] ?? '⚪ OK'}</span>
+                                ? <PriorityBadge priority={priority} />
                                 : col === 'OMS_SKU'
-                                  ? <span className="font-medium text-gray-900">{row[col]}</span>
+                                  ? <span className="font-medium">{sku}</span>
                                   : col === 'PO_Pipeline_Total'
                                     ? Number(row[col] ?? 0) > 0
                                       ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
-                                          🏭 {Number(row[col]).toLocaleString()} already ordered
+                                          🏭 {Number(row[col]).toLocaleString()}
                                         </span>
                                       : <span className="text-gray-300">—</span>
                                     : col === 'PO_Qty'
-                                      ? <div className="flex flex-col">
-                                          <span className={`font-bold ${(row[col] ?? 0) > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
-                                            {row[col]}
-                                          </span>
-                                          {Number(row['PO_Pipeline_Total'] ?? 0) > 0 && Number(row[col] ?? 0) === 0 && (
-                                            <span className="text-xs text-blue-500 font-medium">covered by pipeline</span>
-                                          )}
-                                        </div>
+                                      ? <QtyInput
+                                          value={finalQty}
+                                          computed={computedQty}
+                                          onChange={v => setEditedQty(prev => ({ ...prev, [sku]: v }))}
+                                          onReset={() => setEditedQty(prev => { const n = {...prev}; delete n[sku]; return n })}
+                                        />
                                       : col === 'Days_Left'
                                         ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
                                         : typeof row[col] === 'number'
@@ -320,13 +443,38 @@ export default function POEngine() {
                               }
                             </td>
                           ))}
+
+                          {/* Quarterly columns */}
+                          {quarterCols.length > 0 && (
+                            <>
+                              <td className="px-2 py-2 bg-indigo-50 border-l border-r border-indigo-100" />
+                              {quarterCols.map(c => {
+                                const v = Number(qRow[c] ?? 0)
+                                return (
+                                  <td key={c} className="px-3 py-2 text-right whitespace-nowrap bg-indigo-50/50 border-r border-indigo-100/60">
+                                    {v > 0
+                                      ? <span className="font-medium text-indigo-700">{v.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>}
+                                  </td>
+                                )
+                              })}
+                              <td className="px-3 py-2 text-right whitespace-nowrap bg-indigo-50/50 border-r border-indigo-100/60 font-semibold text-indigo-800 text-xs">
+                                {qRow['Avg_Monthly'] ? Number(qRow['Avg_Monthly']).toFixed(1) : '—'}
+                              </td>
+                              <td className="px-3 py-2 whitespace-nowrap bg-indigo-50/50">
+                                {status
+                                  ? <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusClass}`}>{status}</span>
+                                  : <span className="text-gray-300">—</span>}
+                              </td>
+                            </>
+                          )}
                         </tr>
                       )
                     })}
                   </tbody>
                 </table>
-                {rows.length > 300 && (
-                  <p className="text-xs text-gray-400 text-center py-2">Showing 300 of {rows.length}</p>
+                {rows.length > 500 && (
+                  <p className="text-xs text-gray-400 text-center py-2">Showing 500 of {rows.length}</p>
                 )}
               </div>
             </>
@@ -339,18 +487,15 @@ export default function POEngine() {
         <>
           <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
             <div className="flex items-center gap-4 flex-wrap">
-              <Toggle
-                label="Group by Parent SKU"
-                checked={params.group_by_parent}
-                onChange={v => setParams(p => ({ ...p, group_by_parent: v }))}
-              />
+              <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
+                onChange={v => setParams(p => ({ ...p, group_by_parent: v }))} />
               <button
-                onClick={loadQuarterly} disabled={qLoading}
+                onClick={run} disabled={loading}
                 className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
               >
-                {qLoading ? 'Loading…' : '📊 Load Quarterly History'}
+                {loading ? 'Loading…' : '📊 Load Quarterly History'}
               </button>
-              {quarterly && !quarterly.loaded && !qLoading && (
+              {quarterly && !quarterly.loaded && !loading && (
                 <span className="text-sm text-red-500">No data — build Sales first.</span>
               )}
             </div>
@@ -443,7 +588,6 @@ export default function POEngine() {
                   <p className="text-xs text-gray-400 text-center py-2">Showing 500 of {qFiltered.length}</p>
                 )}
               </div>
-
               <p className="text-xs text-gray-400">
                 Quarterly totals = forward shipments only. Avg/Month = last 4 quarters ÷ 3. Daily Avg = last 90d ÷ 90.
               </p>
@@ -451,16 +595,128 @@ export default function POEngine() {
           )}
         </>
       )}
+
+      {/* ── Raise PO Modal ── */}
+      {raiseModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col">
+            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-[#002B5B]">🚀 Raise Purchase Order</h3>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  {selectedRows.length} SKU{selectedRows.length !== 1 ? 's' : ''} · {totalRaiseUnits.toLocaleString()} total units
+                </p>
+              </div>
+              <button onClick={() => setRaiseModal(false)} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+            </div>
+
+            <div className="overflow-auto flex-1 p-4">
+              {selectedRows.length === 0 ? (
+                <div className="text-center text-gray-400 py-8">
+                  No SKUs with PO Qty &gt; 0 in selection.
+                  <br /><span className="text-sm">Adjust quantities or include SKUs that need ordering.</span>
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="text-left px-3 py-2 font-semibold text-gray-600">SKU</th>
+                      <th className="text-left px-3 py-2 font-semibold text-gray-600">Priority</th>
+                      <th className="text-right px-3 py-2 font-semibold text-gray-600">Days Left</th>
+                      <th className="text-right px-3 py-2 font-semibold text-gray-600">ADS</th>
+                      <th className="text-right px-3 py-2 font-semibold text-orange-600">PO Qty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedRows.map((r, i) => (
+                      <tr key={i} className="border-b border-gray-100">
+                        <td className="px-3 py-2 font-medium text-gray-900">{r['OMS_SKU']}</td>
+                        <td className="px-3 py-2"><PriorityBadge priority={String(r['Priority'] ?? '')} /></td>
+                        <td className="px-3 py-2 text-right"><DaysLeftBadge days={Number(r['Days_Left'] ?? 999)} /></td>
+                        <td className="px-3 py-2 text-right text-gray-600">{Number(r['ADS'] ?? 0).toFixed(3)}</td>
+                        <td className="px-3 py-2 text-right font-bold text-orange-600">{r.Final_PO_Qty.toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-gray-50 border-t-2 border-gray-300">
+                      <td colSpan={4} className="px-3 py-2 font-semibold text-gray-700">Total</td>
+                      <td className="px-3 py-2 text-right font-bold text-orange-600 text-base">{totalRaiseUnits.toLocaleString()}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-gray-200 flex gap-3 justify-end">
+              <button
+                onClick={() => setRaiseModal(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              {selectedRows.length > 0 && (
+                <button
+                  onClick={() => { exportRaisePO(selectedRows); setRaiseModal(false) }}
+                  className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700"
+                >
+                  ⬇ Export & Confirm PO
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Helpers ───────────────────────────────────────────────────
+// ── Sub-components ──────────────────────────────────────────────
+
+function PriorityBadge({ priority }: { priority: string }) {
+  return <span className="font-semibold text-xs whitespace-nowrap">{priority || '⚪ OK'}</span>
+}
 
 function DaysLeftBadge({ days }: { days: number }) {
   if (days >= 999) return <span className="text-gray-400">∞</span>
   const color = days < 14 ? 'text-red-600 font-bold' : days < 30 ? 'text-yellow-600 font-semibold' : 'text-gray-700'
-  return <span className={color}>{days}</span>
+  return <span className={color}>{Math.round(days)}</span>
+}
+
+function QtyInput({
+  value, computed, onChange, onReset,
+}: {
+  value: number
+  computed: number
+  onChange: (v: number) => void
+  onReset: () => void
+}) {
+  const isEdited = value !== computed
+  return (
+    <div className="flex items-center gap-1 min-w-[90px]">
+      <input
+        type="number"
+        value={value}
+        min={0}
+        step={5}
+        onChange={e => onChange(Math.max(0, Math.round(+e.target.value / 5) * 5))}
+        className={`w-20 border rounded px-2 py-1 text-xs text-right font-bold focus:outline-none focus:ring-1
+          ${isEdited
+            ? 'border-orange-400 bg-orange-50 text-orange-700 ring-orange-300 focus:ring-orange-400'
+            : 'border-gray-300 bg-white text-orange-600 focus:ring-blue-300'
+          }`}
+      />
+      {isEdited && (
+        <button
+          onClick={onReset}
+          title={`Reset to ${computed}`}
+          className="text-gray-300 hover:text-gray-500 text-sm leading-none"
+        >
+          ↩
+        </button>
+      )}
+    </div>
+  )
 }
 
 function KpiCard({ label, value, accent }: { label: string; value: number; accent?: string }) {
@@ -500,19 +756,49 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
   )
 }
 
-function downloadCsv(rows: PORow[], columns: string[]) {
-  const cols = columns.length ? columns : PO_DISPLAY_COLS
+// ── Export helpers ──────────────────────────────────────────────
+
+function exportPOCsv(
+  rows: PORow[],
+  editedQty: Record<string, number>,
+  quarterCols: string[],
+  quarterMap: Record<string, Record<string, number | string>>,
+) {
+  const base = PO_DISPLAY_COLS
+  const all  = [...base, ...quarterCols]
+  const header = all.join(',')
+  const body = rows.map(r => {
+    const sku = String(r['OMS_SKU'])
+    const qRow = quarterMap[sku] ?? {}
+    return all.map(c => {
+      if (c === 'PO_Qty') {
+        const v = editedQty[sku] !== undefined ? editedQty[sku] : Number(r[c] ?? 0)
+        return JSON.stringify(v)
+      }
+      if (quarterCols.includes(c)) return JSON.stringify(qRow[c] ?? 0)
+      return JSON.stringify(r[c] ?? '')
+    }).join(',')
+  }).join('\n')
+  trigger(header + '\n' + body, 'po_recommendation.csv')
+}
+
+function exportRaisePO(rows: Array<PORow & { Final_PO_Qty: number }>) {
+  const cols  = ['OMS_SKU', 'Priority', 'Days_Left', 'ADS', 'Gross_PO_Qty', 'PO_Pipeline_Total', 'Final_PO_Qty']
   const header = cols.join(',')
-  const body = rows.map(r => cols.map(c => JSON.stringify(r[c] ?? '')).join(',')).join('\n')
-  const blob = new Blob([header + '\n' + body], { type: 'text/csv' })
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
-  a.download = 'po_recommendation.csv'; a.click()
+  const body = rows.map(r => cols.map(c => JSON.stringify(r[c as keyof typeof r] ?? '')).join(',')).join('\n')
+  trigger(header + '\n' + body, 'raise_po_' + new Date().toISOString().slice(0, 10) + '.csv')
 }
 
 function downloadQCsv(rows: QuarterlyRow[], columns: string[]) {
   const header = columns.join(',')
-  const body = rows.map(r => columns.map(c => JSON.stringify(r[c] ?? '')).join(',')).join('\n')
-  const blob = new Blob([header + '\n' + body], { type: 'text/csv' })
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
-  a.download = 'quarterly_history.csv'; a.click()
+  const body   = rows.map(r => columns.map(c => JSON.stringify(r[c] ?? '')).join(',')).join('\n')
+  trigger(header + '\n' + body, 'quarterly_history.csv')
+}
+
+function trigger(csv: string, filename: string) {
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
 }
