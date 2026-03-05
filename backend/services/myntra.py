@@ -110,6 +110,13 @@ def _parse_myntra_csv(
     # Step 1: classify from the detected forward status column
     df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
 
+    # Step 1b: RT files are customer-return files — every row is a Refund.
+    # The filename starts with "RT " (e.g. "RT April-2024.csv").
+    # These files have order_status=C (delivered) but fr_is_refunded=1, so the
+    # normal status-based classification wrongly marks them as Shipments.
+    if filename.upper().startswith("RT "):
+        df["_TxnType"] = "Refund"
+
     # Step 2: if reverse_order_status column exists, override rows where it is
     # populated with a non-trivial value → those are returns
     if reverse_col is not None:
