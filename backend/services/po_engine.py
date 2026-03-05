@@ -314,14 +314,20 @@ def calculate_po_base(
 
     # Pipeline deduction from existing PO sheet
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
+        # Pull PO_Pipeline_Total + any breakdown columns present in the uploaded sheet
+        _breakdown_cols = [c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
+                           if c in existing_po_df.columns]
+        _merge_cols = ["OMS_SKU", "PO_Pipeline_Total"] + _breakdown_cols
         po_df = pd.merge(
             po_df,
-            existing_po_df[["OMS_SKU", "PO_Pipeline_Total"]],
+            existing_po_df[_merge_cols],
             on="OMS_SKU", how="left",
         )
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
         ).fillna(0).astype(int)
+        for _bc in _breakdown_cols:
+            po_df[_bc] = pd.to_numeric(po_df[_bc], errors="coerce").fillna(0).astype(int)
     else:
         po_df["PO_Pipeline_Total"] = 0
 

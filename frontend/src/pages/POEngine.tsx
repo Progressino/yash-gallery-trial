@@ -29,6 +29,9 @@ interface ParentGroup {
   totalSoldUnits: number
   totalADS: number
   totalGrossQty: number
+  totalPOOrdered: number
+  totalPendingCutting: number
+  totalBalanceDispatch: number
   totalPipeline: number
   totalFinalQty: number
   quarterTotals: Record<string, number>
@@ -62,8 +65,17 @@ interface QuarterlyResult {
 
 const PO_DISPLAY_COLS = [
   'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
-  'Sold_Units', 'ADS', 'Gross_PO_Qty', 'PO_Pipeline_Total', 'PO_Qty',
+  'Sold_Units', 'ADS', 'Gross_PO_Qty',
+  'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
+  'PO_Pipeline_Total', 'PO_Qty',
 ]
+
+const COL_LABEL: Record<string, string> = {
+  'PO_Pipeline_Total':   '🏭 Total Pipeline',
+  'PO_Qty_Ordered':      '📋 PO Ordered',
+  'Pending_Cutting':     '✂️ Pend. Cutting',
+  'Balance_to_Dispatch': '📦 Bal. Dispatch',
+}
 
 const PRIORITY_ORDER: Record<string, number> = {
   '🔴 URGENT': 0, '🟡 HIGH': 1, '🟢 MEDIUM': 2, '🔄 In Pipeline': 3, '⚪ OK': 4,
@@ -211,18 +223,22 @@ export default function POEngine() {
           parentSku, variants: [],
           worstPriority: '⚪ OK', totalInventory: 0, worstDaysLeft: 999,
           totalSoldUnits: 0, totalADS: 0, totalGrossQty: 0,
+          totalPOOrdered: 0, totalPendingCutting: 0, totalBalanceDispatch: 0,
           totalPipeline: 0, totalFinalQty: 0, quarterTotals: {}, avgMonthly: 0, worstStatus: '',
         })
       }
       const g = groupMap.get(parentSku)!
       g.variants.push({ ...row, finalQty })
-      g.totalInventory  += Number(row['Total_Inventory'] ?? 0)
-      g.worstDaysLeft    = Math.min(g.worstDaysLeft, Number(row['Days_Left'] ?? 999))
-      g.totalSoldUnits  += Number(row['Sold_Units'] ?? 0)
-      g.totalADS        += Number(row['ADS'] ?? 0)
-      g.totalGrossQty   += Number(row['Gross_PO_Qty'] ?? 0)
-      g.totalPipeline   += Number(row['PO_Pipeline_Total'] ?? 0)
-      g.totalFinalQty   += finalQty
+      g.totalInventory      += Number(row['Total_Inventory'] ?? 0)
+      g.worstDaysLeft        = Math.min(g.worstDaysLeft, Number(row['Days_Left'] ?? 999))
+      g.totalSoldUnits      += Number(row['Sold_Units'] ?? 0)
+      g.totalADS            += Number(row['ADS'] ?? 0)
+      g.totalGrossQty       += Number(row['Gross_PO_Qty'] ?? 0)
+      g.totalPOOrdered      += Number(row['PO_Qty_Ordered'] ?? 0)
+      g.totalPendingCutting += Number(row['Pending_Cutting'] ?? 0)
+      g.totalBalanceDispatch += Number(row['Balance_to_Dispatch'] ?? 0)
+      g.totalPipeline       += Number(row['PO_Pipeline_Total'] ?? 0)
+      g.totalFinalQty       += finalQty
       const p = String(row['Priority'] ?? '')
       if ((PRIORITY_ORDER[p] ?? 9) < (PRIORITY_ORDER[g.worstPriority] ?? 9)) g.worstPriority = p
       const qRow = quarterMap[sku] ?? {}
@@ -434,13 +450,18 @@ export default function POEngine() {
                       {/* PO columns */}
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
-                          className={`text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-20 shadow-sm' : ''}`}
+                          className={`text-left px-4 py-3 font-semibold whitespace-nowrap
+                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-20 shadow-sm text-gray-600' : ''}
+                            ${c === 'PO_Qty' ? 'text-orange-600' : ''}
+                            ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
+                            ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
+                            ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}
+                            ${!['OMS_SKU','PO_Qty','PO_Qty_Ordered','Pending_Cutting','Balance_to_Dispatch'].includes(c) ? 'text-gray-600' : ''}`}
                         >
-                          {c === 'PO_Pipeline_Total'
-                            ? <span className="flex items-center gap-1">🏭 In Production</span>
-                            : c === 'PO_Qty'
-                              ? <span className="text-orange-600">PO Qty ✏️</span>
+                          {c === 'PO_Qty'
+                            ? <span>PO Qty ✏️</span>
+                            : COL_LABEL[c]
+                              ? <span>{COL_LABEL[c]}</span>
                               : c.replace(/_/g, ' ')}
                         </th>
                       ))}
@@ -513,18 +534,30 @@ export default function POEngine() {
                                           🏭 {Number(row[col]).toLocaleString()}
                                         </span>
                                       : <span className="text-gray-300">—</span>
-                                    : col === 'PO_Qty'
-                                      ? <QtyInput
-                                          value={finalQty}
-                                          computed={computedQty}
-                                          onChange={v => setEditedQty(prev => ({ ...prev, [sku]: v }))}
-                                          onReset={() => setEditedQty(prev => { const n = {...prev}; delete n[sku]; return n })}
-                                        />
-                                      : col === 'Days_Left'
-                                        ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
-                                        : typeof row[col] === 'number'
-                                          ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
-                                          : row[col] ?? '—'
+                                    : col === 'PO_Qty_Ordered'
+                                      ? Number(row[col] ?? 0) > 0
+                                        ? <span className="text-xs font-semibold text-slate-700">{Number(row[col]).toLocaleString()}</span>
+                                        : <span className="text-gray-300">—</span>
+                                      : col === 'Pending_Cutting'
+                                        ? Number(row[col] ?? 0) > 0
+                                          ? <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">{Number(row[col]).toLocaleString()}</span>
+                                          : <span className="text-gray-300">—</span>
+                                        : col === 'Balance_to_Dispatch'
+                                          ? Number(row[col] ?? 0) > 0
+                                            ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{Number(row[col]).toLocaleString()}</span>
+                                            : <span className="text-gray-300">—</span>
+                                          : col === 'PO_Qty'
+                                            ? <QtyInput
+                                                value={finalQty}
+                                                computed={computedQty}
+                                                onChange={v => setEditedQty(prev => ({ ...prev, [sku]: v }))}
+                                                onReset={() => setEditedQty(prev => { const n = {...prev}; delete n[sku]; return n })}
+                                              />
+                                            : col === 'Days_Left'
+                                              ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
+                                              : typeof row[col] === 'number'
+                                                ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
+                                                : row[col] ?? '—'
                               }
                             </td>
                           ))}
@@ -573,13 +606,18 @@ export default function POEngine() {
                       <th className="px-3 py-3 sticky left-0 bg-gray-50 z-20 w-14" />
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
-                          className={`text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-20 shadow-sm' : ''}`}
+                          className={`text-left px-4 py-3 font-semibold whitespace-nowrap
+                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-20 shadow-sm text-gray-600' : ''}
+                            ${c === 'PO_Qty' ? 'text-orange-600' : ''}
+                            ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
+                            ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
+                            ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}
+                            ${!['OMS_SKU','PO_Qty','PO_Qty_Ordered','Pending_Cutting','Balance_to_Dispatch'].includes(c) ? 'text-gray-600' : ''}`}
                         >
-                          {c === 'PO_Pipeline_Total'
-                            ? <span className="flex items-center gap-1">🏭 In Production</span>
-                            : c === 'PO_Qty'
-                              ? <span className="text-orange-600">PO Qty ✏️</span>
+                          {c === 'PO_Qty'
+                            ? <span>PO Qty ✏️</span>
+                            : COL_LABEL[c]
+                              ? <span>{COL_LABEL[c]}</span>
                               : c.replace(/_/g, ' ')}
                         </th>
                       ))}
@@ -644,6 +682,18 @@ export default function POEngine() {
                                   : c === 'Sold_Units'       ? group.totalSoldUnits.toLocaleString()
                                   : c === 'ADS'              ? group.totalADS.toFixed(3)
                                   : c === 'Gross_PO_Qty'     ? group.totalGrossQty.toLocaleString()
+                                  : c === 'PO_Qty_Ordered'
+                                    ? group.totalPOOrdered > 0
+                                      ? <span className="text-xs font-semibold text-slate-700">{group.totalPOOrdered.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : c === 'Pending_Cutting'
+                                    ? group.totalPendingCutting > 0
+                                      ? <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">{group.totalPendingCutting.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : c === 'Balance_to_Dispatch'
+                                    ? group.totalBalanceDispatch > 0
+                                      ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{group.totalBalanceDispatch.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
                                   : c === 'PO_Pipeline_Total'
                                     ? group.totalPipeline > 0
                                       ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-full">
@@ -721,6 +771,18 @@ export default function POEngine() {
                                       ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
                                           🏭 {Number(variant[col]).toLocaleString()}
                                         </span>
+                                      : <span className="text-gray-300">—</span>
+                                  : col === 'PO_Qty_Ordered'
+                                    ? Number(variant[col] ?? 0) > 0
+                                      ? <span className="text-xs font-semibold text-slate-700">{Number(variant[col]).toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : col === 'Pending_Cutting'
+                                    ? Number(variant[col] ?? 0) > 0
+                                      ? <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">{Number(variant[col]).toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : col === 'Balance_to_Dispatch'
+                                    ? Number(variant[col] ?? 0) > 0
+                                      ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{Number(variant[col]).toLocaleString()}</span>
                                       : <span className="text-gray-300">—</span>
                                   : col === 'PO_Qty'
                                     ? <QtyInput value={finalQty} computed={computedQty}
