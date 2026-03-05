@@ -480,6 +480,7 @@ async def upload_daily_auto(
                 flipkart_df=sess.flipkart_df,
                 sku_mapping=sess.sku_mapping,
             )
+            sess._quarterly_cache.clear()  # invalidate quarterly cache
         except Exception as e:
             warnings.append(f"Sales rebuild warning: {e}")
 
@@ -618,6 +619,7 @@ async def build_sales(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse(content={"ok": False, "message": f"Build error: {e}"})
 
     sess.sales_df = sales_df
+    sess._quarterly_cache.clear()  # invalidate quarterly cache on new sales data
     background_tasks.add_task(_auto_save_cache, sess)
     return JSONResponse(content={
         "ok": True,

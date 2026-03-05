@@ -110,9 +110,17 @@ def calculate_quarterly_history(
     if group_by_parent:
         hist["SKU"] = hist["SKU"].apply(get_parent_sku)
 
-    fy_q = hist["Date"].apply(get_indian_fy_quarter)
-    hist["FY"] = fy_q.apply(lambda x: x[0])
-    hist["QN"] = fy_q.apply(lambda x: x[1])
+    # Vectorized FY/Quarter computation (avoids slow row-by-row .apply)
+    _month = hist["Date"].dt.month
+    _year  = hist["Date"].dt.year
+    hist["FY"] = np.where(_month >= 4, _year + 1, _year)
+    hist["QN"] = np.select(
+        [(_month >= 4) & (_month <= 6),
+         (_month >= 7) & (_month <= 9),
+         _month >= 10],
+        [1, 2, 3],
+        default=4,
+    )
 
     today         = pd.Timestamp.today()
     cur_fy, cur_q = get_indian_fy_quarter(today)
@@ -126,7 +134,14 @@ def calculate_quarterly_history(
             fy_i -= 1
     quarter_seq = list(reversed(quarter_seq))
 
-    hist["col"] = hist.apply(lambda r: quarter_col_name(int(r["FY"]), int(r["QN"])), axis=1)
+    # Build quarter label via a lookup map (avoids row-by-row apply)
+    _unique_fq = hist[["FY", "QN"]].drop_duplicates()
+    _q_label_map = {
+        (int(r.FY), int(r.QN)): quarter_col_name(int(r.FY), int(r.QN))
+        for r in _unique_fq.itertuples(index=False)
+    }
+    hist["col"] = [_q_label_map[(int(fy), int(qn))]
+                   for fy, qn in zip(hist["FY"], hist["QN"])]
     grp   = hist.groupby(["SKU", "col"])["Qty"].sum().reset_index()
     pivot = grp.pivot_table(index="SKU", columns="col", values="Qty",
                             aggfunc="sum", fill_value=0).reset_index()

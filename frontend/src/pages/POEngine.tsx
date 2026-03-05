@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback, memo } from 'react'
 import { api } from '../api/client'
 
 interface PORow {
@@ -159,57 +159,80 @@ export default function POEngine() {
 
   // ── PO tab rows ──
   const allRows = result?.rows ?? []
-  const filtered = allRows.filter(r =>
-    !search || String(r['OMS_SKU'] ?? '').toLowerCase().includes(search.toLowerCase())
-  )
-  const rows = sortByPriority
-    ? [...filtered].sort((a, b) =>
-        (PRIORITY_ORDER[a['Priority'] as string] ?? 9) -
-        (PRIORITY_ORDER[b['Priority'] as string] ?? 9)
-      )
-    : filtered
 
-  const urgent       = allRows.filter(r => r['Priority'] === '🔴 URGENT').length
-  const high         = allRows.filter(r => r['Priority'] === '🟡 HIGH').length
-  const medium       = allRows.filter(r => r['Priority'] === '🟢 MEDIUM').length
-  const pipeline     = allRows.filter(r => r['Priority'] === '🔄 In Pipeline').length
-  const totalPOUnits = allRows.reduce((s, r) => {
-    const sku = String(r['OMS_SKU'])
-    const qty = editedQty[sku] !== undefined ? editedQty[sku] : Number(r['PO_Qty'] || 0)
-    return s + qty
-  }, 0)
+  const filtered = useMemo(() =>
+    !search
+      ? allRows
+      : allRows.filter(r => String(r['OMS_SKU'] ?? '').toLowerCase().includes(search.toLowerCase())),
+    [allRows, search]
+  )
+
+  const rows = useMemo(() =>
+    sortByPriority
+      ? [...filtered].sort((a, b) =>
+          (PRIORITY_ORDER[a['Priority'] as string] ?? 9) -
+          (PRIORITY_ORDER[b['Priority'] as string] ?? 9)
+        )
+      : filtered,
+    [filtered, sortByPriority]
+  )
+
+  const { urgent, high, medium, pipeline, totalPOUnits } = useMemo(() => ({
+    urgent:       allRows.filter(r => r['Priority'] === '🔴 URGENT').length,
+    high:         allRows.filter(r => r['Priority'] === '🟡 HIGH').length,
+    medium:       allRows.filter(r => r['Priority'] === '🟢 MEDIUM').length,
+    pipeline:     allRows.filter(r => r['Priority'] === '🔄 In Pipeline').length,
+    totalPOUnits: allRows.reduce((s, r) => {
+      const sku = String(r['OMS_SKU'])
+      return s + (editedQty[sku] !== undefined ? editedQty[sku] : Number(r['PO_Qty'] || 0))
+    }, 0),
+  }), [allRows, editedQty])
 
   // ── Selection helpers ──
-  const visibleSkus = rows.map(r => String(r['OMS_SKU']))
-  const allVisibleSelected = visibleSkus.length > 0 && visibleSkus.every(s => selected.has(s))
+  const visibleSkus = useMemo(() => rows.map(r => String(r['OMS_SKU'])), [rows])
+  const allVisibleSelected = useMemo(
+    () => visibleSkus.length > 0 && visibleSkus.every(s => selected.has(s)),
+    [visibleSkus, selected]
+  )
   const someSelected = selected.size > 0
 
-  const toggleRow = (sku: string) => {
+  const toggleRow = useCallback((sku: string) => {
     setSelected(prev => {
       const next = new Set(prev)
       next.has(sku) ? next.delete(sku) : next.add(sku)
       return next
     })
-  }
-  const toggleAll = () => {
-    if (allVisibleSelected) {
-      setSelected(prev => { const n = new Set(prev); visibleSkus.forEach(s => n.delete(s)); return n })
-    } else {
-      setSelected(prev => new Set([...prev, ...visibleSkus]))
-    }
-  }
+  }, [])
+
+  const toggleAll = useCallback(() => {
+    setSelected(prev => {
+      const n = new Set(prev)
+      if (visibleSkus.length > 0 && visibleSkus.every(s => n.has(s))) {
+        visibleSkus.forEach(s => n.delete(s))
+      } else {
+        visibleSkus.forEach(s => n.add(s))
+      }
+      return n
+    })
+  }, [visibleSkus])
 
   // ── Selected rows for raise PO ──
-  const selectedRows = allRows
-    .filter(r => selected.has(String(r['OMS_SKU'])))
-    .map(r => {
-      const sku = String(r['OMS_SKU'])
-      const finalQty = editedQty[sku] !== undefined ? editedQty[sku] : Number(r['PO_Qty'] || 0)
-      return { ...r, Final_PO_Qty: finalQty }
-    })
-    .filter(r => r.Final_PO_Qty > 0)
+  const selectedRows = useMemo(() =>
+    allRows
+      .filter(r => selected.has(String(r['OMS_SKU'])))
+      .map(r => {
+        const sku = String(r['OMS_SKU'])
+        const finalQty = editedQty[sku] !== undefined ? editedQty[sku] : Number(r['PO_Qty'] || 0)
+        return { ...r, Final_PO_Qty: finalQty }
+      })
+      .filter(r => r.Final_PO_Qty > 0),
+    [allRows, selected, editedQty]
+  )
 
-  const totalRaiseUnits = selectedRows.reduce((s, r) => s + r.Final_PO_Qty, 0)
+  const totalRaiseUnits = useMemo(
+    () => selectedRows.reduce((s, r) => s + r.Final_PO_Qty, 0),
+    [selectedRows]
+  )
 
   // ── Parent groups (for size-grouped view) ──
   const parentGroups = useMemo((): ParentGroup[] => {
@@ -254,28 +277,35 @@ export default function POEngine() {
     return Array.from(groupMap.values())
   }, [rows, editedQty, quarterMap, quarterCols])
 
-  const toggleCollapse = (parentSku: string) => {
+  const toggleCollapse = useCallback((parentSku: string) => {
     setCollapsedParents(prev => {
       const next = new Set(prev)
       next.has(parentSku) ? next.delete(parentSku) : next.add(parentSku)
       return next
     })
-  }
+  }, [])
 
-  const toggleParentSelect = (group: ParentGroup) => {
-    const childSkus  = group.variants.map(r => String(r['OMS_SKU']))
-    const allChecked = childSkus.every(s => selected.has(s))
+  const toggleParentSelect = useCallback((group: ParentGroup) => {
+    const childSkus = group.variants.map(r => String(r['OMS_SKU']))
     setSelected(prev => {
+      const allChecked = childSkus.every(s => prev.has(s))
       const next = new Set(prev)
       allChecked ? childSkus.forEach(s => next.delete(s)) : childSkus.forEach(s => next.add(s))
       return next
     })
-  }
+  }, [])
+
+  // ── Grouped table visible slice (cap to prevent DOM overload) ──
+  const GROUPED_CAP = 400
+  const visibleGroups = useMemo(() => parentGroups.slice(0, GROUPED_CAP), [parentGroups])
 
   // ── Quarterly tab rows ──
   const qAllRows  = quarterly?.rows ?? []
-  const qFiltered = qAllRows.filter(r =>
-    !qSearch || String(r['OMS_SKU'] ?? '').toLowerCase().includes(qSearch.toLowerCase())
+  const qFiltered = useMemo(() =>
+    !qSearch
+      ? qAllRows
+      : qAllRows.filter(r => String(r['OMS_SKU'] ?? '').toLowerCase().includes(qSearch.toLowerCase())),
+    [qAllRows, qSearch]
   )
 
   return (
@@ -638,7 +668,7 @@ export default function POEngine() {
                     </tr>
                   </thead>
                   <tbody>
-                    {parentGroups.flatMap(group => {
+                    {visibleGroups.flatMap(group => {
                       const isCollapsed = collapsedParents.has(group.parentSku)
                       const childSkus   = group.variants.map(r => String(r['OMS_SKU']))
                       const allChecked  = childSkus.every(s => selected.has(s))
@@ -824,6 +854,11 @@ export default function POEngine() {
                 </table>
                 {parentGroups.length === 0 && (
                   <p className="text-xs text-gray-400 text-center py-4">No data</p>
+                )}
+                {parentGroups.length > GROUPED_CAP && (
+                  <p className="text-xs text-gray-400 text-center py-2">
+                    Showing {GROUPED_CAP} of {parentGroups.length} parent SKUs — use search to filter
+                  </p>
                 )}
               </div>
               )}
@@ -1023,17 +1058,17 @@ export default function POEngine() {
 
 // ── Sub-components ──────────────────────────────────────────────
 
-function PriorityBadge({ priority }: { priority: string }) {
+const PriorityBadge = memo(function PriorityBadge({ priority }: { priority: string }) {
   return <span className="font-semibold text-xs whitespace-nowrap">{priority || '⚪ OK'}</span>
-}
+})
 
-function DaysLeftBadge({ days }: { days: number }) {
+const DaysLeftBadge = memo(function DaysLeftBadge({ days }: { days: number }) {
   if (days >= 999) return <span className="text-gray-400">∞</span>
   const color = days < 14 ? 'text-red-600 font-bold' : days < 30 ? 'text-yellow-600 font-semibold' : 'text-gray-700'
   return <span className={color}>{Math.round(days)}</span>
-}
+})
 
-function QtyInput({
+const QtyInput = memo(function QtyInput({
   value, computed, onChange, onReset,
 }: {
   value: number
@@ -1067,16 +1102,16 @@ function QtyInput({
       )}
     </div>
   )
-}
+})
 
-function KpiCard({ label, value, accent }: { label: string; value: number; accent?: string }) {
+const KpiCard = memo(function KpiCard({ label, value, accent }: { label: string; value: number; accent?: string }) {
   return (
     <div className={`bg-white rounded-xl border border-gray-200 p-4 shadow-sm border-l-4 ${accent ?? 'border-l-[#002B5B]'}`}>
       <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">{label}</p>
       <p className="text-2xl font-bold text-[#002B5B] mt-1">{value.toLocaleString()}</p>
     </div>
   )
-}
+})
 
 function Param({
   label, type, value, min, max, step, onChange,

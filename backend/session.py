@@ -36,6 +36,10 @@ class AppSession:
     daily_sales_rows: int = 0
     load_warnings: list = field(default_factory=list)
 
+    # ── PO Engine cache ───────────────────────────────────────
+    # Keyed by (group_by_parent, n_quarters) — cleared when sales data changes
+    _quarterly_cache: dict = field(default_factory=dict)
+
 
 class SessionStore:
     """Thread-safe in-memory session store."""

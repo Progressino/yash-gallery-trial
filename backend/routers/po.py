@@ -77,6 +77,10 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if sess is None:
         return {"loaded": False}
 
+    cache_key = (group_by_parent, n_quarters)
+    if cache_key in sess._quarterly_cache:
+        return sess._quarterly_cache[cache_key]
+
     from ..services.po_engine import calculate_quarterly_history
 
     pivot = calculate_quarterly_history(
@@ -88,10 +92,12 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
         n_quarters=n_quarters,
     )
     if pivot.empty:
-        return {"loaded": False, "rows": []}
-
-    return {
-        "loaded":   True,
-        "columns":  list(pivot.columns),
-        "rows":     pivot.fillna(0).to_dict("records"),
-    }
+        result = {"loaded": False, "rows": []}
+    else:
+        result = {
+            "loaded":   True,
+            "columns":  list(pivot.columns),
+            "rows":     pivot.fillna(0).to_dict("records"),
+        }
+    sess._quarterly_cache[cache_key] = result
+    return result
