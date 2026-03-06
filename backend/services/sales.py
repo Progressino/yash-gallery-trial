@@ -144,6 +144,9 @@ def get_top_skus(sales_df: pd.DataFrame, limit: int = 20) -> List[dict]:
     if sales_df.empty or "Sku" not in sales_df.columns:
         return []
     df = sales_df[sales_df["Transaction Type"] == "Shipment"].copy()
+    # Filter out aggregate/total rows (e.g. MEESHO_TOTAL, TOTAL, etc.)
+    _sku_lower = df["Sku"].astype(str).str.lower()
+    df = df[~(_sku_lower.str.contains("_total") | _sku_lower.str.endswith("total") | _sku_lower.str.startswith("total"))]
     grp = df.groupby("Sku")["Quantity"].sum().reset_index()
     grp.columns = ["sku", "units"]
     return grp.sort_values("units", ascending=False).head(limit).to_dict("records")
