@@ -89,10 +89,13 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
     # ── Find specific breakdown columns (all optional) ──────────
 
     # Originally ordered with manufacturer
+    # Column may include a date suffix, e.g. "new order 23-02-2026" — fuzzy match handles this
     ordered_col = _find_col(cols, [
         "NEW ORDER", "New Order", "PO Qty", "PO Quantity",
         "Ordered Qty", "Ordered Quantity", "Order Qty",
     ])
+    if ordered_col is None:
+        ordered_col = _find_col_fuzzy(cols, ["new order", "po qty", "ordered qty", "order qty"])
 
     # Units awaiting cutting
     cutting_col = _find_col(cols, [
