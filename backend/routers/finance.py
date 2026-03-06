@@ -1,5 +1,6 @@
 """
 Finance module router.
+POST /api/finance/verify-pin       — verify Finance 2FA PIN
 GET  /api/finance/pl               — P&L statement
 GET  /api/finance/gst              — GST summary (Amazon MTR)
 GET  /api/finance/platform-revenue — per-platform revenue reconciliation
@@ -7,12 +8,15 @@ GET  /api/finance/expenses         — list expenses
 POST /api/finance/expenses         — add expense
 DELETE /api/finance/expenses/{id}  — delete expense
 """
+import os
 from typing import Optional
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
 from ..db.finance_db import add_expense, list_expenses, delete_expense
 from ..services.finance import get_pl_statement, get_gst_summary, get_platform_revenue
+
+_FINANCE_PIN = os.environ.get("FINANCE_PIN", "").strip()
 
 router = APIRouter()
 
@@ -25,11 +29,32 @@ class ExpenseCreate(BaseModel):
     gst_amount:  float = 0.0
 
 
+class PinVerify(BaseModel):
+    pin: str
+
+
 def _sess(request: Request):
     sess = request.state.session
     if sess is None:
         raise HTTPException(status_code=403, detail="No session")
     return sess
+
+
+@router.get("/pin-required")
+def pin_required():
+    """Check whether Finance 2FA PIN is configured."""
+    return {"required": bool(_FINANCE_PIN)}
+
+
+@router.post("/verify-pin")
+def verify_pin(body: PinVerify):
+    """Verify the Finance 2FA PIN set via FINANCE_PIN env var."""
+    if not _FINANCE_PIN:
+        # No PIN configured → access is open
+        return {"ok": True, "message": "no_pin_set"}
+    if body.pin == _FINANCE_PIN:
+        return {"ok": True}
+    return {"ok": False, "message": "Incorrect PIN"}
 
 
 @router.get("/pl")
