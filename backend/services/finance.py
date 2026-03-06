@@ -194,7 +194,7 @@ def parse_cogs_sheet(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
     # Find SKU column
     sku_col = next(
-        (cols_lower[k] for k in ["oms sku", "oms_sku", "sku", "style code", "item code", "product code"] if k in cols_lower),
+        (cols_lower[k] for k in ["oms child sku", "oms_child_sku", "oms sku", "oms_sku", "child sku", "sku", "style code", "item code", "product code"] if k in cols_lower),
         None,
     )
     if sku_col is None:
@@ -202,7 +202,7 @@ def parse_cogs_sheet(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
     # Find cost column
     cost_col = next(
-        (cols_lower[k] for k in ["cost price", "cost per unit", "cost_price", "cogs", "unit cost", "cost"] if k in cols_lower),
+        (cols_lower[k] for k in ["pwn", "cost price", "cost per unit", "cost_price", "cogs", "unit cost", "cost"] if k in cols_lower),
         None,
     )
     if cost_col is None:
