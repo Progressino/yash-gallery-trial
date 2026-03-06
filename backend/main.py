@@ -12,6 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from .session import store
 from .routers import upload, data, cache, po, auth as auth_router
 from .routers.auth import verify_token
+from .routers.finance import router as finance_router
+from .db.finance_db import init_db
+
+init_db()
 
 app = FastAPI(
     title="Yash Gallery ERP API",
@@ -81,11 +85,12 @@ async def session_middleware(request: Request, call_next):
 
 
 # ── Routers ───────────────────────────────────────────────────
-app.include_router(auth_router.router, prefix="/api/auth",   tags=["auth"])
-app.include_router(upload.router,      prefix="/api/upload", tags=["upload"])
-app.include_router(data.router,        prefix="/api/data",   tags=["data"])
-app.include_router(cache.router,       prefix="/api/cache",  tags=["cache"])
-app.include_router(po.router,          prefix="/api/po",     tags=["po"])
+app.include_router(auth_router.router, prefix="/api/auth",    tags=["auth"])
+app.include_router(upload.router,      prefix="/api/upload",  tags=["upload"])
+app.include_router(data.router,        prefix="/api/data",    tags=["data"])
+app.include_router(cache.router,       prefix="/api/cache",   tags=["cache"])
+app.include_router(po.router,          prefix="/api/po",      tags=["po"])
+app.include_router(finance_router,     prefix="/api/finance", tags=["finance"])
 
 
 @app.get("/api/health")

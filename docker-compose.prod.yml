@@ -17,6 +17,9 @@ services:
     env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
+      - FINANCE_DB_PATH=/data/finance.db
+    volumes:
+      - /root/app-data/finance:/data
     expose:
       - "8000"          # internal only, nginx proxies to it
     restart: unless-stopped

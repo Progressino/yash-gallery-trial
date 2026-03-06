@@ -10,6 +10,7 @@ import Flipkart from './pages/Flipkart'
 import Inventory from './pages/Inventory'
 import POEngine from './pages/POEngine'
 import Forecast from './pages/Forecast'
+import Finance from './pages/Finance'
 import Login from './pages/Login'
 import api from './api/client'
 
@@ -54,6 +55,7 @@ export default function App() {
               <Route path="inventory" element={<Inventory />} />
               <Route path="po"        element={<POEngine />} />
               <Route path="forecast"  element={<Forecast />} />
+              <Route path="finance"   element={<Finance />} />
             </Route>
           </Route>
         </Routes>

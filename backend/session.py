@@ -26,6 +26,7 @@ class AppSession:
     daily_orders_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     existing_po_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     transfer_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    cogs_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     # ── Settings ─────────────────────────────────────────────
     amazon_date_basis: str = "Shipment Date"

@@ -300,6 +300,21 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=422, detail=f"Failed to parse Existing PO: {e}")
 
 
+@router.post("/cogs", response_model=UploadResponse)
+async def upload_cogs(request: Request, file: UploadFile = File(...)):
+    sess = _get_session(request)
+    try:
+        from ..services.finance import parse_cogs_sheet
+        file_bytes = await file.read()
+        df = parse_cogs_sheet(file_bytes, file.filename or "cogs.xlsx")
+        sess.cogs_df = df
+        return UploadResponse(ok=True, message=f"COGS sheet loaded: {len(df):,} SKUs.", rows=len(df))
+    except ValueError as e:
+        return UploadResponse(ok=False, message=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to parse COGS sheet: {e}")
+
+
 # ── Daily Orders — Auto-detect (drop all files, we figure it out) ─
 
 def _detect_platform(filename: str, header_bytes: bytes) -> str:
