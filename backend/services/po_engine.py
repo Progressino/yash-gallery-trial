@@ -346,6 +346,35 @@ def calculate_po_base(
     else:
         po_df["PO_Pipeline_Total"] = 0
 
+    # ── Inject PO-sheet SKUs missing from inventory ──────────────
+    # If a SKU has an active pipeline order but isn't in the inventory file
+    # (e.g. out of stock, removed from listing), add it as a ghost row so it
+    # still shows up as "🔄 In Pipeline" and isn't invisible to the user.
+    if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
+        missing_mask = (
+            ~existing_po_df["OMS_SKU"].isin(po_df["OMS_SKU"])
+            & (existing_po_df["PO_Pipeline_Total"] > 0)
+        )
+        missing_po = existing_po_df[missing_mask].copy()
+        if not missing_po.empty:
+            ghost = pd.DataFrame({"OMS_SKU": missing_po["OMS_SKU"].values})
+            ghost["Total_Inventory"] = 0
+            ghost["Sold_Units"]      = 0
+            ghost["Return_Units"]    = 0
+            ghost["Net_Units"]       = 0
+            ghost["Recent_ADS"]      = 0.0
+            ghost["ADS"]             = 0.0
+            ghost["LY_ADS"]          = 0.0
+            ghost["Days_Left"]       = 999.0
+            ghost["Gross_PO_Qty"]    = 0
+            for c in ["PO_Pipeline_Total"] + _breakdown_cols:
+                ghost[c] = missing_po[c].values if c in missing_po.columns else 0
+            # Fill any other columns po_df already has
+            for c in po_df.columns:
+                if c not in ghost.columns:
+                    ghost[c] = 0
+            po_df = pd.concat([po_df, ghost[po_df.columns]], ignore_index=True)
+
     net_po = (po_df["Gross_PO_Qty"] - po_df["PO_Pipeline_Total"]).clip(lower=0)
     po_df["PO_Qty"] = (np.ceil(net_po / 5) * 5).astype(int)
 
