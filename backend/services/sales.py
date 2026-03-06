@@ -2,7 +2,7 @@
 Sales aggregation — build + dedup logic extracted from app.py.
 """
 import gc
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -101,8 +101,17 @@ def build_sales_df(
     return _downcast_sales(result)
 
 
-def get_sales_summary(sales_df: pd.DataFrame, months: int = 3) -> dict:
-    """Return KPI summary for the dashboard."""
+def get_sales_summary(
+    sales_df: pd.DataFrame,
+    months: int = 3,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """Return KPI summary for the dashboard.
+
+    If start_date/end_date (ISO strings) are provided they take priority over months.
+    months=0 means all-time.
+    """
     if sales_df.empty:
         return {"total_units": 0, "total_returns": 0, "net_units": 0, "return_rate": 0.0}
 
@@ -110,7 +119,11 @@ def get_sales_summary(sales_df: pd.DataFrame, months: int = 3) -> dict:
     df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
     df = df.dropna(subset=["TxnDate"])
 
-    if months > 0:
+    if start_date:
+        df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
+    if end_date:
+        df = df[df["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+    elif not start_date and months > 0:
         cutoff = df["TxnDate"].max() - pd.DateOffset(months=months)
         df = df[df["TxnDate"] >= cutoff]
 
@@ -139,11 +152,22 @@ def get_sales_by_source(sales_df: pd.DataFrame) -> List[dict]:
     return grp.sort_values("units", ascending=False).to_dict("records")
 
 
-def get_top_skus(sales_df: pd.DataFrame, limit: int = 20) -> List[dict]:
-    """Returns top SKUs by net units sold."""
+def get_top_skus(
+    sales_df: pd.DataFrame,
+    limit: int = 20,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> List[dict]:
+    """Returns top SKUs by net units sold, optionally filtered by date range."""
     if sales_df.empty or "Sku" not in sales_df.columns:
         return []
     df = sales_df[sales_df["Transaction Type"] == "Shipment"].copy()
+    if start_date or end_date:
+        df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+        if start_date:
+            df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
+        if end_date:
+            df = df[df["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
     # Filter out aggregate/total rows (e.g. MEESHO_TOTAL, TOTAL, etc.)
     _sku_lower = df["Sku"].astype(str).str.lower()
     df = df[~(_sku_lower.str.contains("_total") | _sku_lower.str.endswith("total") | _sku_lower.str.startswith("total"))]

@@ -44,9 +44,14 @@ def get_coverage(request: Request):
 # ── Sales Dashboard KPIs ──────────────────────────────────────
 
 @router.get("/sales-summary")
-def sales_summary(request: Request, months: int = 3):
+def sales_summary(
+    request: Request,
+    months: int = 3,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     sess = _sess(request)
-    return get_sales_summary(sess.sales_df, months=months)
+    return get_sales_summary(sess.sales_df, months=months, start_date=start_date, end_date=end_date)
 
 
 @router.get("/sales-by-source")
@@ -56,9 +61,14 @@ def sales_by_source(request: Request):
 
 
 @router.get("/top-skus")
-def top_skus(request: Request, limit: int = 20):
+def top_skus(
+    request: Request,
+    limit: int = 20,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     sess = _sess(request)
-    return get_top_skus(sess.sales_df, limit=limit)
+    return get_top_skus(sess.sales_df, limit=limit, start_date=start_date, end_date=end_date)
 
 
 # ── MTR Analytics ─────────────────────────────────────────────

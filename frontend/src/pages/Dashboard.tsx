@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
@@ -101,12 +101,53 @@ function getIntensityClass(units: number, max: number) {
   return INTENSITY_CLASSES[4]
 }
 
+// ── Date helpers ─────────────────────────────────────────────────
+function toIso(d: Date) { return d.toISOString().split('T')[0] }
+function daysAgo(n: number) { const d = new Date(); d.setDate(d.getDate() - n); return toIso(d) }
+function monthsAgo(n: number) { const d = new Date(); d.setMonth(d.getMonth() - n); return toIso(d) }
+const TODAY = toIso(new Date())
+
+const PRESETS = [
+  { label: '30D',  start: () => daysAgo(30) },
+  { label: '90D',  start: () => daysAgo(90) },
+  { label: '6M',   start: () => monthsAgo(6) },
+  { label: '1Y',   start: () => monthsAgo(12) },
+  { label: 'All',  start: () => '' },
+] as const
+
 // ── Main Dashboard ──────────────────────────────────────────────
 export default function Dashboard() {
   const setCoverage = useSession((s) => s.setCoverage)
-  const [timeFilter, setTimeFilter] = useState<'1m' | '3m' | '6m'>('3m')
+  const [dateStart, setDateStart] = useState(() => daysAgo(90))
+  const [dateEnd,   setDateEnd]   = useState(TODAY)
+  const [activePreset, setActivePreset] = useState<string>('90D')
   const [deepDiveTab, setDeepDiveTab] = useState<'Amazon' | 'Myntra' | 'Meesho' | 'Flipkart'>('Amazon')
   const [heatmapPlatform, setHeatmapPlatform] = useState('Myntra')
+
+  function applyPreset(label: string, startFn: () => string) {
+    const s = startFn()
+    setDateStart(s)
+    setDateEnd(TODAY)
+    setActivePreset(label)
+  }
+
+  function handleStartChange(val: string) { setDateStart(val); setActivePreset('') }
+  function handleEndChange(val: string)   { setDateEnd(val);   setActivePreset('') }
+
+  // Build query string params for date-filtered endpoints
+  const dateParams = useMemo(() => {
+    const p = new URLSearchParams({ limit: '10' })
+    if (dateStart) p.set('start_date', dateStart)
+    if (dateEnd)   p.set('end_date',   dateEnd)
+    return p.toString()
+  }, [dateStart, dateEnd])
+
+  const summaryParams = useMemo(() => {
+    const p = new URLSearchParams({ months: '0' })
+    if (dateStart) p.set('start_date', dateStart)
+    if (dateEnd)   p.set('end_date',   dateEnd)
+    return p.toString()
+  }, [dateStart, dateEnd])
 
   useQuery({
     queryKey: ['coverage'],
@@ -115,15 +156,15 @@ export default function Dashboard() {
   })
 
   const { data: salesSummary, isLoading: loadingSales } = useQuery<SalesSummary>({
-    queryKey: ['sales-summary', 3],
-    queryFn: async () => { const { data } = await api.get('/data/sales-summary?months=3'); return data },
-    staleTime: 5 * 60 * 1000,
+    queryKey: ['sales-summary', dateStart, dateEnd],
+    queryFn: async () => { const { data } = await api.get(`/data/sales-summary?${summaryParams}`); return data },
+    staleTime: 2 * 60 * 1000,
   })
 
   const { data: topSkusRaw, isLoading: loadingSkus } = useQuery<TopSku[]>({
-    queryKey: ['top-skus', 10],
-    queryFn: async () => { const { data } = await api.get('/data/top-skus?limit=10'); return data },
-    staleTime: 5 * 60 * 1000,
+    queryKey: ['top-skus', dateStart, dateEnd],
+    queryFn: async () => { const { data } = await api.get(`/data/top-skus?${dateParams}`); return data },
+    staleTime: 2 * 60 * 1000,
   })
 
   const { data: platformSummary, isLoading: loadingPlatforms } = useQuery<PlatformSummaryItem[]>({
@@ -145,13 +186,20 @@ export default function Dashboard() {
   const netUnits = salesSummary?.net_units ?? 0
   const returnRate = salesSummary?.return_rate ?? 0
 
-  // Sliced monthly data based on filter
-  const monthsToShow = timeFilter === '1m' ? 1 : timeFilter === '3m' ? 3 : 6
-  const slicedPlatforms = platforms.map(p => ({
-    ...p,
-    monthly: p.monthly.slice(-monthsToShow),
-  }))
-  const chartData = mergePlatformMonthly(slicedPlatforms)
+  // Filter monthly chart data client-side by date range
+  const filteredPlatforms = useMemo(() => {
+    const startMonth = dateStart ? dateStart.slice(0, 7) : ''
+    const endMonth   = dateEnd   ? dateEnd.slice(0, 7)   : ''
+    return platforms.map(p => ({
+      ...p,
+      monthly: p.monthly.filter(r =>
+        (!startMonth || r.month >= startMonth) &&
+        (!endMonth   || r.month <= endMonth)
+      ),
+    }))
+  }, [platforms, dateStart, dateEnd])
+
+  const chartData = useMemo(() => mergePlatformMonthly(filteredPlatforms), [filteredPlatforms])
 
   // Heatmap data
   const heatmapData = platforms.find(p => p.platform === heatmapPlatform)?.by_state ?? []
@@ -159,8 +207,8 @@ export default function Dashboard() {
   for (const s of heatmapData) stateMap[s.state] = s.units
   const maxUnits = Math.max(...heatmapData.map(s => s.units), 0)
 
-  // Deep dive
-  const deepPlatform = platforms.find(p => p.platform === deepDiveTab)
+  // Deep dive — use filtered monthly
+  const deepPlatform = filteredPlatforms.find(p => p.platform === deepDiveTab)
   const deepChartData = (deepPlatform?.monthly ?? []).map(r => ({
     month: fmtMonth(r.month),
     shipments: r.shipments,
@@ -193,6 +241,50 @@ export default function Dashboard() {
             )
           })}
         </div>
+      </div>
+
+      {/* ── Date Filter Bar ── */}
+      <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 shadow-sm flex flex-wrap items-center gap-3">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Date Range</span>
+        <div className="flex gap-1">
+          {PRESETS.map(({ label, start }) => (
+            <button
+              key={label}
+              onClick={() => applyPreset(label, start)}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                activePreset === label
+                  ? 'bg-[#002B5B] text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 ml-2">
+          <span className="text-xs text-gray-400">From</span>
+          <input
+            type="date"
+            value={dateStart}
+            max={dateEnd || TODAY}
+            onChange={e => handleStartChange(e.target.value)}
+            className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
+          />
+          <span className="text-xs text-gray-400">To</span>
+          <input
+            type="date"
+            value={dateEnd}
+            min={dateStart}
+            max={TODAY}
+            onChange={e => handleEndChange(e.target.value)}
+            className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
+          />
+        </div>
+        {(dateStart || dateEnd) && (
+          <span className="text-xs text-gray-400 ml-auto">
+            {dateStart || '…'} → {dateEnd || '…'}
+          </span>
+        )}
       </div>
 
       {/* ── KPI Strip ── */}
@@ -263,21 +355,9 @@ export default function Dashboard() {
         <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
             <h3 className="text-sm font-semibold text-gray-700">Sales Trend by Platform</h3>
-            <div className="flex gap-1">
-              {(['1m', '3m', '6m'] as const).map(f => (
-                <button
-                  key={f}
-                  onClick={() => setTimeFilter(f)}
-                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                    timeFilter === f
-                      ? 'bg-[#002B5B] text-white'
-                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                  }`}
-                >
-                  {f === '1m' ? '1 Mo' : f === '3m' ? '3 Mo' : '6 Mo'}
-                </button>
-              ))}
-            </div>
+            <span className="text-xs text-gray-400">
+              {dateStart || 'All time'}{dateEnd ? ` → ${dateEnd}` : ''}
+            </span>
           </div>
           {loadingPlatforms ? (
             <div className="h-64 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
