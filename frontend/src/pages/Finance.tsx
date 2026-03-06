@@ -284,7 +284,7 @@ export default function Finance() {
                     <YAxis tick={{ fontSize: 10, fill: '#9CA3AF' }} tickFormatter={v => `₹${(v/1000).toFixed(0)}k`} />
                     <Tooltip
                       contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                      formatter={(v: number) => [fmt(v), '']}
+                      formatter={(v: number | undefined) => [fmt(v ?? 0), '']}
                     />
                     <Bar dataKey="value" radius={[4, 4, 0, 0]}>
                       {['#002B5B', '#EF4444', '#F59E0B', '#10B981'].map((color, i) => (
@@ -504,7 +504,7 @@ export default function Finance() {
                   <YAxis tick={{ fontSize: 10, fill: '#9CA3AF' }} tickFormatter={v => `₹${(v/1000).toFixed(0)}k`} />
                   <Tooltip
                     contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                    formatter={(v: number) => [fmt(v), '']}
+                    formatter={(v: number | undefined) => [fmt(v ?? 0), '']}
                   />
                   <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
                   <Bar dataKey="Gross" name="Gross Revenue" fill="#93C5FD" radius={[3,3,0,0]} />
