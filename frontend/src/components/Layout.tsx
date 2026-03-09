@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { to: '/po',        label: '🎯 PO Engine' },
   { to: '/forecast',  label: '📈 AI Forecast' },
   { to: '/finance',   label: '💰 Finance' },
+  { to: '/items',     label: '🏭 Item Master' },
 ]
 
 export default function Layout() {

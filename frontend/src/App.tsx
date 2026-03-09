@@ -11,6 +11,7 @@ import Inventory from './pages/Inventory'
 import POEngine from './pages/POEngine'
 import Forecast from './pages/Forecast'
 import Finance from './pages/Finance'
+import ItemMaster from './pages/ItemMaster'
 import Login from './pages/Login'
 import api from './api/client'
 
@@ -56,6 +57,7 @@ export default function App() {
               <Route path="po"        element={<POEngine />} />
               <Route path="forecast"  element={<Forecast />} />
               <Route path="finance"   element={<Finance />} />
+              <Route path="items"     element={<ItemMaster />} />
             </Route>
           </Route>
         </Routes>

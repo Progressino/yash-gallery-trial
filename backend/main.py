@@ -13,9 +13,12 @@ from .session import store
 from .routers import upload, data, cache, po, auth as auth_router
 from .routers.auth import verify_token
 from .routers.finance import router as finance_router
+from .routers.item import router as item_router
 from .db.finance_db import init_db
+from .db.item_db import init_db as init_item_db
 
 init_db()
+init_item_db()
 
 app = FastAPI(
     title="Yash Gallery ERP API",
@@ -91,6 +94,7 @@ app.include_router(data.router,        prefix="/api/data",    tags=["data"])
 app.include_router(cache.router,       prefix="/api/cache",   tags=["cache"])
 app.include_router(po.router,          prefix="/api/po",      tags=["po"])
 app.include_router(finance_router,     prefix="/api/finance", tags=["finance"])
+app.include_router(item_router,        prefix="/api/items",   tags=["items"])
 
 
 @app.get("/api/health")

@@ -1,0 +1,995 @@
+import { useState, useMemo, useRef } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import api from '../api/client'
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface ItemType   { id: number; name: string; code: string }
+interface SizeGroup  { id: number; name: string; sizes: string[] }
+interface RoutingStep { id: number; name: string; description: string; sort_order: number }
+
+interface Item {
+  id: number; item_code: string; item_name: string
+  item_type_id: number; item_type_name: string; item_type_code: string
+  hsn_code: string; season: string; merchant_code: string
+  selling_price: number; purchase_price: number
+  parent_id: number | null; size_label: string; launch_date: string
+  variant_count: number; created_at: string
+}
+interface ItemDetail extends Item {
+  variants: { id: number; item_code: string; size_label: string }[]
+  routing:  { id: number; name: string; sort_order: number }[]
+}
+interface BOMHeader {
+  id: number; item_id: number; bom_name: string; applies_to: string
+  is_default: number; line_count: number; created_at: string
+}
+interface BOMLine {
+  id: number; bom_id: number; component_item_id: number | null
+  component_name: string; component_type: string
+  quantity: number; unit: string; rate: number
+  process_id: number | null; process_name: string | null
+  shrinkage_pct: number; wastage_pct: number; remarks: string
+}
+interface BOMDetail extends BOMHeader { lines: BOMLine[] }
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const COMPONENT_TYPES = ['FG', 'SFG', 'RM', 'ACC', 'PKG', 'FUEL', 'SERVICE']
+const UNITS = ['PCS', 'MTR', 'KG', 'LTR', 'SET', 'PAIR', 'BOX', 'ROLL']
+const fmt = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
+const fmtN = (n: number, d = 2) => +n.toFixed(d)
+
+// ── BOM cost helpers ──────────────────────────────────────────────────────────
+function netQty(l: BOMLine) { return l.quantity * (1 + l.shrinkage_pct / 100) * (1 + l.wastage_pct / 100) }
+function lineAmt(l: BOMLine) { return netQty(l) * l.rate }
+
+// ── Blank form states ─────────────────────────────────────────────────────────
+const blankItem = () => ({
+  item_code: '', item_name: '', item_type_id: 1,
+  hsn_code: '', season: '', merchant_code: '',
+  selling_price: '', purchase_price: '', launch_date: '',
+  sizes: [] as string[], custom_size: '',
+  routing_step_ids: [] as number[], size_group_id: '',
+})
+const blankBOMLine = () => ({
+  component_name: '', component_type: 'RM', quantity: '1', unit: 'PCS',
+  rate: '0', component_item_id: '', process_id: '', shrinkage_pct: '0', wastage_pct: '0', remarks: '',
+})
+
+// ── Main Component ────────────────────────────────────────────────────────────
+export default function ItemMaster() {
+  const qc = useQueryClient()
+  const [activeTab, setActiveTab] = useState<'items' | 'bom' | 'routing' | 'import'>('items')
+
+  // ── Meta query (types, size groups, routing steps) ────────────────────────
+  const { data: meta } = useQuery({
+    queryKey: ['item-meta'],
+    queryFn: async () => { const { data } = await api.get('/items/meta'); return data as { item_types: ItemType[]; size_groups: SizeGroup[]; routing_steps: RoutingStep[] } },
+    staleTime: 5 * 60 * 1000,
+  })
+  const itemTypes    = meta?.item_types    ?? []
+  const sizeGroups   = meta?.size_groups   ?? []
+  const routingSteps = meta?.routing_steps ?? []
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // TAB 1 — ITEMS
+  // ══════════════════════════════════════════════════════════════════════════════
+  const [typeFilter,   setTypeFilter]   = useState<string>('')
+  const [searchQ,      setSearchQ]      = useState('')
+  const [parentOnly,   setParentOnly]   = useState(true)
+  const [expandedId,   setExpandedId]   = useState<number | null>(null)
+  const [showNewItem,  setShowNewItem]  = useState(false)
+  const [newItem,      setNewItem]      = useState(blankItem)
+  const [newItemErr,   setNewItemErr]   = useState('')
+  const [sizePreview,  setSizePreview]  = useState<string[]>([])
+
+  const { data: items = [], isLoading: loadItems } = useQuery<Item[]>({
+    queryKey: ['items', typeFilter, searchQ, parentOnly],
+    queryFn:  async () => {
+      const p = new URLSearchParams()
+      if (typeFilter) p.set('type_id', typeFilter)
+      if (searchQ)    p.set('search', searchQ)
+      if (parentOnly) p.set('parent_only', 'true')
+      const { data } = await api.get(`/items?${p}`)
+      return data
+    },
+    staleTime: 60 * 1000,
+  })
+
+  const { data: expandedDetail } = useQuery<ItemDetail>({
+    queryKey: ['item-detail', expandedId],
+    queryFn:  async () => { const { data } = await api.get(`/items/${expandedId}`); return data },
+    enabled:  expandedId !== null,
+    staleTime: 30 * 1000,
+  })
+
+  const createItemMut = useMutation({
+    mutationFn: (body: object) => api.post('/items', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['items'] })
+      setShowNewItem(false); setNewItem(blankItem()); setSizePreview([]); setNewItemErr('')
+    },
+    onError: (e: any) => setNewItemErr(e?.response?.data?.detail ?? 'Failed to create item.'),
+  })
+
+  const deleteItemMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/items/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['items'] }),
+  })
+
+  function applyPreviewSizes(groupId: string) {
+    const grp = sizeGroups.find(g => g.id === +groupId)
+    const sizes = grp ? [...grp.sizes] : []
+    setNewItem(p => ({ ...p, sizes, size_group_id: groupId }))
+    setSizePreview(sizes)
+  }
+
+  function addCustomSize() {
+    const s = newItem.custom_size.trim().toUpperCase()
+    if (s && !newItem.sizes.includes(s)) {
+      const next = [...newItem.sizes, s]
+      setNewItem(p => ({ ...p, sizes: next, custom_size: '' }))
+      setSizePreview(next)
+    }
+  }
+
+  function toggleSize(sz: string) {
+    const next = newItem.sizes.includes(sz)
+      ? newItem.sizes.filter(s => s !== sz)
+      : [...newItem.sizes, sz]
+    setNewItem(p => ({ ...p, sizes: next }))
+    setSizePreview(next)
+  }
+
+  function handleCreateItem() {
+    if (!newItem.item_code.trim() || !newItem.item_name.trim()) {
+      setNewItemErr('Item Code and Item Name are required.'); return
+    }
+    createItemMut.mutate({
+      item_code:      newItem.item_code.trim(),
+      item_name:      newItem.item_name.trim(),
+      item_type_id:   newItem.item_type_id,
+      hsn_code:       newItem.hsn_code,
+      season:         newItem.season,
+      merchant_code:  newItem.merchant_code,
+      selling_price:  parseFloat(String(newItem.selling_price)) || 0,
+      purchase_price: parseFloat(String(newItem.purchase_price)) || 0,
+      launch_date:    newItem.launch_date,
+      sizes:          newItem.sizes,
+      routing_step_ids: newItem.routing_step_ids,
+    })
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // TAB 2 — BOM BUILDER
+  // ══════════════════════════════════════════════════════════════════════════════
+  const [bomItemSearch, setBomItemSearch] = useState('')
+  const [bomItemId,     setBomItemId]     = useState<number | null>(null)
+  const [bomItemName,   setBomItemName]   = useState('')
+  const [selectedBomId, setSelectedBomId] = useState<number | null>(null)
+  const [showNewBOM,    setShowNewBOM]    = useState(false)
+  const [newBOMName,    setNewBOMName]    = useState('')
+  const [newBOMApply,   setNewBOMApply]   = useState('all')
+  const [showCopyBOM,   setShowCopyBOM]   = useState(false)
+  const [copyTarget,    setCopyTarget]    = useState('')
+  const [copyName,      setCopyName]      = useState('')
+  const [newLine,       setNewLine]       = useState(blankBOMLine)
+  const [showAddLine,   setShowAddLine]   = useState(false)
+
+  const { data: bomSearchResults = [] } = useQuery<Item[]>({
+    queryKey: ['item-search', bomItemSearch],
+    queryFn:  async () => {
+      const { data } = await api.get(`/items/search?q=${encodeURIComponent(bomItemSearch)}`)
+      return data
+    },
+    enabled:  bomItemSearch.length >= 2,
+    staleTime: 30 * 1000,
+  })
+
+  const { data: boms = [] } = useQuery<BOMHeader[]>({
+    queryKey: ['boms', bomItemId],
+    queryFn:  async () => { const { data } = await api.get(`/items/${bomItemId}/boms`); return data },
+    enabled:  bomItemId !== null,
+    staleTime: 30 * 1000,
+  })
+
+  const { data: bomDetail } = useQuery<BOMDetail>({
+    queryKey: ['bom-detail', selectedBomId],
+    queryFn:  async () => {
+      const { data } = await api.get(`/items/${bomItemId}/boms/${selectedBomId}`)
+      return data
+    },
+    enabled:  selectedBomId !== null && bomItemId !== null,
+    staleTime: 30 * 1000,
+  })
+
+  const createBOMMut = useMutation({
+    mutationFn: (body: object) => api.post(`/items/${bomItemId}/boms`, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['boms', bomItemId] }); setShowNewBOM(false); setNewBOMName('') },
+  })
+
+  const deleteBOMMut = useMutation({
+    mutationFn: (bomId: number) => api.delete(`/items/${bomItemId}/boms/${bomId}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['boms', bomItemId] }); setSelectedBomId(null) },
+  })
+
+  const addLineMut = useMutation({
+    mutationFn: (body: object) => api.post(`/items/${bomItemId}/boms/${selectedBomId}/lines`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] })
+      setNewLine(blankBOMLine()); setShowAddLine(false)
+    },
+  })
+
+  const deleteLineMut = useMutation({
+    mutationFn: ({ bomId, lineId }: { bomId: number; lineId: number }) =>
+      api.delete(`/items/${bomItemId}/boms/${bomId}/lines/${lineId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] }),
+  })
+
+  const copyBOMMut = useMutation({
+    mutationFn: (body: object) => api.post(`/items/${bomItemId}/boms/${selectedBomId}/copy`, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['boms'] }); setShowCopyBOM(false) },
+  })
+
+  const totalCost = useMemo(() =>
+    (bomDetail?.lines ?? []).reduce((s, l) => s + lineAmt(l), 0), [bomDetail])
+
+  const costByType = useMemo(() => {
+    const acc: Record<string, number> = {}
+    for (const l of bomDetail?.lines ?? []) {
+      acc[l.component_type] = (acc[l.component_type] ?? 0) + lineAmt(l)
+    }
+    return acc
+  }, [bomDetail])
+
+  function handleAddLine() {
+    addLineMut.mutate({
+      component_name:    newLine.component_name,
+      component_type:    newLine.component_type,
+      quantity:          parseFloat(newLine.quantity) || 1,
+      unit:              newLine.unit,
+      rate:              parseFloat(newLine.rate) || 0,
+      component_item_id: newLine.component_item_id ? +newLine.component_item_id : null,
+      process_id:        newLine.process_id ? +newLine.process_id : null,
+      shrinkage_pct:     parseFloat(newLine.shrinkage_pct) || 0,
+      wastage_pct:       parseFloat(newLine.wastage_pct) || 0,
+      remarks:           newLine.remarks,
+    })
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // TAB 3 — ROUTING MASTER
+  // ══════════════════════════════════════════════════════════════════════════════
+  const [newRoute, setNewRoute] = useState({ name: '', description: '', sort_order: '' })
+
+  const createRouteMut = useMutation({
+    mutationFn: (body: object) => api.post('/items/routing', body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['item-meta'] }); setNewRoute({ name: '', description: '', sort_order: '' }) },
+  })
+
+  const deleteRouteMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/items/routing/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['item-meta'] }),
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // TAB 4 — IMPORT
+  // ══════════════════════════════════════════════════════════════════════════════
+  const importRef = useRef<HTMLInputElement>(null)
+  const [importFile,    setImportFile]    = useState<File | null>(null)
+  const [importPreview, setImportPreview] = useState<any[] | null>(null)
+  const [importTotal,   setImportTotal]   = useState(0)
+  const [importMsg,     setImportMsg]     = useState('')
+  const [importing,     setImporting]     = useState(false)
+
+  async function handleImportPreview(file: File) {
+    setImportPreview(null); setImportMsg('')
+    const fd = new FormData(); fd.append('file', file)
+    try {
+      const { data } = await api.post('/items/import/preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      setImportPreview(data.rows); setImportTotal(data.total)
+    } catch (e: any) {
+      setImportMsg('✗ ' + (e?.response?.data?.detail ?? 'Parse failed.'))
+    }
+  }
+
+  async function handleImportConfirm() {
+    if (!importFile) return
+    setImporting(true); setImportMsg('')
+    const fd = new FormData(); fd.append('file', importFile)
+    try {
+      const { data } = await api.post('/items/import/confirm', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      setImportMsg(`✓ Created ${data.created} items. Skipped ${data.skipped} duplicates.${data.errors.length ? ' Errors: ' + data.errors.slice(0, 3).join('; ') : ''}`)
+      qc.invalidateQueries({ queryKey: ['items'] })
+      setImportPreview(null); setImportFile(null)
+    } catch (e: any) {
+      setImportMsg('✗ ' + (e?.response?.data?.detail ?? 'Import failed.'))
+    } finally { setImporting(false) }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────────
+  const TABS = [
+    ['items',   '📦 Items'],
+    ['bom',     '🧩 BOM Builder'],
+    ['routing', '⚙️ Routing Master'],
+    ['import',  '📥 Import'],
+  ] as const
+
+  return (
+    <div className="max-w-7xl mx-auto space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Item Master & BOM</h1>
+          <p className="text-sm text-gray-500 mt-0.5">Manage finished goods, raw materials, and bill of materials</p>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="flex border-b border-gray-200 gap-1 px-2 pt-2">
+          {TABS.map(([id, label]) => (
+            <button key={id} onClick={() => setActiveTab(id)}
+              className={`px-4 py-2.5 text-sm font-medium transition-colors rounded-t-lg ${
+                activeTab === id
+                  ? 'border-b-2 border-[#002B5B] text-[#002B5B] bg-blue-50'
+                  : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+              }`}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-5">
+
+          {/* ================================================================
+              TAB 1 — ITEMS
+              ================================================================ */}
+          {activeTab === 'items' && (
+            <div className="space-y-4">
+              {/* Controls row */}
+              <div className="flex flex-wrap gap-3 items-center justify-between">
+                <div className="flex gap-2 flex-wrap">
+                  <input
+                    type="text" placeholder="Search items…" value={searchQ}
+                    onChange={e => setSearchQ(e.target.value)}
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm w-52 focus:outline-none focus:ring-2 focus:ring-[#002B5B]"
+                  />
+                  <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                    <option value="">All Types</option>
+                    {itemTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                  <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+                    <input type="checkbox" checked={parentOnly} onChange={e => setParentOnly(e.target.checked)} className="rounded" />
+                    Parents only
+                  </label>
+                </div>
+                <button onClick={() => setShowNewItem(true)}
+                  className="bg-[#002B5B] text-white text-sm px-4 py-2 rounded-lg hover:bg-[#003d80] transition-colors font-medium">
+                  + New Item
+                </button>
+              </div>
+
+              {/* Items table */}
+              {loadItems ? (
+                <div className="text-center py-10 text-gray-400">Loading…</div>
+              ) : items.length === 0 ? (
+                <div className="text-center py-14 text-gray-400">
+                  <div className="text-4xl mb-2">📦</div>
+                  <p>No items yet. Create your first item or import from Excel.</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-gray-200">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Item Code</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Name</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">HSN</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Season</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wide">Sizes</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wide">Selling ₹</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wide">Cost ₹</th>
+                        <th className="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {items.map(item => (
+                        <>
+                          <tr key={item.id}
+                            className="hover:bg-gray-50 cursor-pointer transition-colors"
+                            onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}>
+                            <td className="px-4 py-3 font-mono font-medium text-[#002B5B]">{item.item_code}</td>
+                            <td className="px-4 py-3 font-medium text-gray-900">{item.item_name}</td>
+                            <td className="px-4 py-3">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
+                                {item.item_type_code}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-gray-500">{item.hsn_code || '—'}</td>
+                            <td className="px-4 py-3 text-gray-500">{item.season || '—'}</td>
+                            <td className="px-4 py-3 text-right">
+                              {item.variant_count > 0
+                                ? <span className="text-blue-600 text-xs font-medium">{item.variant_count} sizes</span>
+                                : <span className="text-gray-400 text-xs">—</span>}
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-700">{item.selling_price > 0 ? fmt(item.selling_price) : '—'}</td>
+                            <td className="px-4 py-3 text-right text-gray-700">{item.purchase_price > 0 ? fmt(item.purchase_price) : '—'}</td>
+                            <td className="px-4 py-3 text-center">
+                              <button
+                                onClick={e => { e.stopPropagation(); if (confirm(`Delete ${item.item_code}?`)) deleteItemMut.mutate(item.id) }}
+                                className="text-red-400 hover:text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50 transition-colors">
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                          {expandedId === item.id && expandedDetail && expandedDetail.id === item.id && (
+                            <tr key={`exp-${item.id}`} className="bg-blue-50/40">
+                              <td colSpan={9} className="px-6 py-3">
+                                <div className="flex flex-wrap gap-4 text-xs text-gray-600">
+                                  {expandedDetail.variants.length > 0 && (
+                                    <div>
+                                      <span className="font-semibold text-gray-700 block mb-1">Size Variants</span>
+                                      <div className="flex flex-wrap gap-1">
+                                        {expandedDetail.variants.map(v => (
+                                          <span key={v.id} className="bg-white border border-gray-200 rounded px-2 py-0.5 font-mono">{v.size_label}</span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {expandedDetail.routing.length > 0 && (
+                                    <div>
+                                      <span className="font-semibold text-gray-700 block mb-1">Routing</span>
+                                      <div className="flex flex-wrap gap-1">
+                                        {expandedDetail.routing.map((r, i) => (
+                                          <span key={r.id} className="bg-white border border-gray-200 rounded px-2 py-0.5">
+                                            {i + 1}. {r.name}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  <div>
+                                    <span className="font-semibold text-gray-700 block mb-1">Merchant Code</span>
+                                    <span>{expandedDetail.merchant_code || '—'}</span>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* New Item Slide-over */}
+              {showNewItem && (
+                <div className="fixed inset-0 bg-black/40 z-50 flex justify-end" onClick={() => setShowNewItem(false)}>
+                  <div className="bg-white w-full max-w-lg h-full overflow-y-auto shadow-xl p-6 space-y-5" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-lg font-bold text-gray-900">New Item</h2>
+                      <button onClick={() => setShowNewItem(false)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                    </div>
+
+                    {/* Basic fields */}
+                    <div className="grid grid-cols-2 gap-3">
+                      {[
+                        ['item_code', 'Item Code *', 'text'],
+                        ['item_name', 'Item Name *', 'text'],
+                        ['hsn_code',  'HSN Code',    'text'],
+                        ['season',    'Season',      'text'],
+                        ['merchant_code', 'Merchant Code', 'text'],
+                        ['launch_date',   'Launch Date',   'date'],
+                        ['selling_price', 'Selling Price ₹', 'number'],
+                        ['purchase_price','Cost Price ₹',   'number'],
+                      ].map(([key, label, type]) => (
+                        <div key={key} className="space-y-1">
+                          <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">{label}</label>
+                          <input type={type} value={(newItem as any)[key]}
+                            onChange={e => setNewItem(p => ({ ...p, [key]: e.target.value }))}
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                        </div>
+                      ))}
+                      <div className="col-span-2 space-y-1">
+                        <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Item Type *</label>
+                        <select value={newItem.item_type_id}
+                          onChange={e => setNewItem(p => ({ ...p, item_type_id: +e.target.value }))}
+                          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                          {itemTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Size selection */}
+                    <div className="space-y-2">
+                      <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Size Variants</label>
+                      <div className="flex gap-2">
+                        <select value={newItem.size_group_id}
+                          onChange={e => applyPreviewSizes(e.target.value)}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                          <option value="">Pick a size group…</option>
+                          {sizeGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.sizes.join(', ')})</option>)}
+                        </select>
+                      </div>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {(sizeGroups.find(g => g.id === +newItem.size_group_id)?.sizes ?? []).map(sz => (
+                          <button key={sz} type="button"
+                            onClick={() => toggleSize(sz)}
+                            className={`px-2 py-0.5 rounded border text-xs font-medium transition-colors ${
+                              newItem.sizes.includes(sz)
+                                ? 'bg-[#002B5B] text-white border-[#002B5B]'
+                                : 'bg-white text-gray-600 border-gray-200 hover:border-[#002B5B]'
+                            }`}>{sz}</button>
+                        ))}
+                      </div>
+                      <div className="flex gap-2">
+                        <input type="text" placeholder="Custom size (e.g. 3XL)" value={newItem.custom_size}
+                          onChange={e => setNewItem(p => ({ ...p, custom_size: e.target.value }))}
+                          onKeyDown={e => e.key === 'Enter' && addCustomSize()}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                        <button type="button" onClick={addCustomSize}
+                          className="px-3 py-2 bg-gray-100 rounded-lg text-sm hover:bg-gray-200 transition-colors">Add</button>
+                      </div>
+                      {sizePreview.length > 0 && (
+                        <div className="bg-gray-50 rounded-lg p-2 text-xs text-gray-600">
+                          <span className="font-medium">Will create: </span>
+                          {sizePreview.map(s => `${newItem.item_code}-${s}`).join(', ')}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Routing */}
+                    <div className="space-y-2">
+                      <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Production Routing</label>
+                      <div className="flex flex-wrap gap-1">
+                        {routingSteps.map(r => (
+                          <button key={r.id} type="button"
+                            onClick={() => setNewItem(p => ({
+                              ...p,
+                              routing_step_ids: p.routing_step_ids.includes(r.id)
+                                ? p.routing_step_ids.filter(x => x !== r.id)
+                                : [...p.routing_step_ids, r.id]
+                            }))}
+                            className={`px-2 py-0.5 rounded border text-xs font-medium transition-colors ${
+                              newItem.routing_step_ids.includes(r.id)
+                                ? 'bg-[#002B5B] text-white border-[#002B5B]'
+                                : 'bg-white text-gray-600 border-gray-200 hover:border-[#002B5B]'
+                            }`}>{r.name}</button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {newItemErr && <p className="text-red-500 text-sm">{newItemErr}</p>}
+                    <button onClick={handleCreateItem}
+                      disabled={createItemMut.isPending}
+                      className="w-full bg-[#002B5B] text-white py-3 rounded-xl font-medium hover:bg-[#003d80] disabled:opacity-50 transition-colors">
+                      {createItemMut.isPending ? 'Creating…' : 'Create Item'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 2 — BOM BUILDER
+              ================================================================ */}
+          {activeTab === 'bom' && (
+            <div className="flex gap-5 min-h-[500px]">
+              {/* Left: Item selector */}
+              <div className="w-64 flex-shrink-0 space-y-3">
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Select Item</div>
+                <input type="text" placeholder="Search item code / name…"
+                  value={bomItemSearch} onChange={e => setBomItemSearch(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                {bomItemSearch.length >= 2 && bomSearchResults.length > 0 && (
+                  <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-60 overflow-y-auto bg-white shadow-sm">
+                    {bomSearchResults.map(it => (
+                      <button key={it.id} onClick={() => {
+                        setBomItemId(it.id); setBomItemName(it.item_code + ' — ' + it.item_name)
+                        setBomItemSearch(''); setSelectedBomId(null)
+                      }}
+                        className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors">
+                        <div className="text-xs font-mono font-medium text-[#002B5B]">{it.item_code}</div>
+                        <div className="text-xs text-gray-500">{it.item_name}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {bomItemId && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs font-medium text-blue-800">
+                    {bomItemName}
+                  </div>
+                )}
+              </div>
+
+              {/* Right: BOM panel */}
+              <div className="flex-1 space-y-4">
+                {!bomItemId ? (
+                  <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
+                    Search and select an item to view/edit its BOM
+                  </div>
+                ) : (
+                  <>
+                    {/* BOM list */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">BOMs:</span>
+                      {boms.map(b => (
+                        <button key={b.id} onClick={() => setSelectedBomId(b.id)}
+                          className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                            selectedBomId === b.id
+                              ? 'bg-[#002B5B] text-white border-[#002B5B]'
+                              : 'bg-white text-gray-700 border-gray-200 hover:border-[#002B5B]'
+                          }`}>
+                          {b.bom_name}
+                          {b.applies_to !== 'all' && <span className="ml-1 opacity-70">({b.applies_to})</span>}
+                          <span className="ml-1 opacity-60">[{b.line_count}]</span>
+                        </button>
+                      ))}
+                      <button onClick={() => setShowNewBOM(true)}
+                        className="px-3 py-1 rounded-full text-xs font-medium border border-dashed border-gray-300 text-gray-500 hover:border-[#002B5B] hover:text-[#002B5B] transition-colors">
+                        + Add BOM
+                      </button>
+                    </div>
+
+                    {/* New BOM form */}
+                    {showNewBOM && (
+                      <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                        <div className="flex gap-3 flex-wrap">
+                          <div className="flex-1 space-y-1">
+                            <label className="text-xs font-medium text-gray-600">BOM Name</label>
+                            <input type="text" placeholder='e.g. BOM-1 (56" Fabric)' value={newBOMName}
+                              onChange={e => setNewBOMName(e.target.value)}
+                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                          </div>
+                          <div className="w-48 space-y-1">
+                            <label className="text-xs font-medium text-gray-600">Applies To</label>
+                            <input type="text" placeholder="all   or   XL,XXL,3XL" value={newBOMApply}
+                              onChange={e => setNewBOMApply(e.target.value)}
+                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => createBOMMut.mutate({ bom_name: newBOMName || 'Default', applies_to: newBOMApply || 'all' })}
+                            className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] transition-colors">
+                            Create BOM
+                          </button>
+                          <button onClick={() => setShowNewBOM(false)}
+                            className="text-gray-500 text-xs px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors">
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* BOM Detail */}
+                    {selectedBomId && bomDetail && (
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-gray-800">{bomDetail.bom_name}</span>
+                            <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                              {bomDetail.applies_to === 'all' ? 'All sizes' : `Sizes: ${bomDetail.applies_to}`}
+                            </span>
+                          </div>
+                          <div className="flex gap-2">
+                            <button onClick={() => setShowCopyBOM(true)}
+                              className="text-xs text-blue-600 hover:text-blue-800 px-2 py-1 rounded hover:bg-blue-50 transition-colors">
+                              Copy BOM
+                            </button>
+                            <button onClick={() => { if (confirm('Delete this BOM?')) deleteBOMMut.mutate(selectedBomId) }}
+                              className="text-xs text-red-500 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50 transition-colors">
+                              Delete BOM
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Copy BOM modal */}
+                        {showCopyBOM && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                            <p className="text-sm font-medium text-gray-700">Copy BOM to another item</p>
+                            <div className="flex gap-3">
+                              <input type="number" placeholder="Target Item ID" value={copyTarget}
+                                onChange={e => setCopyTarget(e.target.value)}
+                                className="border border-gray-200 rounded-lg px-3 py-2 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                              <input type="text" placeholder="New BOM name" value={copyName}
+                                onChange={e => setCopyName(e.target.value)}
+                                className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={() => copyBOMMut.mutate({ target_item_id: +copyTarget, new_name: copyName || 'Copied BOM' })}
+                                className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] transition-colors">Copy</button>
+                              <button onClick={() => setShowCopyBOM(false)}
+                                className="text-gray-500 text-xs px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors">Cancel</button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* BOM Lines table */}
+                        <div className="overflow-x-auto rounded-xl border border-gray-200">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="bg-gray-50 border-b border-gray-200">
+                                {['Component', 'Type', 'Qty', 'Unit', 'Rate ₹', 'Process', 'Shrink%', 'Waste%', 'Net Qty', 'Amount ₹', 'Remarks', ''].map(h => (
+                                  <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {bomDetail.lines.map(l => (
+                                <tr key={l.id} className="hover:bg-gray-50 transition-colors">
+                                  <td className="px-3 py-2 font-medium text-gray-800">{l.component_name}</td>
+                                  <td className="px-3 py-2">
+                                    <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-xs">{l.component_type}</span>
+                                  </td>
+                                  <td className="px-3 py-2 tabular-nums">{l.quantity}</td>
+                                  <td className="px-3 py-2 text-gray-500">{l.unit}</td>
+                                  <td className="px-3 py-2 tabular-nums">{l.rate.toLocaleString('en-IN')}</td>
+                                  <td className="px-3 py-2 text-gray-500">{l.process_name || '—'}</td>
+                                  <td className="px-3 py-2 tabular-nums text-orange-600">{l.shrinkage_pct > 0 ? l.shrinkage_pct + '%' : '—'}</td>
+                                  <td className="px-3 py-2 tabular-nums text-orange-600">{l.wastage_pct > 0 ? l.wastage_pct + '%' : '—'}</td>
+                                  <td className="px-3 py-2 tabular-nums text-gray-700">{fmtN(netQty(l))}</td>
+                                  <td className="px-3 py-2 tabular-nums font-medium text-gray-900">{lineAmt(l).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</td>
+                                  <td className="px-3 py-2 text-gray-400 max-w-[120px] truncate">{l.remarks || '—'}</td>
+                                  <td className="px-3 py-2">
+                                    <button onClick={() => deleteLineMut.mutate({ bomId: selectedBomId, lineId: l.id })}
+                                      className="text-red-400 hover:text-red-600 transition-colors">✕</button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {bomDetail.lines.length === 0 && (
+                            <div className="text-center py-8 text-gray-400 text-sm">No BOM lines yet. Add components below.</div>
+                          )}
+                        </div>
+
+                        {/* Add Line form */}
+                        {!showAddLine ? (
+                          <button onClick={() => setShowAddLine(true)}
+                            className="text-sm text-[#002B5B] hover:text-[#003d80] font-medium border border-dashed border-[#002B5B]/30 rounded-lg px-4 py-2 hover:bg-blue-50 transition-colors w-full">
+                            + Add Component
+                          </button>
+                        ) : (
+                          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                            <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add Component</p>
+                            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                              <div className="col-span-2 space-y-1">
+                                <label className="text-xs text-gray-500">Component Name *</label>
+                                <input type="text" value={newLine.component_name}
+                                  onChange={e => setNewLine(p => ({ ...p, component_name: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-xs text-gray-500">Type</label>
+                                <select value={newLine.component_type}
+                                  onChange={e => setNewLine(p => ({ ...p, component_type: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                                  {COMPONENT_TYPES.map(t => <option key={t}>{t}</option>)}
+                                </select>
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-xs text-gray-500">Unit</label>
+                                <select value={newLine.unit}
+                                  onChange={e => setNewLine(p => ({ ...p, unit: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                                  {UNITS.map(u => <option key={u}>{u}</option>)}
+                                </select>
+                              </div>
+                              {[
+                                ['quantity',      'Quantity',  'number'],
+                                ['rate',          'Rate ₹',    'number'],
+                                ['shrinkage_pct', 'Shrink %',  'number'],
+                                ['wastage_pct',   'Wastage %', 'number'],
+                              ].map(([key, label, type]) => (
+                                <div key={key} className="space-y-1">
+                                  <label className="text-xs text-gray-500">{label}</label>
+                                  <input type={type} value={(newLine as any)[key]}
+                                    onChange={e => setNewLine(p => ({ ...p, [key]: e.target.value }))}
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                                </div>
+                              ))}
+                              <div className="space-y-1">
+                                <label className="text-xs text-gray-500">Process</label>
+                                <select value={newLine.process_id}
+                                  onChange={e => setNewLine(p => ({ ...p, process_id: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                                  <option value="">— None —</option>
+                                  {routingSteps.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                                </select>
+                              </div>
+                              <div className="col-span-2 space-y-1">
+                                <label className="text-xs text-gray-500">Remarks</label>
+                                <input type="text" value={newLine.remarks}
+                                  onChange={e => setNewLine(p => ({ ...p, remarks: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={handleAddLine} disabled={addLineMut.isPending}
+                                className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">
+                                {addLineMut.isPending ? 'Adding…' : 'Add Component'}
+                              </button>
+                              <button onClick={() => { setShowAddLine(false); setNewLine(blankBOMLine()) }}
+                                className="text-gray-500 text-xs px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors">Cancel</button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Cost Summary */}
+                        {bomDetail.lines.length > 0 && (
+                          <div className="bg-gradient-to-r from-[#002B5B]/5 to-blue-50 border border-[#002B5B]/10 rounded-xl p-4">
+                            <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-3">BOM Cost Summary</p>
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 text-xs mb-3">
+                              {Object.entries(costByType).map(([type, amt]) => (
+                                <div key={type} className="bg-white rounded-lg p-2 border border-gray-100">
+                                  <div className="text-gray-500">{type}</div>
+                                  <div className="font-semibold text-gray-900 mt-0.5">{fmt(amt)}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="flex items-center justify-between border-t border-[#002B5B]/10 pt-2">
+                              <span className="text-sm font-semibold text-gray-700">Total Production Cost</span>
+                              <span className="text-lg font-bold text-[#002B5B]">{fmt(totalCost)}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 3 — ROUTING MASTER
+              ================================================================ */}
+          {activeTab === 'routing' && (
+            <div className="space-y-4 max-w-2xl">
+              <div className="overflow-x-auto rounded-xl border border-gray-200">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      {['#', 'Process Name', 'Description', 'Order', 'Action'].map(h => (
+                        <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {routingSteps.map((r, i) => (
+                      <tr key={r.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-3 text-gray-400 text-xs">{i + 1}</td>
+                        <td className="px-4 py-3 font-medium text-gray-800">{r.name}</td>
+                        <td className="px-4 py-3 text-gray-500">{r.description || '—'}</td>
+                        <td className="px-4 py-3 text-gray-500">{r.sort_order}</td>
+                        <td className="px-4 py-3">
+                          <button onClick={() => { if (confirm(`Delete "${r.name}"?`)) deleteRouteMut.mutate(r.id) }}
+                            className="text-red-400 hover:text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50 transition-colors">
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Add routing step */}
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add Process</p>
+                <div className="flex gap-3 flex-wrap">
+                  <input type="text" placeholder="Process name *" value={newRoute.name}
+                    onChange={e => setNewRoute(p => ({ ...p, name: e.target.value }))}
+                    className="flex-1 min-w-[150px] border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                  <input type="text" placeholder="Description" value={newRoute.description}
+                    onChange={e => setNewRoute(p => ({ ...p, description: e.target.value }))}
+                    className="flex-1 min-w-[200px] border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                  <input type="number" placeholder="Sort #" value={newRoute.sort_order}
+                    onChange={e => setNewRoute(p => ({ ...p, sort_order: e.target.value }))}
+                    className="w-20 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                  <button
+                    onClick={() => createRouteMut.mutate({ name: newRoute.name, description: newRoute.description, sort_order: +newRoute.sort_order || 0 })}
+                    disabled={!newRoute.name.trim()}
+                    className="bg-[#002B5B] text-white text-sm px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">
+                    Add
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 4 — IMPORT
+              ================================================================ */}
+          {activeTab === 'import' && (
+            <div className="space-y-5 max-w-3xl">
+              {/* Expected columns */}
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
+                <p className="text-xs font-semibold text-blue-800 mb-2">Expected columns (Excel / CSV)</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {['item_code *', 'item_name *', 'item_type', 'hsn_code', 'season', 'merchant_code', 'selling_price', 'purchase_price', 'sizes', 'launch_date'].map(c => (
+                    <span key={c} className={`px-2 py-0.5 rounded text-xs font-mono ${c.includes('*') ? 'bg-blue-600 text-white' : 'bg-white border border-blue-200 text-blue-700'}`}>{c}</span>
+                  ))}
+                </div>
+                <p className="text-xs text-blue-600 mt-2">
+                  <strong>item_type</strong> values: FG, SFG, RM, ACC, PKG, FUEL &nbsp;·&nbsp;
+                  <strong>sizes</strong>: comma-separated e.g. "S,M,L,XL"
+                </p>
+              </div>
+
+              {/* Upload zone */}
+              <div
+                className="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center hover:border-[#002B5B] transition-colors cursor-pointer"
+                onClick={() => importRef.current?.click()}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => {
+                  e.preventDefault()
+                  const f = e.dataTransfer.files[0]
+                  if (f) { setImportFile(f); handleImportPreview(f) }
+                }}>
+                <div className="text-3xl mb-2">📥</div>
+                <p className="text-sm text-gray-600 font-medium">Click or drag & drop your Excel / CSV file</p>
+                <p className="text-xs text-gray-400 mt-1">.xlsx, .xls, .csv supported</p>
+                <input ref={importRef} type="file" accept=".xlsx,.xls,.csv" className="hidden"
+                  onChange={e => {
+                    const f = e.target.files?.[0]
+                    if (f) { setImportFile(f); handleImportPreview(f) }
+                  }} />
+              </div>
+
+              {importMsg && (
+                <p className={`text-sm font-medium ${importMsg.startsWith('✓') ? 'text-green-600' : 'text-red-500'}`}>{importMsg}</p>
+              )}
+
+              {/* Preview table */}
+              {importPreview && importPreview.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-gray-700">
+                      Preview — showing {importPreview.length} of {importTotal} rows
+                    </p>
+                    <button onClick={handleImportConfirm} disabled={importing}
+                      className="bg-green-600 text-white text-sm px-5 py-2 rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium transition-colors">
+                      {importing ? 'Importing…' : `Confirm Import (${importTotal} rows)`}
+                    </button>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-gray-200">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="bg-gray-50 border-b border-gray-200">
+                          {['item_code', 'item_name', 'item_type', 'hsn_code', 'season', 'sizes', 'selling_price', 'purchase_price'].map(h => (
+                            <th key={h} className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {importPreview.map((row, i) => (
+                          <tr key={i} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 font-mono font-medium text-[#002B5B]">{row.item_code}</td>
+                            <td className="px-3 py-2 text-gray-700">{row.item_name}</td>
+                            <td className="px-3 py-2 text-gray-500">{row.item_type}</td>
+                            <td className="px-3 py-2 text-gray-500">{row.hsn_code || '—'}</td>
+                            <td className="px-3 py-2 text-gray-500">{row.season || '—'}</td>
+                            <td className="px-3 py-2 text-blue-600">{(row.sizes ?? []).join(', ') || '—'}</td>
+                            <td className="px-3 py-2 tabular-nums">{row.selling_price || '—'}</td>
+                            <td className="px-3 py-2 tabular-nums">{row.purchase_price || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  )
+}

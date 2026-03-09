@@ -18,6 +18,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - FINANCE_DB_PATH=/data/finance.db
+      - ITEM_DB_PATH=/data/items.db
     volumes:
       - /root/app-data/finance:/data
     expose:
