@@ -1,15 +1,19 @@
 """
 Snapdeal loader — parses monthly Excel/ZIP reports from Snapdeal Seller Panel.
 
-Typical Snapdeal report columns (fuzzy-matched):
-  Order ID / Order Code / Suborder ID
-  Order Date / Created Date / Order Created Date
-  SKU / Product SKU / Seller SKU Code / SKU Code
-  Quantity / Qty
-  Status / Order Status / Sub Status / Fulfillment Status
-    → Shipped / Delivered / RTO / Returned / Cancelled
-  Sale Price / Selling Price / Deal Price / MRP / Total Amount
-  State / Delivery State / Customer State
+Snapdeal reports often have 1-5 title/metadata rows before the actual column
+headers, so we auto-detect the real header row before parsing.
+
+Known Snapdeal column names (from actual seller panel exports):
+  Order Code / Sub Order Code / Order ID
+  Order Date / Order Placed Date
+  Product Name
+  Seller SKU Code / Snap SKU / SKU
+  Quantity
+  Order Status / Status / Sub Status
+  Deal Price / Selling Price / Sale Price / Total Amount
+  State/UT / State / Delivery State
+  City / Buyer Name / Pincode
 
 Returns a DataFrame with:
   Date, TxnType (Shipment/Refund/Cancel), Quantity, Invoice_Amount,
@@ -24,6 +28,15 @@ import numpy as np
 import pandas as pd
 
 from .helpers import map_to_oms_sku, clean_sku
+
+
+# ── Keywords that appear in the REAL header row of Snapdeal reports ──────────
+_HEADER_KEYWORDS = [
+    "order code", "order date", "order id", "sub order",
+    "seller sku", "snap sku", "order status", "deal price",
+    "selling price", "quantity", "state/ut", "buyer name",
+    "product name", "order placed", "suborder",
+]
 
 
 def _find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
@@ -42,35 +55,60 @@ def _find_col_fuzzy(cols: List[str], keywords: List[str]) -> Optional[str]:
     return None
 
 
+def _detect_header_row(raw: pd.DataFrame) -> int:
+    """
+    Scan the first 15 rows to find the row that most looks like a header
+    (contains the most recognised Snapdeal column keyword matches).
+    Returns the 0-based row index, or 0 if nothing found.
+    """
+    best_row, best_score = 0, 0
+    for i in range(min(15, len(raw))):
+        row_vals = [str(v).lower().strip() for v in raw.iloc[i].values]
+        score = sum(
+            1 for cell in row_vals
+            if any(kw in cell for kw in _HEADER_KEYWORDS)
+        )
+        if score > best_score:
+            best_score, best_row = score, i
+    return best_row
+
+
 def _snapdeal_txn(status: str) -> str:
     """Map Snapdeal order status → Shipment / Refund / Cancel."""
     s = str(status).strip().lower()
-    if any(x in s for x in ["return", "rto", "refund", "returned"]):
+    if any(x in s for x in ["return", "rto", "refund", "returned", "reverse"]):
         return "Refund"
-    if any(x in s for x in ["cancel", "cancelled"]):
+    if any(x in s for x in ["cancel", "cancelled", "cancellation"]):
         return "Cancel"
-    # Delivered / Shipped / Dispatched / Picked / Processing
+    # Delivered / Shipped / Dispatched / Picked / Processing / Approved
     return "Shipment"
 
 
 def _parse_snapdeal_df(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
     """
-    Given a raw DataFrame (from Excel/CSV), extract and normalise columns.
+    Given a raw DataFrame (already with correct headers), extract and normalise.
     Returns cleaned DataFrame with: Date, TxnType, Quantity, Invoice_Amount,
     State, OrderId, OMS_SKU, Month.
     """
     if df.empty:
         return pd.DataFrame()
 
-    # Normalise column names for fuzzy search
+    # Normalise column names
+    df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+    # Drop rows where all values are NaN
+    df = df.dropna(how="all")
+    if df.empty:
+        return pd.DataFrame()
+
     cols = list(df.columns)
 
     # ── Date ──────────────────────────────────────────────────
     date_col = _find_col(cols, [
-        "Order Date", "Order Created Date", "Created Date",
-        "Order Placed Date", "Placed Date",
-    ]) or _find_col_fuzzy(cols, ["order date", "created date", "placed date"])
+        "Order Date", "Order Placed Date", "Order Created Date",
+        "Created Date", "Placed Date", "Date",
+        "Order_Date", "OrderDate",
+    ]) or _find_col_fuzzy(cols, ["order date", "placed date", "created date"])
 
     if date_col is None:
         return pd.DataFrame()
@@ -80,18 +118,18 @@ def _parse_snapdeal_df(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFram
     if df.empty:
         return pd.DataFrame()
 
-    # ── Order ID ──────────────────────────────────────────────
+    # ── Order ID — prefer Sub Order Code (most specific) ─────
     order_col = _find_col(cols, [
-        "Order ID", "Order Code", "Suborder ID", "Sub Order ID",
-        "Order Number", "Snapdeal Order ID",
-    ]) or _find_col_fuzzy(cols, ["order id", "order code", "suborder"])
+        "Sub Order Code", "Suborder Code", "Sub Order ID",
+        "Order Code", "Order ID", "Snapdeal Order ID", "Order Number",
+    ]) or _find_col_fuzzy(cols, ["sub order", "order code", "order id"])
     df["_OrderId"] = df[order_col].fillna("").astype(str) if order_col else ""
 
     # ── SKU ───────────────────────────────────────────────────
     sku_col = _find_col(cols, [
-        "SKU", "Product SKU", "Seller SKU Code", "SKU Code",
-        "Seller SKU", "Item SKU",
-    ]) or _find_col_fuzzy(cols, ["sku", "seller sku"])
+        "Seller SKU Code", "Seller SKU", "Snap SKU", "SKU Code",
+        "SKU", "Product SKU", "Item SKU", "SellerSKUCode",
+    ]) or _find_col_fuzzy(cols, ["seller sku", "snap sku", "sku code", "sku"])
     if sku_col:
         df["_OMS_SKU"] = df[sku_col].apply(
             lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
@@ -100,23 +138,31 @@ def _parse_snapdeal_df(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFram
         df["_OMS_SKU"] = "UNKNOWN"
 
     # ── Quantity ──────────────────────────────────────────────
-    qty_col = _find_col(cols, ["Quantity", "Qty", "Item Qty"]) or \
-              _find_col_fuzzy(cols, ["quantity", "qty"])
-    df["_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1).astype("float32") \
-                 if qty_col else 1.0
+    qty_col = _find_col(cols, [
+        "Quantity", "Qty", "Item Qty", "No. of Units", "Units",
+    ]) or _find_col_fuzzy(cols, ["quantity", "qty", "units"])
+    df["_Qty"] = pd.to_numeric(
+        df[qty_col], errors="coerce"
+    ).fillna(1).astype("float32") if qty_col else 1.0
 
     # ── Revenue ───────────────────────────────────────────────
     rev_col = _find_col(cols, [
-        "Sale Price", "Selling Price", "Deal Price",
-        "Total Amount", "Invoice Amount", "Net Amount", "Buyer Price",
-    ]) or _find_col_fuzzy(cols, ["sale price", "selling price", "total amount", "net amount"])
-    df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0).astype("float32") \
-                 if rev_col else 0.0
+        "Deal Price", "Selling Price", "Sale Price",
+        "Total Amount", "Invoice Amount", "Net Amount",
+        "Buyer Price", "MRP", "Product Price",
+    ]) or _find_col_fuzzy(cols, [
+        "deal price", "selling price", "sale price",
+        "total amount", "net amount", "invoice",
+    ])
+    df["_Rev"] = pd.to_numeric(
+        df[rev_col], errors="coerce"
+    ).fillna(0).astype("float32") if rev_col else 0.0
 
     # ── Transaction Type ─────────────────────────────────────
     status_col = _find_col(cols, [
-        "Status", "Order Status", "Sub Status", "Fulfillment Status",
-        "Shipment Status", "Item Status",
+        "Order Status", "Status", "Sub Status",
+        "Fulfillment Status", "Shipment Status", "Item Status",
+        "Order Sub Status",
     ]) or _find_col_fuzzy(cols, ["status"])
     if status_col:
         df["_TxnType"] = df[status_col].apply(_snapdeal_txn)
@@ -125,11 +171,13 @@ def _parse_snapdeal_df(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFram
 
     # ── State ─────────────────────────────────────────────────
     state_col = _find_col(cols, [
-        "State", "Delivery State", "Customer State",
-        "Shipping State", "Ship State",
+        "State/UT", "State", "Delivery State", "Customer State",
+        "Shipping State", "Ship State", "Buyer State",
     ]) or _find_col_fuzzy(cols, ["state"])
-    df["_State"] = df[state_col].fillna("").astype(str).str.upper().str.strip() \
-                   if state_col else ""
+    df["_State"] = (
+        df[state_col].fillna("").astype(str).str.upper().str.strip()
+        if state_col else ""
+    )
 
     # ── Build output ──────────────────────────────────────────
     out = pd.DataFrame({
@@ -150,34 +198,57 @@ def _parse_snapdeal_file(
     fname: str,
     mapping: Dict[str, str],
 ) -> pd.DataFrame:
-    """Parse a single Snapdeal Excel or CSV report."""
+    """
+    Parse a single Snapdeal Excel or CSV report.
+    Auto-detects the real header row (Snapdeal reports have title rows on top).
+    """
     fn_lower = fname.lower()
+
     try:
         if fn_lower.endswith(".csv"):
+            # CSV: try auto-detect header row too
+            raw_no_header: Optional[pd.DataFrame] = None
             for enc in ("utf-8", "ISO-8859-1"):
                 try:
-                    raw = pd.read_csv(
-                        io.BytesIO(file_bytes), dtype=str,
+                    raw_no_header = pd.read_csv(
+                        io.BytesIO(file_bytes), dtype=str, header=None,
                         encoding=enc, on_bad_lines="skip",
                     )
                     break
                 except UnicodeDecodeError:
                     continue
+            if raw_no_header is None or raw_no_header.empty:
+                return pd.DataFrame()
+            hdr_row = _detect_header_row(raw_no_header)
+            cols = raw_no_header.iloc[hdr_row].astype(str).tolist()
+            raw = raw_no_header.iloc[hdr_row + 1:].reset_index(drop=True)
+            raw.columns = cols
         else:
-            # Try all sheets, use the largest one with data
+            # Excel: iterate sheets, auto-detect header row on each
             xl = pd.ExcelFile(io.BytesIO(file_bytes))
-            dfs_by_sheet = []
+            best_df: Optional[pd.DataFrame] = None
+            best_rows = 0
+
             for sheet in xl.sheet_names:
                 try:
-                    _df = xl.parse(sheet, dtype=str)
-                    if not _df.empty:
-                        dfs_by_sheet.append(_df)
+                    raw_no_header = xl.parse(sheet, header=None, dtype=str)
+                    if raw_no_header.empty:
+                        continue
+                    hdr_row = _detect_header_row(raw_no_header)
+                    cols = raw_no_header.iloc[hdr_row].astype(str).tolist()
+                    candidate = raw_no_header.iloc[hdr_row + 1:].reset_index(drop=True)
+                    candidate.columns = cols
+                    candidate = candidate.dropna(how="all")
+                    if len(candidate) > best_rows:
+                        best_rows = len(candidate)
+                        best_df = candidate
                 except Exception:
                     continue
-            if not dfs_by_sheet:
+
+            if best_df is None or best_df.empty:
                 return pd.DataFrame()
-            # Pick sheet with most rows
-            raw = max(dfs_by_sheet, key=len)
+            raw = best_df
+
     except Exception:
         return pd.DataFrame()
 
@@ -192,7 +263,7 @@ def load_snapdeal_from_zip(
     mapping: Dict[str, str],
 ) -> Tuple[pd.DataFrame, int, List[str]]:
     """
-    Parse Snapdeal master ZIP (may contain .xlsx/.csv files, optionally nested ZIPs).
+    Parse Snapdeal master ZIP (may contain .xlsx/.csv files or nested ZIPs).
     Returns (combined_df, file_count, skipped_list).
     """
     dfs: List[pd.DataFrame] = []
@@ -204,7 +275,6 @@ def load_snapdeal_from_zip(
         return pd.DataFrame(), 0, [f"Cannot open Snapdeal ZIP: {e}"]
 
     all_names = root_zf.namelist()
-    # Collect all Excel/CSV files (including inside nested ZIPs)
     file_items: List[Tuple[str, bytes]] = []
 
     for name in all_names:
@@ -213,7 +283,7 @@ def load_snapdeal_from_zip(
             continue
         lower = base.lower()
         if lower.endswith(".zip"):
-            # Nested ZIP (monthly ZIP of files)
+            # Nested ZIP
             try:
                 inner_data = root_zf.read(name)
                 with zipfile.ZipFile(io.BytesIO(inner_data)) as inner_zf:
