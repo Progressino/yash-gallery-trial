@@ -158,9 +158,10 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
     all_needed = list(dict.fromkeys([sku_col] + specific_cols))  # deduplicate, preserve order
     df = raw[all_needed].copy()
 
-    df[sku_col] = df[sku_col].astype(str).str.strip()
+    # Normalise to uppercase so the merge with inventory/sales data is case-insensitive
+    df[sku_col] = df[sku_col].astype(str).str.strip().str.upper()
     df = df[df[sku_col].str.len() > 0]
-    df = df[~df[sku_col].str.lower().isin(["sku", "oms_sku", "nan", "none", ""])]
+    df = df[~df[sku_col].isin(["SKU", "OMS_SKU", "NAN", "NONE", ""])]
 
     if df.empty:
         raise ValueError("No valid SKU rows found after parsing.")
