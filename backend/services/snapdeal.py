@@ -1,19 +1,10 @@
 """
 Snapdeal loader — parses monthly Excel/ZIP reports from Snapdeal Seller Panel.
 
-Snapdeal reports often have 1-5 title/metadata rows before the actual column
-headers, so we auto-detect the real header row before parsing.
-
-Known Snapdeal column names (from actual seller panel exports):
-  Order Code / Sub Order Code / Order ID
-  Order Date / Order Placed Date
-  Product Name
-  Seller SKU Code / Snap SKU / SKU
-  Quantity
-  Order Status / Status / Sub Status
-  Deal Price / Selling Price / Sale Price / Total Amount
-  State/UT / State / Delivery State
-  City / Buyer Name / Pincode
+Uses a two-stage approach:
+ 1. Scan every possible header row (0-15) for each sheet
+ 2. For each candidate layout, try full column detection
+ 3. Fall back to value-based date detection if name-based fails
 
 Returns a DataFrame with:
   Date, TxnType (Shipment/Refund/Cancel), Quantity, Invoice_Amount,
@@ -30,12 +21,11 @@ import pandas as pd
 from .helpers import map_to_oms_sku, clean_sku
 
 
-# ── Keywords that appear in the REAL header row of Snapdeal reports ──────────
+# ── Keywords that indicate we're looking at a real header row ─────────────────
 _HEADER_KEYWORDS = [
-    "order code", "order date", "order id", "sub order",
-    "seller sku", "snap sku", "order status", "deal price",
-    "selling price", "quantity", "state/ut", "buyer name",
-    "product name", "order placed", "suborder",
+    "order", "date", "sku", "quantity", "qty", "status", "price",
+    "state", "city", "product", "seller", "snap", "buyer", "amount",
+    "suborder", "sub order", "deal", "shipment", "dispatch",
 ]
 
 
@@ -55,15 +45,15 @@ def _find_col_fuzzy(cols: List[str], keywords: List[str]) -> Optional[str]:
     return None
 
 
-def _detect_header_row(raw: pd.DataFrame) -> int:
+def _detect_header_row(raw: pd.DataFrame, max_scan: int = 20) -> int:
     """
-    Scan the first 15 rows to find the row that most looks like a header
-    (contains the most recognised Snapdeal column keyword matches).
-    Returns the 0-based row index, or 0 if nothing found.
+    Return the 0-based row index most likely to be the real header.
+    Picks the row with the most keyword hits across its cell values.
     """
     best_row, best_score = 0, 0
-    for i in range(min(15, len(raw))):
-        row_vals = [str(v).lower().strip() for v in raw.iloc[i].values]
+    for i in range(min(max_scan, len(raw))):
+        row_vals = [str(v).lower().strip() for v in raw.iloc[i].values
+                    if pd.notna(v) and str(v).strip()]
         score = sum(
             1 for cell in row_vals
             if any(kw in cell for kw in _HEADER_KEYWORDS)
@@ -73,6 +63,28 @@ def _detect_header_row(raw: pd.DataFrame) -> int:
     return best_row
 
 
+def _find_date_col_by_value(df: pd.DataFrame) -> Optional[str]:
+    """
+    Scan all columns for one whose non-null values parse as dates ≥50% of the time.
+    Returns the first such column name, or None.
+    """
+    for col in df.columns:
+        try:
+            sample = df[col].dropna().head(20)
+            if len(sample) == 0:
+                continue
+            parsed = pd.to_datetime(sample, errors="coerce", dayfirst=True)
+            hit_rate = parsed.notna().mean()
+            if hit_rate >= 0.5:
+                # Also verify they look like real dates (year 2000-2030)
+                years = parsed.dropna().dt.year
+                if years.between(2000, 2030).all():
+                    return col
+        except Exception:
+            continue
+    return None
+
+
 def _snapdeal_txn(status: str) -> str:
     """Map Snapdeal order status → Shipment / Refund / Cancel."""
     s = str(status).strip().lower()
@@ -80,56 +92,66 @@ def _snapdeal_txn(status: str) -> str:
         return "Refund"
     if any(x in s for x in ["cancel", "cancelled", "cancellation"]):
         return "Cancel"
-    # Delivered / Shipped / Dispatched / Picked / Processing / Approved
     return "Shipment"
 
 
-def _parse_snapdeal_df(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+def _parse_snapdeal_df(
+    df: pd.DataFrame,
+    mapping: Dict[str, str],
+) -> Tuple[pd.DataFrame, str]:
     """
-    Given a raw DataFrame (already with correct headers), extract and normalise.
-    Returns cleaned DataFrame with: Date, TxnType, Quantity, Invoice_Amount,
-    State, OrderId, OMS_SKU, Month.
+    Given a DataFrame (already with correct column headers), parse and normalise.
+    Returns (result_df, debug_msg).
+    result_df is empty on failure; debug_msg explains why.
     """
     if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), "empty"
 
-    # Normalise column names
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
-    # Drop rows where all values are NaN
     df = df.dropna(how="all")
     if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), "all-NaN rows"
 
     cols = list(df.columns)
 
-    # ── Date ──────────────────────────────────────────────────
+    # ── Date — name-based first, then value-based fallback ───────
     date_col = _find_col(cols, [
         "Order Date", "Order Placed Date", "Order Created Date",
-        "Created Date", "Placed Date", "Date",
-        "Order_Date", "OrderDate",
-    ]) or _find_col_fuzzy(cols, ["order date", "placed date", "created date"])
+        "Created Date", "Placed Date", "Date", "Order_Date",
+        "Dispatch Date", "Ship Date",
+    ]) or _find_col_fuzzy(cols, ["order date", "placed date", "created date", "dispatch date"])
 
     if date_col is None:
-        return pd.DataFrame()
+        date_col = _find_date_col_by_value(df)
+
+    if date_col is None:
+        return pd.DataFrame(), f"no date col (cols: {cols[:15]})"
 
     df["_Date"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
     df = df.dropna(subset=["_Date"])
     if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), f"date col '{date_col}' yielded 0 valid dates"
 
-    # ── Order ID — prefer Sub Order Code (most specific) ─────
+    # Sanity: require reasonable date range
+    years = df["_Date"].dt.year
+    if not years.between(2010, 2035).any():
+        return pd.DataFrame(), f"date col '{date_col}' has no dates in 2010-2035"
+
+    # ── Order ID ──────────────────────────────────────────────
     order_col = _find_col(cols, [
-        "Sub Order Code", "Suborder Code", "Sub Order ID",
+        "Sub Order Code", "Suborder Code", "Sub Order ID", "Sub Order No",
         "Order Code", "Order ID", "Snapdeal Order ID", "Order Number",
-    ]) or _find_col_fuzzy(cols, ["sub order", "order code", "order id"])
+        "SubOrder Code", "Sub-Order Code",
+    ]) or _find_col_fuzzy(cols, ["sub order", "suborder", "order code", "order id", "order no"])
     df["_OrderId"] = df[order_col].fillna("").astype(str) if order_col else ""
 
     # ── SKU ───────────────────────────────────────────────────
     sku_col = _find_col(cols, [
         "Seller SKU Code", "Seller SKU", "Snap SKU", "SKU Code",
         "SKU", "Product SKU", "Item SKU", "SellerSKUCode",
-    ]) or _find_col_fuzzy(cols, ["seller sku", "snap sku", "sku code", "sku"])
+        "Seller_SKU", "Article Code",
+    ]) or _find_col_fuzzy(cols, ["seller sku", "snap sku", "sku code", " sku", "article"])
     if sku_col:
         df["_OMS_SKU"] = df[sku_col].apply(
             lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
@@ -139,47 +161,48 @@ def _parse_snapdeal_df(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFram
 
     # ── Quantity ──────────────────────────────────────────────
     qty_col = _find_col(cols, [
-        "Quantity", "Qty", "Item Qty", "No. of Units", "Units",
-    ]) or _find_col_fuzzy(cols, ["quantity", "qty", "units"])
-    df["_Qty"] = pd.to_numeric(
-        df[qty_col], errors="coerce"
-    ).fillna(1).astype("float32") if qty_col else 1.0
+        "Quantity", "Qty", "Item Qty", "No. of Units", "Units", "Pieces",
+    ]) or _find_col_fuzzy(cols, ["quantity", "qty", " units", "pieces"])
+    df["_Qty"] = (
+        pd.to_numeric(df[qty_col], errors="coerce").fillna(1).astype("float32")
+        if qty_col else 1.0
+    )
 
     # ── Revenue ───────────────────────────────────────────────
     rev_col = _find_col(cols, [
         "Deal Price", "Selling Price", "Sale Price",
         "Total Amount", "Invoice Amount", "Net Amount",
-        "Buyer Price", "MRP", "Product Price",
+        "Buyer Price", "MRP", "Product Price", "Gross Amount",
+        "Order Amount", "Item Price",
     ]) or _find_col_fuzzy(cols, [
-        "deal price", "selling price", "sale price",
-        "total amount", "net amount", "invoice",
+        "deal price", "selling price", "sale price", "total amount",
+        "net amount", "invoice", "order amount", "item price",
     ])
-    df["_Rev"] = pd.to_numeric(
-        df[rev_col], errors="coerce"
-    ).fillna(0).astype("float32") if rev_col else 0.0
+    df["_Rev"] = (
+        pd.to_numeric(df[rev_col], errors="coerce").fillna(0).astype("float32")
+        if rev_col else 0.0
+    )
 
     # ── Transaction Type ─────────────────────────────────────
     status_col = _find_col(cols, [
-        "Order Status", "Status", "Sub Status",
-        "Fulfillment Status", "Shipment Status", "Item Status",
-        "Order Sub Status",
+        "Order Status", "Status", "Sub Status", "Fulfillment Status",
+        "Shipment Status", "Item Status", "Order Sub Status", "Current Status",
     ]) or _find_col_fuzzy(cols, ["status"])
-    if status_col:
-        df["_TxnType"] = df[status_col].apply(_snapdeal_txn)
-    else:
-        df["_TxnType"] = "Shipment"
+    df["_TxnType"] = (
+        df[status_col].apply(_snapdeal_txn)
+        if status_col else "Shipment"
+    )
 
     # ── State ─────────────────────────────────────────────────
     state_col = _find_col(cols, [
         "State/UT", "State", "Delivery State", "Customer State",
-        "Shipping State", "Ship State", "Buyer State",
+        "Shipping State", "Ship State", "Buyer State", "Delivery State/UT",
     ]) or _find_col_fuzzy(cols, ["state"])
     df["_State"] = (
         df[state_col].fillna("").astype(str).str.upper().str.strip()
         if state_col else ""
     )
 
-    # ── Build output ──────────────────────────────────────────
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "TxnType":        df["_TxnType"],
@@ -190,72 +213,103 @@ def _parse_snapdeal_df(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFram
         "OMS_SKU":        df["_OMS_SKU"],
     })
     out["Month"] = out["Date"].dt.to_period("M").astype(str)
-    return out.dropna(subset=["Date"])
+    result = out.dropna(subset=["Date"])
+    return result, f"ok ({len(result)} rows)"
+
+
+def _try_parse_with_header(
+    raw: pd.DataFrame,
+    hdr_row: int,
+    mapping: Dict[str, str],
+) -> pd.DataFrame:
+    """Apply header row `hdr_row` and attempt parse. Returns empty DF on failure."""
+    if hdr_row >= len(raw):
+        return pd.DataFrame()
+    cols = raw.iloc[hdr_row].astype(str).tolist()
+    data = raw.iloc[hdr_row + 1:].reset_index(drop=True)
+    data.columns = cols
+    data = data.dropna(how="all")
+    result, _ = _parse_snapdeal_df(data, mapping)
+    return result
 
 
 def _parse_snapdeal_file(
     file_bytes: bytes,
     fname: str,
     mapping: Dict[str, str],
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, str]:
     """
-    Parse a single Snapdeal Excel or CSV report.
-    Auto-detects the real header row (Snapdeal reports have title rows on top).
+    Parse a single Snapdeal Excel or CSV file.
+    Returns (df, debug_info) — df is empty on failure, debug_info explains what happened.
+    Tries every header row 0-15 until one yields valid data.
     """
     fn_lower = fname.lower()
 
+    raw_candidates: List[pd.DataFrame] = []   # list of raw (no-header) DataFrames to try
+
     try:
         if fn_lower.endswith(".csv"):
-            # CSV: try auto-detect header row too
-            raw_no_header: Optional[pd.DataFrame] = None
             for enc in ("utf-8", "ISO-8859-1"):
                 try:
-                    raw_no_header = pd.read_csv(
+                    raw = pd.read_csv(
                         io.BytesIO(file_bytes), dtype=str, header=None,
                         encoding=enc, on_bad_lines="skip",
                     )
+                    raw_candidates.append(raw)
                     break
                 except UnicodeDecodeError:
                     continue
-            if raw_no_header is None or raw_no_header.empty:
-                return pd.DataFrame()
-            hdr_row = _detect_header_row(raw_no_header)
-            cols = raw_no_header.iloc[hdr_row].astype(str).tolist()
-            raw = raw_no_header.iloc[hdr_row + 1:].reset_index(drop=True)
-            raw.columns = cols
         else:
-            # Excel: iterate sheets, auto-detect header row on each
             xl = pd.ExcelFile(io.BytesIO(file_bytes))
-            best_df: Optional[pd.DataFrame] = None
-            best_rows = 0
-
             for sheet in xl.sheet_names:
                 try:
-                    raw_no_header = xl.parse(sheet, header=None, dtype=str)
-                    if raw_no_header.empty:
-                        continue
-                    hdr_row = _detect_header_row(raw_no_header)
-                    cols = raw_no_header.iloc[hdr_row].astype(str).tolist()
-                    candidate = raw_no_header.iloc[hdr_row + 1:].reset_index(drop=True)
-                    candidate.columns = cols
-                    candidate = candidate.dropna(how="all")
-                    if len(candidate) > best_rows:
-                        best_rows = len(candidate)
-                        best_df = candidate
+                    raw = xl.parse(sheet, header=None, dtype=str)
+                    if not raw.empty:
+                        raw_candidates.append(raw)
                 except Exception:
                     continue
+    except Exception as e:
+        return pd.DataFrame(), f"read error: {e}"
 
-            if best_df is None or best_df.empty:
-                return pd.DataFrame()
-            raw = best_df
+    if not raw_candidates:
+        return pd.DataFrame(), "no sheets / empty file"
 
-    except Exception:
-        return pd.DataFrame()
+    # For each sheet (raw), try every header row from 0 to 15
+    best_df: pd.DataFrame = pd.DataFrame()
+    best_debug = ""
 
-    if raw.empty:
-        return pd.DataFrame()
+    for raw in raw_candidates:
+        # First: try the heuristic best row
+        hdr_row = _detect_header_row(raw)
+        candidate = _try_parse_with_header(raw, hdr_row, mapping)
+        if not candidate.empty:
+            if len(candidate) > len(best_df):
+                best_df = candidate
+                best_debug = f"header row {hdr_row}"
+            continue  # already found something on this sheet
 
-    return _parse_snapdeal_df(raw, mapping)
+        # Brute force: try every row 0-15
+        for r in range(min(16, len(raw))):
+            if r == hdr_row:
+                continue
+            candidate = _try_parse_with_header(raw, r, mapping)
+            if not candidate.empty and len(candidate) > len(best_df):
+                best_df = candidate
+                best_debug = f"header row {r} (brute force)"
+                break
+
+    if best_df.empty:
+        # Return column names from row 0 for diagnostics
+        debug_cols = []
+        for raw in raw_candidates[:1]:
+            for r in range(min(5, len(raw))):
+                row_vals = [str(v).strip() for v in raw.iloc[r].values
+                            if pd.notna(v) and str(v).strip()]
+                if row_vals:
+                    debug_cols.append(f"row{r}: {row_vals[:8]}")
+        return pd.DataFrame(), " | ".join(debug_cols) or "no data"
+
+    return best_df, best_debug
 
 
 def load_snapdeal_from_zip(
@@ -263,7 +317,7 @@ def load_snapdeal_from_zip(
     mapping: Dict[str, str],
 ) -> Tuple[pd.DataFrame, int, List[str]]:
     """
-    Parse Snapdeal master ZIP (may contain .xlsx/.csv files or nested ZIPs).
+    Parse Snapdeal master ZIP (may contain .xlsx/.csv or nested ZIPs).
     Returns (combined_df, file_count, skipped_list).
     """
     dfs: List[pd.DataFrame] = []
@@ -272,18 +326,16 @@ def load_snapdeal_from_zip(
     try:
         root_zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except Exception as e:
-        return pd.DataFrame(), 0, [f"Cannot open Snapdeal ZIP: {e}"]
+        return pd.DataFrame(), 0, [f"Cannot open ZIP: {e}"]
 
-    all_names = root_zf.namelist()
     file_items: List[Tuple[str, bytes]] = []
 
-    for name in all_names:
+    for name in root_zf.namelist():
         base = Path(name).name
         if "__MACOSX" in name or base.startswith("."):
             continue
         lower = base.lower()
         if lower.endswith(".zip"):
-            # Nested ZIP
             try:
                 inner_data = root_zf.read(name)
                 with zipfile.ZipFile(io.BytesIO(inner_data)) as inner_zf:
@@ -299,11 +351,11 @@ def load_snapdeal_from_zip(
             except Exception as e:
                 skipped.append(f"{base}: {e}")
 
-    for fname, file_bytes in file_items:
+    for fname, fbytes in file_items:
         try:
-            df = _parse_snapdeal_file(file_bytes, fname, mapping)
+            df, debug = _parse_snapdeal_file(fbytes, fname, mapping)
             if df.empty:
-                skipped.append(f"{fname}: No recognised data / empty")
+                skipped.append(f"{fname}: {debug}")
             else:
                 dfs.append(df)
         except Exception as e:
@@ -318,7 +370,6 @@ def load_snapdeal_from_zip(
 
 
 def snapdeal_to_sales_rows(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
-    """Convert snapdeal_df to unified sales_df format."""
     if snapdeal_df.empty:
         return pd.DataFrame()
     return pd.DataFrame({
