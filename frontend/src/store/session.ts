@@ -16,6 +16,7 @@ const empty: CoverageResponse = {
   myntra: false,
   meesho: false,
   flipkart: false,
+  snapdeal: false,
   inventory: false,
   daily_orders: false,
   existing_po: false,
@@ -24,6 +25,7 @@ const empty: CoverageResponse = {
   myntra_rows: 0,
   meesho_rows: 0,
   flipkart_rows: 0,
+  snapdeal_rows: 0,
 }
 
 export const useSession = create<SessionState>((set) => ({

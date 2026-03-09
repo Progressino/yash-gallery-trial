@@ -30,6 +30,7 @@ def get_coverage(request: Request):
         myntra=not sess.myntra_df.empty,
         meesho=not sess.meesho_df.empty,
         flipkart=not sess.flipkart_df.empty,
+        snapdeal=not sess.snapdeal_df.empty,
         inventory=not sess.inventory_df_variant.empty,
         daily_orders=len(sess.daily_sales_sources) > 0,
         existing_po=not sess.existing_po_df.empty,
@@ -38,6 +39,7 @@ def get_coverage(request: Request):
         myntra_rows=len(sess.myntra_df),
         meesho_rows=len(sess.meesho_df),
         flipkart_rows=len(sess.flipkart_df),
+        snapdeal_rows=len(sess.snapdeal_df),
     )
 
 
@@ -292,19 +294,80 @@ def get_inventory(request: Request):
     }
 
 
+# ── Snapdeal Analytics ────────────────────────────────────────
+
+@router.get("/snapdeal-analytics")
+def snapdeal_analytics(request: Request):
+    sess = _sess(request)
+    df = sess.snapdeal_df
+    if df.empty:
+        return {"loaded": False}
+
+    import pandas as pd
+
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+
+    shipped  = float(df[df["TxnType"] == "Shipment"]["Quantity"].sum())
+    returned = float(df[df["TxnType"] == "Refund"]["Quantity"].sum())
+
+    monthly = (
+        df.groupby(["Month", "TxnType"])["Quantity"]
+        .sum().reset_index()
+        .pivot_table(index="Month", columns="TxnType", values="Quantity", fill_value=0)
+        .reset_index()
+    )
+    monthly.columns.name = None
+    monthly = monthly.rename(columns={"Shipment": "shipments", "Refund": "refunds"})
+    if "shipments" not in monthly.columns:
+        monthly["shipments"] = 0
+    if "refunds" not in monthly.columns:
+        monthly["refunds"] = 0
+
+    top_skus = (
+        df[df["TxnType"] == "Shipment"].groupby("OMS_SKU")["Quantity"]
+        .sum().sort_values(ascending=False).head(20).reset_index()
+    )
+    top_skus.columns = ["sku", "units"]
+
+    by_state = (
+        df[df["TxnType"] == "Shipment"].groupby("State")["Quantity"]
+        .sum().sort_values(ascending=False).head(15).reset_index()
+    )
+    by_state.columns = ["state", "units"]
+    by_state = by_state[by_state["state"].str.strip() != ""]
+
+    return {
+        "loaded":      True,
+        "rows":        len(df),
+        "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
+        "shipped":     int(shipped),
+        "returned":    int(returned),
+        "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
+        "monthly":     monthly.to_dict("records"),
+        "top_skus":    top_skus.to_dict("records"),
+        "by_state":    by_state.to_dict("records"),
+    }
+
+
 # ── AI Dashboard Endpoints ────────────────────────────────────
 
 @router.get("/platform-summary")
 def platform_summary(request: Request):
     sess = _sess(request)
-    return get_platform_summary(sess.mtr_df, sess.myntra_df, sess.meesho_df, sess.flipkart_df)
+    return get_platform_summary(
+        sess.mtr_df, sess.myntra_df, sess.meesho_df,
+        sess.flipkart_df, sess.snapdeal_df,
+    )
 
 
 @router.get("/anomalies")
 def anomalies_endpoint(request: Request):
     sess = _sess(request)
     return get_anomalies(
-        sess.mtr_df, sess.myntra_df, sess.meesho_df, sess.flipkart_df,
+        sess.mtr_df, sess.myntra_df, sess.meesho_df,
+        sess.flipkart_df, sess.snapdeal_df,
         sess.inventory_df_variant, sess.sales_df,
     )
 

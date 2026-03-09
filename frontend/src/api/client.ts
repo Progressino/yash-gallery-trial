@@ -29,6 +29,7 @@ export interface CoverageResponse {
   myntra: boolean
   meesho: boolean
   flipkart: boolean
+  snapdeal: boolean
   inventory: boolean
   daily_orders: boolean
   existing_po: boolean
@@ -37,6 +38,7 @@ export interface CoverageResponse {
   myntra_rows: number
   meesho_rows: number
   flipkart_rows: number
+  snapdeal_rows: number
 }
 
 // ── Upload helpers ────────────────────────────────────────────
@@ -59,6 +61,7 @@ export const uploadFlipkart   = (file: File) => uploadFile('/upload/flipkart', f
 export const uploadAmazonB2C  = (file: File) => uploadFile('/upload/amazon-b2c', file)
 export const uploadAmazonB2B  = (file: File) => uploadFile('/upload/amazon-b2b', file)
 export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po', file)
+export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
 export async function uploadInventory(files: {
   oms?: File; fk?: File; myntra?: File; amz?: File

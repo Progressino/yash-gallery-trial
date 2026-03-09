@@ -17,10 +17,11 @@ const NAV_ITEMS = [
   { to: '/forecast',  label: '📈 AI Forecast' },
   { to: '/finance',   label: '💰 Finance' },
   { to: '/items',     label: '🏭 Item Master' },
+  { to: '/snapdeal',  label: '🔴 Snapdeal' },
 ]
 
 export default function Layout() {
-  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, setCoverage } = useSession()
+  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, setCoverage } = useSession()
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | null>(null)
@@ -131,6 +132,7 @@ export default function Layout() {
           <Badge label="Myntra"   active={myntra} />
           <Badge label="Meesho"   active={meesho} />
           <Badge label="Flipkart" active={flipkart} />
+          <Badge label="Snapdeal" active={snapdeal} />
         </div>
 
         {/* Logout */}

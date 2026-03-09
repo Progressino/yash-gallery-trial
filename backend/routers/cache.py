@@ -43,6 +43,7 @@ def cache_save(request: Request):
         "meesho_df":   sess.meesho_df,
         "myntra_df":   sess.myntra_df,
         "flipkart_df": sess.flipkart_df,
+        "snapdeal_df": sess.snapdeal_df,
         "sku_mapping": sess.sku_mapping,
     }
     ok, msg = save_cache_to_drive(session_data)
@@ -74,5 +75,6 @@ def cache_clear(request: Request):
     sess.meesho_df   = pd.DataFrame()
     sess.myntra_df   = pd.DataFrame()
     sess.flipkart_df = pd.DataFrame()
+    sess.snapdeal_df = pd.DataFrame()
     sess.sku_mapping = {}
     return CacheStatusResponse(ok=True, message="Session data cleared.")

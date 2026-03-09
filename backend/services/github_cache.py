@@ -22,6 +22,7 @@ _CACHE_FILES = {
     "meesho_df":   "meesho_df.parquet",
     "myntra_df":   "myntra_df.parquet",
     "flipkart_df": "flipkart_df.parquet",
+    "snapdeal_df": "snapdeal_df.parquet",
     "sku_mapping": "sku_mapping.json",
 }
 

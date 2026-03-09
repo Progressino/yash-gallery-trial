@@ -17,6 +17,7 @@ from ..services.mtr import load_mtr_from_zip, parse_mtr_csv
 from ..services.myntra import load_myntra_from_zip
 from ..services.meesho import load_meesho_from_zip
 from ..services.flipkart import load_flipkart_from_zip
+from ..services.snapdeal import load_snapdeal_from_zip
 from ..services.inventory import load_inventory_consolidated
 from ..services.sales import build_sales_df
 from ..services.existing_po import parse_existing_po
@@ -35,6 +36,7 @@ def _auto_save_cache(sess) -> None:
         "meesho_df":   sess.meesho_df,
         "myntra_df":   sess.myntra_df,
         "flipkart_df": sess.flipkart_df,
+        "snapdeal_df": sess.snapdeal_df,
         "sku_mapping": sess.sku_mapping,
     }
     ok, msg = save_cache_to_drive(session_data)
@@ -187,6 +189,53 @@ async def upload_flipkart(request: Request, file: UploadFile = File(...)):
         )
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Failed to parse Flipkart ZIP: {e}")
+
+
+# ── Snapdeal ──────────────────────────────────────────────────
+
+@router.post("/snapdeal", response_model=UploadResponse)
+async def upload_snapdeal(request: Request, file: UploadFile = File(...)):
+    sess = _get_session(request)
+    try:
+        zip_bytes = await file.read()
+        df, file_count, skipped = load_snapdeal_from_zip(zip_bytes, sess.sku_mapping)
+        del zip_bytes
+        gc.collect()
+
+        if df.empty:
+            return UploadResponse(
+                ok=False,
+                message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
+            )
+
+        import pandas as pd
+        sess.snapdeal_df = pd.concat(
+            [sess.snapdeal_df, df], ignore_index=True
+        ) if not sess.snapdeal_df.empty else df
+
+        # Rebuild sales_df if SKU mapping is loaded
+        if sess.sku_mapping:
+            from ..services.sales import build_sales_df
+            sess.sales_df = build_sales_df(
+                mtr_df=sess.mtr_df,
+                myntra_df=sess.myntra_df,
+                meesho_df=sess.meesho_df,
+                flipkart_df=sess.flipkart_df,
+                snapdeal_df=sess.snapdeal_df,
+                sku_mapping=sess.sku_mapping,
+            )
+            sess._quarterly_cache.clear()
+
+        years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        return UploadResponse(
+            ok=True,
+            message=f"Snapdeal loaded: {len(df):,} rows from {file_count} file(s)"
+                    + (f". Warnings: {'; '.join(skipped[:3])}" if skipped else ""),
+            rows=len(df),
+            years=years,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to parse Snapdeal ZIP: {e}")
 
 
 # ── Inventory ─────────────────────────────────────────────────
@@ -493,6 +542,7 @@ async def upload_daily_auto(
                 myntra_df=sess.myntra_df,
                 meesho_df=sess.meesho_df,
                 flipkart_df=sess.flipkart_df,
+                snapdeal_df=sess.snapdeal_df,
                 sku_mapping=sess.sku_mapping,
             )
             sess._quarterly_cache.clear()  # invalidate quarterly cache
@@ -628,6 +678,7 @@ async def build_sales(request: Request, background_tasks: BackgroundTasks):
             myntra_df=sess.myntra_df,
             meesho_df=sess.meesho_df,
             flipkart_df=sess.flipkart_df,
+            snapdeal_df=sess.snapdeal_df,
             sku_mapping=sess.sku_mapping,
         )
     except Exception as e:

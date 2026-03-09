@@ -19,6 +19,7 @@ class CoverageResponse(BaseModel):
     myntra: bool
     meesho: bool
     flipkart: bool
+    snapdeal: bool = False
     inventory: bool
     daily_orders: bool
     existing_po: bool = False
@@ -28,6 +29,7 @@ class CoverageResponse(BaseModel):
     myntra_rows: int = 0
     meesho_rows: int = 0
     flipkart_rows: int = 0
+    snapdeal_rows: int = 0
 
 
 class ErrorResponse(BaseModel):

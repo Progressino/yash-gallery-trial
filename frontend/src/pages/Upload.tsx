@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
-  uploadFlipkart, uploadInventory, buildSales, getCoverage,
+  uploadFlipkart, uploadSnapdeal, uploadInventory, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
 } from '../api/client'
 import { useSession } from '../store/session'
@@ -101,6 +101,7 @@ export default function Upload() {
         <KpiCard label="Platforms"    value={[
           coverage.myntra && 'Myntra',
           coverage.meesho && 'Meesho',
+          coverage.snapdeal && 'Snapdeal',
           coverage.flipkart && 'Flipkart',
         ].filter(Boolean).join(', ') || '—'} />
       </div>
@@ -155,6 +156,15 @@ export default function Upload() {
             accept={{ 'application/zip': ['.zip'] }}
             onUpload={handle('flipkart', (file: File) => uploadFlipkart(file))}
             uploading={loading['flipkart']}
+          />
+        </UploadCard>
+
+        <UploadCard title="🔴 Snapdeal" subtitle="Seller report ZIP (all months)" loaded={coverage.snapdeal}>
+          <FileUpload
+            label="Upload .zip"
+            accept={{ 'application/zip': ['.zip'] }}
+            onUpload={handle('snapdeal', (file: File) => uploadSnapdeal(file))}
+            uploading={loading['snapdeal']}
           />
         </UploadCard>
 
@@ -244,7 +254,7 @@ export default function Upload() {
           <div>
             <h3 className="font-semibold text-[#002B5B]">🔄 Build Combined Sales Dataset</h3>
             <p className="text-sm text-gray-400 mt-0.5">
-              Merges MTR + Myntra + Meesho + Flipkart into a single deduplicated sales_df.
+              Merges MTR + Myntra + Meesho + Flipkart + Snapdeal into a single deduplicated sales_df.
               {coverage.sales && ` (${coverage.sales_rows.toLocaleString()} rows currently loaded)`}
             </p>
             {buildingMsg && <p className="text-xs text-blue-600 mt-1">{buildingMsg}</p>}

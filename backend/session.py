@@ -21,6 +21,7 @@ class AppSession:
     myntra_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     meesho_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     flipkart_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    snapdeal_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     inventory_df_variant: pd.DataFrame = field(default_factory=pd.DataFrame)
     inventory_df_parent: pd.DataFrame = field(default_factory=pd.DataFrame)
     daily_orders_df: pd.DataFrame = field(default_factory=pd.DataFrame)

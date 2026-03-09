@@ -11,6 +11,7 @@ from .helpers import _downcast_sales, map_to_oms_sku
 from .myntra import myntra_to_sales_rows
 from .meesho import meesho_to_sales_rows
 from .flipkart import flipkart_to_sales_rows
+from .snapdeal import snapdeal_to_sales_rows
 
 
 def _mtr_to_sales_df(
@@ -51,6 +52,7 @@ def build_sales_df(
     meesho_df: pd.DataFrame,
     flipkart_df: pd.DataFrame,
     sku_mapping: Dict[str, str],
+    snapdeal_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Concatenate all platform DataFrames into a unified sales_df and deduplicate.
@@ -64,6 +66,8 @@ def build_sales_df(
         sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df)))
     if not flipkart_df.empty:
         sales_parts.append(_downcast_sales(flipkart_to_sales_rows(flipkart_df)))
+    if snapdeal_df is not None and not snapdeal_df.empty:
+        sales_parts.append(_downcast_sales(snapdeal_to_sales_rows(snapdeal_df)))
     if not mtr_df.empty and sku_mapping:
         _mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping)
         if not _mtr_sales.empty:
@@ -284,18 +288,22 @@ def get_platform_summary(
     myntra_df: pd.DataFrame,
     meesho_df: pd.DataFrame,
     flipkart_df: pd.DataFrame,
+    snapdeal_df: Optional[pd.DataFrame] = None,
 ) -> List[dict]:
-    """Returns 4 platform summary dicts (always 4, even for unloaded platforms)."""
+    """Returns 5 platform summary dicts (always 5, even for unloaded platforms)."""
     # MTR has Date col already; add it as _Date alias
     mtr = mtr_df.copy() if not mtr_df.empty else mtr_df
     if not mtr.empty and "Date" in mtr.columns:
         mtr["_Date"] = mtr["Date"]
+
+    _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
 
     results = [
         _compute_platform_metrics(mtr,        "Amazon",   "SKU",     "Transaction_Type"),
         _compute_platform_metrics(myntra_df,   "Myntra",   "OMS_SKU", "TxnType"),
         _compute_platform_metrics(meesho_df,   "Meesho",   "OMS_SKU", "TxnType"),
         _compute_platform_metrics(flipkart_df, "Flipkart", "OMS_SKU", "TxnType"),
+        _compute_platform_metrics(_snapdeal,   "Snapdeal", "OMS_SKU", "TxnType"),
     ]
     return results
 
@@ -305,18 +313,26 @@ def get_anomalies(
     myntra_df: pd.DataFrame,
     meesho_df: pd.DataFrame,
     flipkart_df: pd.DataFrame,
-    inventory_df: pd.DataFrame,
-    sales_df: pd.DataFrame,
+    snapdeal_df: Optional[pd.DataFrame] = None,
+    inventory_df: pd.DataFrame = None,
+    sales_df: pd.DataFrame = None,
 ) -> List[dict]:
     """Runs 5 anomaly rules. Returns list sorted critical → warning → info."""
+    if inventory_df is None:
+        inventory_df = pd.DataFrame()
+    if sales_df is None:
+        sales_df = pd.DataFrame()
+
     SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
     alerts: List[dict] = []
 
+    _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
     platform_dfs = [
         ("Amazon",   mtr_df,        "Transaction_Type", "Shipment", "Refund", "Date"),
         ("Myntra",   myntra_df,      "TxnType",          "Shipment", "Refund", "Date"),
         ("Meesho",   meesho_df,      "TxnType",          "Shipment", "Refund", "Date"),
         ("Flipkart", flipkart_df,    "TxnType",          "Shipment", "Refund", "Date"),
+        ("Snapdeal", _snapdeal,      "TxnType",          "Shipment", "Refund", "Date"),
     ]
 
     for name, df, txn_col, ship_val, refund_val, date_col in platform_dfs:

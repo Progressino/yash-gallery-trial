@@ -12,6 +12,7 @@ import POEngine from './pages/POEngine'
 import Forecast from './pages/Forecast'
 import Finance from './pages/Finance'
 import ItemMaster from './pages/ItemMaster'
+import Snapdeal from './pages/Snapdeal'
 import Login from './pages/Login'
 import api from './api/client'
 
@@ -58,6 +59,7 @@ export default function App() {
               <Route path="forecast"  element={<Forecast />} />
               <Route path="finance"   element={<Finance />} />
               <Route path="items"     element={<ItemMaster />} />
+              <Route path="snapdeal"  element={<Snapdeal />} />
             </Route>
           </Route>
         </Routes>
