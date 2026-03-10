@@ -198,9 +198,12 @@ async def upload_snapdeal(request: Request, file: UploadFile = File(...)):
     sess = _get_session(request)
     try:
         zip_bytes = await file.read()
-        df, file_count, skipped = load_snapdeal_from_zip(zip_bytes, sess.sku_mapping)
+        df, file_count, skipped, parse_info = load_snapdeal_from_zip(zip_bytes, sess.sku_mapping)
         del zip_bytes
         gc.collect()
+
+        # Store parse diagnostics (merge with existing)
+        sess.snapdeal_parse_info.update(parse_info)
 
         if df.empty:
             return UploadResponse(

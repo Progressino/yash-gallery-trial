@@ -361,13 +361,13 @@ def snapdeal_debug(request: Request):
     if df.empty:
         return {"loaded": False}
     return {
-        "loaded":     True,
-        "rows":       len(df),
-        "columns":    list(df.columns),
-        "txn_types":  df["TxnType"].value_counts().to_dict(),
-        "sku_sample": df["OMS_SKU"].value_counts().head(15).to_dict(),
+        "loaded":       True,
+        "rows":         len(df),
+        "txn_types":    df["TxnType"].value_counts().to_dict(),
+        "sku_sample":   df["OMS_SKU"].value_counts().head(15).to_dict(),
         "state_sample": df["State"].value_counts().head(10).to_dict(),
-        "sample_rows": df.head(3).fillna("").to_dict("records"),
+        "parse_info":   sess.snapdeal_parse_info,   # raw cols + detected fields per file
+        "sample_rows":  df.head(3).fillna("").to_dict("records"),
     }
 
 

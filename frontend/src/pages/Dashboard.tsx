@@ -40,10 +40,11 @@ interface TopSku {
 
 // ── Constants ───────────────────────────────────────────────────
 const PLATFORM_COLORS: Record<string, string> = {
-  Amazon: '#002B5B',
-  Myntra: '#E91E63',
-  Meesho: '#9C27B0',
+  Amazon:   '#002B5B',
+  Myntra:   '#E91E63',
+  Meesho:   '#9C27B0',
   Flipkart: '#F7971D',
+  Snapdeal: '#e53935',
 }
 
 const SKU_COLORS = [
@@ -121,7 +122,7 @@ export default function Dashboard() {
   const [dateStart, setDateStart] = useState(() => daysAgo(90))
   const [dateEnd,   setDateEnd]   = useState(TODAY)
   const [activePreset, setActivePreset] = useState<string>('90D')
-  const [deepDiveTab, setDeepDiveTab] = useState<'Amazon' | 'Myntra' | 'Meesho' | 'Flipkart'>('Amazon')
+  const [deepDiveTab, setDeepDiveTab] = useState<string>('Amazon')
   const [heatmapPlatform, setHeatmapPlatform] = useState('Myntra')
 
   function applyPreset(label: string, startFn: () => string) {
@@ -293,16 +294,16 @@ export default function Dashboard() {
         <KpiCard label="Total Returns"    value={loadingSales ? '…' : totalReturns.toLocaleString()} accent="#EF4444" />
         <KpiCard label="Return Rate"      value={loadingSales ? '…' : `${returnRate.toFixed(1)}%`} accent={returnRate > 30 ? '#EF4444' : returnRate > 15 ? '#F59E0B' : '#10B981'} />
         <KpiCard label="Net Units"        value={loadingSales ? '…' : netUnits.toLocaleString()} accent="#10B981" />
-        <KpiCard label="Active Platforms" value={loadingPlatforms ? '…' : `${activePlatforms} / 4`} accent="#6366F1" />
+        <KpiCard label="Active Platforms" value={loadingPlatforms ? '…' : `${activePlatforms} / ${platforms.length || 5}`} accent="#6366F1" />
       </div>
 
       {/* ── Platform Comparison Row ── */}
       <div>
         <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Platform Overview</h3>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {(['Amazon', 'Myntra', 'Meesho', 'Flipkart'] as const).map(name => {
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          {(platforms.length > 0 ? platforms.map(p => p.platform) : ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal']).map(name => {
             const p = platforms.find(x => x.platform === name)
-            const color = PLATFORM_COLORS[name]
+            const color = PLATFORM_COLORS[name] ?? '#6366F1'
             if (loadingPlatforms && !p) {
               return (
                 <div key={name} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm animate-pulse">
@@ -484,8 +485,8 @@ export default function Dashboard() {
               onChange={e => setHeatmapPlatform(e.target.value)}
               className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-300"
             >
-              {['Myntra', 'Meesho', 'Flipkart'].map(p => (
-                <option key={p} value={p}>{p}</option>
+              {platforms.filter(p => p.loaded && p.by_state?.length > 0).map(p => (
+                <option key={p.platform} value={p.platform}>{p.platform}</option>
               ))}
             </select>
           </div>
@@ -529,15 +530,16 @@ export default function Dashboard() {
         <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
           <h3 className="text-sm font-semibold text-gray-700">🔍 Platform Deep Dive</h3>
           <div className="flex border-b border-gray-200">
-            {(['Amazon', 'Myntra', 'Meesho', 'Flipkart'] as const).map(name => (
+            {(platforms.length > 0 ? platforms.map(p => p.platform) : ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal']).map(name => (
               <button
                 key={name}
                 onClick={() => setDeepDiveTab(name)}
                 className={`px-4 py-2 text-xs font-medium transition-colors ${
                   deepDiveTab === name
-                    ? 'border-b-2 border-[#002B5B] text-[#002B5B] -mb-px'
+                    ? 'border-b-2 text-[#002B5B] -mb-px'
                     : 'text-gray-500 hover:text-gray-700'
                 }`}
+                style={deepDiveTab === name ? { borderBottomColor: PLATFORM_COLORS[name] ?? '#002B5B' } : {}}
               >
                 {name}
               </button>

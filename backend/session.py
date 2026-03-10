@@ -38,6 +38,9 @@ class AppSession:
     daily_sales_rows: int = 0
     load_warnings: list = field(default_factory=list)
 
+    # ── Parse diagnostics ────────────────────────────────────
+    snapdeal_parse_info: dict = field(default_factory=dict)  # raw cols + detected fields per file
+
     # ── PO Engine cache ───────────────────────────────────────
     # Keyed by (group_by_parent, n_quarters) — cleared when sales data changes
     _quarterly_cache: dict = field(default_factory=dict)
