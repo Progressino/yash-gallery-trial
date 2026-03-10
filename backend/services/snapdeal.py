@@ -150,8 +150,10 @@ def _parse_snapdeal_df(
     sku_col = _find_col(cols, [
         "Seller SKU Code", "Seller SKU", "Snap SKU", "SKU Code",
         "SKU", "Product SKU", "Item SKU", "SellerSKUCode",
-        "Seller_SKU", "Article Code",
-    ]) or _find_col_fuzzy(cols, ["seller sku", "snap sku", "sku code", " sku", "article"])
+        "Seller_SKU", "Article Code", "EAN Code", "EAN", "Bar Code",
+        "Barcode", "Product Code", "Vendor SKU", "Listing SKU",
+        "Seller Product Code", "Style Code", "Style ID",
+    ]) or _find_col_fuzzy(cols, ["seller sku", "snap sku", "sku code", "sku", "article code", "ean", "bar code", "barcode", "product code", "vendor sku", "style code"])
     if sku_col:
         df["_OMS_SKU"] = df[sku_col].apply(
             lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
@@ -187,7 +189,9 @@ def _parse_snapdeal_df(
     status_col = _find_col(cols, [
         "Order Status", "Status", "Sub Status", "Fulfillment Status",
         "Shipment Status", "Item Status", "Order Sub Status", "Current Status",
-    ]) or _find_col_fuzzy(cols, ["status"])
+        "Current Order Status", "Dispatch Status", "Return Status",
+        "Transaction Type", "Transaction_Type", "Order Type",
+    ]) or _find_col_fuzzy(cols, ["status", "txn type", "transaction type", "order type"])
     df["_TxnType"] = (
         df[status_col].apply(_snapdeal_txn)
         if status_col else "Shipment"

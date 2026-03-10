@@ -159,12 +159,13 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🔴 Snapdeal" subtitle="Seller report ZIP (all months)" loaded={coverage.snapdeal}>
+        <UploadCard title="🔴 Snapdeal" subtitle="Select all company ZIPs at once (AG, PE, YG)" loaded={coverage.snapdeal}>
           <FileUpload
-            label="Upload .zip"
+            label="Upload ZIPs (select multiple)"
             accept={{ 'application/zip': ['.zip'] }}
             onUpload={handle('snapdeal', (file: File) => uploadSnapdeal(file))}
             uploading={loading['snapdeal']}
+            multiple={true}
           />
         </UploadCard>
 

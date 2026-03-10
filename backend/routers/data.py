@@ -351,6 +351,26 @@ def snapdeal_analytics(request: Request):
     }
 
 
+# ── Snapdeal Debug (column inspection) ───────────────────────
+
+@router.get("/snapdeal-debug")
+def snapdeal_debug(request: Request):
+    """Returns column names, TxnType distribution, and SKU sample from the loaded snapdeal_df."""
+    sess = _sess(request)
+    df = sess.snapdeal_df
+    if df.empty:
+        return {"loaded": False}
+    return {
+        "loaded":     True,
+        "rows":       len(df),
+        "columns":    list(df.columns),
+        "txn_types":  df["TxnType"].value_counts().to_dict(),
+        "sku_sample": df["OMS_SKU"].value_counts().head(15).to_dict(),
+        "state_sample": df["State"].value_counts().head(10).to_dict(),
+        "sample_rows": df.head(3).fillna("").to_dict("records"),
+    }
+
+
 # ── AI Dashboard Endpoints ────────────────────────────────────
 
 @router.get("/platform-summary")
