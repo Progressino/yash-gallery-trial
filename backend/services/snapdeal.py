@@ -28,6 +28,20 @@ _HEADER_KEYWORDS = [
     "suborder", "sub order", "deal", "shipment", "dispatch",
 ]
 
+# ── Sheet name → TxnType override (used when status col is absent) ────────────
+_SHEET_TXNTYPE: Dict[str, str] = {
+    "return":        "Refund",
+    "returns":       "Refund",
+    "rto":           "Refund",
+    "reverse":       "Refund",
+    "returned":      "Refund",
+    "cancel":        "Cancel",
+    "cancelled":     "Cancel",
+    "cancellation":  "Cancel",
+}
+# Sheets to skip entirely (summary/report sheets with no row-level order data)
+_SKIP_SHEET_KEYWORDS = ["summary", "report", "dashboard", "pivot", "master"]
+
 
 def _find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
     lower = {c.lower().strip(): c for c in cols}
@@ -248,6 +262,20 @@ def _try_parse_with_header(
     return result, field_map
 
 
+def _txntype_from_sheet(sheet_name: str) -> Optional[str]:
+    """Return a forced TxnType based on the sheet name, or None if no hint."""
+    s = sheet_name.lower().strip()
+    for kw, txn in _SHEET_TXNTYPE.items():
+        if kw in s:
+            return txn
+    return None
+
+
+def _should_skip_sheet(sheet_name: str) -> bool:
+    s = sheet_name.lower().strip()
+    return any(kw in s for kw in _SKIP_SHEET_KEYWORDS)
+
+
 def _parse_snapdeal_file(
     file_bytes: bytes,
     fname: str,
@@ -256,11 +284,15 @@ def _parse_snapdeal_file(
     """
     Parse a single Snapdeal Excel or CSV file.
     Returns (df, debug_info, field_map).
-    Tries every header row 0-15 until one yields valid data.
+
+    KEY BEHAVIOUR: ALL sheets are parsed and combined.
+    Sheet name is used to override TxnType when no status column exists
+    (e.g. a 'Returns' sheet → all rows become Refund).
     """
     fn_lower = fname.lower()
 
-    raw_candidates: List[pd.DataFrame] = []   # list of raw (no-header) DataFrames to try
+    # (sheet_name, raw_df) pairs to try
+    raw_candidates: List[Tuple[str, pd.DataFrame]] = []
 
     try:
         if fn_lower.endswith(".csv"):
@@ -270,17 +302,19 @@ def _parse_snapdeal_file(
                         io.BytesIO(file_bytes), dtype=str, header=None,
                         encoding=enc, on_bad_lines="skip",
                     )
-                    raw_candidates.append(raw)
+                    raw_candidates.append(("Sheet1", raw))
                     break
                 except UnicodeDecodeError:
                     continue
         else:
             xl = pd.ExcelFile(io.BytesIO(file_bytes))
             for sheet in xl.sheet_names:
+                if _should_skip_sheet(sheet):
+                    continue
                 try:
                     raw = xl.parse(sheet, header=None, dtype=str)
                     if not raw.empty:
-                        raw_candidates.append(raw)
+                        raw_candidates.append((sheet, raw))
                 except Exception:
                     continue
     except Exception as e:
@@ -289,38 +323,44 @@ def _parse_snapdeal_file(
     if not raw_candidates:
         return pd.DataFrame(), "no sheets / empty file", {}
 
-    # For each sheet (raw), try every header row from 0 to 15
-    best_df: pd.DataFrame = pd.DataFrame()
-    best_debug = ""
+    all_sheet_dfs: List[pd.DataFrame] = []
     best_field_map: dict = {}
+    sheet_results: List[str] = []
 
-    for raw in raw_candidates:
-        # First: try the heuristic best row
+    for sheet_name, raw in raw_candidates:
+        txn_hint = _txntype_from_sheet(sheet_name)
+
+        # Try heuristic header row first, then brute-force
         hdr_row = _detect_header_row(raw)
         candidate, field_map = _try_parse_with_header(raw, hdr_row, mapping)
-        if not candidate.empty:
-            if len(candidate) > len(best_df):
-                best_df = candidate
-                best_debug = f"header row {hdr_row}"
-                best_field_map = field_map
-            continue  # already found something on this sheet
 
-        # Brute force: try every row 0-15
-        for r in range(min(16, len(raw))):
-            if r == hdr_row:
-                continue
-            candidate, field_map = _try_parse_with_header(raw, r, mapping)
-            if not candidate.empty and len(candidate) > len(best_df):
-                best_df = candidate
-                best_debug = f"header row {r} (brute force)"
-                best_field_map = field_map
-                break
+        if candidate.empty:
+            for r in range(min(16, len(raw))):
+                if r == hdr_row:
+                    continue
+                candidate, field_map = _try_parse_with_header(raw, r, mapping)
+                if not candidate.empty:
+                    break
 
-    if best_df.empty:
-        # Return column names from first 5 rows for diagnostics
+        if candidate.empty:
+            sheet_results.append(f"'{sheet_name}': no data")
+            continue
+
+        # Apply sheet-name TxnType override when no status column was detected
+        if txn_hint is not None and field_map.get("status_col") is None:
+            candidate = candidate.copy()
+            candidate["TxnType"] = txn_hint
+
+        all_sheet_dfs.append(candidate)
+        if not best_field_map:
+            best_field_map = field_map
+        sheet_results.append(f"'{sheet_name}'({txn_hint or 'mixed'}): {len(candidate)} rows")
+
+    if not all_sheet_dfs:
+        # Diagnostics: show first 5 rows from the first sheet
         debug_cols = []
-        raw_cols_found = []
-        for raw in raw_candidates[:1]:
+        raw_cols_found: List[str] = []
+        for _, raw in raw_candidates[:1]:
             for r in range(min(5, len(raw))):
                 row_vals = [str(v).strip() for v in raw.iloc[r].values
                             if pd.notna(v) and str(v).strip()]
@@ -330,7 +370,9 @@ def _parse_snapdeal_file(
                         raw_cols_found = row_vals
         return pd.DataFrame(), " | ".join(debug_cols) or "no data", {"raw_cols": raw_cols_found}
 
-    return best_df, best_debug, best_field_map
+    combined = pd.concat(all_sheet_dfs, ignore_index=True)
+    debug_msg = f"ok ({len(combined)} rows from {len(all_sheet_dfs)} sheets: {', '.join(sheet_results)})"
+    return combined, debug_msg, best_field_map
 
 
 def load_snapdeal_from_zip(
