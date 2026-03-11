@@ -7,6 +7,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Request, HTTPException
 from ..models.schemas import CoverageResponse
 from ..services.sales import get_sales_summary, get_sales_by_source, get_top_skus, get_platform_summary, get_anomalies
+from ..services.daily_store import list_uploads, get_summary, delete_upload
 
 router = APIRouter()
 
@@ -369,6 +370,28 @@ def snapdeal_debug(request: Request):
         "parse_info":   sess.snapdeal_parse_info,   # raw cols + detected fields per file
         "sample_rows":  df.head(3).fillna("").to_dict("records"),
     }
+
+
+# ── Daily Sales Management ───────────────────────────────────
+
+@router.get("/daily-summary")
+def daily_summary(_request: Request):
+    """Per-platform summary of persisted daily uploads."""
+    return get_summary()
+
+
+@router.get("/daily-uploads")
+def daily_uploads(_request: Request):
+    """Full list of persisted daily upload records (newest first)."""
+    return list_uploads()
+
+
+@router.delete("/daily-uploads/{upload_id}")
+def delete_daily_upload(upload_id: int, _request: Request):
+    ok = delete_upload(upload_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    return {"ok": True, "message": f"Deleted upload {upload_id}"}
 
 
 # ── AI Dashboard Endpoints ────────────────────────────────────

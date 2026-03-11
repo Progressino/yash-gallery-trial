@@ -22,6 +22,7 @@ from ..services.inventory import load_inventory_consolidated
 from ..services.sales import build_sales_df
 from ..services.existing_po import parse_existing_po
 from ..services.github_cache import save_cache_to_drive
+from ..services.daily_store import save_daily_file
 
 router = APIRouter()
 
@@ -454,6 +455,7 @@ async def upload_daily_auto(
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
                     sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+                    save_daily_file("amazon", fname, df)
                     detected.append(f"Amazon ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -464,6 +466,7 @@ async def upload_daily_auto(
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
                     sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+                    save_daily_file("amazon", fname, df)
                     detected.append(f"Amazon B2B ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -475,6 +478,7 @@ async def upload_daily_auto(
                 df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
                 if not df.empty:
                     sess.myntra_df = pd.concat([sess.myntra_df, df], ignore_index=True) if not sess.myntra_df.empty else df
+                    save_daily_file("myntra", fname, df)
                     detected.append(f"Myntra ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -485,6 +489,7 @@ async def upload_daily_auto(
                 df, _count, _skipped = load_meesho_from_zip(raw)
                 if not df.empty:
                     sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
+                    save_daily_file("meesho", fname, df)
                     detected.append(f"Meesho ({fname})")
                     if _skipped:
                         warnings.append(f"{fname}: {'; '.join(_skipped[:2])}")
@@ -496,6 +501,7 @@ async def upload_daily_auto(
                 df, msg = parse_meesho_csv(raw)
                 if not df.empty:
                     sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
+                    save_daily_file("meesho", fname, df)
                     detected.append(f"Meesho ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -518,6 +524,7 @@ async def upload_daily_auto(
                     continue
                 if not df.empty:
                     sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
+                    save_daily_file("flipkart", fname, df)
                     detected.append(f"Flipkart ({fname})")
                 else:
                     warnings.append(f"{fname}: No data extracted from Flipkart file")

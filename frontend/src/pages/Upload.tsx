@@ -1,11 +1,13 @@
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventory, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
+  getDailySummary, getDailyUploads, deleteDailyUpload,
+  type DailyUpload, type DailySummary,
 } from '../api/client'
 import { useSession } from '../store/session'
 
@@ -236,7 +238,7 @@ export default function Upload() {
           </div>
           <DailyDropzone
             uploading={loading['daily']}
-            onUpload={handleDailyAuto}
+            onUpload={async (files) => { await handleDailyAuto(files); qc.invalidateQueries({ queryKey: ['daily-summary'] }); qc.invalidateQueries({ queryKey: ['daily-uploads'] }) }}
           />
           {dailyDetected.length > 0 && (
             <p className="text-xs text-green-600">
@@ -246,6 +248,9 @@ export default function Upload() {
           {coverage.daily_orders && (
             <p className="text-xs text-blue-600">Daily orders loaded ✓ — included in sales dataset.</p>
           )}
+        </div>
+        <div className="col-span-2">
+          <DailyHistory />
         </div>
       </Section>
 
@@ -382,6 +387,109 @@ function DailyDropzone({ uploading, onUpload }: {
           >
             {uploading ? 'Uploading…' : `⬆ Upload ${queued.length} file${queued.length > 1 ? 's' : ''}`}
           </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const PLATFORM_LABELS: Record<string, { label: string; color: string }> = {
+  amazon:   { label: 'Amazon',   color: 'bg-orange-100 text-orange-700' },
+  myntra:   { label: 'Myntra',   color: 'bg-pink-100 text-pink-700' },
+  meesho:   { label: 'Meesho',   color: 'bg-purple-100 text-purple-700' },
+  flipkart: { label: 'Flipkart', color: 'bg-yellow-100 text-yellow-700' },
+}
+
+function DailyHistory() {
+  const qc = useQueryClient()
+
+  const { data: summary, isLoading: summaryLoading } = useQuery<DailySummary>({
+    queryKey: ['daily-summary'],
+    queryFn: getDailySummary,
+    refetchInterval: 10000,
+  })
+
+  const { data: uploads, isLoading: uploadsLoading } = useQuery<DailyUpload[]>({
+    queryKey: ['daily-uploads'],
+    queryFn: getDailyUploads,
+    refetchInterval: 10000,
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => deleteDailyUpload(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['daily-summary'] })
+      qc.invalidateQueries({ queryKey: ['daily-uploads'] })
+    },
+  })
+
+  const hasSummary = summary && Object.keys(summary).length > 0
+  const hasUploads = uploads && uploads.length > 0
+
+  if (summaryLoading && uploadsLoading) {
+    return <p className="text-xs text-gray-400 py-2">Loading saved daily data…</p>
+  }
+
+  if (!hasSummary && !hasUploads) {
+    return (
+      <div className="bg-gray-50 rounded-xl border border-dashed border-gray-200 p-4 text-center">
+        <p className="text-xs text-gray-400">No daily uploads saved yet. Files uploaded above are persisted automatically.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Per-platform summary cards */}
+      {hasSummary && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {Object.entries(summary!).map(([platform, s]) => {
+            const meta = PLATFORM_LABELS[platform] ?? { label: platform, color: 'bg-gray-100 text-gray-700' }
+            return (
+              <div key={platform} className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                <div className="flex items-center justify-between mb-2">
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${meta.color}`}>{meta.label}</span>
+                  <span className="text-xs text-gray-400">{s.file_count} file{s.file_count !== 1 ? 's' : ''}</span>
+                </div>
+                <p className="text-lg font-bold text-gray-800">{s.total_rows.toLocaleString()}</p>
+                <p className="text-xs text-gray-400">rows saved</p>
+                <p className="text-xs text-gray-500 mt-1 truncate">
+                  {s.min_date === s.max_date ? s.min_date : `${s.min_date} → ${s.max_date}`}
+                </p>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Upload history table */}
+      {hasUploads && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+            <h4 className="text-sm font-semibold text-[#002B5B]">Saved Daily Uploads</h4>
+            <span className="text-xs text-gray-400">{uploads!.length} file{uploads!.length !== 1 ? 's' : ''} · last 30 per platform</span>
+          </div>
+          <div className="divide-y divide-gray-50 max-h-64 overflow-y-auto">
+            {uploads!.map(u => {
+              const meta = PLATFORM_LABELS[u.platform] ?? { label: u.platform, color: 'bg-gray-100 text-gray-700' }
+              return (
+                <div key={u.id} className="flex items-center gap-3 px-5 py-2.5 hover:bg-gray-50 transition-colors">
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${meta.color}`}>{meta.label}</span>
+                  <span className="text-xs font-mono text-gray-500 shrink-0 w-24">{u.file_date}</span>
+                  <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{u.filename}</span>
+                  <span className="text-xs text-gray-400 shrink-0">{u.rows.toLocaleString()} rows</span>
+                  <button
+                    onClick={() => deleteMut.mutate(u.id)}
+                    disabled={deleteMut.isPending}
+                    title="Delete this upload"
+                    className="text-gray-300 hover:text-red-500 transition-colors shrink-0 ml-1 disabled:opacity-40"
+                  >
+                    🗑
+                  </button>
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
     </div>

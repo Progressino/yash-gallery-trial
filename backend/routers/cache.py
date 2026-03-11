@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest
+from ..services.daily_store import load_all_platforms
 
 router = APIRouter()
 
@@ -60,6 +61,25 @@ def cache_load(request: Request):
     if ok:
         for key, val in loaded.items():
             setattr(sess, key, val)
+
+        # Merge saved daily uploads into the session (last 30 days, from SQLite)
+        try:
+            import pandas as pd
+            daily_data = load_all_platforms()
+            if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
+                sess.mtr_df = pd.concat([sess.mtr_df, daily_data["amazon"]], ignore_index=True) if not sess.mtr_df.empty else daily_data["amazon"]
+            if daily_data.get("myntra") is not None and not daily_data["myntra"].empty:
+                sess.myntra_df = pd.concat([sess.myntra_df, daily_data["myntra"]], ignore_index=True) if not sess.myntra_df.empty else daily_data["myntra"]
+            if daily_data.get("meesho") is not None and not daily_data["meesho"].empty:
+                sess.meesho_df = pd.concat([sess.meesho_df, daily_data["meesho"]], ignore_index=True) if not sess.meesho_df.empty else daily_data["meesho"]
+            if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
+                sess.flipkart_df = pd.concat([sess.flipkart_df, daily_data["flipkart"]], ignore_index=True) if not sess.flipkart_df.empty else daily_data["flipkart"]
+            if daily_data:
+                n_days = sum(1 for v in daily_data.values() if not v.empty)
+                msg += f" + {n_days} platform(s) of daily data loaded from local store."
+        except Exception as e:
+            msg += f" (daily store warning: {e})"
+
     return CacheStatusResponse(ok=ok, message=msg)
 
 

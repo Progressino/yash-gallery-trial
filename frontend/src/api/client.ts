@@ -100,6 +100,30 @@ export async function getCoverage(): Promise<CoverageResponse> {
   return data
 }
 
+// ── Daily sales management ────────────────────────────────────
+
+export interface DailyUpload {
+  id: number
+  platform: string
+  file_date: string
+  filename: string
+  uploaded_at: string
+  rows: number
+}
+
+export interface DailySummary {
+  [platform: string]: {
+    min_date: string
+    max_date: string
+    total_rows: number
+    file_count: number
+  }
+}
+
+export const getDailySummary  = (): Promise<DailySummary>    => api.get('/data/daily-summary').then(r => r.data)
+export const getDailyUploads  = (): Promise<DailyUpload[]>   => api.get('/data/daily-uploads').then(r => r.data)
+export const deleteDailyUpload = (id: number)                => api.delete(`/data/daily-uploads/${id}`).then(r => r.data)
+
 // ── Cache ─────────────────────────────────────────────────────
 
 export async function cacheStatus() {
