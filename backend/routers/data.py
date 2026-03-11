@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, HTTPException
 from ..models.schemas import CoverageResponse
 from ..services.sales import get_sales_summary, get_sales_by_source, get_top_skus, get_platform_summary, get_anomalies
 from ..services.daily_store import list_uploads, get_summary, delete_upload
+from ..session import AppSession
 
 router = APIRouter()
 
@@ -19,11 +20,54 @@ def _sess(request: Request):
     return sess
 
 
+def _restore_daily_if_needed(sess: AppSession) -> None:
+    """
+    On first coverage check per session, load any persisted daily SQLite data
+    into the session DFs (fills in data lost on server restart).
+    Skips platforms that already have session data.
+    """
+    if sess.daily_restored:
+        return
+    sess.daily_restored = True  # Only attempt once per session
+
+    import pandas as pd
+    from ..services.daily_store import load_platform_data
+    from ..services.sales import build_sales_df
+
+    changed = False
+    for platform, attr in [
+        ("amazon",   "mtr_df"),
+        ("myntra",   "myntra_df"),
+        ("meesho",   "meesho_df"),
+        ("flipkart", "flipkart_df"),
+    ]:
+        if getattr(sess, attr).empty:
+            df = load_platform_data(platform)
+            if not df.empty:
+                setattr(sess, attr, df)
+                changed = True
+
+    if changed:
+        try:
+            sess.sales_df = build_sales_df(
+                mtr_df=sess.mtr_df,
+                myntra_df=sess.myntra_df,
+                meesho_df=sess.meesho_df,
+                flipkart_df=sess.flipkart_df,
+                snapdeal_df=sess.snapdeal_df,
+                sku_mapping=sess.sku_mapping,
+            )
+            sess._quarterly_cache.clear()
+        except Exception:
+            pass
+
+
 # ── Coverage ──────────────────────────────────────────────────
 
 @router.get("/coverage", response_model=CoverageResponse)
 def get_coverage(request: Request):
     sess = _sess(request)
+    _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=not sess.mtr_df.empty,
@@ -72,6 +116,62 @@ def top_skus(
 ):
     sess = _sess(request)
     return get_top_skus(sess.sales_df, limit=limit, start_date=start_date, end_date=end_date)
+
+
+# ── Daily Breakdown ───────────────────────────────────────────
+
+@router.get("/daily-breakdown")
+def daily_breakdown(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    platform: Optional[str] = None,   # comma-sep list, e.g. "Amazon,Meesho"
+):
+    """
+    Per-day shipment/refund counts broken down by platform.
+    Returns [{date, platform, units, returns}] sorted by date.
+    """
+    import pandas as pd
+    sess = _sess(request)
+    df = sess.sales_df
+    if df.empty:
+        return []
+
+    try:
+        d = df.copy()
+        d["TxnDate"] = pd.to_datetime(d["TxnDate"], errors="coerce")
+        d = d.dropna(subset=["TxnDate"])
+
+        if start_date:
+            d = d[d["TxnDate"] >= pd.Timestamp(start_date)]
+        if end_date:
+            d = d[d["TxnDate"] <= pd.Timestamp(end_date)]
+        if platform:
+            plats = [p.strip() for p in platform.split(",")]
+            d = d[d["Source"].isin(plats)]
+
+        if d.empty:
+            return []
+
+        d["_day"] = d["TxnDate"].dt.strftime("%Y-%m-%d")
+        qty = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0)
+        ship_mask   = d["Transaction Type"].astype(str).str.strip() == "Shipment"
+        refund_mask = d["Transaction Type"].astype(str).str.strip() == "Refund"
+
+        grp = (
+            d.assign(_qty=qty)
+            .groupby(["_day", "Source"])
+            .apply(lambda g: pd.Series({
+                "units":   int(g.loc[ship_mask.loc[g.index], "_qty"].sum()),
+                "returns": int(g.loc[refund_mask.loc[g.index], "_qty"].sum()),
+            }))
+            .reset_index()
+            .rename(columns={"_day": "date", "Source": "platform"})
+            .sort_values("date")
+        )
+        return grp.to_dict("records")
+    except Exception:
+        return []
 
 
 # ── MTR Analytics ─────────────────────────────────────────────

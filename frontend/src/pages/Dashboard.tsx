@@ -7,6 +7,8 @@ import {
 import api, { getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 
+interface DailyBreakdownRow { date: string; platform: string; units: number; returns: number }
+
 // ── Types ───────────────────────────────────────────────────────
 interface PlatformSummaryItem {
   platform: string
@@ -123,7 +125,11 @@ export default function Dashboard() {
   const [dateEnd,   setDateEnd]   = useState(TODAY)
   const [activePreset, setActivePreset] = useState<string>('90D')
   const [deepDiveTab, setDeepDiveTab] = useState<string>('Amazon')
+  const [deepViewMode, setDeepViewMode] = useState<'monthly' | 'daily'>('monthly')
   const [heatmapPlatform, setHeatmapPlatform] = useState('Myntra')
+  const [hiddenPlatforms, setHiddenPlatforms] = useState<Set<string>>(new Set())
+  const [skuSearch, setSkuSearch] = useState('')
+  const [topSkuLimit, setTopSkuLimit] = useState(10)
 
   function applyPreset(label: string, startFn: () => string) {
     const s = startFn()
@@ -134,14 +140,22 @@ export default function Dashboard() {
 
   function handleStartChange(val: string) { setDateStart(val); setActivePreset('') }
   function handleEndChange(val: string)   { setDateEnd(val);   setActivePreset('') }
+  function togglePlatform(name: string) {
+    setHiddenPlatforms(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
 
   // Build query string params for date-filtered endpoints
   const dateParams = useMemo(() => {
-    const p = new URLSearchParams({ limit: '10' })
+    const p = new URLSearchParams({ limit: String(topSkuLimit) })
     if (dateStart) p.set('start_date', dateStart)
     if (dateEnd)   p.set('end_date',   dateEnd)
     return p.toString()
-  }, [dateStart, dateEnd])
+  }, [dateStart, dateEnd, topSkuLimit])
 
   const summaryParams = useMemo(() => {
     const p = new URLSearchParams({ months: '0' })
@@ -149,6 +163,14 @@ export default function Dashboard() {
     if (dateEnd)   p.set('end_date',   dateEnd)
     return p.toString()
   }, [dateStart, dateEnd])
+
+  const dailyParams = useMemo(() => {
+    const p = new URLSearchParams()
+    if (dateStart) p.set('start_date', dateStart)
+    if (dateEnd)   p.set('end_date',   dateEnd)
+    if (deepDiveTab) p.set('platform', deepDiveTab)
+    return p.toString()
+  }, [dateStart, dateEnd, deepDiveTab])
 
   useQuery({
     queryKey: ['coverage'],
@@ -180,14 +202,22 @@ export default function Dashboard() {
     staleTime: 2 * 60 * 1000,
   })
 
+  const { data: dailyBreakdown = [] } = useQuery<DailyBreakdownRow[]>({
+    queryKey: ['daily-breakdown', dailyParams],
+    queryFn: async () => { const { data } = await api.get(`/data/daily-breakdown?${dailyParams}`); return data },
+    enabled: deepViewMode === 'daily',
+    staleTime: 60 * 1000,
+  })
+
   const platforms = platformSummary ?? []
-  const activePlatforms = platforms.filter(p => p.loaded).length
+  const loadedPlatforms = platforms.filter(p => p.loaded)
+  const activePlatformCount = loadedPlatforms.length
   const totalUnits = salesSummary?.total_units ?? 0
   const totalReturns = salesSummary?.total_returns ?? 0
   const netUnits = salesSummary?.net_units ?? 0
   const returnRate = salesSummary?.return_rate ?? 0
 
-  // Filter monthly chart data client-side by date range
+  // Filter monthly chart data client-side by date range + hidden platforms
   const filteredPlatforms = useMemo(() => {
     const startMonth = dateStart ? dateStart.slice(0, 7) : ''
     const endMonth   = dateEnd   ? dateEnd.slice(0, 7)   : ''
@@ -202,6 +232,14 @@ export default function Dashboard() {
 
   const chartData = useMemo(() => mergePlatformMonthly(filteredPlatforms), [filteredPlatforms])
 
+  // Top SKUs with search filter
+  const topSkusFiltered = useMemo(() => {
+    if (!topSkusRaw) return []
+    if (!skuSearch.trim()) return topSkusRaw
+    const q = skuSearch.trim().toLowerCase()
+    return topSkusRaw.filter(s => s.sku.toLowerCase().includes(q))
+  }, [topSkusRaw, skuSearch])
+
   // Heatmap data
   const heatmapData = platforms.find(p => p.platform === heatmapPlatform)?.by_state ?? []
   const stateMap: Record<string, number> = {}
@@ -215,6 +253,17 @@ export default function Dashboard() {
     shipments: r.shipments,
     refunds: r.refunds,
   }))
+
+  // Daily breakdown chart data
+  const deepDailyData = useMemo(() => {
+    const byDate: Record<string, { date: string; units: number; returns: number }> = {}
+    for (const row of dailyBreakdown) {
+      if (!byDate[row.date]) byDate[row.date] = { date: row.date, units: 0, returns: 0 }
+      byDate[row.date].units   += row.units
+      byDate[row.date].returns += row.returns
+    }
+    return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date))
+  }, [dailyBreakdown])
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -244,47 +293,70 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ── Date Filter Bar ── */}
-      <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 shadow-sm flex flex-wrap items-center gap-3">
-        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Date Range</span>
-        <div className="flex gap-1">
-          {PRESETS.map(({ label, start }) => (
-            <button
-              key={label}
-              onClick={() => applyPreset(label, start)}
-              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                activePreset === label
-                  ? 'bg-[#002B5B] text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+      {/* ── Filter Bar ── */}
+      <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 shadow-sm space-y-2">
+        {/* Date row */}
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Date</span>
+          <div className="flex gap-1">
+            {PRESETS.map(({ label, start }) => (
+              <button
+                key={label}
+                onClick={() => applyPreset(label, start)}
+                className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                  activePreset === label
+                    ? 'bg-[#002B5B] text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 ml-1">
+            <input
+              type="date" value={dateStart} max={dateEnd || TODAY}
+              onChange={e => handleStartChange(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
+            />
+            <span className="text-xs text-gray-400">→</span>
+            <input
+              type="date" value={dateEnd} min={dateStart} max={TODAY}
+              onChange={e => handleEndChange(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
+            />
+          </div>
         </div>
-        <div className="flex items-center gap-2 ml-2">
-          <span className="text-xs text-gray-400">From</span>
-          <input
-            type="date"
-            value={dateStart}
-            max={dateEnd || TODAY}
-            onChange={e => handleStartChange(e.target.value)}
-            className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
-          />
-          <span className="text-xs text-gray-400">To</span>
-          <input
-            type="date"
-            value={dateEnd}
-            min={dateStart}
-            max={TODAY}
-            onChange={e => handleEndChange(e.target.value)}
-            className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
-          />
-        </div>
-        {(dateStart || dateEnd) && (
-          <span className="text-xs text-gray-400 ml-auto">
-            {dateStart || '…'} → {dateEnd || '…'}
-          </span>
+        {/* Platform toggle row */}
+        {loadedPlatforms.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Platforms</span>
+            {loadedPlatforms.map(p => {
+              const hidden = hiddenPlatforms.has(p.platform)
+              return (
+                <button
+                  key={p.platform}
+                  onClick={() => togglePlatform(p.platform)}
+                  className={`text-xs font-medium px-3 py-1 rounded-full border transition-all ${
+                    hidden
+                      ? 'bg-gray-50 border-gray-200 text-gray-400 line-through'
+                      : 'border-transparent text-white'
+                  }`}
+                  style={hidden ? {} : { backgroundColor: PLATFORM_COLORS[p.platform] ?? '#6366F1' }}
+                >
+                  {p.platform}
+                </button>
+              )
+            })}
+            {hiddenPlatforms.size > 0 && (
+              <button
+                onClick={() => setHiddenPlatforms(new Set())}
+                className="text-xs text-blue-600 hover:underline ml-1"
+              >
+                Show all
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -294,7 +366,7 @@ export default function Dashboard() {
         <KpiCard label="Total Returns"    value={loadingSales ? '…' : totalReturns.toLocaleString()} accent="#EF4444" />
         <KpiCard label="Return Rate"      value={loadingSales ? '…' : `${returnRate.toFixed(1)}%`} accent={returnRate > 30 ? '#EF4444' : returnRate > 15 ? '#F59E0B' : '#10B981'} />
         <KpiCard label="Net Units"        value={loadingSales ? '…' : netUnits.toLocaleString()} accent="#10B981" />
-        <KpiCard label="Active Platforms" value={loadingPlatforms ? '…' : `${activePlatforms} / ${platforms.length || 5}`} accent="#6366F1" />
+        <KpiCard label="Active Platforms" value={loadingPlatforms ? '…' : `${activePlatformCount} / ${platforms.length || 5}`} accent="#6366F1" />
       </div>
 
       {/* ── Platform Comparison Row ── */}
@@ -377,7 +449,7 @@ export default function Dashboard() {
                   formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), '']}
                 />
                 <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-                {platforms.filter(p => p.loaded).map(p => (
+                {platforms.filter(p => p.loaded && !hiddenPlatforms.has(p.platform)).map(p => (
                   <Line
                     key={p.platform}
                     type="monotone"
@@ -442,15 +514,35 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Top SKUs */}
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <h3 className="text-sm font-semibold text-gray-700 mb-4">🏆 Top 10 SKUs</h3>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-gray-700">🏆 Top SKUs</h3>
+            <select
+              value={topSkuLimit}
+              onChange={e => setTopSkuLimit(Number(e.target.value))}
+              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-300"
+            >
+              {[10, 20, 30, 50].map(n => (
+                <option key={n} value={n}>Top {n}</option>
+              ))}
+            </select>
+          </div>
+          <input
+            type="text"
+            placeholder="Search SKU…"
+            value={skuSearch}
+            onChange={e => setSkuSearch(e.target.value)}
+            className="w-full text-xs border border-gray-200 rounded px-3 py-1.5 mb-3 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
+          />
           {loadingSkus ? (
             <div className="h-64 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
-          ) : !topSkusRaw || topSkusRaw.length === 0 ? (
-            <div className="h-64 flex items-center justify-center text-gray-400 text-sm">No SKU data</div>
+          ) : topSkusFiltered.length === 0 ? (
+            <div className="h-64 flex items-center justify-center text-gray-400 text-sm">
+              {skuSearch ? 'No SKUs match your search' : 'No SKU data'}
+            </div>
           ) : (
-            <ResponsiveContainer width="100%" height={280}>
+            <ResponsiveContainer width="100%" height={Math.max(200, topSkusFiltered.length * 28)}>
               <BarChart
-                data={topSkusRaw}
+                data={topSkusFiltered}
                 layout="vertical"
                 margin={{ top: 0, right: 20, left: 0, bottom: 0 }}
               >
@@ -467,7 +559,7 @@ export default function Dashboard() {
                   formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), 'Units']}
                 />
                 <Bar dataKey="units" radius={[0, 4, 4, 0]}>
-                  {topSkusRaw.map((_, index) => (
+                  {topSkusFiltered.map((_, index) => (
                     <Cell key={index} fill={SKU_COLORS[index % SKU_COLORS.length]} />
                   ))}
                 </Bar>
@@ -529,21 +621,40 @@ export default function Dashboard() {
       <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
         <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
           <h3 className="text-sm font-semibold text-gray-700">🔍 Platform Deep Dive</h3>
-          <div className="flex border-b border-gray-200">
-            {(platforms.length > 0 ? platforms.map(p => p.platform) : ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal']).map(name => (
-              <button
-                key={name}
-                onClick={() => setDeepDiveTab(name)}
-                className={`px-4 py-2 text-xs font-medium transition-colors ${
-                  deepDiveTab === name
-                    ? 'border-b-2 text-[#002B5B] -mb-px'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-                style={deepDiveTab === name ? { borderBottomColor: PLATFORM_COLORS[name] ?? '#002B5B' } : {}}
-              >
-                {name}
-              </button>
-            ))}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Monthly / Daily toggle */}
+            <div className="flex rounded-lg overflow-hidden border border-gray-200">
+              {(['monthly', 'daily'] as const).map(mode => (
+                <button
+                  key={mode}
+                  onClick={() => setDeepViewMode(mode)}
+                  className={`px-3 py-1 text-xs font-medium transition-colors ${
+                    deepViewMode === mode
+                      ? 'bg-[#002B5B] text-white'
+                      : 'bg-white text-gray-500 hover:bg-gray-50'
+                  }`}
+                >
+                  {mode === 'monthly' ? 'Monthly' : 'Daily'}
+                </button>
+              ))}
+            </div>
+            {/* Platform tabs */}
+            <div className="flex border-b border-gray-200">
+              {(platforms.length > 0 ? platforms.map(p => p.platform) : ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal']).map(name => (
+                <button
+                  key={name}
+                  onClick={() => setDeepDiveTab(name)}
+                  className={`px-4 py-2 text-xs font-medium transition-colors ${
+                    deepDiveTab === name
+                      ? 'border-b-2 text-[#002B5B] -mb-px'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                  style={deepDiveTab === name ? { borderBottomColor: PLATFORM_COLORS[name] ?? '#002B5B' } : {}}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -553,6 +664,27 @@ export default function Dashboard() {
             <p className="text-sm">No {deepDiveTab} data loaded</p>
             <a href="/upload" className="text-xs text-blue-600 hover:underline">Go to Upload →</a>
           </div>
+        ) : deepViewMode === 'daily' ? (
+          deepDailyData.length === 0 ? (
+            <div className="h-48 flex items-center justify-center text-gray-400 text-sm">
+              No daily data in range — upload daily files to see day-by-day breakdown
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={deepDailyData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9CA3AF' }} />
+                <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
+                <Tooltip
+                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
+                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), '']}
+                />
+                <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="units"   name="Units"   fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
+                <Bar dataKey="returns" name="Returns" fill="#F87171" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )
         ) : deepChartData.length === 0 ? (
           <div className="h-48 flex items-center justify-center text-gray-400 text-sm">No monthly data available</div>
         ) : (

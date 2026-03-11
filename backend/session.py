@@ -41,6 +41,9 @@ class AppSession:
     # ── Parse diagnostics ────────────────────────────────────
     snapdeal_parse_info: dict = field(default_factory=dict)  # raw cols + detected fields per file
 
+    # ── Daily-store restore flag ──────────────────────────────
+    daily_restored: bool = False   # True once daily SQLite data has been loaded into session
+
     # ── PO Engine cache ───────────────────────────────────────
     # Keyed by (group_by_parent, n_quarters) — cleared when sales data changes
     _quarterly_cache: dict = field(default_factory=dict)

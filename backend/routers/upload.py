@@ -556,24 +556,24 @@ async def upload_daily_auto(
         return JSONResponse(content={"ok": False, "message": warn_str})
 
     # Track loaded platforms & auto-rebuild sales_df
+    # Always rebuild — non-Amazon platforms don't need sku_mapping;
+    # Amazon rows are simply skipped when sku_mapping is empty.
     sess.daily_sales_sources = list(set(sess.daily_sales_sources + detected))
-
-    if sess.sku_mapping:
-        try:
-            sess.sales_df = build_sales_df(
-                mtr_df=sess.mtr_df,
-                myntra_df=sess.myntra_df,
-                meesho_df=sess.meesho_df,
-                flipkart_df=sess.flipkart_df,
-                snapdeal_df=sess.snapdeal_df,
-                sku_mapping=sess.sku_mapping,
-            )
-            sess._quarterly_cache.clear()  # invalidate quarterly cache
-        except Exception as e:
-            warnings.append(f"Sales rebuild warning: {e}")
+    try:
+        sess.sales_df = build_sales_df(
+            mtr_df=sess.mtr_df,
+            myntra_df=sess.myntra_df,
+            meesho_df=sess.meesho_df,
+            flipkart_df=sess.flipkart_df,
+            snapdeal_df=sess.snapdeal_df,
+            sku_mapping=sess.sku_mapping,
+        )
+        sess._quarterly_cache.clear()
+    except Exception as e:
+        warnings.append(f"Sales rebuild warning: {e}")
 
     msg_parts = [f"Loaded {len(detected)} file(s): {', '.join(d.split('(')[0].strip() for d in detected)}."]
-    if sess.sku_mapping:
+    if not sess.sales_df.empty:
         msg_parts.append(f"Sales rebuilt ({len(sess.sales_df):,} rows).")
     if warnings:
         msg_parts.append(f"Warnings: {'; '.join(warnings)}")
