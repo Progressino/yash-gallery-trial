@@ -167,20 +167,32 @@ def _parse_snapdeal_df(
     df["_OrderId"] = df[order_col].fillna("").astype(str) if order_col else ""
 
     # ── SKU ───────────────────────────────────────────────────
+    # Note: "Product Code" intentionally excluded — Snapdeal uses it for
+    # their internal numeric deal IDs (e.g. 92764694), not seller SKUs.
     sku_col = _find_col(cols, [
         "Seller SKU Code", "Seller SKU", "Snap SKU", "SKU Code",
-        "SKU", "Product SKU", "Item SKU", "SellerSKUCode",
-        "Seller_SKU", "Article Code", "EAN Code", "EAN", "Bar Code",
-        "Barcode", "Product Code", "Vendor SKU", "Listing SKU",
-        "Seller Product Code", "Style Code", "Style ID",
-    ]) or _find_col_fuzzy(cols, ["seller sku", "snap sku", "sku code", "sku", "article code", "ean", "bar code", "barcode", "product code", "vendor sku", "style code"])
+        "SKU ID", "SKU", "Product SKU", "Item SKU", "SellerSKUCode",
+        "Seller_SKU", "Seller Item Code", "Seller Product SKU",
+        "Vendor SKU", "Listing SKU", "Seller Product Code",
+        "Style Code", "Style ID", "Item Code",
+    ]) or _find_col_fuzzy(cols, [
+        "seller sku", "snap sku", "sku code", "sku id", "sku",
+        "vendor sku", "listing sku", "seller item", "seller product",
+        "style code", "item code",
+    ])
     field_map["sku_col"] = sku_col
     if sku_col:
         df["_OMS_SKU"] = df[sku_col].apply(
             lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
         )
+        # Drop rows where SKU resolved to empty / literal "nan"
+        df = df[~df["_OMS_SKU"].str.upper().isin(["", "NAN", "NONE"])]
+        if df.empty:
+            return pd.DataFrame(), f"sku col '{sku_col}' yielded no valid SKUs", field_map
     else:
-        df["_OMS_SKU"] = "UNKNOWN"
+        # No SKU column at all — this sheet has no per-order SKU data (e.g. financial summary).
+        # Exclude it entirely rather than polluting the dashboard with UNKNOWN rows.
+        return pd.DataFrame(), f"no sku col found (cols: {cols[:15]})", field_map
 
     # ── Quantity ──────────────────────────────────────────────
     qty_col = _find_col(cols, [
