@@ -46,8 +46,10 @@ def _parse_myntra_csv(
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
 
-    # PPMP: "sku_id"; Seller Orders Report: "sku id" or "sku"
-    sku_col = next((c for c in df.columns if c in ["sku_id", "skuid", "sku", "sku id", "seller sku"]), None)
+    # PPMP: "sku_id"; Seller Orders Report: "sku id" / "seller sku code" (daily PPMP CSV)
+    sku_col = next((c for c in df.columns if c in [
+        "sku_id", "skuid", "sku", "sku id", "seller sku", "seller sku code",
+    ]), None)
     if not sku_col:
         return pd.DataFrame(), "No SKU column"
     df["_OMS_SKU"] = df[sku_col].apply(lambda x: map_to_oms_sku(str(x).strip(), mapping))
@@ -56,7 +58,10 @@ def _parse_myntra_csv(
     df["_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1) if qty_col else 1.0
 
     rev_col = next(
-        (c for c in df.columns if c in ["invoiceamount", "invoice_amount", "net_amount", "shipment_value"]),
+        (c for c in df.columns if c in [
+            "invoiceamount", "invoice_amount", "net_amount", "shipment_value",
+            "final amount", "seller price",
+        ]),
         None,
     )
     df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0

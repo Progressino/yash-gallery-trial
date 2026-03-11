@@ -70,6 +70,20 @@ def _extract_file_date(filename: str, df: pd.DataFrame) -> str:
         except ValueError:
             pass
 
+    # Pattern: D-Mon-YYYY or D Mon YYYY (e.g. "6-Mar-2026", "9 Mar 2026")
+    _MON = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+            "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+    m = re.search(r"(\d{1,2})[-\s]([A-Za-z]{3})[-\s](\d{4})", filename)
+    if m:
+        try:
+            mon = _MON.get(m.group(2).lower())
+            if mon:
+                d = datetime.date(int(m.group(3)), mon, int(m.group(1)))
+                if 2020 <= d.year <= 2030:
+                    return str(d)
+        except ValueError:
+            pass
+
     # Fall back to earliest date in the DataFrame
     for col in ("Date", "TxnDate", "_Date", "Customer Shipment Date", "Order Date"):
         if col in df.columns:

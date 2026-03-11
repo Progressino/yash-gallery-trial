@@ -191,6 +191,100 @@ def _parse_flipkart_orders_sheet(
         return pd.DataFrame()
 
 
+def _parse_flipkart_earn_more(
+    file_bytes: bytes, fname: str, mapping: Dict[str, str]
+) -> pd.DataFrame:
+    """
+    Parse Flipkart 'earn_more_report' sheet (daily seller performance report).
+    Columns: Product Id, SKU ID, Category, Brand, Vertical, Order Date,
+             Fulfillment Type, Location Id, Gross Units, GMV,
+             Cancellation Units, Cancellation Amount,
+             Return Units, Return Amount, Final Sale Units, Final Sale Amount.
+    Expands aggregated rows into Shipment/Refund/Cancel rows.
+    """
+    try:
+        xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name="earn_more_report", dtype=str)
+        if xl.empty:
+            return pd.DataFrame()
+
+        xl.columns = xl.columns.str.strip()
+
+        # Normalize date
+        xl["Date"] = pd.to_datetime(xl["Order Date"], errors="coerce")
+        xl = xl.dropna(subset=["Date"])
+        if xl.empty:
+            return pd.DataFrame()
+
+        file_month = _fk_month_from_filename(fname)
+
+        def _get_month(d):
+            return file_month if file_month else d.to_period("M").strftime("%Y-%m")
+
+        # Normalize units columns
+        for col in ["Final Sale Units", "Return Units", "Cancellation Units",
+                    "Final Sale Amount", "Return Amount"]:
+            xl[col] = pd.to_numeric(xl.get(col, 0), errors="coerce").fillna(0)
+
+        # SKU mapping
+        xl["OMS_SKU"] = xl["SKU ID"].apply(
+            lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
+        )
+
+        rows: List[pd.DataFrame] = []
+
+        # Shipment rows
+        ship = xl[xl["Final Sale Units"] > 0].copy()
+        if not ship.empty:
+            rows.append(pd.DataFrame({
+                "Date":           ship["Date"],
+                "Month":          ship["Date"].apply(_get_month),
+                "TxnType":        "Shipment",
+                "Quantity":       ship["Final Sale Units"].astype("float32"),
+                "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
+                "OMS_SKU":        ship["OMS_SKU"],
+                "State":          "",
+                "OrderId":        "",
+                "BuyerInvoiceId": "",
+            }))
+
+        # Refund rows
+        ret = xl[xl["Return Units"] > 0].copy()
+        if not ret.empty:
+            rows.append(pd.DataFrame({
+                "Date":           ret["Date"],
+                "Month":          ret["Date"].apply(_get_month),
+                "TxnType":        "Refund",
+                "Quantity":       ret["Return Units"].astype("float32"),
+                "Invoice_Amount": ret["Return Amount"].astype("float32"),
+                "OMS_SKU":        ret["OMS_SKU"],
+                "State":          "",
+                "OrderId":        "",
+                "BuyerInvoiceId": "",
+            }))
+
+        # Cancel rows
+        can = xl[xl["Cancellation Units"] > 0].copy()
+        if not can.empty:
+            rows.append(pd.DataFrame({
+                "Date":           can["Date"],
+                "Month":          can["Date"].apply(_get_month),
+                "TxnType":        "Cancel",
+                "Quantity":       can["Cancellation Units"].astype("float32"),
+                "Invoice_Amount": can["Cancellation Amount"].astype("float32"),
+                "OMS_SKU":        can["OMS_SKU"],
+                "State":          "",
+                "OrderId":        "",
+                "BuyerInvoiceId": "",
+            }))
+
+        if not rows:
+            return pd.DataFrame()
+        return pd.concat(rows, ignore_index=True)
+
+    except Exception:
+        return pd.DataFrame()
+
+
 def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
     if fk_df.empty:
         return pd.DataFrame()

@@ -386,7 +386,7 @@ def _detect_platform(filename: str, header_bytes: bytes) -> str:
         return "flipkart"
 
     # CSV — filename hints first
-    if "myntra" in fn or "ppmp" in fn or "seller_orders" in fn or "seller orders" in fn:
+    if "myntra" in fn or "ppmp" in fn or "seller_orders" in fn or "seller orders" in fn or "my ppmp" in fn:
         return "myntra"
     if "b2b" in fn:
         return "amazon_b2b"
@@ -394,6 +394,9 @@ def _detect_platform(filename: str, header_bytes: bytes) -> str:
         return "amazon_b2c"
     if "meesho" in fn:
         return "meesho_csv"
+    # "Amz ..." or "amz ..." filenames → Amazon FBA
+    if fn.startswith("amz ") or fn.startswith("amz_"):
+        return "amazon_b2c"
     # Purely numeric filename (e.g. 937788020504.csv) → Amazon FBA/MTR export
     if re.match(r"^\d+\.csv$", fn):
         return "amazon_b2c"
@@ -509,7 +512,7 @@ async def upload_daily_auto(
                     warnings.append(f"{fname}: {msg}")
 
             elif platform == "flipkart":
-                from ..services.flipkart import _parse_flipkart_xlsx, _parse_flipkart_orders_sheet
+                from ..services.flipkart import _parse_flipkart_xlsx, _parse_flipkart_orders_sheet, _parse_flipkart_earn_more
                 try:
                     import pandas as _pd
                     xl_sheets = _pd.ExcelFile(io.BytesIO(raw)).sheet_names
@@ -519,8 +522,10 @@ async def upload_daily_auto(
                     df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
                 elif "Orders" in xl_sheets:
                     df = _parse_flipkart_orders_sheet(raw, fname, sess.sku_mapping)
+                elif "earn_more_report" in xl_sheets:
+                    df = _parse_flipkart_earn_more(raw, fname, sess.sku_mapping)
                 else:
-                    warnings.append(f"{fname}: Skipped — no Sales Report or Orders sheet (sheets: {', '.join(xl_sheets[:4])})")
+                    warnings.append(f"{fname}: Skipped — no Sales Report, Orders, or earn_more_report sheet (sheets: {', '.join(xl_sheets[:4])})")
                     continue
                 if not df.empty:
                     sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
