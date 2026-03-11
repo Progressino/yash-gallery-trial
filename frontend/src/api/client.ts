@@ -93,6 +93,11 @@ export async function buildSales(): Promise<{ ok: boolean; message: string; rows
   return data
 }
 
+export async function clearPlatform(platform: string): Promise<{ ok: boolean; message: string }> {
+  const { data } = await api.delete(`/upload/clear/${platform}`)
+  return data
+}
+
 // ── Coverage ──────────────────────────────────────────────────
 
 export async function getCoverage(): Promise<CoverageResponse> {

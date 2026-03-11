@@ -89,12 +89,14 @@ async def upload_mtr(request: Request, file: UploadFile = File(...)):
                 message=f"No valid CSV files found. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.mtr_df = df
-        years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        import pandas as pd
+        sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
+        total = len(sess.mtr_df)
+        years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         return UploadResponse(
             ok=True,
-            message=f"MTR loaded: {len(df):,} rows from {csv_count} files",
-            rows=len(df),
+            message=f"Amazon MTR: added {len(df):,} rows ({csv_count} files). Total: {total:,} rows.",
+            rows=total,
             years=years,
         )
     except Exception as e:
@@ -120,12 +122,14 @@ async def upload_myntra(request: Request, file: UploadFile = File(...)):
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.myntra_df = df
-        years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        import pandas as pd
+        sess.myntra_df = pd.concat([sess.myntra_df, df], ignore_index=True) if not sess.myntra_df.empty else df
+        total = len(sess.myntra_df)
+        years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         return UploadResponse(
             ok=True,
-            message=f"Myntra loaded: {len(df):,} rows from {csv_count} CSVs",
-            rows=len(df),
+            message=f"Myntra: added {len(df):,} rows ({csv_count} CSVs). Total: {total:,} rows.",
+            rows=total,
             years=years,
         )
     except Exception as e:
@@ -149,12 +153,14 @@ async def upload_meesho(request: Request, file: UploadFile = File(...)):
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.meesho_df = df
-        years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        import pandas as pd
+        sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
+        total = len(sess.meesho_df)
+        years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         return UploadResponse(
             ok=True,
-            message=f"Meesho loaded: {len(df):,} rows from {zip_count} monthly ZIPs",
-            rows=len(df),
+            message=f"Meesho: added {len(df):,} rows ({zip_count} monthly ZIPs). Total: {total:,} rows.",
+            rows=total,
             years=years,
         )
     except Exception as e:
@@ -180,12 +186,14 @@ async def upload_flipkart(request: Request, file: UploadFile = File(...)):
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.flipkart_df = df
-        years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        import pandas as pd
+        sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
+        total = len(sess.flipkart_df)
+        years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         return UploadResponse(
             ok=True,
-            message=f"Flipkart loaded: {len(df):,} rows from {xlsx_count} files",
-            rows=len(df),
+            message=f"Flipkart: added {len(df):,} rows ({xlsx_count} files). Total: {total:,} rows.",
+            rows=total,
             years=years,
         )
     except Exception as e:
@@ -707,3 +715,29 @@ async def build_sales(request: Request, background_tasks: BackgroundTasks):
         "message": f"Sales built: {len(sales_df):,} rows. Saving to cache in background…",
         "rows": len(sales_df),
     })
+
+
+# ── Clear platform data ────────────────────────────────────────
+
+_PLATFORM_CLEAR = {
+    "mtr":      lambda sess, pd: setattr(sess, "mtr_df",      pd.DataFrame()),
+    "myntra":   lambda sess, pd: setattr(sess, "myntra_df",   pd.DataFrame()),
+    "meesho":   lambda sess, pd: setattr(sess, "meesho_df",   pd.DataFrame()),
+    "flipkart": lambda sess, pd: setattr(sess, "flipkart_df", pd.DataFrame()),
+    "snapdeal": lambda sess, pd: setattr(sess, "snapdeal_df", pd.DataFrame()),
+    "sales":    lambda sess, pd: setattr(sess, "sales_df",    pd.DataFrame()),
+}
+
+@router.delete("/clear/{platform}")
+async def clear_platform(platform: str, request: Request):
+    """Clear a specific platform's data from the session."""
+    sess = _get_session(request)
+    cleaner = _PLATFORM_CLEAR.get(platform)
+    if not cleaner:
+        return JSONResponse(content={"ok": False, "message": f"Unknown platform: {platform}"}, status_code=400)
+    import pandas as pd
+    cleaner(sess, pd)
+    if platform != "sales":
+        sess.sales_df = pd.DataFrame()   # invalidate combined sales
+        sess._quarterly_cache.clear()
+    return JSONResponse(content={"ok": True, "message": f"{platform} data cleared."})

@@ -6,7 +6,7 @@ import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventory, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
-  getDailySummary, getDailyUploads, deleteDailyUpload,
+  getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   type DailyUpload, type DailySummary,
 } from '../api/client'
 import { useSession } from '../store/session'
@@ -80,6 +80,17 @@ export default function Upload() {
 
   const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
 
+  const handleClear = (platform: string) => async () => {
+    setL(`clear_${platform}`, true)
+    try {
+      const res = await clearPlatform(platform)
+      if (res.ok) { showToast('success', res.message); await refresh() }
+      else showToast('error', res.message)
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Clear failed')
+    } finally { setL(`clear_${platform}`, false) }
+  }
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div>
@@ -119,7 +130,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="2️⃣ Amazon MTR" subtitle="Historical ZIP (all months)" loaded={coverage.mtr}>
+        <UploadCard title="2️⃣ Amazon MTR" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
@@ -132,7 +143,7 @@ export default function Upload() {
 
       {/* Tier 1 — Platforms */}
       <Section title="Tier 1 — Platform History">
-        <UploadCard title="🛍️ Myntra PPMP" subtitle="Master ZIP (all months)" loaded={coverage.myntra}>
+        <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={handleClear('myntra')} clearing={loading['clear_myntra']}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
@@ -142,7 +153,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🛒 Meesho" subtitle="Master ZIP (all months)" loaded={coverage.meesho}>
+        <UploadCard title="🛒 Meesho" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']}>
           <FileUpload
             label="Upload .zip"
             accept={{ 'application/zip': ['.zip'] }}
@@ -151,7 +162,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🟡 Flipkart" subtitle="Master ZIP (all months)" loaded={coverage.flipkart}>
+        <UploadCard title="🟡 Flipkart" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.flipkart} rows={coverage.flipkart_rows} onClear={handleClear('flipkart')} clearing={loading['clear_flipkart']}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
@@ -161,7 +172,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🔴 Snapdeal" subtitle="Select all company ZIPs at once (AG, PE, YG)" loaded={coverage.snapdeal}>
+        <UploadCard title="🔴 Snapdeal" subtitle="Select all company ZIPs at once (AG, PE, YG)" loaded={coverage.snapdeal} rows={coverage.snapdeal_rows} onClear={handleClear('snapdeal')} clearing={loading['clear_snapdeal']}>
           <FileUpload
             label="Upload ZIPs (select multiple)"
             accept={{ 'application/zip': ['.zip'] }}
@@ -299,16 +310,36 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function UploadCard({
-  title, subtitle, loaded, children,
-}: { title: string; subtitle: string; loaded: boolean; children: React.ReactNode }) {
+  title, subtitle, loaded, rows, onClear, clearing, children,
+}: {
+  title: string; subtitle: string; loaded: boolean
+  rows?: number; onClear?: () => void; clearing?: boolean
+  children: React.ReactNode
+}) {
   return (
     <div className={`bg-white rounded-xl border p-5 space-y-3 shadow-sm ${loaded ? 'border-green-300' : 'border-gray-200'}`}>
-      <div className="flex items-start justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
           <h3 className="font-semibold text-[#002B5B] text-sm">{title}</h3>
           <p className="text-xs text-gray-400">{subtitle}</p>
         </div>
-        {loaded && <span className="text-green-600 text-xs font-medium bg-green-50 px-2 py-0.5 rounded-full">✓ Loaded</span>}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {loaded && rows !== undefined && rows > 0 && (
+            <span className="text-green-700 text-xs font-medium bg-green-50 px-2 py-0.5 rounded-full">
+              ✓ {rows.toLocaleString()} rows
+            </span>
+          )}
+          {loaded && onClear && (
+            <button
+              onClick={onClear}
+              disabled={clearing}
+              title="Clear this platform's data"
+              className="text-xs text-gray-400 hover:text-red-500 border border-gray-200 hover:border-red-300 px-1.5 py-0.5 rounded transition-colors disabled:opacity-40"
+            >
+              {clearing ? '…' : '✕ Clear'}
+            </button>
+          )}
+        </div>
       </div>
       {children}
     </div>
