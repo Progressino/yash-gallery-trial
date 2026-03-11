@@ -180,13 +180,24 @@ def _parse_snapdeal_df(
         "vendor sku", "listing sku", "seller item", "seller product",
         "style code", "item code",
     ])
+    # Last resort: "Product Code" — only use when values look like seller SKUs (contain letters).
+    # Snapdeal's internal deal IDs are purely numeric (e.g. 92764694); seller SKUs contain letters.
+    if sku_col is None:
+        pc_col = _find_col(cols, ["Product Code", "Product ID", "Deal Code", "Catalog ID"])
+        if pc_col:
+            sample = df[pc_col].dropna().astype(str).str.strip().head(30)
+            numeric_ratio = sample.str.match(r'^\d+$').mean() if len(sample) > 0 else 1.0
+            if numeric_ratio < 0.5:   # majority are alphanumeric → real seller SKUs
+                sku_col = pc_col
+
     field_map["sku_col"] = sku_col
     if sku_col:
         df["_OMS_SKU"] = df[sku_col].apply(
             lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
         )
-        # Drop rows where SKU resolved to empty / literal "nan"
+        # Drop rows where SKU resolved to empty / literal "nan" / purely numeric Snapdeal IDs
         df = df[~df["_OMS_SKU"].str.upper().isin(["", "NAN", "NONE"])]
+        df = df[~df["_OMS_SKU"].str.match(r'^\d+$')]   # strip any residual numeric-only IDs
         if df.empty:
             return pd.DataFrame(), f"sku col '{sku_col}' yielded no valid SKUs", field_map
     else:

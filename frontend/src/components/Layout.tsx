@@ -8,7 +8,7 @@ import api from '../api/client'
 const NAV_ITEMS = [
   { to: '/',          label: '📊 Intelligence' },
   { to: '/upload',    label: '📁 Upload Data' },
-  { to: '/mtr',       label: '📑 MTR Analytics' },
+  { to: '/mtr',       label: '📦 Amazon' },
   { to: '/myntra',    label: '🛍️ Myntra' },
   { to: '/meesho',    label: '🛒 Meesho' },
   { to: '/flipkart',  label: '🟡 Flipkart' },
@@ -127,7 +127,7 @@ export default function Layout() {
         <div className="px-3 py-3 border-t border-gray-100 text-xs space-y-1">
           <p className="font-semibold text-gray-500 uppercase tracking-wide mb-2">Loaded</p>
           <Badge label="SKU Map"  active={sku_mapping} />
-          <Badge label="MTR"      active={mtr} />
+          <Badge label="Amazon"   active={mtr} />
           <Badge label="Sales"    active={sales} />
           <Badge label="Myntra"   active={myntra} />
           <Badge label="Meesho"   active={meesho} />

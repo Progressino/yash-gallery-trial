@@ -109,7 +109,7 @@ export default function Upload() {
       {/* KPI strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiCard label="SKU Mapping"  value={coverage.sku_mapping ? '✅ Loaded' : '— Not loaded'} />
-        <KpiCard label="MTR Rows"     value={coverage.mtr_rows > 0 ? coverage.mtr_rows.toLocaleString() : '—'} />
+        <KpiCard label="Amazon Rows"  value={coverage.mtr_rows > 0 ? coverage.mtr_rows.toLocaleString() : '—'} />
         <KpiCard label="Sales Rows"   value={coverage.sales_rows > 0 ? coverage.sales_rows.toLocaleString() : '—'} />
         <KpiCard label="Platforms"    value={[
           coverage.myntra && 'Myntra',
@@ -130,7 +130,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="2️⃣ Amazon MTR" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']}>
+        <UploadCard title="2️⃣ Amazon" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
