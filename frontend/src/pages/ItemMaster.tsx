@@ -3,9 +3,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface ItemType   { id: number; name: string; code: string }
-interface SizeGroup  { id: number; name: string; sizes: string[] }
+interface ItemType    { id: number; name: string; code: string }
+interface SizeGroup   { id: number; name: string; sizes: string[] }
 interface RoutingStep { id: number; name: string; description: string; sort_order: number }
+interface Merchant    { id: number; merchant_code: string; merchant_name: string }
 
 interface Item {
   id: number; item_code: string; item_name: string
@@ -22,6 +23,7 @@ interface ItemDetail extends Item {
 interface BOMHeader {
   id: number; item_id: number; bom_name: string; applies_to: string
   is_default: number; line_count: number; created_at: string
+  is_certified: number; certified_by: string; certified_at: string
 }
 interface BOMLine {
   id: number; bom_id: number; component_item_id: number | null
@@ -33,9 +35,9 @@ interface BOMLine {
 interface BOMDetail extends BOMHeader { lines: BOMLine[] }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const COMPONENT_TYPES = ['FG', 'SFG', 'RM', 'ACC', 'PKG', 'FUEL', 'SERVICE']
+const COMPONENT_TYPES = ['FG', 'SFG', 'RM', 'ACC', 'PKG', 'FUEL', 'SVC', 'CMT']
 const UNITS = ['PCS', 'MTR', 'KG', 'LTR', 'SET', 'PAIR', 'BOX', 'ROLL']
-const fmt = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
+const fmt  = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
 const fmtN = (n: number, d = 2) => +n.toFixed(d)
 
 // ── BOM cost helpers ──────────────────────────────────────────────────────────
@@ -52,35 +54,40 @@ const blankItem = () => ({
 })
 const blankBOMLine = () => ({
   component_name: '', component_type: 'RM', quantity: '1', unit: 'PCS',
-  rate: '0', component_item_id: '', process_id: '', shrinkage_pct: '0', wastage_pct: '0', remarks: '',
+  rate: '0', component_item_id: null as number | null,
+  process_id: '', shrinkage_pct: '0', wastage_pct: '0', remarks: '',
 })
 
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function ItemMaster() {
   const qc = useQueryClient()
-  const [activeTab, setActiveTab] = useState<'items' | 'bom' | 'routing' | 'import'>('items')
+  const [activeTab, setActiveTab] = useState<'items' | 'bom' | 'routing' | 'import' | 'merchants'>('items')
 
-  // ── Meta query (types, size groups, routing steps) ────────────────────────
+  // ── Meta query ────────────────────────────────────────────────────────────
   const { data: meta } = useQuery({
     queryKey: ['item-meta'],
-    queryFn: async () => { const { data } = await api.get('/items/meta'); return data as { item_types: ItemType[]; size_groups: SizeGroup[]; routing_steps: RoutingStep[] } },
+    queryFn: async () => {
+      const { data } = await api.get('/items/meta')
+      return data as { item_types: ItemType[]; size_groups: SizeGroup[]; routing_steps: RoutingStep[]; merchants: Merchant[] }
+    },
     staleTime: 5 * 60 * 1000,
   })
   const itemTypes    = meta?.item_types    ?? []
   const sizeGroups   = meta?.size_groups   ?? []
   const routingSteps = meta?.routing_steps ?? []
+  const merchants    = meta?.merchants     ?? []
 
   // ══════════════════════════════════════════════════════════════════════════════
   // TAB 1 — ITEMS
   // ══════════════════════════════════════════════════════════════════════════════
-  const [typeFilter,   setTypeFilter]   = useState<string>('')
-  const [searchQ,      setSearchQ]      = useState('')
-  const [parentOnly,   setParentOnly]   = useState(true)
-  const [expandedId,   setExpandedId]   = useState<number | null>(null)
-  const [showNewItem,  setShowNewItem]  = useState(false)
-  const [newItem,      setNewItem]      = useState(blankItem)
-  const [newItemErr,   setNewItemErr]   = useState('')
-  const [sizePreview,  setSizePreview]  = useState<string[]>([])
+  const [typeFilter,  setTypeFilter]  = useState<string>('')
+  const [searchQ,     setSearchQ]     = useState('')
+  const [parentOnly,  setParentOnly]  = useState(true)
+  const [expandedId,  setExpandedId]  = useState<number | null>(null)
+  const [showNewItem, setShowNewItem] = useState(false)
+  const [newItem,     setNewItem]     = useState(blankItem)
+  const [newItemErr,  setNewItemErr]  = useState('')
+  const [sizePreview, setSizePreview] = useState<string[]>([])
 
   const { data: items = [], isLoading: loadItems } = useQuery<Item[]>({
     queryKey: ['items', typeFilter, searchQ, parentOnly],
@@ -98,6 +105,14 @@ export default function ItemMaster() {
   const { data: expandedDetail } = useQuery<ItemDetail>({
     queryKey: ['item-detail', expandedId],
     queryFn:  async () => { const { data } = await api.get(`/items/${expandedId}`); return data },
+    enabled:  expandedId !== null,
+    staleTime: 30 * 1000,
+  })
+
+  // BOMs for expanded item (Items tab)
+  const { data: expandedBoms = [] } = useQuery<BOMHeader[]>({
+    queryKey: ['item-boms-expand', expandedId],
+    queryFn:  async () => { const { data } = await api.get(`/items/${expandedId}/boms`); return data },
     enabled:  expandedId !== null,
     staleTime: 30 * 1000,
   })
@@ -140,6 +155,25 @@ export default function ItemMaster() {
     setSizePreview(next)
   }
 
+  // Ordered routing helpers
+  function toggleRoutingStep(stepId: number) {
+    setNewItem(p => ({
+      ...p,
+      routing_step_ids: p.routing_step_ids.includes(stepId)
+        ? p.routing_step_ids.filter(x => x !== stepId)
+        : [...p.routing_step_ids, stepId],
+    }))
+  }
+  function moveRoutingStep(idx: number, dir: -1 | 1) {
+    setNewItem(p => {
+      const arr = [...p.routing_step_ids]
+      const target = idx + dir
+      if (target < 0 || target >= arr.length) return p
+      ;[arr[idx], arr[target]] = [arr[target], arr[idx]]
+      return { ...p, routing_step_ids: arr }
+    })
+  }
+
   function handleCreateItem() {
     if (!newItem.item_code.trim() || !newItem.item_name.trim()) {
       setNewItemErr('Item Code and Item Name are required.'); return
@@ -170,10 +204,15 @@ export default function ItemMaster() {
   const [newBOMName,    setNewBOMName]    = useState('')
   const [newBOMApply,   setNewBOMApply]   = useState('all')
   const [showCopyBOM,   setShowCopyBOM]   = useState(false)
-  const [copyTarget,    setCopyTarget]    = useState('')
+  const [copyTargetSearch, setCopyTargetSearch] = useState('')
+  const [copyTargetId,  setCopyTargetId]  = useState<number | null>(null)
+  const [copyTargetName,setCopyTargetName]= useState('')
   const [copyName,      setCopyName]      = useState('')
   const [newLine,       setNewLine]       = useState(blankBOMLine)
   const [showAddLine,   setShowAddLine]   = useState(false)
+  // Component item search within BOM line form
+  const [compSearch,    setCompSearch]    = useState('')
+  const [certifyErr,    setCertifyErr]    = useState('')
 
   const { data: bomSearchResults = [] } = useQuery<Item[]>({
     queryKey: ['item-search', bomItemSearch],
@@ -182,6 +221,26 @@ export default function ItemMaster() {
       return data
     },
     enabled:  bomItemSearch.length >= 2,
+    staleTime: 30 * 1000,
+  })
+
+  const { data: compSearchResults = [] } = useQuery<Item[]>({
+    queryKey: ['item-search', compSearch],
+    queryFn:  async () => {
+      const { data } = await api.get(`/items/search?q=${encodeURIComponent(compSearch)}`)
+      return data
+    },
+    enabled:  compSearch.length >= 2,
+    staleTime: 30 * 1000,
+  })
+
+  const { data: copyTargetResults = [] } = useQuery<Item[]>({
+    queryKey: ['item-search', copyTargetSearch],
+    queryFn:  async () => {
+      const { data } = await api.get(`/items/search?q=${encodeURIComponent(copyTargetSearch)}`)
+      return data
+    },
+    enabled:  copyTargetSearch.length >= 2,
     staleTime: 30 * 1000,
   })
 
@@ -204,31 +263,71 @@ export default function ItemMaster() {
 
   const createBOMMut = useMutation({
     mutationFn: (body: object) => api.post(`/items/${bomItemId}/boms`, body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['boms', bomItemId] }); setShowNewBOM(false); setNewBOMName('') },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['boms', bomItemId] })
+      qc.invalidateQueries({ queryKey: ['item-boms-expand', bomItemId] })
+      setShowNewBOM(false); setNewBOMName('')
+    },
   })
 
   const deleteBOMMut = useMutation({
     mutationFn: (bomId: number) => api.delete(`/items/${bomItemId}/boms/${bomId}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['boms', bomItemId] }); setSelectedBomId(null) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['boms', bomItemId] })
+      qc.invalidateQueries({ queryKey: ['item-boms-expand', bomItemId] })
+      setSelectedBomId(null)
+    },
+    onError: (e: any) => setCertifyErr(e?.response?.data?.detail ?? 'Delete failed.'),
+  })
+
+  const certifyBOMMut = useMutation({
+    mutationFn: (bomId: number) => api.post(`/items/${bomItemId}/boms/${bomId}/certify`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] })
+      qc.invalidateQueries({ queryKey: ['boms', bomItemId] })
+      setCertifyErr('')
+    },
+    onError: (e: any) => setCertifyErr(e?.response?.data?.detail ?? 'Certify failed.'),
+  })
+
+  const uncertifyBOMMut = useMutation({
+    mutationFn: (bomId: number) => api.delete(`/items/${bomItemId}/boms/${bomId}/certify`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] })
+      qc.invalidateQueries({ queryKey: ['boms', bomItemId] })
+      setCertifyErr('')
+    },
+    onError: (e: any) => setCertifyErr(e?.response?.data?.detail ?? 'Uncertify failed.'),
   })
 
   const addLineMut = useMutation({
     mutationFn: (body: object) => api.post(`/items/${bomItemId}/boms/${selectedBomId}/lines`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] })
-      setNewLine(blankBOMLine()); setShowAddLine(false)
+      qc.invalidateQueries({ queryKey: ['boms', bomItemId] })
+      qc.invalidateQueries({ queryKey: ['item-boms-expand', bomItemId] })
+      setNewLine(blankBOMLine()); setShowAddLine(false); setCompSearch('')
     },
+    onError: (e: any) => setCertifyErr(e?.response?.data?.detail ?? 'Add failed.'),
   })
 
   const deleteLineMut = useMutation({
     mutationFn: ({ bomId, lineId }: { bomId: number; lineId: number }) =>
       api.delete(`/items/${bomItemId}/boms/${bomId}/lines/${lineId}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] })
+      qc.invalidateQueries({ queryKey: ['boms', bomItemId] })
+    },
+    onError: (e: any) => setCertifyErr(e?.response?.data?.detail ?? 'Delete failed.'),
   })
 
   const copyBOMMut = useMutation({
     mutationFn: (body: object) => api.post(`/items/${bomItemId}/boms/${selectedBomId}/copy`, body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['boms'] }); setShowCopyBOM(false) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['boms'] })
+      qc.invalidateQueries({ queryKey: ['item-boms-expand'] })
+      setShowCopyBOM(false); setCopyTargetSearch(''); setCopyTargetId(null); setCopyTargetName('')
+    },
   })
 
   const totalCost = useMemo(() =>
@@ -243,13 +342,18 @@ export default function ItemMaster() {
   }, [bomDetail])
 
   function handleAddLine() {
+    if (!newLine.component_item_id) {
+      setCertifyErr('Select a component from Item Master search.')
+      return
+    }
+    setCertifyErr('')
     addLineMut.mutate({
       component_name:    newLine.component_name,
       component_type:    newLine.component_type,
       quantity:          parseFloat(newLine.quantity) || 1,
       unit:              newLine.unit,
       rate:              parseFloat(newLine.rate) || 0,
-      component_item_id: newLine.component_item_id ? +newLine.component_item_id : null,
+      component_item_id: newLine.component_item_id,
       process_id:        newLine.process_id ? +newLine.process_id : null,
       shrinkage_pct:     parseFloat(newLine.shrinkage_pct) || 0,
       wastage_pct:       parseFloat(newLine.wastage_pct) || 0,
@@ -307,12 +411,33 @@ export default function ItemMaster() {
     } finally { setImporting(false) }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════════
+  // TAB 5 — MERCHANTS
+  // ══════════════════════════════════════════════════════════════════════════════
+  const [newMerchant, setNewMerchant] = useState({ merchant_code: '', merchant_name: '' })
+  const [merchantErr, setMerchantErr] = useState('')
+
+  const createMerchantMut = useMutation({
+    mutationFn: (body: object) => api.post('/items/merchants', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['item-meta'] })
+      setNewMerchant({ merchant_code: '', merchant_name: '' }); setMerchantErr('')
+    },
+    onError: (e: any) => setMerchantErr(e?.response?.data?.detail ?? 'Failed to create merchant.'),
+  })
+
+  const deleteMerchantMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/items/merchants/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['item-meta'] }),
+  })
+
   // ── Render ────────────────────────────────────────────────────────────────────
   const TABS = [
-    ['items',   '📦 Items'],
-    ['bom',     '🧩 BOM Builder'],
-    ['routing', '⚙️ Routing Master'],
-    ['import',  '📥 Import'],
+    ['items',     '📦 Items'],
+    ['bom',       '🧩 BOM Builder'],
+    ['routing',   '⚙️ Routing'],
+    ['import',    '📥 Import'],
+    ['merchants', '🏪 Merchants'],
   ] as const
 
   return (
@@ -327,10 +452,10 @@ export default function ItemMaster() {
 
       {/* Tabs */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="flex border-b border-gray-200 gap-1 px-2 pt-2">
+        <div className="flex border-b border-gray-200 gap-1 px-2 pt-2 overflow-x-auto">
           {TABS.map(([id, label]) => (
             <button key={id} onClick={() => setActiveTab(id)}
-              className={`px-4 py-2.5 text-sm font-medium transition-colors rounded-t-lg ${
+              className={`px-4 py-2.5 text-sm font-medium transition-colors rounded-t-lg whitespace-nowrap ${
                 activeTab === id
                   ? 'border-b-2 border-[#002B5B] text-[#002B5B] bg-blue-50'
                   : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
@@ -428,7 +553,7 @@ export default function ItemMaster() {
                           {expandedId === item.id && expandedDetail && expandedDetail.id === item.id && (
                             <tr key={`exp-${item.id}`} className="bg-blue-50/40">
                               <td colSpan={9} className="px-6 py-3">
-                                <div className="flex flex-wrap gap-4 text-xs text-gray-600">
+                                <div className="flex flex-wrap gap-5 text-xs text-gray-600">
                                   {expandedDetail.variants.length > 0 && (
                                     <div>
                                       <span className="font-semibold text-gray-700 block mb-1">Size Variants</span>
@@ -451,10 +576,29 @@ export default function ItemMaster() {
                                       </div>
                                     </div>
                                   )}
-                                  <div>
-                                    <span className="font-semibold text-gray-700 block mb-1">Merchant Code</span>
-                                    <span>{expandedDetail.merchant_code || '—'}</span>
-                                  </div>
+                                  {expandedDetail.merchant_code && (
+                                    <div>
+                                      <span className="font-semibold text-gray-700 block mb-1">Merchant</span>
+                                      <span className="bg-white border border-gray-200 rounded px-2 py-0.5">{expandedDetail.merchant_code}</span>
+                                    </div>
+                                  )}
+                                  {expandedBoms.length > 0 && (
+                                    <div>
+                                      <span className="font-semibold text-gray-700 block mb-1">BOMs</span>
+                                      <div className="flex flex-wrap gap-1">
+                                        {expandedBoms.map(b => (
+                                          <button
+                                            key={b.id}
+                                            onClick={() => { setActiveTab('bom'); setBomItemId(item.id); setBomItemName(item.item_code + ' — ' + item.item_name); setSelectedBomId(b.id) }}
+                                            className="bg-white border border-blue-200 rounded px-2 py-0.5 text-blue-700 hover:bg-blue-50 transition-colors flex items-center gap-1">
+                                            {b.is_certified ? '🔒' : '📋'} {b.bom_name}
+                                            <span className="text-gray-400">({b.line_count} lines)</span>
+                                            {b.applies_to !== 'all' && <span className="text-gray-400 text-[10px]">· {b.applies_to}</span>}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -478,14 +622,13 @@ export default function ItemMaster() {
                     {/* Basic fields */}
                     <div className="grid grid-cols-2 gap-3">
                       {[
-                        ['item_code', 'Item Code *', 'text'],
-                        ['item_name', 'Item Name *', 'text'],
-                        ['hsn_code',  'HSN Code',    'text'],
-                        ['season',    'Season',      'text'],
-                        ['merchant_code', 'Merchant Code', 'text'],
-                        ['launch_date',   'Launch Date',   'date'],
-                        ['selling_price', 'Selling Price ₹', 'number'],
-                        ['purchase_price','Cost Price ₹',   'number'],
+                        ['item_code',      'Item Code *',    'text'],
+                        ['item_name',      'Item Name *',    'text'],
+                        ['hsn_code',       'HSN Code',       'text'],
+                        ['season',         'Season',         'text'],
+                        ['launch_date',    'Launch Date',    'date'],
+                        ['selling_price',  'Selling Price ₹','number'],
+                        ['purchase_price', 'Cost Price ₹',  'number'],
                       ].map(([key, label, type]) => (
                         <div key={key} className="space-y-1">
                           <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">{label}</label>
@@ -494,7 +637,8 @@ export default function ItemMaster() {
                             className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
                         </div>
                       ))}
-                      <div className="col-span-2 space-y-1">
+                      {/* Item Type */}
+                      <div className="space-y-1">
                         <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Item Type *</label>
                         <select value={newItem.item_type_id}
                           onChange={e => setNewItem(p => ({ ...p, item_type_id: +e.target.value }))}
@@ -502,19 +646,30 @@ export default function ItemMaster() {
                           {itemTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                         </select>
                       </div>
+                      {/* Merchant dropdown */}
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Merchant</label>
+                        <select value={newItem.merchant_code}
+                          onChange={e => setNewItem(p => ({ ...p, merchant_code: e.target.value }))}
+                          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                          <option value="">— None —</option>
+                          {merchants.map(m => <option key={m.id} value={m.merchant_code}>{m.merchant_code} — {m.merchant_name}</option>)}
+                        </select>
+                        {merchants.length === 0 && (
+                          <p className="text-[11px] text-gray-400">Add merchants in the Merchants tab first.</p>
+                        )}
+                      </div>
                     </div>
 
                     {/* Size selection */}
                     <div className="space-y-2">
                       <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Size Variants</label>
-                      <div className="flex gap-2">
-                        <select value={newItem.size_group_id}
-                          onChange={e => applyPreviewSizes(e.target.value)}
-                          className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
-                          <option value="">Pick a size group…</option>
-                          {sizeGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.sizes.join(', ')})</option>)}
-                        </select>
-                      </div>
+                      <select value={newItem.size_group_id}
+                        onChange={e => applyPreviewSizes(e.target.value)}
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                        <option value="">Pick a size group…</option>
+                        {sizeGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.sizes.join(', ')})</option>)}
+                      </select>
                       <div className="flex flex-wrap gap-1 mt-1">
                         {(sizeGroups.find(g => g.id === +newItem.size_group_id)?.sizes ?? []).map(sz => (
                           <button key={sz} type="button"
@@ -542,25 +697,42 @@ export default function ItemMaster() {
                       )}
                     </div>
 
-                    {/* Routing */}
+                    {/* Ordered Routing */}
                     <div className="space-y-2">
-                      <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Production Routing</label>
+                      <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Production Routing (in order)</label>
+                      {/* Available processes */}
                       <div className="flex flex-wrap gap-1">
-                        {routingSteps.map(r => (
-                          <button key={r.id} type="button"
-                            onClick={() => setNewItem(p => ({
-                              ...p,
-                              routing_step_ids: p.routing_step_ids.includes(r.id)
-                                ? p.routing_step_ids.filter(x => x !== r.id)
-                                : [...p.routing_step_ids, r.id]
-                            }))}
-                            className={`px-2 py-0.5 rounded border text-xs font-medium transition-colors ${
-                              newItem.routing_step_ids.includes(r.id)
-                                ? 'bg-[#002B5B] text-white border-[#002B5B]'
-                                : 'bg-white text-gray-600 border-gray-200 hover:border-[#002B5B]'
-                            }`}>{r.name}</button>
-                        ))}
+                        {routingSteps
+                          .filter(r => !newItem.routing_step_ids.includes(r.id))
+                          .map(r => (
+                            <button key={r.id} type="button" onClick={() => toggleRoutingStep(r.id)}
+                              className="px-2 py-0.5 rounded border text-xs font-medium bg-white text-gray-600 border-gray-200 hover:border-[#002B5B] hover:text-[#002B5B] transition-colors">
+                              + {r.name}
+                            </button>
+                          ))}
                       </div>
+                      {/* Selected in order */}
+                      {newItem.routing_step_ids.length > 0 && (
+                        <div className="space-y-1 mt-1">
+                          {newItem.routing_step_ids.map((stepId, idx) => {
+                            const step = routingSteps.find(r => r.id === stepId)
+                            return step ? (
+                              <div key={stepId} className="flex items-center gap-2 bg-[#002B5B]/5 border border-[#002B5B]/20 rounded-lg px-3 py-1.5">
+                                <span className="text-xs font-bold text-[#002B5B] w-4">{idx + 1}.</span>
+                                <span className="text-xs font-medium text-gray-800 flex-1">{step.name}</span>
+                                <div className="flex gap-1">
+                                  <button type="button" onClick={() => moveRoutingStep(idx, -1)} disabled={idx === 0}
+                                    className="text-gray-400 hover:text-gray-600 disabled:opacity-30 text-xs px-1">↑</button>
+                                  <button type="button" onClick={() => moveRoutingStep(idx, 1)} disabled={idx === newItem.routing_step_ids.length - 1}
+                                    className="text-gray-400 hover:text-gray-600 disabled:opacity-30 text-xs px-1">↓</button>
+                                  <button type="button" onClick={() => toggleRoutingStep(stepId)}
+                                    className="text-red-400 hover:text-red-600 text-xs px-1 ml-1">✕</button>
+                                </div>
+                              </div>
+                            ) : null
+                          })}
+                        </div>
+                      )}
                     </div>
 
                     {newItemErr && <p className="text-red-500 text-sm">{newItemErr}</p>}
@@ -591,7 +763,7 @@ export default function ItemMaster() {
                     {bomSearchResults.map(it => (
                       <button key={it.id} onClick={() => {
                         setBomItemId(it.id); setBomItemName(it.item_code + ' — ' + it.item_name)
-                        setBomItemSearch(''); setSelectedBomId(null)
+                        setBomItemSearch(''); setSelectedBomId(null); setCertifyErr('')
                       }}
                         className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors">
                         <div className="text-xs font-mono font-medium text-[#002B5B]">{it.item_code}</div>
@@ -619,13 +791,13 @@ export default function ItemMaster() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">BOMs:</span>
                       {boms.map(b => (
-                        <button key={b.id} onClick={() => setSelectedBomId(b.id)}
-                          className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        <button key={b.id} onClick={() => { setSelectedBomId(b.id); setCertifyErr('') }}
+                          className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors flex items-center gap-1 ${
                             selectedBomId === b.id
                               ? 'bg-[#002B5B] text-white border-[#002B5B]'
                               : 'bg-white text-gray-700 border-gray-200 hover:border-[#002B5B]'
                           }`}>
-                          {b.bom_name}
+                          {b.is_certified ? '🔒' : ''}{b.bom_name}
                           {b.applies_to !== 'all' && <span className="ml-1 opacity-70">({b.applies_to})</span>}
                           <span className="ml-1 opacity-60">[{b.line_count}]</span>
                         </button>
@@ -669,40 +841,82 @@ export default function ItemMaster() {
                     {/* BOM Detail */}
                     {selectedBomId && bomDetail && (
                       <div className="space-y-4">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
+                        {/* BOM header bar */}
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-sm font-semibold text-gray-800">{bomDetail.bom_name}</span>
                             <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
                               {bomDetail.applies_to === 'all' ? 'All sizes' : `Sizes: ${bomDetail.applies_to}`}
                             </span>
+                            {bomDetail.is_certified ? (
+                              <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium flex items-center gap-1">
+                                🔒 Certified {bomDetail.certified_by && `by ${bomDetail.certified_by}`}
+                              </span>
+                            ) : (
+                              <span className="text-xs bg-yellow-50 text-yellow-700 px-2 py-0.5 rounded-full">Draft</span>
+                            )}
                           </div>
-                          <div className="flex gap-2">
+                          <div className="flex gap-2 items-center">
+                            {bomDetail.is_certified ? (
+                              <button
+                                onClick={() => { if (confirm('Remove certification? This will allow editing.')) uncertifyBOMMut.mutate(selectedBomId) }}
+                                disabled={uncertifyBOMMut.isPending}
+                                className="text-xs text-orange-600 hover:text-orange-800 px-2 py-1 rounded hover:bg-orange-50 transition-colors border border-orange-200">
+                                🔓 Uncertify
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => { if (confirm('Certify this BOM? Regular users will not be able to edit it.')) certifyBOMMut.mutate(selectedBomId) }}
+                                disabled={certifyBOMMut.isPending}
+                                className="text-xs text-green-600 hover:text-green-800 px-2 py-1 rounded hover:bg-green-50 transition-colors border border-green-200">
+                                ✓ Certify BOM
+                              </button>
+                            )}
                             <button onClick={() => setShowCopyBOM(true)}
                               className="text-xs text-blue-600 hover:text-blue-800 px-2 py-1 rounded hover:bg-blue-50 transition-colors">
                               Copy BOM
                             </button>
-                            <button onClick={() => { if (confirm('Delete this BOM?')) deleteBOMMut.mutate(selectedBomId) }}
-                              className="text-xs text-red-500 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50 transition-colors">
-                              Delete BOM
-                            </button>
+                            {!bomDetail.is_certified && (
+                              <button onClick={() => { if (confirm('Delete this BOM?')) deleteBOMMut.mutate(selectedBomId) }}
+                                className="text-xs text-red-500 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50 transition-colors">
+                                Delete BOM
+                              </button>
+                            )}
                           </div>
                         </div>
+
+                        {certifyErr && (
+                          <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{certifyErr}</p>
+                        )}
 
                         {/* Copy BOM modal */}
                         {showCopyBOM && (
                           <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
                             <p className="text-sm font-medium text-gray-700">Copy BOM to another item</p>
-                            <div className="flex gap-3">
-                              <input type="number" placeholder="Target Item ID" value={copyTarget}
-                                onChange={e => setCopyTarget(e.target.value)}
-                                className="border border-gray-200 rounded-lg px-3 py-2 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                            <div className="space-y-2">
+                              <input type="text" placeholder="Search target item…" value={copyTargetSearch}
+                                onChange={e => { setCopyTargetSearch(e.target.value); setCopyTargetId(null) }}
+                                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                              {copyTargetSearch.length >= 2 && copyTargetResults.length > 0 && !copyTargetId && (
+                                <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-40 overflow-y-auto bg-white shadow-sm">
+                                  {copyTargetResults.map(it => (
+                                    <button key={it.id} onClick={() => { setCopyTargetId(it.id); setCopyTargetName(it.item_code + ' — ' + it.item_name); setCopyTargetSearch('') }}
+                                      className="w-full text-left px-3 py-2 hover:bg-blue-50 text-xs transition-colors">
+                                      <span className="font-mono font-medium text-[#002B5B]">{it.item_code}</span> — {it.item_name}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              {copyTargetId && <div className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded px-2 py-1">{copyTargetName}</div>}
                               <input type="text" placeholder="New BOM name" value={copyName}
                                 onChange={e => setCopyName(e.target.value)}
-                                className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
                             </div>
                             <div className="flex gap-2">
-                              <button onClick={() => copyBOMMut.mutate({ target_item_id: +copyTarget, new_name: copyName || 'Copied BOM' })}
-                                className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] transition-colors">Copy</button>
+                              <button
+                                onClick={() => copyTargetId && copyBOMMut.mutate({ target_item_id: copyTargetId, new_name: copyName || 'Copied BOM' })}
+                                disabled={!copyTargetId}
+                                className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">Copy</button>
                               <button onClick={() => setShowCopyBOM(false)}
                                 className="text-gray-500 text-xs px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors">Cancel</button>
                             </div>
@@ -736,8 +950,10 @@ export default function ItemMaster() {
                                   <td className="px-3 py-2 tabular-nums font-medium text-gray-900">{lineAmt(l).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</td>
                                   <td className="px-3 py-2 text-gray-400 max-w-[120px] truncate">{l.remarks || '—'}</td>
                                   <td className="px-3 py-2">
-                                    <button onClick={() => deleteLineMut.mutate({ bomId: selectedBomId, lineId: l.id })}
-                                      className="text-red-400 hover:text-red-600 transition-colors">✕</button>
+                                    {!bomDetail.is_certified && (
+                                      <button onClick={() => deleteLineMut.mutate({ bomId: selectedBomId, lineId: l.id })}
+                                        className="text-red-400 hover:text-red-600 transition-colors">✕</button>
+                                    )}
                                   </td>
                                 </tr>
                               ))}
@@ -748,76 +964,110 @@ export default function ItemMaster() {
                           )}
                         </div>
 
-                        {/* Add Line form */}
-                        {!showAddLine ? (
-                          <button onClick={() => setShowAddLine(true)}
-                            className="text-sm text-[#002B5B] hover:text-[#003d80] font-medium border border-dashed border-[#002B5B]/30 rounded-lg px-4 py-2 hover:bg-blue-50 transition-colors w-full">
-                            + Add Component
-                          </button>
-                        ) : (
-                          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
-                            <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add Component</p>
-                            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                              <div className="col-span-2 space-y-1">
-                                <label className="text-xs text-gray-500">Component Name *</label>
-                                <input type="text" value={newLine.component_name}
-                                  onChange={e => setNewLine(p => ({ ...p, component_name: e.target.value }))}
-                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
-                              </div>
+                        {/* Add Line form — hidden when certified */}
+                        {!bomDetail.is_certified && (
+                          !showAddLine ? (
+                            <button onClick={() => { setShowAddLine(true); setCertifyErr('') }}
+                              className="text-sm text-[#002B5B] hover:text-[#003d80] font-medium border border-dashed border-[#002B5B]/30 rounded-lg px-4 py-2 hover:bg-blue-50 transition-colors w-full">
+                              + Add Component
+                            </button>
+                          ) : (
+                            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                              <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add Component (from Item Master)</p>
+
+                              {/* Component item search */}
                               <div className="space-y-1">
-                                <label className="text-xs text-gray-500">Type</label>
-                                <select value={newLine.component_type}
-                                  onChange={e => setNewLine(p => ({ ...p, component_type: e.target.value }))}
-                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
-                                  {COMPONENT_TYPES.map(t => <option key={t}>{t}</option>)}
-                                </select>
+                                <label className="text-xs text-gray-500">Component Item *</label>
+                                {newLine.component_item_id ? (
+                                  <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                                    <span className="text-xs font-medium text-blue-800 flex-1">{newLine.component_name}</span>
+                                    <button onClick={() => setNewLine(p => ({ ...p, component_item_id: null, component_name: '' }))}
+                                      className="text-gray-400 hover:text-red-500 text-xs">✕</button>
+                                  </div>
+                                ) : (
+                                  <div className="relative">
+                                    <input type="text" placeholder="Type item code or name to search…" value={compSearch}
+                                      onChange={e => setCompSearch(e.target.value)}
+                                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                                    {compSearch.length >= 2 && compSearchResults.length > 0 && (
+                                      <div className="absolute z-10 top-full mt-1 w-full border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-48 overflow-y-auto bg-white shadow-lg">
+                                        {compSearchResults.map(it => (
+                                          <button key={it.id} onClick={() => {
+                                            setNewLine(p => ({
+                                              ...p,
+                                              component_item_id: it.id,
+                                              component_name: it.item_code + ' — ' + it.item_name,
+                                              component_type: it.item_type_code,
+                                            }))
+                                            setCompSearch('')
+                                          }}
+                                            className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors">
+                                            <div className="text-xs font-mono font-medium text-[#002B5B]">{it.item_code}</div>
+                                            <div className="text-xs text-gray-500">{it.item_name} · {it.item_type_code}</div>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                              <div className="space-y-1">
-                                <label className="text-xs text-gray-500">Unit</label>
-                                <select value={newLine.unit}
-                                  onChange={e => setNewLine(p => ({ ...p, unit: e.target.value }))}
-                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
-                                  {UNITS.map(u => <option key={u}>{u}</option>)}
-                                </select>
-                              </div>
-                              {[
-                                ['quantity',      'Quantity',  'number'],
-                                ['rate',          'Rate ₹',    'number'],
-                                ['shrinkage_pct', 'Shrink %',  'number'],
-                                ['wastage_pct',   'Wastage %', 'number'],
-                              ].map(([key, label, type]) => (
-                                <div key={key} className="space-y-1">
-                                  <label className="text-xs text-gray-500">{label}</label>
-                                  <input type={type} value={(newLine as any)[key]}
-                                    onChange={e => setNewLine(p => ({ ...p, [key]: e.target.value }))}
+
+                              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                <div className="space-y-1">
+                                  <label className="text-xs text-gray-500">Type</label>
+                                  <select value={newLine.component_type}
+                                    onChange={e => setNewLine(p => ({ ...p, component_type: e.target.value }))}
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                                    {COMPONENT_TYPES.map(t => <option key={t}>{t}</option>)}
+                                  </select>
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-xs text-gray-500">Unit</label>
+                                  <select value={newLine.unit}
+                                    onChange={e => setNewLine(p => ({ ...p, unit: e.target.value }))}
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                                    {UNITS.map(u => <option key={u}>{u}</option>)}
+                                  </select>
+                                </div>
+                                {[
+                                  ['quantity',      'Quantity',  'number'],
+                                  ['rate',          'Rate ₹',    'number'],
+                                  ['shrinkage_pct', 'Shrink %',  'number'],
+                                  ['wastage_pct',   'Wastage %', 'number'],
+                                ].map(([key, label, type]) => (
+                                  <div key={key} className="space-y-1">
+                                    <label className="text-xs text-gray-500">{label}</label>
+                                    <input type={type} value={(newLine as any)[key]}
+                                      onChange={e => setNewLine(p => ({ ...p, [key]: e.target.value }))}
+                                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                                  </div>
+                                ))}
+                                <div className="space-y-1">
+                                  <label className="text-xs text-gray-500">Process</label>
+                                  <select value={newLine.process_id}
+                                    onChange={e => setNewLine(p => ({ ...p, process_id: e.target.value }))}
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                                    <option value="">— None —</option>
+                                    {routingSteps.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                                  </select>
+                                </div>
+                                <div className="col-span-2 space-y-1">
+                                  <label className="text-xs text-gray-500">Remarks</label>
+                                  <input type="text" value={newLine.remarks}
+                                    onChange={e => setNewLine(p => ({ ...p, remarks: e.target.value }))}
                                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
                                 </div>
-                              ))}
-                              <div className="space-y-1">
-                                <label className="text-xs text-gray-500">Process</label>
-                                <select value={newLine.process_id}
-                                  onChange={e => setNewLine(p => ({ ...p, process_id: e.target.value }))}
-                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
-                                  <option value="">— None —</option>
-                                  {routingSteps.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                                </select>
                               </div>
-                              <div className="col-span-2 space-y-1">
-                                <label className="text-xs text-gray-500">Remarks</label>
-                                <input type="text" value={newLine.remarks}
-                                  onChange={e => setNewLine(p => ({ ...p, remarks: e.target.value }))}
-                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                              <div className="flex gap-2">
+                                <button onClick={handleAddLine} disabled={addLineMut.isPending}
+                                  className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">
+                                  {addLineMut.isPending ? 'Adding…' : 'Add Component'}
+                                </button>
+                                <button onClick={() => { setShowAddLine(false); setNewLine(blankBOMLine()); setCompSearch(''); setCertifyErr('') }}
+                                  className="text-gray-500 text-xs px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors">Cancel</button>
                               </div>
                             </div>
-                            <div className="flex gap-2">
-                              <button onClick={handleAddLine} disabled={addLineMut.isPending}
-                                className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">
-                                {addLineMut.isPending ? 'Adding…' : 'Add Component'}
-                              </button>
-                              <button onClick={() => { setShowAddLine(false); setNewLine(blankBOMLine()) }}
-                                className="text-gray-500 text-xs px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors">Cancel</button>
-                            </div>
-                          </div>
+                          )
                         )}
 
                         {/* Cost Summary */}
@@ -908,7 +1158,6 @@ export default function ItemMaster() {
               ================================================================ */}
           {activeTab === 'import' && (
             <div className="space-y-5 max-w-3xl">
-              {/* Expected columns */}
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
                 <p className="text-xs font-semibold text-blue-800 mb-2">Expected columns (Excel / CSV)</p>
                 <div className="flex flex-wrap gap-1.5">
@@ -917,12 +1166,11 @@ export default function ItemMaster() {
                   ))}
                 </div>
                 <p className="text-xs text-blue-600 mt-2">
-                  <strong>item_type</strong> values: FG, SFG, RM, ACC, PKG, FUEL &nbsp;·&nbsp;
+                  <strong>item_type</strong> values: FG, SFG, RM, ACC, PKG, FUEL, SVC &nbsp;·&nbsp;
                   <strong>sizes</strong>: comma-separated e.g. "S,M,L,XL"
                 </p>
               </div>
 
-              {/* Upload zone */}
               <div
                 className="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center hover:border-[#002B5B] transition-colors cursor-pointer"
                 onClick={() => importRef.current?.click()}
@@ -946,7 +1194,6 @@ export default function ItemMaster() {
                 <p className={`text-sm font-medium ${importMsg.startsWith('✓') ? 'text-green-600' : 'text-red-500'}`}>{importMsg}</p>
               )}
 
-              {/* Preview table */}
               {importPreview && importPreview.length > 0 && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
@@ -985,6 +1232,76 @@ export default function ItemMaster() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 5 — MERCHANTS
+              ================================================================ */}
+          {activeTab === 'merchants' && (
+            <div className="space-y-4 max-w-2xl">
+              <p className="text-sm text-gray-500">
+                Create merchant records here. The Merchant dropdown in the Item creation form will use this list.
+              </p>
+
+              {/* Merchants table */}
+              <div className="overflow-x-auto rounded-xl border border-gray-200">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      {['#', 'Merchant Code', 'Merchant Name', 'Action'].map(h => (
+                        <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {merchants.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="px-4 py-8 text-center text-gray-400">
+                          No merchants yet. Add one below.
+                        </td>
+                      </tr>
+                    ) : merchants.map((m, i) => (
+                      <tr key={m.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-3 text-gray-400 text-xs">{i + 1}</td>
+                        <td className="px-4 py-3 font-mono font-medium text-[#002B5B]">{m.merchant_code}</td>
+                        <td className="px-4 py-3 text-gray-800">{m.merchant_name}</td>
+                        <td className="px-4 py-3">
+                          <button onClick={() => { if (confirm(`Delete merchant "${m.merchant_code}"?`)) deleteMerchantMut.mutate(m.id) }}
+                            className="text-red-400 hover:text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50 transition-colors">
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Add merchant form */}
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add Merchant</p>
+                <div className="flex gap-3 flex-wrap">
+                  <input type="text" placeholder="Merchant Code * (e.g. YG001)" value={newMerchant.merchant_code}
+                    onChange={e => setNewMerchant(p => ({ ...p, merchant_code: e.target.value }))}
+                    className="flex-1 min-w-[140px] border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                  <input type="text" placeholder="Merchant Name *" value={newMerchant.merchant_name}
+                    onChange={e => setNewMerchant(p => ({ ...p, merchant_name: e.target.value }))}
+                    className="flex-1 min-w-[200px] border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                  <button
+                    onClick={() => {
+                      if (!newMerchant.merchant_code.trim() || !newMerchant.merchant_name.trim()) {
+                        setMerchantErr('Both fields are required.'); return
+                      }
+                      createMerchantMut.mutate(newMerchant)
+                    }}
+                    disabled={createMerchantMut.isPending}
+                    className="bg-[#002B5B] text-white text-sm px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">
+                    Add
+                  </button>
+                </div>
+                {merchantErr && <p className="text-xs text-red-500">{merchantErr}</p>}
+              </div>
             </div>
           )}
 

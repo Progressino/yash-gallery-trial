@@ -16,6 +16,7 @@ _DEFAULT_TYPES = [
     ("Accessories",         "ACC"),
     ("Packing Materials",   "PKG"),
     ("Fuel & Lubricants",   "FUEL"),
+    ("Service / Process",   "SVC"),
 ]
 
 _DEFAULT_SIZE_GROUPS = [
@@ -116,7 +117,25 @@ def init_db() -> None:
             step_id    INTEGER NOT NULL REFERENCES routing_steps(id),
             sort_order INTEGER DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS merchants (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            merchant_code TEXT NOT NULL UNIQUE,
+            merchant_name TEXT NOT NULL,
+            created_at    TEXT DEFAULT (datetime('now'))
+        );
     """)
+
+    # Migrate existing bom_headers table — add certification columns if missing
+    for col_ddl in [
+        "ALTER TABLE bom_headers ADD COLUMN is_certified INTEGER DEFAULT 0",
+        "ALTER TABLE bom_headers ADD COLUMN certified_by TEXT DEFAULT ''",
+        "ALTER TABLE bom_headers ADD COLUMN certified_at TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(col_ddl)
+        except Exception:
+            pass  # column already exists
 
     # Seed item types
     for name, code in _DEFAULT_TYPES:
@@ -209,6 +228,36 @@ def create_routing_step(name: str, description: str = "", sort_order: int = 0) -
 def delete_routing_step(step_id: int) -> bool:
     conn = _connect()
     cur = conn.execute("DELETE FROM routing_steps WHERE id = ?", (step_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+# ── Merchants ──────────────────────────────────────────────────────────────────
+
+def list_merchants() -> list[dict]:
+    conn = _connect()
+    rows = conn.execute("SELECT * FROM merchants ORDER BY merchant_name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_merchant(merchant_code: str, merchant_name: str) -> int:
+    conn = _connect()
+    cur = conn.execute(
+        "INSERT INTO merchants (merchant_code, merchant_name) VALUES (?, ?)",
+        (merchant_code.strip().upper(), merchant_name.strip()),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def delete_merchant(merchant_id: int) -> bool:
+    conn = _connect()
+    cur = conn.execute("DELETE FROM merchants WHERE id = ?", (merchant_id,))
     conn.commit()
     deleted = cur.rowcount > 0
     conn.close()
@@ -382,6 +431,38 @@ def set_item_routing(item_id: int, step_ids: list[int]) -> None:
 
 # ── BOM ───────────────────────────────────────────────────────────────────────
 
+def _bom_is_certified(bom_id: int) -> bool:
+    conn = _connect()
+    row = conn.execute("SELECT is_certified FROM bom_headers WHERE id = ?", (bom_id,)).fetchone()
+    conn.close()
+    return bool(row and row["is_certified"])
+
+
+def certify_bom(bom_id: int, certified_by: str = "admin") -> bool:
+    conn = _connect()
+    from datetime import datetime, timezone
+    cur = conn.execute(
+        "UPDATE bom_headers SET is_certified=1, certified_by=?, certified_at=? WHERE id=?",
+        (certified_by, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), bom_id),
+    )
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
+
+
+def uncertify_bom(bom_id: int) -> bool:
+    conn = _connect()
+    cur = conn.execute(
+        "UPDATE bom_headers SET is_certified=0, certified_by='', certified_at='' WHERE id=?",
+        (bom_id,),
+    )
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
+
+
 def list_boms(item_id: int) -> list[dict]:
     conn = _connect()
     rows = conn.execute(
@@ -433,6 +514,8 @@ def create_bom(item_id: int, bom_name: str, applies_to: str = "all", is_default:
 
 
 def update_bom(bom_id: int, **fields) -> bool:
+    if _bom_is_certified(bom_id):
+        raise ValueError("BOM is certified and cannot be modified. Uncertify first.")
     allowed = {"bom_name", "applies_to", "is_default"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
@@ -450,6 +533,8 @@ def update_bom(bom_id: int, **fields) -> bool:
 
 
 def delete_bom(bom_id: int) -> bool:
+    if _bom_is_certified(bom_id):
+        raise ValueError("BOM is certified and cannot be deleted. Uncertify first.")
     conn = _connect()
     cur = conn.execute("DELETE FROM bom_headers WHERE id = ?", (bom_id,))
     conn.commit()
@@ -471,6 +556,8 @@ def add_bom_line(
     wastage_pct: float = 0.0,
     remarks: str = "",
 ) -> int:
+    if _bom_is_certified(bom_id):
+        raise ValueError("BOM is certified and cannot be modified. Uncertify first.")
     conn = _connect()
     cur = conn.execute(
         """INSERT INTO bom_lines
@@ -487,6 +574,12 @@ def add_bom_line(
 
 
 def update_bom_line(line_id: int, **fields) -> bool:
+    # Check if the parent BOM is certified
+    conn = _connect()
+    row = conn.execute("SELECT bom_id FROM bom_lines WHERE id = ?", (line_id,)).fetchone()
+    conn.close()
+    if row and _bom_is_certified(row["bom_id"]):
+        raise ValueError("BOM is certified and cannot be modified. Uncertify first.")
     allowed = {"component_name", "component_type", "quantity", "unit", "rate",
                "component_item_id", "process_id", "shrinkage_pct", "wastage_pct", "remarks"}
     updates = {k: v for k, v in fields.items() if k in allowed}
@@ -505,6 +598,11 @@ def update_bom_line(line_id: int, **fields) -> bool:
 
 
 def delete_bom_line(line_id: int) -> bool:
+    conn = _connect()
+    row = conn.execute("SELECT bom_id FROM bom_lines WHERE id = ?", (line_id,)).fetchone()
+    conn.close()
+    if row and _bom_is_certified(row["bom_id"]):
+        raise ValueError("BOM is certified and cannot be modified. Uncertify first.")
     conn = _connect()
     cur = conn.execute("DELETE FROM bom_lines WHERE id = ?", (line_id,))
     conn.commit()

@@ -33,9 +33,11 @@ from ..db.item_db import (
     list_item_types, create_item_type,
     list_size_groups, create_size_group,
     list_routing_steps, create_routing_step, delete_routing_step,
+    list_merchants, create_merchant, delete_merchant,
     list_items, get_item, create_item, update_item, delete_item,
     create_size_variants, set_item_routing,
     list_boms, get_bom_with_lines, create_bom, update_bom, delete_bom,
+    certify_bom, uncertify_bom,
     add_bom_line, update_bom_line, delete_bom_line, copy_bom,
     bulk_create_items,
 )
@@ -122,6 +124,10 @@ class BOMCopyRequest(BaseModel):
     target_item_id: int
     new_name:       str = "Copied BOM"
 
+class MerchantCreate(BaseModel):
+    merchant_code: str
+    merchant_name: str
+
 
 # ── Meta ──────────────────────────────────────────────────────────────────────
 
@@ -131,7 +137,26 @@ def get_meta():
         "item_types":    list_item_types(),
         "size_groups":   list_size_groups(),
         "routing_steps": list_routing_steps(),
+        "merchants":     list_merchants(),
     }
+
+
+# ── Merchants ──────────────────────────────────────────────────────────────────
+
+@router.get("/merchants")
+def get_merchants():
+    return list_merchants()
+
+@router.post("/merchants")
+def add_merchant(body: MerchantCreate):
+    new_id = create_merchant(body.merchant_code, body.merchant_name)
+    return {"ok": True, "id": new_id}
+
+@router.delete("/merchants/{merchant_id}")
+def remove_merchant(merchant_id: int):
+    if not delete_merchant(merchant_id):
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    return {"ok": True}
 
 
 # ── Item Types ────────────────────────────────────────────────────────────────
@@ -264,40 +289,66 @@ def edit_bom(item_id: int, bom_id: int, body: BOMUpdate):
 
 @router.delete("/{item_id}/boms/{bom_id}")
 def remove_bom(item_id: int, bom_id: int):
-    if not delete_bom(bom_id):
+    try:
+        if not delete_bom(bom_id):
+            raise HTTPException(status_code=404, detail="BOM not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True}
+
+
+@router.post("/{item_id}/boms/{bom_id}/certify")
+def certify_bom_endpoint(item_id: int, bom_id: int):
+    if not certify_bom(bom_id):
+        raise HTTPException(status_code=404, detail="BOM not found")
+    return {"ok": True}
+
+
+@router.delete("/{item_id}/boms/{bom_id}/certify")
+def uncertify_bom_endpoint(item_id: int, bom_id: int):
+    if not uncertify_bom(bom_id):
         raise HTTPException(status_code=404, detail="BOM not found")
     return {"ok": True}
 
 
 @router.post("/{item_id}/boms/{bom_id}/lines")
 def add_line(item_id: int, bom_id: int, body: BOMLineCreate):
-    new_id = add_bom_line(
-        bom_id            = bom_id,
-        component_name    = body.component_name,
-        component_type    = body.component_type,
-        quantity          = body.quantity,
-        unit              = body.unit,
-        rate              = body.rate,
-        component_item_id = body.component_item_id,
-        process_id        = body.process_id,
-        shrinkage_pct     = body.shrinkage_pct,
-        wastage_pct       = body.wastage_pct,
-        remarks           = body.remarks,
-    )
+    try:
+        new_id = add_bom_line(
+            bom_id            = bom_id,
+            component_name    = body.component_name,
+            component_type    = body.component_type,
+            quantity          = body.quantity,
+            unit              = body.unit,
+            rate              = body.rate,
+            component_item_id = body.component_item_id,
+            process_id        = body.process_id,
+            shrinkage_pct     = body.shrinkage_pct,
+            wastage_pct       = body.wastage_pct,
+            remarks           = body.remarks,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "id": new_id}
 
 
 @router.put("/{item_id}/boms/{bom_id}/lines/{line_id}")
 def edit_line(item_id: int, bom_id: int, line_id: int, body: BOMLineUpdate):
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    update_bom_line(line_id, **fields)
+    try:
+        fields = {k: v for k, v in body.model_dump().items() if v is not None}
+        update_bom_line(line_id, **fields)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True}
 
 
 @router.delete("/{item_id}/boms/{bom_id}/lines/{line_id}")
 def remove_line(item_id: int, bom_id: int, line_id: int):
-    if not delete_bom_line(line_id):
-        raise HTTPException(status_code=404, detail="BOM line not found")
+    try:
+        if not delete_bom_line(line_id):
+            raise HTTPException(status_code=404, detail="BOM line not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True}
 
 
