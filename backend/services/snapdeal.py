@@ -167,42 +167,71 @@ def _parse_snapdeal_df(
     df["_OrderId"] = df[order_col].fillna("").astype(str) if order_col else ""
 
     # ── SKU ───────────────────────────────────────────────────
-    # Note: "Product Code" intentionally excluded — Snapdeal uses it for
-    # their internal numeric deal IDs (e.g. 92764694), not seller SKUs.
+    # OMS files have "Product Sku Code" (correct YK SKU) AND "Listing Sku Code"
+    # (may have "PL" prefix or other variants). Prefer Product Sku Code.
+    # Note: "Product Code" excluded — Snapdeal's internal numeric deal IDs.
     sku_col = _find_col(cols, [
+        "Product Sku Code", "Product SKU Code",
         "Seller SKU Code", "Seller SKU", "Snap SKU", "SKU Code",
         "SKU ID", "SKU", "Product SKU", "Item SKU", "SellerSKUCode",
         "Seller_SKU", "Seller Item Code", "Seller Product SKU",
-        "Vendor SKU", "Listing SKU", "Seller Product Code",
+        "Vendor SKU", "Seller Product Code",
         "Style Code", "Style ID", "Item Code",
     ]) or _find_col_fuzzy(cols, [
-        "seller sku", "snap sku", "sku code", "sku id", "sku",
-        "vendor sku", "listing sku", "seller item", "seller product",
+        "product sku", "seller sku", "snap sku", "sku code", "sku id",
+        "vendor sku", "seller item", "seller product",
         "style code", "item code",
     ])
+    # Fallback listing SKU col for description/variant matching
+    listing_sku_col = _find_col(cols, ["Listing Sku Code", "Listing SKU Code", "Listing SKU"]) \
+        or _find_col_fuzzy(cols, ["listing sku"])
     # Last resort: "Product Code" — only use when values look like seller SKUs (contain letters).
-    # Snapdeal's internal deal IDs are purely numeric (e.g. 92764694); seller SKUs contain letters.
     if sku_col is None:
         pc_col = _find_col(cols, ["Product Code", "Product ID", "Deal Code", "Catalog ID"])
         if pc_col:
             sample = df[pc_col].dropna().astype(str).str.strip().head(30)
             numeric_ratio = sample.str.match(r'^\d+$').mean() if len(sample) > 0 else 1.0
-            if numeric_ratio < 0.5:   # majority are alphanumeric → real seller SKUs
+            if numeric_ratio < 0.5:
                 sku_col = pc_col
 
     field_map["sku_col"] = sku_col
+    field_map["listing_sku_col"] = listing_sku_col
     if sku_col:
-        df["_OMS_SKU"] = df[sku_col].apply(
-            lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
-        )
+        def _resolve_sku(row_sku, row_listing_sku=None) -> str:
+            """Resolve SKU with Listing SKU fallback and PL-prefix stripping."""
+            import re as _re
+            c = clean_sku(str(row_sku))
+            resolved = mapping.get(c, c)
+            # If we have a listing SKU column and it differs, try it as fallback
+            if listing_sku_col and row_listing_sku is not None:
+                listing = clean_sku(str(row_listing_sku))
+                if listing and listing != c:
+                    # Try direct listing SKU match
+                    if listing in mapping:
+                        return mapping[listing]
+                    # Strip common Snapdeal listing prefixes (e.g. 1253PLYK... → 1253YK...)
+                    stripped = _re.sub(r'^(\d+)PL(YK)', r'\1\2', listing, flags=_re.I)
+                    if stripped != listing:
+                        if stripped in mapping:
+                            return mapping[stripped]
+                        if stripped:
+                            resolved = stripped  # use stripped listing SKU as fallback
+            return resolved
+
+        if listing_sku_col:
+            df["_OMS_SKU"] = df.apply(
+                lambda r: _resolve_sku(r[sku_col], r[listing_sku_col]), axis=1
+            )
+        else:
+            df["_OMS_SKU"] = df[sku_col].apply(
+                lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
+            )
         # Drop rows where SKU resolved to empty / literal "nan" / purely numeric Snapdeal IDs
         df = df[~df["_OMS_SKU"].str.upper().isin(["", "NAN", "NONE"])]
-        df = df[~df["_OMS_SKU"].str.match(r'^\d+$')]   # strip any residual numeric-only IDs
+        df = df[~df["_OMS_SKU"].str.match(r'^\d+$')]
         if df.empty:
             return pd.DataFrame(), f"sku col '{sku_col}' yielded no valid SKUs", field_map
     else:
-        # No SKU column at all — this sheet has no per-order SKU data (e.g. financial summary).
-        # Exclude it entirely rather than polluting the dashboard with UNKNOWN rows.
         return pd.DataFrame(), f"no sku col found (cols: {cols[:15]})", field_map
 
     # ── Quantity ──────────────────────────────────────────────
@@ -255,6 +284,21 @@ def _parse_snapdeal_df(
         if state_col else ""
     )
 
+    # ── Company / Channel ─────────────────────────────────────
+    # OMS reports have "Channel Name" = "Yash gallery private limited - Snapdeal",
+    # "Aashirwad Garments - Snapdeal", etc.  Strip the " - Snapdeal" suffix.
+    channel_col = _find_col(cols, ["Channel Name", "Channel", "Seller Name", "Company"]) \
+        or _find_col_fuzzy(cols, ["channel name", "channel", "seller name"])
+    field_map["channel_col"] = channel_col
+    if channel_col:
+        df["_Company"] = (
+            df[channel_col].fillna("").astype(str).str.strip()
+            .str.replace(r"\s*-\s*snapdeal\s*$", "", case=False, regex=True)
+            .str.strip()
+        )
+    else:
+        df["_Company"] = ""
+
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "TxnType":        df["_TxnType"],
@@ -263,6 +307,7 @@ def _parse_snapdeal_df(
         "State":          df["_State"],
         "OrderId":        df["_OrderId"],
         "OMS_SKU":        df["_OMS_SKU"],
+        "Company":        df["_Company"],
     })
     out["Month"] = out["Date"].dt.to_period("M").astype(str)
     result = out.dropna(subset=["Date"])
@@ -476,7 +521,7 @@ def load_snapdeal_from_zip(
 def snapdeal_to_sales_rows(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
     if snapdeal_df.empty:
         return pd.DataFrame()
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "Sku":              snapdeal_df["OMS_SKU"],
         "TxnDate":          snapdeal_df["Date"],
         "Transaction Type": snapdeal_df["TxnType"],
@@ -488,3 +533,6 @@ def snapdeal_to_sales_rows(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
         "Source":           "Snapdeal",
         "OrderId":          snapdeal_df["OrderId"],
     })
+    if "Company" in snapdeal_df.columns:
+        out["Company"] = snapdeal_df["Company"].values
+    return out

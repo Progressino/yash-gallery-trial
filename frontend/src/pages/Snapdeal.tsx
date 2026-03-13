@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import {
@@ -8,6 +9,7 @@ import {
 interface SnapdealData {
   loaded: boolean
   rows?: number
+  companies?: string[]
   date_range?: [string, string]
   shipped?: number
   returned?: number
@@ -36,9 +38,11 @@ const SNAPDEAL_RED   = '#e53935'
 const SNAPDEAL_CORAL = '#ff7043'
 
 export default function Snapdeal() {
+  const [company, setCompany] = useState<string>('')
+
   const { data, isLoading } = useQuery<SnapdealData>({
-    queryKey: ['snapdeal-analytics'],
-    queryFn: () => api.get('/data/snapdeal-analytics').then(r => r.data),
+    queryKey: ['snapdeal-analytics', company],
+    queryFn: () => api.get('/data/snapdeal-analytics', { params: company ? { company } : {} }).then(r => r.data),
     refetchInterval: 15000,
   })
 
@@ -61,11 +65,11 @@ export default function Snapdeal() {
           to see analytics here.
         </p>
         <div className="mt-2 bg-gray-50 rounded-lg p-4 text-xs text-gray-500 text-left max-w-md">
-          <p className="font-semibold mb-1">Expected file format:</p>
+          <p className="font-semibold mb-1">Accepted formats:</p>
           <ul className="space-y-0.5">
-            <li>• ZIP file containing monthly Excel/CSV reports</li>
-            <li>• Columns: Order ID, Order Date, SKU, Quantity, Status, Sale Price, State</li>
-            <li>• Status values: Delivered/Shipped/RTO/Returned/Cancelled</li>
+            <li>• <strong>OMS order reports</strong> (CSV/ZIP) — has <code>Product Sku Code</code>, <code>Channel Name</code> columns</li>
+            <li>• Old AG/PE/YG financial ZIP reports (no SKU data — not recommended)</li>
+            <li>• Multiple companies (Yash Gallery, Pushpa Enterprises, Aashirwad) combined — filter by company after upload</li>
           </ul>
         </div>
       </div>
@@ -82,10 +86,12 @@ export default function Snapdeal() {
   const byState    = data.by_state   ?? []
   const returnRate = data.return_rate ?? 0
 
+  const companies = data.companies ?? []
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-bold text-[#002B5B]">🔴 Snapdeal Analytics</h2>
           <p className="text-gray-400 text-sm mt-1">
@@ -93,12 +99,42 @@ export default function Snapdeal() {
             {data.date_range?.[0]} → {data.date_range?.[1]}
           </p>
         </div>
-        <span className={`px-3 py-1 rounded-full text-xs font-bold text-white ${
+        <span className={`px-3 py-1 rounded-full text-xs font-bold text-white self-start ${
           returnRate > 25 ? 'bg-red-500' : returnRate > 15 ? 'bg-amber-500' : 'bg-green-500'
         }`}>
           {returnRate}% return rate
         </span>
       </div>
+
+      {/* Company filter */}
+      {companies.length > 1 && (
+        <div className="flex flex-wrap gap-2 items-center">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Company:</span>
+          <button
+            onClick={() => setCompany('')}
+            className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+              company === ''
+                ? 'bg-[#002B5B] text-white border-[#002B5B]'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
+            }`}
+          >
+            All
+          </button>
+          {companies.map(c => (
+            <button
+              key={c}
+              onClick={() => setCompany(c === company ? '' : c)}
+              className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                company === c
+                  ? 'bg-[#e53935] text-white border-[#e53935]'
+                  : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
+              }`}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

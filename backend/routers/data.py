@@ -398,7 +398,7 @@ def get_inventory(request: Request):
 # ── Snapdeal Analytics ────────────────────────────────────────
 
 @router.get("/snapdeal-analytics")
-def snapdeal_analytics(request: Request):
+def snapdeal_analytics(request: Request, company: Optional[str] = None):
     sess = _sess(request)
     df = sess.snapdeal_df
     if df.empty:
@@ -409,6 +409,16 @@ def snapdeal_analytics(request: Request):
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
+
+    # Collect unique companies before filtering
+    companies: list = []
+    if "Company" in df.columns:
+        companies = sorted(df["Company"].dropna().str.strip().unique().tolist())
+        companies = [c for c in companies if c]
+
+    # Apply company filter
+    if company and "Company" in df.columns:
+        df = df[df["Company"].str.strip() == company.strip()]
 
     shipped  = float(df[df["TxnType"] == "Shipment"]["Quantity"].sum())
     returned = float(df[df["TxnType"] == "Refund"]["Quantity"].sum())
@@ -442,6 +452,7 @@ def snapdeal_analytics(request: Request):
     return {
         "loaded":      True,
         "rows":        len(df),
+        "companies":   companies,
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
         "shipped":     int(shipped),
         "returned":    int(returned),

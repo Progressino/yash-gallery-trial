@@ -75,7 +75,7 @@ async def upload_sku_mapping(request: Request, file: UploadFile = File(...)):
 # ── Amazon MTR ────────────────────────────────────────────────
 
 @router.post("/mtr", response_model=UploadResponse)
-async def upload_mtr(request: Request, file: UploadFile = File(...)):
+async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     sess = _get_session(request)
     try:
         zip_bytes = await file.read()
@@ -93,6 +93,7 @@ async def upload_mtr(request: Request, file: UploadFile = File(...)):
         sess.mtr_df = pd.concat([sess.mtr_df, df], ignore_index=True) if not sess.mtr_df.empty else df
         total = len(sess.mtr_df)
         years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        background_tasks.add_task(_auto_save_cache, sess)
         return UploadResponse(
             ok=True,
             message=f"Amazon MTR: added {len(df):,} rows ({csv_count} files). Total: {total:,} rows.",
@@ -106,7 +107,7 @@ async def upload_mtr(request: Request, file: UploadFile = File(...)):
 # ── Myntra ────────────────────────────────────────────────────
 
 @router.post("/myntra", response_model=UploadResponse)
-async def upload_myntra(request: Request, file: UploadFile = File(...)):
+async def upload_myntra(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     sess = _get_session(request)
     if not sess.sku_mapping:
         return UploadResponse(ok=False, message="Upload SKU Mapping first.")
@@ -126,6 +127,7 @@ async def upload_myntra(request: Request, file: UploadFile = File(...)):
         sess.myntra_df = pd.concat([sess.myntra_df, df], ignore_index=True) if not sess.myntra_df.empty else df
         total = len(sess.myntra_df)
         years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        background_tasks.add_task(_auto_save_cache, sess)
         return UploadResponse(
             ok=True,
             message=f"Myntra: added {len(df):,} rows ({csv_count} CSVs). Total: {total:,} rows.",
@@ -139,7 +141,7 @@ async def upload_myntra(request: Request, file: UploadFile = File(...)):
 # ── Meesho ────────────────────────────────────────────────────
 
 @router.post("/meesho", response_model=UploadResponse)
-async def upload_meesho(request: Request, file: UploadFile = File(...)):
+async def upload_meesho(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     sess = _get_session(request)
     try:
         zip_bytes = await file.read()
@@ -157,6 +159,7 @@ async def upload_meesho(request: Request, file: UploadFile = File(...)):
         sess.meesho_df = pd.concat([sess.meesho_df, df], ignore_index=True) if not sess.meesho_df.empty else df
         total = len(sess.meesho_df)
         years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        background_tasks.add_task(_auto_save_cache, sess)
         return UploadResponse(
             ok=True,
             message=f"Meesho: added {len(df):,} rows ({zip_count} monthly ZIPs). Total: {total:,} rows.",
@@ -170,7 +173,7 @@ async def upload_meesho(request: Request, file: UploadFile = File(...)):
 # ── Flipkart ──────────────────────────────────────────────────
 
 @router.post("/flipkart", response_model=UploadResponse)
-async def upload_flipkart(request: Request, file: UploadFile = File(...)):
+async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     sess = _get_session(request)
     if not sess.sku_mapping:
         return UploadResponse(ok=False, message="Upload SKU Mapping first.")
@@ -190,6 +193,7 @@ async def upload_flipkart(request: Request, file: UploadFile = File(...)):
         sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
         total = len(sess.flipkart_df)
         years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        background_tasks.add_task(_auto_save_cache, sess)
         return UploadResponse(
             ok=True,
             message=f"Flipkart: added {len(df):,} rows ({xlsx_count} files). Total: {total:,} rows.",
@@ -203,7 +207,7 @@ async def upload_flipkart(request: Request, file: UploadFile = File(...)):
 # ── Snapdeal ──────────────────────────────────────────────────
 
 @router.post("/snapdeal", response_model=UploadResponse)
-async def upload_snapdeal(request: Request, file: UploadFile = File(...)):
+async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     sess = _get_session(request)
     try:
         zip_bytes = await file.read()
@@ -239,6 +243,7 @@ async def upload_snapdeal(request: Request, file: UploadFile = File(...)):
             sess._quarterly_cache.clear()
 
         years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
+        background_tasks.add_task(_auto_save_cache, sess)
         return UploadResponse(
             ok=True,
             message=f"Snapdeal loaded: {len(df):,} rows from {file_count} file(s)"
