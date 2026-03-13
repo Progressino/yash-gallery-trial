@@ -182,7 +182,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="📦 Inventory" subtitle="OMS/FK/Myntra CSVs + Amazon CSV or RAR (filters ZNNE & non-SELLABLE)" loaded={coverage.inventory}>
+        <UploadCard title="📦 Inventory" subtitle="OMS/FK/Myntra CSVs + Amazon RAR (Amazon SELLABLE, FBA in-transit, Myntra other WH, OMS+buffer stock, combos)" loaded={coverage.inventory}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <InventoryUploader
             skuLoaded={coverage.sku_mapping}
