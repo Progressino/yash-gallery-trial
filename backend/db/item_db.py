@@ -124,6 +124,24 @@ def init_db() -> None:
             merchant_name TEXT NOT NULL,
             created_at    TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS buyers (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            buyer_code TEXT NOT NULL UNIQUE,
+            buyer_name TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS item_buyer_packaging (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id           INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            buyer_id          INTEGER NOT NULL REFERENCES buyers(id) ON DELETE CASCADE,
+            packaging_item_id INTEGER NOT NULL REFERENCES items(id),
+            quantity          REAL NOT NULL DEFAULT 1,
+            unit              TEXT DEFAULT 'PCS',
+            remarks           TEXT DEFAULT '',
+            created_at        TEXT DEFAULT (datetime('now'))
+        );
     """)
 
     # Migrate existing bom_headers table — add certification columns if missing
@@ -258,6 +276,101 @@ def create_merchant(merchant_code: str, merchant_name: str) -> int:
 def delete_merchant(merchant_id: int) -> bool:
     conn = _connect()
     cur = conn.execute("DELETE FROM merchants WHERE id = ?", (merchant_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+# ── Buyers ────────────────────────────────────────────────────────────────────
+
+def list_buyers() -> list[dict]:
+    conn = _connect()
+    rows = conn.execute("SELECT * FROM buyers ORDER BY buyer_name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_buyer(buyer_code: str, buyer_name: str) -> int:
+    conn = _connect()
+    cur = conn.execute(
+        "INSERT INTO buyers (buyer_code, buyer_name) VALUES (?, ?)",
+        (buyer_code.strip().upper(), buyer_name.strip()),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def delete_buyer(buyer_id: int) -> bool:
+    conn = _connect()
+    cur = conn.execute("DELETE FROM buyers WHERE id = ?", (buyer_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+# ── Buyer Packaging ───────────────────────────────────────────────────────────
+
+def list_item_packaging(item_id: int) -> list[dict]:
+    """All packaging lines for an item, across all buyers."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT p.*, b.buyer_code, b.buyer_name,
+                  i.item_code AS pkg_item_code, i.item_name AS pkg_item_name
+           FROM item_buyer_packaging p
+           JOIN buyers b ON b.id = p.buyer_id
+           JOIN items  i ON i.id = p.packaging_item_id
+           WHERE p.item_id = ?
+           ORDER BY b.buyer_name, p.id""",
+        (item_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_buyer_packaging(item_id: int, buyer_id: int) -> list[dict]:
+    """Packaging lines for a specific item + buyer."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT p.*, i.item_code AS pkg_item_code, i.item_name AS pkg_item_name,
+                  i.item_type_code AS pkg_item_type
+           FROM item_buyer_packaging p
+           JOIN items i ON i.id = p.packaging_item_id
+           WHERE p.item_id = ? AND p.buyer_id = ?
+           ORDER BY p.id""",
+        (item_id, buyer_id),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_packaging_line(
+    item_id: int,
+    buyer_id: int,
+    packaging_item_id: int,
+    quantity: float = 1.0,
+    unit: str = "PCS",
+    remarks: str = "",
+) -> int:
+    conn = _connect()
+    cur = conn.execute(
+        """INSERT INTO item_buyer_packaging
+           (item_id, buyer_id, packaging_item_id, quantity, unit, remarks)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (item_id, buyer_id, packaging_item_id, quantity, unit, remarks),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def delete_packaging_line(line_id: int) -> bool:
+    conn = _connect()
+    cur = conn.execute("DELETE FROM item_buyer_packaging WHERE id = ?", (line_id,))
     conn.commit()
     deleted = cur.rowcount > 0
     conn.close()

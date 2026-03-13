@@ -7,6 +7,12 @@ interface ItemType    { id: number; name: string; code: string }
 interface SizeGroup   { id: number; name: string; sizes: string[] }
 interface RoutingStep { id: number; name: string; description: string; sort_order: number }
 interface Merchant    { id: number; merchant_code: string; merchant_name: string }
+interface Buyer       { id: number; buyer_code: string; buyer_name: string }
+interface PackagingLine {
+  id: number; item_id: number; buyer_id: number; packaging_item_id: number
+  pkg_item_code: string; pkg_item_name: string; pkg_item_type: string
+  quantity: number; unit: string; remarks: string
+}
 
 interface Item {
   id: number; item_code: string; item_name: string
@@ -61,14 +67,14 @@ const blankBOMLine = () => ({
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function ItemMaster() {
   const qc = useQueryClient()
-  const [activeTab, setActiveTab] = useState<'items' | 'bom' | 'routing' | 'import' | 'merchants'>('items')
+  const [activeTab, setActiveTab] = useState<'items' | 'bom' | 'routing' | 'import' | 'merchants' | 'packaging'>('items')
 
   // ── Meta query ────────────────────────────────────────────────────────────
   const { data: meta } = useQuery({
     queryKey: ['item-meta'],
     queryFn: async () => {
       const { data } = await api.get('/items/meta')
-      return data as { item_types: ItemType[]; size_groups: SizeGroup[]; routing_steps: RoutingStep[]; merchants: Merchant[] }
+      return data as { item_types: ItemType[]; size_groups: SizeGroup[]; routing_steps: RoutingStep[]; merchants: Merchant[]; buyers: Buyer[] }
     },
     staleTime: 5 * 60 * 1000,
   })
@@ -76,6 +82,7 @@ export default function ItemMaster() {
   const sizeGroups   = meta?.size_groups   ?? []
   const routingSteps = meta?.routing_steps ?? []
   const merchants    = meta?.merchants     ?? []
+  const buyers       = meta?.buyers        ?? []
 
   // ══════════════════════════════════════════════════════════════════════════════
   // TAB 1 — ITEMS
@@ -431,6 +438,76 @@ export default function ItemMaster() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['item-meta'] }),
   })
 
+  // ══════════════════════════════════════════════════════════════════════════════
+  // TAB 6 — BUYER PACKAGING
+  // ══════════════════════════════════════════════════════════════════════════════
+  const [newBuyer,       setNewBuyer]       = useState({ buyer_code: '', buyer_name: '' })
+  const [buyerErr,       setBuyerErr]       = useState('')
+  // Packaging configurator state
+  const [pkgItemSearch,  setPkgItemSearch]  = useState('')
+  const [pkgItemId,      setPkgItemId]      = useState<number | null>(null)
+  const [pkgItemName,    setPkgItemName]    = useState('')
+  const [pkgBuyerId,     setPkgBuyerId]     = useState<number | null>(null)
+  const [pkgCompSearch,  setPkgCompSearch]  = useState('')
+  const [showPkgForm,    setShowPkgForm]    = useState(false)
+  const [newPkgLine,     setNewPkgLine]     = useState({ packaging_item_id: null as number | null, pkg_label: '', quantity: '1', unit: 'PCS', remarks: '' })
+  const [pkgErr,         setPkgErr]         = useState('')
+
+  const { data: pkgItemSearchResults = [] } = useQuery<Item[]>({
+    queryKey: ['item-search', pkgItemSearch],
+    queryFn:  async () => { const { data } = await api.get(`/items/search?q=${encodeURIComponent(pkgItemSearch)}`); return data },
+    enabled:  pkgItemSearch.length >= 2,
+    staleTime: 30 * 1000,
+  })
+
+  const { data: pkgCompSearchResults = [] } = useQuery<Item[]>({
+    queryKey: ['item-search', pkgCompSearch],
+    queryFn:  async () => { const { data } = await api.get(`/items/search?q=${encodeURIComponent(pkgCompSearch)}`); return data },
+    enabled:  pkgCompSearch.length >= 2,
+    staleTime: 30 * 1000,
+  })
+
+  const { data: packagingLines = [] } = useQuery<PackagingLine[]>({
+    queryKey: ['item-packaging', pkgItemId, pkgBuyerId],
+    queryFn:  async () => {
+      if (pkgBuyerId) {
+        const { data } = await api.get(`/items/${pkgItemId}/packaging/${pkgBuyerId}`)
+        return data
+      }
+      const { data } = await api.get(`/items/${pkgItemId}/packaging`)
+      return data
+    },
+    enabled:  pkgItemId !== null,
+    staleTime: 30 * 1000,
+  })
+
+  const createBuyerMut = useMutation({
+    mutationFn: (body: object) => api.post('/items/buyers', body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['item-meta'] }); setNewBuyer({ buyer_code: '', buyer_name: '' }); setBuyerErr('') },
+    onError: (e: any) => setBuyerErr(e?.response?.data?.detail ?? 'Failed.'),
+  })
+
+  const deleteBuyerMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/items/buyers/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['item-meta'] }),
+  })
+
+  const addPkgLineMut = useMutation({
+    mutationFn: (body: object) => api.post(`/items/${pkgItemId}/packaging/${pkgBuyerId}/lines`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['item-packaging', pkgItemId, pkgBuyerId] })
+      setNewPkgLine({ packaging_item_id: null, pkg_label: '', quantity: '1', unit: 'PCS', remarks: '' })
+      setPkgCompSearch(''); setShowPkgForm(false); setPkgErr('')
+    },
+    onError: (e: any) => setPkgErr(e?.response?.data?.detail ?? 'Add failed.'),
+  })
+
+  const deletePkgLineMut = useMutation({
+    mutationFn: ({ buyerId, lineId }: { buyerId: number; lineId: number }) =>
+      api.delete(`/items/${pkgItemId}/packaging/${buyerId}/lines/${lineId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['item-packaging', pkgItemId, pkgBuyerId] }),
+  })
+
   // ── Render ────────────────────────────────────────────────────────────────────
   const TABS = [
     ['items',     '📦 Items'],
@@ -438,6 +515,7 @@ export default function ItemMaster() {
     ['routing',   '⚙️ Routing'],
     ['import',    '📥 Import'],
     ['merchants', '🏪 Merchants'],
+    ['packaging', '🛍️ Buyer Packaging'],
   ] as const
 
   return (
@@ -1232,6 +1310,292 @@ export default function ItemMaster() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 6 — BUYER PACKAGING
+              ================================================================ */}
+          {activeTab === 'packaging' && (
+            <div className="space-y-6">
+
+              {/* ── Buyer Master ─────────────────────────────────────────── */}
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-700">Buyer Master</h3>
+                <div className="overflow-x-auto rounded-xl border border-gray-200">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        {['#', 'Buyer Code', 'Buyer Name', 'Action'].map(h => (
+                          <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {buyers.length === 0 ? (
+                        <tr><td colSpan={4} className="px-4 py-6 text-center text-gray-400 text-sm">No buyers yet. Add one below.</td></tr>
+                      ) : buyers.map((b, i) => (
+                        <tr key={b.id} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-4 py-2.5 text-gray-400 text-xs">{i + 1}</td>
+                          <td className="px-4 py-2.5 font-mono font-medium text-[#002B5B]">{b.buyer_code}</td>
+                          <td className="px-4 py-2.5 text-gray-800">{b.buyer_name}</td>
+                          <td className="px-4 py-2.5">
+                            <button onClick={() => { if (confirm(`Delete buyer "${b.buyer_code}"?`)) deleteBuyerMut.mutate(b.id) }}
+                              className="text-red-400 hover:text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50 transition-colors">
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                  <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Add Buyer</p>
+                  <div className="flex gap-3 flex-wrap">
+                    <input type="text" placeholder="Buyer Code *" value={newBuyer.buyer_code}
+                      onChange={e => setNewBuyer(p => ({ ...p, buyer_code: e.target.value }))}
+                      className="flex-1 min-w-[130px] border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                    <input type="text" placeholder="Buyer Name *" value={newBuyer.buyer_name}
+                      onChange={e => setNewBuyer(p => ({ ...p, buyer_name: e.target.value }))}
+                      className="flex-1 min-w-[200px] border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                    <button
+                      onClick={() => {
+                        if (!newBuyer.buyer_code.trim() || !newBuyer.buyer_name.trim()) { setBuyerErr('Both fields required.'); return }
+                        createBuyerMut.mutate(newBuyer)
+                      }}
+                      disabled={createBuyerMut.isPending}
+                      className="bg-[#002B5B] text-white text-sm px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">
+                      Add
+                    </button>
+                  </div>
+                  {buyerErr && <p className="text-xs text-red-500">{buyerErr}</p>}
+                </div>
+              </div>
+
+              <hr className="border-gray-200" />
+
+              {/* ── Packaging Configurator ───────────────────────────────── */}
+              <div>
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">Define Packaging per Item per Buyer</h3>
+                <div className="flex gap-5 min-h-[400px]">
+
+                  {/* Left: item search + buyer selector */}
+                  <div className="w-64 flex-shrink-0 space-y-4">
+                    <div className="space-y-2">
+                      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">1. Select Item</div>
+                      <input type="text" placeholder="Search item code / name…"
+                        value={pkgItemSearch} onChange={e => setPkgItemSearch(e.target.value)}
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                      {pkgItemSearch.length >= 2 && pkgItemSearchResults.length > 0 && (
+                        <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-52 overflow-y-auto bg-white shadow-sm">
+                          {pkgItemSearchResults.map(it => (
+                            <button key={it.id} onClick={() => {
+                              setPkgItemId(it.id); setPkgItemName(it.item_code + ' — ' + it.item_name)
+                              setPkgItemSearch(''); setPkgBuyerId(null); setPkgErr('')
+                            }}
+                              className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors">
+                              <div className="text-xs font-mono font-medium text-[#002B5B]">{it.item_code}</div>
+                              <div className="text-xs text-gray-500">{it.item_name}</div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {pkgItemId && (
+                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs font-medium text-blue-800">{pkgItemName}</div>
+                      )}
+                    </div>
+
+                    {pkgItemId && (
+                      <div className="space-y-2">
+                        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">2. Select Buyer</div>
+                        {buyers.length === 0 ? (
+                          <p className="text-xs text-gray-400">Add buyers above first.</p>
+                        ) : (
+                          <div className="space-y-1">
+                            <button
+                              onClick={() => setPkgBuyerId(null)}
+                              className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors border ${
+                                pkgBuyerId === null ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'bg-white text-gray-700 border-gray-200 hover:border-[#002B5B]'
+                              }`}>
+                              All Buyers
+                            </button>
+                            {buyers.map(b => (
+                              <button key={b.id}
+                                onClick={() => setPkgBuyerId(b.id)}
+                                className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors border ${
+                                  pkgBuyerId === b.id ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'bg-white text-gray-700 border-gray-200 hover:border-[#002B5B]'
+                                }`}>
+                                <div className="font-mono">{b.buyer_code}</div>
+                                <div className="opacity-70 font-normal">{b.buyer_name}</div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right: packaging lines */}
+                  <div className="flex-1 space-y-4">
+                    {!pkgItemId ? (
+                      <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
+                        Search and select an item to view/define its packaging
+                      </div>
+                    ) : (
+                      <>
+                        {/* Heading */}
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="text-sm font-semibold text-gray-800">
+                              {pkgBuyerId ? buyers.find(b => b.id === pkgBuyerId)?.buyer_name ?? '' : 'All Buyers'}
+                            </span>
+                            <span className="ml-2 text-xs text-gray-500">packaging for {pkgItemName.split('—')[0].trim()}</span>
+                          </div>
+                          {pkgBuyerId && (
+                            <button onClick={() => { setShowPkgForm(true); setPkgErr('') }}
+                              className="text-sm text-[#002B5B] hover:text-[#003d80] font-medium border border-dashed border-[#002B5B]/30 rounded-lg px-4 py-1.5 hover:bg-blue-50 transition-colors">
+                              + Add Packaging
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Packaging table */}
+                        {packagingLines.length === 0 ? (
+                          <div className="text-center py-10 text-gray-400 text-sm border border-dashed border-gray-200 rounded-xl">
+                            {pkgBuyerId
+                              ? 'No packaging defined for this buyer. Click "+ Add Packaging" to start.'
+                              : 'Select a specific buyer to add packaging, or view all buyers below.'}
+                          </div>
+                        ) : (
+                          <div className="overflow-x-auto rounded-xl border border-gray-200">
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="bg-gray-50 border-b border-gray-200">
+                                  {!pkgBuyerId && <th className="px-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Buyer</th>}
+                                  <th className="px-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Packaging Item</th>
+                                  <th className="px-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+                                  <th className="px-3 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase tracking-wide">Qty</th>
+                                  <th className="px-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Unit</th>
+                                  <th className="px-3 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Remarks</th>
+                                  <th className="px-3 py-2.5"></th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100">
+                                {packagingLines.map((l: any) => (
+                                  <tr key={l.id} className="hover:bg-gray-50 transition-colors">
+                                    {!pkgBuyerId && (
+                                      <td className="px-3 py-2">
+                                        <div className="font-mono font-medium text-[#002B5B]">{l.buyer_code}</div>
+                                        <div className="text-gray-400">{l.buyer_name}</div>
+                                      </td>
+                                    )}
+                                    <td className="px-3 py-2">
+                                      <div className="font-medium text-gray-800">{l.pkg_item_code}</div>
+                                      <div className="text-gray-400">{l.pkg_item_name}</div>
+                                    </td>
+                                    <td className="px-3 py-2">
+                                      <span className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded text-xs">{l.pkg_item_type}</span>
+                                    </td>
+                                    <td className="px-3 py-2 text-right tabular-nums font-medium">{l.quantity}</td>
+                                    <td className="px-3 py-2 text-gray-500">{l.unit}</td>
+                                    <td className="px-3 py-2 text-gray-400 max-w-[140px] truncate">{l.remarks || '—'}</td>
+                                    <td className="px-3 py-2">
+                                      <button onClick={() => deletePkgLineMut.mutate({ buyerId: l.buyer_id, lineId: l.id })}
+                                        className="text-red-400 hover:text-red-600 transition-colors">✕</button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+
+                        {/* Add packaging line form */}
+                        {showPkgForm && pkgBuyerId && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+                            <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                              Add packaging for {buyers.find(b => b.id === pkgBuyerId)?.buyer_name}
+                            </p>
+                            {/* Packaging item search */}
+                            <div className="space-y-1">
+                              <label className="text-xs text-gray-500">Packaging Item * (from Item Master)</label>
+                              {newPkgLine.packaging_item_id ? (
+                                <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                                  <span className="text-xs font-medium text-blue-800 flex-1">{newPkgLine.pkg_label}</span>
+                                  <button onClick={() => setNewPkgLine(p => ({ ...p, packaging_item_id: null, pkg_label: '' }))}
+                                    className="text-gray-400 hover:text-red-500 text-xs">✕</button>
+                                </div>
+                              ) : (
+                                <div className="relative">
+                                  <input type="text" placeholder="Type item code or name (e.g. Polybag, Tag)…" value={pkgCompSearch}
+                                    onChange={e => setPkgCompSearch(e.target.value)}
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                                  {pkgCompSearch.length >= 2 && pkgCompSearchResults.length > 0 && (
+                                    <div className="absolute z-10 top-full mt-1 w-full border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-48 overflow-y-auto bg-white shadow-lg">
+                                      {pkgCompSearchResults.map(it => (
+                                        <button key={it.id} onClick={() => {
+                                          setNewPkgLine(p => ({ ...p, packaging_item_id: it.id, pkg_label: it.item_code + ' — ' + it.item_name }))
+                                          setPkgCompSearch('')
+                                        }}
+                                          className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors">
+                                          <div className="text-xs font-mono font-medium text-[#002B5B]">{it.item_code}</div>
+                                          <div className="text-xs text-gray-500">{it.item_name} · {it.item_type_code}</div>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex gap-3 flex-wrap">
+                              <div className="space-y-1 w-24">
+                                <label className="text-xs text-gray-500">Quantity</label>
+                                <input type="number" value={newPkgLine.quantity}
+                                  onChange={e => setNewPkgLine(p => ({ ...p, quantity: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                              </div>
+                              <div className="space-y-1 w-28">
+                                <label className="text-xs text-gray-500">Unit</label>
+                                <select value={newPkgLine.unit}
+                                  onChange={e => setNewPkgLine(p => ({ ...p, unit: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                                  {UNITS.map(u => <option key={u}>{u}</option>)}
+                                </select>
+                              </div>
+                              <div className="space-y-1 flex-1 min-w-[160px]">
+                                <label className="text-xs text-gray-500">Remarks</label>
+                                <input type="text" placeholder="e.g. Per 12 pcs carton" value={newPkgLine.remarks}
+                                  onChange={e => setNewPkgLine(p => ({ ...p, remarks: e.target.value }))}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                              </div>
+                            </div>
+                            {pkgErr && <p className="text-xs text-red-500">{pkgErr}</p>}
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => {
+                                  if (!newPkgLine.packaging_item_id) { setPkgErr('Select a packaging item first.'); return }
+                                  addPkgLineMut.mutate({
+                                    packaging_item_id: newPkgLine.packaging_item_id,
+                                    quantity: parseFloat(newPkgLine.quantity) || 1,
+                                    unit: newPkgLine.unit,
+                                    remarks: newPkgLine.remarks,
+                                  })
+                                }}
+                                disabled={addPkgLineMut.isPending}
+                                className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] disabled:opacity-50 transition-colors">
+                                {addPkgLineMut.isPending ? 'Adding…' : 'Add'}
+                              </button>
+                              <button onClick={() => { setShowPkgForm(false); setPkgCompSearch(''); setPkgErr('') }}
+                                className="text-gray-500 text-xs px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors">Cancel</button>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 

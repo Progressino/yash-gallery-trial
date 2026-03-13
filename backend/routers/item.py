@@ -34,11 +34,13 @@ from ..db.item_db import (
     list_size_groups, create_size_group,
     list_routing_steps, create_routing_step, delete_routing_step,
     list_merchants, create_merchant, delete_merchant,
+    list_buyers, create_buyer, delete_buyer,
     list_items, get_item, create_item, update_item, delete_item,
     create_size_variants, set_item_routing,
     list_boms, get_bom_with_lines, create_bom, update_bom, delete_bom,
     certify_bom, uncertify_bom,
     add_bom_line, update_bom_line, delete_bom_line, copy_bom,
+    list_item_packaging, get_buyer_packaging, add_packaging_line, delete_packaging_line,
     bulk_create_items,
 )
 from ..services.item_import import parse_item_import
@@ -128,6 +130,16 @@ class MerchantCreate(BaseModel):
     merchant_code: str
     merchant_name: str
 
+class BuyerCreate(BaseModel):
+    buyer_code: str
+    buyer_name: str
+
+class PackagingLineCreate(BaseModel):
+    packaging_item_id: int
+    quantity:          float = 1.0
+    unit:              str   = "PCS"
+    remarks:           str   = ""
+
 
 # ── Meta ──────────────────────────────────────────────────────────────────────
 
@@ -138,6 +150,7 @@ def get_meta():
         "size_groups":   list_size_groups(),
         "routing_steps": list_routing_steps(),
         "merchants":     list_merchants(),
+        "buyers":        list_buyers(),
     }
 
 
@@ -156,6 +169,24 @@ def add_merchant(body: MerchantCreate):
 def remove_merchant(merchant_id: int):
     if not delete_merchant(merchant_id):
         raise HTTPException(status_code=404, detail="Merchant not found")
+    return {"ok": True}
+
+
+# ── Buyers ────────────────────────────────────────────────────────────────────
+
+@router.get("/buyers")
+def get_buyers():
+    return list_buyers()
+
+@router.post("/buyers")
+def add_buyer(body: BuyerCreate):
+    new_id = create_buyer(body.buyer_code, body.buyer_name)
+    return {"ok": True, "id": new_id}
+
+@router.delete("/buyers/{buyer_id}")
+def remove_buyer(buyer_id: int):
+    if not delete_buyer(buyer_id):
+        raise HTTPException(status_code=404, detail="Buyer not found")
     return {"ok": True}
 
 
@@ -359,6 +390,37 @@ def copy_bom_to_item(item_id: int, bom_id: int, body: BOMCopyRequest):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"ok": True, "id": new_id}
+
+
+# ── Buyer Packaging ───────────────────────────────────────────────────────────
+
+@router.get("/{item_id}/packaging")
+def get_item_packaging(item_id: int):
+    """All packaging lines for an item across all buyers."""
+    return list_item_packaging(item_id)
+
+@router.get("/{item_id}/packaging/{buyer_id}")
+def get_packaging_for_buyer(item_id: int, buyer_id: int):
+    """Packaging lines for a specific item + buyer."""
+    return get_buyer_packaging(item_id, buyer_id)
+
+@router.post("/{item_id}/packaging/{buyer_id}/lines")
+def add_packaging(item_id: int, buyer_id: int, body: PackagingLineCreate):
+    new_id = add_packaging_line(
+        item_id=item_id,
+        buyer_id=buyer_id,
+        packaging_item_id=body.packaging_item_id,
+        quantity=body.quantity,
+        unit=body.unit,
+        remarks=body.remarks,
+    )
+    return {"ok": True, "id": new_id}
+
+@router.delete("/{item_id}/packaging/{buyer_id}/lines/{line_id}")
+def remove_packaging(item_id: int, buyer_id: int, line_id: int):
+    if not delete_packaging_line(line_id):
+        raise HTTPException(status_code=404, detail="Packaging line not found")
+    return {"ok": True}
 
 
 # ── Bulk Import ───────────────────────────────────────────────────────────────
