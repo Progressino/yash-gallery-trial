@@ -182,7 +182,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="📦 Inventory" subtitle="Upload OMS + platform CSVs" loaded={coverage.inventory}>
+        <UploadCard title="📦 Inventory" subtitle="OMS/FK/Myntra CSVs + Amazon CSV or RAR (filters ZNNE & non-SELLABLE)" loaded={coverage.inventory}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <InventoryUploader
             skuLoaded={coverage.sku_mapping}
@@ -546,7 +546,7 @@ function InventoryUploader({
         <div key={k} className="flex items-center gap-2">
           <label className="text-xs text-gray-500 w-16 shrink-0">{k.toUpperCase()}</label>
           <input
-            type="file" accept=".csv"
+            type="file" accept={k === 'amz' ? '.csv,.rar' : '.csv'}
             onChange={set(k)}
             className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100"
           />

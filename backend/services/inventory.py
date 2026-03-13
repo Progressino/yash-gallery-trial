@@ -1,11 +1,35 @@
 """
 Inventory loader — extracted 1-for-1 from app.py.
 """
+import io
 from typing import Dict, Optional
 
 import pandas as pd
 
 from .helpers import map_to_oms_sku, get_parent_sku, read_csv_safe
+
+
+_RAR_MAGIC = b"Rar!\x1a\x07"
+
+
+def _extract_csv_from_rar(rar_bytes: bytes) -> bytes:
+    """
+    Extract the first CSV file found inside a RAR archive.
+    Requires the `rarfile` Python module and `unrar` binary.
+    """
+    try:
+        import rarfile
+        with rarfile.RarFile(io.BytesIO(rar_bytes)) as rf:
+            csv_names = [n for n in rf.namelist() if n.lower().endswith(".csv")]
+            if not csv_names:
+                raise ValueError("No CSV file found inside RAR archive")
+            # Prefer "Amz other" in name, else take first
+            target = next((n for n in csv_names if "amz" in n.lower()), csv_names[0])
+            return rf.read(target)
+    except ImportError:
+        raise ValueError(
+            "rarfile module not installed — please upload the extracted CSV directly"
+        )
 
 
 def load_inventory_consolidated(
@@ -48,10 +72,18 @@ def load_inventory_consolidated(
                 inv_dfs.append(df.groupby("OMS_SKU")["Myntra_Inventory"].sum().reset_index())
 
     if amz_bytes:
-        df = read_csv_safe(amz_bytes)
+        # If file is a RAR archive, extract the CSV first
+        raw = amz_bytes
+        if raw[:6] == _RAR_MAGIC:
+            raw = _extract_csv_from_rar(raw)
+        df = read_csv_safe(raw)
         if not df.empty and {"MSKU", "Ending Warehouse Balance"}.issubset(df.columns):
+            # Keep only SELLABLE disposition
+            if "Disposition" in df.columns:
+                df = df[df["Disposition"].astype(str).str.strip().str.upper() == "SELLABLE"]
+            # Remove ZNNE location entries
             if "Location" in df.columns:
-                df = df[df["Location"] != "ZNNE"]
+                df = df[df["Location"].astype(str).str.strip().str.upper() != "ZNNE"]
             df["OMS_SKU"]          = df["MSKU"].apply(lambda x: map_to_oms_sku(x, mapping))
             df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
             inv_dfs.append(df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index())
