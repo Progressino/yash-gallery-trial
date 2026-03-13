@@ -401,9 +401,10 @@ def _parse_snapdeal_file(
 def load_snapdeal_from_zip(
     zip_bytes: bytes,
     mapping: Dict[str, str],
+    filename: str = "upload",
 ) -> Tuple[pd.DataFrame, int, List[str], dict]:
     """
-    Parse Snapdeal master ZIP (may contain .xlsx/.csv or nested ZIPs).
+    Parse Snapdeal files: ZIP (with .xlsx/.csv or nested ZIPs), or a plain CSV/Excel.
     Returns (combined_df, file_count, skipped_list, parse_info).
     parse_info maps fname → field_map for diagnostics.
     """
@@ -411,9 +412,23 @@ def load_snapdeal_from_zip(
     skipped: List[str] = []
     parse_info: dict = {}  # fname → field_map
 
+    # ── If not a ZIP, try parsing as a direct CSV/Excel file ──────────────────
+    fn_lower = filename.lower()
+    if not fn_lower.endswith(".zip"):
+        df, debug, field_map = _parse_snapdeal_file(zip_bytes, filename, mapping)
+        parse_info[filename] = field_map
+        if df.empty:
+            return pd.DataFrame(), 1, [f"{filename}: {debug}"], parse_info
+        return df, 1, [], parse_info
+
     try:
         root_zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except Exception as e:
+        # Last resort: maybe it's a CSV with a .zip extension or misdetected
+        df, debug, field_map = _parse_snapdeal_file(zip_bytes, filename.replace(".zip", ".csv"), mapping)
+        if not df.empty:
+            parse_info[filename] = field_map
+            return df, 1, [], parse_info
         return pd.DataFrame(), 0, [f"Cannot open ZIP: {e}"], {}
 
     file_items: List[Tuple[str, bytes]] = []

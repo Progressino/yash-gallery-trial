@@ -172,10 +172,10 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🔴 Snapdeal" subtitle="Select all company ZIPs at once (AG, PE, YG)" loaded={coverage.snapdeal} rows={coverage.snapdeal_rows} onClear={handleClear('snapdeal')} clearing={loading['clear_snapdeal']}>
+        <UploadCard title="🔴 Snapdeal" subtitle="OMS order reports (CSV/ZIP) or AG/PE/YG ZIPs" loaded={coverage.snapdeal} rows={coverage.snapdeal_rows} onClear={handleClear('snapdeal')} clearing={loading['clear_snapdeal']}>
           <FileUpload
-            label="Upload ZIPs (select multiple)"
-            accept={{ 'application/zip': ['.zip'] }}
+            label="Upload files (select multiple)"
+            accept={{ 'application/zip': ['.zip'], 'text/csv': ['.csv'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }}
             onUpload={handle('snapdeal', (file: File) => uploadSnapdeal(file))}
             uploading={loading['snapdeal']}
             multiple={true}
