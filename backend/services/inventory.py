@@ -2,7 +2,11 @@
 Inventory loader — consolidated from all sources.
 """
 import io
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -27,13 +31,9 @@ _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
 def _extract_all_from_rar(rar_bytes: bytes) -> dict:
     """
     Extract all relevant inventory files from a RAR archive.
+    Tries bsdtar subprocess first (always available), then falls back to rarfile.
     Returns dict with keys: amz_csv, myntra_csv, oms_csv, combo_csv, fba_tsvs (list).
     """
-    try:
-        import rarfile
-    except ImportError:
-        raise ValueError("rarfile module not installed — please upload extracted CSVs directly")
-
     result: dict = {
         "amz_csv":    None,
         "myntra_csv": None,
@@ -41,6 +41,49 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
         "combo_csv":  None,
         "fba_tsvs":   [],
     }
+
+    # ── Try bsdtar subprocess (libarchive-tools — supports RAR4 & RAR5) ──
+    bsdtar = shutil.which("bsdtar")
+    if bsdtar:
+        tmpdir = tempfile.mkdtemp(prefix="inv_rar_")
+        try:
+            rar_path = os.path.join(tmpdir, "upload.rar")
+            with open(rar_path, "wb") as f:
+                f.write(rar_bytes)
+            subprocess.run(
+                [bsdtar, "xf", rar_path, "-C", tmpdir],
+                check=True, capture_output=True,
+            )
+            for root, _dirs, files in os.walk(tmpdir):
+                for fname in files:
+                    if fname == "upload.rar":
+                        continue
+                    base = fname.lower()
+                    fpath = os.path.join(root, fname)
+                    with open(fpath, "rb") as fh:
+                        data = fh.read()
+                    if base.endswith(".tsv"):
+                        result["fba_tsvs"].append(data)
+                    elif "amz" in base and base.endswith(".csv"):
+                        result["amz_csv"] = data
+                    elif "myntra" in base and base.endswith(".csv"):
+                        result["myntra_csv"] = data
+                    elif "combo" in base and base.endswith(".csv"):
+                        result["combo_csv"] = data
+                    elif "oms" in base and base.endswith(".csv"):
+                        result["oms_csv"] = data
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return result
+
+    # ── Fallback: rarfile Python module ──────────────────────────────────
+    try:
+        import rarfile
+    except ImportError:
+        raise ValueError(
+            "Cannot extract RAR: neither bsdtar nor rarfile module found. "
+            "Install libarchive-tools (apt) or rarfile (pip)."
+        )
     with rarfile.RarFile(io.BytesIO(rar_bytes)) as rf:
         for name in rf.namelist():
             base = name.replace("\\", "/").split("/")[-1].lower()

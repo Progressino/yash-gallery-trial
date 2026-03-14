@@ -369,6 +369,8 @@ function DailyDropzone({ uploading, onUpload }: {
       'text/csv': ['.csv'],
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
       'application/zip': ['.zip'],
+      'application/x-rar-compressed': ['.rar'],
+      'application/vnd.rar': ['.rar'],
     },
     multiple: true,
     disabled: uploading,
@@ -399,7 +401,7 @@ function DailyDropzone({ uploading, onUpload }: {
                 Drag & drop daily report files here, or{' '}
                 <span className="text-blue-600 underline">browse</span>
                 <br />
-                <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .zip — platform auto-detected</span>
+                <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .zip / .rar — platform auto-detected</span>
               </p>
         }
       </div>

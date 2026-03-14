@@ -3,7 +3,11 @@ Upload router — all file ingestion endpoints.
 """
 import gc
 import io
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 from typing import List, Optional
 
 import logging
@@ -27,6 +31,34 @@ from ..services.daily_store import save_daily_file
 router = APIRouter()
 
 _log = logging.getLogger(__name__)
+
+_RAR_MAGIC = b"Rar!\x1a\x07"
+
+
+def _extract_rar_files(rar_bytes: bytes) -> list[tuple[str, bytes]]:
+    """
+    Extract all files from a RAR archive using bsdtar subprocess.
+    Returns list of (filename, bytes) tuples.
+    """
+    bsdtar = shutil.which("bsdtar")
+    if not bsdtar:
+        raise ValueError("bsdtar not found — cannot extract RAR files")
+    tmpdir = tempfile.mkdtemp(prefix="rar_daily_")
+    try:
+        rar_path = os.path.join(tmpdir, "upload.rar")
+        with open(rar_path, "wb") as f:
+            f.write(rar_bytes)
+        subprocess.run([bsdtar, "xf", rar_path, "-C", tmpdir], check=True, capture_output=True)
+        result = []
+        for root, _dirs, files in os.walk(tmpdir):
+            for fname in files:
+                if fname == "upload.rar":
+                    continue
+                with open(os.path.join(root, fname), "rb") as fh:
+                    result.append((fname, fh.read()))
+        return result
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _auto_save_cache(sess) -> None:
@@ -453,6 +485,7 @@ async def upload_daily_auto(
 ):
     """
     Drop any mix of daily report files — platform is auto-detected per file.
+    Also accepts a RAR archive — each file inside is extracted and processed.
     Appends to existing session data and rebuilds sales_df automatically.
     """
     sess = _get_session(request)
@@ -461,11 +494,9 @@ async def upload_daily_auto(
     detected: list[str] = []
     warnings: list[str] = []
 
-    for fobj in files:
-        fname = fobj.filename or "upload"
-        raw = await fobj.read()
+    def _handle_one(fname: str, raw: bytes) -> None:
+        """Process a single (non-RAR) file and mutate detected/warnings."""
         platform = _detect_platform(fname, raw)
-
         try:
             if platform == "amazon_b2c":
                 df, msg = parse_mtr_csv(raw, fname)
@@ -539,7 +570,7 @@ async def upload_daily_auto(
                     df = _parse_flipkart_earn_more(raw, fname, sess.sku_mapping)
                 else:
                     warnings.append(f"{fname}: Skipped — no Sales Report, Orders, or earn_more_report sheet (sheets: {', '.join(xl_sheets[:4])})")
-                    continue
+                    return
                 if not df.empty:
                     sess.flipkart_df = pd.concat([sess.flipkart_df, df], ignore_index=True) if not sess.flipkart_df.empty else df
                     save_daily_file("flipkart", fname, df)
@@ -552,6 +583,21 @@ async def upload_daily_auto(
 
         except Exception as e:
             warnings.append(f"{fname}: {e}")
+
+    for fobj in files:
+        fname = fobj.filename or "upload"
+        raw = await fobj.read()
+        try:
+            # RAR archive — extract and process each file inside
+            if raw[:6] == _RAR_MAGIC or fname.lower().endswith(".rar"):
+                try:
+                    inner_files = _extract_rar_files(raw)
+                    for inner_name, inner_bytes in inner_files:
+                        _handle_one(inner_name, inner_bytes)
+                except Exception as e:
+                    warnings.append(f"{fname} (RAR extract): {e}")
+            else:
+                _handle_one(fname, raw)
         finally:
             del raw
             gc.collect()
