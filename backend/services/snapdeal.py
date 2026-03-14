@@ -226,8 +226,8 @@ def _parse_snapdeal_df(
             df["_OMS_SKU"] = df[sku_col].apply(
                 lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
             )
-        # Drop rows where SKU resolved to empty / literal "nan" / purely numeric Snapdeal IDs
-        df = df[~df["_OMS_SKU"].str.upper().isin(["", "NAN", "NONE"])]
+        # Drop rows where SKU resolved to empty / literal "nan" / "unknown" / purely numeric Snapdeal IDs
+        df = df[~df["_OMS_SKU"].str.upper().isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])]
         df = df[~df["_OMS_SKU"].str.match(r'^\d+$')]
         if df.empty:
             return pd.DataFrame(), f"sku col '{sku_col}' yielded no valid SKUs", field_map

@@ -59,12 +59,21 @@ def cache_load(request: Request):
 
     ok, msg, loaded = load_cache_from_drive()
     if ok:
+        import pandas as pd
+        # Sanitise snapdeal_df — remove stale "UNKNOWN" / invalid SKUs from cached data
+        if "snapdeal_df" in loaded and isinstance(loaded["snapdeal_df"], pd.DataFrame):
+            snap = loaded["snapdeal_df"]
+            if not snap.empty and "OMS_SKU" in snap.columns:
+                _bad = snap["OMS_SKU"].astype(str).str.upper()
+                loaded["snapdeal_df"] = snap[
+                    ~(_bad.isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])
+                      | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
+                ].reset_index(drop=True)
         for key, val in loaded.items():
             setattr(sess, key, val)
 
         # Merge saved daily uploads into the session (last 30 days, from SQLite)
         try:
-            import pandas as pd
             daily_data = load_all_platforms()
             if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
                 sess.mtr_df = pd.concat([sess.mtr_df, daily_data["amazon"]], ignore_index=True) if not sess.mtr_df.empty else daily_data["amazon"]
