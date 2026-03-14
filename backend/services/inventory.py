@@ -9,6 +9,14 @@ import pandas as pd
 
 from .helpers import map_to_oms_sku, get_parent_sku, read_csv_safe
 
+# Use bsdtar (libarchive-tools) for RAR extraction — supports RAR5 natively
+try:
+    import rarfile as _rarfile_mod
+    _rarfile_mod.UNRAR_TOOL = "bsdtar"
+    _rarfile_mod.ALT_TOOL   = "bsdtar"
+except Exception:
+    pass
+
 
 _RAR_MAGIC = b"Rar!\x1a\x07"
 _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
@@ -176,8 +184,16 @@ def _parse_combo_csv(csv_bytes: bytes) -> pd.DataFrame:
 
 # ── Main loader ───────────────────────────────────────────────
 
+def _parse_oms_or_combo(csv_bytes: bytes) -> pd.DataFrame:
+    """Try OMS CSV first, then Combo SKUs CSV. Returns OMS_Inventory column."""
+    part = _parse_oms_csv(csv_bytes)
+    if not part.empty:
+        return part
+    return _parse_combo_csv(csv_bytes)
+
+
 def load_inventory_consolidated(
-    oms_bytes: Optional[bytes],
+    oms_bytes: Optional[bytes | List[bytes]],
     fk_bytes: Optional[bytes],
     myntra_bytes: Optional[bytes],
     amz_bytes: Optional[bytes],
@@ -196,11 +212,15 @@ def load_inventory_consolidated(
     inv_dfs: List[pd.DataFrame] = []
     oms_parts: List[pd.DataFrame] = []   # accumulate OMS data before merging
 
-    # ── Separately uploaded OMS file ─────────────────────────
+    # ── Separately uploaded OMS / Combo files ────────────────
     if oms_bytes:
-        part = _parse_oms_csv(oms_bytes)
-        if not part.empty:
-            oms_parts.append(part)
+        # Accept either a single bytes object or a list of bytes
+        oms_list = oms_bytes if isinstance(oms_bytes, list) else [oms_bytes]
+        for ob in oms_list:
+            if ob:
+                part = _parse_oms_or_combo(ob)
+                if not part.empty:
+                    oms_parts.append(part)
 
     # ── Flipkart ─────────────────────────────────────────────
     if fk_bytes:

@@ -532,13 +532,18 @@ function InventoryUploader({
 }: {
   skuLoaded: boolean
   uploading: boolean
-  onUpload: (files: { oms?: File; fk?: File; myntra?: File; amz?: File }) => Promise<void>
+  onUpload: (files: { oms?: File[]; fk?: File; myntra?: File; amz?: File }) => Promise<void>
 }) {
-  const [files, setFiles] = useState<{ oms?: File; fk?: File; myntra?: File; amz?: File }>({})
+  const [files, setFiles] = useState<{ oms?: File[]; fk?: File; myntra?: File; amz?: File }>({})
   const set = (key: keyof typeof files) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFiles(prev => ({ ...prev, [key]: e.target.files?.[0] }))
+    if (key === 'oms') {
+      const selected = e.target.files ? Array.from(e.target.files) : undefined
+      setFiles(prev => ({ ...prev, oms: selected }))
+    } else {
+      setFiles(prev => ({ ...prev, [key]: e.target.files?.[0] }))
+    }
   }
-  const hasAny = Object.values(files).some(Boolean)
+  const hasAny = !!(files.oms?.length || files.fk || files.myntra || files.amz)
 
   return (
     <div className="space-y-2">
@@ -546,10 +551,15 @@ function InventoryUploader({
         <div key={k} className="flex items-center gap-2">
           <label className="text-xs text-gray-500 w-16 shrink-0">{k.toUpperCase()}</label>
           <input
-            type="file" accept={k === 'amz' ? '.csv,.rar' : '.csv'}
+            type="file"
+            accept={k === 'amz' ? '.csv,.rar' : '.csv'}
+            multiple={k === 'oms'}
             onChange={set(k)}
             className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100"
           />
+          {k === 'oms' && files.oms && files.oms.length > 1 && (
+            <span className="text-xs text-blue-600">{files.oms.length} files</span>
+          )}
         </div>
       ))}
       <button

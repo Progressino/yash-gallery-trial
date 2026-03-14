@@ -64,10 +64,10 @@ export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po'
 export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
 export async function uploadInventory(files: {
-  oms?: File; fk?: File; myntra?: File; amz?: File
+  oms?: File[]; fk?: File; myntra?: File; amz?: File
 }): Promise<{ ok: boolean; message: string; rows?: number }> {
   const fd = new FormData()
-  if (files.oms)    fd.append('oms_file',    files.oms)
+  if (files.oms)    files.oms.forEach(f => fd.append('oms_file', f))
   if (files.fk)     fd.append('fk_file',     files.fk)
   if (files.myntra) fd.append('myntra_file', files.myntra)
   if (files.amz)    fd.append('amz_file',    files.amz)

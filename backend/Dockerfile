@@ -5,7 +5,7 @@ WORKDIR /srv
 
 # System deps for pyarrow / prophet
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ libgomp1 unrar-free \
+    gcc g++ libgomp1 libarchive-tools \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

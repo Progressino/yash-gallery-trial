@@ -260,7 +260,7 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
 @router.post("/inventory")
 async def upload_inventory(
     request: Request,
-    oms_file:    Optional[UploadFile] = File(None),
+    oms_file:    List[UploadFile] = File(default=[]),
     fk_file:     Optional[UploadFile] = File(None),
     myntra_file: Optional[UploadFile] = File(None),
     amz_file:    Optional[UploadFile] = File(None),
@@ -269,20 +269,20 @@ async def upload_inventory(
     if not sess.sku_mapping:
         return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
 
-    oms_b    = await oms_file.read()    if oms_file    else None
+    oms_b_list = [await f.read() for f in oms_file] if oms_file else []
     fk_b     = await fk_file.read()    if fk_file     else None
     myntra_b = await myntra_file.read() if myntra_file else None
     amz_b    = await amz_file.read()   if amz_file    else None
 
-    if not any([oms_b, fk_b, myntra_b, amz_b]):
+    if not any([oms_b_list, fk_b, myntra_b, amz_b]):
         return JSONResponse(content={"ok": False, "message": "No files provided."})
 
     try:
         df_variant = load_inventory_consolidated(
-            oms_b, fk_b, myntra_b, amz_b, sess.sku_mapping, group_by_parent=False
+            oms_b_list or None, fk_b, myntra_b, amz_b, sess.sku_mapping, group_by_parent=False
         )
         df_parent = load_inventory_consolidated(
-            oms_b, fk_b, myntra_b, amz_b, sess.sku_mapping, group_by_parent=True
+            oms_b_list or None, fk_b, myntra_b, amz_b, sess.sku_mapping, group_by_parent=True
         )
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
