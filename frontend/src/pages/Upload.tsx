@@ -554,7 +554,7 @@ function InventoryUploader({
           <label className="text-xs text-gray-500 w-16 shrink-0">{k.toUpperCase()}</label>
           <input
             type="file"
-            accept={k === 'amz' ? '.csv,.rar' : '.csv'}
+            accept={k === 'amz' ? '*' : '.csv'}
             multiple={k === 'oms'}
             onChange={set(k)}
             className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100"
