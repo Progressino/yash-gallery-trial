@@ -234,6 +234,24 @@ export default function Upload() {
             uploading={loading['existingpo']}
           />
         </UploadCard>
+
+        <UploadCard title="🗜️ Monthly Sales RAR" subtitle="Drop Monthly.rar — Amazon, Flipkart, Meesho, Myntra auto-detected inside" loaded={false}>
+          <div className="space-y-2">
+            <MonthlyRarUploader
+              uploading={loading['monthly_rar']}
+              onUpload={async (files) => {
+                setL('monthly_rar', true)
+                try {
+                  const res = await uploadDailyAuto(files)
+                  if (res.ok) { showToast('success', res.message); await refresh() }
+                  else showToast('error', res.message)
+                } catch (e: unknown) {
+                  showToast('error', e instanceof Error ? e.message : 'Upload failed')
+                } finally { setL('monthly_rar', false) }
+              }}
+            />
+          </div>
+        </UploadCard>
       </Section>
 
       {/* Tier 3 — Daily Orders */}
@@ -570,6 +588,45 @@ function InventoryUploader({
         className="w-full mt-1 py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
       >
         {uploading ? 'Uploading…' : 'Upload Inventory'}
+      </button>
+    </div>
+  )
+}
+
+function MonthlyRarUploader({ uploading, onUpload }: {
+  uploading: boolean
+  onUpload: (files: File[]) => Promise<void>
+}) {
+  const [file, setFile] = useState<File | null>(null)
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFile(e.target.files?.[0] ?? null)
+  }
+
+  const submit = async () => {
+    if (!file) return
+    await onUpload([file])
+    setFile(null)
+  }
+
+  return (
+    <div className="space-y-2">
+      <input
+        type="file"
+        accept="*"
+        onChange={handleChange}
+        disabled={uploading}
+        className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100 w-full"
+      />
+      {file && (
+        <p className="text-xs text-gray-500 truncate">📦 {file.name}</p>
+      )}
+      <button
+        onClick={submit}
+        disabled={!file || uploading}
+        className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
+      >
+        {uploading ? 'Processing RAR…' : '⬆ Upload Monthly RAR'}
       </button>
     </div>
   )
