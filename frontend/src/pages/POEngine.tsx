@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, memo } from 'react'
 import { api } from '../api/client'
+import { usePOStore } from '../store/po'
 
 interface PORow {
   OMS_SKU: string
@@ -91,29 +92,23 @@ const STATUS_COLORS: Record<string, string> = {
 type Tab = 'po' | 'quarterly'
 
 export default function POEngine() {
-  const [activeTab, setActiveTab]     = useState<Tab>('po')
-  const [params, setParams]           = useState({
-    period_days:     90,
-    lead_time:       30,
-    target_days:     60,
-    demand_basis:    'Sold',
-    use_seasonality: false,
-    seasonal_weight: 0.5,
-    group_by_parent: false,
-    grace_days:      7,
-    safety_pct:      20,
-  })
-  const [result, setResult]           = useState<POResult | null>(null)
-  const [quarterly, setQuarterly]     = useState<QuarterlyResult | null>(null)
-  const [loading, setLoading]         = useState(false)
-  const [search, setSearch]           = useState('')
-  const [sortByPriority, setSortByPriority] = useState(true)
-  const [editedQty, setEditedQty]     = useState<Record<string, number>>({})
-  const [selected, setSelected]       = useState<Set<string>>(new Set())
-  const [raiseModal, setRaiseModal]   = useState(false)
-  const [qSearch, setQSearch]         = useState('')
-  const [groupedView, setGroupedView] = useState(true)
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set())
+  const {
+    activeTab, setActiveTab,
+    params, setParams,
+    result, setResult,
+    quarterly, setQuarterly,
+    search, setSearch,
+    sortByPriority, setSortByPriority,
+    editedQty, setEditedQty,
+    selected, setSelected,
+    qSearch, setQSearch,
+    groupedView, setGroupedView,
+    collapsedParents, setCollapsedParents,
+  } = usePOStore()
+
+  // ephemeral UI state (no need to persist across navigation)
+  const [loading, setLoading]       = useState(false)
+  const [raiseModal, setRaiseModal] = useState(false)
 
   // ── Calculate PO + quarterly in parallel ──
   const run = async () => {
@@ -197,24 +192,20 @@ export default function POEngine() {
   const someSelected = selected.size > 0
 
   const toggleRow = useCallback((sku: string) => {
-    setSelected(prev => {
-      const next = new Set(prev)
-      next.has(sku) ? next.delete(sku) : next.add(sku)
-      return next
-    })
-  }, [])
+    const next = new Set(selected)
+    next.has(sku) ? next.delete(sku) : next.add(sku)
+    setSelected(next)
+  }, [selected, setSelected])
 
   const toggleAll = useCallback(() => {
-    setSelected(prev => {
-      const n = new Set(prev)
-      if (visibleSkus.length > 0 && visibleSkus.every(s => n.has(s))) {
-        visibleSkus.forEach(s => n.delete(s))
-      } else {
-        visibleSkus.forEach(s => n.add(s))
-      }
-      return n
-    })
-  }, [visibleSkus])
+    const n = new Set(selected)
+    if (visibleSkus.length > 0 && visibleSkus.every(s => n.has(s))) {
+      visibleSkus.forEach(s => n.delete(s))
+    } else {
+      visibleSkus.forEach(s => n.add(s))
+    }
+    setSelected(n)
+  }, [selected, setSelected, visibleSkus])
 
   // ── Selected rows for raise PO ──
   const selectedRows = useMemo(() =>
@@ -278,22 +269,18 @@ export default function POEngine() {
   }, [rows, editedQty, quarterMap, quarterCols])
 
   const toggleCollapse = useCallback((parentSku: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev)
-      next.has(parentSku) ? next.delete(parentSku) : next.add(parentSku)
-      return next
-    })
-  }, [])
+    const next = new Set(collapsedParents)
+    next.has(parentSku) ? next.delete(parentSku) : next.add(parentSku)
+    setCollapsedParents(next)
+  }, [collapsedParents, setCollapsedParents])
 
   const toggleParentSelect = useCallback((group: ParentGroup) => {
     const childSkus = group.variants.map(r => String(r['OMS_SKU']))
-    setSelected(prev => {
-      const allChecked = childSkus.every(s => prev.has(s))
-      const next = new Set(prev)
-      allChecked ? childSkus.forEach(s => next.delete(s)) : childSkus.forEach(s => next.add(s))
-      return next
-    })
-  }, [])
+    const allChecked = childSkus.every(s => selected.has(s))
+    const next = new Set(selected)
+    allChecked ? childSkus.forEach(s => next.delete(s)) : childSkus.forEach(s => next.add(s))
+    setSelected(next)
+  }, [selected, setSelected])
 
   // ── Grouped table visible slice (cap to prevent DOM overload) ──
   const GROUPED_CAP = 400
@@ -580,8 +567,8 @@ export default function POEngine() {
                                             ? <QtyInput
                                                 value={finalQty}
                                                 computed={computedQty}
-                                                onChange={v => setEditedQty(prev => ({ ...prev, [sku]: v }))}
-                                                onReset={() => setEditedQty(prev => { const n = {...prev}; delete n[sku]; return n })}
+                                                onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
+                                                onReset={() => { const n = {...editedQty}; delete n[sku]; setEditedQty(n) }}
                                               />
                                             : col === 'Days_Left'
                                               ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
@@ -816,8 +803,8 @@ export default function POEngine() {
                                       : <span className="text-gray-300">—</span>
                                   : col === 'PO_Qty'
                                     ? <QtyInput value={finalQty} computed={computedQty}
-                                        onChange={v => setEditedQty(prev => ({ ...prev, [sku]: v }))}
-                                        onReset={() => setEditedQty(prev => { const n = {...prev}; delete n[sku]; return n })} />
+                                        onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
+                                        onReset={() => { const n = {...editedQty}; delete n[sku]; setEditedQty(n) }} />
                                   : col === 'Days_Left' ? <DaysLeftBadge days={Number(variant[col] ?? 999)} />
                                   : typeof variant[col] === 'number'
                                     ? Number(variant[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
