@@ -25,6 +25,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     On first coverage check per session, load any persisted daily SQLite data
     into the session DFs (fills in data lost on server restart).
     Skips platforms that already have session data.
+    Also auto-restores SKU mapping from GitHub cache if missing.
     """
     if sess.daily_restored:
         return
@@ -33,6 +34,16 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     import pandas as pd
     from ..services.daily_store import load_platform_data
     from ..services.sales import build_sales_df
+
+    # Auto-restore SKU mapping from GitHub cache if missing (lightweight — JSON only)
+    if not sess.sku_mapping:
+        try:
+            from ..services.github_cache import load_sku_mapping_from_drive
+            mapping = load_sku_mapping_from_drive()
+            if mapping:
+                sess.sku_mapping = mapping
+        except Exception:
+            pass  # GitHub not configured or network error — skip silently
 
     changed = False
     for platform, attr in [

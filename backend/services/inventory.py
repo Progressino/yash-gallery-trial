@@ -102,6 +102,13 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
 
 # ── Per-source parsers ────────────────────────────────────────
 
+def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
+    """Strip PL prefix then map to OMS SKU (mirrors _parse_fba_tsv logic)."""
+    raw = str(msku).strip().upper()
+    stripped = _PL_RE.sub(r"\1\2", raw)   # 1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL
+    return map_to_oms_sku(stripped, mapping)
+
+
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """Amazon other-warehouse CSV: keep SELLABLE, remove ZNNE. Returns OMS_SKU, Amazon_Inventory."""
     df = read_csv_safe(csv_bytes)
@@ -111,7 +118,7 @@ def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
         df = df[df["Disposition"].astype(str).str.strip().str.upper() == "SELLABLE"]
     if "Location" in df.columns:
         df = df[df["Location"].astype(str).str.strip().str.upper() != "ZNNE"]
-    df["OMS_SKU"]          = df["MSKU"].apply(lambda x: map_to_oms_sku(x, mapping))
+    df["OMS_SKU"]          = df["MSKU"].apply(lambda x: _resolve_amz_sku(x, mapping))
     df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
     return df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
 

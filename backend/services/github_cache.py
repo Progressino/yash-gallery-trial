@@ -216,6 +216,22 @@ def load_cache_from_drive(
     return True, msg, loaded
 
 
+def load_sku_mapping_from_drive() -> dict:
+    """
+    Download only sku_mapping.json from GitHub releases.
+    Fast — avoids loading all parquet DataFrames.
+    Returns empty dict if GitHub is not configured or asset is missing.
+    """
+    try:
+        _, assets, err = _get_gh_release()
+        if err or "sku_mapping.json" not in assets:
+            return {}
+        raw = _gh_download_asset(assets["sku_mapping.json"][1])
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
+
+
 def get_cache_manifest() -> Optional[dict]:
     """Return the manifest JSON if a cache exists, else None."""
     _, assets, err = _get_gh_release()
