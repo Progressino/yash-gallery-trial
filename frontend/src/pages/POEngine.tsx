@@ -95,8 +95,8 @@ export default function POEngine() {
   const {
     activeTab, setActiveTab,
     params, setParams,
-    result, setResult,
-    quarterly, setQuarterly,
+    result: _storeResult, setResult,
+    quarterly: _storeQuarterly, setQuarterly,
     search, setSearch,
     sortByPriority, setSortByPriority,
     editedQty, setEditedQty,
@@ -105,6 +105,10 @@ export default function POEngine() {
     groupedView, setGroupedView,
     collapsedParents, setCollapsedParents,
   } = usePOStore()
+
+  // Cast to local interfaces so downstream code keeps its named-field types
+  const result   = _storeResult   as POResult | null
+  const quarterly = _storeQuarterly as QuarterlyResult | null
 
   // ephemeral UI state (no need to persist across navigation)
   const [loading, setLoading]       = useState(false)
