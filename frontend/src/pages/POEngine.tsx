@@ -330,16 +330,16 @@ export default function POEngine() {
             <h3 className="font-semibold text-[#002B5B] mb-4">Parameters</h3>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <Param label="Period (days)" type="number"
-                value={params.period_days} onChange={v => setParams(p => ({ ...p, period_days: +v }))} />
+                value={params.period_days} onChange={v => setParams({ ...params, period_days: +v })} />
               <Param label="Lead Time (days)" type="number"
-                value={params.lead_time} onChange={v => setParams(p => ({ ...p, lead_time: +v }))} />
+                value={params.lead_time} onChange={v => setParams({ ...params, lead_time: +v })} />
               <Param label="Target Cover (days)" type="number"
-                value={params.target_days} onChange={v => setParams(p => ({ ...p, target_days: +v }))} />
+                value={params.target_days} onChange={v => setParams({ ...params, target_days: +v })} />
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Demand Basis</label>
                 <select
                   value={params.demand_basis}
-                  onChange={e => setParams(p => ({ ...p, demand_basis: e.target.value }))}
+                  onChange={e => setParams({ ...params, demand_basis: e.target.value })}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                 >
                   <option value="Sold">Sold</option>
@@ -350,7 +350,7 @@ export default function POEngine() {
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
               <Param label="Grace Days (urgency buffer)" type="number"
-                value={params.grace_days} onChange={v => setParams(p => ({ ...p, grace_days: +v }))} />
+                value={params.grace_days} onChange={v => setParams({ ...params, grace_days: +v })} />
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">
                   Safety Stock % ({params.safety_pct}%)
@@ -358,7 +358,7 @@ export default function POEngine() {
                 <input
                   type="range" min={0} max={100} step={5}
                   value={params.safety_pct}
-                  onChange={e => setParams(p => ({ ...p, safety_pct: +e.target.value }))}
+                  onChange={e => setParams({ ...params, safety_pct: +e.target.value })}
                   className="w-full accent-[#002B5B]"
                 />
                 <div className="flex justify-between text-xs text-gray-400 mt-0.5">
@@ -369,14 +369,14 @@ export default function POEngine() {
 
             <div className="flex items-center gap-6 mt-4 flex-wrap">
               <Toggle label="YoY Seasonality" checked={params.use_seasonality}
-                onChange={v => setParams(p => ({ ...p, use_seasonality: v }))} />
+                onChange={v => setParams({ ...params, use_seasonality: v })} />
               {params.use_seasonality && (
                 <Param label={`Seasonal Weight (${Math.round(params.seasonal_weight * 100)}%)`} type="range"
                   value={params.seasonal_weight} min={0} max={1} step={0.05}
-                  onChange={v => setParams(p => ({ ...p, seasonal_weight: +v }))} />
+                  onChange={v => setParams({ ...params, seasonal_weight: +v })} />
               )}
               <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
-                onChange={v => setParams(p => ({ ...p, group_by_parent: v }))} />
+                onChange={v => setParams({ ...params, group_by_parent: v })} />
             </div>
 
             <button
@@ -411,7 +411,7 @@ export default function POEngine() {
                 />
                 <Toggle label="Sort by Priority" checked={sortByPriority} onChange={setSortByPriority} />
                 <button
-                  onClick={() => setGroupedView(v => !v)}
+                  onClick={() => setGroupedView(!groupedView)}
                   className={`text-xs px-3 py-1.5 rounded border font-medium transition-colors ${
                     groupedView ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'
                   }`}
@@ -864,7 +864,7 @@ export default function POEngine() {
           <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
             <div className="flex items-center gap-4 flex-wrap">
               <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
-                onChange={v => setParams(p => ({ ...p, group_by_parent: v }))} />
+                onChange={v => setParams({ ...params, group_by_parent: v })} />
               <button
                 onClick={run} disabled={loading}
                 className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
