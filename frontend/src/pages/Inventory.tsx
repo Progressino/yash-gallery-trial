@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
+import * as XLSX from 'xlsx'
 
 interface InventoryData {
   loaded: boolean
@@ -39,6 +40,18 @@ export default function Inventory() {
   const totalSkus = data.rows.length
   const zeroStock = data.rows.filter(r => Number(r['Total_Inventory'] ?? 0) <= 0).length
 
+  const exportExcel = () => {
+    const exportRows = filtered.map(r => {
+      const out: Record<string, string | number> = { 'OMS SKU': String(r['OMS_SKU'] ?? '') }
+      invCols.forEach(col => { out[col] = Number(r[col] ?? 0) })
+      return out
+    })
+    const ws = XLSX.utils.json_to_sheet(exportRows)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Inventory')
+    XLSX.writeFile(wb, `Inventory_${new Date().toISOString().slice(0, 10)}.xlsx`)
+  }
+
   return (
     <div className="p-6 space-y-5">
       <div>
@@ -62,15 +75,21 @@ export default function Inventory() {
         </div>
       </div>
 
-      {/* Search */}
-      <div>
+      {/* Search + Export */}
+      <div className="flex items-center gap-3">
         <input
           value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Search SKU…"
           className="w-full max-w-xs border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
         />
-        {search && <span className="text-xs text-gray-400 ml-2">{filtered.length} results</span>}
+        {search && <span className="text-xs text-gray-400">{filtered.length} results</span>}
+        <button
+          onClick={exportExcel}
+          className="ml-auto flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 shadow-sm"
+        >
+          ⬇ Export Excel
+        </button>
       </div>
 
       {/* Table */}
@@ -85,7 +104,7 @@ export default function Inventory() {
             </tr>
           </thead>
           <tbody>
-            {filtered.slice(0, 200).map((row, i) => {
+            {filtered.slice(0, 500).map((row, i) => {
               const total = Number(row['Total_Inventory'] ?? 0)
               return (
                 <tr key={i} className={`border-b border-gray-100 hover:bg-blue-50 ${total <= 0 ? 'bg-red-50' : ''}`}>
@@ -102,8 +121,8 @@ export default function Inventory() {
             })}
           </tbody>
         </table>
-        {filtered.length > 200 && (
-          <p className="text-xs text-gray-400 text-center py-2">Showing 200 of {filtered.length} rows</p>
+        {filtered.length > 500 && (
+          <p className="text-xs text-gray-400 text-center py-2">Showing 500 of {filtered.length} rows — use Export Excel for full data</p>
         )}
       </div>
     </div>
