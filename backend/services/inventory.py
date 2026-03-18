@@ -201,17 +201,14 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
 
 def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
     """
-    OMS inventory CSV (Item SkuCode, Inventory, Buffer Stock).
-    Returns OMS_SKU, OMS_Inventory (Inventory + Buffer Stock).
+    OMS inventory CSV (Item SkuCode, Inventory).
+    Returns OMS_SKU, OMS_Inventory (Inventory column only — matches OMS export exactly).
     """
     df = read_csv_safe(csv_bytes)
     if df.empty or "Item SkuCode" not in df.columns or "Inventory" not in df.columns:
         return pd.DataFrame()
     df["OMS_SKU"] = df["Item SkuCode"].astype(str).str.strip()
     df["_inv"]    = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
-    if "Buffer Stock" in df.columns:
-        df["_buf"] = pd.to_numeric(df["Buffer Stock"], errors="coerce").fillna(0)
-        df["_inv"] = df["_inv"] + df["_buf"]
     return (
         df.groupby("OMS_SKU")["_inv"].sum()
         .reset_index()
