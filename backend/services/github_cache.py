@@ -137,8 +137,15 @@ def save_cache_to_drive(
         "files":            {},
         "row_counts":       {},
     }
-    items = list(_CACHE_FILES.items())
+    # Prioritise inventory DFs first so they're saved even if other uploads fail
+    priority_keys = {"inventory_df_variant", "inventory_df_parent", "sku_mapping"}
+    all_items = list(_CACHE_FILES.items())
+    items = (
+        [(k, v) for k, v in all_items if k in priority_keys] +
+        [(k, v) for k, v in all_items if k not in priority_keys]
+    )
     total = len(items) + 1
+    errors: list[str] = []
 
     for step, (ss_key, filename) in enumerate(items):
         if progress_callback:
@@ -165,7 +172,8 @@ def save_cache_to_drive(
             _gh_upload_asset(release_id, filename, file_bytes, existing_id)
             manifest["files"][filename] = filename
         except Exception as e:
-            return False, f"Failed uploading {filename}: {e}"
+            # Log and continue — don't abort the whole save for one file failure
+            errors.append(f"{filename}: {e}")
 
     if progress_callback:
         progress_callback(total - 1, total, "Writing manifest…")
@@ -176,7 +184,10 @@ def save_cache_to_drive(
     except Exception as e:
         return False, f"Failed writing manifest: {e}"
 
-    return True, f"Saved {len(manifest['files'])} files ({manifest['saved_at_display']})."
+    msg = f"Saved {len(manifest['files'])} files ({manifest['saved_at_display']})."
+    if errors:
+        msg += f" Partial errors ({len(errors)}): {'; '.join(errors[:3])}"
+    return True, msg
 
 
 def load_cache_from_drive(
