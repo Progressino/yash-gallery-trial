@@ -22,7 +22,7 @@ from ..services.myntra import load_myntra_from_zip
 from ..services.meesho import load_meesho_from_zip
 from ..services.flipkart import load_flipkart_from_zip
 from ..services.snapdeal import load_snapdeal_from_zip
-from ..services.inventory import load_inventory_consolidated
+from ..services.inventory import load_inventory_consolidated, merge_inventory_update
 from ..services.sales import build_sales_df
 from ..services.existing_po import parse_existing_po
 from ..services.github_cache import save_cache_to_drive
@@ -382,12 +382,31 @@ async def upload_inventory_auto(
             oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
             group_by_parent=False, return_debug=True,
         )
-        df_parent = load_inventory_consolidated(
-            oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
-            group_by_parent=True,
-        )
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
+
+    # If existing session inventory is present, MERGE rather than replace.
+    # This lets users upload RAR + Flipkart CSVs in separate drops and combine them.
+    if not sess.inventory_df_variant.empty:
+        df_variant = merge_inventory_update(sess.inventory_df_variant, df_variant)
+
+    # Rebuild parent view from merged variant DF (group by parent SKU)
+    try:
+        from ..services.helpers import get_parent_sku
+        df_parent = df_variant.copy()
+        inv_cols = [
+            c for c in df_parent.columns
+            if c.endswith("_Inventory") or c.endswith("_Live") or c.endswith("_InTransit")
+               or c in ("Buffer_Stock", "Marketplace_Total", "Total_Inventory")
+        ]
+        df_parent["Parent_SKU"] = df_parent["OMS_SKU"].apply(get_parent_sku)
+        df_parent = (
+            df_parent.groupby("Parent_SKU")[inv_cols].sum()
+            .reset_index()
+            .rename(columns={"Parent_SKU": "OMS_SKU"})
+        )
+    except Exception:
+        df_parent = df_variant  # fallback
 
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent  = df_parent

@@ -486,3 +486,55 @@ def load_inventory_consolidated(
     if return_debug:
         return result, debug
     return result
+
+
+# ── Incremental merge helper ──────────────────────────────────────────────────
+
+_COMPUTED_COLS = {"Total_Inventory", "Marketplace_Total"}
+_FIXED_COLS    = {"OMS_SKU", "OMS_Inventory", "Buffer_Stock"}
+
+
+def merge_inventory_update(existing: pd.DataFrame, update: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge a new partial inventory upload into the existing session inventory.
+
+    Source columns from `update` (e.g. Flipkart_Inventory) replace the same
+    columns in `existing`.  All other columns from `existing` are kept.
+    Total_Inventory and Marketplace_Total are recomputed from scratch.
+    """
+    if existing.empty:
+        return update
+    if update.empty:
+        return existing
+
+    # Source columns carried by this update (skip computed totals)
+    update_src_cols = [c for c in update.columns if c not in _COMPUTED_COLS]
+
+    # Drop replaced columns from existing, keep OMS_SKU
+    drop_from_existing = [
+        c for c in update_src_cols
+        if c in existing.columns and c != "OMS_SKU"
+    ]
+    base = existing.drop(columns=drop_from_existing + list(_COMPUTED_COLS), errors="ignore")
+
+    # Outer-merge: keeps all SKUs from both sides
+    result = pd.merge(base, update[update_src_cols], on="OMS_SKU", how="outer")
+
+    # Fill numerics with 0
+    for col in result.columns:
+        if col != "OMS_SKU":
+            result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
+
+    # Recompute totals
+    inv_cols = [
+        c for c in result.columns
+        if c.endswith("_Inventory") or c.endswith("_Live") or c.endswith("_InTransit")
+           or c == "Buffer_Stock"
+    ]
+    mkt_cols = [c for c in inv_cols if "OMS" not in c and c != "Buffer_Stock"]
+    result["Marketplace_Total"] = result[mkt_cols].sum(axis=1) if mkt_cols else 0
+    oms_inv   = result.get("OMS_Inventory", pd.Series(0, index=result.index))
+    buf_stock = result.get("Buffer_Stock",  pd.Series(0, index=result.index))
+    result["Total_Inventory"] = oms_inv + buf_stock + result["Marketplace_Total"]
+
+    return result[result["Total_Inventory"] > 0].reset_index(drop=True)
