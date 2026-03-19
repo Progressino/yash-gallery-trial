@@ -181,13 +181,28 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
 
     df[inv_col] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
 
+    def _resolve_seller_sku(raw: str) -> str:
+        """Map a non-numeric Myntra seller SKU to OMS SKU, handling PL prefix."""
+        cleaned = raw.strip().upper()
+        if not cleaned or cleaned == "NAN":
+            return ""
+        # Try direct mapping first
+        if cleaned in mapping:
+            return mapping[cleaned]
+        # Strip PL prefix (1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL) and try again
+        stripped = _PL_RE.sub(r"\1\2", cleaned)
+        if stripped in mapping:
+            return mapping[stripped]
+        # Use PL-stripped version as-is (it IS the OMS SKU)
+        return stripped
+
     def _resolve(row) -> str:
         # Primary: seller sku code — only use if it's a real seller SKU (non-numeric)
         # Myntra sometimes puts their internal sku_id (pure number) here, skip those
         if sku_col:
             val = str(row.get(sku_col, "")).strip()
             if val and val.lower() not in ("nan", "") and not val.isdigit():
-                return map_to_oms_sku(val, mapping)
+                return _resolve_seller_sku(val)
         # Fallback: style id → mapped via SKU mapping sheet (MYNTRA sheet adds style_id→OMS)
         if style_col:
             val = str(row.get(style_col, "")).strip()
@@ -357,10 +372,11 @@ def load_inventory_consolidated(
                 inv_dfs.append(part)
             debug["amz_csv"] = f"{len(part)} SKUs"
 
-    # ── Combine all OMS parts → single OMS_Inventory column ──
+    # ── Combine all OMS parts → single OMS_Inventory + Buffer_Stock ──
     if oms_parts:
         combined_oms = pd.concat(oms_parts, ignore_index=True)
-        oms_part = combined_oms.groupby("OMS_SKU")["OMS_Inventory"].sum().reset_index()
+        agg_cols = [c for c in ["OMS_Inventory", "Buffer_Stock"] if c in combined_oms.columns]
+        oms_part = combined_oms.groupby("OMS_SKU")[agg_cols].sum().reset_index()
         inv_dfs.insert(0, oms_part)
         debug["oms"] = f"{len(oms_part)} SKUs"
 
