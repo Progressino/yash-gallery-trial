@@ -168,10 +168,10 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
     df = read_csv_safe(csv_bytes)
     if df.empty:
         return pd.DataFrame()
-    cols = {c.lower().strip(): c for c in df.columns}
-    sku_col   = cols.get("seller sku code")
-    style_col = cols.get("style id")
-    inv_col   = cols.get("sellable inventory count")
+    # Use substring matching so minor column name variations are handled
+    sku_col   = next((c for c in df.columns if "seller sku" in c.lower() or ("sku" in c.lower() and "code" in c.lower())), None)
+    style_col = next((c for c in df.columns if "style" in c.lower() and "id" in c.lower()), None)
+    inv_col   = next((c for c in df.columns if "sellable" in c.lower() and "inventory" in c.lower()), None)
     if inv_col is None:
         return pd.DataFrame()
 

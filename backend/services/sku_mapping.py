@@ -11,6 +11,9 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
     """
     Parse a multi-sheet Excel SKU mapping file.
     Returns {seller_sku_upper → oms_sku} dict.
+
+    For MYNTRA sheet: also adds STYLE ID → OMS SKU mappings so Myntra
+    inventory files that report by Style ID are resolved correctly.
     """
     mapping: Dict[str, str] = {}
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
@@ -20,7 +23,9 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         if df.empty or len(df.columns) < 2:
             continue
 
-        seller_col, oms_col = None, None
+        col_lower_map = {str(col).lower().strip(): col for col in df.columns}
+
+        seller_col, oms_col, style_col = None, None, None
         for col in df.columns:
             col_lower = str(col).lower()
             if (
@@ -30,6 +35,8 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
                 seller_col = col
             if "oms" in col_lower and "sku" in col_lower:
                 oms_col = col
+            if "style" in col_lower and "id" in col_lower:
+                style_col = col
 
         if seller_col is None and len(df.columns) > 1:
             seller_col = df.columns[1]
@@ -42,6 +49,11 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
                 o = _clean(row.get(oms_col, ""))
                 if s and o and s != "nan" and o != "nan":
                     mapping[s] = o
+                # For MYNTRA sheet: also map STYLE ID → OMS SKU
+                if style_col:
+                    sid = _clean(row.get(style_col, ""))
+                    if sid and sid != "nan" and o and o != "nan":
+                        mapping.setdefault(sid, o)  # don't overwrite if already mapped
 
     return mapping
 
