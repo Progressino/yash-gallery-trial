@@ -88,19 +88,27 @@ def _gh_delete_asset(asset_id: int) -> None:
 def _gh_upload_asset(
     release_id: int, filename: str, data: bytes, existing_id: Optional[int] = None
 ) -> None:
+    import time
     repo    = _gh_repo()
     headers = _gh_headers()
     if not repo or not headers:
         raise RuntimeError("GitHub not configured")
     if existing_id:
         _gh_delete_asset(existing_id)
+        time.sleep(1)  # GitHub needs a moment after delete before re-upload
     upload_url = f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets"
     upload_headers = {**headers, "Content-Type": "application/octet-stream"}
-    r = requests.post(
-        upload_url, headers=upload_headers,
-        params={"name": filename}, data=data, timeout=300,
-    )
-    r.raise_for_status()
+    for attempt in range(3):
+        r = requests.post(
+            upload_url, headers=upload_headers,
+            params={"name": filename}, data=data, timeout=300,
+        )
+        if r.status_code == 422 and attempt < 2:
+            # Asset may still be deleting — wait and retry
+            time.sleep(2 * (attempt + 1))
+            continue
+        r.raise_for_status()
+        return
 
 
 def _gh_download_asset(url: str) -> bytes:
