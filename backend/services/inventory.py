@@ -110,14 +110,10 @@ def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
 
 
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
-    """Amazon other-warehouse CSV: keep SELLABLE, remove ZNNE. Returns OMS_SKU, Amazon_Inventory."""
+    """Amazon other-warehouse CSV: count all inventory to match OMS totals. Returns OMS_SKU, Amazon_Inventory."""
     df = read_csv_safe(csv_bytes)
     if df.empty or not {"MSKU", "Ending Warehouse Balance"}.issubset(df.columns):
         return pd.DataFrame()
-    if "Disposition" in df.columns:
-        df = df[df["Disposition"].astype(str).str.strip().str.upper() == "SELLABLE"]
-    if "Location" in df.columns:
-        df = df[df["Location"].astype(str).str.strip().str.upper() != "ZNNE"]
     df["OMS_SKU"]          = df["MSKU"].apply(lambda x: _resolve_amz_sku(x, mapping))
     df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
     return df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
@@ -290,9 +286,10 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
     df["OMS_SKU"] = df["Item SkuCode"].astype(str).str.strip()
     df["_inv"]    = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
     df["_buf"]    = pd.to_numeric(df.get("Buffer Stock", 0), errors="coerce").fillna(0)
+    # Deduplicate by SKU — OMS has one authoritative row per SKU; duplicates are export artifacts
+    df = df.drop_duplicates(subset="OMS_SKU", keep="last")
     return (
-        df.groupby("OMS_SKU")[["_inv", "_buf"]].sum()
-        .reset_index()
+        df[["OMS_SKU", "_inv", "_buf"]]
         .rename(columns={"_inv": "OMS_Inventory", "_buf": "Buffer_Stock"})
     )
 
