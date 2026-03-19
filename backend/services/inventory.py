@@ -446,6 +446,16 @@ def load_inventory_consolidated(
             return pd.DataFrame(), debug
         return pd.DataFrame()
 
+    # ── Normalize OMS_SKU case before merge to prevent case-based duplicates ──
+    # (OMS CSV may use lowercase sizes like "6xl" while Amazon uses "6XL")
+    for i, df in enumerate(inv_dfs):
+        if "OMS_SKU" in df.columns:
+            df = df.copy()
+            df["OMS_SKU"] = df["OMS_SKU"].str.strip().str.upper()
+            num_cols = [c for c in df.columns if c != "OMS_SKU"]
+            df = df.groupby("OMS_SKU")[num_cols].sum().reset_index()
+            inv_dfs[i] = df
+
     # ── Outer-merge all sources on OMS_SKU ───────────────────
     consolidated = inv_dfs[0]
     for d in inv_dfs[1:]:

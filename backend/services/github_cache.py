@@ -17,13 +17,15 @@ _GH_API             = "https://api.github.com"
 _CACHE_RELEASE_TAG  = "data-cache"
 _CACHE_MANIFEST_NAME = "_manifest.json"
 _CACHE_FILES = {
-    "sales_df":    "sales_df.parquet",
-    "mtr_df":      "mtr_df.parquet",
-    "meesho_df":   "meesho_df.parquet",
-    "myntra_df":   "myntra_df.parquet",
-    "flipkart_df": "flipkart_df.parquet",
-    "snapdeal_df": "snapdeal_df.parquet",
-    "sku_mapping": "sku_mapping.json",
+    "sales_df":              "sales_df.parquet",
+    "mtr_df":                "mtr_df.parquet",
+    "meesho_df":             "meesho_df.parquet",
+    "myntra_df":             "myntra_df.parquet",
+    "flipkart_df":           "flipkart_df.parquet",
+    "snapdeal_df":           "snapdeal_df.parquet",
+    "sku_mapping":           "sku_mapping.json",
+    "inventory_df_variant":  "inventory_df_variant.parquet",
+    "inventory_df_parent":   "inventory_df_parent.parquet",
 }
 
 

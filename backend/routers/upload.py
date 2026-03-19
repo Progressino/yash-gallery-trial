@@ -64,13 +64,15 @@ def _extract_rar_files(rar_bytes: bytes) -> list[tuple[str, bytes]]:
 def _auto_save_cache(sess) -> None:
     """Run in background after build-sales: silently push session to GitHub Releases."""
     session_data = {
-        "sales_df":    sess.sales_df,
-        "mtr_df":      sess.mtr_df,
-        "meesho_df":   sess.meesho_df,
-        "myntra_df":   sess.myntra_df,
-        "flipkart_df": sess.flipkart_df,
-        "snapdeal_df": sess.snapdeal_df,
-        "sku_mapping": sess.sku_mapping,
+        "sales_df":             sess.sales_df,
+        "mtr_df":               sess.mtr_df,
+        "meesho_df":            sess.meesho_df,
+        "myntra_df":            sess.myntra_df,
+        "flipkart_df":          sess.flipkart_df,
+        "snapdeal_df":          sess.snapdeal_df,
+        "sku_mapping":          sess.sku_mapping,
+        "inventory_df_variant": sess.inventory_df_variant,
+        "inventory_df_parent":  sess.inventory_df_parent,
     }
     ok, msg = save_cache_to_drive(session_data)
     if ok:
@@ -332,6 +334,7 @@ def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
 @router.post("/inventory-auto")
 async def upload_inventory_auto(
     request: Request,
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
 ):
     """
@@ -388,6 +391,7 @@ async def upload_inventory_auto(
 
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent  = df_parent
+    background_tasks.add_task(_auto_save_cache, sess)
 
     parts = [f"{len(df_variant):,} total SKUs"]
     for src, info in debug.items():
@@ -404,6 +408,7 @@ async def upload_inventory_auto(
 @router.post("/inventory")
 async def upload_inventory(
     request: Request,
+    background_tasks: BackgroundTasks,
     oms_file:    List[UploadFile] = File(default=[]),
     fk_file:     Optional[UploadFile] = File(None),
     myntra_file: Optional[UploadFile] = File(None),
@@ -434,6 +439,7 @@ async def upload_inventory(
 
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent  = df_parent
+    background_tasks.add_task(_auto_save_cache, sess)
 
     # Build human-readable breakdown
     parts = [f"{len(df_variant):,} total SKUs"]

@@ -82,19 +82,28 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         except Exception:
             pass
 
-    # If sales_df has < 90 days of history, load full 2-year history from GitHub cache
-    if sales_history_days < 90:
+    # If sales_df has < 90 days of history, load full 2-year history from GitHub cache.
+    # Also always restore inventory (always lost on restart since there's no daily SQLite for it).
+    need_sales_cache = sales_history_days < 90
+    need_inventory   = sess.inventory_df_variant.empty
+    if need_sales_cache or need_inventory:
         try:
             from ..services.github_cache import load_cache_from_drive
             ok, _, loaded = load_cache_from_drive()
             if ok and loaded:
-                for key in ["sales_df", "mtr_df", "meesho_df", "myntra_df", "flipkart_df", "snapdeal_df"]:
-                    val = loaded.get(key)
-                    if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                        setattr(sess, key, val)
-                if not sess.sku_mapping and loaded.get("sku_mapping"):
-                    sess.sku_mapping = loaded["sku_mapping"]
-                sess._quarterly_cache.clear()
+                if need_sales_cache:
+                    for key in ["sales_df", "mtr_df", "meesho_df", "myntra_df", "flipkart_df", "snapdeal_df"]:
+                        val = loaded.get(key)
+                        if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                            setattr(sess, key, val)
+                    if not sess.sku_mapping and loaded.get("sku_mapping"):
+                        sess.sku_mapping = loaded["sku_mapping"]
+                    sess._quarterly_cache.clear()
+                if need_inventory:
+                    for key in ["inventory_df_variant", "inventory_df_parent"]:
+                        val = loaded.get(key)
+                        if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                            setattr(sess, key, val)
         except Exception:
             pass
 
