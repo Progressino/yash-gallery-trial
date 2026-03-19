@@ -162,32 +162,40 @@ def _parse_fba_tsv(tsv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
 def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """
     Myntra other-warehouse CSV.
-    Uses 'seller sku code' for SKU mapping; falls back to 'style id' when empty.
+    Uses 'seller sku code' (non-numeric only) for SKU mapping; falls back to
+    'style id' for rows where seller sku code is a Myntra internal numeric ID.
+    Uses 'inventory count' (not 'sellable inventory count') as the stock value.
     Returns OMS_SKU, Myntra_Other_Inventory.
     """
     df = read_csv_safe(csv_bytes)
     if df.empty:
         return pd.DataFrame()
-    # Use substring matching so minor column name variations are handled
-    sku_col   = next((c for c in df.columns if "seller sku" in c.lower() or ("sku" in c.lower() and "code" in c.lower())), None)
+    sku_col   = next((c for c in df.columns if "seller sku" in c.lower()), None)
     style_col = next((c for c in df.columns if "style" in c.lower() and "id" in c.lower()), None)
-    inv_col   = next((c for c in df.columns if "sellable" in c.lower() and "inventory" in c.lower()), None)
+    # Prefer exact "inventory count" over "sellable inventory count"
+    inv_col = next((c for c in df.columns if c.lower().strip() == "inventory count"), None)
+    if inv_col is None:
+        inv_col = next((c for c in df.columns if "inventory" in c.lower() and "count" in c.lower()), None)
     if inv_col is None:
         return pd.DataFrame()
 
     df[inv_col] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
 
     def _resolve(row) -> str:
-        # Primary: seller sku code
+        # Primary: seller sku code — only use if it's a real seller SKU (non-numeric)
+        # Myntra sometimes puts their internal sku_id (pure number) here, skip those
         if sku_col:
             val = str(row.get(sku_col, "")).strip()
-            if val and val.lower() != "nan":
+            if val and val.lower() not in ("nan", "") and not val.isdigit():
                 return map_to_oms_sku(val, mapping)
-        # Fallback: style id
+        # Fallback: style id → mapped via SKU mapping sheet (MYNTRA sheet adds style_id→OMS)
         if style_col:
             val = str(row.get(style_col, "")).strip()
-            if val and val.lower() != "nan":
-                return map_to_oms_sku(val, mapping)
+            if val and val.lower() not in ("nan", ""):
+                result = map_to_oms_sku(val, mapping)
+                # Only use if it resolved to a non-numeric OMS SKU
+                if result and not result.isdigit():
+                    return result
         return ""
 
     df["OMS_SKU"] = df.apply(_resolve, axis=1)
@@ -286,28 +294,15 @@ def load_inventory_consolidated(
 
     # ── Separately uploaded Myntra file ──────────────────────
     if myntra_bytes:
-        df = read_csv_safe(myntra_bytes)
-        if not df.empty:
-            sku_col = next(
-                (c for c in df.columns
-                 if "seller sku" in c.lower() or "sku code" in c.lower()), None
-            )
-            inv_col = next(
-                (c for c in df.columns if "sellable" in c.lower() and "inventory" in c.lower()), None
-            )
-            debug["myntra_upload_cols"] = list(df.columns)
-            debug["myntra_sku_col"] = sku_col
-            debug["myntra_inv_col"] = inv_col
-            if sku_col and inv_col:
-                df["OMS_SKU"]          = df[sku_col].apply(lambda x: map_to_oms_sku(x, mapping))
-                df["Myntra_Inventory"] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
-                part = df.groupby("OMS_SKU")["Myntra_Inventory"].sum().reset_index()
-                inv_dfs.append(part)
-                debug["myntra"] = f"{len(part)} SKUs"
-            else:
-                debug["myntra"] = f"0 SKUs — sku_col={sku_col} inv_col={inv_col}"
+        part = _parse_myntra_other(myntra_bytes, mapping)
+        debug["myntra_upload_cols"] = "via _parse_myntra_other"
+        if not part.empty:
+            # rename column to Myntra_Inventory for separately-uploaded file
+            part = part.rename(columns={"Myntra_Other_Inventory": "Myntra_Inventory"})
+            inv_dfs.append(part)
+            debug["myntra"] = f"{len(part)} SKUs"
         else:
-            debug["myntra"] = "0 SKUs — empty file"
+            debug["myntra"] = "0 SKUs"
 
     # ── Amazon / RAR ─────────────────────────────────────────
     if amz_bytes:
