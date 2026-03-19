@@ -201,18 +201,20 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
 
 def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
     """
-    OMS inventory CSV (Item SkuCode, Inventory).
-    Returns OMS_SKU, OMS_Inventory (Inventory column only — matches OMS export exactly).
+    OMS inventory CSV (Item SkuCode, Inventory, Buffer Stock).
+    Returns OMS_SKU, OMS_Inventory (Inventory column only — matches OMS export exactly),
+    and Buffer_Stock as a separate column so zero-Inventory / nonzero-Buffer items remain visible.
     """
     df = read_csv_safe(csv_bytes)
     if df.empty or "Item SkuCode" not in df.columns or "Inventory" not in df.columns:
         return pd.DataFrame()
     df["OMS_SKU"] = df["Item SkuCode"].astype(str).str.strip()
     df["_inv"]    = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
+    df["_buf"]    = pd.to_numeric(df.get("Buffer Stock", 0), errors="coerce").fillna(0)
     return (
-        df.groupby("OMS_SKU")["_inv"].sum()
+        df.groupby("OMS_SKU")[["_inv", "_buf"]].sum()
         .reset_index()
-        .rename(columns={"_inv": "OMS_Inventory"})
+        .rename(columns={"_inv": "OMS_Inventory", "_buf": "Buffer_Stock"})
     )
 
 
@@ -358,13 +360,15 @@ def load_inventory_consolidated(
     inv_cols = [
         c for c in consolidated.columns
         if c.endswith("_Inventory") or c.endswith("_Live") or c.endswith("_InTransit")
+           or c == "Buffer_Stock"
     ]
     consolidated[inv_cols] = consolidated[inv_cols].fillna(0)
 
-    mkt_cols = [c for c in inv_cols if "OMS" not in c]
+    mkt_cols = [c for c in inv_cols if "OMS" not in c and c != "Buffer_Stock"]
     consolidated["Marketplace_Total"] = consolidated[mkt_cols].sum(axis=1) if mkt_cols else 0
-    oms_inv = consolidated.get("OMS_Inventory", pd.Series(0, index=consolidated.index))
-    consolidated["Total_Inventory"]   = oms_inv + consolidated["Marketplace_Total"]
+    oms_inv    = consolidated.get("OMS_Inventory", pd.Series(0, index=consolidated.index))
+    buf_stock  = consolidated.get("Buffer_Stock",  pd.Series(0, index=consolidated.index))
+    consolidated["Total_Inventory"] = oms_inv + buf_stock + consolidated["Marketplace_Total"]
 
     if group_by_parent:
         consolidated["Parent_SKU"] = consolidated["OMS_SKU"].apply(get_parent_sku)
