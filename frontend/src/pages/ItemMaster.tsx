@@ -48,7 +48,7 @@ interface BOMLine {
   process_id: number | null; process_name: string | null
   shrinkage_pct: number; wastage_pct: number; remarks: string
 }
-interface BOMDetail extends BOMHeader { lines: BOMLine[] }
+interface BOMDetail extends BOMHeader { lines: BOMLine[]; cmt_cost: number; other_cost: number }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const COMPONENT_TYPES = ['FG', 'SFG', 'RM', 'ACC', 'PKG', 'FUEL', 'SVC', 'CMT']
