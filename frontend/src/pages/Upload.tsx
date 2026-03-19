@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
-  uploadFlipkart, uploadSnapdeal, uploadInventory, buildSales, getCoverage,
+  uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   type DailyUpload, type DailySummary,
@@ -182,15 +182,15 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="📦 Inventory" subtitle="OMS/FK/Myntra CSVs + Amazon RAR (Amazon SELLABLE, FBA in-transit, Myntra other WH, OMS+buffer stock, combos)" loaded={coverage.inventory}>
+        <UploadCard title="📦 Inventory" subtitle="Drop any mix: OMS CSV, Flipkart CSV, Myntra CSV, Amazon RAR — auto-detected" loaded={coverage.inventory}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <InventoryUploader
-            skuLoaded={coverage.sku_mapping}
+          <InventoryDropzone
+            disabled={!coverage.sku_mapping}
             uploading={loading['inv']}
             onUpload={async (files) => {
               setL('inv', true)
               try {
-                const res = await uploadInventory(files)
+                const res = await uploadInventoryAuto(files)
                 if (res.ok) {
                   const debugStr = res.debug ? '\n' + JSON.stringify(res.debug, null, 2) : ''
                   showToast('success', res.message + debugStr)
@@ -550,47 +550,76 @@ function DailyHistory() {
   )
 }
 
-function InventoryUploader({
-  skuLoaded, uploading, onUpload,
-}: {
-  skuLoaded: boolean
+function InventoryDropzone({ disabled, uploading, onUpload }: {
+  disabled: boolean
   uploading: boolean
-  onUpload: (files: { oms?: File[]; fk?: File; myntra?: File; amz?: File }) => Promise<void>
+  onUpload: (files: File[]) => Promise<void>
 }) {
-  const [files, setFiles] = useState<{ oms?: File[]; fk?: File; myntra?: File; amz?: File }>({})
-  const set = (key: keyof typeof files) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (key === 'oms') {
-      const selected = e.target.files ? Array.from(e.target.files) : undefined
-      setFiles(prev => ({ ...prev, oms: selected }))
-    } else {
-      setFiles(prev => ({ ...prev, [key]: e.target.files?.[0] }))
-    }
+  const [queued, setQueued] = useState<File[]>([])
+
+  const onDrop = useCallback((accepted: File[]) => {
+    setQueued(prev => {
+      const names = new Set(prev.map(f => f.name))
+      return [...prev, ...accepted.filter(f => !names.has(f.name))]
+    })
+  }, [])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'text/csv': ['.csv'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/x-rar-compressed': ['.rar'],
+      'application/vnd.rar': ['.rar'],
+      'application/octet-stream': ['.rar'],
+    },
+    multiple: true,
+    disabled: uploading || disabled,
+  })
+
+  const remove = (name: string) => setQueued(prev => prev.filter(f => f.name !== name))
+
+  const submit = async () => {
+    if (!queued.length) return
+    await onUpload(queued)
+    setQueued([])
   }
-  const hasAny = !!(files.oms?.length || files.fk || files.myntra || files.amz)
 
   return (
     <div className="space-y-2">
-      {(['oms', 'fk', 'myntra', 'amz'] as const).map(k => (
-        <div key={k} className="flex items-center gap-2">
-          <label className="text-xs text-gray-500 w-16 shrink-0">{k.toUpperCase()}</label>
-          <input
-            type="file"
-            accept={k === 'amz' ? '*' : '.csv'}
-            multiple={k === 'oms'}
-            onChange={set(k)}
-            className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100"
-          />
-          {k === 'oms' && files.oms && files.oms.length > 1 && (
-            <span className="text-xs text-blue-600">{files.oms.length} files</span>
-          )}
-        </div>
-      ))}
-      <button
-        onClick={() => onUpload(files)}
-        disabled={!hasAny || !skuLoaded || uploading}
-        className="w-full mt-1 py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
+      <div
+        {...getRootProps()}
+        className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-colors
+          ${isDragActive ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-gray-400 bg-white'}
+          ${(uploading || disabled) ? 'opacity-50 cursor-not-allowed' : ''}`}
       >
-        {uploading ? 'Uploading…' : 'Upload Inventory'}
+        <input {...getInputProps()} />
+        {uploading
+          ? <p className="text-sm text-blue-600 animate-pulse">Uploading & detecting…</p>
+          : isDragActive
+            ? <p className="text-sm text-blue-600">Drop files here</p>
+            : <p className="text-sm text-gray-500">
+                Drag & drop inventory files here, or <span className="text-blue-600 underline">browse</span>
+                <br /><span className="text-xs text-gray-400">OMS CSV, Flipkart CSV, Myntra CSV, Amazon RAR — auto-detected</span>
+              </p>
+        }
+      </div>
+      {queued.length > 0 && (
+        <ul className="text-xs space-y-1">
+          {queued.map(f => (
+            <li key={f.name} className="flex items-center justify-between bg-gray-50 rounded px-2 py-1">
+              <span className="truncate text-gray-700">{f.name}</span>
+              <button onClick={() => remove(f.name)} className="ml-2 text-gray-400 hover:text-red-500">✕</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button
+        onClick={submit}
+        disabled={!queued.length || uploading || disabled}
+        className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
+      >
+        {uploading ? 'Uploading…' : `Upload Inventory${queued.length ? ` (${queued.length} file${queued.length > 1 ? 's' : ''})` : ''}`}
       </button>
     </div>
   )

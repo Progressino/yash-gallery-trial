@@ -72,6 +72,20 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         except Exception:
             pass
 
+    # If still no sales data after SQLite restore, try GitHub cache (has full 2-year history)
+    if sess.sales_df.empty:
+        try:
+            from ..services.github_cache import load_cache_from_drive
+            ok, _, loaded = load_cache_from_drive()
+            if ok and loaded:
+                for key in ["sales_df", "mtr_df", "meesho_df", "myntra_df", "flipkart_df", "snapdeal_df"]:
+                    val = loaded.get(key)
+                    if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                        setattr(sess, key, val)
+                sess._quarterly_cache.clear()
+        except Exception:
+            pass
+
 
 # ── Coverage ──────────────────────────────────────────────────
 

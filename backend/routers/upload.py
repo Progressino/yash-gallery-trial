@@ -289,6 +289,116 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
 
 # ── Inventory ─────────────────────────────────────────────────
 
+def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
+    """
+    Guess inventory file type from filename and first ~2 KB of content.
+    Returns: 'oms', 'flipkart', 'myntra', 'amazon', 'rar'
+    """
+    fn = filename.lower()
+
+    # RAR by magic bytes or extension
+    if content_bytes[:6] == _RAR_MAGIC or fn.endswith(".rar"):
+        return "rar"
+
+    # Filename hints
+    if "myntra" in fn:
+        return "myntra"
+    if "flipkart" in fn or fn.startswith("fk"):
+        return "flipkart"
+    if "amazon" in fn or fn.startswith("amz"):
+        return "amazon"
+
+    # Content-based detection
+    try:
+        text = content_bytes[:2000].decode("utf-8", errors="ignore").lower()
+        if "item skucode" in text or "buffer stock" in text:
+            return "oms"
+        if "combo sku code" in text and "combo qty stock" in text:
+            return "oms"
+        if "seller sku code" in text or ("style id" in text and "inventory count" in text):
+            return "myntra"
+        if "live on website" in text:
+            return "flipkart"
+        if "msku" in text and "ending warehouse balance" in text:
+            return "amazon"
+        if "merchant sku" in text and "shipped" in text:
+            return "amazon"
+    except Exception:
+        pass
+
+    return "oms"  # safe default
+
+
+@router.post("/inventory-auto")
+async def upload_inventory_auto(
+    request: Request,
+    files: List[UploadFile] = File(...),
+):
+    """
+    Drop any mix of inventory files — type auto-detected from filename/content.
+    Accepts: OMS inventory CSV/XLSX, Flipkart CSV, Myntra CSV, Amazon RAR/CSV.
+    """
+    sess = _get_session(request)
+    if not sess.sku_mapping:
+        return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
+
+    oms_bytes_list: list[bytes] = []
+    fk_bytes = None
+    myntra_bytes = None
+    amz_bytes = None
+    detected: list[str] = []
+
+    for file in files:
+        raw = await file.read()
+        fname = file.filename or ""
+        inv_type = _detect_inventory_type(fname, raw)
+
+        if inv_type == "rar":
+            amz_bytes = raw
+            detected.append(f"RAR archive ({fname})")
+        elif inv_type == "flipkart":
+            fk_bytes = raw
+            detected.append(f"Flipkart ({fname})")
+        elif inv_type == "myntra":
+            myntra_bytes = raw
+            detected.append(f"Myntra ({fname})")
+        elif inv_type == "amazon":
+            amz_bytes = raw
+            detected.append(f"Amazon ({fname})")
+        else:  # oms or unknown
+            oms_bytes_list.append(raw)
+            detected.append(f"OMS ({fname})")
+
+    if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
+        return JSONResponse(content={"ok": False, "message": "No files provided."})
+
+    try:
+        df_variant, debug = load_inventory_consolidated(
+            oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
+            group_by_parent=False, return_debug=True,
+        )
+        df_parent = load_inventory_consolidated(
+            oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
+            group_by_parent=True,
+        )
+    except Exception as e:
+        return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
+
+    sess.inventory_df_variant = df_variant
+    sess.inventory_df_parent  = df_parent
+
+    parts = [f"{len(df_variant):,} total SKUs"]
+    for src, info in debug.items():
+        parts.append(f"{src}: {info}")
+    return JSONResponse(content={
+        "ok":      True,
+        "message": " | ".join(parts),
+        "rows":    len(df_variant),
+        "debug":   debug,
+        "detected": detected,
+    })
+
+
 @router.post("/inventory")
 async def upload_inventory(
     request: Request,

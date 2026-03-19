@@ -63,6 +63,17 @@ export const uploadAmazonB2B  = (file: File) => uploadFile('/upload/amazon-b2b',
 export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po', file)
 export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
+export async function uploadInventoryAuto(
+  files: File[]
+): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown>; detected?: string[] }> {
+  const fd = new FormData()
+  files.forEach(f => fd.append('files', f))
+  const { data } = await api.post('/upload/inventory-auto', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
 export async function uploadInventory(files: {
   oms?: File[]; fk?: File; myntra?: File; amz?: File
 }): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown> }> {
