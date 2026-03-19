@@ -41,7 +41,7 @@ from ..db.item_db import (
     certify_bom, uncertify_bom,
     add_bom_line, update_bom_line, delete_bom_line, copy_bom,
     list_item_packaging, get_buyer_packaging, add_packaging_line, delete_packaging_line,
-    bulk_create_items,
+    bulk_create_items, get_item_stats, list_all_boms,
 )
 from ..services.item_import import parse_item_import
 
@@ -94,9 +94,11 @@ class BOMCreate(BaseModel):
     is_default: int = 0
 
 class BOMUpdate(BaseModel):
-    bom_name:   Optional[str] = None
-    applies_to: Optional[str] = None
-    is_default: Optional[int] = None
+    bom_name:   Optional[str]   = None
+    applies_to: Optional[str]   = None
+    is_default: Optional[int]   = None
+    cmt_cost:   Optional[float] = None
+    other_cost: Optional[float] = None
 
 class BOMLineCreate(BaseModel):
     component_name:    str
@@ -152,6 +154,16 @@ def get_meta():
         "merchants":     list_merchants(),
         "buyers":        list_buyers(),
     }
+
+
+@router.get("/stats")
+def get_stats():
+    return get_item_stats()
+
+
+@router.get("/boms/all")
+def get_all_boms():
+    return list_all_boms()
 
 
 # ── Merchants ──────────────────────────────────────────────────────────────────

@@ -144,11 +144,13 @@ def init_db() -> None:
         );
     """)
 
-    # Migrate existing bom_headers table — add certification columns if missing
+    # Migrate existing bom_headers table — add columns if missing
     for col_ddl in [
         "ALTER TABLE bom_headers ADD COLUMN is_certified INTEGER DEFAULT 0",
         "ALTER TABLE bom_headers ADD COLUMN certified_by TEXT DEFAULT ''",
         "ALTER TABLE bom_headers ADD COLUMN certified_at TEXT DEFAULT ''",
+        "ALTER TABLE bom_headers ADD COLUMN cmt_cost REAL DEFAULT 0",
+        "ALTER TABLE bom_headers ADD COLUMN other_cost REAL DEFAULT 0",
     ]:
         try:
             conn.execute(col_ddl)
@@ -629,7 +631,7 @@ def create_bom(item_id: int, bom_name: str, applies_to: str = "all", is_default:
 def update_bom(bom_id: int, **fields) -> bool:
     if _bom_is_certified(bom_id):
         raise ValueError("BOM is certified and cannot be modified. Uncertify first.")
-    allowed = {"bom_name", "applies_to", "is_default"}
+    allowed = {"bom_name", "applies_to", "is_default", "cmt_cost", "other_cost"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False
@@ -800,3 +802,48 @@ def bulk_create_items(items: list[dict]) -> dict:
             errors.append(f"{row.get('item_code', '?')}: {exc}")
 
     return {"created": created, "skipped": skipped, "errors": errors}
+
+
+def get_item_stats() -> dict:
+    """Return summary counts for the Item Master dashboard."""
+    conn = _connect()
+    total = conn.execute("SELECT COUNT(*) FROM items WHERE parent_id IS NULL").fetchone()[0]
+    by_type = conn.execute(
+        """SELECT t.name, t.code, COUNT(i.id) AS cnt
+           FROM item_types t
+           LEFT JOIN items i ON i.item_type_id = t.id AND i.parent_id IS NULL
+           GROUP BY t.id ORDER BY t.id"""
+    ).fetchall()
+    total_boms = conn.execute("SELECT COUNT(*) FROM bom_headers").fetchone()[0]
+    certified_boms = conn.execute(
+        "SELECT COUNT(*) FROM bom_headers WHERE is_certified = 1"
+    ).fetchone()[0]
+    conn.close()
+    return {
+        "total_items": total,
+        "total_boms": total_boms,
+        "certified_boms": certified_boms,
+        "by_type": [dict(r) for r in by_type],
+    }
+
+
+def list_all_boms() -> list[dict]:
+    """Return all BOM headers across all items, with item info."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT bh.*, i.item_code, i.item_name,
+                  (SELECT COUNT(*) FROM bom_lines bl WHERE bl.bom_id = bh.id) AS line_count,
+                  (SELECT SUM(bl.quantity * bl.rate * (1 + bl.shrinkage_pct/100.0) * (1 + bl.wastage_pct/100.0))
+                   FROM bom_lines bl WHERE bl.bom_id = bh.id) AS lines_total
+           FROM bom_headers bh
+           JOIN items i ON i.id = bh.item_id
+           ORDER BY bh.item_id, bh.id"""
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["lines_total"] = d["lines_total"] or 0
+        d["grand_total"] = d["lines_total"] + (d.get("cmt_cost") or 0) + (d.get("other_cost") or 0)
+        result.append(d)
+    return result
