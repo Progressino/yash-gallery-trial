@@ -159,6 +159,62 @@ def _parse_fba_tsv(tsv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     )
 
 
+# Flipkart stock columns that represent physical units at the warehouse
+_FK_STOCK_COLS = [
+    "Live on Website",
+    "B2B Receiving",
+    "Transfers Receiving",
+    "Reserved for Orders and Recalls",
+    "Reserved for Internal Processing",
+    "Returns Processing",
+    "Orders to Dispatch",
+    "Recalls to Dispatch",
+]
+
+
+def _parse_fk_inventory_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Flipkart warehouse inventory CSV (Current Inventory export).
+    Sums all usable stock columns (Live on Website + reserved + receiving + dispatching).
+    Strips PL prefix from SKUs (e.g. 1388PLYKMAROON-XL → 1388YKMAROON-XL).
+    Returns OMS_SKU, Flipkart_Inventory.
+    """
+    df = read_csv_safe(csv_bytes)
+    if df.empty or "SKU" not in df.columns:
+        return pd.DataFrame()
+
+    # Build stock total from whichever stock columns exist
+    present = [c for c in _FK_STOCK_COLS if c in df.columns]
+    if not present:
+        # Fallback: any column named "Live on Website" only
+        if "Live on Website" not in df.columns:
+            return pd.DataFrame()
+        present = ["Live on Website"]
+
+    for c in present:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    df["_total"] = df[present].sum(axis=1)
+
+    def _resolve_fk_sku(raw) -> str:
+        cleaned = str(raw).strip().upper()
+        if not cleaned or cleaned == "NAN":
+            return ""
+        if cleaned in mapping:
+            return mapping[cleaned]
+        stripped = _PL_RE.sub(r"\1\2", cleaned)
+        if stripped in mapping:
+            return mapping[stripped]
+        return stripped
+
+    df["OMS_SKU"] = df["SKU"].apply(_resolve_fk_sku)
+    df = df[df["OMS_SKU"].str.strip() != ""]
+    return (
+        df.groupby("OMS_SKU")["_total"].sum()
+        .reset_index()
+        .rename(columns={"_total": "Flipkart_Inventory"})
+    )
+
+
 def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """
     Myntra other-warehouse CSV.
@@ -266,7 +322,7 @@ def _parse_oms_or_combo(csv_bytes: bytes) -> pd.DataFrame:
 
 def load_inventory_consolidated(
     oms_bytes: Optional[bytes | List[bytes]],
-    fk_bytes: Optional[bytes],
+    fk_bytes: Optional[bytes | List[bytes]],
     myntra_bytes: Optional[bytes],
     amz_bytes: Optional[bytes],
     mapping: Dict[str, str],
@@ -297,15 +353,20 @@ def load_inventory_consolidated(
 
     # ── Flipkart ─────────────────────────────────────────────
     if fk_bytes:
-        df = read_csv_safe(fk_bytes)
-        if not df.empty and {"SKU", "Live on Website"}.issubset(df.columns):
-            df["OMS_SKU"]       = df["SKU"].apply(lambda x: map_to_oms_sku(x, mapping))
-            df["Flipkart_Live"] = pd.to_numeric(df["Live on Website"], errors="coerce").fillna(0)
-            part = df.groupby("OMS_SKU")["Flipkart_Live"].sum().reset_index()
+        fk_list = fk_bytes if isinstance(fk_bytes, list) else [fk_bytes]
+        fk_parts = []
+        for fb in fk_list:
+            if fb:
+                p = _parse_fk_inventory_csv(fb, mapping)
+                if not p.empty:
+                    fk_parts.append(p)
+        if fk_parts:
+            combined_fk = pd.concat(fk_parts, ignore_index=True)
+            part = combined_fk.groupby("OMS_SKU")["Flipkart_Inventory"].sum().reset_index()
             inv_dfs.append(part)
-            debug["flipkart"] = f"{len(part)} SKUs"
+            debug["flipkart"] = f"{len(part)} SKUs ({len(fk_list)} files)"
         else:
-            debug["flipkart"] = f"0 SKUs (cols: {list(df.columns)[:6]})"
+            debug["flipkart"] = f"0 SKUs (no valid FK data)"
 
     # ── Separately uploaded Myntra file ──────────────────────
     if myntra_bytes:

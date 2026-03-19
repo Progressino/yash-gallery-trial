@@ -343,7 +343,7 @@ async def upload_inventory_auto(
         return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
 
     oms_bytes_list: list[bytes] = []
-    fk_bytes = None
+    fk_bytes_list: list[bytes] = []
     myntra_bytes = None
     amz_bytes = None
     detected: list[str] = []
@@ -357,7 +357,7 @@ async def upload_inventory_auto(
             amz_bytes = raw
             detected.append(f"RAR archive ({fname})")
         elif inv_type == "flipkart":
-            fk_bytes = raw
+            fk_bytes_list.append(raw)
             detected.append(f"Flipkart ({fname})")
         elif inv_type == "myntra":
             myntra_bytes = raw
@@ -368,6 +368,8 @@ async def upload_inventory_auto(
         else:  # oms or unknown
             oms_bytes_list.append(raw)
             detected.append(f"OMS ({fname})")
+
+    fk_bytes = fk_bytes_list or None
 
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
         return JSONResponse(content={"ok": False, "message": "No files provided."})
