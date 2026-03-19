@@ -7,6 +7,7 @@ interface InventoryData {
   loaded: boolean
   rows: Array<Record<string, number | string>>
   columns: string[]
+  totals?: Record<string, number>
 }
 
 export default function Inventory() {
@@ -74,6 +75,23 @@ export default function Inventory() {
           <p className={`text-2xl font-bold mt-1 ${zeroStock > 0 ? 'text-red-600' : 'text-[#002B5B]'}`}>{zeroStock}</p>
         </div>
       </div>
+
+      {/* Per-source totals breakdown */}
+      {data.totals && (
+        <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+          <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-3">Source Breakdown (all SKUs)</p>
+          <div className="flex flex-wrap gap-4">
+            {Object.entries(data.totals)
+              .filter(([col]) => col !== 'Total_Inventory')
+              .map(([col, val]) => (
+                <div key={col} className="text-center">
+                  <p className="text-xs text-gray-400">{col.replace(/_/g, ' ')}</p>
+                  <p className="text-base font-bold text-[#002B5B]">{Number(val).toLocaleString()}</p>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* Search + Export */}
       <div className="flex items-center gap-3">

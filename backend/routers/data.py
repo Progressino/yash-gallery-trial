@@ -433,11 +433,22 @@ def get_inventory(request: Request):
     if df.empty:
         return {"loaded": False, "rows": []}
 
+    import pandas as pd
     cols = [c for c in df.columns if c != "OMS_SKU"]
+
+    # Per-source totals for debugging discrepancies
+    totals = {}
+    for c in cols:
+        try:
+            totals[c] = int(pd.to_numeric(df[c], errors="coerce").fillna(0).sum())
+        except Exception:
+            totals[c] = 0
+
     return {
         "loaded":   True,
         "rows":     df.fillna(0).to_dict("records"),
         "columns":  ["OMS_SKU"] + cols,
+        "totals":   totals,
     }
 
 
