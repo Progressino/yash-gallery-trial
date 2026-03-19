@@ -72,8 +72,18 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         except Exception:
             pass
 
-    # If still no sales data after SQLite restore, try GitHub cache (has full 2-year history)
-    if sess.sales_df.empty:
+    # Check how much history is in sales_df
+    sales_history_days = 0
+    if not sess.sales_df.empty and "TxnDate" in sess.sales_df.columns:
+        try:
+            dates = pd.to_datetime(sess.sales_df["TxnDate"], errors="coerce").dropna()
+            if not dates.empty:
+                sales_history_days = (dates.max() - dates.min()).days
+        except Exception:
+            pass
+
+    # If sales_df has < 90 days of history, load full 2-year history from GitHub cache
+    if sales_history_days < 90:
         try:
             from ..services.github_cache import load_cache_from_drive
             ok, _, loaded = load_cache_from_drive()
@@ -82,6 +92,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
                     val = loaded.get(key)
                     if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
                         setattr(sess, key, val)
+                if not sess.sku_mapping and loaded.get("sku_mapping"):
+                    sess.sku_mapping = loaded["sku_mapping"]
                 sess._quarterly_cache.clear()
         except Exception:
             pass
