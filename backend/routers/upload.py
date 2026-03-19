@@ -310,8 +310,9 @@ async def upload_inventory(
         return JSONResponse(content={"ok": False, "message": "No files provided."})
 
     try:
-        df_variant = load_inventory_consolidated(
-            oms_b_list or None, fk_b, myntra_b, amz_b, sess.sku_mapping, group_by_parent=False
+        df_variant, debug = load_inventory_consolidated(
+            oms_b_list or None, fk_b, myntra_b, amz_b, sess.sku_mapping,
+            group_by_parent=False, return_debug=True,
         )
         df_parent = load_inventory_consolidated(
             oms_b_list or None, fk_b, myntra_b, amz_b, sess.sku_mapping, group_by_parent=True
@@ -321,10 +322,16 @@ async def upload_inventory(
 
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent  = df_parent
+
+    # Build human-readable breakdown
+    parts = [f"{len(df_variant):,} total SKUs"]
+    for src, info in debug.items():
+        parts.append(f"{src}: {info}")
     return JSONResponse(content={
         "ok": True,
-        "message": f"Inventory loaded: {len(df_variant):,} SKUs.",
+        "message": " | ".join(parts),
         "rows": len(df_variant),
+        "debug": debug,
     })
 
 

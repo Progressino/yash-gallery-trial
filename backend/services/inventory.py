@@ -248,7 +248,8 @@ def load_inventory_consolidated(
     amz_bytes: Optional[bytes],
     mapping: Dict[str, str],
     group_by_parent: bool = False,
-) -> pd.DataFrame:
+    return_debug: bool = False,
+) -> "pd.DataFrame | tuple[pd.DataFrame, dict]":
     """
     Merge inventory from OMS, Flipkart, Myntra and Amazon/RAR sources.
     When amz_bytes is a RAR archive it is split into:
@@ -260,10 +261,10 @@ def load_inventory_consolidated(
     """
     inv_dfs: List[pd.DataFrame] = []
     oms_parts: List[pd.DataFrame] = []   # accumulate OMS data before merging
+    debug: dict = {}
 
     # ── Separately uploaded OMS / Combo files ────────────────
     if oms_bytes:
-        # Accept either a single bytes object or a list of bytes
         oms_list = oms_bytes if isinstance(oms_bytes, list) else [oms_bytes]
         for ob in oms_list:
             if ob:
@@ -277,7 +278,11 @@ def load_inventory_consolidated(
         if not df.empty and {"SKU", "Live on Website"}.issubset(df.columns):
             df["OMS_SKU"]       = df["SKU"].apply(lambda x: map_to_oms_sku(x, mapping))
             df["Flipkart_Live"] = pd.to_numeric(df["Live on Website"], errors="coerce").fillna(0)
-            inv_dfs.append(df.groupby("OMS_SKU")["Flipkart_Live"].sum().reset_index())
+            part = df.groupby("OMS_SKU")["Flipkart_Live"].sum().reset_index()
+            inv_dfs.append(part)
+            debug["flipkart"] = f"{len(part)} SKUs"
+        else:
+            debug["flipkart"] = f"0 SKUs (cols: {list(df.columns)[:6]})"
 
     # ── Separately uploaded Myntra file ──────────────────────
     if myntra_bytes:
@@ -285,71 +290,88 @@ def load_inventory_consolidated(
         if not df.empty:
             sku_col = next(
                 (c for c in df.columns
-                 if "seller sku code" in c.lower() or "sku code" in c.lower()), None
+                 if "seller sku" in c.lower() or "sku code" in c.lower()), None
             )
             inv_col = next(
-                (c for c in df.columns if "sellable inventory count" in c.lower()), None
+                (c for c in df.columns if "sellable" in c.lower() and "inventory" in c.lower()), None
             )
+            debug["myntra_upload_cols"] = list(df.columns)
+            debug["myntra_sku_col"] = sku_col
+            debug["myntra_inv_col"] = inv_col
             if sku_col and inv_col:
                 df["OMS_SKU"]          = df[sku_col].apply(lambda x: map_to_oms_sku(x, mapping))
                 df["Myntra_Inventory"] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
-                inv_dfs.append(df.groupby("OMS_SKU")["Myntra_Inventory"].sum().reset_index())
+                part = df.groupby("OMS_SKU")["Myntra_Inventory"].sum().reset_index()
+                inv_dfs.append(part)
+                debug["myntra"] = f"{len(part)} SKUs"
+            else:
+                debug["myntra"] = f"0 SKUs — sku_col={sku_col} inv_col={inv_col}"
+        else:
+            debug["myntra"] = "0 SKUs — empty file"
 
     # ── Amazon / RAR ─────────────────────────────────────────
     if amz_bytes:
         raw = amz_bytes
         if raw[:6] == _RAR_MAGIC:
-            # Multi-file RAR — extract all sources
             extracted = _extract_all_from_rar(raw)
+            debug["rar_files"] = {
+                "amz_csv": bool(extracted["amz_csv"]),
+                "myntra_csv": bool(extracted["myntra_csv"]),
+                "oms_csv": bool(extracted["oms_csv"]),
+                "combo_csv": bool(extracted["combo_csv"]),
+                "fba_tsvs": len(extracted["fba_tsvs"]),
+            }
 
-            # 1. Amazon other-warehouse CSV
             if extracted["amz_csv"]:
                 part = _parse_amz_csv(extracted["amz_csv"], mapping)
                 if not part.empty:
                     inv_dfs.append(part)
+                debug["amz"] = f"{len(part)} SKUs"
 
-            # 2. FBA in-transit TSVs (combine all shipments)
             fba_parts = [_parse_fba_tsv(t, mapping) for t in extracted["fba_tsvs"]]
             fba_parts = [d for d in fba_parts if not d.empty]
             if fba_parts:
                 combined = pd.concat(fba_parts, ignore_index=True)
-                inv_dfs.append(
-                    combined.groupby("OMS_SKU")["FBA_InTransit"].sum().reset_index()
-                )
+                part = combined.groupby("OMS_SKU")["FBA_InTransit"].sum().reset_index()
+                inv_dfs.append(part)
+                debug["fba"] = f"{len(part)} SKUs"
 
-            # 3. Myntra other-warehouse CSV
             if extracted["myntra_csv"]:
                 part = _parse_myntra_other(extracted["myntra_csv"], mapping)
+                debug["myntra_rar"] = f"{len(part)} SKUs"
                 if not part.empty:
                     inv_dfs.append(part)
+            else:
+                debug["myntra_rar"] = "no myntra csv found in RAR"
 
-            # 4. OMS inventory CSV (Inventory + Buffer Stock)
             if extracted["oms_csv"]:
                 part = _parse_oms_csv(extracted["oms_csv"])
                 if not part.empty:
                     oms_parts.append(part)
+                debug["oms_rar"] = f"{len(part)} SKUs"
 
-            # 5. Combo SKUs CSV
             if extracted["combo_csv"]:
                 part = _parse_combo_csv(extracted["combo_csv"])
                 if not part.empty:
                     oms_parts.append(part)
+                debug["combo_rar"] = f"{len(part)} SKUs"
 
         else:
-            # Plain CSV — treat as Amazon inventory
             part = _parse_amz_csv(raw, mapping)
             if not part.empty:
                 inv_dfs.append(part)
+            debug["amz_csv"] = f"{len(part)} SKUs"
 
     # ── Combine all OMS parts → single OMS_Inventory column ──
     if oms_parts:
         combined_oms = pd.concat(oms_parts, ignore_index=True)
-        inv_dfs.insert(
-            0,
-            combined_oms.groupby("OMS_SKU")["OMS_Inventory"].sum().reset_index(),
-        )
+        oms_part = combined_oms.groupby("OMS_SKU")["OMS_Inventory"].sum().reset_index()
+        inv_dfs.insert(0, oms_part)
+        debug["oms"] = f"{len(oms_part)} SKUs"
 
     if not inv_dfs:
+        if return_debug:
+            return pd.DataFrame(), debug
         return pd.DataFrame()
 
     # ── Outer-merge all sources on OMS_SKU ───────────────────
@@ -378,4 +400,7 @@ def load_inventory_consolidated(
             .rename(columns={"Parent_SKU": "OMS_SKU"})
         )
 
-    return consolidated[consolidated["Total_Inventory"] > 0].reset_index(drop=True)
+    result = consolidated[consolidated["Total_Inventory"] > 0].reset_index(drop=True)
+    if return_debug:
+        return result, debug
+    return result

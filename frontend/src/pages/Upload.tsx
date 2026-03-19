@@ -191,8 +191,11 @@ export default function Upload() {
               setL('inv', true)
               try {
                 const res = await uploadInventory(files)
-                if (res.ok) { showToast('success', res.message); await refresh() }
-                else showToast('error', res.message)
+                if (res.ok) {
+                  const debugStr = res.debug ? '\n' + JSON.stringify(res.debug, null, 2) : ''
+                  showToast('success', res.message + debugStr)
+                  await refresh()
+                } else showToast('error', res.message)
               } catch (e: unknown) {
                 showToast('error', e instanceof Error ? e.message : 'Upload failed')
               } finally { setL('inv', false) }

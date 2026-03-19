@@ -65,7 +65,7 @@ export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', f
 
 export async function uploadInventory(files: {
   oms?: File[]; fk?: File; myntra?: File; amz?: File
-}): Promise<{ ok: boolean; message: string; rows?: number }> {
+}): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown> }> {
   const fd = new FormData()
   if (files.oms)    files.oms.forEach(f => fd.append('oms_file', f))
   if (files.fk)     fd.append('fk_file',     files.fk)
