@@ -147,6 +147,12 @@ def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     if disp_col:
         df = df[df[disp_col].astype(str).str.strip().str.upper() == "SELLABLE"]
 
+    # ── Exclude ZNNE — Amazon virtual/accounting location, not physical warehouse stock ──
+    # ZNNE represents ~25,670 units that Amazon tracks internally but OMS excludes from
+    # "Amazon Other Warehouse".  All real FCs use 3-letter city codes (BLR7, MAA4, etc.).
+    if "Location" in df.columns:
+        df = df[df["Location"].astype(str).str.strip().str.upper() != "ZNNE"]
+
     df["OMS_SKU"]          = df["MSKU"].apply(lambda x: _resolve_amz_sku(x, mapping))
     df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
     return df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
@@ -361,7 +367,7 @@ def _parse_combo_csv(csv_bytes: bytes) -> pd.DataFrame:
     df = read_csv_safe(csv_bytes)
     if df.empty or "Combo SKU Code" not in df.columns or "Combo Qty Stock" not in df.columns:
         return pd.DataFrame()
-    df["OMS_SKU"]      = df["Combo SKU Code"].astype(str).str.strip()
+    df["OMS_SKU"]      = df["Combo SKU Code"].astype(str).str.strip().str.upper()
     df["OMS_Inventory"] = pd.to_numeric(df["Combo Qty Stock"], errors="coerce").fillna(0)
     return df.groupby("OMS_SKU")["OMS_Inventory"].sum().reset_index()
 

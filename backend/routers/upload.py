@@ -424,7 +424,7 @@ async def upload_inventory_auto(
         "rows":    len(df_variant),
         "debug":   debug,
         "detected": detected,
-        "v":       "inv-v6",   # bump to confirm new code is running
+        "v":       "inv-v7",   # bump to confirm new code is running
     })
 
 
