@@ -305,23 +305,52 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
 
 def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
     """
-    OMS inventory CSV (Item SkuCode, Inventory, Buffer Stock).
-    Returns OMS_SKU, OMS_Inventory (Inventory column only — matches OMS export exactly),
-    and Buffer_Stock as a separate column so zero-Inventory / nonzero-Buffer items remain visible.
+    OMS inventory CSV (Item SkuCode, Inventory, Buffer Stock + optional marketplace columns).
+    The Unicommerce export includes per-channel inventory as additional columns
+    (e.g. 'Amazon Other Warehouse', 'Flipkart', 'Myntra'). When present, these are
+    returned alongside OMS_Inventory so the caller can use them as authoritative figures.
+    Returns: OMS_SKU, OMS_Inventory, Buffer_Stock, and optionally
+             Amazon_Inventory, Flipkart_Inventory, Myntra_Other_Inventory.
     """
     df = read_csv_safe(csv_bytes)
     if df.empty or "Item SkuCode" not in df.columns or "Inventory" not in df.columns:
         return pd.DataFrame()
-    # Normalize case first so "1001ykbeige-xl" and "1001YKBEIGE-XL" are treated as the same SKU
     df["OMS_SKU"] = df["Item SkuCode"].astype(str).str.strip().str.upper()
-    df["_inv"]    = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
-    df["_buf"]    = pd.to_numeric(df.get("Buffer Stock", 0), errors="coerce").fillna(0)
-    # Deduplicate by SKU — OMS has one authoritative row per SKU; duplicates are export artifacts
     df = df.drop_duplicates(subset="OMS_SKU", keep="last")
-    return (
-        df[["OMS_SKU", "_inv", "_buf"]]
-        .rename(columns={"_inv": "OMS_Inventory", "_buf": "Buffer_Stock"})
+
+    result = df[["OMS_SKU"]].copy()
+    result["OMS_Inventory"] = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0).values
+
+    # Buffer Stock — flexible column name match
+    buf_col = next(
+        (c for c in df.columns if c.strip().lower() in ("buffer stock", "buffer_stock", "bufferstock", "buffer")),
+        None,
     )
+    result["Buffer_Stock"] = (
+        pd.to_numeric(df[buf_col], errors="coerce").fillna(0).values if buf_col else 0
+    )
+
+    # Auto-detect marketplace inventory columns — Unicommerce exports them as separate columns.
+    # Reading these gives exact OMS figures without relying on separate platform CSV files.
+    col_lower = {c.strip().lower(): c for c in df.columns}
+    _MKTPLACE = [
+        ("Amazon_Inventory",       [
+            "amazon other warehouse", "amazon other wh", "amazon other", "amz other warehouse",
+            "amz other wh", "amazon_other_warehouse",
+        ]),
+        ("Flipkart_Inventory",     ["flipkart inventory", "flipkart_inventory", "flipkart"]),
+        ("Myntra_Other_Inventory", [
+            "myntra other warehouse", "myntra other wh", "myntra other", "myntra inventory",
+            "myntra_other_inventory", "myntra_inventory", "myntra",
+        ]),
+    ]
+    for out_col, keywords in _MKTPLACE:
+        for kw in keywords:
+            if kw in col_lower:
+                result[out_col] = pd.to_numeric(df[col_lower[kw]], errors="coerce").fillna(0).values
+                break
+
+    return result
 
 
 def _parse_combo_csv(csv_bytes: bytes) -> pd.DataFrame:
@@ -463,6 +492,8 @@ def load_inventory_consolidated(
                     # Separate OMS file was also uploaded — skip RAR's OMS to avoid double-counting
                     debug["oms_rar"] = "skipped (separate OMS file takes precedence)"
                 else:
+                    _oms_peek = read_csv_safe(extracted["oms_csv"])
+                    debug["oms_csv_all_cols"] = list(_oms_peek.columns)
                     part = _parse_oms_csv(extracted["oms_csv"])
                     if not part.empty:
                         oms_parts.append(part)
@@ -484,13 +515,25 @@ def load_inventory_consolidated(
                 inv_dfs.append(part)
             debug["amz_csv"] = f"{len(part)} SKUs"
 
-    # ── Combine all OMS parts → single OMS_Inventory + Buffer_Stock ──
+    # ── Combine all OMS parts → single OMS_Inventory + Buffer_Stock (+ marketplace cols) ──
     if oms_parts:
         combined_oms = pd.concat(oms_parts, ignore_index=True)
-        agg_cols = [c for c in ["OMS_Inventory", "Buffer_Stock"] if c in combined_oms.columns]
+        _all_src = ["OMS_Inventory", "Buffer_Stock", "Amazon_Inventory", "Flipkart_Inventory", "Myntra_Other_Inventory"]
+        agg_cols = [c for c in _all_src if c in combined_oms.columns]
         oms_part = combined_oms.groupby("OMS_SKU")[agg_cols].sum().reset_index()
         inv_dfs.insert(0, oms_part)
         debug["oms"] = f"{len(oms_part)} SKUs"
+
+        # If OMS CSV provides marketplace columns, they are authoritative (same source as OMS UI).
+        # Remove those columns from separately parsed sources to avoid double-counting.
+        oms_mkt_cols = {c for c in ["Amazon_Inventory", "Flipkart_Inventory", "Myntra_Other_Inventory"]
+                        if c in oms_part.columns and oms_part[c].sum() > 0}
+        if oms_mkt_cols:
+            debug["oms_provides_marketplace"] = sorted(oms_mkt_cols)
+            for i in range(1, len(inv_dfs)):
+                drop = [c for c in oms_mkt_cols if c in inv_dfs[i].columns]
+                if drop:
+                    inv_dfs[i] = inv_dfs[i].drop(columns=drop)
 
     if not inv_dfs:
         if return_debug:
