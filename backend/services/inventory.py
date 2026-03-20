@@ -110,15 +110,43 @@ def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
 
 
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
-    """Amazon other-warehouse CSV: SELLABLE disposition only to match OMS totals. Returns OMS_SKU, Amazon_Inventory."""
+    """
+    Amazon Inventory Ledger CSV (Summary view).
+    The report has one row per MSKU × Disposition × Location × Date — multi-period exports
+    contain many date rows per MSKU.  We keep only the MOST RECENT date per
+    (MSKU, Disposition, Location) before summing, giving current stock levels.
+    Then filter to SELLABLE disposition to match OMS 'Amazon Other Warehouse'.
+    Returns OMS_SKU, Amazon_Inventory.
+    """
     df = read_csv_safe(csv_bytes)
     if df.empty or not {"MSKU", "Ending Warehouse Balance"}.issubset(df.columns):
         return pd.DataFrame()
-    # Filter to SELLABLE disposition only — matches OMS "Amazon Other Warehouse" figure
-    # (Inventory Ledger report has SELLABLE, UNSELLABLE, IN_TRANSIT, INBOUND_RECEIVING etc.)
+
+    # ── Deduplicate by keeping the most recent Date per (MSKU, Disposition, Location) ──
+    # Amazon Inventory Ledger exported over a date range has one row per period per SKU;
+    # summing all periods inflates the total.  Only the latest row = current balance.
+    group_keys = ["MSKU"]
+    if "Disposition" in df.columns:
+        group_keys.append("Disposition")
+    if "Location" in df.columns:
+        group_keys.append("Location")
+
+    if "Date" in df.columns:
+        df["_date_parsed"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=False)
+        # Within each (MSKU, Disposition, Location) group keep only the latest date row
+        df = (
+            df.sort_values("_date_parsed")
+              .groupby(group_keys, sort=False)
+              .last()
+              .reset_index()
+        )
+        df = df.drop(columns=["_date_parsed"], errors="ignore")
+
+    # ── Filter to SELLABLE only ──────────────────────────────────────────────────────
     disp_col = next((c for c in df.columns if c.strip().lower() in ("disposition", "inventory disposition")), None)
     if disp_col:
         df = df[df[disp_col].astype(str).str.strip().str.upper() == "SELLABLE"]
+
     df["OMS_SKU"]          = df["MSKU"].apply(lambda x: _resolve_amz_sku(x, mapping))
     df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
     return df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
@@ -427,16 +455,24 @@ def load_inventory_consolidated(
                 debug["myntra_rar"] = "no myntra csv found in RAR"
 
             if extracted["oms_csv"]:
-                part = _parse_oms_csv(extracted["oms_csv"])
-                if not part.empty:
-                    oms_parts.append(part)
-                debug["oms_rar"] = f"{len(part)} SKUs"
+                if oms_bytes:
+                    # Separate OMS file was also uploaded — skip RAR's OMS to avoid double-counting
+                    debug["oms_rar"] = "skipped (separate OMS file takes precedence)"
+                else:
+                    part = _parse_oms_csv(extracted["oms_csv"])
+                    if not part.empty:
+                        oms_parts.append(part)
+                    debug["oms_rar"] = f"{len(part)} SKUs"
 
             if extracted["combo_csv"]:
-                part = _parse_combo_csv(extracted["combo_csv"])
-                if not part.empty:
-                    oms_parts.append(part)
-                debug["combo_rar"] = f"{len(part)} SKUs"
+                if oms_bytes:
+                    # Same: skip RAR's Combo CSV if separate OMS was uploaded
+                    debug["combo_rar"] = "skipped (separate OMS file takes precedence)"
+                else:
+                    part = _parse_combo_csv(extracted["combo_csv"])
+                    if not part.empty:
+                        oms_parts.append(part)
+                    debug["combo_rar"] = f"{len(part)} SKUs"
 
         else:
             part = _parse_amz_csv(raw, mapping)
