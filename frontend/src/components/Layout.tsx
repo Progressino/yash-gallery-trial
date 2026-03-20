@@ -5,19 +5,35 @@ import { useSession } from '../store/session'
 import { cacheLoad, cacheSave, getCoverage } from '../api/client'
 import api from '../api/client'
 
-const NAV_ITEMS = [
-  { to: '/',          label: '📊 Intelligence' },
-  { to: '/upload',    label: '📁 Upload Data' },
-  { to: '/mtr',       label: '📦 Amazon' },
-  { to: '/myntra',    label: '🛍️ Myntra' },
-  { to: '/meesho',    label: '🛒 Meesho' },
-  { to: '/flipkart',  label: '🟡 Flipkart' },
-  { to: '/inventory', label: '📦 Inventory' },
-  { to: '/po',        label: '🎯 PO Engine' },
-  { to: '/forecast',  label: '📈 AI Forecast' },
-  { to: '/finance',   label: '💰 Finance' },
-  { to: '/items',     label: '🏭 Item Master' },
-  { to: '/snapdeal',  label: '🔴 Snapdeal' },
+const NAV_GROUPS = [
+  {
+    label: 'Sales & Analytics',
+    items: [
+      { to: '/',          label: '📊 Intelligence' },
+      { to: '/upload',    label: '📁 Upload Data' },
+      { to: '/mtr',       label: '📦 Amazon' },
+      { to: '/myntra',    label: '🛍️ Myntra' },
+      { to: '/meesho',    label: '🛒 Meesho' },
+      { to: '/flipkart',  label: '🟡 Flipkart' },
+      { to: '/snapdeal',  label: '🔴 Snapdeal' },
+      { to: '/forecast',  label: '📈 AI Forecast' },
+      { to: '/finance',   label: '💰 Finance' },
+    ],
+  },
+  {
+    label: 'ERP',
+    items: [
+      { to: '/sales',      label: '🧾 Sales Orders' },
+      { to: '/items',      label: '🏭 Item Master' },
+      { to: '/purchase',   label: '🛒 Purchase' },
+      { to: '/tna',        label: '📅 TNA Calendar' },
+      { to: '/production', label: '⚙️ Production' },
+      { to: '/grey',       label: '🧵 Grey Fabric' },
+      { to: '/inventory',  label: '📦 Inventory' },
+      { to: '/po',         label: '🎯 PO Engine' },
+      { to: '/admin',      label: '🔐 Admin' },
+    ],
+  },
 ]
 
 export default function Layout() {
@@ -104,22 +120,27 @@ export default function Layout() {
         </div>
 
         <nav className="flex-1 overflow-y-auto py-2">
-          {NAV_ITEMS.map(({ to, label }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              onClick={closeSidebar}
-              className={({ isActive }) =>
-                `block px-4 py-2 text-sm transition-colors ${
-                  isActive
-                    ? 'bg-[#002B5B] text-white font-semibold'
-                    : 'text-gray-600 hover:bg-gray-50'
-                }`
-              }
-            >
-              {label}
-            </NavLink>
+          {NAV_GROUPS.map(({ label, items }) => (
+            <div key={label}>
+              <p className="px-4 pt-3 pb-1 text-[10px] font-bold text-gray-400 uppercase tracking-widest">{label}</p>
+              {items.map(({ to, label: navLabel }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={to === '/'}
+                  onClick={closeSidebar}
+                  className={({ isActive }) =>
+                    `block px-4 py-1.5 text-sm transition-colors ${
+                      isActive
+                        ? 'bg-[#002B5B] text-white font-semibold'
+                        : 'text-gray-600 hover:bg-gray-50'
+                    }`
+                  }
+                >
+                  {navLabel}
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
 

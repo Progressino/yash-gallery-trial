@@ -14,11 +14,29 @@ from .routers import upload, data, cache, po, auth as auth_router
 from .routers.auth import verify_token
 from .routers.finance import router as finance_router
 from .routers.item import router as item_router
+from .routers.sales import router as sales_router
+from .routers.purchase import router as purchase_router
+from .routers.tna import router as tna_router
+from .routers.production import router as production_router
+from .routers.grey import router as grey_router
+from .routers.erp_admin import router as erp_admin_router
 from .db.finance_db import init_db
 from .db.item_db import init_db as init_item_db
+from .db.sales_db import init_db as init_sales_db
+from .db.purchase_db import init_db as init_purchase_db
+from .db.tna_db import init_db as init_tna_db
+from .db.production_db import init_db as init_production_db
+from .db.grey_db import init_db as init_grey_db
+from .db.users_db import init_db as init_users_db
 
 init_db()
 init_item_db()
+init_sales_db()
+init_purchase_db()
+init_tna_db()
+init_production_db()
+init_grey_db()
+init_users_db()
 
 app = FastAPI(
     title="Yash Gallery ERP API",
@@ -88,13 +106,19 @@ async def session_middleware(request: Request, call_next):
 
 
 # ── Routers ───────────────────────────────────────────────────
-app.include_router(auth_router.router, prefix="/api/auth",    tags=["auth"])
-app.include_router(upload.router,      prefix="/api/upload",  tags=["upload"])
-app.include_router(data.router,        prefix="/api/data",    tags=["data"])
-app.include_router(cache.router,       prefix="/api/cache",   tags=["cache"])
-app.include_router(po.router,          prefix="/api/po",      tags=["po"])
-app.include_router(finance_router,     prefix="/api/finance", tags=["finance"])
-app.include_router(item_router,        prefix="/api/items",   tags=["items"])
+app.include_router(auth_router.router, prefix="/api/auth",       tags=["auth"])
+app.include_router(upload.router,      prefix="/api/upload",     tags=["upload"])
+app.include_router(data.router,        prefix="/api/data",       tags=["data"])
+app.include_router(cache.router,       prefix="/api/cache",      tags=["cache"])
+app.include_router(po.router,          prefix="/api/po",         tags=["po"])
+app.include_router(finance_router,     prefix="/api/finance",    tags=["finance"])
+app.include_router(item_router,        prefix="/api/items",      tags=["items"])
+app.include_router(sales_router,       prefix="/api/sales",      tags=["sales"])
+app.include_router(purchase_router,    prefix="/api/purchase",   tags=["purchase"])
+app.include_router(tna_router,         prefix="/api/tna",        tags=["tna"])
+app.include_router(production_router,  prefix="/api/production", tags=["production"])
+app.include_router(grey_router,        prefix="/api/grey",       tags=["grey"])
+app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])
 
 
 @app.get("/api/health")

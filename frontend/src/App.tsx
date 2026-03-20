@@ -13,6 +13,12 @@ import Forecast from './pages/Forecast'
 import Finance from './pages/Finance'
 import ItemMaster from './pages/ItemMaster'
 import Snapdeal from './pages/Snapdeal'
+import SalesOrders from './pages/SalesOrders'
+import Purchase from './pages/Purchase'
+import TNA from './pages/TNA'
+import Production from './pages/Production'
+import GreyFabric from './pages/GreyFabric'
+import Admin from './pages/Admin'
 import Login from './pages/Login'
 import api from './api/client'
 
@@ -58,8 +64,14 @@ export default function App() {
               <Route path="po"        element={<POEngine />} />
               <Route path="forecast"  element={<Forecast />} />
               <Route path="finance"   element={<Finance />} />
-              <Route path="items"     element={<ItemMaster />} />
+              <Route path="items"      element={<ItemMaster />} />
               <Route path="snapdeal"  element={<Snapdeal />} />
+              <Route path="sales"     element={<SalesOrders />} />
+              <Route path="purchase"  element={<Purchase />} />
+              <Route path="tna"       element={<TNA />} />
+              <Route path="production" element={<Production />} />
+              <Route path="grey"      element={<GreyFabric />} />
+              <Route path="admin"     element={<Admin />} />
             </Route>
           </Route>
         </Routes>
