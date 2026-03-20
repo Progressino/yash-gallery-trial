@@ -428,11 +428,15 @@ def load_inventory_consolidated(
                     _amz_peek["Disposition"].dropna().unique().tolist()
                     if "Disposition" in _amz_peek.columns else "no Disposition col"
                 )
-                # Also expose first value of every column so we can see candidate filter columns
-                debug["amz_csv_first_row"] = (
-                    {c: str(_amz_peek[c].iloc[0]) for c in _amz_peek.columns}
-                    if not _amz_peek.empty else {}
-                )
+                # Expose Location → inventory sum breakdown to identify which locations OMS counts
+                if not _amz_peek.empty and "Location" in _amz_peek.columns and "Ending Warehouse Balance" in _amz_peek.columns:
+                    _amz_peek["_bal"] = pd.to_numeric(_amz_peek["Ending Warehouse Balance"], errors="coerce").fillna(0)
+                    _amz_sellable = _amz_peek[_amz_peek.get("Disposition", pd.Series(dtype=str)).astype(str).str.strip().str.upper() == "SELLABLE"] if "Disposition" in _amz_peek.columns else _amz_peek
+                    debug["amz_location_totals"] = (
+                        _amz_sellable.groupby("Location")["_bal"].sum()
+                        .sort_values(ascending=False).head(30).to_dict()
+                    )
+                    debug["amz_sellable_total"] = int(_amz_sellable["_bal"].sum())
                 part = _parse_amz_csv(extracted["amz_csv"], mapping)
                 if not part.empty:
                     inv_dfs.append(part)
