@@ -410,6 +410,7 @@ async def upload_inventory_auto(
 
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent  = df_parent
+    sess.inventory_debug      = debug   # persist so /data/inventory can expose it
     background_tasks.add_task(_auto_save_cache, sess)
 
     parts = [f"{len(df_variant):,} total SKUs"]

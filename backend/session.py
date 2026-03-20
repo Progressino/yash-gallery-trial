@@ -40,6 +40,7 @@ class AppSession:
 
     # ── Parse diagnostics ────────────────────────────────────
     snapdeal_parse_info: dict = field(default_factory=dict)  # raw cols + detected fields per file
+    inventory_debug: dict = field(default_factory=dict)      # debug info from last inventory upload
 
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session

@@ -449,6 +449,7 @@ def get_inventory(request: Request):
         "rows":     df.fillna(0).to_dict("records"),
         "columns":  ["OMS_SKU"] + cols,
         "totals":   totals,
+        "debug":    getattr(sess, "inventory_debug", {}),
     }
 
 

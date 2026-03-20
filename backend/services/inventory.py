@@ -224,11 +224,9 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
         return pd.DataFrame()
     sku_col   = next((c for c in df.columns if "seller sku" in c.lower()), None)
     style_col = next((c for c in df.columns if "style" in c.lower() and "id" in c.lower()), None)
-    # Prefer "sellable inventory count" — matches OMS Myntra Other Warehouse figure exactly.
-    # Plain "inventory count" can differ slightly (includes non-sellable states).
-    inv_col = next((c for c in df.columns if "sellable" in c.lower() and "inventory" in c.lower() and "count" in c.lower()), None)
-    if inv_col is None:
-        inv_col = next((c for c in df.columns if c.lower().strip() == "inventory count"), None)
+    # Use "inventory count" (total warehouse stock) — matches OMS Myntra Other Warehouse figure.
+    # "sellable inventory count" is per-listing stock (lower); "inventory count" is the physical count.
+    inv_col = next((c for c in df.columns if c.lower().strip() == "inventory count"), None)
     if inv_col is None:
         inv_col = next((c for c in df.columns if "inventory" in c.lower() and "count" in c.lower()), None)
     if inv_col is None:
@@ -395,6 +393,18 @@ def load_inventory_consolidated(
             }
 
             if extracted["amz_csv"]:
+                # Log all columns so we can identify the right filter for Other Warehouse
+                _amz_peek = read_csv_safe(extracted["amz_csv"])
+                debug["amz_csv_cols"] = list(_amz_peek.columns) if not _amz_peek.empty else []
+                debug["amz_csv_sample_dispositions"] = (
+                    _amz_peek["Disposition"].dropna().unique().tolist()
+                    if "Disposition" in _amz_peek.columns else "no Disposition col"
+                )
+                # Also expose first value of every column so we can see candidate filter columns
+                debug["amz_csv_first_row"] = (
+                    {c: str(_amz_peek[c].iloc[0]) for c in _amz_peek.columns}
+                    if not _amz_peek.empty else {}
+                )
                 part = _parse_amz_csv(extracted["amz_csv"], mapping)
                 if not part.empty:
                     inv_dfs.append(part)
