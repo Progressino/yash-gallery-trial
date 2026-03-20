@@ -110,10 +110,15 @@ def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
 
 
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
-    """Amazon other-warehouse CSV: count all inventory to match OMS totals. Returns OMS_SKU, Amazon_Inventory."""
+    """Amazon other-warehouse CSV: SELLABLE disposition only to match OMS totals. Returns OMS_SKU, Amazon_Inventory."""
     df = read_csv_safe(csv_bytes)
     if df.empty or not {"MSKU", "Ending Warehouse Balance"}.issubset(df.columns):
         return pd.DataFrame()
+    # Filter to SELLABLE disposition only — matches OMS "Amazon Other Warehouse" figure
+    # (Inventory Ledger report has SELLABLE, UNSELLABLE, IN_TRANSIT, INBOUND_RECEIVING etc.)
+    disp_col = next((c for c in df.columns if c.strip().lower() in ("disposition", "inventory disposition")), None)
+    if disp_col:
+        df = df[df[disp_col].astype(str).str.strip().str.upper() == "SELLABLE"]
     df["OMS_SKU"]          = df["MSKU"].apply(lambda x: _resolve_amz_sku(x, mapping))
     df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
     return df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
@@ -155,16 +160,11 @@ def _parse_fba_tsv(tsv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     )
 
 
-# Flipkart stock columns that represent physical units at the warehouse
+# Flipkart stock columns — only physically available/sellable units (matches OMS Flipkart count).
+# "Orders to Dispatch", "Recalls to Dispatch", "Returns Processing" are excluded because
+# OMS does not count stock that is already committed/dispatched/in returns.
 _FK_STOCK_COLS = [
     "Live on Website",
-    "B2B Receiving",
-    "Transfers Receiving",
-    "Reserved for Orders and Recalls",
-    "Reserved for Internal Processing",
-    "Returns Processing",
-    "Orders to Dispatch",
-    "Recalls to Dispatch",
 ]
 
 
