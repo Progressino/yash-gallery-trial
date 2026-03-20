@@ -385,9 +385,11 @@ async def upload_inventory_auto(
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
 
-    # If existing session inventory is present, MERGE rather than replace.
-    # This lets users upload RAR + Flipkart CSVs in separate drops and combine them.
-    if not sess.inventory_df_variant.empty:
+    # RAR upload contains all sources (OMS + Amazon + Myntra + FBA) — always REPLACE
+    # the full inventory so stale cached values never bleed through.
+    # Only MERGE when uploading a single-source file (Flipkart-only, etc.) on top of existing data.
+    has_rar = amz_bytes is not None and amz_bytes[:6] == b"Rar!\x1a\x07"
+    if not has_rar and not sess.inventory_df_variant.empty:
         df_variant = merge_inventory_update(sess.inventory_df_variant, df_variant)
 
     # Rebuild parent view from merged variant DF (group by parent SKU)
@@ -422,6 +424,7 @@ async def upload_inventory_auto(
         "rows":    len(df_variant),
         "debug":   debug,
         "detected": detected,
+        "v":       "inv-v6",   # bump to confirm new code is running
     })
 
 
