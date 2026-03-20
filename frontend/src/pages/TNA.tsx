@@ -19,7 +19,7 @@ interface TNAStats { total: number; active: number; delayed_activities: number; 
 
 const PRIORITIES = ['Normal', 'High', 'Urgent']
 const LINE_STATUSES = ['Not Started', 'In Progress', 'Completed', 'Delayed', 'Cancelled']
-const GROUPS = ['Merchandising', 'Fabric', 'Sampling', 'CAD', 'Purchase', 'Printing', 'Dyeing', 'Cutting', 'Stitching', 'Finishing', 'Packing', 'Quality', 'Dispatch', 'Logistics']
+
 
 const statusColor = (s: string) => {
   if (s === 'Completed') return 'bg-green-100 text-green-700'

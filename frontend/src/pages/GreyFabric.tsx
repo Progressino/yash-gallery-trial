@@ -14,7 +14,7 @@ interface GreyEntry {
   status: string; qc_status: string; qc_checked_by: string; qc_remarks: string
 }
 interface LedgerEntry { id: number; entry_date: string; material_code: string; material_name: string; transaction_type: string; qty: number; from_location: string; to_location: string; reference_no: string; remarks: string }
-interface HardReservation { id: number; fabric_code: string; fabric_name: string; so_number: string; sku: string; qty: number; unit: string; status: string }
+interface HardReservation { id: number; fabric_code: string; fabric_name: string; so_number: string; sku: string; qty: number; unit: string; status: string; reserved_date: string }
 
 const STATUSES = ['PO Created', 'Vendor Dispatch Pending', 'In Transit', 'At Transport Location', 'Sent to Factory', 'At Factory', 'Sent to Printer', 'At Printer', 'Printed Fabric Received', 'QC Pass', 'QC Reject', 'Rework', 'Closed']
 

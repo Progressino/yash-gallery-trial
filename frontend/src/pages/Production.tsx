@@ -12,7 +12,7 @@ interface JobOrder {
   status: string; expected_completion: string; issued_to: string
 }
 interface MRPItem { material_code: string; material_name: string; unit: string; required_qty: number; reserved_qty: number; net_requirement: number; so_refs: string[] }
-interface SoftReservation { id: number; material_code: string; material_name: string; reserved_qty: number; unit: string; against_so: string; status: string }
+interface SoftReservation { id: number; material_code: string; material_name: string; reserved_qty: number; unit: string; against_so: string; status: string; reservation_date: string }
 
 const PROCESSES = ['Cutting', 'Stitching', 'Finishing', 'Embroidery', 'Dyeing', 'Kaja Button', 'Packing', 'Quality Check', 'Other']
 const JO_STATUSES = ['Created', 'Material Issued', 'In Progress', 'Partially Completed', 'Completed', 'Closed', 'Cancelled']

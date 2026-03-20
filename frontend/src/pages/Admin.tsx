@@ -6,7 +6,7 @@ type Tab = 'dashboard' | 'users' | 'roles' | 'activity'
 
 interface AdminStats { total_users: number; total_roles: number; recent_activity: number; by_role: { role_name: string; cnt: number }[] }
 interface ERPUser { id: number; username: string; email: string; full_name: string; role_id: number; role_name: string; department: string; active: number; created_at: string }
-interface Role { id: number; role_name: string; description: string }
+interface Role { id: number; role_name: string; description: string; created_at: string }
 interface ActivityLog { id: number; username: string; action: string; document_type: string; document_no: string; details: string; created_at: string }
 
 const DEPARTMENTS = ['Sales', 'Merchandising', 'Stores', 'Production', 'Quality', 'Logistics', 'Finance', 'Admin']

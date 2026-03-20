@@ -377,7 +377,7 @@ export default function Purchase() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 {[['supplier_name','Supplier Name'],['delivery_date','Delivery Date'],['payment_terms','Payment Terms'],['delivery_location','Delivery Location'],['pr_reference','PR Reference'],['so_reference','SO Reference'],['remarks','Remarks']].map(([k,l]) => (
                   <div key={k}><label className="text-xs text-gray-500">{l}</label>
-                    <input type={k === 'delivery_date' ? 'date' : 'text'} value={(poForm as Record<string,string>)[k]}
+                    <input type={k === 'delivery_date' ? 'date' : 'text'} value={(poForm as Record<string,unknown>)[k] as string}
                       onChange={e => setPOForm(f => ({ ...f, [k]: e.target.value }))}
                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
                   </div>
@@ -475,7 +475,7 @@ export default function Purchase() {
                 </div>
                 {[['expected_return_date','Return Date','date'],['so_reference','SO Reference','text'],['issued_by','Issued By','text']].map(([k,l,t]) => (
                   <div key={k}><label className="text-xs text-gray-500">{l}</label>
-                    <input type={t} value={(jwoForm as Record<string,string>)[k]}
+                    <input type={t} value={(jwoForm as Record<string,unknown>)[k] as string}
                       onChange={e => setJWOForm(f => ({ ...f, [k]: e.target.value }))}
                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
                   </div>
