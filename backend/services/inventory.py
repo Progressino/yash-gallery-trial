@@ -224,8 +224,11 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
         return pd.DataFrame()
     sku_col   = next((c for c in df.columns if "seller sku" in c.lower()), None)
     style_col = next((c for c in df.columns if "style" in c.lower() and "id" in c.lower()), None)
-    # Prefer exact "inventory count" over "sellable inventory count"
-    inv_col = next((c for c in df.columns if c.lower().strip() == "inventory count"), None)
+    # Prefer "sellable inventory count" — matches OMS Myntra Other Warehouse figure exactly.
+    # Plain "inventory count" can differ slightly (includes non-sellable states).
+    inv_col = next((c for c in df.columns if "sellable" in c.lower() and "inventory" in c.lower() and "count" in c.lower()), None)
+    if inv_col is None:
+        inv_col = next((c for c in df.columns if c.lower().strip() == "inventory count"), None)
     if inv_col is None:
         inv_col = next((c for c in df.columns if "inventory" in c.lower() and "count" in c.lower()), None)
     if inv_col is None:
@@ -283,7 +286,8 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
     df = read_csv_safe(csv_bytes)
     if df.empty or "Item SkuCode" not in df.columns or "Inventory" not in df.columns:
         return pd.DataFrame()
-    df["OMS_SKU"] = df["Item SkuCode"].astype(str).str.strip()
+    # Normalize case first so "1001ykbeige-xl" and "1001YKBEIGE-XL" are treated as the same SKU
+    df["OMS_SKU"] = df["Item SkuCode"].astype(str).str.strip().str.upper()
     df["_inv"]    = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
     df["_buf"]    = pd.to_numeric(df.get("Buffer Stock", 0), errors="coerce").fillna(0)
     # Deduplicate by SKU — OMS has one authoritative row per SKU; duplicates are export artifacts
@@ -468,8 +472,9 @@ def load_inventory_consolidated(
     mkt_cols = [c for c in inv_cols if "OMS" not in c and c != "Buffer_Stock"]
     consolidated["Marketplace_Total"] = consolidated[mkt_cols].sum(axis=1) if mkt_cols else 0
     oms_inv    = consolidated.get("OMS_Inventory", pd.Series(0, index=consolidated.index))
-    buf_stock  = consolidated.get("Buffer_Stock",  pd.Series(0, index=consolidated.index))
-    consolidated["Total_Inventory"] = oms_inv + buf_stock + consolidated["Marketplace_Total"]
+    # Buffer_Stock is shown as a separate informational column but NOT added to Total_Inventory.
+    # OMS exports "Inventory" as the complete figure; adding Buffer_Stock would double-count it.
+    consolidated["Total_Inventory"] = oms_inv + consolidated["Marketplace_Total"]
 
     if group_by_parent:
         consolidated["Parent_SKU"] = consolidated["OMS_SKU"].apply(get_parent_sku)
@@ -531,7 +536,7 @@ def merge_inventory_update(existing: pd.DataFrame, update: pd.DataFrame) -> pd.D
     mkt_cols = [c for c in inv_cols if "OMS" not in c and c != "Buffer_Stock"]
     result["Marketplace_Total"] = result[mkt_cols].sum(axis=1) if mkt_cols else 0
     oms_inv   = result.get("OMS_Inventory", pd.Series(0, index=result.index))
-    buf_stock = result.get("Buffer_Stock",  pd.Series(0, index=result.index))
-    result["Total_Inventory"] = oms_inv + buf_stock + result["Marketplace_Total"]
+    # Buffer_Stock is informational only — not added to Total_Inventory (would double-count OMS figure)
+    result["Total_Inventory"] = oms_inv + result["Marketplace_Total"]
 
     return result[result["Total_Inventory"] > 0].reset_index(drop=True)
