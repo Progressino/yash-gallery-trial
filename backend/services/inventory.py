@@ -322,22 +322,14 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
     if df.empty or "Item SkuCode" not in df.columns or "Inventory" not in df.columns:
         return pd.DataFrame()
     df["OMS_SKU"] = df["Item SkuCode"].astype(str).str.strip().str.upper()
-    df = df.drop_duplicates(subset="OMS_SKU", keep="last")
 
-    result = df[["OMS_SKU"]].copy()
-    result["OMS_Inventory"] = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0).values
-
-    # Buffer Stock — flexible column name match
+    # Buffer Stock — flexible column name match (before dedup so we can sum it)
     buf_col = next(
         (c for c in df.columns if c.strip().lower() in ("buffer stock", "buffer_stock", "bufferstock", "buffer")),
         None,
     )
-    result["Buffer_Stock"] = (
-        pd.to_numeric(df[buf_col], errors="coerce").fillna(0).values if buf_col else 0
-    )
 
-    # Auto-detect marketplace inventory columns — Unicommerce exports them as separate columns.
-    # Reading these gives exact OMS figures without relying on separate platform CSV files.
+    # Auto-detect marketplace inventory columns
     col_lower = {c.strip().lower(): c for c in df.columns}
     _MKTPLACE = [
         ("Amazon_Inventory",       [
@@ -350,11 +342,29 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
             "myntra_other_inventory", "myntra_inventory", "myntra",
         ]),
     ]
+
+    # Build numeric columns to aggregate
+    agg_cols = {"OMS_Inventory": ("Inventory", "sum")}
+    if buf_col:
+        agg_cols["Buffer_Stock"] = (buf_col, "sum")
     for out_col, keywords in _MKTPLACE:
         for kw in keywords:
             if kw in col_lower:
-                result[out_col] = pd.to_numeric(df[col_lower[kw]], errors="coerce").fillna(0).values
+                agg_cols[out_col] = (col_lower[kw], "sum")
                 break
+
+    # Convert to numeric before groupby
+    df["OMS_Inventory"] = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
+    if buf_col:
+        df["Buffer_Stock"] = pd.to_numeric(df[buf_col], errors="coerce").fillna(0)
+    for out_col, (src_col, _) in {k: v for k, v in agg_cols.items() if k not in ("OMS_Inventory", "Buffer_Stock")}.items():
+        df[out_col] = pd.to_numeric(df[src_col], errors="coerce").fillna(0)
+
+    numeric_cols = list(agg_cols.keys())
+    result = df.groupby("OMS_SKU", as_index=False)[numeric_cols].sum()
+
+    if "Buffer_Stock" not in result.columns:
+        result["Buffer_Stock"] = 0
 
     return result
 
