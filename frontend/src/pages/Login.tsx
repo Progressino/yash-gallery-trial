@@ -1,14 +1,17 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import api from '../api/client'
+import api, { cacheLoad, getCoverage } from '../api/client'
+import { useSession } from '../store/session'
 
 export default function Login() {
   const nav = useNavigate()
+  const setCoverage = useSession(s => s.setCoverage)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError]       = useState('')
   const [loading, setLoading]   = useState(false)
+  const [loadStep, setLoadStep] = useState('')
   const [showPwd, setShowPwd]   = useState(false)
 
   const submit = async (e: FormEvent) => {
@@ -16,12 +19,24 @@ export default function Login() {
     setError('')
     setLoading(true)
     try {
+      setLoadStep('Signing in…')
       await api.post('/auth/login', { username, password })
+      setLoadStep('Loading your data…')
+      await cacheLoad()
+      const coverage = await getCoverage()
+      setCoverage(coverage)
       nav('/', { replace: true })
-    } catch {
-      setError('Invalid username or password')
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      if (status === 401) {
+        setError('Invalid username or password')
+      } else {
+        // Cache load failed (non-critical) — still navigate in
+        nav('/', { replace: true })
+      }
     } finally {
       setLoading(false)
+      setLoadStep('')
     }
   }
 
@@ -154,7 +169,7 @@ export default function Login() {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                     </svg>
-                    Signing in…
+                    {loadStep || 'Signing in…'}
                   </span>
                 ) : 'Sign In'}
               </button>
