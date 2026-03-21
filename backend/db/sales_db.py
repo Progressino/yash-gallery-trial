@@ -108,9 +108,9 @@ def create_demand(data: dict):
     num = _next_num(conn, 'demands', 'demand_number', 'DEM')
     conn.execute("""INSERT INTO demands(demand_number,demand_date,demand_source,buyer,priority,status,notes)
         VALUES(?,?,?,?,?,?,?)""",
-        (num, data.get('demand_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('demand_source','Sales Team'), data.get('buyer',''),
-         data.get('priority','Normal'), data.get('status','Draft'), data.get('notes','')))
+        (num, data.get('demand_date') or datetime.now().strftime('%Y-%m-%d'),
+         data.get('demand_source') or 'Sales Team', data.get('buyer') or '',
+         data.get('priority') or 'Normal', data.get('status') or 'Draft', data.get('notes') or ''))
     did = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         conn.execute("INSERT INTO demand_lines(demand_id,sku,sku_name,demand_qty) VALUES(?,?,?,?)",
@@ -151,11 +151,11 @@ def create_order(data: dict):
     conn.execute("""INSERT INTO sales_orders(so_number,so_date,buyer,warehouse,sales_team,source_type,
         ref_demand,delivery_date,payment_terms,status,notes)
         VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-        (num, data.get('so_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('buyer',''), data.get('warehouse',''), data.get('sales_team',''),
-         data.get('source_type','Sales Team Demand'), data.get('ref_demand',''),
-         data.get('delivery_date',''), data.get('payment_terms',''),
-         data.get('status','Draft'), data.get('notes','')))
+        (num, data.get('so_date') or datetime.now().strftime('%Y-%m-%d'),
+         data.get('buyer') or '', data.get('warehouse') or '', data.get('sales_team') or '',
+         data.get('source_type') or 'Sales Team Demand', data.get('ref_demand') or '',
+         data.get('delivery_date') or '', data.get('payment_terms') or '',
+         data.get('status') or 'Draft', data.get('notes') or ''))
     soid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         conn.execute(

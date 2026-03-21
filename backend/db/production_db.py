@@ -91,12 +91,12 @@ def create_jo(data: dict):
     conn.execute("""INSERT INTO job_orders(jo_number,jo_date,so_number,sku,sku_name,process,exec_type,vendor_name,
         so_qty,planned_qty,status,expected_completion,issued_to,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (num, data.get('jo_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('so_number',''), data.get('sku',''), data.get('sku_name',''),
-         data.get('process','Cutting'), data.get('exec_type','Inhouse'),
-         data.get('vendor_name',''), data.get('so_qty',0), data.get('planned_qty',0),
-         'Created', data.get('expected_completion',''),
-         data.get('issued_to',''), data.get('remarks','')))
+        (num, data.get('jo_date') or datetime.now().strftime('%Y-%m-%d'),
+         data.get('so_number') or '', data.get('sku') or '', data.get('sku_name') or '',
+         data.get('process') or 'Cutting', data.get('exec_type') or 'Inhouse',
+         data.get('vendor_name') or '', data.get('so_qty') or 0, data.get('planned_qty') or 0,
+         'Created', data.get('expected_completion') or '',
+         data.get('issued_to') or '', data.get('remarks') or ''))
     joid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         conn.execute("""INSERT INTO jo_lines(jo_id,sku,sku_name,planned_qty,input_material,input_qty,input_unit,remarks)

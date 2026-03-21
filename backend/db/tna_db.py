@@ -151,17 +151,17 @@ def get_tna(tid: int):
 def create_tna(data: dict):
     conn = _connect()
     num = _next_num(conn)
-    delivery = data.get('delivery_date', '')
-    template = data.get('template_used', 'Domestic Order TNA')
+    delivery = data.get('delivery_date') or ''
+    template = data.get('template_used') or 'Domestic Order TNA'
     conn.execute("""INSERT INTO tna_list(tna_number,so_number,style_name,buyer,po_number,merchandiser,season,
         order_qty,delivery_date,exfactory_date,shipment_date,priority,status,template_used)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (num, data.get('so_number',''), data.get('style_name',''),
-         data.get('buyer',''), data.get('po_number',''),
-         data.get('merchandiser',''), data.get('season',''),
-         data.get('order_qty',0), delivery,
-         data.get('exfactory_date',''), data.get('shipment_date',''),
-         data.get('priority','Normal'), 'Active', template))
+        (num, data.get('so_number') or '', data.get('style_name') or '',
+         data.get('buyer') or '', data.get('po_number') or '',
+         data.get('merchandiser') or '', data.get('season') or '',
+         data.get('order_qty') or 0, delivery,
+         data.get('exfactory_date') or '', data.get('shipment_date') or '',
+         data.get('priority') or 'Normal', 'Active', template))
     tid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     # Generate lines from template
     tmpl_activities = data.get('custom_lines') or TEMPLATES.get(template, TEMPLATES["Domestic Order TNA"])

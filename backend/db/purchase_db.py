@@ -225,9 +225,9 @@ def create_pr(data: dict):
     num = _next_num(conn, 'pr_headers', 'pr_number', 'PR')
     conn.execute("""INSERT INTO pr_headers(pr_number,pr_date,requested_by,department,priority,status,so_reference,notes)
         VALUES(?,?,?,?,?,?,?,?)""",
-        (num, data.get('pr_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('requested_by',''), data.get('department','Production'),
-         data.get('priority','Normal'), 'Draft', data.get('so_reference',''), data.get('notes','')))
+        (num, data.get('pr_date') or datetime.now().strftime('%Y-%m-%d'),
+         data.get('requested_by') or '', data.get('department') or 'Production',
+         data.get('priority') or 'Normal', 'Draft', data.get('so_reference') or '', data.get('notes') or ''))
     prid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         conn.execute("""INSERT INTO pr_lines(pr_id,material_code,material_name,material_type,required_qty,unit,required_by_date,purpose,remarks)
@@ -268,12 +268,12 @@ def create_po(data: dict):
     conn.execute("""INSERT INTO po_headers(po_number,po_date,supplier_id,supplier_name,currency,payment_terms,
         delivery_location,delivery_date,pr_reference,so_reference,status,subtotal,gst_amount,total,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (num, data.get('po_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('supplier_id'), data.get('supplier_name',''),
-         data.get('currency','INR'), data.get('payment_terms',''),
-         data.get('delivery_location',''), data.get('delivery_date',''),
-         data.get('pr_reference',''), data.get('so_reference',''),
-         'Draft', subtotal, gst, subtotal+gst, data.get('remarks','')))
+        (num, data.get('po_date') or datetime.now().strftime('%Y-%m-%d'),
+         data.get('supplier_id'), data.get('supplier_name') or '',
+         data.get('currency') or 'INR', data.get('payment_terms') or '',
+         data.get('delivery_location') or '', data.get('delivery_date') or '',
+         data.get('pr_reference') or '', data.get('so_reference') or '',
+         'Draft', subtotal, gst, subtotal+gst, data.get('remarks') or ''))
     poid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in lines:
         amt = ln.get('amount', ln.get('po_qty',0)*ln.get('rate',0))
@@ -306,11 +306,11 @@ def create_jwo(data: dict):
     total = sum(l.get('amount', l.get('output_qty',0)*l.get('rate',0)) for l in lines)
     conn.execute("""INSERT INTO jwo_headers(jwo_number,jwo_date,processor_id,processor_name,pr_reference,so_reference,
         expected_return_date,status,total,remarks,issued_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-        (num, data.get('jwo_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('processor_id'), data.get('processor_name',''),
-         data.get('pr_reference',''), data.get('so_reference',''),
-         data.get('expected_return_date',''), 'Draft', total,
-         data.get('remarks',''), data.get('issued_by','')))
+        (num, data.get('jwo_date') or datetime.now().strftime('%Y-%m-%d'),
+         data.get('processor_id'), data.get('processor_name') or '',
+         data.get('pr_reference') or '', data.get('so_reference') or '',
+         data.get('expected_return_date') or '', 'Draft', total,
+         data.get('remarks') or '', data.get('issued_by') or ''))
     jwoid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in lines:
         amt = ln.get('amount', ln.get('output_qty',0)*ln.get('rate',0))
@@ -345,13 +345,13 @@ def create_grn(data: dict):
     conn.execute("""INSERT INTO grn_headers(grn_number,grn_date,grn_type,reference_number,party_name,challan_no,
         invoice_no,invoice_date,vehicle_no,transporter,warehouse,so_reference,total_value,status,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (num, data.get('grn_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('grn_type','PO Receipt'), data.get('reference_number',''),
-         data.get('party_name',''), data.get('challan_no',''),
-         data.get('invoice_no',''), data.get('invoice_date',''),
-         data.get('vehicle_no',''), data.get('transporter',''),
-         data.get('warehouse',''), data.get('so_reference',''),
-         total, 'Draft', data.get('remarks','')))
+        (num, data.get('grn_date') or datetime.now().strftime('%Y-%m-%d'),
+         data.get('grn_type') or 'PO Receipt', data.get('reference_number') or '',
+         data.get('party_name') or '', data.get('challan_no') or '',
+         data.get('invoice_no') or '', data.get('invoice_date') or '',
+         data.get('vehicle_no') or '', data.get('transporter') or '',
+         data.get('warehouse') or '', data.get('so_reference') or '',
+         total, 'Draft', data.get('remarks') or ''))
     grnid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in lines:
         amt = ln.get('amount', ln.get('accepted_qty',0)*ln.get('rate',0))
