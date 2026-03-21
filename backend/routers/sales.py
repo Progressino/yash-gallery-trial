@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from ..db.sales_db import (
-    list_demands, create_demand, update_demand_status,
+    list_demands, create_demand, update_demand_status, get_demand_by_number,
     list_orders, create_order, update_order, update_so_line, get_open_orders
 )
 
@@ -28,6 +28,9 @@ class SOLineIn(BaseModel):
     sku_name: Optional[str] = ''
     qty: int = 0
     unit: Optional[str] = 'PCS'
+    rate: Optional[float] = 0
+    delivery_date: Optional[str] = ''
+    remarks: Optional[str] = ''
 
 class SOIn(BaseModel):
     so_date: Optional[str] = None
@@ -46,9 +49,13 @@ class StatusUpdate(BaseModel):
     status: str
 
 class SOLineUpdate(BaseModel):
-    produced_qty: Optional[int] = None
-    dispatch_qty: Optional[int] = None
-    received_qty: Optional[int] = None
+    produced_qty:  Optional[int]   = None
+    dispatch_qty:  Optional[int]   = None
+    received_qty:  Optional[int]   = None
+    qty:           Optional[int]   = None
+    rate:          Optional[float] = None
+    delivery_date: Optional[str]   = None
+    remarks:       Optional[str]   = None
 
 # ── Demands ───────────────────────────────────────────────────────────────────
 @router.get("/demands")
@@ -59,6 +66,13 @@ def get_demands(status: Optional[str] = None):
 def post_demand(body: DemandIn):
     num = create_demand(body.model_dump())
     return {"demand_number": num}
+
+@router.get("/demands/by-number/{demand_number}")
+def get_demand_detail(demand_number: str):
+    d = get_demand_by_number(demand_number)
+    if not d:
+        raise HTTPException(status_code=404, detail="Demand not found")
+    return d
 
 @router.patch("/demands/{did}/status")
 def patch_demand_status(did: int, body: StatusUpdate):

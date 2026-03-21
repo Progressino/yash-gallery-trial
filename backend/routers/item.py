@@ -73,6 +73,7 @@ class ItemCreate(BaseModel):
     selling_price:  float = 0.0
     purchase_price: float = 0.0
     launch_date:    str   = ""
+    uom:            str   = "PCS"
     sizes:          List[str] = []       # triggers size variant generation
     routing_step_ids: List[int] = []
 
@@ -86,6 +87,7 @@ class ItemUpdate(BaseModel):
     selling_price:  Optional[float] = None
     purchase_price: Optional[float] = None
     launch_date:    Optional[str]   = None
+    uom:            Optional[str]   = None
     routing_step_ids: Optional[List[int]] = None
 
 class BOMCreate(BaseModel):
@@ -261,6 +263,7 @@ def add_item(body: ItemCreate):
         selling_price  = body.selling_price,
         purchase_price = body.purchase_price,
         launch_date    = body.launch_date,
+        uom            = body.uom,
     )
     variant_ids: list[int] = []
     if body.sizes:

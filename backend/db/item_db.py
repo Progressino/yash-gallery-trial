@@ -13,6 +13,7 @@ _DEFAULT_TYPES = [
     ("Finished Goods",      "FG"),
     ("Semi-Finished Goods", "SFG"),
     ("Raw Material",        "RM"),
+    ("Grey Fabric",         "GF"),
     ("Accessories",         "ACC"),
     ("Packing Materials",   "PKG"),
     ("Fuel & Lubricants",   "FUEL"),
@@ -84,6 +85,7 @@ def init_db() -> None:
             parent_id      INTEGER REFERENCES items(id),
             size_label     TEXT DEFAULT '',
             launch_date    TEXT DEFAULT '',
+            uom            TEXT DEFAULT 'PCS',
             created_at     TEXT DEFAULT (datetime('now'))
         );
 
@@ -143,6 +145,15 @@ def init_db() -> None:
             created_at        TEXT DEFAULT (datetime('now'))
         );
     """)
+
+    # Migrate existing items table — add columns if missing
+    for col_ddl in [
+        "ALTER TABLE items ADD COLUMN uom TEXT DEFAULT 'PCS'",
+    ]:
+        try:
+            conn.execute(col_ddl)
+        except Exception:
+            pass  # column already exists
 
     # Migrate existing bom_headers table — add columns if missing
     for col_ddl in [
@@ -451,15 +462,16 @@ def create_item(
     parent_id: Optional[int] = None,
     size_label: str = "",
     launch_date: str = "",
+    uom: str = "PCS",
 ) -> int:
     conn = _connect()
     cur = conn.execute(
         """INSERT INTO items
            (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
-            selling_price, purchase_price, parent_id, size_label, launch_date)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            selling_price, purchase_price, parent_id, size_label, launch_date, uom)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
-         selling_price, purchase_price, parent_id, size_label, launch_date),
+         selling_price, purchase_price, parent_id, size_label, launch_date, uom),
     )
     conn.commit()
     new_id = cur.lastrowid
@@ -471,7 +483,7 @@ def create_size_variants(parent_id: int, sizes: list[str]) -> list[int]:
     """Auto-generate size variant items linked to a parent item."""
     conn = _connect()
     parent = conn.execute(
-        "SELECT item_code, item_name, item_type_id, hsn_code, season, merchant_code, selling_price, purchase_price FROM items WHERE id = ?",
+        "SELECT item_code, item_name, item_type_id, hsn_code, season, merchant_code, selling_price, purchase_price, uom FROM items WHERE id = ?",
         (parent_id,),
     ).fetchone()
     if parent is None:
@@ -490,12 +502,12 @@ def create_size_variants(parent_id: int, sizes: list[str]) -> list[int]:
         cur = conn.execute(
             """INSERT INTO items
                (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
-                selling_price, purchase_price, parent_id, size_label)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                selling_price, purchase_price, parent_id, size_label, uom)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (variant_code, parent["item_name"], parent["item_type_id"],
              parent["hsn_code"], parent["season"], parent["merchant_code"],
              parent["selling_price"], parent["purchase_price"],
-             parent_id, size),
+             parent_id, size, parent["uom"] or "PCS"),
         )
         new_ids.append(cur.lastrowid)
     conn.commit()
@@ -505,7 +517,7 @@ def create_size_variants(parent_id: int, sizes: list[str]) -> list[int]:
 
 def update_item(item_id: int, **fields) -> bool:
     allowed = {"item_code", "item_name", "item_type_id", "hsn_code", "season",
-               "merchant_code", "selling_price", "purchase_price", "launch_date"}
+               "merchant_code", "selling_price", "purchase_price", "launch_date", "uom"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False

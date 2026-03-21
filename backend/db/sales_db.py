@@ -56,10 +56,26 @@ def init_db():
         produced_qty  INTEGER DEFAULT 0,
         dispatch_qty  INTEGER DEFAULT 0,
         received_qty  INTEGER DEFAULT 0,
-        unit          TEXT DEFAULT 'PCS'
+        unit          TEXT DEFAULT 'PCS',
+        rate          REAL DEFAULT 0,
+        delivery_date TEXT DEFAULT '',
+        remarks       TEXT DEFAULT ''
     );
     """)
-    conn.commit(); conn.close()
+    conn.commit()
+
+    # Migrate so_lines — add new columns if missing
+    for col_ddl in [
+        "ALTER TABLE so_lines ADD COLUMN rate REAL DEFAULT 0",
+        "ALTER TABLE so_lines ADD COLUMN delivery_date TEXT DEFAULT ''",
+        "ALTER TABLE so_lines ADD COLUMN remarks TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(col_ddl)
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
 
 # ── auto-number helpers ────────────────────────────────────────────────────────
 def _next_num(conn, table, col, prefix):
@@ -106,6 +122,15 @@ def update_demand_status(did: int, status: str):
     conn.execute("UPDATE demands SET status=? WHERE id=?", (status, did))
     conn.commit(); conn.close()
 
+def get_demand_by_number(demand_number: str):
+    conn = _connect()
+    row = conn.execute("SELECT * FROM demands WHERE demand_number=?", (demand_number,)).fetchone()
+    if not row:
+        conn.close(); return None
+    d = dict(row)
+    d['lines'] = [dict(l) for l in conn.execute("SELECT * FROM demand_lines WHERE demand_id=?", (d['id'],)).fetchall()]
+    conn.close(); return d
+
 # ── Sales Orders ──────────────────────────────────────────────────────────────
 def list_orders(status: str = None):
     conn = _connect()
@@ -133,8 +158,10 @@ def create_order(data: dict):
          data.get('status','Draft'), data.get('notes','')))
     soid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
-        conn.execute("INSERT INTO so_lines(so_id,sku,sku_name,qty,unit) VALUES(?,?,?,?,?)",
-            (soid, ln['sku'], ln.get('sku_name',''), ln.get('qty',0), ln.get('unit','PCS')))
+        conn.execute(
+            "INSERT INTO so_lines(so_id,sku,sku_name,qty,unit,rate,delivery_date,remarks) VALUES(?,?,?,?,?,?,?,?)",
+            (soid, ln['sku'], ln.get('sku_name',''), ln.get('qty',0), ln.get('unit','PCS'),
+             ln.get('rate', 0), ln.get('delivery_date',''), ln.get('remarks','')))
     conn.commit(); conn.close(); return num
 
 def update_order(soid: int, data: dict):
@@ -147,7 +174,7 @@ def update_order(soid: int, data: dict):
     conn.commit(); conn.close()
 
 def update_so_line(lid: int, data: dict):
-    allowed = ['produced_qty','dispatch_qty','received_qty']
+    allowed = ['produced_qty','dispatch_qty','received_qty','qty','rate','delivery_date','remarks']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed] + [lid]
     if not sets: return

@@ -30,7 +30,7 @@ interface Item {
   hsn_code: string; season: string; merchant_code: string
   selling_price: number; purchase_price: number
   parent_id: number | null; size_label: string; launch_date: string
-  variant_count: number; created_at: string
+  uom: string; variant_count: number; created_at: string
 }
 interface ItemDetail extends Item {
   variants: { id: number; item_code: string; size_label: string }[]
@@ -61,10 +61,13 @@ function netQty(l: BOMLine) { return l.quantity * (1 + l.shrinkage_pct / 100) * 
 function lineAmt(l: BOMLine) { return netQty(l) * l.rate }
 
 // ── Blank form states ─────────────────────────────────────────────────────────
+const UOM_OPTIONS = ['PCS', 'MTR', 'KG', 'LTR', 'SET', 'PAIR', 'BOX', 'ROLL']
+
 const blankItem = () => ({
   item_code: '', item_name: '', item_type_id: 1,
   hsn_code: '', season: '', merchant_code: '',
   selling_price: '', purchase_price: '', launch_date: '',
+  uom: 'PCS',
   sizes: [] as string[], custom_size: '',
   routing_step_ids: [] as number[], size_group_id: '',
 })
@@ -125,7 +128,7 @@ export default function ItemMaster() {
   const [editItem,     setEditItem]     = useState<null | {
     id: number; item_code: string; item_name: string; item_type_id: number
     hsn_code: string; season: string; merchant_code: string
-    selling_price: string; purchase_price: string; launch_date: string
+    selling_price: string; purchase_price: string; launch_date: string; uom: string
   }>(null)
   const [editItemErr,  setEditItemErr]  = useState('')
 
@@ -229,6 +232,9 @@ export default function ItemMaster() {
     if (!newItem.item_code.trim() || !newItem.item_name.trim()) {
       setNewItemErr('Item Code and Item Name are required.'); return
     }
+    if (!newItem.uom) {
+      setNewItemErr('UOM is required.'); return
+    }
     createItemMut.mutate({
       item_code:      newItem.item_code.trim(),
       item_name:      newItem.item_name.trim(),
@@ -239,6 +245,7 @@ export default function ItemMaster() {
       selling_price:  parseFloat(String(newItem.selling_price)) || 0,
       purchase_price: parseFloat(String(newItem.purchase_price)) || 0,
       launch_date:    newItem.launch_date,
+      uom:            newItem.uom,
       sizes:          newItem.sizes,
       routing_step_ids: newItem.routing_step_ids,
     })
@@ -767,7 +774,7 @@ export default function ItemMaster() {
                             <td className="px-4 py-3 text-center">
                               <div className="flex items-center justify-center gap-1">
                                 <button
-                                  onClick={e => { e.stopPropagation(); setEditItem({ id: item.id, item_code: item.item_code, item_name: item.item_name, item_type_id: item.item_type_id, hsn_code: item.hsn_code, season: item.season, merchant_code: item.merchant_code, selling_price: String(item.selling_price), purchase_price: String(item.purchase_price), launch_date: item.launch_date }); setShowEditItem(true); setEditItemErr('') }}
+                                  onClick={e => { e.stopPropagation(); setEditItem({ id: item.id, item_code: item.item_code, item_name: item.item_name, item_type_id: item.item_type_id, hsn_code: item.hsn_code, season: item.season, merchant_code: item.merchant_code, selling_price: String(item.selling_price), purchase_price: String(item.purchase_price), launch_date: item.launch_date, uom: item.uom || 'PCS' }); setShowEditItem(true); setEditItemErr('') }}
                                   className="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 rounded hover:bg-blue-50 transition-colors">
                                   Edit
                                 </button>
@@ -906,6 +913,15 @@ export default function ItemMaster() {
                           <p className="text-[11px] text-gray-400">Add merchants in the Merchants tab first.</p>
                         )}
                       </div>
+                      {/* UOM — mandatory */}
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">UOM <span className="text-red-500">*</span></label>
+                        <select value={newItem.uom}
+                          onChange={e => setNewItem(p => ({ ...p, uom: e.target.value }))}
+                          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                          {UOM_OPTIONS.map(u => <option key={u}>{u}</option>)}
+                        </select>
+                      </div>
                     </div>
 
                     {/* Size selection */}
@@ -1036,6 +1052,14 @@ export default function ItemMaster() {
                           {merchants.map(m => <option key={m.id} value={m.merchant_code}>{m.merchant_code} — {m.merchant_name}</option>)}
                         </select>
                       </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">UOM <span className="text-red-500">*</span></label>
+                        <select value={editItem.uom}
+                          onChange={e => setEditItem(p => p ? { ...p, uom: e.target.value } : p)}
+                          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                          {UOM_OPTIONS.map(u => <option key={u}>{u}</option>)}
+                        </select>
+                      </div>
                     </div>
                     {editItemErr && <p className="text-red-500 text-sm">{editItemErr}</p>}
                     <button
@@ -1050,6 +1074,7 @@ export default function ItemMaster() {
                           selling_price:  parseFloat(editItem.selling_price) || 0,
                           purchase_price: parseFloat(editItem.purchase_price) || 0,
                           launch_date:    editItem.launch_date,
+                          uom:            editItem.uom,
                         }
                       })}
                       disabled={updateItemMut.isPending}
