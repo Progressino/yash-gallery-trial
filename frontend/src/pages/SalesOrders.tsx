@@ -7,6 +7,7 @@ type Tab = 'dashboard' | 'demands' | 'orders'
 interface Item {
   id: number; item_code: string; item_name: string
   parent_id: number | null; size_label: string; uom: string
+  variant_count?: number
   variants?: { id: number; item_code: string; item_name: string; size_label: string; uom: string }[]
 }
 interface Demand {
