@@ -78,7 +78,7 @@ def run_mrp(so_number: Optional[str] = None):
             item_db_path = _os.environ.get("ITEM_DB_PATH", "/data/items.db")
             if not _os.path.exists(item_db_path):
                 item_db_path = _os.path.join(_os.path.dirname(__file__), '..', 'items_dev.db')
-            if os.path.exists(item_db_path):
+            if _os.path.exists(item_db_path):
                 conn = sqlite3.connect(item_db_path)
                 conn.row_factory = sqlite3.Row
                 # Find item by code
