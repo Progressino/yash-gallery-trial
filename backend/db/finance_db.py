@@ -145,6 +145,40 @@ def init_db() -> None:
         )
     """)
 
+    # ── Voucher Types ─────────────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS voucher_types (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            name              TEXT NOT NULL UNIQUE,
+            voucher_category  TEXT DEFAULT 'Sales',
+            abbreviation      TEXT DEFAULT '',
+            is_active         INTEGER DEFAULT 1,
+            allow_narration   INTEGER DEFAULT 1,
+            numbering_method  TEXT DEFAULT 'Auto',
+            created_at        TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    conn.commit()
+
+    # ── Migrate ledgers table — add new columns if missing ────────
+    for col_ddl in [
+        "ALTER TABLE ledgers ADD COLUMN alias TEXT DEFAULT ''",
+        "ALTER TABLE ledgers ADD COLUMN credit_period INTEGER DEFAULT 0",
+        "ALTER TABLE ledgers ADD COLUMN maintain_bill_by_bill INTEGER DEFAULT 0",
+        "ALTER TABLE ledgers ADD COLUMN is_tcs_applicable INTEGER DEFAULT 0",
+        "ALTER TABLE ledgers ADD COLUMN country TEXT DEFAULT 'India'",
+        "ALTER TABLE ledgers ADD COLUMN pincode TEXT DEFAULT ''",
+        "ALTER TABLE ledgers ADD COLUMN registration_type TEXT DEFAULT ''",
+        "ALTER TABLE ledgers ADD COLUMN bank_name TEXT DEFAULT ''",
+        "ALTER TABLE ledgers ADD COLUMN bank_account TEXT DEFAULT ''",
+        "ALTER TABLE ledgers ADD COLUMN bank_ifsc TEXT DEFAULT ''",
+        "ALTER TABLE ledgers ADD COLUMN opening_balance REAL DEFAULT 0",
+    ]:
+        try:
+            conn.execute(col_ddl)
+        except Exception:
+            pass  # column already exists
     conn.commit()
 
     # ── Seed ledger_groups ────────────────────────────────────────
@@ -204,6 +238,29 @@ def init_db() -> None:
         conn.executemany(
             "INSERT INTO tds_sections (section, description, rate_individual, rate_company, threshold) VALUES (?,?,?,?,?)",
             seed_tds,
+        )
+        conn.commit()
+
+    # ── Seed voucher_types ────────────────────────────────────────
+    count = conn.execute("SELECT COUNT(*) FROM voucher_types").fetchone()[0]
+    if count == 0:
+        seed_vt = [
+            ('Amazon Sales',     'Sales',    'Sale', 1, 1, 'Manual'),
+            ('Myntra Sales',     'Sales',    'Myn',  1, 1, 'Manual'),
+            ('Meesho Sales',     'Sales',    'Mee',  1, 1, 'Manual'),
+            ('Flipkart Sales',   'Sales',    'Flip', 1, 1, 'Manual'),
+            ('Cash Payment',     'Payment',  'CPay', 1, 1, 'Auto'),
+            ('Bank Payment',     'Payment',  'BPay', 1, 1, 'Auto'),
+            ('Bank Receipt',     'Receipt',  'BRec', 1, 1, 'Auto'),
+            ('Purchase Invoice', 'Purchase', 'Pur',  1, 1, 'Manual'),
+            ('Journal',          'Journal',  'Jnl',  1, 1, 'Auto'),
+            ('Contra',           'Contra',   'Con',  1, 1, 'Auto'),
+        ]
+        conn.executemany(
+            """INSERT INTO voucher_types
+               (name, voucher_category, abbreviation, is_active, allow_narration, numbering_method)
+               VALUES (?,?,?,?,?,?)""",
+            seed_vt,
         )
         conn.commit()
 
@@ -319,12 +376,26 @@ def create_ledger(
     address: str,
     tds_applicable: int,
     tds_section: str,
+    alias: str = '',
+    credit_period: int = 0,
+    maintain_bill_by_bill: int = 0,
+    is_tcs_applicable: int = 0,
+    country: str = 'India',
+    pincode: str = '',
+    registration_type: str = '',
+    bank_name: str = '',
+    bank_account: str = '',
+    bank_ifsc: str = '',
+    opening_balance: float = 0.0,
 ) -> int:
     conn = _connect()
     cur = conn.execute(
         """INSERT INTO ledgers
-           (name, group_id, group_name, gstin, pan, state, state_code, address, tds_applicable, tds_section)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+           (name, group_id, group_name, gstin, pan, state, state_code, address,
+            tds_applicable, tds_section, alias, credit_period, maintain_bill_by_bill,
+            is_tcs_applicable, country, pincode, registration_type,
+            bank_name, bank_account, bank_ifsc, opening_balance)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             name,
             group_id,
@@ -336,6 +407,17 @@ def create_ledger(
             address or '',
             tds_applicable or 0,
             tds_section or '',
+            alias or '',
+            credit_period or 0,
+            maintain_bill_by_bill or 0,
+            is_tcs_applicable or 0,
+            country or 'India',
+            pincode or '',
+            registration_type or '',
+            bank_name or '',
+            bank_account or '',
+            bank_ifsc or '',
+            opening_balance or 0.0,
         ),
     )
     conn.commit()
@@ -350,6 +432,9 @@ def update_ledger(ledger_id: int, **fields) -> bool:
     allowed = {
         'name', 'group_id', 'group_name', 'gstin', 'pan', 'state',
         'state_code', 'address', 'tds_applicable', 'tds_section', 'is_active',
+        'alias', 'credit_period', 'maintain_bill_by_bill', 'is_tcs_applicable',
+        'country', 'pincode', 'registration_type', 'bank_name', 'bank_account',
+        'bank_ifsc', 'opening_balance',
     }
     safe = {k: v for k, v in fields.items() if k in allowed}
     if not safe:
@@ -619,6 +704,73 @@ def create_finance_sales_upload(data: dict) -> int:
 def delete_finance_sales_upload(upload_id: int) -> bool:
     conn = _connect()
     cur = conn.execute("DELETE FROM finance_sales_uploads WHERE id = ?", (upload_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+# ── Voucher Types CRUD ────────────────────────────────────────────
+
+def list_voucher_types(category: Optional[str] = None) -> list[dict]:
+    conn = _connect()
+    query = "SELECT * FROM voucher_types WHERE 1=1"
+    params: list = []
+    if category:
+        query += " AND voucher_category = ?"
+        params.append(category)
+    query += " ORDER BY voucher_category, name"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_voucher_type(
+    name: str,
+    voucher_category: str,
+    abbreviation: str,
+    allow_narration: int,
+    numbering_method: str,
+) -> int:
+    conn = _connect()
+    cur = conn.execute(
+        """INSERT INTO voucher_types
+           (name, voucher_category, abbreviation, allow_narration, numbering_method)
+           VALUES (?,?,?,?,?)""",
+        (
+            name,
+            voucher_category or 'Sales',
+            abbreviation or '',
+            allow_narration if allow_narration is not None else 1,
+            numbering_method or 'Auto',
+        ),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def update_voucher_type(voucher_type_id: int, **fields) -> bool:
+    if not fields:
+        return False
+    allowed = {'name', 'voucher_category', 'abbreviation', 'is_active', 'allow_narration', 'numbering_method'}
+    safe = {k: v for k, v in fields.items() if k in allowed}
+    if not safe:
+        return False
+    set_clause = ', '.join(f"{k} = ?" for k in safe)
+    values = list(safe.values()) + [voucher_type_id]
+    conn = _connect()
+    cur = conn.execute(f"UPDATE voucher_types SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
+
+
+def delete_voucher_type(voucher_type_id: int) -> bool:
+    conn = _connect()
+    cur = conn.execute("DELETE FROM voucher_types WHERE id = ?", (voucher_type_id,))
     conn.commit()
     deleted = cur.rowcount > 0
     conn.close()

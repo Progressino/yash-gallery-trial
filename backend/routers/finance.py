@@ -34,6 +34,7 @@ from ..db.finance_db import (
     list_tds_sections, create_tds_section, delete_tds_section,
     list_expense_vouchers, get_expense_voucher, create_expense_voucher, delete_expense_voucher,
     list_finance_sales_uploads, create_finance_sales_upload, delete_finance_sales_upload,
+    list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
 )
 from ..services.finance import get_pl_statement, get_gst_summary, get_platform_revenue
 
@@ -63,30 +64,69 @@ class LedgerGroupCreate(BaseModel):
 
 
 class LedgerCreate(BaseModel):
-    name:           str
-    group_id:       Optional[int] = None
-    group_name:     str = ''
-    gstin:          str = ''
-    pan:            str = ''
-    state:          str = ''
-    state_code:     str = ''
-    address:        str = ''
-    tds_applicable: int = 0
-    tds_section:    str = ''
+    name:                  str
+    group_id:              Optional[int] = None
+    group_name:            str = ''
+    gstin:                 str = ''
+    pan:                   str = ''
+    state:                 str = ''
+    state_code:            str = ''
+    address:               str = ''
+    tds_applicable:        int = 0
+    tds_section:           str = ''
+    alias:                 str = ''
+    credit_period:         int = 0
+    maintain_bill_by_bill: int = 0
+    is_tcs_applicable:     int = 0
+    country:               str = 'India'
+    pincode:               str = ''
+    registration_type:     str = ''
+    bank_name:             str = ''
+    bank_account:          str = ''
+    bank_ifsc:             str = ''
+    opening_balance:       float = 0.0
 
 
 class LedgerUpdate(BaseModel):
-    name:           Optional[str] = None
-    group_id:       Optional[int] = None
-    group_name:     Optional[str] = None
-    gstin:          Optional[str] = None
-    pan:            Optional[str] = None
-    state:          Optional[str] = None
-    state_code:     Optional[str] = None
-    address:        Optional[str] = None
-    tds_applicable: Optional[int] = None
-    tds_section:    Optional[str] = None
-    is_active:      Optional[int] = None
+    name:                  Optional[str]   = None
+    group_id:              Optional[int]   = None
+    group_name:            Optional[str]   = None
+    gstin:                 Optional[str]   = None
+    pan:                   Optional[str]   = None
+    state:                 Optional[str]   = None
+    state_code:            Optional[str]   = None
+    address:               Optional[str]   = None
+    tds_applicable:        Optional[int]   = None
+    tds_section:           Optional[str]   = None
+    is_active:             Optional[int]   = None
+    alias:                 Optional[str]   = None
+    credit_period:         Optional[int]   = None
+    maintain_bill_by_bill: Optional[int]   = None
+    is_tcs_applicable:     Optional[int]   = None
+    country:               Optional[str]   = None
+    pincode:               Optional[str]   = None
+    registration_type:     Optional[str]   = None
+    bank_name:             Optional[str]   = None
+    bank_account:          Optional[str]   = None
+    bank_ifsc:             Optional[str]   = None
+    opening_balance:       Optional[float] = None
+
+
+class VoucherTypeCreate(BaseModel):
+    name:             str
+    voucher_category: str = 'Sales'
+    abbreviation:     str = ''
+    allow_narration:  int = 1
+    numbering_method: str = 'Auto'
+
+
+class VoucherTypeUpdate(BaseModel):
+    name:             Optional[str] = None
+    voucher_category: Optional[str] = None
+    abbreviation:     Optional[str] = None
+    is_active:        Optional[int] = None
+    allow_narration:  Optional[int] = None
+    numbering_method: Optional[str] = None
 
 
 class GSTClassificationCreate(BaseModel):
@@ -285,16 +325,27 @@ def get_ledgers(group_id: Optional[int] = None, search: Optional[str] = None):
 @router.post("/masters/ledgers")
 def post_ledger(body: LedgerCreate):
     new_id = create_ledger(
-        name           = body.name,
-        group_id       = body.group_id,
-        group_name     = body.group_name,
-        gstin          = body.gstin,
-        pan            = body.pan,
-        state          = body.state,
-        state_code     = body.state_code,
-        address        = body.address,
-        tds_applicable = body.tds_applicable,
-        tds_section    = body.tds_section,
+        name                  = body.name,
+        group_id              = body.group_id,
+        group_name            = body.group_name,
+        gstin                 = body.gstin,
+        pan                   = body.pan,
+        state                 = body.state,
+        state_code            = body.state_code,
+        address               = body.address,
+        tds_applicable        = body.tds_applicable,
+        tds_section           = body.tds_section,
+        alias                 = body.alias,
+        credit_period         = body.credit_period,
+        maintain_bill_by_bill = body.maintain_bill_by_bill,
+        is_tcs_applicable     = body.is_tcs_applicable,
+        country               = body.country,
+        pincode               = body.pincode,
+        registration_type     = body.registration_type,
+        bank_name             = body.bank_name,
+        bank_account          = body.bank_account,
+        bank_ifsc             = body.bank_ifsc,
+        opening_balance       = body.opening_balance,
     )
     return {"ok": True, "id": new_id}
 
@@ -366,6 +417,42 @@ def del_tds_section(section_id: int):
     deleted = delete_tds_section(section_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="TDS section not found")
+    return {"ok": True}
+
+
+# ── Masters: Voucher Types ────────────────────────────────────────
+
+@router.get("/masters/voucher-types")
+def get_voucher_types(category: Optional[str] = None):
+    return list_voucher_types(category=category)
+
+
+@router.post("/masters/voucher-types")
+def post_voucher_type(body: VoucherTypeCreate):
+    new_id = create_voucher_type(
+        name             = body.name,
+        voucher_category = body.voucher_category,
+        abbreviation     = body.abbreviation,
+        allow_narration  = body.allow_narration,
+        numbering_method = body.numbering_method,
+    )
+    return {"ok": True, "id": new_id}
+
+
+@router.put("/masters/voucher-types/{vt_id}")
+def put_voucher_type(vt_id: int, body: VoucherTypeUpdate):
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    updated = update_voucher_type(vt_id, **fields)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Voucher type not found")
+    return {"ok": True}
+
+
+@router.delete("/masters/voucher-types/{vt_id}")
+def del_voucher_type(vt_id: int):
+    deleted = delete_voucher_type(vt_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Voucher type not found")
     return {"ok": True}
 
 

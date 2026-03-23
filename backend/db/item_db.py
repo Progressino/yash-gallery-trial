@@ -149,6 +149,10 @@ def init_db() -> None:
     # Migrate existing items table — add columns if missing
     for col_ddl in [
         "ALTER TABLE items ADD COLUMN uom TEXT DEFAULT 'PCS'",
+        "ALTER TABLE items ADD COLUMN alias TEXT DEFAULT ''",
+        "ALTER TABLE items ADD COLUMN gst_applicability TEXT DEFAULT 'Applicable'",
+        "ALTER TABLE items ADD COLUMN type_of_supply TEXT DEFAULT 'Goods'",
+        "ALTER TABLE items ADD COLUMN gst_rate REAL DEFAULT 0",
     ]:
         try:
             conn.execute(col_ddl)
@@ -463,15 +467,21 @@ def create_item(
     size_label: str = "",
     launch_date: str = "",
     uom: str = "PCS",
+    alias: str = "",
+    gst_applicability: str = "Applicable",
+    type_of_supply: str = "Goods",
+    gst_rate: float = 0.0,
 ) -> int:
     conn = _connect()
     cur = conn.execute(
         """INSERT INTO items
            (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
-            selling_price, purchase_price, parent_id, size_label, launch_date, uom)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            selling_price, purchase_price, parent_id, size_label, launch_date, uom,
+            alias, gst_applicability, type_of_supply, gst_rate)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
-         selling_price, purchase_price, parent_id, size_label, launch_date, uom),
+         selling_price, purchase_price, parent_id, size_label, launch_date, uom,
+         alias or '', gst_applicability or 'Applicable', type_of_supply or 'Goods', gst_rate or 0.0),
     )
     conn.commit()
     new_id = cur.lastrowid
@@ -517,7 +527,8 @@ def create_size_variants(parent_id: int, sizes: list[str]) -> list[int]:
 
 def update_item(item_id: int, **fields) -> bool:
     allowed = {"item_code", "item_name", "item_type_id", "hsn_code", "season",
-               "merchant_code", "selling_price", "purchase_price", "launch_date", "uom"}
+               "merchant_code", "selling_price", "purchase_price", "launch_date", "uom",
+               "alias", "gst_applicability", "type_of_supply", "gst_rate"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False

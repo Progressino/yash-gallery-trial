@@ -31,6 +31,7 @@ interface Item {
   selling_price: number; purchase_price: number
   parent_id: number | null; size_label: string; launch_date: string
   uom: string; variant_count: number; created_at: string
+  alias: string; gst_applicability: string; type_of_supply: string; gst_rate: number
 }
 interface ItemDetail extends Item {
   variants: { id: number; item_code: string; size_label: string }[]
@@ -68,6 +69,7 @@ const blankItem = () => ({
   hsn_code: '', season: '', merchant_code: '',
   selling_price: '', purchase_price: '', launch_date: '',
   uom: 'PCS',
+  alias: '', gst_applicability: 'Applicable', type_of_supply: 'Goods', gst_rate: '',
   sizes: [] as string[], custom_size: '',
   routing_step_ids: [] as number[], size_group_id: '',
 })
@@ -236,18 +238,22 @@ export default function ItemMaster() {
       setNewItemErr('UOM is required.'); return
     }
     createItemMut.mutate({
-      item_code:      newItem.item_code.trim(),
-      item_name:      newItem.item_name.trim(),
-      item_type_id:   newItem.item_type_id,
-      hsn_code:       newItem.hsn_code,
-      season:         newItem.season,
-      merchant_code:  newItem.merchant_code,
-      selling_price:  parseFloat(String(newItem.selling_price)) || 0,
-      purchase_price: parseFloat(String(newItem.purchase_price)) || 0,
-      launch_date:    newItem.launch_date,
-      uom:            newItem.uom,
-      sizes:          newItem.sizes,
-      routing_step_ids: newItem.routing_step_ids,
+      item_code:         newItem.item_code.trim(),
+      item_name:         newItem.item_name.trim(),
+      item_type_id:      newItem.item_type_id,
+      hsn_code:          newItem.hsn_code,
+      season:            newItem.season,
+      merchant_code:     newItem.merchant_code,
+      selling_price:     parseFloat(String(newItem.selling_price)) || 0,
+      purchase_price:    parseFloat(String(newItem.purchase_price)) || 0,
+      launch_date:       newItem.launch_date,
+      uom:               newItem.uom,
+      alias:             newItem.alias,
+      gst_applicability: newItem.gst_applicability,
+      type_of_supply:    newItem.type_of_supply,
+      gst_rate:          parseFloat(String(newItem.gst_rate)) || 0,
+      sizes:             newItem.sizes,
+      routing_step_ids:  newItem.routing_step_ids,
     })
   }
 
@@ -958,6 +964,46 @@ export default function ItemMaster() {
                           {sizePreview.map(s => `${newItem.item_code}-${s}`).join(', ')}
                         </div>
                       )}
+                    </div>
+
+                    {/* GST / Statutory */}
+                    <div className="space-y-2">
+                      <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">GST / Statutory</label>
+                      <div className="grid grid-cols-2 gap-3 bg-gray-50 border border-gray-100 rounded-xl p-3">
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">Alias</label>
+                          <input type="text" value={newItem.alias}
+                            onChange={e => setNewItem(p => ({ ...p, alias: e.target.value }))}
+                            placeholder="Alternate name"
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">GST Applicability</label>
+                          <select value={newItem.gst_applicability}
+                            onChange={e => setNewItem(p => ({ ...p, gst_applicability: e.target.value }))}
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                            <option>Applicable</option>
+                            <option>Not Applicable</option>
+                            <option>Exempted</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">Type of Supply</label>
+                          <select value={newItem.type_of_supply}
+                            onChange={e => setNewItem(p => ({ ...p, type_of_supply: e.target.value }))}
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                            <option>Goods</option>
+                            <option>Services</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">Rate of Duty (GST %)</label>
+                          <input type="number" min="0" max="28" step="0.1" value={newItem.gst_rate}
+                            onChange={e => setNewItem(p => ({ ...p, gst_rate: e.target.value }))}
+                            placeholder="0"
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                        </div>
+                      </div>
                     </div>
 
                     {/* Ordered Routing */}

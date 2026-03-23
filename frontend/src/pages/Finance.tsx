@@ -48,18 +48,39 @@ interface LedgerGroup {
   nature:       string
 }
 interface Ledger {
-  id:             number
-  name:           string
-  group_id:       number | null
-  group_name:     string
-  gstin:          string
-  pan:            string
-  state:          string
-  state_code:     string
-  address:        string
-  tds_applicable: number
-  tds_section:    string
-  is_active:      number
+  id:                    number
+  name:                  string
+  group_id:              number | null
+  group_name:            string
+  gstin:                 string
+  pan:                   string
+  state:                 string
+  state_code:            string
+  address:               string
+  tds_applicable:        number
+  tds_section:           string
+  is_active:             number
+  alias:                 string
+  credit_period:         number
+  maintain_bill_by_bill: number
+  is_tcs_applicable:     number
+  country:               string
+  pincode:               string
+  registration_type:     string
+  bank_name:             string
+  bank_account:          string
+  bank_ifsc:             string
+  opening_balance:       number
+}
+interface VoucherType {
+  id:               number
+  name:             string
+  voucher_category: string
+  abbreviation:     string
+  is_active:        number
+  allow_narration:  number
+  numbering_method: string
+  created_at:       string
 }
 interface GSTClassification {
   id:       number
@@ -148,7 +169,7 @@ const PRESETS = [
 ] as const
 
 type FinanceTab = 'pl' | 'gst' | 'expenses' | 'revenue' | 'vouchers' | 'masters' | 'sales-uploads'
-type MastersSubTab = 'ledger-groups' | 'ledgers' | 'gst-classifications' | 'tds-sections'
+type MastersSubTab = 'ledger-groups' | 'ledgers' | 'gst-classifications' | 'tds-sections' | 'voucher-types'
 
 // ── Main Component ───────────────────────────────────────────────
 export default function Finance() {
@@ -1105,6 +1126,7 @@ function MastersTab() {
           ['ledgers', 'Ledgers'],
           ['gst-classifications', 'GST Classifications'],
           ['tds-sections', 'TDS Sections'],
+          ['voucher-types', 'Voucher Types'],
         ] as [MastersSubTab, string][]).map(([id, label]) => (
           <button key={id} onClick={() => setSub(id)}
             className={`px-3 py-2 text-xs font-medium transition-colors rounded-t ${sub === id ? 'border-b-2 border-[#002B5B] text-[#002B5B] bg-blue-50' : 'text-gray-500 hover:text-gray-700'}`}>
@@ -1117,6 +1139,7 @@ function MastersTab() {
       {sub === 'ledgers'             && <LedgersSubTab />}
       {sub === 'gst-classifications' && <GSTClassificationsSubTab />}
       {sub === 'tds-sections'        && <TDSSectionsSubTab />}
+      {sub === 'voucher-types'       && <VoucherTypesSubTab />}
     </div>
   )
 }
@@ -1206,11 +1229,23 @@ function LedgerGroupsSubTab() {
   )
 }
 
+const blankLedgerForm = () => ({
+  name: '', alias: '', group_id: '', maintain_bill_by_bill: false, credit_period: '',
+  tds_applicable: false, tds_section: '', is_tcs_applicable: false,
+  address: '', state: '', country: 'India', pincode: '', registration_type: '', gstin: '', pan: '',
+  bank_name: '', bank_account: '', bank_ifsc: '',
+})
+
 function LedgersSubTab() {
   const qc = useQueryClient()
   const { data: groups = [] } = useQuery<LedgerGroup[]>({
     queryKey: ['finance-ledger-groups'],
     queryFn: async () => { const { data } = await api.get('/finance/masters/ledger-groups'); return data },
+  })
+  const { data: tdsSections = [] } = useQuery<TDSSection[]>({
+    queryKey: ['finance-tds-sections'],
+    queryFn: async () => { const { data } = await api.get('/finance/masters/tds-sections'); return data },
+    staleTime: 5 * 60 * 1000,
   })
   const [filterGroup, setFilterGroup] = useState<string>('')
   const { data: ledgers = [], isLoading } = useQuery<Ledger[]>({
@@ -1222,22 +1257,15 @@ function LedgersSubTab() {
     },
   })
 
-  const [name, setName] = useState('')
-  const [groupId, setGroupId] = useState('')
-  const [gstin, setGstin] = useState('')
-  const [pan, setPan] = useState('')
-  const [state, setState] = useState('')
-  const [stateCode, setStateCode] = useState('')
-  const [address, setAddress] = useState('')
-  const [tdsApp, setTdsApp] = useState(false)
-  const [tdsSection, setTdsSection] = useState('')
+  const [form, setForm] = useState(blankLedgerForm)
   const [err, setErr] = useState('')
+  const F = (k: string, v: string | boolean) => setForm(p => ({ ...p, [k]: v }))
 
   const addMut = useMutation({
     mutationFn: (b: object) => api.post('/finance/masters/ledgers', b),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['finance-ledgers'] })
-      setName(''); setGstin(''); setPan(''); setState(''); setStateCode(''); setAddress(''); setTdsApp(false); setTdsSection(''); setErr('')
+      setForm(blankLedgerForm()); setErr('')
     },
     onError: () => setErr('Failed to save.'),
   })
@@ -1246,71 +1274,181 @@ function LedgersSubTab() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['finance-ledgers'] }),
   })
 
-  const selectedGroup = groups.find(g => String(g.id) === groupId)
+  const selectedGroup = groups.find(g => String(g.id) === form.group_id)
+
+  function handleSave() {
+    if (!form.name.trim()) { setErr('Name is required'); return }
+    addMut.mutate({
+      name: form.name.trim(),
+      alias: form.alias,
+      group_id: form.group_id ? parseInt(form.group_id) : null,
+      group_name: selectedGroup?.name || '',
+      maintain_bill_by_bill: form.maintain_bill_by_bill ? 1 : 0,
+      credit_period: parseInt(form.credit_period) || 0,
+      tds_applicable: form.tds_applicable ? 1 : 0,
+      tds_section: form.tds_section,
+      is_tcs_applicable: form.is_tcs_applicable ? 1 : 0,
+      address: form.address,
+      state: form.state,
+      country: form.country,
+      pincode: form.pincode,
+      registration_type: form.registration_type,
+      gstin: form.gstin,
+      pan: form.pan,
+      bank_name: form.bank_name,
+      bank_account: form.bank_account,
+      bank_ifsc: form.bank_ifsc,
+    })
+  }
+
+  const inp = "text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300 w-full"
+  const lbl = "text-xs text-gray-500 mb-0.5"
 
   return (
     <div className="space-y-4">
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-        <h4 className="text-xs font-semibold text-gray-600 mb-3">Add Ledger</h4>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Name *</label>
-            <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Ledger name"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Group</label>
-            <select value={groupId} onChange={e => setGroupId(e.target.value)}
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
-              <option value="">— Select —</option>
-              {groups.map(g => <option key={g.id} value={String(g.id)}>{g.name}</option>)}
-            </select>
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">GSTIN</label>
-            <input type="text" value={gstin} onChange={e => setGstin(e.target.value)} placeholder="15-digit GSTIN"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">PAN</label>
-            <input type="text" value={pan} onChange={e => setPan(e.target.value)} placeholder="PAN"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">State</label>
-            <input type="text" value={state} onChange={e => setState(e.target.value)} placeholder="State"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">State Code</label>
-            <input type="text" value={stateCode} onChange={e => setStateCode(e.target.value)} placeholder="e.g. 27"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1 col-span-2">
-            <label className="text-xs text-gray-500">Address</label>
-            <input type="text" value={address} onChange={e => setAddress(e.target.value)} placeholder="Address"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-        </div>
-        <div className="flex items-center gap-4 mb-3">
-          <label className="flex items-center gap-2 text-xs cursor-pointer">
-            <input type="checkbox" checked={tdsApp} onChange={e => setTdsApp(e.target.checked)} />
-            TDS Applicable
-          </label>
-          {tdsApp && (
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-gray-500">TDS Section</label>
-              <input type="text" value={tdsSection} onChange={e => setTdsSection(e.target.value)} placeholder="e.g. 194C"
-                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+        <h4 className="text-sm font-semibold text-[#002B5B] mb-4">Add Ledger</h4>
+
+        {/* Section: General */}
+        <div className="mb-4">
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">General</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="flex flex-col">
+              <label className={lbl}>Name *</label>
+              <input type="text" value={form.name} onChange={e => F('name', e.target.value)} placeholder="Ledger name" className={inp} />
             </div>
-          )}
+            <div className="flex flex-col">
+              <label className={lbl}>Alias</label>
+              <input type="text" value={form.alias} onChange={e => F('alias', e.target.value)} placeholder="Alternate name" className={inp} />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>Under (Group)</label>
+              <select value={form.group_id} onChange={e => F('group_id', e.target.value)} className={inp}>
+                <option value="">— Select —</option>
+                {groups.map(g => <option key={g.id} value={String(g.id)}>{g.name}</option>)}
+              </select>
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>Default Credit Period (days)</label>
+              <input type="number" value={form.credit_period} onChange={e => F('credit_period', e.target.value)} placeholder="0" className={inp} />
+            </div>
+            <div className="flex flex-col justify-end">
+              <label className="text-xs text-gray-500 mb-1">Maintain Bill-by-Bill</label>
+              <div className="flex gap-3">
+                {(['Yes', 'No'] as const).map(v => (
+                  <label key={v} className="flex items-center gap-1 text-xs cursor-pointer">
+                    <input type="radio" checked={form.maintain_bill_by_bill === (v === 'Yes')} onChange={() => F('maintain_bill_by_bill', v === 'Yes')} />
+                    {v}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
-        <button onClick={() => {
-          if (!name.trim()) { setErr('Name required'); return }
-          addMut.mutate({ name, group_id: groupId ? parseInt(groupId) : null, group_name: selectedGroup?.name || '', gstin, pan, state, state_code: stateCode, address, tds_applicable: tdsApp ? 1 : 0, tds_section: tdsSection })
-        }} disabled={addMut.isPending}
-          className="px-4 py-1.5 text-xs font-semibold bg-[#002B5B] text-white rounded hover:bg-blue-900 disabled:opacity-60">
-          + Add Ledger
+
+        {/* Section: Statutory */}
+        <div className="mb-4">
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Statutory Details</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="flex flex-col justify-end">
+              <label className="text-xs text-gray-500 mb-1">Is TDS Deductable</label>
+              <div className="flex gap-3">
+                {(['Yes', 'No'] as const).map(v => (
+                  <label key={v} className="flex items-center gap-1 text-xs cursor-pointer">
+                    <input type="radio" checked={form.tds_applicable === (v === 'Yes')} onChange={() => F('tds_applicable', v === 'Yes')} />
+                    {v}
+                  </label>
+                ))}
+              </div>
+            </div>
+            {form.tds_applicable && (
+              <div className="flex flex-col">
+                <label className={lbl}>TDS Section</label>
+                <select value={form.tds_section} onChange={e => F('tds_section', e.target.value)} className={inp}>
+                  <option value="">— Select —</option>
+                  {tdsSections.map(s => <option key={s.id} value={s.section}>{s.section} — {s.description}</option>)}
+                </select>
+              </div>
+            )}
+            <div className="flex flex-col justify-end">
+              <label className="text-xs text-gray-500 mb-1">Is TCS Applicable</label>
+              <div className="flex gap-3">
+                {(['Yes', 'No'] as const).map(v => (
+                  <label key={v} className="flex items-center gap-1 text-xs cursor-pointer">
+                    <input type="radio" checked={form.is_tcs_applicable === (v === 'Yes')} onChange={() => F('is_tcs_applicable', v === 'Yes')} />
+                    {v}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Section: Mailing Details */}
+        <div className="mb-4">
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Mailing Details</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="flex flex-col col-span-2">
+              <label className={lbl}>Address</label>
+              <textarea value={form.address} onChange={e => F('address', e.target.value)} placeholder="Full address" rows={2}
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300 w-full resize-none" />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>State</label>
+              <input type="text" value={form.state} onChange={e => F('state', e.target.value)} placeholder="e.g. Maharashtra" className={inp} />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>Country</label>
+              <input type="text" value={form.country} onChange={e => F('country', e.target.value)} placeholder="India" className={inp} />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>Pincode</label>
+              <input type="text" value={form.pincode} onChange={e => F('pincode', e.target.value)} placeholder="400001" className={inp} />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>Registration Type</label>
+              <select value={form.registration_type} onChange={e => F('registration_type', e.target.value)} className={inp}>
+                <option value="">— None —</option>
+                <option>Regular</option>
+                <option>Composition</option>
+                <option>e-Commerce Operator</option>
+                <option>Unregistered</option>
+                <option>SEZ</option>
+              </select>
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>GSTIN / UIN</label>
+              <input type="text" value={form.gstin} onChange={e => F('gstin', e.target.value)} placeholder="15-digit GSTIN" className={inp} />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>PAN / IT No</label>
+              <input type="text" value={form.pan} onChange={e => F('pan', e.target.value)} placeholder="PAN" className={inp} />
+            </div>
+          </div>
+        </div>
+
+        {/* Section: Banking Details */}
+        <div className="mb-5">
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Banking Details</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="flex flex-col">
+              <label className={lbl}>Bank Name</label>
+              <input type="text" value={form.bank_name} onChange={e => F('bank_name', e.target.value)} placeholder="e.g. HDFC Bank" className={inp} />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>Account No</label>
+              <input type="text" value={form.bank_account} onChange={e => F('bank_account', e.target.value)} placeholder="Account number" className={inp} />
+            </div>
+            <div className="flex flex-col">
+              <label className={lbl}>IFSC Code</label>
+              <input type="text" value={form.bank_ifsc} onChange={e => F('bank_ifsc', e.target.value)} placeholder="HDFC0001234" className={inp} />
+            </div>
+          </div>
+        </div>
+
+        <button onClick={handleSave} disabled={addMut.isPending}
+          className="px-5 py-2 text-xs font-semibold bg-[#002B5B] text-white rounded hover:bg-blue-900 disabled:opacity-60">
+          {addMut.isPending ? 'Saving…' : '+ Save Ledger'}
         </button>
         {err && <p className="text-xs text-red-600 mt-1">{err}</p>}
       </div>
@@ -1334,18 +1472,25 @@ function LedgersSubTab() {
                 <th className="px-4 py-2.5 text-left">PAN</th>
                 <th className="px-4 py-2.5 text-left">State</th>
                 <th className="px-4 py-2.5 text-center">TDS?</th>
+                <th className="px-4 py-2.5 text-center">TCS?</th>
                 <th className="px-4 py-2.5"></th>
               </tr></thead>
               <tbody>
                 {ledgers.map(l => (
                   <tr key={l.id} className="border-t border-gray-50 hover:bg-gray-50">
-                    <td className="px-4 py-2 font-medium text-gray-700">{l.name}</td>
+                    <td className="px-4 py-2 font-medium text-gray-700">
+                      {l.name}
+                      {l.alias ? <span className="ml-1 text-[10px] text-gray-400">({l.alias})</span> : null}
+                    </td>
                     <td className="px-4 py-2 text-gray-500">{l.group_name || '—'}</td>
                     <td className="px-4 py-2 text-gray-500 font-mono text-xs">{l.gstin || '—'}</td>
                     <td className="px-4 py-2 text-gray-500 font-mono text-xs">{l.pan || '—'}</td>
                     <td className="px-4 py-2 text-gray-500">{l.state || '—'}</td>
                     <td className="px-4 py-2 text-center">
                       {l.tds_applicable ? <span className="text-xs bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded">Yes ({l.tds_section})</span> : '—'}
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      {l.is_tcs_applicable ? <span className="text-xs bg-orange-50 text-orange-700 px-1.5 py-0.5 rounded">Yes</span> : '—'}
                     </td>
                     <td className="px-4 py-2 text-right">
                       <button onClick={() => { if (window.confirm('Delete ledger?')) delMut.mutate(l.id) }}
@@ -1536,6 +1681,194 @@ function TDSSectionsSubTab() {
                       className="text-red-400 hover:text-red-600 text-xs">✕</button>
                   </td>
                 </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Voucher Types Sub-tab ─────────────────────────────────────────
+function VoucherTypesSubTab() {
+  const qc = useQueryClient()
+  const { data: vtypes = [], isLoading } = useQuery<VoucherType[]>({
+    queryKey: ['finance-voucher-types'],
+    queryFn: async () => { const { data } = await api.get('/finance/masters/voucher-types'); return data },
+  })
+
+  const [name, setName] = useState('')
+  const [category, setCategory] = useState('Sales')
+  const [abbr, setAbbr] = useState('')
+  const [allowNarration, setAllowNarration] = useState(true)
+  const [numberingMethod, setNumberingMethod] = useState('Auto')
+  const [err, setErr] = useState('')
+  const [editId, setEditId] = useState<number | null>(null)
+  const [editForm, setEditForm] = useState<Partial<VoucherType>>({})
+
+  const CATEGORIES = ['Sales', 'Purchase', 'Payment', 'Receipt', 'Journal', 'Contra']
+
+  const addMut = useMutation({
+    mutationFn: (b: object) => api.post('/finance/masters/voucher-types', b),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['finance-voucher-types'] })
+      setName(''); setAbbr(''); setErr('')
+    },
+    onError: () => setErr('Failed to save.'),
+  })
+
+  const updateMut = useMutation({
+    mutationFn: ({ id, body }: { id: number; body: object }) => api.put(`/finance/masters/voucher-types/${id}`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['finance-voucher-types'] })
+      setEditId(null); setEditForm({})
+    },
+    onError: () => setErr('Update failed.'),
+  })
+
+  const delMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/finance/masters/voucher-types/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['finance-voucher-types'] }),
+  })
+
+  const CATEGORY_COLORS: Record<string, string> = {
+    Sales: 'bg-green-50 text-green-700',
+    Purchase: 'bg-blue-50 text-blue-700',
+    Payment: 'bg-red-50 text-red-700',
+    Receipt: 'bg-teal-50 text-teal-700',
+    Journal: 'bg-purple-50 text-purple-700',
+    Contra: 'bg-gray-100 text-gray-700',
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+        <h4 className="text-xs font-semibold text-gray-600 mb-3">Add Voucher Type</h4>
+        <div className="flex flex-wrap gap-2 items-end">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">Name *</label>
+            <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Amazon Sales"
+              className="text-xs border border-gray-200 rounded px-2 py-1.5 w-40 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">Category</label>
+            <select value={category} onChange={e => setCategory(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
+              {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">Abbreviation</label>
+            <input type="text" value={abbr} onChange={e => setAbbr(e.target.value)} placeholder="e.g. Amz"
+              className="text-xs border border-gray-200 rounded px-2 py-1.5 w-20 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">Numbering</label>
+            <select value={numberingMethod} onChange={e => setNumberingMethod(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
+              <option>Auto</option>
+              <option>Manual</option>
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">Allow Narration</label>
+            <label className="flex items-center gap-1.5 h-[28px] cursor-pointer">
+              <input type="checkbox" checked={allowNarration} onChange={e => setAllowNarration(e.target.checked)} />
+              <span className="text-xs">{allowNarration ? 'Yes' : 'No'}</span>
+            </label>
+          </div>
+          <button onClick={() => {
+            if (!name.trim()) { setErr('Name required'); return }
+            addMut.mutate({ name, voucher_category: category, abbreviation: abbr, allow_narration: allowNarration ? 1 : 0, numbering_method: numberingMethod })
+          }} disabled={addMut.isPending}
+            className="px-4 py-1.5 text-xs font-semibold bg-[#002B5B] text-white rounded hover:bg-blue-900 disabled:opacity-60">
+            + Add
+          </button>
+        </div>
+        {err && <p className="text-xs text-red-600 mt-1">{err}</p>}
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        {isLoading ? <div className="p-6 text-center text-gray-400 text-sm animate-pulse">Loading…</div> : (
+          <table className="w-full text-sm">
+            <thead><tr className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+              <th className="px-4 py-2.5 text-left">Name</th>
+              <th className="px-4 py-2.5 text-left">Category</th>
+              <th className="px-4 py-2.5 text-left">Abbreviation</th>
+              <th className="px-4 py-2.5 text-center">Narration</th>
+              <th className="px-4 py-2.5 text-center">Numbering</th>
+              <th className="px-4 py-2.5 text-center">Status</th>
+              <th className="px-4 py-2.5 text-center">Edit</th>
+              <th className="px-4 py-2.5 text-center">Delete</th>
+            </tr></thead>
+            <tbody>
+              {vtypes.map(vt => (
+                editId === vt.id ? (
+                  <tr key={vt.id} className="border-t border-blue-100 bg-blue-50">
+                    <td className="px-2 py-1.5">
+                      <input type="text" value={editForm.name ?? vt.name} onChange={e => setEditForm(p => ({ ...p, name: e.target.value }))}
+                        className="text-xs border border-gray-200 rounded px-2 py-1 w-full focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <select value={editForm.voucher_category ?? vt.voucher_category} onChange={e => setEditForm(p => ({ ...p, voucher_category: e.target.value }))}
+                        className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300">
+                        {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <input type="text" value={editForm.abbreviation ?? vt.abbreviation} onChange={e => setEditForm(p => ({ ...p, abbreviation: e.target.value }))}
+                        className="text-xs border border-gray-200 rounded px-2 py-1 w-20 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      <input type="checkbox" checked={(editForm.allow_narration ?? vt.allow_narration) === 1}
+                        onChange={e => setEditForm(p => ({ ...p, allow_narration: e.target.checked ? 1 : 0 }))} />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <select value={editForm.numbering_method ?? vt.numbering_method} onChange={e => setEditForm(p => ({ ...p, numbering_method: e.target.value }))}
+                        className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300">
+                        <option>Auto</option><option>Manual</option>
+                      </select>
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      <select value={editForm.is_active ?? vt.is_active} onChange={e => setEditForm(p => ({ ...p, is_active: +e.target.value }))}
+                        className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300">
+                        <option value={1}>Active</option><option value={0}>Inactive</option>
+                      </select>
+                    </td>
+                    <td className="px-2 py-1.5 text-center" colSpan={2}>
+                      <button onClick={() => updateMut.mutate({ id: vt.id, body: editForm })}
+                        className="text-xs px-2 py-1 bg-[#002B5B] text-white rounded hover:bg-blue-900 mr-1">Save</button>
+                      <button onClick={() => { setEditId(null); setEditForm({}) }}
+                        className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded hover:bg-gray-200">Cancel</button>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={vt.id} className="border-t border-gray-50 hover:bg-gray-50">
+                    <td className="px-4 py-2 font-medium text-gray-700">{vt.name}</td>
+                    <td className="px-4 py-2">
+                      <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${CATEGORY_COLORS[vt.voucher_category] ?? 'bg-gray-100 text-gray-600'}`}>
+                        {vt.voucher_category}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2 font-mono text-xs text-gray-600">{vt.abbreviation || '—'}</td>
+                    <td className="px-4 py-2 text-center text-xs text-gray-500">{vt.allow_narration ? 'Yes' : 'No'}</td>
+                    <td className="px-4 py-2 text-center text-xs text-gray-500">{vt.numbering_method}</td>
+                    <td className="px-4 py-2 text-center">
+                      {vt.is_active
+                        ? <span className="text-xs bg-green-50 text-green-700 px-1.5 py-0.5 rounded font-medium">Active</span>
+                        : <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-medium">Inactive</span>}
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      <button onClick={() => { setEditId(vt.id); setEditForm({}) }}
+                        className="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      <button onClick={() => { if (window.confirm('Delete voucher type?')) delMut.mutate(vt.id) }}
+                        className="text-red-400 hover:text-red-600 text-xs">✕</button>
+                    </td>
+                  </tr>
+                )
               ))}
             </tbody>
           </table>

@@ -64,31 +64,39 @@ class RoutingStepCreate(BaseModel):
     sort_order: int  = 0
 
 class ItemCreate(BaseModel):
-    item_code:      str
-    item_name:      str
-    item_type_id:   int
-    hsn_code:       str   = ""
-    season:         str   = ""
-    merchant_code:  str   = ""
-    selling_price:  float = 0.0
-    purchase_price: float = 0.0
-    launch_date:    str   = ""
-    uom:            str   = "PCS"
-    sizes:          List[str] = []       # triggers size variant generation
-    routing_step_ids: List[int] = []
+    item_code:          str
+    item_name:          str
+    item_type_id:       int
+    hsn_code:           str   = ""
+    season:             str   = ""
+    merchant_code:      str   = ""
+    selling_price:      float = 0.0
+    purchase_price:     float = 0.0
+    launch_date:        str   = ""
+    uom:                str   = "PCS"
+    alias:              str   = ""
+    gst_applicability:  str   = "Applicable"
+    type_of_supply:     str   = "Goods"
+    gst_rate:           float = 0.0
+    sizes:              List[str] = []       # triggers size variant generation
+    routing_step_ids:   List[int] = []
 
 class ItemUpdate(BaseModel):
-    item_code:      Optional[str]   = None
-    item_name:      Optional[str]   = None
-    item_type_id:   Optional[int]   = None
-    hsn_code:       Optional[str]   = None
-    season:         Optional[str]   = None
-    merchant_code:  Optional[str]   = None
-    selling_price:  Optional[float] = None
-    purchase_price: Optional[float] = None
-    launch_date:    Optional[str]   = None
-    uom:            Optional[str]   = None
-    routing_step_ids: Optional[List[int]] = None
+    item_code:          Optional[str]   = None
+    item_name:          Optional[str]   = None
+    item_type_id:       Optional[int]   = None
+    hsn_code:           Optional[str]   = None
+    season:             Optional[str]   = None
+    merchant_code:      Optional[str]   = None
+    selling_price:      Optional[float] = None
+    purchase_price:     Optional[float] = None
+    launch_date:        Optional[str]   = None
+    uom:                Optional[str]   = None
+    alias:              Optional[str]   = None
+    gst_applicability:  Optional[str]   = None
+    type_of_supply:     Optional[str]   = None
+    gst_rate:           Optional[float] = None
+    routing_step_ids:   Optional[List[int]] = None
 
 class BOMCreate(BaseModel):
     bom_name:   str = "Default"
@@ -254,16 +262,20 @@ def get_items(
 @router.post("")
 def add_item(body: ItemCreate):
     item_id = create_item(
-        item_code      = body.item_code,
-        item_name      = body.item_name,
-        item_type_id   = body.item_type_id,
-        hsn_code       = body.hsn_code,
-        season         = body.season,
-        merchant_code  = body.merchant_code,
-        selling_price  = body.selling_price,
-        purchase_price = body.purchase_price,
-        launch_date    = body.launch_date,
-        uom            = body.uom,
+        item_code         = body.item_code,
+        item_name         = body.item_name,
+        item_type_id      = body.item_type_id,
+        hsn_code          = body.hsn_code,
+        season            = body.season,
+        merchant_code     = body.merchant_code,
+        selling_price     = body.selling_price,
+        purchase_price    = body.purchase_price,
+        launch_date       = body.launch_date,
+        uom               = body.uom,
+        alias             = body.alias,
+        gst_applicability = body.gst_applicability,
+        type_of_supply    = body.type_of_supply,
+        gst_rate          = body.gst_rate,
     )
     variant_ids: list[int] = []
     if body.sizes:
