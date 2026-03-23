@@ -161,6 +161,29 @@ def init_db() -> None:
 
     conn.commit()
 
+    # ── Migrate expense_vouchers — add payment/bank columns ───────
+    for col_ddl in [
+        "ALTER TABLE expense_vouchers ADD COLUMN payment_mode TEXT DEFAULT ''",
+        "ALTER TABLE expense_vouchers ADD COLUMN bank_ledger TEXT DEFAULT ''",
+        "ALTER TABLE expense_vouchers ADD COLUMN cheque_no TEXT DEFAULT ''",
+        "ALTER TABLE expense_vouchers ADD COLUMN ref_number TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(col_ddl)
+        except Exception:
+            pass  # column already exists
+    conn.commit()
+
+    # ── Migrate expense_voucher_lines — add is_debit column ───────
+    for col_ddl in [
+        "ALTER TABLE expense_voucher_lines ADD COLUMN is_debit INTEGER DEFAULT 1",
+    ]:
+        try:
+            conn.execute(col_ddl)
+        except Exception:
+            pass  # column already exists
+    conn.commit()
+
     # ── Migrate ledgers table — add new columns if missing ────────
     for col_ddl in [
         "ALTER TABLE ledgers ADD COLUMN alias TEXT DEFAULT ''",
@@ -203,6 +226,35 @@ def init_db() -> None:
             seed_groups,
         )
         conn.commit()
+
+    # ── Seed additional Tally ledger groups (INSERT OR IGNORE) ────
+    extra_groups = [
+        ('Reserve & Surplus',           'Capital Account',   'liability'),
+        ('Bank Overdraft',              'Loans Liabilities', 'liability'),
+        ('Secured Loans',               'Loans Liabilities', 'liability'),
+        ('Unsecured Loans',             'Loans Liabilities', 'liability'),
+        ('Loans Liabilities',           '',                  'liability'),
+        ('Fixed Assets',                '',                  'asset'),
+        ('Investments',                 '',                  'asset'),
+        ('Current Assets',              '',                  'asset'),
+        ('Current Liabilities',         '',                  'liability'),
+        ('Deposit Assets',              'Current Assets',    'asset'),
+        ('Loans & Advances (Assets)',   'Current Assets',    'asset'),
+        ('Stock in Hand',               'Current Assets',    'asset'),
+        ('Provision',                   'Current Liabilities', 'liability'),
+        ('Miscellaneous Expenses',      '',                  'asset'),
+        ('Suspense Account',            '',                  'asset'),
+        ('Branch/Division',             '',                  'asset'),
+    ]
+    for grp in extra_groups:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO ledger_groups (name, parent_group, nature) VALUES (?,?,?)",
+                grp,
+            )
+        except Exception:
+            pass
+    conn.commit()
 
     # ── Seed gst_classifications ──────────────────────────────────
     count = conn.execute("SELECT COUNT(*) FROM gst_classifications").fetchone()[0]
@@ -532,7 +584,16 @@ def delete_tds_section(section_id: int) -> bool:
 # ── Expense Vouchers CRUD ─────────────────────────────────────────
 
 def _next_voucher_no(conn: sqlite3.Connection, voucher_type: str) -> str:
-    prefix = 'JWO' if voucher_type == 'JWO Payment' else 'EXP'
+    prefix_map = {
+        'JWO Payment':      'JWO',
+        'Payment':          'PAY',
+        'Receipt':          'REC',
+        'Journal':          'JNL',
+        'Contra':           'CON',
+        'Purchase Invoice': 'PUR',
+        'Sales Invoice':    'SAL',
+    }
+    prefix = prefix_map.get(voucher_type) or 'EXP'
     row = conn.execute(
         "SELECT COUNT(*) FROM expense_vouchers WHERE voucher_type = ?",
         (voucher_type,),
@@ -599,8 +660,9 @@ def create_expense_voucher(data: dict) -> str:
            (voucher_no, voucher_date, voucher_type, party_name, party_gstin, party_state,
             bill_no, bill_date, supply_type, narration,
             taxable_amount, cgst_amount, sgst_amount, igst_amount,
-            tds_section, tds_rate, tds_amount, total_amount, net_payable)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            tds_section, tds_rate, tds_amount, total_amount, net_payable,
+            payment_mode, bank_ledger, cheque_no, ref_number)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             voucher_no,
             data.get('voucher_date') or '',
@@ -621,6 +683,10 @@ def create_expense_voucher(data: dict) -> str:
             data.get('tds_amount') or 0,
             data.get('total_amount') or 0,
             data.get('net_payable') or 0,
+            data.get('payment_mode') or '',
+            data.get('bank_ledger') or '',
+            data.get('cheque_no') or '',
+            data.get('ref_number') or '',
         ),
     )
     conn.commit()
@@ -631,14 +697,15 @@ def create_expense_voucher(data: dict) -> str:
     for line in data.get('lines') or []:
         conn.execute(
             """INSERT INTO expense_voucher_lines
-               (voucher_id, expense_head, description, amount, cost_centre)
-               VALUES (?,?,?,?,?)""",
+               (voucher_id, expense_head, description, amount, cost_centre, is_debit)
+               VALUES (?,?,?,?,?,?)""",
             (
                 vid,
                 line.get('expense_head') or '',
                 line.get('description') or '',
                 line.get('amount') or 0,
                 line.get('cost_centre') or '',
+                line.get('is_debit') if line.get('is_debit') is not None else 1,
             ),
         )
     conn.commit()
@@ -699,6 +766,117 @@ def create_finance_sales_upload(data: dict) -> int:
     new_id = cur.lastrowid
     conn.close()
     return new_id
+
+
+def list_vouchers(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    voucher_type: Optional[str] = None,
+) -> list[dict]:
+    """Return ALL vouchers with their lines, filtered by type/date."""
+    return list_expense_vouchers(
+        start_date=start_date,
+        end_date=end_date,
+        voucher_type=voucher_type,
+    )
+
+
+def get_voucher_summary_by_date(date: str) -> list[dict]:
+    """Return all vouchers for a specific date (for Day Book)."""
+    conn = _connect()
+    vouchers = [dict(r) for r in conn.execute(
+        "SELECT * FROM expense_vouchers WHERE voucher_date = ? ORDER BY id ASC",
+        (date,),
+    ).fetchall()]
+    for v in vouchers:
+        lines = conn.execute(
+            "SELECT * FROM expense_voucher_lines WHERE voucher_id = ? ORDER BY id",
+            (v['id'],),
+        ).fetchall()
+        v['lines'] = [dict(ln) for ln in lines]
+    conn.close()
+    return vouchers
+
+
+def get_gstr3b_data(start_date: str, end_date: str) -> dict:
+    """Compute GSTR3B data from expense_vouchers."""
+    conn = _connect()
+    # Outward supplies (Sales Invoice)
+    out_rows = conn.execute(
+        """SELECT SUM(taxable_amount) AS taxable, SUM(cgst_amount) AS cgst,
+                  SUM(sgst_amount) AS sgst, SUM(igst_amount) AS igst,
+                  SUM(total_amount) AS total
+           FROM expense_vouchers
+           WHERE voucher_type = 'Sales Invoice'
+             AND voucher_date >= ? AND voucher_date <= ?""",
+        (start_date, end_date),
+    ).fetchone()
+    outward = {
+        'taxable': round(out_rows['taxable'] or 0, 2),
+        'cgst':    round(out_rows['cgst']    or 0, 2),
+        'sgst':    round(out_rows['sgst']    or 0, 2),
+        'igst':    round(out_rows['igst']    or 0, 2),
+        'total':   round(out_rows['total']   or 0, 2),
+    }
+    # Inward ITC (Purchase Invoice, Expense, JWO Payment)
+    itc_rows = conn.execute(
+        """SELECT SUM(taxable_amount) AS taxable, SUM(cgst_amount) AS cgst,
+                  SUM(sgst_amount) AS sgst, SUM(igst_amount) AS igst,
+                  SUM(total_amount) AS total
+           FROM expense_vouchers
+           WHERE voucher_type IN ('Purchase Invoice', 'Expense', 'JWO Payment')
+             AND voucher_date >= ? AND voucher_date <= ?""",
+        (start_date, end_date),
+    ).fetchone()
+    inward_itc = {
+        'taxable': round(itc_rows['taxable'] or 0, 2),
+        'cgst':    round(itc_rows['cgst']    or 0, 2),
+        'sgst':    round(itc_rows['sgst']    or 0, 2),
+        'igst':    round(itc_rows['igst']    or 0, 2),
+        'total':   round(itc_rows['total']   or 0, 2),
+    }
+    # Line-by-line voucher breakdown for the period
+    breakdown_rows = conn.execute(
+        """SELECT voucher_no, voucher_date, voucher_type, party_name,
+                  taxable_amount, cgst_amount, sgst_amount, igst_amount, total_amount
+           FROM expense_vouchers
+           WHERE voucher_type IN ('Sales Invoice','Purchase Invoice','Expense','JWO Payment')
+             AND voucher_date >= ? AND voucher_date <= ?
+           ORDER BY voucher_date ASC, id ASC""",
+        (start_date, end_date),
+    ).fetchall()
+    breakdown = [dict(r) for r in breakdown_rows]
+    conn.close()
+    net_cgst  = round(outward['cgst'] - inward_itc['cgst'], 2)
+    net_sgst  = round(outward['sgst'] - inward_itc['sgst'], 2)
+    net_igst  = round(outward['igst'] - inward_itc['igst'], 2)
+    net_total = round(net_cgst + net_sgst + net_igst, 2)
+    return {
+        'outward':    outward,
+        'inward_itc': inward_itc,
+        'net_cgst':   net_cgst,
+        'net_sgst':   net_sgst,
+        'net_igst':   net_igst,
+        'net_total':  net_total,
+        'breakdown':  breakdown,
+    }
+
+
+def get_ledger_balances() -> list[dict]:
+    """Sum of payments/receipts per ledger (party_name)."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT party_name,
+                  SUM(CASE WHEN voucher_type IN ('Payment','JWO Payment','Expense','Purchase Invoice') THEN net_payable ELSE 0 END) AS total_payments,
+                  SUM(CASE WHEN voucher_type IN ('Receipt','Sales Invoice') THEN total_amount ELSE 0 END) AS total_receipts,
+                  COUNT(*) AS voucher_count
+           FROM expense_vouchers
+           WHERE party_name != ''
+           GROUP BY party_name
+           ORDER BY party_name""",
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def delete_finance_sales_upload(upload_id: int) -> bool:

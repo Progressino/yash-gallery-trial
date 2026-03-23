@@ -35,6 +35,7 @@ from ..db.finance_db import (
     list_expense_vouchers, get_expense_voucher, create_expense_voucher, delete_expense_voucher,
     list_finance_sales_uploads, create_finance_sales_upload, delete_finance_sales_upload,
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
+    list_vouchers, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances,
 )
 from ..services.finance import get_pl_statement, get_gst_summary, get_platform_revenue
 
@@ -149,6 +150,7 @@ class VoucherLineIn(BaseModel):
     description:  str   = ''
     amount:       float = 0
     cost_centre:  str   = ''
+    is_debit:     int   = 1   # 1=Dr, 0=Cr (for Journal)
 
 
 class VoucherCreate(BaseModel):
@@ -170,6 +172,10 @@ class VoucherCreate(BaseModel):
     tds_amount:     float = 0
     total_amount:   float = 0
     net_payable:    float = 0
+    payment_mode:   str   = ''   # Cash/Cheque/NEFT/RTGS/IMPS
+    bank_ledger:    str   = ''
+    cheque_no:      str   = ''
+    ref_number:     str   = ''   # UTR/transaction ref
     lines:          List[VoucherLineIn] = []
 
 
@@ -493,6 +499,48 @@ def del_voucher(voucher_id: int):
     if not deleted:
         raise HTTPException(status_code=404, detail="Voucher not found")
     return {"ok": True}
+
+
+# ── Extra Voucher Endpoints ───────────────────────────────────────
+
+@router.get("/vouchers/types")
+def get_voucher_types_in_db():
+    """Return distinct voucher_type values present in expense_vouchers table."""
+    from ..db.finance_db import _connect
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT DISTINCT voucher_type FROM expense_vouchers ORDER BY voucher_type"
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+@router.get("/daybook")
+def get_daybook(date: Optional[str] = None):
+    """Return all vouchers for a specific date."""
+    import datetime
+    use_date = date or datetime.date.today().isoformat()
+    return get_voucher_summary_by_date(use_date)
+
+
+@router.get("/gstr3b")
+def get_gstr3b(
+    start_date: Optional[str] = None,
+    end_date:   Optional[str] = None,
+):
+    """Return GSTR3B computed summary."""
+    import datetime
+    today = datetime.date.today().isoformat()
+    first_of_month = datetime.date.today().replace(day=1).isoformat()
+    sd = start_date or first_of_month
+    ed = end_date   or today
+    return get_gstr3b_data(sd, ed)
+
+
+@router.get("/ledger-balances")
+def ledger_balances():
+    """Sum of payments/receipts per ledger."""
+    return get_ledger_balances()
 
 
 # ── Finance Sales Uploads ─────────────────────────────────────────

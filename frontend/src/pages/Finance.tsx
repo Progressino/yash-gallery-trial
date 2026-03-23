@@ -168,8 +168,34 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'pl' | 'gst' | 'expenses' | 'revenue' | 'vouchers' | 'masters' | 'sales-uploads'
+type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads'
 type MastersSubTab = 'ledger-groups' | 'ledgers' | 'gst-classifications' | 'tds-sections' | 'voucher-types'
+
+const VOUCHER_COLORS: Record<string, string> = {
+  'Expense':          'bg-red-50 text-red-700',
+  'JWO Payment':      'bg-orange-50 text-orange-700',
+  'Payment':          'bg-red-100 text-red-800',
+  'Receipt':          'bg-green-100 text-green-800',
+  'Journal':          'bg-purple-50 text-purple-700',
+  'Contra':           'bg-blue-50 text-blue-700',
+  'Purchase Invoice': 'bg-amber-50 text-amber-700',
+  'Sales Invoice':    'bg-emerald-50 text-emerald-700',
+}
+
+interface DaybookVoucher {
+  id: number; voucher_no: string; voucher_date: string; voucher_type: string
+  party_name: string; narration: string; taxable_amount: number
+  cgst_amount: number; sgst_amount: number; igst_amount: number
+  tds_amount: number; total_amount: number; net_payable: number
+  payment_mode: string; bank_ledger: string; lines: VoucherLine[]
+}
+
+interface GSTR3BData {
+  outward:    { taxable: number; cgst: number; sgst: number; igst: number; total: number }
+  inward_itc: { taxable: number; cgst: number; sgst: number; igst: number; total: number }
+  net_cgst: number; net_sgst: number; net_igst: number; net_total: number
+  breakdown: { voucher_no: string; voucher_date: string; voucher_type: string; party_name: string; taxable_amount: number; cgst_amount: number; sgst_amount: number; igst_amount: number; total_amount: number }[]
+}
 
 // ── Main Component ───────────────────────────────────────────────
 export default function Finance() {
@@ -188,7 +214,7 @@ export default function Finance() {
     }).catch(() => {})
   }, [])
 
-  const [activeTab,    setActiveTab]    = useState<FinanceTab>('pl')
+  const [activeTab,    setActiveTab]    = useState<FinanceTab>('dashboard')
   const [dateStart,    setDateStart]    = useState(() => daysAgo(90))
   const [dateEnd,      setDateEnd]      = useState(TODAY)
   const [activePreset, setActivePreset] = useState<string>('90D')
@@ -391,11 +417,13 @@ export default function Finance() {
       {/* Tabs */}
       <div className="flex border-b border-gray-200 gap-1 flex-wrap">
         {([
-          ['pl','P&L Statement'],
+          ['dashboard','Dashboard'],
+          ['daybook','Day Book'],
+          ['vouchers','Vouchers'],
+          ['gstr','GSTR3B'],
+          ['pl','P&L'],
           ['gst','GST Summary'],
           ['expenses','Expenses'],
-          ['revenue','Platform Revenue'],
-          ['vouchers','Expense Vouchers'],
           ['masters','Masters'],
           ['sales-uploads','Sales Uploads'],
         ] as [FinanceTab, string][]).map(([id, label]) => (
@@ -705,6 +733,15 @@ export default function Finance() {
         </div>
       )}
 
+      {/* ── Tab: Dashboard ── */}
+      {activeTab === 'dashboard' && <DashboardTab onNavigate={setActiveTab} />}
+
+      {/* ── Tab: Day Book ── */}
+      {activeTab === 'daybook' && <DaybookTab />}
+
+      {/* ── Tab: GSTR3B ── */}
+      {activeTab === 'gstr' && <GSTR3BTab />}
+
       {/* ── Tab: Vouchers ── */}
       {activeTab === 'vouchers' && <VouchersTab />}
 
@@ -713,6 +750,476 @@ export default function Finance() {
 
       {/* ── Tab: Sales Uploads ── */}
       {activeTab === 'sales-uploads' && <SalesUploadsTab />}
+    </div>
+  )
+}
+
+// ── Dashboard Tab ────────────────────────────────────────────────
+function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void }) {
+  const todayStr = toIso(new Date())
+
+  const { data: todayVouchers = [], isLoading: loadToday } = useQuery<DaybookVoucher[]>({
+    queryKey: ['finance-daybook-today'],
+    queryFn: async () => { const { data } = await api.get(`/finance/daybook?date=${todayStr}`); return data },
+    staleTime: 30 * 1000,
+  })
+
+  const { data: monthExpenses } = useQuery<Expense[]>({
+    queryKey: ['finance-expenses-month'],
+    queryFn: async () => {
+      const now = new Date()
+      const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+      const { data } = await api.get(`/finance/expenses?start_date=${start}&end_date=${todayStr}`)
+      return data
+    },
+    staleTime: 60 * 1000,
+  })
+
+  const { data: gstr3b } = useQuery<GSTR3BData>({
+    queryKey: ['finance-gstr3b-current'],
+    queryFn: async () => {
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = String(now.getMonth() + 1).padStart(2, '0')
+      const { data } = await api.get(`/finance/gstr3b?start_date=${y}-${m}-01&end_date=${y}-${m}-31`)
+      return data
+    },
+    staleTime: 60 * 1000,
+  })
+
+  const { data: ledgerBalances } = useQuery<{ debtors: { name: string; balance: number }[]; creditors: { name: string; balance: number }[] }>({
+    queryKey: ['finance-ledger-balances'],
+    queryFn: async () => { const { data } = await api.get('/finance/ledger-balances'); return data },
+    staleTime: 2 * 60 * 1000,
+  })
+
+  const todayCount = todayVouchers.length
+  const todayTotal = todayVouchers.reduce((s, v) => s + v.net_payable, 0)
+  const monthExpTotal = (monthExpenses ?? []).reduce((s, e) => s + e.amount + e.gst_amount, 0)
+  const gstPayable = gstr3b?.net_total ?? 0
+
+  const QUICK_ACTIONS: { label: string; vtype?: string; icon: string }[] = [
+    { label: 'New Expense', icon: '📋' },
+    { label: 'New Payment', icon: '💳' },
+    { label: 'New Receipt', icon: '🧾' },
+    { label: 'New Journal', icon: '📒' },
+  ]
+
+  return (
+    <div className="space-y-5">
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">Today's Vouchers</p>
+          {loadToday ? (
+            <div className="h-7 bg-gray-100 rounded animate-pulse mt-2" />
+          ) : (
+            <p className="text-2xl font-bold text-[#002B5B] mt-1">{todayCount}</p>
+          )}
+          <p className="text-xs text-gray-400 mt-0.5">{todayStr}</p>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">Today's Total</p>
+          {loadToday ? (
+            <div className="h-7 bg-gray-100 rounded animate-pulse mt-2" />
+          ) : (
+            <p className="text-2xl font-bold text-gray-800 mt-1">{fmt(todayTotal)}</p>
+          )}
+          <p className="text-xs text-gray-400 mt-0.5">net payable</p>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">This Month Expenses</p>
+          <p className="text-2xl font-bold text-red-600 mt-1">{fmt(monthExpTotal)}</p>
+          <p className="text-xs text-gray-400 mt-0.5">incl. GST</p>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">GST Payable</p>
+          <p className={`text-2xl font-bold mt-1 ${gstPayable > 0 ? 'text-orange-600' : 'text-green-600'}`}>{fmt(gstPayable)}</p>
+          <p className="text-xs text-gray-400 mt-0.5">current month net</p>
+        </div>
+      </div>
+
+      {/* Quick Actions */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+        <h3 className="text-sm font-semibold text-gray-700 mb-3">Quick Actions</h3>
+        <div className="flex flex-wrap gap-2">
+          {QUICK_ACTIONS.map(({ label, icon }) => (
+            <button key={label} onClick={() => onNavigate('vouchers')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[#002B5B] text-white rounded-lg hover:bg-[#003875] transition-colors">
+              <span>{icon}</span>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Today's Day Book */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-700">Today's Day Book</h3>
+            <button onClick={() => onNavigate('daybook')} className="text-xs text-blue-600 hover:underline">View Full →</button>
+          </div>
+          {loadToday ? (
+            <div className="p-6 text-center text-gray-400 text-sm animate-pulse">Loading…</div>
+          ) : todayVouchers.length === 0 ? (
+            <div className="p-6 text-center text-gray-400 text-sm">No vouchers today.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                    <th className="px-3 py-2 text-left">Voucher No</th>
+                    <th className="px-3 py-2 text-left">Type</th>
+                    <th className="px-3 py-2 text-left">Party</th>
+                    <th className="px-3 py-2 text-right">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {todayVouchers.slice(0, 8).map(v => (
+                    <tr key={v.id} className="border-t border-gray-50 hover:bg-gray-50">
+                      <td className="px-3 py-1.5 font-mono font-semibold text-[#002B5B]">{v.voucher_no}</td>
+                      <td className="px-3 py-1.5">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${VOUCHER_COLORS[v.voucher_type] ?? 'bg-gray-100 text-gray-600'}`}>
+                          {v.voucher_type}
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-600 max-w-[80px] truncate">{v.party_name || '—'}</td>
+                      <td className="px-3 py-1.5 text-right font-semibold text-gray-800">{fmt(v.net_payable)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Outstanding Summary */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100">
+            <h3 className="text-sm font-semibold text-gray-700">Outstanding Summary</h3>
+          </div>
+          {!ledgerBalances ? (
+            <div className="p-6 text-center text-gray-400 text-sm animate-pulse">Loading…</div>
+          ) : (
+            <div className="grid grid-cols-2 divide-x divide-gray-100">
+              <div className="p-3">
+                <p className="text-[10px] font-bold text-green-700 uppercase tracking-widest mb-2">Top Debtors</p>
+                {(ledgerBalances.debtors ?? []).slice(0, 5).length === 0 ? (
+                  <p className="text-xs text-gray-400">None</p>
+                ) : (
+                  (ledgerBalances.debtors ?? []).slice(0, 5).map((d, i) => (
+                    <div key={i} className="flex justify-between items-center py-0.5">
+                      <span className="text-xs text-gray-600 truncate max-w-[80px]" title={d.name}>{d.name}</span>
+                      <span className="text-xs font-semibold text-green-700">{fmt(d.balance)}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="p-3">
+                <p className="text-[10px] font-bold text-red-700 uppercase tracking-widest mb-2">Top Creditors</p>
+                {(ledgerBalances.creditors ?? []).slice(0, 5).length === 0 ? (
+                  <p className="text-xs text-gray-400">None</p>
+                ) : (
+                  (ledgerBalances.creditors ?? []).slice(0, 5).map((c, i) => (
+                    <div key={i} className="flex justify-between items-center py-0.5">
+                      <span className="text-xs text-gray-600 truncate max-w-[80px]" title={c.name}>{c.name}</span>
+                      <span className="text-xs font-semibold text-red-600">{fmt(c.balance)}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Day Book Tab ──────────────────────────────────────────────────
+function DaybookTab() {
+  const qc = useQueryClient()
+  const [dateStr, setDateStr] = useState(toIso(new Date()))
+
+  function prevDay() {
+    const d = new Date(dateStr)
+    d.setDate(d.getDate() - 1)
+    setDateStr(toIso(d))
+  }
+  function nextDay() {
+    const d = new Date(dateStr)
+    d.setDate(d.getDate() + 1)
+    setDateStr(toIso(d))
+  }
+
+  const { data: vouchers = [], isLoading } = useQuery<DaybookVoucher[]>({
+    queryKey: ['finance-daybook', dateStr],
+    queryFn: async () => { const { data } = await api.get(`/finance/daybook?date=${dateStr}`); return data },
+    staleTime: 30 * 1000,
+  })
+
+  const delMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/finance/vouchers/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['finance-daybook', dateStr] })
+      qc.invalidateQueries({ queryKey: ['finance-daybook-today'] })
+    },
+  })
+
+  const totalTaxable = vouchers.reduce((s, v) => s + v.taxable_amount, 0)
+  const totalGst = vouchers.reduce((s, v) => s + v.cgst_amount + v.sgst_amount + v.igst_amount, 0)
+  const totalTds = vouchers.reduce((s, v) => s + v.tds_amount, 0)
+  const totalNet = vouchers.reduce((s, v) => s + v.net_payable, 0)
+
+  return (
+    <div className="space-y-4">
+      {/* Date navigator */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3 flex items-center gap-3">
+        <button onClick={prevDay} className="px-3 py-1.5 text-xs font-medium bg-gray-100 text-gray-600 rounded hover:bg-gray-200 transition-colors">← Prev</button>
+        <input type="date" value={dateStr} max={toIso(new Date())} onChange={e => setDateStr(e.target.value)}
+          className="text-sm font-semibold border border-gray-200 rounded px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+        <button onClick={nextDay} className="px-3 py-1.5 text-xs font-medium bg-gray-100 text-gray-600 rounded hover:bg-gray-200 transition-colors">Next →</button>
+        <span className="text-xs text-gray-400 ml-2">{vouchers.length} voucher{vouchers.length !== 1 ? 's' : ''}</span>
+      </div>
+
+      {/* Table */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-100">
+          <h3 className="text-sm font-semibold text-gray-700">Day Book — {dateStr}</h3>
+        </div>
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm animate-pulse">Loading…</div>
+        ) : vouchers.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No vouchers for this date.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                  <th className="px-3 py-2.5 text-left">Date</th>
+                  <th className="px-3 py-2.5 text-left">Voucher No</th>
+                  <th className="px-3 py-2.5 text-left">Type</th>
+                  <th className="px-3 py-2.5 text-left">Party</th>
+                  <th className="px-3 py-2.5 text-right">Taxable</th>
+                  <th className="px-3 py-2.5 text-right">CGST</th>
+                  <th className="px-3 py-2.5 text-right">SGST</th>
+                  <th className="px-3 py-2.5 text-right">IGST</th>
+                  <th className="px-3 py-2.5 text-right">TDS</th>
+                  <th className="px-3 py-2.5 text-right">Total</th>
+                  <th className="px-3 py-2.5 text-right">Net Payable</th>
+                  <th className="px-3 py-2.5"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {vouchers.map(v => (
+                  <tr key={v.id} className="border-t border-gray-50 hover:bg-gray-50">
+                    <td className="px-3 py-2 text-gray-500">{v.voucher_date}</td>
+                    <td className="px-3 py-2 font-mono font-semibold text-[#002B5B]">{v.voucher_no}</td>
+                    <td className="px-3 py-2">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${VOUCHER_COLORS[v.voucher_type] ?? 'bg-gray-100 text-gray-600'}`}>
+                        {v.voucher_type}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-600 max-w-[100px] truncate" title={v.party_name}>{v.party_name || '—'}</td>
+                    <td className="px-3 py-2 text-right">{fmt(v.taxable_amount)}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{v.cgst_amount > 0 ? fmt(v.cgst_amount) : '—'}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{v.sgst_amount > 0 ? fmt(v.sgst_amount) : '—'}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{v.igst_amount > 0 ? fmt(v.igst_amount) : '—'}</td>
+                    <td className="px-3 py-2 text-right text-amber-700">{v.tds_amount > 0 ? fmt(v.tds_amount) : '—'}</td>
+                    <td className="px-3 py-2 text-right text-gray-700">{fmt(v.total_amount)}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-gray-800">{fmt(v.net_payable)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button onClick={() => { if (window.confirm('Delete voucher ' + v.voucher_no + '?')) delMut.mutate(v.id) }}
+                        className="text-red-400 hover:text-red-600">✕</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="bg-[#002B5B] text-white text-xs font-semibold">
+                  <td className="px-3 py-2.5" colSpan={4}>Total ({vouchers.length} vouchers)</td>
+                  <td className="px-3 py-2.5 text-right">{fmt(totalTaxable)}</td>
+                  <td className="px-3 py-2.5 text-right" colSpan={3}>{fmt(totalGst)} GST</td>
+                  <td className="px-3 py-2.5 text-right">{totalTds > 0 ? fmt(totalTds) : '—'}</td>
+                  <td className="px-3 py-2.5 text-right">{fmt(totalTaxable + totalGst)}</td>
+                  <td className="px-3 py-2.5 text-right">{fmt(totalNet)}</td>
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── GSTR3B Tab ───────────────────────────────────────────────────
+function GSTR3BTab() {
+  const now = new Date()
+  const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  const [month, setMonth] = useState(defaultMonth)
+
+  const [y, m] = month.split('-')
+  const startDate = `${y}-${m}-01`
+  const endDate = `${y}-${m}-31`
+
+  const { data: gstr, isLoading } = useQuery<GSTR3BData>({
+    queryKey: ['finance-gstr3b', month],
+    queryFn: async () => { const { data } = await api.get(`/finance/gstr3b?start_date=${startDate}&end_date=${endDate}`); return data },
+    staleTime: 60 * 1000,
+  })
+
+  return (
+    <div className="space-y-4">
+      {/* Month picker */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3 flex items-center gap-3">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Return Period</span>
+        <input type="month" value={month} onChange={e => setMonth(e.target.value)}
+          className="text-sm font-semibold border border-gray-200 rounded px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+        <span className="text-xs text-gray-400">{startDate} to {endDate}</span>
+      </div>
+
+      {isLoading ? (
+        <div className="p-8 text-center text-gray-400 text-sm animate-pulse">Loading GSTR3B data…</div>
+      ) : !gstr ? (
+        <div className="p-8 text-center text-gray-400 text-sm">No data found for this period.</div>
+      ) : (
+        <div className="space-y-4">
+          {/* GSTR3B Form */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-100 bg-[#002B5B] text-white">
+              <h3 className="text-sm font-semibold">GSTR-3B — {month}</h3>
+              <p className="text-xs text-blue-200 mt-0.5">Monthly Summary Return</p>
+            </div>
+
+            {/* Section 3.1 */}
+            <div className="px-5 py-4 border-b border-gray-100">
+              <h4 className="text-xs font-bold text-blue-800 uppercase tracking-widest mb-3">3.1 — Outward Supplies (Output Tax)</h4>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <div className="bg-blue-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-blue-500 font-semibold uppercase">Taxable</p>
+                  <p className="text-base font-bold text-blue-800 mt-1">{fmt(gstr.outward.taxable)}</p>
+                </div>
+                <div className="bg-blue-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-blue-500 font-semibold uppercase">CGST</p>
+                  <p className="text-base font-bold text-blue-800 mt-1">{fmt(gstr.outward.cgst)}</p>
+                </div>
+                <div className="bg-blue-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-blue-500 font-semibold uppercase">SGST</p>
+                  <p className="text-base font-bold text-blue-800 mt-1">{fmt(gstr.outward.sgst)}</p>
+                </div>
+                <div className="bg-blue-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-blue-500 font-semibold uppercase">IGST</p>
+                  <p className="text-base font-bold text-blue-800 mt-1">{fmt(gstr.outward.igst)}</p>
+                </div>
+                <div className="bg-blue-100 rounded-lg p-3 text-center border border-blue-200">
+                  <p className="text-[10px] text-blue-700 font-bold uppercase">Total Output</p>
+                  <p className="text-lg font-bold text-blue-900 mt-1">{fmt(gstr.outward.total)}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 4 */}
+            <div className="px-5 py-4 border-b border-gray-100">
+              <h4 className="text-xs font-bold text-green-800 uppercase tracking-widest mb-3">4 — Eligible Input Tax Credit (ITC)</h4>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <div className="bg-green-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-green-500 font-semibold uppercase">Taxable</p>
+                  <p className="text-base font-bold text-green-800 mt-1">{fmt(gstr.inward_itc.taxable)}</p>
+                </div>
+                <div className="bg-green-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-green-500 font-semibold uppercase">CGST ITC</p>
+                  <p className="text-base font-bold text-green-800 mt-1">{fmt(gstr.inward_itc.cgst)}</p>
+                </div>
+                <div className="bg-green-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-green-500 font-semibold uppercase">SGST ITC</p>
+                  <p className="text-base font-bold text-green-800 mt-1">{fmt(gstr.inward_itc.sgst)}</p>
+                </div>
+                <div className="bg-green-50 rounded-lg p-3 text-center">
+                  <p className="text-[10px] text-green-500 font-semibold uppercase">IGST ITC</p>
+                  <p className="text-base font-bold text-green-800 mt-1">{fmt(gstr.inward_itc.igst)}</p>
+                </div>
+                <div className="bg-green-100 rounded-lg p-3 text-center border border-green-200">
+                  <p className="text-[10px] text-green-700 font-bold uppercase">Total ITC</p>
+                  <p className="text-lg font-bold text-green-900 mt-1">{fmt(gstr.inward_itc.total)}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Net Tax Payable */}
+            <div className="px-5 py-4 bg-gray-50">
+              <h4 className="text-xs font-bold text-gray-600 uppercase tracking-widest mb-3">Net Tax Payable (Output − ITC)</h4>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className={`rounded-lg p-3 text-center ${gstr.net_cgst > 0 ? 'bg-orange-50 border border-orange-200' : 'bg-gray-50 border border-gray-200'}`}>
+                  <p className="text-[10px] font-semibold uppercase text-gray-500">CGST Payable</p>
+                  <p className={`text-base font-bold mt-1 ${gstr.net_cgst > 0 ? 'text-orange-700' : 'text-gray-600'}`}>{fmt(gstr.net_cgst)}</p>
+                </div>
+                <div className={`rounded-lg p-3 text-center ${gstr.net_sgst > 0 ? 'bg-orange-50 border border-orange-200' : 'bg-gray-50 border border-gray-200'}`}>
+                  <p className="text-[10px] font-semibold uppercase text-gray-500">SGST Payable</p>
+                  <p className={`text-base font-bold mt-1 ${gstr.net_sgst > 0 ? 'text-orange-700' : 'text-gray-600'}`}>{fmt(gstr.net_sgst)}</p>
+                </div>
+                <div className={`rounded-lg p-3 text-center ${gstr.net_igst > 0 ? 'bg-orange-50 border border-orange-200' : 'bg-gray-50 border border-gray-200'}`}>
+                  <p className="text-[10px] font-semibold uppercase text-gray-500">IGST Payable</p>
+                  <p className={`text-base font-bold mt-1 ${gstr.net_igst > 0 ? 'text-orange-700' : 'text-gray-600'}`}>{fmt(gstr.net_igst)}</p>
+                </div>
+                <div className={`rounded-lg p-4 text-center ${gstr.net_total > 0 ? 'bg-red-50 border-2 border-red-300' : 'bg-green-50 border-2 border-green-300'}`}>
+                  <p className="text-[10px] font-bold uppercase text-gray-600">Total Payable</p>
+                  <p className={`text-xl font-bold mt-1 ${gstr.net_total > 0 ? 'text-red-700' : 'text-green-700'}`}>{fmt(gstr.net_total)}</p>
+                  {gstr.net_total <= 0 && <p className="text-[10px] text-green-600 mt-0.5">No tax due</p>}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Voucher Breakdown */}
+          {(gstr.breakdown ?? []).length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100">
+                <h3 className="text-sm font-semibold text-gray-700">Voucher Breakdown</h3>
+                <p className="text-xs text-gray-400 mt-0.5">{gstr.breakdown.length} vouchers included in this return</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                      <th className="px-3 py-2.5 text-left">Voucher No</th>
+                      <th className="px-3 py-2.5 text-left">Date</th>
+                      <th className="px-3 py-2.5 text-left">Type</th>
+                      <th className="px-3 py-2.5 text-left">Party</th>
+                      <th className="px-3 py-2.5 text-right">Taxable</th>
+                      <th className="px-3 py-2.5 text-right">CGST</th>
+                      <th className="px-3 py-2.5 text-right">SGST</th>
+                      <th className="px-3 py-2.5 text-right">IGST</th>
+                      <th className="px-3 py-2.5 text-right">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {gstr.breakdown.map((row, i) => (
+                      <tr key={i} className="border-t border-gray-50 hover:bg-gray-50">
+                        <td className="px-3 py-1.5 font-mono text-[#002B5B]">{row.voucher_no}</td>
+                        <td className="px-3 py-1.5 text-gray-500">{row.voucher_date}</td>
+                        <td className="px-3 py-1.5">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${VOUCHER_COLORS[row.voucher_type] ?? 'bg-gray-100 text-gray-600'}`}>
+                            {row.voucher_type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-gray-600 max-w-[100px] truncate">{row.party_name || '—'}</td>
+                        <td className="px-3 py-1.5 text-right">{fmt(row.taxable_amount)}</td>
+                        <td className="px-3 py-1.5 text-right text-blue-600">{row.cgst_amount > 0 ? fmt(row.cgst_amount) : '—'}</td>
+                        <td className="px-3 py-1.5 text-right text-blue-600">{row.sgst_amount > 0 ? fmt(row.sgst_amount) : '—'}</td>
+                        <td className="px-3 py-1.5 text-right text-blue-600">{row.igst_amount > 0 ? fmt(row.igst_amount) : '—'}</td>
+                        <td className="px-3 py-1.5 text-right font-semibold">{fmt(row.total_amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -739,27 +1246,45 @@ function VouchersTab() {
   })
 
   // Form state
-  const [vType,      setVType]      = useState('Expense')
-  const [vDate,      setVDate]      = useState(toIso(new Date()))
-  const [billNo,     setBillNo]     = useState('')
-  const [billDate,   setBillDate]   = useState('')
-  const [partyName,  setPartyName]  = useState('')
-  const [partyGstin, setPartyGstin] = useState('')
-  const [partyState, setPartyState] = useState('')
-  const [supplyType, setSupplyType] = useState<'Intra' | 'Inter'>('Intra')
-  const [cgstRate,   setCgstRate]   = useState('9')
-  const [igstRate,   setIgstRate]   = useState('18')
-  const [applyTds,   setApplyTds]   = useState(false)
-  const [tdsSection, setTdsSection] = useState('')
-  const [tdsRate,    setTdsRate]    = useState('')
-  const [narration,  setNarration]  = useState('')
-  const [lines, setLines] = useState([{ expense_head: '', description: '', amount: '', cost_centre: '' }])
+  const [vType,       setVType]       = useState('Expense')
+  const [vDate,       setVDate]       = useState(toIso(new Date()))
+  const [billNo,      setBillNo]      = useState('')
+  const [billDate,    setBillDate]    = useState('')
+  const [partyName,   setPartyName]   = useState('')
+  const [partyGstin,  setPartyGstin]  = useState('')
+  const [partyState,  setPartyState]  = useState('')
+  const [supplyType,  setSupplyType]  = useState<'Intra' | 'Inter'>('Intra')
+  const [cgstRate,    setCgstRate]    = useState('9')
+  const [igstRate,    setIgstRate]    = useState('18')
+  const [applyTds,    setApplyTds]    = useState(false)
+  const [tdsSection,  setTdsSection]  = useState('')
+  const [tdsRate,     setTdsRate]     = useState('')
+  const [narration,   setNarration]   = useState('')
+  const [lines, setLines] = useState([{ expense_head: '', description: '', amount: '', cost_centre: '', is_debit: 1 }])
   const [saveErr, setSaveErr] = useState('')
+
+  // Additional fields for Payment / Receipt / Contra types
+  const [paymentMode, setPaymentMode] = useState('Cash')
+  const [bankLedger,  setBankLedger]  = useState('')
+  const [chequeNo,    setChequeNo]    = useState('')
+  const [refNumber,   setRefNumber]   = useState('')
+  const [singleAmount, setSingleAmount] = useState('')
+  const [fromAccount, setFromAccount] = useState('')
+  const [toAccount,   setToAccount]   = useState('')
 
   const ledgerNames = useMemo(() => ledgers.map(l => l.name), [ledgers])
 
-  const taxableAmount = useMemo(() =>
-    lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), [lines])
+  const isPaymentReceipt = useMemo(() => ['Payment', 'Receipt'].includes(vType), [vType])
+  const isJournal        = useMemo(() => vType === 'Journal', [vType])
+  const isContra         = useMemo(() => vType === 'Contra', [vType])
+  const isPurchaseInvoice = useMemo(() => vType === 'Purchase Invoice', [vType])
+  const isExpenseType    = useMemo(() => ['Expense', 'JWO Payment', 'Purchase Invoice'].includes(vType), [vType])
+  const showGstSection   = useMemo(() => isExpenseType, [isExpenseType])
+
+  const taxableAmount = useMemo(() => {
+    if (isPaymentReceipt || isContra) return parseFloat(singleAmount) || 0
+    return lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
+  }, [lines, isPaymentReceipt, isContra, singleAmount])
 
   const cgstAmt = useMemo(() =>
     supplyType === 'Intra' ? taxableAmount * (parseFloat(cgstRate) || 0) / 100 : 0, [supplyType, taxableAmount, cgstRate])
@@ -774,6 +1299,12 @@ function VouchersTab() {
     return taxableAmount * (parseFloat(tdsRate) || 0) / 100
   }, [applyTds, vType, taxableAmount, tdsRate])
 
+  const journalDrTotal = useMemo(() =>
+    lines.filter(l => l.is_debit === 1).reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), [lines])
+  const journalCrTotal = useMemo(() =>
+    lines.filter(l => l.is_debit === 0).reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), [lines])
+  const journalBalanced = useMemo(() => Math.abs(journalDrTotal - journalCrTotal) < 0.01, [journalDrTotal, journalCrTotal])
+
   const netPayable = totalAmt - tdsAmtComputed
 
   function handleTdsSectionChange(sec: string) {
@@ -783,22 +1314,24 @@ function VouchersTab() {
   }
 
   function addLine() {
-    setLines(prev => [...prev, { expense_head: '', description: '', amount: '', cost_centre: '' }])
+    setLines(prev => [...prev, { expense_head: '', description: '', amount: '', cost_centre: '', is_debit: 1 }])
   }
   function removeLine(idx: number) {
     setLines(prev => prev.filter((_, i) => i !== idx))
   }
   function updateLine(idx: number, field: string, value: string) {
-    setLines(prev => prev.map((l, i) => i === idx ? { ...l, [field]: value } : l))
+    setLines(prev => prev.map((l, i) => i === idx ? { ...l, [field]: field === 'is_debit' ? parseInt(value) : value } : l))
   }
 
   const saveMut = useMutation({
     mutationFn: (body: object) => api.post('/finance/vouchers', body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['finance-vouchers'] })
-      setLines([{ expense_head: '', description: '', amount: '', cost_centre: '' }])
+      qc.invalidateQueries({ queryKey: ['finance-daybook-today'] })
+      setLines([{ expense_head: '', description: '', amount: '', cost_centre: '', is_debit: 1 }])
       setBillNo(''); setBillDate(''); setPartyName(''); setPartyGstin(''); setPartyState('')
       setNarration(''); setTdsSection(''); setTdsRate(''); setApplyTds(false); setSaveErr('')
+      setSingleAmount(''); setChequeNo(''); setRefNumber(''); setFromAccount(''); setToAccount('')
     },
     onError: () => setSaveErr('Failed to save voucher.'),
   })
@@ -810,9 +1343,16 @@ function VouchersTab() {
 
   function handleSave() {
     if (!vDate) { setSaveErr('Voucher date is required.'); return }
-    if (lines.every(l => !l.expense_head)) { setSaveErr('At least one expense line is required.'); return }
+    if (isPaymentReceipt || isContra) {
+      if (!singleAmount || parseFloat(singleAmount) <= 0) { setSaveErr('Amount is required.'); return }
+    } else if (isJournal) {
+      if (lines.every(l => !l.expense_head)) { setSaveErr('At least one journal line is required.'); return }
+      if (!journalBalanced) { setSaveErr('Journal entries must balance (Dr = Cr).'); return }
+    } else {
+      if (lines.every(l => !l.expense_head)) { setSaveErr('At least one expense line is required.'); return }
+    }
     const showTds = applyTds || vType === 'JWO Payment'
-    saveMut.mutate({
+    const body: Record<string, unknown> = {
       voucher_type: vType,
       voucher_date: vDate,
       bill_no: billNo, bill_date: billDate,
@@ -820,30 +1360,42 @@ function VouchersTab() {
       supply_type: supplyType,
       narration,
       taxable_amount: taxableAmount,
-      cgst_amount: cgstAmt,
-      sgst_amount: sgstAmt,
-      igst_amount: igstAmt,
+      cgst_amount: showGstSection ? cgstAmt : 0,
+      sgst_amount: showGstSection ? sgstAmt : 0,
+      igst_amount: showGstSection ? igstAmt : 0,
       tds_section: showTds ? tdsSection : '',
       tds_rate: showTds ? parseFloat(tdsRate) || 0 : 0,
       tds_amount: showTds ? tdsAmtComputed : 0,
       total_amount: totalAmt,
       net_payable: netPayable,
-      lines: lines.filter(l => l.expense_head).map(l => ({
+      payment_mode: (isPaymentReceipt || isContra) ? paymentMode : '',
+      bank_ledger: (isPaymentReceipt || isContra) ? bankLedger : '',
+      cheque_no: chequeNo,
+      ref_number: refNumber,
+      lines: (isPaymentReceipt || isContra) ? [] : lines.filter(l => l.expense_head).map(l => ({
         expense_head: l.expense_head,
         description: l.description,
         amount: parseFloat(l.amount) || 0,
         cost_centre: l.cost_centre,
+        is_debit: l.is_debit,
       })),
-    })
+    }
+    if (isContra) {
+      body.from_account = fromAccount
+      body.to_account = toAccount
+    }
+    saveMut.mutate(body)
   }
 
-  const showTdsSection = applyTds || vType === 'JWO Payment'
+  const showTdsSection = applyTds || vType === 'JWO Payment' || (isPaymentReceipt && applyTds)
 
   return (
     <div className="space-y-5">
       {/* Form */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
-        <h3 className="text-sm font-semibold text-gray-700">New Expense Voucher</h3>
+        <h3 className="text-sm font-semibold text-gray-700">
+          {isJournal ? 'New Journal Entry' : isContra ? 'New Contra Voucher' : isPaymentReceipt ? `New ${vType} Voucher` : 'New Expense Voucher'}
+        </h3>
 
         {/* Row 1: type, date, bill no, bill date */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -853,6 +1405,11 @@ function VouchersTab() {
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
               <option>Expense</option>
               <option>JWO Payment</option>
+              <option>Payment</option>
+              <option>Receipt</option>
+              <option>Journal</option>
+              <option>Contra</option>
+              <option>Purchase Invoice</option>
             </select>
           </div>
           <div className="flex flex-col gap-1">
@@ -860,147 +1417,293 @@ function VouchersTab() {
             <input type="date" value={vDate} onChange={e => setVDate(e.target.value)}
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Bill No</label>
-            <input type="text" value={billNo} onChange={e => setBillNo(e.target.value)} placeholder="Vendor bill no"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Bill Date</label>
-            <input type="date" value={billDate} onChange={e => setBillDate(e.target.value)}
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
+          {(isExpenseType || isPurchaseInvoice) && (
+            <>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-500">Bill No{isPurchaseInvoice ? ' *' : ''}</label>
+                <input type="text" value={billNo} onChange={e => setBillNo(e.target.value)} placeholder="Vendor bill no"
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-500">Bill Date</label>
+                <input type="date" value={billDate} onChange={e => setBillDate(e.target.value)}
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+            </>
+          )}
+          {isPaymentReceipt && (
+            <>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-500">Reference No</label>
+                <input type="text" value={refNumber} onChange={e => setRefNumber(e.target.value)} placeholder="Ref / UTR"
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+            </>
+          )}
         </div>
 
-        {/* Row 2: party */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Party Name</label>
-            <input type="text" value={partyName} onChange={e => setPartyName(e.target.value)}
-              list="ledger-names-list" placeholder="Vendor / party name"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-            <datalist id="ledger-names-list">
+        {/* Party row — not for Contra or Journal */}
+        {!isContra && !isJournal && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">{vType === 'Receipt' ? 'Received From' : 'Pay To / Party Name'}</label>
+              <input type="text" value={partyName} onChange={e => setPartyName(e.target.value)}
+                list="ledger-names-list" placeholder="Vendor / party name"
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              <datalist id="ledger-names-list">
+                {ledgerNames.map(n => <option key={n} value={n} />)}
+              </datalist>
+            </div>
+            {isExpenseType && (
+              <>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-500">Party GSTIN</label>
+                  <input type="text" value={partyGstin} onChange={e => setPartyGstin(e.target.value)} placeholder="15-digit GSTIN"
+                    className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-500">Party State</label>
+                  <input type="text" value={partyState} onChange={e => setPartyState(e.target.value)} placeholder="e.g. Maharashtra"
+                    className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Payment / Receipt — single amount + payment mode */}
+        {isPaymentReceipt && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-gray-50 rounded-lg p-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Amount (₹) *</label>
+              <input type="number" value={singleAmount} onChange={e => setSingleAmount(e.target.value)} placeholder="0"
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Payment Mode</label>
+              <select value={paymentMode} onChange={e => setPaymentMode(e.target.value)}
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
+                <option>Cash</option>
+                <option>Cheque</option>
+                <option>NEFT</option>
+                <option>RTGS</option>
+                <option>IMPS</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Bank Account</label>
+              <input type="text" value={bankLedger} onChange={e => setBankLedger(e.target.value)}
+                list="bank-ledgers-list" placeholder="Bank ledger name"
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              <datalist id="bank-ledgers-list">
+                {ledgerNames.map(n => <option key={n} value={n} />)}
+              </datalist>
+            </div>
+            {paymentMode === 'Cheque' && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-500">Cheque No</label>
+                <input type="text" value={chequeNo} onChange={e => setChequeNo(e.target.value)} placeholder="Cheque number"
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+            )}
+            {['NEFT', 'RTGS', 'IMPS'].includes(paymentMode) && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-500">UTR / Ref No</label>
+                <input type="text" value={refNumber} onChange={e => setRefNumber(e.target.value)} placeholder="UTR number"
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Contra — from/to accounts */}
+        {isContra && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-blue-50 rounded-lg p-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">From Account *</label>
+              <input type="text" value={fromAccount} onChange={e => setFromAccount(e.target.value)}
+                list="from-acct-list" placeholder="Cash / Bank ledger"
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              <datalist id="from-acct-list">
+                {ledgerNames.map(n => <option key={n} value={n} />)}
+              </datalist>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">To Account *</label>
+              <input type="text" value={toAccount} onChange={e => setToAccount(e.target.value)}
+                list="to-acct-list" placeholder="Cash / Bank ledger"
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              <datalist id="to-acct-list">
+                {ledgerNames.map(n => <option key={n} value={n} />)}
+              </datalist>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Amount (₹) *</label>
+              <input type="number" value={singleAmount} onChange={e => setSingleAmount(e.target.value)} placeholder="0"
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Transaction Type</label>
+              <select value={paymentMode} onChange={e => setPaymentMode(e.target.value)}
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
+                <option>Cash</option>
+                <option>Cheque</option>
+                <option>NEFT</option>
+                <option>RTGS</option>
+                <option>IMPS</option>
+              </select>
+            </div>
+            {paymentMode === 'Cheque' && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-500">Cheque No</label>
+                <input type="text" value={chequeNo} onChange={e => setChequeNo(e.target.value)} placeholder="Cheque number"
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+            )}
+            {['NEFT', 'RTGS', 'IMPS'].includes(paymentMode) && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-500">UTR No</label>
+                <input type="text" value={refNumber} onChange={e => setRefNumber(e.target.value)} placeholder="UTR number"
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Supply Type — only for Expense / Purchase Invoice */}
+        {isExpenseType && (
+          <div className="flex items-center gap-6">
+            <span className="text-xs text-gray-500 font-medium">Supply Type:</span>
+            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="radio" name="supply_type" value="Intra" checked={supplyType === 'Intra'} onChange={() => setSupplyType('Intra')} />
+              Intra-state (CGST + SGST)
+            </label>
+            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="radio" name="supply_type" value="Inter" checked={supplyType === 'Inter'} onChange={() => setSupplyType('Inter')} />
+              Inter-state (IGST)
+            </label>
+          </div>
+        )}
+
+        {/* Lines — for Expense / Journal / Purchase Invoice */}
+        {!isPaymentReceipt && !isContra && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-gray-600">
+                {isJournal ? 'Journal Lines' : 'Expense Lines'}
+              </label>
+              <div className="flex items-center gap-3">
+                {isJournal && (
+                  <span className={`text-xs font-medium ${journalBalanced ? 'text-green-600' : 'text-red-500'}`}>
+                    Dr: {fmt(journalDrTotal)} | Cr: {fmt(journalCrTotal)}
+                    {!journalBalanced && ' (Unbalanced)'}
+                  </span>
+                )}
+                <button onClick={addLine} className="text-xs text-blue-600 hover:text-blue-800 font-medium">+ Add Line</button>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                    <th className="px-3 py-2 text-left w-1/3">{isJournal ? 'Ledger / Account' : 'Expense Head'}</th>
+                    <th className="px-3 py-2 text-left">Description</th>
+                    <th className="px-3 py-2 text-right w-28">Amount (₹)</th>
+                    {isJournal && <th className="px-3 py-2 text-center w-20">Dr / Cr</th>}
+                    {!isJournal && <th className="px-3 py-2 text-left w-28">Cost Centre</th>}
+                    <th className="px-3 py-2 w-8"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines.map((line, idx) => (
+                    <tr key={idx} className="border-t border-gray-100">
+                      <td className="px-3 py-1.5">
+                        <input type="text" value={line.expense_head} onChange={e => updateLine(idx, 'expense_head', e.target.value)}
+                          list="expense-heads-list" placeholder={isJournal ? 'Ledger name' : 'Expense head'}
+                          className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <input type="text" value={line.description} onChange={e => updateLine(idx, 'description', e.target.value)}
+                          placeholder="Details"
+                          className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <input type="number" value={line.amount} onChange={e => updateLine(idx, 'amount', e.target.value)}
+                          placeholder="0" className="w-full border border-gray-200 rounded px-2 py-1 text-right focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                      </td>
+                      {isJournal && (
+                        <td className="px-3 py-1.5 text-center">
+                          <select value={String(line.is_debit)} onChange={e => updateLine(idx, 'is_debit', e.target.value)}
+                            className={`text-xs border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300 font-semibold ${line.is_debit === 1 ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-green-300 bg-green-50 text-green-700'}`}>
+                            <option value="1">Dr</option>
+                            <option value="0">Cr</option>
+                          </select>
+                        </td>
+                      )}
+                      {!isJournal && (
+                        <td className="px-3 py-1.5">
+                          <input type="text" value={line.cost_centre} onChange={e => updateLine(idx, 'cost_centre', e.target.value)}
+                            placeholder="Optional"
+                            className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                        </td>
+                      )}
+                      <td className="px-3 py-1.5 text-center">
+                        {lines.length > 1 && (
+                          <button onClick={() => removeLine(idx)} className="text-red-400 hover:text-red-600">✕</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <datalist id="expense-heads-list">
               {ledgerNames.map(n => <option key={n} value={n} />)}
             </datalist>
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Party GSTIN</label>
-            <input type="text" value={partyGstin} onChange={e => setPartyGstin(e.target.value)} placeholder="15-digit GSTIN"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Party State</label>
-            <input type="text" value={partyState} onChange={e => setPartyState(e.target.value)} placeholder="e.g. Maharashtra"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-        </div>
+        )}
 
-        {/* Supply Type */}
-        <div className="flex items-center gap-6">
-          <span className="text-xs text-gray-500 font-medium">Supply Type:</span>
-          <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-            <input type="radio" name="supply_type" value="Intra" checked={supplyType === 'Intra'} onChange={() => setSupplyType('Intra')} />
-            Intra-state (CGST + SGST)
-          </label>
-          <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-            <input type="radio" name="supply_type" value="Inter" checked={supplyType === 'Inter'} onChange={() => setSupplyType('Inter')} />
-            Inter-state (IGST)
-          </label>
-        </div>
-
-        {/* Lines */}
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-medium text-gray-600">Expense Lines</label>
-            <button onClick={addLine} className="text-xs text-blue-600 hover:text-blue-800 font-medium">+ Add Line</button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
-                  <th className="px-3 py-2 text-left w-1/3">Expense Head</th>
-                  <th className="px-3 py-2 text-left">Description</th>
-                  <th className="px-3 py-2 text-right w-28">Amount (₹)</th>
-                  <th className="px-3 py-2 text-left w-28">Cost Centre</th>
-                  <th className="px-3 py-2 w-8"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {lines.map((line, idx) => (
-                  <tr key={idx} className="border-t border-gray-100">
-                    <td className="px-3 py-1.5">
-                      <input type="text" value={line.expense_head} onChange={e => updateLine(idx, 'expense_head', e.target.value)}
-                        list="expense-heads-list" placeholder="Expense head"
-                        className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <input type="text" value={line.description} onChange={e => updateLine(idx, 'description', e.target.value)}
-                        placeholder="Details"
-                        className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <input type="number" value={line.amount} onChange={e => updateLine(idx, 'amount', e.target.value)}
-                        placeholder="0" className="w-full border border-gray-200 rounded px-2 py-1 text-right focus:outline-none focus:ring-1 focus:ring-blue-300" />
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <input type="text" value={line.cost_centre} onChange={e => updateLine(idx, 'cost_centre', e.target.value)}
-                        placeholder="Optional"
-                        className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-                    </td>
-                    <td className="px-3 py-1.5 text-center">
-                      {lines.length > 1 && (
-                        <button onClick={() => removeLine(idx)} className="text-red-400 hover:text-red-600">✕</button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <datalist id="expense-heads-list">
-            {ledgerNames.map(n => <option key={n} value={n} />)}
-          </datalist>
-        </div>
-
-        {/* GST */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-gray-50 rounded-lg p-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Taxable Amount</label>
-            <div className="text-sm font-semibold text-gray-800">{fmt(taxableAmount)}</div>
-          </div>
-          {supplyType === 'Intra' ? (
-            <>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-gray-500">CGST Rate %</label>
-                <input type="number" value={cgstRate} onChange={e => setCgstRate(e.target.value)} placeholder="9"
-                  className="text-xs border border-gray-200 rounded px-2 py-1.5 w-20 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-                <span className="text-xs text-gray-400">{fmt(cgstAmt)}</span>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-gray-500">SGST Rate %</label>
-                <div className="text-xs text-gray-600 py-1.5">{cgstRate}% (same as CGST)</div>
-                <span className="text-xs text-gray-400">{fmt(sgstAmt)}</span>
-              </div>
-            </>
-          ) : (
-            <div className="flex flex-col gap-1 col-span-2">
-              <label className="text-xs text-gray-500">IGST Rate %</label>
-              <input type="number" value={igstRate} onChange={e => setIgstRate(e.target.value)} placeholder="18"
-                className="text-xs border border-gray-200 rounded px-2 py-1.5 w-20 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-              <span className="text-xs text-gray-400">{fmt(igstAmt)}</span>
+        {/* GST — only for Expense / Purchase Invoice */}
+        {showGstSection && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-gray-50 rounded-lg p-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Taxable Amount</label>
+              <div className="text-sm font-semibold text-gray-800">{fmt(taxableAmount)}</div>
             </div>
-          )}
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Total (with GST)</label>
-            <div className="text-sm font-semibold text-gray-800">{fmt(totalAmt)}</div>
+            {supplyType === 'Intra' ? (
+              <>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-500">CGST Rate %</label>
+                  <input type="number" value={cgstRate} onChange={e => setCgstRate(e.target.value)} placeholder="9"
+                    className="text-xs border border-gray-200 rounded px-2 py-1.5 w-20 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                  <span className="text-xs text-gray-400">{fmt(cgstAmt)}</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-500">SGST Rate %</label>
+                  <div className="text-xs text-gray-600 py-1.5">{cgstRate}% (same as CGST)</div>
+                  <span className="text-xs text-gray-400">{fmt(sgstAmt)}</span>
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-col gap-1 col-span-2">
+                <label className="text-xs text-gray-500">IGST Rate %</label>
+                <input type="number" value={igstRate} onChange={e => setIgstRate(e.target.value)} placeholder="18"
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 w-20 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                <span className="text-xs text-gray-400">{fmt(igstAmt)}</span>
+              </div>
+            )}
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Total (with GST)</label>
+              <div className="text-sm font-semibold text-gray-800">{fmt(totalAmt)}</div>
+            </div>
           </div>
-        </div>
+        )}
 
-        {/* TDS */}
-        {vType !== 'JWO Payment' && (
+        {/* TDS — for Expense / JWO Payment / Payment (contractor) */}
+        {!isJournal && !isContra && vType !== 'JWO Payment' && (
           <label className="flex items-center gap-2 text-xs cursor-pointer">
             <input type="checkbox" checked={applyTds} onChange={e => setApplyTds(e.target.checked)} />
-            Apply TDS
+            Apply TDS {isPaymentReceipt ? '(Contractor Payment)' : ''}
           </label>
         )}
         {showTdsSection && (
@@ -1037,13 +1740,24 @@ function VouchersTab() {
         {/* Totals summary */}
         <div className="flex items-center justify-between bg-[#002B5B] text-white rounded-lg px-4 py-3">
           <div className="text-xs space-y-0.5">
-            <div>Taxable: <span className="font-semibold">{fmt(taxableAmount)}</span></div>
-            <div>GST: <span className="font-semibold">{fmt(totalGst)}</span></div>
-            {showTdsSection && <div>TDS: <span className="font-semibold">({fmt(tdsAmtComputed)})</span></div>}
+            {!isJournal && (
+              <>
+                <div>Taxable: <span className="font-semibold">{fmt(taxableAmount)}</span></div>
+                {showGstSection && <div>GST: <span className="font-semibold">{fmt(totalGst)}</span></div>}
+                {showTdsSection && <div>TDS: <span className="font-semibold">({fmt(tdsAmtComputed)})</span></div>}
+              </>
+            )}
+            {isJournal && (
+              <>
+                <div>Dr Total: <span className="font-semibold">{fmt(journalDrTotal)}</span></div>
+                <div>Cr Total: <span className="font-semibold">{fmt(journalCrTotal)}</span></div>
+                {!journalBalanced && <div className="text-yellow-300">Entries unbalanced</div>}
+              </>
+            )}
           </div>
           <div className="text-right">
-            <div className="text-xs text-blue-200">Net Payable</div>
-            <div className="text-xl font-bold">{fmt(netPayable)}</div>
+            <div className="text-xs text-blue-200">{isJournal ? 'Dr / Cr' : 'Net Payable'}</div>
+            <div className="text-xl font-bold">{isJournal ? fmt(journalDrTotal) : fmt(netPayable)}</div>
           </div>
         </div>
 
