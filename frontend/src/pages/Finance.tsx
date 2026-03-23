@@ -148,7 +148,8 @@ const PLATFORM_COLORS: Record<string, string> = {
   Amazon: '#002B5B', Myntra: '#E91E63', Meesho: '#9C27B0', Flipkart: '#F7971D',
 }
 const EXPENSE_CATEGORIES = ['Logistics', 'Platform Fees', 'Marketing', 'Rent', 'Salaries', 'Utilities', 'Other']
-const SALES_PLATFORMS = ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal', 'All Platforms']
+const SALES_PLATFORMS = ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal', 'All Platforms'] as const
+void SALES_PLATFORMS
 
 // ── Formatting ───────────────────────────────────────────────────
 const fmt    = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
@@ -2593,76 +2594,100 @@ function VoucherTypesSubTab() {
 }
 
 // ── Sales Uploads Tab ─────────────────────────────────────────────
+const PLATFORM_FILE_HINTS: Record<string, string> = {
+  Amazon:   'ZIP file containing Amazon MTR CSV reports',
+  Myntra:   'ZIP file containing Myntra settlement CSVs',
+  Meesho:   'ZIP file containing Meesho payment reports',
+  Flipkart: 'ZIP file containing Flipkart settlement reports',
+  Snapdeal: 'ZIP file containing Snapdeal payment reports',
+}
+
+interface UploadResult {
+  id: number; platform: string; period: string; filename: string
+  total_revenue: number; total_orders: number; total_returns: number
+  net_revenue: number; rows_parsed: number
+}
+
 function SalesUploadsTab() {
   const qc = useQueryClient()
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const [platform,    setPlatform]    = useState('Amazon')
+  const [period,      setPeriod]      = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` })
+  const [uploadedBy,  setUploadedBy]  = useState('')
+  const [notes,       setNotes]       = useState('')
+  const [dragging,    setDragging]    = useState(false)
+  const [uploading,   setUploading]   = useState(false)
+  const [result,      setResult]      = useState<UploadResult | null>(null)
+  const [err,         setErr]         = useState('')
   const [filterPlatform, setFilterPlatform] = useState('')
-  const [filterPeriod, setFilterPeriod] = useState('')
+  const [filterPeriod,   setFilterPeriod]   = useState('')
 
   const { data: uploads = [], isLoading } = useQuery<SalesUpload[]>({
     queryKey: ['finance-sales-uploads', filterPlatform, filterPeriod],
     queryFn: async () => {
       const params = new URLSearchParams()
       if (filterPlatform) params.set('platform', filterPlatform)
-      if (filterPeriod) params.set('period', filterPeriod)
+      if (filterPeriod)   params.set('period',   filterPeriod)
       const { data } = await api.get(`/finance/sales-uploads?${params}`)
       return data
     },
   })
 
-  const [platform, setPlatform]   = useState('Amazon')
-  const [period, setPeriod]       = useState('')
-  const [filename, setFilename]   = useState('')
-  const [revenue, setRevenue]     = useState('')
-  const [orders, setOrders]       = useState('')
-  const [returns, setReturns]     = useState('')
-  const [netRev, setNetRev]       = useState('')
-  const [uploadedBy, setUploadedBy] = useState('')
-  const [notes, setNotes]         = useState('')
-  const [err, setErr]             = useState('')
-
-  const addMut = useMutation({
-    mutationFn: (b: object) => api.post('/finance/sales-uploads', b),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['finance-sales-uploads'] })
-      setFilename(''); setRevenue(''); setOrders(''); setReturns(''); setNetRev(''); setUploadedBy(''); setNotes(''); setErr('')
-    },
-    onError: () => setErr('Failed to save.'),
-  })
   const delMut = useMutation({
     mutationFn: (id: number) => api.delete(`/finance/sales-uploads/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['finance-sales-uploads'] }),
   })
 
-  function handleSave() {
-    if (!period) { setErr('Period is required.'); return }
-    addMut.mutate({
-      platform, period, filename,
-      total_revenue: parseFloat(revenue) || 0,
-      total_orders: parseInt(orders) || 0,
-      total_returns: parseFloat(returns) || 0,
-      net_revenue: parseFloat(netRev) || 0,
-      uploaded_by: uploadedBy,
-      upload_notes: notes,
-    })
+  async function handleFile(file: File) {
+    if (!period) { setErr('Select a period (month) before uploading.'); return }
+    setErr(''); setResult(null); setUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('file',        file)
+      fd.append('platform',    platform)
+      fd.append('period',      period)
+      fd.append('uploaded_by', uploadedBy)
+      fd.append('notes',       notes)
+      const { data } = await api.post('/finance/sales-uploads/upload-file', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      setResult(data)
+      qc.invalidateQueries({ queryKey: ['finance-sales-uploads'] })
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setErr(msg || 'Upload failed. Check the file format.')
+    } finally { setUploading(false) }
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault(); setDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (file) handleFile(file)
   }
 
   return (
     <div className="space-y-5">
-      {/* Info Banner */}
+      {/* Lock banner */}
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex gap-2 items-start">
         <span className="text-amber-500 mt-0.5">🔒</span>
-        <p className="text-xs text-amber-700">Data uploaded here is locked. Only the Finance team can remove entries.</p>
+        <div>
+          <p className="text-xs font-semibold text-amber-800">Finance-locked uploads</p>
+          <p className="text-xs text-amber-700 mt-0.5">Records saved here are immutable. Only Finance team members can delete them. Totals are parsed automatically from the file.</p>
+        </div>
       </div>
 
-      {/* Upload Form */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 space-y-3">
-        <h3 className="text-sm font-semibold text-gray-700">Add Sales Upload Record</h3>
+      {/* Upload card */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
+        <h3 className="text-sm font-semibold text-[#002B5B]">Upload Sales File</h3>
+
+        {/* Platform + Period + Uploaded By */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="flex flex-col gap-1">
             <label className="text-xs text-gray-500">Platform *</label>
-            <select value={platform} onChange={e => setPlatform(e.target.value)}
+            <select value={platform} onChange={e => { setPlatform(e.target.value); setResult(null) }}
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
-              {SALES_PLATFORMS.map(p => <option key={p}>{p}</option>)}
+              {['Amazon','Myntra','Meesho','Flipkart','Snapdeal'].map(p => <option key={p}>{p}</option>)}
             </select>
           </div>
           <div className="flex flex-col gap-1">
@@ -2671,55 +2696,81 @@ function SalesUploadsTab() {
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
           </div>
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Filename</label>
-            <input type="text" value={filename} onChange={e => setFilename(e.target.value)} placeholder="e.g. amazon_jan25.xlsx"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
             <label className="text-xs text-gray-500">Uploaded By</label>
-            <input type="text" value={uploadedBy} onChange={e => setUploadedBy(e.target.value)} placeholder="Name"
+            <input type="text" value={uploadedBy} onChange={e => setUploadedBy(e.target.value)} placeholder="Your name"
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
           </div>
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Total Revenue (₹)</label>
-            <input type="number" value={revenue} onChange={e => setRevenue(e.target.value)} placeholder="0"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Total Orders</label>
-            <input type="number" value={orders} onChange={e => setOrders(e.target.value)} placeholder="0"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Total Returns (₹)</label>
-            <input type="number" value={returns} onChange={e => setReturns(e.target.value)} placeholder="0"
-              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-          </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Net Revenue (₹)</label>
-            <input type="number" value={netRev} onChange={e => setNetRev(e.target.value)} placeholder="0"
+            <label className="text-xs text-gray-500">Notes</label>
+            <input type="text" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes"
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
           </div>
         </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-500">Notes</label>
-          <input type="text" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes"
-            className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+
+        {/* Dropzone */}
+        <div
+          onDragOver={e => { e.preventDefault(); setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={onDrop}
+          onClick={() => fileRef.current?.click()}
+          className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors
+            ${dragging ? 'border-[#002B5B] bg-blue-50' : 'border-gray-200 hover:border-gray-400 bg-gray-50'}`}
+        >
+          <input ref={fileRef} type="file" accept=".zip,.xlsx,.csv,.rar" className="hidden"
+            onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = '' }} />
+          {uploading ? (
+            <div className="space-y-2">
+              <div className="w-8 h-8 border-2 border-[#002B5B] border-t-transparent rounded-full animate-spin mx-auto" />
+              <p className="text-sm text-gray-500">Parsing {platform} file…</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="text-3xl">📂</div>
+              <p className="text-sm font-medium text-gray-700">Drop {platform} sales file here</p>
+              <p className="text-xs text-gray-400">{PLATFORM_FILE_HINTS[platform]}</p>
+              <p className="text-xs text-gray-400">or <span className="text-[#002B5B] font-medium underline">click to browse</span></p>
+            </div>
+          )}
         </div>
-        {err && <p className="text-xs text-red-600">{err}</p>}
-        <button onClick={handleSave} disabled={addMut.isPending}
-          className="px-5 py-2 text-xs font-semibold bg-[#002B5B] text-white rounded-lg hover:bg-[#003875] disabled:opacity-60 transition-colors">
-          {addMut.isPending ? 'Saving…' : 'Save Record'}
-        </button>
+
+        {err && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-700">{err}</div>
+        )}
+
+        {/* Parse result */}
+        {result && (
+          <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-green-600 text-lg">✅</span>
+              <div>
+                <p className="text-sm font-semibold text-green-800">Upload saved — {result.rows_parsed.toLocaleString()} rows parsed</p>
+                <p className="text-xs text-green-600">{result.filename} · {result.platform} · {result.period}</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { label: 'Gross Revenue', value: fmt(result.total_revenue), color: 'text-gray-800' },
+                { label: 'Returns',       value: fmt(result.total_returns), color: 'text-red-600'  },
+                { label: 'Net Revenue',   value: fmt(result.net_revenue),   color: 'text-green-700'},
+                { label: 'Orders',        value: result.total_orders.toLocaleString(), color: 'text-gray-700' },
+              ].map(({ label, value, color }) => (
+                <div key={label} className="bg-white rounded-lg p-3 border border-green-100 text-center">
+                  <p className="text-xs text-gray-500 mb-1">{label}</p>
+                  <p className={`text-sm font-bold ${color}`}>{value}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Filter */}
+      {/* Filter bar */}
       <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 shadow-sm flex flex-wrap items-center gap-3">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Filter</span>
         <select value={filterPlatform} onChange={e => setFilterPlatform(e.target.value)}
           className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none">
           <option value="">All Platforms</option>
-          {SALES_PLATFORMS.map(p => <option key={p}>{p}</option>)}
+          {['Amazon','Myntra','Meesho','Flipkart','Snapdeal'].map(p => <option key={p}>{p}</option>)}
         </select>
         <input type="month" value={filterPeriod} onChange={e => setFilterPeriod(e.target.value)}
           className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none" />
@@ -2729,12 +2780,15 @@ function SalesUploadsTab() {
         )}
       </div>
 
-      {/* Table */}
+      {/* Records table */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         {isLoading ? (
           <div className="p-8 text-center text-gray-400 text-sm animate-pulse">Loading…</div>
         ) : uploads.length === 0 ? (
-          <div className="p-8 text-center text-gray-400 text-sm">No sales uploads recorded yet.</div>
+          <div className="p-10 text-center text-gray-400 text-sm">
+            <div className="text-3xl mb-2">📭</div>
+            No sales uploads recorded yet. Upload a platform file above to get started.
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -2742,13 +2796,14 @@ function SalesUploadsTab() {
                 <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
                   <th className="px-3 py-2.5 text-left">Platform</th>
                   <th className="px-3 py-2.5 text-left">Period</th>
-                  <th className="px-3 py-2.5 text-left">Filename</th>
-                  <th className="px-3 py-2.5 text-right">Revenue</th>
-                  <th className="px-3 py-2.5 text-right">Orders</th>
+                  <th className="px-3 py-2.5 text-left">File</th>
+                  <th className="px-3 py-2.5 text-right">Gross Rev</th>
                   <th className="px-3 py-2.5 text-right">Returns</th>
                   <th className="px-3 py-2.5 text-right">Net Revenue</th>
+                  <th className="px-3 py-2.5 text-right">Orders</th>
                   <th className="px-3 py-2.5 text-left">Uploaded By</th>
                   <th className="px-3 py-2.5 text-left">Date</th>
+                  <th className="px-3 py-2.5 text-center">🔒</th>
                   <th className="px-3 py-2.5"></th>
                 </tr>
               </thead>
@@ -2756,23 +2811,39 @@ function SalesUploadsTab() {
                 {uploads.map(u => (
                   <tr key={u.id} className="border-t border-gray-50 hover:bg-gray-50">
                     <td className="px-3 py-2">
-                      <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-medium">{u.platform}</span>
+                      <span style={{ backgroundColor: PLATFORM_COLORS[u.platform] ?? '#6B7280' }}
+                        className="text-white px-1.5 py-0.5 rounded text-[10px] font-semibold">{u.platform}</span>
                     </td>
                     <td className="px-3 py-2 font-medium text-gray-700">{u.period}</td>
-                    <td className="px-3 py-2 text-gray-500 max-w-[100px] truncate" title={u.filename}>{u.filename || '—'}</td>
+                    <td className="px-3 py-2 text-gray-500 max-w-[120px] truncate" title={u.filename}>{u.filename || '—'}</td>
                     <td className="px-3 py-2 text-right text-gray-700">{fmt(u.total_revenue)}</td>
-                    <td className="px-3 py-2 text-right text-gray-600">{u.total_orders.toLocaleString()}</td>
                     <td className="px-3 py-2 text-right text-red-600">{u.total_returns > 0 ? fmt(u.total_returns) : '—'}</td>
                     <td className="px-3 py-2 text-right font-semibold text-green-700">{fmt(u.net_revenue)}</td>
+                    <td className="px-3 py-2 text-right text-gray-600">{u.total_orders.toLocaleString()}</td>
                     <td className="px-3 py-2 text-gray-500">{u.uploaded_by || '—'}</td>
                     <td className="px-3 py-2 text-gray-400">{u.created_at?.slice(0, 10)}</td>
+                    <td className="px-3 py-2 text-center">
+                      {u.is_locked ? <span className="text-amber-500" title="Locked">🔒</span> : <span className="text-gray-300">—</span>}
+                    </td>
                     <td className="px-3 py-2 text-right">
-                      <button onClick={() => { if (window.confirm('Delete this sales upload record?')) delMut.mutate(u.id) }}
+                      <button onClick={() => { if (window.confirm('Delete this locked sales upload? This cannot be undone.')) delMut.mutate(u.id) }}
                         className="text-red-400 hover:text-red-600">✕</button>
                     </td>
                   </tr>
                 ))}
               </tbody>
+              {uploads.length > 0 && (
+                <tfoot>
+                  <tr className="bg-[#002B5B] text-white text-xs font-semibold">
+                    <td className="px-3 py-2.5" colSpan={3}>Total ({uploads.length} records)</td>
+                    <td className="px-3 py-2.5 text-right">{fmt(uploads.reduce((s,u)=>s+u.total_revenue,0))}</td>
+                    <td className="px-3 py-2.5 text-right">{fmt(uploads.reduce((s,u)=>s+u.total_returns,0))}</td>
+                    <td className="px-3 py-2.5 text-right">{fmt(uploads.reduce((s,u)=>s+u.net_revenue,0))}</td>
+                    <td className="px-3 py-2.5 text-right">{uploads.reduce((s,u)=>s+u.total_orders,0).toLocaleString()}</td>
+                    <td colSpan={4} />
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         )}

@@ -23,7 +23,7 @@ GET/POST/DELETE /api/finance/sales-uploads
 """
 import os
 from typing import Optional, List
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
 from ..db.finance_db import (
@@ -565,3 +565,106 @@ def del_sales_upload(upload_id: int):
     if not deleted:
         raise HTTPException(status_code=404, detail="Sales upload not found")
     return {"ok": True}
+
+
+# ── Finance Sales Upload — parse file and save locked record ──────
+
+@router.post("/sales-uploads/upload-file")
+async def upload_sales_file(
+    file:        UploadFile = File(...),
+    platform:    str        = Form(...),
+    period:      str        = Form(...),
+    uploaded_by: str        = Form(''),
+    notes:       str        = Form(''),
+):
+    """
+    Parse a platform sales file (MTR zip, Myntra zip, Meesho zip, Flipkart zip,
+    Snapdeal zip, or plain CSV/Excel) and save a locked record in finance_sales_uploads.
+    Returns parsed summary stats + the new record id.
+    """
+    import pandas as pd
+    from ..services.mtr      import load_mtr_from_zip
+    from ..services.myntra   import load_myntra_from_zip
+    from ..services.meesho   import load_meesho_from_zip
+    from ..services.flipkart import load_flipkart_from_zip
+    from ..services.snapdeal import load_snapdeal_from_zip
+
+    raw = await file.read()
+    filename = file.filename or ''
+    platform_lc = platform.lower()
+
+    df = None
+    ship_col  = 'Transaction_Type'
+    ship_val  = 'Shipment'
+    ret_val   = 'Return'
+    amt_col   = 'Invoice_Amount'
+    order_col = None   # if set, count distinct orders
+
+    try:
+        if platform_lc in ('amazon', 'amazon mtr', 'mtr'):
+            df, _, _ = load_mtr_from_zip(raw)
+            platform = 'Amazon'
+        elif platform_lc == 'myntra':
+            # Myntra needs sku_mapping; skip mapping → parse raw directly
+            df, _, _ = load_myntra_from_zip(raw, {})
+        elif platform_lc == 'meesho':
+            df, _, _ = load_meesho_from_zip(raw)
+        elif platform_lc == 'flipkart':
+            df, _, _ = load_flipkart_from_zip(raw)
+        elif platform_lc == 'snapdeal':
+            df, _, _ = load_snapdeal_from_zip(raw)
+        else:
+            # Fallback: try reading as Excel/CSV for unknown platforms
+            try:
+                import io
+                df = pd.read_excel(io.BytesIO(raw))
+            except Exception:
+                import io
+                df = pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not parse {platform} file: {e}")
+
+    # Compute summary stats from DataFrame
+    total_revenue = 0.0
+    total_returns = 0.0
+    total_orders  = 0
+
+    if df is not None and not df.empty:
+        if ship_col in df.columns and amt_col in df.columns:
+            total_revenue = float(df[df[ship_col] == ship_val][amt_col].sum())
+            total_returns = float(df[df[ship_col] == ret_val][amt_col].sum())
+        elif amt_col in df.columns:
+            total_revenue = float(df[amt_col].sum())
+
+        # Estimate order count from row count (shipments only)
+        if ship_col in df.columns:
+            total_orders = int((df[ship_col] == ship_val).sum())
+        else:
+            total_orders = len(df)
+
+    net_revenue = total_revenue - total_returns
+
+    new_id = create_finance_sales_upload({
+        'platform':      platform,
+        'period':        period,
+        'filename':      filename,
+        'total_revenue': round(total_revenue, 2),
+        'total_orders':  total_orders,
+        'total_returns': round(total_returns, 2),
+        'net_revenue':   round(net_revenue, 2),
+        'uploaded_by':   uploaded_by,
+        'upload_notes':  notes,
+    })
+
+    return {
+        'ok':            True,
+        'id':            new_id,
+        'platform':      platform,
+        'period':        period,
+        'filename':      filename,
+        'total_revenue': round(total_revenue, 2),
+        'total_orders':  total_orders,
+        'total_returns': round(total_returns, 2),
+        'net_revenue':   round(net_revenue, 2),
+        'rows_parsed':   len(df) if df is not None else 0,
+    }
