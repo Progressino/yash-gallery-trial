@@ -7,19 +7,42 @@ GET  /api/finance/platform-revenue — per-platform revenue reconciliation
 GET  /api/finance/expenses         — list expenses
 POST /api/finance/expenses         — add expense
 DELETE /api/finance/expenses/{id}  — delete expense
+
+Masters:
+GET/POST/DELETE /api/finance/masters/ledger-groups
+GET/POST/PUT/DELETE /api/finance/masters/ledgers
+GET/POST/DELETE /api/finance/masters/gst-classifications
+GET/POST/DELETE /api/finance/masters/tds-sections
+
+Vouchers:
+GET/POST /api/finance/vouchers
+GET/DELETE /api/finance/vouchers/{id}
+
+Sales Uploads:
+GET/POST/DELETE /api/finance/sales-uploads
 """
 import os
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
-from ..db.finance_db import add_expense, list_expenses, delete_expense
+from ..db.finance_db import (
+    add_expense, list_expenses, delete_expense,
+    list_ledger_groups, create_ledger_group, delete_ledger_group,
+    list_ledgers, create_ledger, update_ledger, delete_ledger,
+    list_gst_classifications, create_gst_classification, delete_gst_classification,
+    list_tds_sections, create_tds_section, delete_tds_section,
+    list_expense_vouchers, get_expense_voucher, create_expense_voucher, delete_expense_voucher,
+    list_finance_sales_uploads, create_finance_sales_upload, delete_finance_sales_upload,
+)
 from ..services.finance import get_pl_statement, get_gst_summary, get_platform_revenue
 
 _FINANCE_PIN = os.environ.get("FINANCE_PIN", "").strip()
 
 router = APIRouter()
 
+
+# ── Pydantic models ───────────────────────────────────────────────
 
 class ExpenseCreate(BaseModel):
     date:        str
@@ -33,12 +56,105 @@ class PinVerify(BaseModel):
     pin: str
 
 
+class LedgerGroupCreate(BaseModel):
+    name:         str
+    parent_group: str = ''
+    nature:       str = 'expense'
+
+
+class LedgerCreate(BaseModel):
+    name:           str
+    group_id:       Optional[int] = None
+    group_name:     str = ''
+    gstin:          str = ''
+    pan:            str = ''
+    state:          str = ''
+    state_code:     str = ''
+    address:        str = ''
+    tds_applicable: int = 0
+    tds_section:    str = ''
+
+
+class LedgerUpdate(BaseModel):
+    name:           Optional[str] = None
+    group_id:       Optional[int] = None
+    group_name:     Optional[str] = None
+    gstin:          Optional[str] = None
+    pan:            Optional[str] = None
+    state:          Optional[str] = None
+    state_code:     Optional[str] = None
+    address:        Optional[str] = None
+    tds_applicable: Optional[int] = None
+    tds_section:    Optional[str] = None
+    is_active:      Optional[int] = None
+
+
+class GSTClassificationCreate(BaseModel):
+    name:     str
+    hsn_sac:  str  = ''
+    gst_rate: float = 18.0
+    type:     str  = 'Goods'
+
+
+class TDSSectionCreate(BaseModel):
+    section:         str
+    description:     str   = ''
+    rate_individual: float = 1.0
+    rate_company:    float = 2.0
+    threshold:       float = 0.0
+
+
+class VoucherLineIn(BaseModel):
+    expense_head: str
+    description:  str   = ''
+    amount:       float = 0
+    cost_centre:  str   = ''
+
+
+class VoucherCreate(BaseModel):
+    voucher_date:   Optional[str] = None
+    voucher_type:   str   = 'Expense'
+    party_name:     str   = ''
+    party_gstin:    str   = ''
+    party_state:    str   = ''
+    bill_no:        str   = ''
+    bill_date:      str   = ''
+    supply_type:    str   = 'Intra'
+    narration:      str   = ''
+    taxable_amount: float = 0
+    cgst_amount:    float = 0
+    sgst_amount:    float = 0
+    igst_amount:    float = 0
+    tds_section:    str   = ''
+    tds_rate:       float = 0
+    tds_amount:     float = 0
+    total_amount:   float = 0
+    net_payable:    float = 0
+    lines:          List[VoucherLineIn] = []
+
+
+class SalesUploadCreate(BaseModel):
+    platform:      str
+    period:        str
+    filename:      str   = ''
+    total_revenue: float = 0
+    total_orders:  int   = 0
+    total_returns: float = 0
+    net_revenue:   float = 0
+    uploaded_by:   str   = ''
+    upload_notes:  str   = ''
+
+
+# ── Helpers ───────────────────────────────────────────────────────
+
 def _sess(request: Request):
     sess = request.state.session
     if sess is None:
         raise HTTPException(status_code=403, detail="No session")
     return sess
 
+
+# ── Auth ──────────────────────────────────────────────────────────
 
 @router.get("/pin-required")
 def pin_required():
@@ -50,12 +166,13 @@ def pin_required():
 def verify_pin(body: PinVerify):
     """Verify the Finance 2FA PIN set via FINANCE_PIN env var."""
     if not _FINANCE_PIN:
-        # No PIN configured → access is open
         return {"ok": True, "message": "no_pin_set"}
     if body.pin == _FINANCE_PIN:
         return {"ok": True}
     return {"ok": False, "message": "Incorrect PIN"}
 
+
+# ── Analytics endpoints ───────────────────────────────────────────
 
 @router.get("/pl")
 def pl_statement(
@@ -103,6 +220,8 @@ def platform_revenue(
     )
 
 
+# ── Expenses (original) ───────────────────────────────────────────
+
 @router.get("/expenses")
 def get_expenses(
     start_date: Optional[str] = None,
@@ -128,4 +247,186 @@ def remove_expense(expense_id: int):
     deleted = delete_expense(expense_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Expense not found")
+    return {"ok": True}
+
+
+# ── Masters: Ledger Groups ────────────────────────────────────────
+
+@router.get("/masters/ledger-groups")
+def get_ledger_groups():
+    return list_ledger_groups()
+
+
+@router.post("/masters/ledger-groups")
+def post_ledger_group(body: LedgerGroupCreate):
+    new_id = create_ledger_group(
+        name         = body.name,
+        parent_group = body.parent_group,
+        nature       = body.nature,
+    )
+    return {"ok": True, "id": new_id}
+
+
+@router.delete("/masters/ledger-groups/{group_id}")
+def del_ledger_group(group_id: int):
+    deleted = delete_ledger_group(group_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Ledger group not found")
+    return {"ok": True}
+
+
+# ── Masters: Ledgers ──────────────────────────────────────────────
+
+@router.get("/masters/ledgers")
+def get_ledgers(group_id: Optional[int] = None, search: Optional[str] = None):
+    return list_ledgers(group_id=group_id, search=search)
+
+
+@router.post("/masters/ledgers")
+def post_ledger(body: LedgerCreate):
+    new_id = create_ledger(
+        name           = body.name,
+        group_id       = body.group_id,
+        group_name     = body.group_name,
+        gstin          = body.gstin,
+        pan            = body.pan,
+        state          = body.state,
+        state_code     = body.state_code,
+        address        = body.address,
+        tds_applicable = body.tds_applicable,
+        tds_section    = body.tds_section,
+    )
+    return {"ok": True, "id": new_id}
+
+
+@router.put("/masters/ledgers/{ledger_id}")
+def put_ledger(ledger_id: int, body: LedgerUpdate):
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    updated = update_ledger(ledger_id, **fields)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Ledger not found")
+    return {"ok": True}
+
+
+@router.delete("/masters/ledgers/{ledger_id}")
+def del_ledger(ledger_id: int):
+    deleted = delete_ledger(ledger_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Ledger not found")
+    return {"ok": True}
+
+
+# ── Masters: GST Classifications ──────────────────────────────────
+
+@router.get("/masters/gst-classifications")
+def get_gst_classifications():
+    return list_gst_classifications()
+
+
+@router.post("/masters/gst-classifications")
+def post_gst_classification(body: GSTClassificationCreate):
+    new_id = create_gst_classification(
+        name     = body.name,
+        hsn_sac  = body.hsn_sac,
+        gst_rate = body.gst_rate,
+        type_    = body.type,
+    )
+    return {"ok": True, "id": new_id}
+
+
+@router.delete("/masters/gst-classifications/{classification_id}")
+def del_gst_classification(classification_id: int):
+    deleted = delete_gst_classification(classification_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="GST classification not found")
+    return {"ok": True}
+
+
+# ── Masters: TDS Sections ─────────────────────────────────────────
+
+@router.get("/masters/tds-sections")
+def get_tds_sections():
+    return list_tds_sections()
+
+
+@router.post("/masters/tds-sections")
+def post_tds_section(body: TDSSectionCreate):
+    new_id = create_tds_section(
+        section         = body.section,
+        description     = body.description,
+        rate_individual = body.rate_individual,
+        rate_company    = body.rate_company,
+        threshold       = body.threshold,
+    )
+    return {"ok": True, "id": new_id}
+
+
+@router.delete("/masters/tds-sections/{section_id}")
+def del_tds_section(section_id: int):
+    deleted = delete_tds_section(section_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="TDS section not found")
+    return {"ok": True}
+
+
+# ── Expense Vouchers ──────────────────────────────────────────────
+
+@router.get("/vouchers")
+def get_vouchers(
+    start_date:   Optional[str] = None,
+    end_date:     Optional[str] = None,
+    voucher_type: Optional[str] = None,
+):
+    return list_expense_vouchers(
+        start_date   = start_date,
+        end_date     = end_date,
+        voucher_type = voucher_type,
+    )
+
+
+@router.post("/vouchers")
+def post_voucher(body: VoucherCreate):
+    data = body.model_dump()
+    data['lines'] = [ln.model_dump() for ln in body.lines]
+    voucher_no = create_expense_voucher(data)
+    return {"ok": True, "voucher_no": voucher_no}
+
+
+@router.get("/vouchers/{voucher_id}")
+def get_voucher(voucher_id: int):
+    v = get_expense_voucher(voucher_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="Voucher not found")
+    return v
+
+
+@router.delete("/vouchers/{voucher_id}")
+def del_voucher(voucher_id: int):
+    deleted = delete_expense_voucher(voucher_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Voucher not found")
+    return {"ok": True}
+
+
+# ── Finance Sales Uploads ─────────────────────────────────────────
+
+@router.get("/sales-uploads")
+def get_sales_uploads(
+    platform: Optional[str] = None,
+    period:   Optional[str] = None,
+):
+    return list_finance_sales_uploads(platform=platform, period=period)
+
+
+@router.post("/sales-uploads")
+def post_sales_upload(body: SalesUploadCreate):
+    new_id = create_finance_sales_upload(body.model_dump())
+    return {"ok": True, "id": new_id}
+
+
+@router.delete("/sales-uploads/{upload_id}")
+def del_sales_upload(upload_id: int):
+    deleted = delete_finance_sales_upload(upload_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Sales upload not found")
     return {"ok": True}
