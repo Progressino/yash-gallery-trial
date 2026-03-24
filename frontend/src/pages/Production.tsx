@@ -104,6 +104,16 @@ export default function Production() {
   // Reports state
   const [reportType, setReportType] = useState<'all' | 'fabric' | 'accessories' | 'packaging' | 'buyer'>('all')
 
+  // PR from MRP state
+  const [showPRModal, setShowPRModal] = useState(false)
+  const [prLines, setPRLines] = useState<Array<{
+    selected: boolean; material_code: string; material_name: string
+    material_type: string; required_qty: number; unit: string
+  }>>([])
+  const [prForm, setPRForm] = useState({
+    requested_by: '', priority: 'High', required_by_date: '', so_reference: '', notes: ''
+  })
+
   // ── Queries ──────────────────────────────────────────────────────────────────
 
   const { data: stats } = useQuery<ProdStats>({
@@ -174,6 +184,57 @@ export default function Production() {
       qc.invalidateQueries({ queryKey: ['mrp-last'] })
     }
   })
+
+  const createPRMut = useMutation({
+    mutationFn: (body: object) => api.post('/purchase/pr', body).then(r => r.data),
+    onSuccess: (data: { pr_number: string }) => {
+      alert(`PR created: ${data.pr_number}`)
+      setShowPRModal(false)
+    }
+  })
+
+  const openPRModal = () => {
+    const shortage = mrpMaterials
+      .filter(([, mat]) => mat.net_req_with_soft > 0)
+      .map(([code, mat]) => ({
+        selected: true,
+        material_code: code,
+        material_name: mat.name,
+        material_type: mat.type,
+        required_qty: parseFloat(mat.net_req_with_soft.toFixed(3)),
+        unit: mat.unit,
+      }))
+    setPRLines(shortage)
+    setPRForm({
+      requested_by: '', priority: 'High',
+      required_by_date: '',
+      so_reference: lastMRP?.so_numbers?.join(', ') ?? '',
+      notes: `Auto-generated from MRP run: ${lastMRP?.run_time ?? ''}`,
+    })
+    setShowPRModal(true)
+  }
+
+  const submitPR = () => {
+    const lines = prLines.filter(l => l.selected && l.required_qty > 0)
+    if (!lines.length) { alert('No lines selected'); return }
+    createPRMut.mutate({
+      pr_date: new Date().toISOString().split('T')[0],
+      requested_by: prForm.requested_by,
+      department: 'Production',
+      priority: prForm.priority,
+      so_reference: prForm.so_reference,
+      notes: prForm.notes,
+      lines: lines.map(l => ({
+        material_code: l.material_code,
+        material_name: l.material_name,
+        material_type: l.material_type,
+        required_qty: l.required_qty,
+        unit: l.unit,
+        required_by_date: prForm.required_by_date,
+        purpose: 'MRP Requirement',
+      }))
+    })
+  }
 
   // ── Derived Data ─────────────────────────────────────────────────────────────
 
@@ -250,6 +311,7 @@ export default function Production() {
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
+    <>
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-bold text-gray-800">Production &amp; MRP</h1>
@@ -462,6 +524,12 @@ export default function Production() {
                     )}
                     className="text-xs px-3 py-1.5 border border-blue-200 text-blue-700 rounded-lg hover:bg-blue-100">
                     Export CSV
+                  </button>
+                  <button
+                    onClick={openPRModal}
+                    disabled={!mrpMaterials.some(([, m]) => m.net_req_with_soft > 0)}
+                    className="text-xs px-3 py-1.5 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-40 font-medium">
+                    + Create PR from MRP
                   </button>
                 </div>
               </div>
@@ -880,5 +948,125 @@ export default function Production() {
         </div>
       )}
     </div>
+
+    {/* ── PR from MRP Modal ────────────────────────────────────────────────── */}
+    {showPRModal && (
+      <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b">
+            <div>
+              <h2 className="text-lg font-bold text-gray-800">Create Purchase Requisition from MRP</h2>
+              <p className="text-xs text-gray-500 mt-0.5">Pre-filled with shortage materials from last MRP run · {lastMRP?.run_time}</p>
+            </div>
+            <button onClick={() => setShowPRModal(false)} className="text-gray-400 hover:text-gray-700 text-2xl leading-none">×</button>
+          </div>
+
+          {/* PR Header Fields */}
+          <div className="px-6 py-4 border-b bg-gray-50 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Requested By</label>
+              <input value={prForm.requested_by} onChange={e => setPRForm(f => ({ ...f, requested_by: e.target.value }))}
+                placeholder="Name"
+                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Priority</label>
+              <select value={prForm.priority} onChange={e => setPRForm(f => ({ ...f, priority: e.target.value }))}
+                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400">
+                {['Normal', 'High', 'Urgent'].map(p => <option key={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Required By Date</label>
+              <input type="date" value={prForm.required_by_date} onChange={e => setPRForm(f => ({ ...f, required_by_date: e.target.value }))}
+                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">SO Reference</label>
+              <input value={prForm.so_reference} onChange={e => setPRForm(f => ({ ...f, so_reference: e.target.value }))}
+                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
+            </div>
+            <div className="col-span-2 sm:col-span-4">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Notes</label>
+              <input value={prForm.notes} onChange={e => setPRForm(f => ({ ...f, notes: e.target.value }))}
+                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
+            </div>
+          </div>
+
+          {/* Lines table */}
+          <div className="flex-1 overflow-y-auto px-6 py-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                Shortage Materials — {prLines.filter(l => l.selected).length} selected
+              </p>
+              <div className="flex gap-2">
+                <button onClick={() => setPRLines(ls => ls.map(l => ({ ...l, selected: true })))}
+                  className="text-xs text-blue-600 hover:underline">Select All</button>
+                <span className="text-gray-300">|</span>
+                <button onClick={() => setPRLines(ls => ls.map(l => ({ ...l, selected: false })))}
+                  className="text-xs text-gray-500 hover:underline">Clear All</button>
+              </div>
+            </div>
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                <tr>
+                  <th className="px-2 py-2 text-left w-8"></th>
+                  <th className="px-2 py-2 text-left">Material Code</th>
+                  <th className="px-2 py-2 text-left">Material Name</th>
+                  <th className="px-2 py-2 text-left">Type</th>
+                  <th className="px-2 py-2 text-right">Net Shortage</th>
+                  <th className="px-2 py-2 text-right">PR Qty</th>
+                  <th className="px-2 py-2 text-left">Unit</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {prLines.map((line, i) => (
+                  <tr key={line.material_code} className={`hover:bg-gray-50 ${!line.selected ? 'opacity-40' : ''}`}>
+                    <td className="px-2 py-1.5">
+                      <input type="checkbox" checked={line.selected}
+                        onChange={e => setPRLines(ls => ls.map((l, j) => j === i ? { ...l, selected: e.target.checked } : l))}
+                        className="rounded" />
+                    </td>
+                    <td className="px-2 py-1.5 font-mono text-blue-700 font-medium">{line.material_code}</td>
+                    <td className="px-2 py-1.5 text-gray-700">{line.material_name}</td>
+                    <td className="px-2 py-1.5"><span className="text-xs bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">{line.material_type}</span></td>
+                    <td className="px-2 py-1.5 text-right text-red-600 font-medium">{line.required_qty}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      <input type="number" min="0" step="0.001"
+                        value={line.required_qty}
+                        onChange={e => setPRLines(ls => ls.map((l, j) => j === i ? { ...l, required_qty: parseFloat(e.target.value) || 0 } : l))}
+                        className="w-20 border rounded px-1.5 py-1 text-right text-sm focus:outline-none focus:ring-1 focus:ring-orange-400" />
+                    </td>
+                    <td className="px-2 py-1.5 text-gray-500">{line.unit}</td>
+                  </tr>
+                ))}
+                {prLines.length === 0 && (
+                  <tr><td colSpan={7} className="text-center py-8 text-gray-400 text-sm">No shortage materials in current MRP run.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Footer */}
+          <div className="px-6 py-4 border-t flex items-center justify-between gap-3 bg-gray-50">
+            <p className="text-xs text-gray-500">{prLines.filter(l => l.selected).length} materials selected</p>
+            <div className="flex gap-2">
+              <button onClick={() => setShowPRModal(false)}
+                className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-100">
+                Cancel
+              </button>
+              <button
+                onClick={submitPR}
+                disabled={createPRMut.isPending || prLines.filter(l => l.selected).length === 0}
+                className="px-5 py-2 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 disabled:opacity-50">
+                {createPRMut.isPending ? 'Creating PR...' : `Create PR (${prLines.filter(l => l.selected).length} lines)`}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
