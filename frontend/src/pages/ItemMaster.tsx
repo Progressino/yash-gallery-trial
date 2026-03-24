@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react'
+import React, { useState, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 
@@ -757,8 +757,8 @@ export default function ItemMaster() {
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {items.map(item => (
-                        <>
-                          <tr key={item.id}
+                        <React.Fragment key={item.id}>
+                          <tr
                             className="hover:bg-gray-50 cursor-pointer transition-colors"
                             onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}>
                             <td className="px-4 py-3 font-mono font-medium text-[#002B5B]">{item.item_code}</td>
@@ -845,7 +845,7 @@ export default function ItemMaster() {
                               </td>
                             </tr>
                           )}
-                        </>
+                        </React.Fragment>
                       ))}
                     </tbody>
                   </table>
