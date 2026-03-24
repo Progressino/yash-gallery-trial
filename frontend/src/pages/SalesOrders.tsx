@@ -230,7 +230,10 @@ export default function SalesOrders() {
     buyer: '', warehouse: '', sales_team: '', source_type: 'Sales Team Demand',
     ref_demand: '', delivery_date: '', payment_terms: '', notes: ''
   })
-  const [soLines, setSOLines] = useState<{ sku: string; sku_name: string; qty: number; unit: string; rate: number; remarks: string }[]>([])
+  const [soLines, setSOLines] = useState<{
+    sku: string; sku_name: string; qty: number; unit: string; rate: number; remarks: string
+    hsn_code: string; gst_pct: number; merchant_code: string; priority: string; line_delivery_date: string
+  }[]>([])
   const [fetchingDemand, setFetchingDemand] = useState(false)
 
   const { data: demands = [] } = useQuery<Demand[]>({
@@ -284,7 +287,11 @@ export default function SalesOrders() {
   })
 
   function addDLine() { setDLines(l => [...l, { sku: '', sku_name: '', demand_qty: 0 }]) }
-  function addSOLine() { setSOLines(l => [...l, { sku: '', sku_name: '', qty: 0, unit: 'PCS', rate: 0, remarks: '' }]) }
+  const blankSOLine = () => ({
+    sku: '', sku_name: '', qty: 0, unit: 'PCS', rate: 0, remarks: '',
+    hsn_code: '', gst_pct: 0, merchant_code: '', priority: 'Normal', line_delivery_date: soForm.delivery_date
+  })
+  function addSOLine() { setSOLines(l => [...l, blankSOLine()]) }
 
   async function fetchDemandLines() {
     if (!soForm.ref_demand.trim()) return
@@ -292,7 +299,7 @@ export default function SalesOrders() {
     try {
       const { data } = await api.get(`/sales/demands/by-number/${encodeURIComponent(soForm.ref_demand.trim())}`)
       const lines = (data.lines || []).map((l: DemandLine) => ({
-        sku: l.sku, sku_name: l.sku_name, qty: l.demand_qty, unit: 'PCS', rate: 0, remarks: ''
+        ...blankSOLine(), sku: l.sku, sku_name: l.sku_name, qty: l.demand_qty,
       }))
       setSOLines(lines)
       if (data.buyer && !soForm.buyer) setSOForm(f => ({ ...f, buyer: data.buyer }))
@@ -708,64 +715,174 @@ export default function SalesOrders() {
                 )}
               </div>
 
-              {/* SO Lines */}
-              <div>
-                <div className="flex justify-between mb-2">
-                  <p className="text-sm font-medium text-gray-600">SKU Lines</p>
-                  <button onClick={addSOLine} className="text-xs text-blue-600 hover:underline">+ Add Line</button>
+              {/* SO Lines — Streamlit-style card layout */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <p className="text-sm font-semibold text-gray-700">SKU Lines
+                    {soLines.length > 0 && <span className="ml-2 text-xs text-gray-400 font-normal">({soLines.length} line{soLines.length > 1 ? 's' : ''})</span>}
+                  </p>
+                  <button onClick={addSOLine}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">
+                    + Add SKU Line
+                  </button>
                 </div>
 
-                {soLines.length > 0 && (
-                  <div className="flex gap-2 mb-1 px-1 text-xs text-gray-400">
-                    <span className="flex-1">SKU Code</span>
-                    <span className="flex-1">SKU Name</span>
-                    <span className="w-20">Qty</span>
-                    <span className="w-20">Rate ₹</span>
-                    <span className="w-18">UOM</span>
-                    <span className="w-28">Remarks</span>
-                    <span className="w-6" />
+                {soLines.map((ln, i) => (
+                  <div key={i} className="border border-gray-200 rounded-xl p-4 bg-gray-50 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Line {i + 1}</span>
+                      <button onClick={() => setSOLines(l => l.filter((_, j) => j !== i))}
+                        className="text-red-400 hover:text-red-600 text-xs px-2 py-0.5 rounded hover:bg-red-50">✕ Remove</button>
+                    </div>
+
+                    {/* Row 1: SKU + UOM + HSN */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">SKU / Style-Size *</label>
+                        <SkuPicker
+                          value={ln.sku}
+                          onChange={async (sku, skuName, uom) => {
+                            // Auto-fetch item details for HSN, GST%, merchant, rate
+                            let hsn = '', gst = 0, merchant = '', rate = ln.rate
+                            try {
+                              const { data: itm } = await api.get(`/items/items?search=${encodeURIComponent(sku)}&limit=1`)
+                              const item = itm?.[0]
+                              if (item) {
+                                hsn = item.hsn_code || ''
+                                gst = item.gst_rate || 0
+                                merchant = item.merchant_code || ''
+                                rate = item.selling_price || ln.rate
+                              }
+                            } catch { /* ignore */ }
+                            setSOLines(l => l.map((x, j) => j === i
+                              ? { ...x, sku, sku_name: skuName, unit: uom, hsn_code: hsn, gst_pct: gst, merchant_code: merchant, rate }
+                              : x))
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">UOM</label>
+                        <select value={ln.unit}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, unit: e.target.value } : x))}
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm bg-white">
+                          {UOM_OPTIONS.map(u => <option key={u}>{u}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">HSN Code</label>
+                        <input value={ln.hsn_code}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, hsn_code: e.target.value } : x))}
+                          placeholder="e.g. 61041300"
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm" />
+                      </div>
+                    </div>
+
+                    {/* Row 2: Qty + Rate + Delivery Date */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">Quantity *</label>
+                        <div className="flex items-center border border-gray-200 rounded bg-white overflow-hidden">
+                          <button onClick={() => setSOLines(l => l.map((x, j) => j === i ? { ...x, qty: Math.max(0, x.qty - 1) } : x))}
+                            className="px-3 py-1.5 text-gray-500 hover:bg-gray-100 font-bold text-sm">−</button>
+                          <input type="number" value={ln.qty}
+                            onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, qty: +e.target.value } : x))}
+                            className="flex-1 text-center text-sm py-1.5 focus:outline-none border-0 bg-transparent" />
+                          <button onClick={() => setSOLines(l => l.map((x, j) => j === i ? { ...x, qty: x.qty + 1 } : x))}
+                            className="px-3 py-1.5 text-gray-500 hover:bg-gray-100 font-bold text-sm">+</button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">Rate (₹)</label>
+                        <div className="flex items-center border border-gray-200 rounded bg-white overflow-hidden">
+                          <button onClick={() => setSOLines(l => l.map((x, j) => j === i ? { ...x, rate: Math.max(0, +(x.rate - 1).toFixed(2)) } : x))}
+                            className="px-3 py-1.5 text-gray-500 hover:bg-gray-100 font-bold text-sm">−</button>
+                          <input type="number" value={ln.rate}
+                            onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))}
+                            className="flex-1 text-center text-sm py-1.5 focus:outline-none border-0 bg-transparent" />
+                          <button onClick={() => setSOLines(l => l.map((x, j) => j === i ? { ...x, rate: +(x.rate + 1).toFixed(2) } : x))}
+                            className="px-3 py-1.5 text-gray-500 hover:bg-gray-100 font-bold text-sm">+</button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">Line Delivery Date</label>
+                        <input type="date" value={ln.line_delivery_date}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, line_delivery_date: e.target.value } : x))}
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm" />
+                      </div>
+                    </div>
+
+                    {/* Row 3: Priority + GST% + Merchant Code + Remarks */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">Priority</label>
+                        <select value={ln.priority}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, priority: e.target.value } : x))}
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm bg-white">
+                          {['Normal','High','Urgent'].map(p => <option key={p}>{p}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">GST %</label>
+                        <select value={String(ln.gst_pct)}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, gst_pct: +e.target.value } : x))}
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm bg-white">
+                          {[0,5,12,18,28].map(r => <option key={r} value={r}>{r}%</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">Merchant Code</label>
+                        <input value={ln.merchant_code}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, merchant_code: e.target.value } : x))}
+                          placeholder="Merchant code"
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">Remarks</label>
+                        <input value={ln.remarks}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, remarks: e.target.value } : x))}
+                          placeholder="Notes"
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm" />
+                      </div>
+                    </div>
+
+                    {/* Line total */}
+                    {(ln.qty > 0 && ln.rate > 0) && (
+                      <div className="flex justify-end gap-4 text-xs text-gray-500 pt-1 border-t border-gray-100">
+                        <span>Taxable: <strong className="text-gray-700">₹{(ln.qty * ln.rate).toLocaleString('en-IN', {minimumFractionDigits:2})}</strong></span>
+                        {ln.gst_pct > 0 && <span>GST ({ln.gst_pct}%): <strong className="text-gray-700">₹{(ln.qty * ln.rate * ln.gst_pct / 100).toLocaleString('en-IN', {minimumFractionDigits:2})}</strong></span>}
+                        <span>Total: <strong className="text-[#002B5B]">₹{(ln.qty * ln.rate * (1 + ln.gst_pct/100)).toLocaleString('en-IN', {minimumFractionDigits:2})}</strong></span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                {soLines.length === 0 && (
+                  <div className="border-2 border-dashed border-gray-200 rounded-xl p-6 text-center text-gray-400 text-sm">
+                    No SKU lines added. Fetch from a demand or click "+ Add SKU Line".
                   </div>
                 )}
 
-                {soLines.map((ln, i) => (
-                  <div key={i} className="flex gap-2 mb-2 items-center">
-                    <SkuPicker
-                      value={ln.sku}
-                      onChange={(sku, skuName, uom) => setSOLines(l => l.map((x, j) => j === i ? { ...x, sku, sku_name: skuName, unit: uom } : x))}
-                    />
-                    <input placeholder="SKU Name" value={ln.sku_name}
-                      onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, sku_name: e.target.value } : x))}
-                      className="border border-gray-200 rounded px-2 py-1.5 text-sm flex-1" />
-                    <input type="number" placeholder="Qty" value={ln.qty}
-                      onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, qty: +e.target.value } : x))}
-                      className="border border-gray-200 rounded px-2 py-1.5 text-sm w-20" />
-                    <input type="number" placeholder="Rate" value={ln.rate}
-                      onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))}
-                      className="border border-gray-200 rounded px-2 py-1.5 text-sm w-20" />
-                    <select value={ln.unit}
-                      onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, unit: e.target.value } : x))}
-                      className="border border-gray-200 rounded px-2 py-1.5 text-sm w-18">
-                      {UOM_OPTIONS.map(u => <option key={u}>{u}</option>)}
-                    </select>
-                    <input placeholder="Remarks" value={ln.remarks}
-                      onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, remarks: e.target.value } : x))}
-                      className="border border-gray-200 rounded px-2 py-1.5 text-sm w-28" />
-                    <button onClick={() => setSOLines(l => l.filter((_, j) => j !== i))}
-                      className="text-red-400 hover:text-red-600 text-sm px-1">✕</button>
+                {/* Order summary */}
+                {soLines.length > 0 && (
+                  <div className="bg-[#002B5B] text-white rounded-xl px-4 py-3 flex justify-between items-center text-sm">
+                    <span>{soLines.reduce((s,l)=>s+l.qty,0).toLocaleString()} total units · {soLines.length} SKU{soLines.length>1?'s':''}</span>
+                    <span className="font-bold">₹{soLines.reduce((s,l)=>s+(l.qty*l.rate*(1+l.gst_pct/100)),0).toLocaleString('en-IN',{minimumFractionDigits:2})}</span>
                   </div>
-                ))}
-                {soLines.length === 0 && (
-                  <p className="text-xs text-gray-400">Fetch from a demand or click "+ Add Line".</p>
                 )}
               </div>
 
-              <div className="flex gap-2">
-                <button onClick={() => createSOMut.mutate({ ...soForm, lines: soLines })}
+              <div className="flex gap-2 pt-2">
+                <button onClick={() => createSOMut.mutate({ ...soForm, status: 'Draft', lines: soLines })}
                   disabled={createSOMut.isPending}
-                  className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800 disabled:opacity-50">
-                  {createSOMut.isPending ? 'Saving…' : 'Create Sales Order'}
+                  className="px-4 py-2 border-2 border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-semibold hover:bg-blue-50 disabled:opacity-50">
+                  {createSOMut.isPending ? 'Saving…' : '💾 Save as Draft'}
                 </button>
-                <button onClick={() => setShowNewSO(false)}
+                <button onClick={() => createSOMut.mutate({ ...soForm, status: 'Submitted', lines: soLines })}
+                  disabled={createSOMut.isPending}
+                  className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-semibold hover:bg-blue-800 disabled:opacity-50">
+                  {createSOMut.isPending ? 'Saving…' : '✅ Save & Submit'}
+                </button>
+                <button onClick={() => { setSOLines([]); setShowNewSO(false) }}
                   className="px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
               </div>
             </div>

@@ -69,6 +69,11 @@ def init_db():
         "ALTER TABLE so_lines ADD COLUMN rate REAL DEFAULT 0",
         "ALTER TABLE so_lines ADD COLUMN delivery_date TEXT DEFAULT ''",
         "ALTER TABLE so_lines ADD COLUMN remarks TEXT DEFAULT ''",
+        "ALTER TABLE so_lines ADD COLUMN hsn_code TEXT DEFAULT ''",
+        "ALTER TABLE so_lines ADD COLUMN gst_pct REAL DEFAULT 0",
+        "ALTER TABLE so_lines ADD COLUMN merchant_code TEXT DEFAULT ''",
+        "ALTER TABLE so_lines ADD COLUMN priority TEXT DEFAULT 'Normal'",
+        "ALTER TABLE so_lines ADD COLUMN line_delivery_date TEXT DEFAULT ''",
     ]:
         try:
             conn.execute(col_ddl)
@@ -159,9 +164,15 @@ def create_order(data: dict):
     soid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         conn.execute(
-            "INSERT INTO so_lines(so_id,sku,sku_name,qty,unit,rate,delivery_date,remarks) VALUES(?,?,?,?,?,?,?,?)",
+            """INSERT INTO so_lines
+               (so_id,sku,sku_name,qty,unit,rate,delivery_date,remarks,
+                hsn_code,gst_pct,merchant_code,priority,line_delivery_date)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (soid, ln['sku'], ln.get('sku_name',''), ln.get('qty',0), ln.get('unit','PCS'),
-             ln.get('rate', 0), ln.get('delivery_date',''), ln.get('remarks','')))
+             ln.get('rate') or 0, ln.get('delivery_date',''), ln.get('remarks',''),
+             ln.get('hsn_code',''), ln.get('gst_pct') or 0,
+             ln.get('merchant_code',''), ln.get('priority') or 'Normal',
+             ln.get('line_delivery_date','')))
     conn.commit(); conn.close(); return num
 
 def update_order(soid: int, data: dict):
@@ -174,7 +185,8 @@ def update_order(soid: int, data: dict):
     conn.commit(); conn.close()
 
 def update_so_line(lid: int, data: dict):
-    allowed = ['produced_qty','dispatch_qty','received_qty','qty','rate','delivery_date','remarks']
+    allowed = ['produced_qty','dispatch_qty','received_qty','qty','rate','delivery_date','remarks',
+               'hsn_code','gst_pct','merchant_code','priority','line_delivery_date']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed] + [lid]
     if not sets: return
