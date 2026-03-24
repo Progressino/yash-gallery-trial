@@ -153,6 +153,8 @@ def init_db() -> None:
         "ALTER TABLE items ADD COLUMN gst_applicability TEXT DEFAULT 'Applicable'",
         "ALTER TABLE items ADD COLUMN type_of_supply TEXT DEFAULT 'Goods'",
         "ALTER TABLE items ADD COLUMN gst_rate REAL DEFAULT 0",
+        "ALTER TABLE items ADD COLUMN stock REAL DEFAULT 0",
+        "ALTER TABLE items ADD COLUMN reserved REAL DEFAULT 0",
     ]:
         try:
             conn.execute(col_ddl)
@@ -538,6 +540,15 @@ def update_item(item_id: int, **fields) -> bool:
         f"UPDATE items SET {set_clause} WHERE id = ?",
         list(updates.values()) + [item_id],
     )
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
+
+
+def update_item_stock(item_id: int, stock: float) -> bool:
+    conn = _connect()
+    cur = conn.execute("UPDATE items SET stock = ? WHERE id = ?", (stock, item_id))
     conn.commit()
     updated = cur.rowcount > 0
     conn.close()

@@ -35,7 +35,7 @@ from ..db.item_db import (
     list_routing_steps, create_routing_step, delete_routing_step,
     list_merchants, create_merchant, delete_merchant,
     list_buyers, create_buyer, delete_buyer,
-    list_items, get_item, create_item, update_item, delete_item,
+    list_items, get_item, create_item, update_item, update_item_stock, delete_item,
     create_size_variants, set_item_routing,
     list_boms, get_bom_with_lines, create_bom, update_bom, delete_bom,
     certify_bom, uncertify_bom,
@@ -151,6 +151,9 @@ class PackagingLineCreate(BaseModel):
     quantity:          float = 1.0
     unit:              str   = "PCS"
     remarks:           str   = ""
+
+class StockUpdate(BaseModel):
+    stock: float
 
 
 # ── Meta ──────────────────────────────────────────────────────────────────────
@@ -313,6 +316,13 @@ def edit_item(item_id: int, body: ItemUpdate):
 @router.delete("/{item_id}")
 def remove_item(item_id: int):
     if not delete_item(item_id):
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"ok": True}
+
+
+@router.put("/{item_id}/stock")
+def update_stock(item_id: int, body: StockUpdate):
+    if not update_item_stock(item_id, body.stock):
         raise HTTPException(status_code=404, detail="Item not found")
     return {"ok": True}
 

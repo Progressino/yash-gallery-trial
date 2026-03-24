@@ -1,5 +1,5 @@
 """Production Module DB — Job Orders + MRP Soft Reservations"""
-import sqlite3, os
+import sqlite3, os, json
 from datetime import datetime
 
 _DB = os.path.join(os.path.dirname(__file__), "..", "production.db")
@@ -56,6 +56,24 @@ def init_db():
         reservation_date TEXT DEFAULT (datetime('now')),
         status          TEXT DEFAULT 'Active',
         remarks         TEXT
+    );
+    CREATE TABLE IF NOT EXISTS mrp_soft_reservations (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        material_code   TEXT NOT NULL,
+        material_name   TEXT,
+        unit            TEXT DEFAULT 'PCS',
+        so_no           TEXT NOT NULL,
+        sku             TEXT,
+        qty             REAL DEFAULT 0,
+        status          TEXT DEFAULT 'Active',
+        created_at      TEXT DEFAULT (datetime('now')),
+        UNIQUE(material_code, so_no, sku)
+    );
+    CREATE TABLE IF NOT EXISTS mrp_last_run (
+        id          INTEGER PRIMARY KEY,
+        run_time    TEXT NOT NULL,
+        so_numbers  TEXT NOT NULL,
+        result_json TEXT NOT NULL
     );
     """)
     conn.commit(); conn.close()
@@ -148,3 +166,82 @@ def get_production_stats():
         'soft_reservations': conn.execute("SELECT COUNT(*) FROM soft_reservations WHERE status='Active'").fetchone()[0],
     }
     conn.close(); return stats
+
+
+# ── MRP Last Run ───────────────────────────────────────────────────────────────
+
+def save_mrp_result(so_numbers: list, result_dict: dict):
+    """Save (or replace) the last MRP run result."""
+    conn = _connect()
+    conn.execute("DELETE FROM mrp_last_run")
+    conn.execute(
+        "INSERT INTO mrp_last_run(id, run_time, so_numbers, result_json) VALUES(1,?,?,?)",
+        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+         json.dumps(so_numbers),
+         json.dumps(result_dict))
+    )
+    conn.commit(); conn.close()
+
+
+def get_last_mrp_result() -> dict | None:
+    """Returns {so_numbers, run_time, result} or None."""
+    conn = _connect()
+    row = conn.execute("SELECT * FROM mrp_last_run WHERE id=1").fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'run_time': row['run_time'],
+        'so_numbers': json.loads(row['so_numbers']),
+        'result': json.loads(row['result_json']),
+    }
+
+
+# ── MRP Soft Reservations v2 ───────────────────────────────────────────────────
+
+def soft_reserve_all(material_reservations: list):
+    """
+    Each dict: {material_code, material_name, unit, so_no, sku, qty}
+    INSERT OR REPLACE into mrp_soft_reservations.
+    """
+    conn = _connect()
+    for r in material_reservations:
+        conn.execute(
+            """INSERT OR REPLACE INTO mrp_soft_reservations
+               (material_code, material_name, unit, so_no, sku, qty, status, created_at)
+               VALUES(?,?,?,?,?,?,'Active',datetime('now'))""",
+            (r['material_code'], r.get('material_name', ''), r.get('unit', 'PCS'),
+             r['so_no'], r.get('sku', ''), float(r.get('qty', 0)))
+        )
+    conn.commit(); conn.close()
+
+
+def release_so_reservations(so_no: str):
+    """Set status='Released' for all active reservations for this SO."""
+    conn = _connect()
+    conn.execute(
+        "UPDATE mrp_soft_reservations SET status='Released' WHERE so_no=? AND status='Active'",
+        (so_no,)
+    )
+    conn.commit(); conn.close()
+
+
+def list_soft_reservations_v2() -> list:
+    """Returns all active mrp_soft_reservations."""
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM mrp_soft_reservations WHERE status='Active' ORDER BY material_code, so_no"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_soft_reserved_by_material(material_code: str) -> float:
+    """Sum of active qty for a given material code in mrp_soft_reservations."""
+    conn = _connect()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(qty),0) FROM mrp_soft_reservations WHERE material_code=? AND status='Active'",
+        (material_code,)
+    ).fetchone()
+    conn.close()
+    return float(row[0])
