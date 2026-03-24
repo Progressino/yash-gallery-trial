@@ -316,6 +316,73 @@ def init_db() -> None:
         )
         conn.commit()
 
+    # ── Seed default ledgers (INSERT OR IGNORE) ───────────────────
+    def _grp_id(name):
+        row = conn.execute("SELECT id FROM ledger_groups WHERE name=?", (name,)).fetchone()
+        return row[0] if row else None
+
+    seed_ledgers = [
+        # name, group_name, gstin, tds_applicable, tds_section, state
+        ('Cash',                         'Cash-in-Hand',      '', 0, '', 'Rajasthan'),
+        ('Petty Cash',                   'Cash-in-Hand',      '', 0, '', 'Rajasthan'),
+        ('SBI Current Account',          'Bank Accounts',     '', 0, '', 'Rajasthan'),
+        ('HDFC Current Account',         'Bank Accounts',     '', 0, '', 'Rajasthan'),
+        ('ICICI Current Account',        'Bank Accounts',     '', 0, '', 'Rajasthan'),
+        # Purchases
+        ('Fabric Purchase A/c',          'Purchase Accounts', '', 0, '', ''),
+        ('Accessories Purchase A/c',     'Purchase Accounts', '', 0, '', ''),
+        ('Packing Material Purchase',    'Purchase Accounts', '', 0, '', ''),
+        ('Job Work Charges',             'Direct Expenses',   '', 1, '194C', ''),
+        ('Contract Labour',              'Direct Expenses',   '', 1, '194C', ''),
+        ('Freight & Cartage',            'Direct Expenses',   '', 0, '', ''),
+        ('Loading & Unloading',          'Direct Expenses',   '', 0, '', ''),
+        # Indirect Expenses
+        ('Rent A/c',                     'Indirect Expenses', '', 1, '194I', ''),
+        ('Electricity Charges',          'Indirect Expenses', '', 0, '', ''),
+        ('Telephone & Internet',         'Indirect Expenses', '', 0, '', ''),
+        ('Repair & Maintenance',         'Indirect Expenses', '', 0, '', ''),
+        ('Printing & Stationery',        'Indirect Expenses', '', 0, '', ''),
+        ('Postage & Courier',            'Indirect Expenses', '', 0, '', ''),
+        ('Advertisement & Marketing',    'Indirect Expenses', '', 0, '', ''),
+        ('Professional Charges',         'Indirect Expenses', '', 1, '194J', ''),
+        ('Audit Fees',                   'Indirect Expenses', '', 1, '194J', ''),
+        ('Bank Charges',                 'Indirect Expenses', '', 0, '', ''),
+        ('Vehicle Running Expenses',     'Indirect Expenses', '', 0, '', ''),
+        ('Office Expenses',              'Indirect Expenses', '', 0, '', ''),
+        ('Staff Welfare',                'Indirect Expenses', '', 0, '', ''),
+        ('Travelling Expenses',          'Indirect Expenses', '', 0, '', ''),
+        ('Commission Paid',              'Indirect Expenses', '', 1, '194H', ''),
+        # Duties & Taxes
+        ('CGST Payable',                 'Duties & Taxes',    '', 0, '', ''),
+        ('SGST Payable',                 'Duties & Taxes',    '', 0, '', ''),
+        ('IGST Payable',                 'Duties & Taxes',    '', 0, '', ''),
+        ('TDS Payable',                  'Duties & Taxes',    '', 0, '', ''),
+        ('CGST Receivable (ITC)',        'Current Assets',    '', 0, '', ''),
+        ('SGST Receivable (ITC)',        'Current Assets',    '', 0, '', ''),
+        ('IGST Receivable (ITC)',        'Current Assets',    '', 0, '', ''),
+        # Sales
+        ('Amazon Sales A/c',             'Sales Accounts',    '', 0, '', ''),
+        ('Myntra Sales A/c',             'Sales Accounts',    '', 0, '', ''),
+        ('Meesho Sales A/c',             'Sales Accounts',    '', 0, '', ''),
+        ('Flipkart Sales A/c',           'Sales Accounts',    '', 0, '', ''),
+        ('Snapdeal Sales A/c',           'Sales Accounts',    '', 0, '', ''),
+        # Capital
+        ('Capital A/c',                  'Capital Account',   '', 0, '', ''),
+        ('Drawing A/c',                  'Capital Account',   '', 0, '', ''),
+    ]
+    for (name, group_name, gstin, tds_app, tds_sec, state) in seed_ledgers:
+        exists = conn.execute("SELECT 1 FROM ledgers WHERE name=?", (name,)).fetchone()
+        if not exists:
+            gid = _grp_id(group_name)
+            conn.execute(
+                """INSERT OR IGNORE INTO ledgers
+                   (name, alias, group_id, group_name, gstin, tds_applicable, tds_section,
+                    is_tcs_applicable, state, country, is_active)
+                   VALUES (?,?,?,?,?,?,?,0,?,?,1)""",
+                (name, '', gid, group_name, gstin, tds_app, tds_sec, state, 'India'),
+            )
+    conn.commit()
+
     conn.close()
 
 

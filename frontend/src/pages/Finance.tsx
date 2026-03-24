@@ -1273,7 +1273,7 @@ function VouchersTab() {
   const [fromAccount, setFromAccount] = useState('')
   const [toAccount,   setToAccount]   = useState('')
 
-  const ledgerNames = useMemo(() => ledgers.map(l => l.name), [ledgers])
+
 
   const isPaymentReceipt = useMemo(() => ['Payment', 'Receipt'].includes(vType), [vType])
   const isJournal        = useMemo(() => vType === 'Journal', [vType])
@@ -1448,12 +1448,16 @@ function VouchersTab() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="flex flex-col gap-1">
               <label className="text-xs text-gray-500">{vType === 'Receipt' ? 'Received From' : 'Pay To / Party Name'}</label>
-              <input type="text" value={partyName} onChange={e => setPartyName(e.target.value)}
-                list="ledger-names-list" placeholder="Vendor / party name"
-                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-              <datalist id="ledger-names-list">
-                {ledgerNames.map(n => <option key={n} value={n} />)}
-              </datalist>
+              <LedgerCombobox
+                value={partyName}
+                allLedgers={ledgers.filter(l => ['Sundry Creditors','Sundry Debtors','Cash-in-Hand','Bank Accounts'].includes(l.group_name))}
+                placeholder="Vendor / party name"
+                onChange={(name, ledger) => {
+                  setPartyName(name)
+                  if (ledger?.gstin) setPartyGstin(ledger.gstin)
+                  if (ledger?.state) setPartyState(ledger.state)
+                }}
+              />
             </div>
             {isExpenseType && (
               <>
@@ -1493,12 +1497,12 @@ function VouchersTab() {
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs text-gray-500">Bank Account</label>
-              <input type="text" value={bankLedger} onChange={e => setBankLedger(e.target.value)}
-                list="bank-ledgers-list" placeholder="Bank ledger name"
-                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-              <datalist id="bank-ledgers-list">
-                {ledgerNames.map(n => <option key={n} value={n} />)}
-              </datalist>
+              <LedgerCombobox
+                value={bankLedger}
+                allLedgers={ledgers.filter(l => ['Bank Accounts','Cash-in-Hand'].includes(l.group_name))}
+                placeholder="Bank / Cash ledger"
+                onChange={name => setBankLedger(name)}
+              />
             </div>
             {paymentMode === 'Cheque' && (
               <div className="flex flex-col gap-1">
@@ -1522,21 +1526,21 @@ function VouchersTab() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-blue-50 rounded-lg p-3">
             <div className="flex flex-col gap-1">
               <label className="text-xs text-gray-500">From Account *</label>
-              <input type="text" value={fromAccount} onChange={e => setFromAccount(e.target.value)}
-                list="from-acct-list" placeholder="Cash / Bank ledger"
-                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-              <datalist id="from-acct-list">
-                {ledgerNames.map(n => <option key={n} value={n} />)}
-              </datalist>
+              <LedgerCombobox
+                value={fromAccount}
+                allLedgers={ledgers.filter(l => ['Bank Accounts','Cash-in-Hand'].includes(l.group_name))}
+                placeholder="Cash / Bank ledger"
+                onChange={name => setFromAccount(name)}
+              />
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs text-gray-500">To Account *</label>
-              <input type="text" value={toAccount} onChange={e => setToAccount(e.target.value)}
-                list="to-acct-list" placeholder="Cash / Bank ledger"
-                className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-              <datalist id="to-acct-list">
-                {ledgerNames.map(n => <option key={n} value={n} />)}
-              </datalist>
+              <LedgerCombobox
+                value={toAccount}
+                allLedgers={ledgers.filter(l => ['Bank Accounts','Cash-in-Hand'].includes(l.group_name))}
+                placeholder="Cash / Bank ledger"
+                onChange={name => setToAccount(name)}
+              />
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs text-gray-500">Amount (₹) *</label>
@@ -1619,14 +1623,40 @@ function VouchersTab() {
                   {lines.map((line, idx) => (
                     <tr key={idx} className="border-t border-gray-100">
                       <td className="px-3 py-1.5">
-                        <input type="text" value={line.expense_head} onChange={e => updateLine(idx, 'expense_head', e.target.value)}
-                          list="expense-heads-list" placeholder={isJournal ? 'Ledger name' : 'Expense head'}
-                          className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                        <LedgerCombobox
+                          value={line.expense_head}
+                          allLedgers={ledgers}
+                          placeholder={isJournal ? 'Ledger / Account' : 'Expense head'}
+                          onChange={(name, ledger) => {
+                            updateLine(idx, 'expense_head', name)
+                            // Auto-fill GSTIN, TDS when a known ledger is selected
+                            if (ledger) {
+                              if (ledger.gstin) setPartyGstin(ledger.gstin)
+                              if (ledger.state) setPartyState(ledger.state)
+                              if (ledger.tds_applicable && ledger.tds_section) {
+                                setApplyTds(true)
+                                setTdsSection(ledger.tds_section)
+                                const sec = tdsSections.find(s => s.section === ledger.tds_section)
+                                if (sec) setTdsRate(String(sec.rate_individual))
+                              }
+                            }
+                          }}
+                        />
                       </td>
                       <td className="px-3 py-1.5">
                         <input type="text" value={line.description} onChange={e => updateLine(idx, 'description', e.target.value)}
-                          placeholder="Details"
+                          list={`desc-list-${idx}`}
+                          placeholder="Details / narration"
                           className="w-full border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+                        <datalist id={`desc-list-${idx}`}>
+                          {/* Suggest previous descriptions used for this expense head */}
+                          {vouchers.flatMap(v => v.lines ?? [])
+                            .filter(l => l.expense_head === line.expense_head && l.description)
+                            .map(l => l.description)
+                            .filter((d, i, arr) => arr.indexOf(d) === i)
+                            .slice(0, 8)
+                            .map(d => <option key={d} value={d} />)}
+                        </datalist>
                       </td>
                       <td className="px-3 py-1.5">
                         <input type="number" value={line.amount} onChange={e => updateLine(idx, 'amount', e.target.value)}
@@ -1658,9 +1688,6 @@ function VouchersTab() {
                 </tbody>
               </table>
             </div>
-            <datalist id="expense-heads-list">
-              {ledgerNames.map(n => <option key={n} value={n} />)}
-            </datalist>
           </div>
         )}
 
@@ -2848,6 +2875,97 @@ function SalesUploadsTab() {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── LedgerCombobox ─────────────────────────────────────────────────
+// Live-search dropdown that queries /finance/masters/ledgers and returns full ledger object on select
+interface LedgerComboboxProps {
+  value: string
+  onChange: (name: string, ledger?: Ledger) => void
+  placeholder?: string
+  className?: string
+  allLedgers?: Ledger[]   // optional pre-loaded list (avoids extra fetches)
+}
+function LedgerCombobox({ value, onChange, placeholder = 'Search ledger…', className = '', allLedgers }: LedgerComboboxProps) {
+  const [query,   setQuery]   = useState(value)
+  const [open,    setOpen]    = useState(false)
+  const [focused, setFocused] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  // Sync external value changes (e.g. form reset)
+  useEffect(() => { setQuery(value) }, [value])
+
+  // Filter from pre-loaded list or fetch
+  const { data: searchResults = [] } = useQuery<Ledger[]>({
+    queryKey: ['ledger-search', query],
+    queryFn: async () => {
+      if (!query || query.length < 1) return allLedgers ?? []
+      const { data } = await api.get(`/finance/masters/ledgers?search=${encodeURIComponent(query)}`)
+      return data
+    },
+    enabled: focused,
+    staleTime: 30_000,
+  })
+
+  const options = focused
+    ? (query.length === 0
+        ? (allLedgers ?? searchResults)
+        : searchResults.filter(l => l.name.toLowerCase().includes(query.toLowerCase()))
+      )
+    : []
+
+  function select(l: Ledger) {
+    setQuery(l.name)
+    setOpen(false)
+    onChange(l.name, l)
+  }
+
+  // Close on outside click
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false); setFocused(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  return (
+    <div ref={containerRef} className={`relative ${className}`}>
+      <input
+        type="text"
+        value={query}
+        placeholder={placeholder}
+        autoComplete="off"
+        onFocus={() => { setFocused(true); setOpen(true) }}
+        onChange={e => {
+          setQuery(e.target.value)
+          onChange(e.target.value)
+          setOpen(true)
+        }}
+        onBlur={() => setTimeout(() => { setOpen(false) }, 180)}
+        className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-300"
+      />
+      {open && options.length > 0 && (
+        <ul className="absolute z-50 left-0 right-0 mt-0.5 bg-white border border-gray-200 rounded-lg shadow-lg max-h-52 overflow-y-auto text-xs">
+          {options.map(l => (
+            <li key={l.id}
+              onMouseDown={e => { e.preventDefault(); select(l) }}
+              className="px-3 py-2 cursor-pointer hover:bg-blue-50 flex items-center justify-between gap-2">
+              <span className="font-medium text-gray-800">{l.name}</span>
+              <span className="text-gray-400 text-[10px] shrink-0">{l.group_name}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {open && focused && query.length > 0 && options.length === 0 && (
+        <div className="absolute z-50 left-0 right-0 mt-0.5 bg-white border border-gray-200 rounded-lg shadow-lg px-3 py-2 text-xs text-gray-400">
+          No ledger found — you can type a custom name
+        </div>
+      )}
     </div>
   )
 }
