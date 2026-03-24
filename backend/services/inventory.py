@@ -64,14 +64,29 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
                         data = fh.read()
                     if base.endswith(".tsv"):
                         result["fba_tsvs"].append(data)
-                    elif "amz" in base and base.endswith(".csv"):
+                        continue
+                    if not base.endswith(".csv"):
+                        continue
+                    # Filename-based detection first
+                    if "amz" in base:
                         result["amz_csv"] = data
-                    elif "myntra" in base and base.endswith(".csv"):
+                    elif "myntra" in base:
                         result["myntra_csv"] = data
-                    elif "combo" in base and base.endswith(".csv"):
+                    elif "combo" in base:
                         result["combo_csv"] = data
-                    elif "oms" in base and base.endswith(".csv"):
+                    elif "oms" in base:
                         result["oms_csv"] = data
+                    else:
+                        # Filename gives no hint — detect by content
+                        text = data[:2000].decode("utf-8", errors="ignore").lower()
+                        if "msku" in text and "ending warehouse balance" in text:
+                            result["amz_csv"] = data
+                        elif "seller sku code" in text or ("style id" in text and "inventory count" in text):
+                            result["myntra_csv"] = data
+                        elif "combo sku code" in text and "combo" in text:
+                            result["combo_csv"] = data
+                        elif "item skucode" in text or "buffer stock" in text:
+                            result["oms_csv"] = data
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
         return result
@@ -89,14 +104,28 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
             base = name.replace("\\", "/").split("/")[-1].lower()
             if base.endswith(".tsv"):
                 result["fba_tsvs"].append(rf.read(name))
-            elif "amz" in base and base.endswith(".csv"):
-                result["amz_csv"] = rf.read(name)
-            elif "myntra" in base and base.endswith(".csv"):
-                result["myntra_csv"] = rf.read(name)
-            elif "combo" in base and base.endswith(".csv"):
-                result["combo_csv"] = rf.read(name)
-            elif "oms" in base and base.endswith(".csv"):
-                result["oms_csv"] = rf.read(name)
+                continue
+            if not base.endswith(".csv"):
+                continue
+            data = rf.read(name)
+            if "amz" in base:
+                result["amz_csv"] = data
+            elif "myntra" in base:
+                result["myntra_csv"] = data
+            elif "combo" in base:
+                result["combo_csv"] = data
+            elif "oms" in base:
+                result["oms_csv"] = data
+            else:
+                text = data[:2000].decode("utf-8", errors="ignore").lower()
+                if "msku" in text and "ending warehouse balance" in text:
+                    result["amz_csv"] = data
+                elif "seller sku code" in text or ("style id" in text and "inventory count" in text):
+                    result["myntra_csv"] = data
+                elif "combo sku code" in text and "combo" in text:
+                    result["combo_csv"] = data
+                elif "item skucode" in text or "buffer stock" in text:
+                    result["oms_csv"] = data
     return result
 
 
