@@ -99,6 +99,12 @@ def calculate_mrp(so_numbers: List[str]) -> dict:
 
         lines = _get_bom_lines(conn, bom['id'])
         for line in lines:
+            comp_type = line.get('component_type', 'RM') or 'RM'
+
+            # Skip process / service lines — MRP only needs physical materials
+            if comp_type.lower() in ('service', 'process'):
+                continue
+
             comp_code = line.get('component_name') or str(line.get('component_item_id', ''))
             if not comp_code:
                 continue
@@ -109,12 +115,13 @@ def calculate_mrp(so_numbers: List[str]) -> dict:
             adj_qty = line_qty * (1 + shrinkage + wastage)
             total_qty = round(adj_qty * qty, 3)
             unit = line.get('unit', 'PCS') or 'PCS'
-            comp_type = line.get('component_type', 'RM') or 'RM'
 
-            # Get stock from items table if component_item_id is set
+            # Get stock from items table — try component_item_id first, then by code
             comp_item = None
             if line.get('component_item_id'):
                 comp_item = _get_item_by_id(conn, line['component_item_id'])
+            if not comp_item and comp_code:
+                comp_item = _get_item_by_code(conn, comp_code)
 
             stock = float(comp_item.get('stock') or 0) if comp_item else 0
 
@@ -143,11 +150,16 @@ def calculate_mrp(so_numbers: List[str]) -> dict:
             })
 
             # Recurse if component also has a BOM (multi-level)
-            if comp_item:
-                sub_bom = _get_default_bom(conn, comp_item['id'])
+            # comp_item may have been resolved by code above; always attempt recursion
+            sub_item = comp_item or _get_item_by_code(conn, comp_code)
+            if sub_item:
+                sub_bom = _get_default_bom(conn, sub_item['id'])
                 if sub_bom:
-                    sub_lines = _get_bom_lines(conn, sub_bom['id'])
-                    if sub_lines:
+                    mat_sub_lines = [
+                        l for l in _get_bom_lines(conn, sub_bom['id'])
+                        if (l.get('component_type') or 'RM').lower() not in ('service', 'process')
+                    ]
+                    if mat_sub_lines:
                         explode_bom(comp_code, total_qty, so_no, sku, depth + 1)
 
     for line in selected_lines:
