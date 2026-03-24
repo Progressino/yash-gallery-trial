@@ -102,11 +102,27 @@ def calculate_mrp(so_numbers: List[str]) -> dict:
             comp_type = line.get('component_type', 'RM') or 'RM'
 
             # Skip process / service lines — MRP only needs physical materials
-            if comp_type.lower() in ('service', 'process'):
+            # component_type is stored as 'SVC' from frontend; also handle 'service'/'process' text
+            if comp_type.upper() in ('SVC', 'SERVICE', 'PROCESS'):
                 continue
 
-            comp_code = line.get('component_name') or str(line.get('component_item_id', ''))
-            if not comp_code:
+            # component_name may be a display string like "P308 — P308" (item_code — item_name)
+            # Always resolve by component_item_id first; fall back to code lookup
+            comp_item = None
+            if line.get('component_item_id'):
+                comp_item = _get_item_by_id(conn, line['component_item_id'])
+
+            # Determine the canonical item_code to use as key
+            if comp_item:
+                actual_code = comp_item['item_code']
+            else:
+                # Try stripping the " — name" suffix from component_name display value
+                raw_name = line.get('component_name') or ''
+                actual_code = raw_name.split(' — ')[0].strip() if ' — ' in raw_name else raw_name
+                if actual_code:
+                    comp_item = _get_item_by_code(conn, actual_code)
+
+            if not actual_code:
                 continue
 
             line_qty = float(line.get('quantity') or 0)
@@ -116,18 +132,11 @@ def calculate_mrp(so_numbers: List[str]) -> dict:
             total_qty = round(adj_qty * qty, 3)
             unit = line.get('unit', 'PCS') or 'PCS'
 
-            # Get stock from items table — try component_item_id first, then by code
-            comp_item = None
-            if line.get('component_item_id'):
-                comp_item = _get_item_by_id(conn, line['component_item_id'])
-            if not comp_item and comp_code:
-                comp_item = _get_item_by_code(conn, comp_code)
-
             stock = float(comp_item.get('stock') or 0) if comp_item else 0
 
-            if comp_code not in result:
-                result[comp_code] = {
-                    'name': comp_item.get('item_name', comp_code) if comp_item else comp_code,
+            if actual_code not in result:
+                result[actual_code] = {
+                    'name': comp_item.get('item_name', actual_code) if comp_item else actual_code,
                     'type': comp_type,
                     'unit': unit,
                     'total_req': 0.0,
@@ -138,29 +147,28 @@ def calculate_mrp(so_numbers: List[str]) -> dict:
                 }
             else:
                 # Update level to shallowest
-                if depth < result[comp_code]['level']:
-                    result[comp_code]['level'] = depth
+                if depth < result[actual_code]['level']:
+                    result[actual_code]['level'] = depth
 
-            result[comp_code]['total_req'] = round(result[comp_code]['total_req'] + total_qty, 3)
-            result[comp_code]['breakdown'].append({
+            result[actual_code]['total_req'] = round(result[actual_code]['total_req'] + total_qty, 3)
+            result[actual_code]['breakdown'].append({
                 'so_no': so_no,
                 'sku': sku,
                 'qty_req': total_qty,
                 'source': f'BOM: {item_code} → Level {depth}',
             })
 
-            # Recurse if component also has a BOM (multi-level)
-            # comp_item may have been resolved by code above; always attempt recursion
-            sub_item = comp_item or _get_item_by_code(conn, comp_code)
-            if sub_item:
-                sub_bom = _get_default_bom(conn, sub_item['id'])
+            # Recurse if this component also has a BOM (multi-level explosion)
+            # Use comp_item['item_code'] — never the raw component_name display string
+            if comp_item:
+                sub_bom = _get_default_bom(conn, comp_item['id'])
                 if sub_bom:
                     mat_sub_lines = [
                         l for l in _get_bom_lines(conn, sub_bom['id'])
-                        if (l.get('component_type') or 'RM').lower() not in ('service', 'process')
+                        if (l.get('component_type') or 'RM').upper() not in ('SVC', 'SERVICE', 'PROCESS')
                     ]
                     if mat_sub_lines:
-                        explode_bom(comp_code, total_qty, so_no, sku, depth + 1)
+                        explode_bom(comp_item['item_code'], total_qty, so_no, sku, depth + 1)
 
     for line in selected_lines:
         sku = line.get('sku', '')
