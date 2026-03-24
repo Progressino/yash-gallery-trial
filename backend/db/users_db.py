@@ -2,7 +2,7 @@
 import sqlite3, os, bcrypt
 from datetime import datetime
 
-_DB = os.path.join(os.path.dirname(__file__), "..", "users.db")
+_DB = os.environ.get("USERS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "users.db"))
 
 def _connect():
     conn = sqlite3.connect(_DB)

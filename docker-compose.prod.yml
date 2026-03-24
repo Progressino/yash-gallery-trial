@@ -19,6 +19,12 @@ services:
       - PYTHONUNBUFFERED=1
       - FINANCE_DB_PATH=/data/finance.db
       - ITEM_DB_PATH=/data/items.db
+      - SALES_DB_PATH=/data/sales.db
+      - PRODUCTION_DB_PATH=/data/production.db
+      - GREY_DB_PATH=/data/grey.db
+      - PURCHASE_DB_PATH=/data/purchase.db
+      - TNA_DB_PATH=/data/tna.db
+      - USERS_DB_PATH=/data/users.db
     volumes:
       - /root/app-data/finance:/data
     expose:

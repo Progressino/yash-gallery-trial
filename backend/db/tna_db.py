@@ -2,7 +2,7 @@
 import sqlite3, os
 from datetime import datetime, timedelta
 
-_DB = os.path.join(os.path.dirname(__file__), "..", "tna.db")
+_DB = os.environ.get("TNA_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "tna.db"))
 
 def _connect():
     conn = sqlite3.connect(_DB)

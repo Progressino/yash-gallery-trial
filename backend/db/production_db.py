@@ -2,7 +2,7 @@
 import sqlite3, os, json
 from datetime import datetime
 
-_DB = os.path.join(os.path.dirname(__file__), "..", "production.db")
+_DB = os.environ.get("PRODUCTION_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "production.db"))
 
 def _connect():
     conn = sqlite3.connect(_DB)
