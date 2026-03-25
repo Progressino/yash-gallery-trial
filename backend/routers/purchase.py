@@ -5,7 +5,7 @@ from typing import Optional, List
 from ..db.purchase_db import (
     list_suppliers, create_supplier, update_supplier,
     list_processors, create_processor,
-    list_prs, create_pr, approve_pr, update_pr_status,
+    list_prs, create_pr, approve_pr, reject_pr, update_pr_status, create_pos_from_pr,
     list_pos, create_po, update_po_status,
     list_jwos, create_jwo, update_jwo_status,
     list_grns, create_grn, update_grn_status,
@@ -50,12 +50,35 @@ class PRIn(BaseModel):
     department: Optional[str] = 'Production'
     priority: Optional[str] = 'Normal'
     so_reference: Optional[str] = ''
+    pr_type: Optional[str] = 'Purchase'
+    source: Optional[str] = 'Manual'
+    required_by_date: Optional[str] = ''
     notes: Optional[str] = ''
     lines: List[PRLineIn] = []
 
 class ApproveIn(BaseModel):
     approver: str
     remarks: Optional[str] = ''
+
+class RejectIn(BaseModel):
+    remarks: Optional[str] = ''
+
+class POFromPRLineIn(BaseModel):
+    material_code: str
+    material_name: Optional[str] = ''
+    material_type: Optional[str] = 'RM'
+    unit: Optional[str] = 'PCS'
+    qty: float = 0
+    rate: float = 0
+    gst_pct: Optional[int] = 0
+    supplier_id: Optional[int] = None
+    supplier_name: Optional[str] = ''
+
+class POFromPRIn(BaseModel):
+    pr_id: int
+    delivery_date: Optional[str] = ''
+    payment_terms: Optional[str] = 'Immediate'
+    lines: List[POFromPRLineIn] = []
 
 class POLineIn(BaseModel):
     material_code: str
@@ -185,10 +208,25 @@ def post_approve_pr(prid: int, body: ApproveIn):
     approve_pr(prid, body.approver, body.remarks or '')
     return {"ok": True}
 
+@router.post("/pr/{prid}/reject")
+def post_reject_pr(prid: int, body: RejectIn):
+    reject_pr(prid, body.remarks or '')
+    return {"ok": True}
+
 @router.patch("/pr/{prid}/status")
 def patch_pr_status(prid: int, body: StatusUpdate):
     update_pr_status(prid, body.status)
     return {"ok": True}
+
+@router.post("/po/from-pr")
+def post_po_from_pr(body: POFromPRIn):
+    po_numbers = create_pos_from_pr(
+        body.pr_id,
+        [l.model_dump() for l in body.lines],
+        body.delivery_date or '',
+        body.payment_terms or 'Immediate',
+    )
+    return {"po_numbers": po_numbers, "count": len(po_numbers)}
 
 # ── Purchase Orders ───────────────────────────────────────────────────────────
 @router.get("/po")

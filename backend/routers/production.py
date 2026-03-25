@@ -311,6 +311,88 @@ def get_last_mrp():
     return data
 
 
+@router.get("/mrp/lines-for-so")
+def get_mrp_lines_for_so(so_number: str = ''):
+    """Split last MRP result into purchase_items and sfg_items for a given SO, with SFG BOM inputs."""
+    data = get_last_mrp_result()
+    if not data:
+        return {'purchase_items': [], 'sfg_items': [], 'error': 'No MRP result. Run MRP first.'}
+
+    result = data.get('result', {})
+    so_numbers = data.get('so_numbers', [])
+
+    if so_number and so_number not in so_numbers:
+        return {
+            'purchase_items': [], 'sfg_items': [],
+            'warning': f'{so_number} not in last MRP run ({", ".join(so_numbers)})',
+        }
+
+    try:
+        conn = _item_connect()
+    except Exception:
+        conn = None
+
+    purchase_items = []
+    sfg_items = []
+
+    for code, mat in result.items():
+        so_qty = (
+            sum(bd['qty_req'] for bd in mat.get('breakdown', []) if bd.get('so_no') == so_number)
+            if so_number else mat['total_req']
+        )
+        if so_qty <= 0:
+            continue
+
+        item_data = {
+            'material_code': code,
+            'material_name': mat['name'],
+            'material_type': mat.get('type', 'RM'),
+            'required_qty': round(so_qty, 3),
+            'unit': mat['unit'],
+            'net_req': mat.get('net_req_with_soft', so_qty),
+        }
+
+        if mat.get('type', '').upper() == 'SFG':
+            # Attach BOM inputs for display (what raw materials go INTO this SFG)
+            inputs = []
+            if conn:
+                item = _get_item_by_code(conn, code)
+                if item:
+                    bom = _get_default_bom(conn, item['id'])
+                    if bom:
+                        for bl in _get_bom_lines(conn, bom['id']):
+                            ctype = (bl.get('component_type') or 'RM').upper()
+                            if ctype in ('SVC', 'SERVICE', 'PROCESS'):
+                                continue
+                            comp_item = None
+                            if bl.get('component_item_id'):
+                                comp_item = _get_item_by_id(conn, bl['component_item_id'])
+                            if not comp_item:
+                                raw = bl.get('component_name') or ''
+                                disp = raw.split(' — ')[0].strip() if ' — ' in raw else raw
+                                comp_item = _get_item_by_code(conn, disp) if disp else None
+                            inputs.append({
+                                'material_code': comp_item['item_code'] if comp_item else (bl.get('component_name') or ''),
+                                'material_name': comp_item['item_name'] if comp_item else (bl.get('component_name') or ''),
+                                'quantity': bl.get('quantity', 0),
+                                'unit': bl.get('unit', 'PCS'),
+                            })
+            item_data['inputs'] = inputs
+            sfg_items.append(item_data)
+        else:
+            purchase_items.append(item_data)
+
+    if conn:
+        conn.close()
+
+    purchase_items.sort(key=lambda x: x['material_type'])
+    return {
+        'so_number': so_number,
+        'purchase_items': purchase_items,
+        'sfg_items': sfg_items,
+    }
+
+
 @router.post("/mrp/soft-reserve-all")
 def mrp_soft_reserve_all():
     """Use last MRP result to create soft reservations for all materials/SOs."""

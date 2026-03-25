@@ -35,17 +35,20 @@ def init_db():
         created_at     TEXT DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS pr_headers (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        pr_number    TEXT UNIQUE NOT NULL,
-        pr_date      TEXT NOT NULL,
-        requested_by TEXT,
-        department   TEXT DEFAULT 'Production',
-        priority     TEXT DEFAULT 'Normal',
-        status       TEXT DEFAULT 'Draft',
-        so_reference TEXT,
-        approver     TEXT, approval_date TEXT, approval_remarks TEXT,
-        notes        TEXT,
-        created_at   TEXT DEFAULT (datetime('now'))
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        pr_number        TEXT UNIQUE NOT NULL,
+        pr_date          TEXT NOT NULL,
+        requested_by     TEXT,
+        department       TEXT DEFAULT 'Production',
+        priority         TEXT DEFAULT 'Normal',
+        status           TEXT DEFAULT 'Pending Approval',
+        so_reference     TEXT,
+        pr_type          TEXT DEFAULT 'Purchase',
+        source           TEXT DEFAULT 'Manual',
+        required_by_date TEXT,
+        approver         TEXT, approval_date TEXT, approval_remarks TEXT,
+        notes            TEXT,
+        created_at       TEXT DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS pr_lines (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +57,7 @@ def init_db():
         material_name    TEXT,
         material_type    TEXT DEFAULT 'RM',
         required_qty     REAL DEFAULT 0,
+        po_qty           REAL DEFAULT 0,
         unit             TEXT DEFAULT 'PCS',
         required_by_date TEXT,
         purpose          TEXT,
@@ -157,7 +161,18 @@ def init_db():
         rejection_reason TEXT
     );
     """)
-    conn.commit(); conn.close()
+    conn.commit()
+    # Migrations for existing DBs
+    for sql in [
+        "ALTER TABLE pr_headers ADD COLUMN pr_type TEXT DEFAULT 'Purchase'",
+        "ALTER TABLE pr_headers ADD COLUMN source TEXT DEFAULT 'Manual'",
+        "ALTER TABLE pr_headers ADD COLUMN required_by_date TEXT",
+        "ALTER TABLE pr_lines ADD COLUMN po_qty REAL DEFAULT 0",
+    ]:
+        try: conn.execute(sql)
+        except: pass
+    conn.commit()
+    conn.close()
 
 def _next_num(conn, table, col, prefix):
     row = conn.execute(f"SELECT {col} FROM {table} ORDER BY id DESC LIMIT 1").fetchone()
@@ -223,17 +238,23 @@ def list_prs(status=None):
 def create_pr(data: dict):
     conn = _connect()
     num = _next_num(conn, 'pr_headers', 'pr_number', 'PR')
-    conn.execute("""INSERT INTO pr_headers(pr_number,pr_date,requested_by,department,priority,status,so_reference,notes)
-        VALUES(?,?,?,?,?,?,?,?)""",
+    conn.execute("""INSERT INTO pr_headers(pr_number,pr_date,requested_by,department,priority,status,so_reference,pr_type,source,required_by_date,notes)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (num, data.get('pr_date') or datetime.now().strftime('%Y-%m-%d'),
          data.get('requested_by') or '', data.get('department') or 'Production',
-         data.get('priority') or 'Normal', 'Draft', data.get('so_reference') or '', data.get('notes') or ''))
+         data.get('priority') or 'Normal', 'Pending Approval',
+         data.get('so_reference') or '',
+         data.get('pr_type') or 'Purchase',
+         data.get('source') or 'Manual',
+         data.get('required_by_date') or '',
+         data.get('notes') or ''))
     prid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         conn.execute("""INSERT INTO pr_lines(pr_id,material_code,material_name,material_type,required_qty,unit,required_by_date,purpose,remarks)
             VALUES(?,?,?,?,?,?,?,?,?)""",
             (prid, ln['material_code'], ln.get('material_name',''), ln.get('material_type','RM'),
-             ln.get('required_qty',0), ln.get('unit','PCS'), ln.get('required_by_date',''),
+             ln.get('required_qty',0), ln.get('unit','PCS'),
+             ln.get('required_by_date', data.get('required_by_date', '')),
              ln.get('purpose',''), ln.get('remarks','')))
     conn.commit(); conn.close(); return num
 
@@ -243,9 +264,60 @@ def approve_pr(prid: int, approver: str, remarks: str = ''):
         (approver, datetime.now().strftime('%Y-%m-%d'), remarks, prid))
     conn.commit(); conn.close()
 
+def reject_pr(prid: int, remarks: str = ''):
+    conn = _connect()
+    conn.execute("UPDATE pr_headers SET status='Rejected',approval_remarks=?,approval_date=? WHERE id=?",
+        (remarks, datetime.now().strftime('%Y-%m-%d'), prid))
+    conn.commit(); conn.close()
+
 def update_pr_status(prid: int, status: str):
     conn = _connect(); conn.execute("UPDATE pr_headers SET status=? WHERE id=?", (status, prid))
     conn.commit(); conn.close()
+
+def create_pos_from_pr(pr_id: int, lines_data: list, delivery_date: str = '', payment_terms: str = 'Immediate') -> list:
+    """Create POs from an approved PR, one PO per unique supplier. Returns list of PO numbers."""
+    from collections import defaultdict
+    by_supplier: dict = defaultdict(list)
+    for ld in lines_data:
+        sup_name = (ld.get('supplier_name') or '').strip()
+        sup_id = ld.get('supplier_id') or None
+        if not sup_name and not sup_id:
+            continue
+        key = (sup_id, sup_name)
+        by_supplier[key].append(ld)
+    if not by_supplier:
+        return []
+    conn = _connect()
+    pr = conn.execute("SELECT * FROM pr_headers WHERE id=?", (pr_id,)).fetchone()
+    if not pr:
+        conn.close(); return []
+    pr = dict(pr)
+    po_numbers = []
+    for (sup_id, sup_name), lines in by_supplier.items():
+        num = _next_num(conn, 'po_headers', 'po_number', 'PO')
+        subtotal = sum(l.get('qty', 0) * l.get('rate', 0) for l in lines)
+        gst = sum(l.get('qty', 0) * l.get('rate', 0) * (l.get('gst_pct') or 0) / 100 for l in lines)
+        conn.execute("""INSERT INTO po_headers(po_number,po_date,supplier_id,supplier_name,currency,payment_terms,
+            delivery_date,pr_reference,so_reference,status,subtotal,gst_amount,total,remarks)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (num, datetime.now().strftime('%Y-%m-%d'), sup_id, sup_name, 'INR',
+             payment_terms or 'Immediate', delivery_date or '',
+             pr['pr_number'], pr.get('so_reference') or '',
+             'Draft', subtotal, gst, subtotal + gst, ''))
+        poid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for ln in lines:
+            qty = ln.get('qty', 0)
+            rate = ln.get('rate', 0)
+            conn.execute("""INSERT INTO po_lines(po_id,material_code,material_name,material_type,po_qty,unit,rate,gst_pct,amount)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (poid, ln['material_code'], ln.get('material_name', ''), ln.get('material_type', 'RM'),
+                 qty, ln.get('unit', 'PCS'), rate, ln.get('gst_pct', 0), qty * rate))
+            conn.execute("UPDATE pr_lines SET po_qty = po_qty + ? WHERE pr_id=? AND material_code=?",
+                (qty, pr_id, ln['material_code']))
+        po_numbers.append(num)
+    conn.execute("UPDATE pr_headers SET status='PO Created' WHERE id=?", (pr_id,))
+    conn.commit(); conn.close()
+    return po_numbers
 
 # ── Purchase Orders ───────────────────────────────────────────────────────────
 def list_pos(status=None):
