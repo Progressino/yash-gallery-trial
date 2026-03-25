@@ -23,7 +23,7 @@ interface POFromPRLine { supplier_id?: number; supplier_name: string; qty: numbe
 const SUP_TYPES = ['Fabric Supplier', 'Accessories Supplier', 'Job Work', 'Others']
 const PROC_TYPES = ['Printing Unit', 'Dyeing Unit', 'Embroidery', 'Others']
 const DEPTS = ['Production', 'Stores', 'Others']
-const PRIORITIES = ['Low', 'Normal', 'High', 'Urgent']
+// const PRIORITIES = ['Low', 'Normal', 'High', 'Urgent']
 const MAT_TYPES = ['RM', 'ACC', 'PKG', 'SFG', 'FG', 'GF']
 const PROC_TYPES2 = ['Printing', 'Dyeing', 'Embroidery', 'Other']
 const GRN_TYPES = ['PO Receipt', 'JWO Receipt']
