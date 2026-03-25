@@ -63,8 +63,8 @@ export default function Purchase() {
   const [mrpSO, setMrpSO] = useState('')
   const [mrpLinesData, setMrpLinesData] = useState<MRPLinesResult | null>(null)
   const [mrpLoadingLines, setMrpLoadingLines] = useState(false)
-  const [sfgActions, setSfgActions] = useState<Record<string, 'job_work' | 'direct_purchase'>>({})
   const [selectedPurchaseItems, setSelectedPurchaseItems] = useState<Set<string>>(new Set())
+  const [selectedSFGItems, setSelectedSFGItems] = useState<Set<string>>(new Set())
   const [mrpReqDate, setMrpReqDate] = useState('')
   const [generatingPRs, setGeneratingPRs] = useState(false)
   const [generatedPRs, setGeneratedPRs] = useState<string[]>([])
@@ -128,11 +128,8 @@ export default function Purchase() {
       const d: MRPLinesResult = res.data
       setMrpLinesData(d)
       // Default: all purchase items selected, all SFGs → job_work
-      const sel = new Set(d.purchase_items.map(i => i.material_code))
-      setSelectedPurchaseItems(sel)
-      const actions: Record<string, 'job_work' | 'direct_purchase'> = {}
-      d.sfg_items.forEach(i => { actions[i.material_code] = 'job_work' })
-      setSfgActions(actions)
+      setSelectedPurchaseItems(new Set(d.purchase_items.map(i => i.material_code)))
+      setSelectedSFGItems(new Set(d.sfg_items.map(i => i.material_code)))
     } catch {
       setMrpLinesData({ so_number: mrpSO, purchase_items: [], sfg_items: [], error: 'Failed to load MRP lines.' })
     }
@@ -146,17 +143,9 @@ export default function Purchase() {
     const created: string[] = []
     try {
       // Purchase lines: selected RM/ACC/etc + SFGs marked as direct_purchase
-      const purchaseLines = [
-        ...mrpLinesData.purchase_items
-          .filter(i => selectedPurchaseItems.has(i.material_code))
-          .map(i => ({ material_code: i.material_code, material_name: i.material_name, material_type: i.material_type, required_qty: i.net_req || i.required_qty, unit: i.unit })),
-        ...mrpLinesData.sfg_items
-          .filter(i => sfgActions[i.material_code] === 'direct_purchase')
-          .map(i => ({ material_code: i.material_code, material_name: i.material_name, material_type: i.material_type, required_qty: i.net_req || i.required_qty, unit: i.unit })),
-      ]
-      const jwLines = mrpLinesData.sfg_items
-        .filter(i => sfgActions[i.material_code] === 'job_work' || !sfgActions[i.material_code])
-        .map(i => ({ material_code: i.material_code, material_name: i.material_name, material_type: i.material_type, required_qty: i.net_req || i.required_qty, unit: i.unit }))
+      const toLine = (i: MRPLineItem) => ({ material_code: i.material_code, material_name: i.material_name, material_type: i.material_type, required_qty: i.net_req || i.required_qty, unit: i.unit })
+      const purchaseLines = mrpLinesData.purchase_items.filter(i => selectedPurchaseItems.has(i.material_code)).map(toLine)
+      const jwLines = mrpLinesData.sfg_items.filter(i => selectedSFGItems.has(i.material_code)).map(toLine)
 
       if (purchaseLines.length > 0) {
         const r = await api.post('/purchase/pr', { pr_type: 'Purchase', source: 'MRP', so_reference: mrpSO, required_by_date: mrpReqDate, department: 'Production', priority: 'Normal', lines: purchaseLines })
@@ -737,38 +726,52 @@ export default function Purchase() {
                       </div>
                     )}
 
-                    {/* SFG Items */}
+                    {/* SFG Items — auto-classified as Job Work */}
                     {mrpLinesData.sfg_items.length > 0 && (
                       <div>
-                        <h4 className="font-semibold text-gray-700 mb-2">✏️ SFG Materials — Choose Purchase or Job Work</h4>
-                        <div className="space-y-2">
-                          {mrpLinesData.sfg_items.map(item => (
-                            <div key={item.material_code} className="border border-gray-200 rounded-lg p-3 space-y-2">
-                              <div>
-                                <p className="font-medium text-sm text-gray-800">{item.material_code} — {item.material_name}</p>
-                                <p className="text-xs text-gray-500">Required: {item.net_req || item.required_qty} {item.unit}</p>
-                                {(item.inputs || []).length > 0 && (
-                                  <p className="text-xs text-blue-600 mt-1">
-                                    Input: {item.inputs!.map(inp => `${inp.material_code} (${inp.quantity} ${inp.unit})`).join(', ')}
-                                  </p>
-                                )}
-                              </div>
-                              <div className="flex gap-4 text-sm">
-                                <label className="flex items-center gap-1.5 cursor-pointer">
-                                  <input type="radio" name={`sfg-${item.material_code}`}
-                                    checked={!sfgActions[item.material_code] || sfgActions[item.material_code] === 'job_work'}
-                                    onChange={() => setSfgActions(a => ({ ...a, [item.material_code]: 'job_work' }))} />
-                                  <span className="text-gray-700">Job Work</span>
-                                </label>
-                                <label className="flex items-center gap-1.5 cursor-pointer">
-                                  <input type="radio" name={`sfg-${item.material_code}`}
-                                    checked={sfgActions[item.material_code] === 'direct_purchase'}
-                                    onChange={() => setSfgActions(a => ({ ...a, [item.material_code]: 'direct_purchase' }))} />
-                                  <span className="text-gray-700">Direct Purchase</span>
-                                </label>
-                              </div>
-                            </div>
-                          ))}
+                        <h4 className="font-semibold text-gray-700 mb-1 flex items-center gap-2">
+                          ✏️ Job Work PR — Semi-Finished Goods
+                          <span className="text-xs text-gray-400 font-normal">{selectedSFGItems.size} selected</span>
+                        </h4>
+                        <p className="text-xs text-gray-500 mb-2">These SFG items will go into a Job Work PR. Uncheck to exclude.</p>
+                        <div className="bg-white border border-gray-100 rounded-lg overflow-hidden">
+                          <table className="w-full text-sm">
+                            <thead className="bg-gray-50 text-gray-400 text-xs uppercase">
+                              <tr>
+                                <th className="px-3 py-2 text-left w-8">
+                                  <input type="checkbox"
+                                    checked={mrpLinesData.sfg_items.every(i => selectedSFGItems.has(i.material_code))}
+                                    onChange={e => setSelectedSFGItems(e.target.checked ? new Set(mrpLinesData.sfg_items.map(i => i.material_code)) : new Set())} />
+                                </th>
+                                <th className="px-3 py-2 text-left">Code</th>
+                                <th className="px-3 py-2 text-left">Name</th>
+                                <th className="px-3 py-2 text-right">Qty</th>
+                                <th className="px-3 py-2 text-right">Unit</th>
+                                <th className="px-3 py-2 text-left">BOM Inputs</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {mrpLinesData.sfg_items.map(item => (
+                                <tr key={item.material_code} className="border-t border-gray-50 hover:bg-gray-50">
+                                  <td className="px-3 py-2">
+                                    <input type="checkbox" checked={selectedSFGItems.has(item.material_code)}
+                                      onChange={e => setSelectedSFGItems(prev => {
+                                        const n = new Set(prev)
+                                        e.target.checked ? n.add(item.material_code) : n.delete(item.material_code)
+                                        return n
+                                      })} />
+                                  </td>
+                                  <td className="px-3 py-2 font-medium text-gray-800">{item.material_code}</td>
+                                  <td className="px-3 py-2 text-gray-600">{item.material_name}</td>
+                                  <td className="px-3 py-2 text-right font-semibold text-gray-800">{item.net_req || item.required_qty}</td>
+                                  <td className="px-3 py-2 text-right text-gray-500">{item.unit}</td>
+                                  <td className="px-3 py-2 text-xs text-blue-600">
+                                    {(item.inputs || []).map(inp => `${inp.material_code} (${inp.quantity} ${inp.unit})`).join(', ') || '—'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
                     )}
@@ -808,7 +811,17 @@ export default function Purchase() {
             <div className="bg-white rounded-xl border p-4 space-y-3">
               <h3 className="font-semibold text-gray-700">New Purchase Order</h3>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {[['supplier_name','Supplier Name'],['delivery_date','Delivery Date'],['payment_terms','Payment Terms'],['delivery_location','Delivery Location'],['pr_reference','PR Reference'],['so_reference','SO Reference'],['remarks','Remarks']].map(([k,l]) => (
+                <div>
+                  <label className="text-xs text-gray-500">Supplier</label>
+                  <select value={poForm.supplier_id ?? ''} onChange={e => {
+                    const s = suppliers.find(x => x.id === +e.target.value)
+                    setPOForm(f => ({ ...f, supplier_id: +e.target.value || undefined, supplier_name: s?.supplier_name || '' }))
+                  }} className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Select supplier</option>
+                    {suppliers.map(s => <option key={s.id} value={s.id}>{s.supplier_name}</option>)}
+                  </select>
+                </div>
+                {[['delivery_date','Delivery Date'],['payment_terms','Payment Terms'],['delivery_location','Delivery Location'],['pr_reference','PR Reference'],['so_reference','SO Reference'],['remarks','Remarks']].map(([k,l]) => (
                   <div key={k}><label className="text-xs text-gray-500">{l}</label>
                     <input type={k === 'delivery_date' ? 'date' : 'text'} value={(poForm as Record<string,unknown>)[k] as string}
                       onChange={e => setPOForm(f => ({ ...f, [k]: e.target.value }))}
