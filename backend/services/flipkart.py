@@ -33,44 +33,121 @@ def _fk_month_from_filename(fname: str):
 def _parse_flipkart_xlsx(
     file_bytes: bytes, fname: str, mapping: Dict[str, str]
 ) -> pd.DataFrame:
+    # ── Try legacy "Sales Report" sheet first ──────────────────────────────
     try:
         xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Sales Report")
+        xl.columns = xl.columns.str.strip()
+        if not xl.empty and "Event Sub Type" in xl.columns:
+            date_col = "Buyer Invoice Date" if "Buyer Invoice Date" in xl.columns else "Order Date"
+            xl["Date"] = pd.to_datetime(xl[date_col], errors="coerce")
+
+            file_month = _fk_month_from_filename(fname)
+            if file_month:
+                xl["Month"] = file_month
+            else:
+                xl["Month"] = xl["Date"].dt.to_period("M").astype(str)
+
+            def _fk_txn(event):
+                e = str(event).strip()
+                if e == "Sale":                 return "Shipment"
+                if e == "Return":               return "Refund"
+                if e == "Cancellation":         return "Cancel"
+                if e == "Return Cancellation":  return "ReturnCancel"
+                return "Shipment"
+
+            xl["TxnType"]        = xl["Event Sub Type"].apply(_fk_txn)
+            xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
+            xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
+            xl["OMS_SKU"]        = xl["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
+
+            state_col = next((c for c in xl.columns if "Delivery State" in c), None)
+            xl["State"] = xl[state_col].fillna("").astype(str).str.upper().str.strip() if state_col else ""
+
+            xl["OrderId"]        = xl.get("Order ID",         xl.get("Order Id",         "")).astype(str)
+            xl["BuyerInvoiceId"] = xl.get("Buyer Invoice ID", xl.get("Buyer Invoice Id", "")).astype(str)
+
+            out = xl[["Date", "Month", "TxnType", "Quantity", "Invoice_Amount",
+                      "OMS_SKU", "State", "OrderId", "BuyerInvoiceId"]].copy()
+            return out.dropna(subset=["Date"])
+    except Exception:
+        pass
+
+    # ── Try new "Order Export" format (first sheet, columns: SKU ID / Gross Units / Order Date) ──
+    try:
+        xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, dtype=str)
         if xl.empty:
             return pd.DataFrame()
 
         xl.columns = xl.columns.str.strip()
 
-        date_col = "Buyer Invoice Date" if "Buyer Invoice Date" in xl.columns else "Order Date"
-        xl["Date"] = pd.to_datetime(xl[date_col], errors="coerce")
+        # Detect new format by required columns
+        if not ("SKU ID" in xl.columns and "Gross Units" in xl.columns and "Order Date" in xl.columns):
+            return pd.DataFrame()
+
+        xl["Date"] = pd.to_datetime(xl["Order Date"], errors="coerce")
+        xl = xl.dropna(subset=["Date"])
+        if xl.empty:
+            return pd.DataFrame()
 
         file_month = _fk_month_from_filename(fname)
-        if file_month:
-            xl["Month"] = file_month
+
+        def _get_month(d):
+            return file_month if file_month else d.to_period("M").strftime("%Y-%m")
+
+        for col in ["Final Sale Units", "Return Units", "Cancellation Units",
+                    "Final Sale Amount", "Return Amount"]:
+            xl[col] = pd.to_numeric(xl.get(col, 0), errors="coerce").fillna(0)
+
+        xl["OMS_SKU"] = xl["SKU ID"].apply(
+            lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
+        )
+
+        # Synthetic OrderId: ProductId + SKU + date string (no real order ID available)
+        product_id_col = "Product Id" if "Product Id" in xl.columns else ""
+        if product_id_col:
+            xl["_OrderId"] = (
+                xl[product_id_col].astype(str) + "_" +
+                xl["SKU ID"].astype(str) + "_" +
+                xl["Date"].dt.strftime("%Y%m%d")
+            )
         else:
-            xl["Month"] = xl["Date"].dt.to_period("M").astype(str)
+            xl["_OrderId"] = xl["SKU ID"].astype(str) + "_" + xl["Date"].dt.strftime("%Y%m%d")
 
-        def _fk_txn(event):
-            e = str(event).strip()
-            if e == "Sale":                 return "Shipment"
-            if e == "Return":               return "Refund"
-            if e == "Cancellation":         return "Cancel"
-            if e == "Return Cancellation":  return "ReturnCancel"
-            return "Shipment"
+        rows: List[pd.DataFrame] = []
 
-        xl["TxnType"]        = xl["Event Sub Type"].apply(_fk_txn)
-        xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
-        xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
-        xl["OMS_SKU"]        = xl["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
+        # Shipment rows
+        ship = xl[xl["Final Sale Units"] > 0].copy()
+        if not ship.empty:
+            rows.append(pd.DataFrame({
+                "Date":           ship["Date"],
+                "Month":          ship["Date"].apply(_get_month),
+                "TxnType":        "Shipment",
+                "Quantity":       ship["Final Sale Units"].astype("float32"),
+                "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
+                "OMS_SKU":        ship["OMS_SKU"],
+                "State":          "",
+                "OrderId":        ship["_OrderId"],
+                "BuyerInvoiceId": "",
+            }))
 
-        state_col = next((c for c in xl.columns if "Delivery State" in c), None)
-        xl["State"] = xl[state_col].fillna("").astype(str).str.upper().str.strip() if state_col else ""
+        # Refund rows
+        ret = xl[xl["Return Units"] > 0].copy()
+        if not ret.empty:
+            rows.append(pd.DataFrame({
+                "Date":           ret["Date"],
+                "Month":          ret["Date"].apply(_get_month),
+                "TxnType":        "Refund",
+                "Quantity":       ret["Return Units"].astype("float32"),
+                "Invoice_Amount": ret["Return Amount"].astype("float32"),
+                "OMS_SKU":        ret["OMS_SKU"],
+                "State":          "",
+                "OrderId":        ret["_OrderId"],
+                "BuyerInvoiceId": "",
+            }))
 
-        xl["OrderId"]        = xl.get("Order ID",         xl.get("Order Id",         "")).astype(str)
-        xl["BuyerInvoiceId"] = xl.get("Buyer Invoice ID", xl.get("Buyer Invoice Id", "")).astype(str)
-
-        out = xl[["Date", "Month", "TxnType", "Quantity", "Invoice_Amount",
-                  "OMS_SKU", "State", "OrderId", "BuyerInvoiceId"]].copy()
-        return out.dropna(subset=["Date"])
+        if not rows:
+            return pd.DataFrame()
+        return pd.concat(rows, ignore_index=True)
 
     except Exception:
         return pd.DataFrame()
