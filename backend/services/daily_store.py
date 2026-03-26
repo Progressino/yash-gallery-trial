@@ -17,7 +17,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 _DB_PATH = Path("/data/daily_sales.db") if Path("/data").exists() else Path("daily_sales.db")
-_MAX_FILES = 30   # keep at most 30 entries per platform
+_MAX_FILES = 60   # keep at most 60 entries per platform
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -39,6 +39,15 @@ def _get_conn() -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_platform_date "
         "ON daily_uploads (platform, file_date)"
     )
+    # Migration: add date_from / date_to columns if missing
+    try:
+        conn.execute("ALTER TABLE daily_uploads ADD COLUMN date_from DATE")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE daily_uploads ADD COLUMN date_to DATE")
+    except Exception:
+        pass
     conn.commit()
     return conn
 
@@ -99,6 +108,20 @@ def _extract_file_date(filename: str, df: pd.DataFrame) -> str:
     return str(datetime.date.today())
 
 
+def _extract_date_range(df: pd.DataFrame) -> Tuple[str, str]:
+    """Extract actual min/max date from a DataFrame. Returns (date_from, date_to) ISO strings."""
+    for col in ("Date", "TxnDate", "_Date"):
+        if col in df.columns:
+            try:
+                dates = pd.to_datetime(df[col], errors="coerce").dropna()
+                if not dates.empty:
+                    return str(dates.min().date()), str(dates.max().date())
+            except Exception:
+                pass
+    today = str(datetime.date.today())
+    return today, today
+
+
 def _df_to_parquet(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     # Strip tz info from any tz-aware datetime columns (parquet requires uniform tz)
@@ -116,6 +139,37 @@ def _df_to_parquet(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
+    """
+    Deduplicate a concatenated platform DataFrame to remove inflated rows
+    caused by overlapping file uploads.
+    - Amazon (mtr_df): MTR rows (Invoice_Number filled) take priority over
+      FBA Shipment Report rows (no Invoice_Number) for the same Order_Id.
+    - Other platforms: deduplicate by OrderId.
+    """
+    if df.empty:
+        return df
+    try:
+        if platform == "amazon" and "Invoice_Number" in df.columns and "Order_Id" in df.columns:
+            has_inv = df["Invoice_Number"].astype(str).str.strip().replace("nan", "") != ""
+            inv_rows = df[has_inv].drop_duplicates(
+                subset=["Invoice_Number", "SKU", "Transaction_Type", "Date"], keep="last"
+            )
+            covered = set(inv_rows["Order_Id"].astype(str).str.strip().unique()) - {"", "nan"}
+            no_inv = df[~has_inv].copy()
+            if covered:
+                no_inv = no_inv[~no_inv["Order_Id"].astype(str).str.strip().isin(covered)]
+            no_inv = no_inv.drop_duplicates(
+                subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="last"
+            )
+            return pd.concat([inv_rows, no_inv], ignore_index=True)
+        elif "OrderId" in df.columns:
+            return df.drop_duplicates(subset=["OrderId"], keep="last")
+    except Exception:
+        pass
+    return df
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def save_daily_file(
@@ -125,7 +179,9 @@ def save_daily_file(
 ) -> Tuple[str, int]:
     """
     Persist a daily upload.
-    - Deduplicates: existing row with same (platform, file_date, filename) is replaced.
+    - Replaces any existing entries for the same platform whose date range
+      overlaps with the new file's actual data date range (prevents duplication
+      when re-uploading or uploading wider date-range reports).
     - Auto-trims: only the latest _MAX_FILES entries per platform are kept.
     Returns (file_date, rows_saved).
     """
@@ -133,18 +189,30 @@ def save_daily_file(
         return str(datetime.date.today()), 0
 
     file_date = _extract_file_date(filename, df)
+    date_from, date_to = _extract_date_range(df)
     parquet_bytes = _df_to_parquet(df)
 
     conn = _get_conn()
-    # Replace if already exists
+
+    # Delete existing entries for this platform that overlap with [date_from, date_to].
+    # Overlap condition: existing.date_from <= new.date_to AND existing.date_to >= new.date_from
+    # Also delete entries where date_from/date_to are NULL but file_date falls in range.
     conn.execute(
-        "DELETE FROM daily_uploads WHERE platform=? AND file_date=? AND filename=?",
-        (platform, file_date, filename),
+        """DELETE FROM daily_uploads
+           WHERE platform=?
+             AND (
+               (date_from IS NOT NULL AND date_to IS NOT NULL
+                AND date_from <= ? AND date_to >= ?)
+               OR
+               (date_from IS NULL AND file_date >= ? AND file_date <= ?)
+             )""",
+        (platform, date_to, date_from, date_from, date_to),
     )
+
     conn.execute(
-        "INSERT INTO daily_uploads (platform, file_date, filename, rows, data_parquet) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (platform, file_date, filename, len(df), parquet_bytes),
+        "INSERT INTO daily_uploads (platform, file_date, filename, rows, data_parquet, date_from, date_to) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (platform, file_date, filename, len(df), parquet_bytes, date_from, date_to),
     )
     # Trim: keep only the latest _MAX_FILES per platform
     conn.execute(
@@ -163,7 +231,7 @@ def save_daily_file(
 
 
 def load_platform_data(platform: str) -> pd.DataFrame:
-    """Load and concatenate all stored daily data for one platform."""
+    """Load and concatenate all stored daily data for one platform, with deduplication."""
     conn = _get_conn()
     rows = conn.execute(
         "SELECT data_parquet FROM daily_uploads "
@@ -180,7 +248,9 @@ def load_platform_data(platform: str) -> pd.DataFrame:
             pass
     if not dfs:
         return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True)
+
+    combined = pd.concat(dfs, ignore_index=True)
+    return _dedup_platform_df(combined, platform)
 
 
 def load_all_platforms() -> Dict[str, pd.DataFrame]:
@@ -197,7 +267,7 @@ def list_uploads() -> List[dict]:
     """Return metadata for all uploads (newest first), no blob."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT id, platform, file_date, filename, uploaded_at, rows "
+        "SELECT id, platform, file_date, filename, uploaded_at, rows, date_from, date_to "
         "FROM daily_uploads "
         "ORDER BY file_date DESC, uploaded_at DESC"
     ).fetchall()
@@ -206,6 +276,7 @@ def list_uploads() -> List[dict]:
         {
             "id": r[0], "platform": r[1], "file_date": r[2],
             "filename": r[3], "uploaded_at": r[4], "rows": r[5],
+            "date_from": r[6], "date_to": r[7],
         }
         for r in rows
     ]

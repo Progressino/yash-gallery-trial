@@ -93,6 +93,11 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             if ok and loaded:
                 if need_sales_cache:
                     for key in ["sales_df", "mtr_df", "meesho_df", "myntra_df", "flipkart_df", "snapdeal_df"]:
+                        # Only use GitHub cache if daily_store didn't already provide this data.
+                        # This prevents the cache from overwriting fresher data the user just uploaded.
+                        current = getattr(sess, key, None)
+                        if current is not None and isinstance(current, pd.DataFrame) and not current.empty:
+                            continue
                         val = loaded.get(key)
                         if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
                             setattr(sess, key, val)
