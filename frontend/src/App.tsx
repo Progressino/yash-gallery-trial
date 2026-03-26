@@ -1,26 +1,28 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import Layout from './components/Layout'
-import Dashboard from './pages/Dashboard'
-import Upload from './pages/Upload'
-import MTR from './pages/MTR'
-import Myntra from './pages/Myntra'
-import Meesho from './pages/Meesho'
-import Flipkart from './pages/Flipkart'
-import Inventory from './pages/Inventory'
-import POEngine from './pages/POEngine'
-import Forecast from './pages/Forecast'
-import Finance from './pages/Finance'
-import ItemMaster from './pages/ItemMaster'
-import Snapdeal from './pages/Snapdeal'
-import SalesOrders from './pages/SalesOrders'
-import Purchase from './pages/Purchase'
-import TNA from './pages/TNA'
-import Production from './pages/Production'
-import GreyFabric from './pages/GreyFabric'
-import Admin from './pages/Admin'
 import Login from './pages/Login'
 import api from './api/client'
+
+const Dashboard   = lazy(() => import('./pages/Dashboard'))
+const Upload      = lazy(() => import('./pages/Upload'))
+const MTR         = lazy(() => import('./pages/MTR'))
+const Myntra      = lazy(() => import('./pages/Myntra'))
+const Meesho      = lazy(() => import('./pages/Meesho'))
+const Flipkart    = lazy(() => import('./pages/Flipkart'))
+const Inventory   = lazy(() => import('./pages/Inventory'))
+const POEngine    = lazy(() => import('./pages/POEngine'))
+const Forecast    = lazy(() => import('./pages/Forecast'))
+const Finance     = lazy(() => import('./pages/Finance'))
+const ItemMaster  = lazy(() => import('./pages/ItemMaster'))
+const Snapdeal    = lazy(() => import('./pages/Snapdeal'))
+const SalesOrders = lazy(() => import('./pages/SalesOrders'))
+const Purchase    = lazy(() => import('./pages/Purchase'))
+const TNA         = lazy(() => import('./pages/TNA'))
+const Production  = lazy(() => import('./pages/Production'))
+const GreyFabric  = lazy(() => import('./pages/GreyFabric'))
+const Admin       = lazy(() => import('./pages/Admin'))
 
 const qc = new QueryClient()
 
@@ -43,7 +45,11 @@ function ProtectedRoute() {
     )
   }
   if (isError || !data) return <Navigate to="/login" replace />
-  return <Outlet />
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>
+      <Outlet />
+    </Suspense>
+  )
 }
 
 export default function App() {
