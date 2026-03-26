@@ -191,8 +191,8 @@ export default function Dashboard() {
   })
 
   const { data: platformSummary, isLoading: loadingPlatforms } = useQuery<PlatformSummaryItem[]>({
-    queryKey: ['platform-summary'],
-    queryFn: async () => { const { data } = await api.get('/data/platform-summary'); return data },
+    queryKey: ['platform-summary', dateStart, dateEnd],
+    queryFn: async () => { const { data } = await api.get(`/data/platform-summary?${summaryParams}`); return data },
     staleTime: 5 * 60 * 1000,
   })
 

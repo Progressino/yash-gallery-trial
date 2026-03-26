@@ -144,6 +144,7 @@ def sales_summary(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
+    _restore_daily_if_needed(sess)
     return get_sales_summary(sess.sales_df, months=months, start_date=start_date, end_date=end_date)
 
 
@@ -566,11 +567,17 @@ def delete_daily_upload(upload_id: int, _request: Request):
 # ── AI Dashboard Endpoints ────────────────────────────────────
 
 @router.get("/platform-summary")
-def platform_summary(request: Request):
+def platform_summary(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     sess = _sess(request)
+    _restore_daily_if_needed(sess)
     return get_platform_summary(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,
+        start_date=start_date, end_date=end_date,
     )
 
 

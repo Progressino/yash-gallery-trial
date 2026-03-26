@@ -189,6 +189,8 @@ def _compute_platform_metrics(
     txn_col: str,
     ship_val: str = "Shipment",
     refund_val: str = "Refund",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> dict:
     """Shared computation for a single platform DataFrame."""
     stub = {
@@ -204,6 +206,14 @@ def _compute_platform_metrics(
         d = df.copy()
         d["_Date"] = pd.to_datetime(d.get("Date", d.get("_Date")), errors="coerce")
         d = d.dropna(subset=["_Date"])
+        if d.empty:
+            return stub
+
+        # Apply date filter if provided
+        if start_date:
+            d = d[d["_Date"] >= pd.Timestamp(start_date)]
+        if end_date:
+            d = d[d["_Date"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
         if d.empty:
             return stub
 
@@ -289,6 +299,8 @@ def get_platform_summary(
     meesho_df: pd.DataFrame,
     flipkart_df: pd.DataFrame,
     snapdeal_df: Optional[pd.DataFrame] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[dict]:
     """Returns 5 platform summary dicts (always 5, even for unloaded platforms)."""
     # MTR has Date col already; add it as _Date alias
@@ -298,12 +310,13 @@ def get_platform_summary(
 
     _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
 
+    kwargs = dict(start_date=start_date, end_date=end_date)
     results = [
-        _compute_platform_metrics(mtr,        "Amazon",   "SKU",     "Transaction_Type"),
-        _compute_platform_metrics(myntra_df,   "Myntra",   "OMS_SKU", "TxnType"),
-        _compute_platform_metrics(meesho_df,   "Meesho",   "OMS_SKU", "TxnType"),
-        _compute_platform_metrics(flipkart_df, "Flipkart", "OMS_SKU", "TxnType"),
-        _compute_platform_metrics(_snapdeal,   "Snapdeal", "OMS_SKU", "TxnType"),
+        _compute_platform_metrics(mtr,        "Amazon",   "SKU",     "Transaction_Type", **kwargs),
+        _compute_platform_metrics(myntra_df,   "Myntra",   "OMS_SKU", "TxnType",          **kwargs),
+        _compute_platform_metrics(meesho_df,   "Meesho",   "OMS_SKU", "TxnType",          **kwargs),
+        _compute_platform_metrics(flipkart_df, "Flipkart", "OMS_SKU", "TxnType",          **kwargs),
+        _compute_platform_metrics(_snapdeal,   "Snapdeal", "OMS_SKU", "TxnType",          **kwargs),
     ]
     return results
 
