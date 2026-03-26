@@ -27,50 +27,7 @@ from ..services.inventory import load_inventory_consolidated, merge_inventory_up
 from ..services.sales import build_sales_df
 from ..services.existing_po import parse_existing_po
 from ..services.github_cache import save_cache_to_drive
-from ..services.daily_store import save_daily_file
-
-
-def _merge_mtr(existing: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge new Amazon MTR/FBA data into existing mtr_df with proper deduplication.
-    MTR rows (with Invoice_Number) take priority over FBA Shipment Report rows
-    (no Invoice_Number) for the same Order_Id, preventing double-counting.
-    """
-    if existing.empty:
-        return new_df
-    if new_df.empty:
-        return existing
-    combined = pd.concat([existing, new_df], ignore_index=True)
-    has_inv = combined["Invoice_Number"].astype(str).str.strip().replace("nan", "") != ""
-    # Rows WITH Invoice_Number: dedup by Invoice_Number+SKU+TxnType+Date
-    inv_rows = combined[has_inv].drop_duplicates(
-        subset=["Invoice_Number", "SKU", "Transaction_Type", "Date"], keep="last"
-    )
-    # Order_Ids already covered by invoice rows (MTR)
-    covered_ids = set(inv_rows["Order_Id"].astype(str).str.strip().unique()) - {"", "nan"}
-    # Rows WITHOUT Invoice_Number: exclude those whose Order_Id is covered by MTR
-    no_inv = combined[~has_inv].copy()
-    if covered_ids:
-        no_inv = no_inv[~no_inv["Order_Id"].astype(str).str.strip().isin(covered_ids)]
-    no_inv = no_inv.drop_duplicates(
-        subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="last"
-    )
-    return pd.concat([inv_rows, no_inv], ignore_index=True)
-
-
-def _merge_platform(existing: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge and deduplicate platform DF (Meesho/Myntra/Flipkart) by OrderId.
-    Prevents double-counting when re-uploading overlapping date ranges.
-    """
-    if existing.empty:
-        return new_df
-    if new_df.empty:
-        return existing
-    combined = pd.concat([existing, new_df], ignore_index=True)
-    if "OrderId" in combined.columns:
-        combined = combined.drop_duplicates(subset=["OrderId"], keep="last")
-    return combined
+from ..services.daily_store import save_daily_file, merge_platform_data as _merge_platform_data
 
 
 router = APIRouter()
@@ -168,7 +125,7 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
                 message=f"No valid CSV files found. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.mtr_df = _merge_mtr(sess.mtr_df, df)
+        sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
         total = len(sess.mtr_df)
         years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
@@ -201,7 +158,7 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.myntra_df = _merge_platform(sess.myntra_df, df)
+        sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
         total = len(sess.myntra_df)
         years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
@@ -232,7 +189,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.meesho_df = _merge_platform(sess.meesho_df, df)
+        sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
         total = len(sess.meesho_df)
         years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
@@ -265,7 +222,7 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        sess.flipkart_df = _merge_platform(sess.flipkart_df, df)
+        sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
         total = len(sess.flipkart_df)
         years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
@@ -532,7 +489,7 @@ async def upload_amazon_b2c(request: Request, file: UploadFile = File(...)):
         if df.empty:
             return UploadResponse(ok=False, message=f"B2C parse failed: {msg}")
 
-        sess.mtr_df = _merge_mtr(sess.mtr_df, df)
+        sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
         return UploadResponse(
             ok=True,
             message=f"Amazon B2C loaded: {len(df):,} rows. {msg if msg != 'OK' else ''}".strip(),
@@ -556,7 +513,7 @@ async def upload_amazon_b2b(request: Request, file: UploadFile = File(...)):
         if df.empty:
             return UploadResponse(ok=False, message=f"B2B parse failed: {msg}")
 
-        sess.mtr_df = _merge_mtr(sess.mtr_df, df)
+        sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
         return UploadResponse(
             ok=True,
             message=f"Amazon B2B loaded: {len(df):,} rows. {msg if msg != 'OK' else ''}".strip(),
@@ -688,7 +645,7 @@ async def upload_daily_auto(
             if platform == "amazon_b2c":
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
-                    sess.mtr_df = _merge_mtr(sess.mtr_df, df)
+                    sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
                     save_daily_file("amazon", fname, df)
                     detected.append(f"Amazon ({fname})")
                     if msg != "OK":
@@ -699,7 +656,7 @@ async def upload_daily_auto(
             elif platform == "amazon_b2b":
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
-                    sess.mtr_df = _merge_mtr(sess.mtr_df, df)
+                    sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
                     save_daily_file("amazon", fname, df)
                     detected.append(f"Amazon B2B ({fname})")
                     if msg != "OK":
@@ -711,7 +668,7 @@ async def upload_daily_auto(
                 from ..services.myntra import _parse_myntra_csv
                 df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
                 if not df.empty:
-                    sess.myntra_df = _merge_platform(sess.myntra_df, df)
+                    sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
                     save_daily_file("myntra", fname, df)
                     detected.append(f"Myntra ({fname})")
                     if msg != "OK":
@@ -722,7 +679,7 @@ async def upload_daily_auto(
             elif platform == "meesho":
                 df, _count, _skipped = load_meesho_from_zip(raw)
                 if not df.empty:
-                    sess.meesho_df = _merge_platform(sess.meesho_df, df)
+                    sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
                     save_daily_file("meesho", fname, df)
                     detected.append(f"Meesho ({fname})")
                     if _skipped:
@@ -734,7 +691,7 @@ async def upload_daily_auto(
                 from ..services.meesho import parse_meesho_csv
                 df, msg = parse_meesho_csv(raw)
                 if not df.empty:
-                    sess.meesho_df = _merge_platform(sess.meesho_df, df)
+                    sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
                     save_daily_file("meesho", fname, df)
                     detected.append(f"Meesho ({fname})")
                     if msg != "OK":
@@ -760,7 +717,7 @@ async def upload_daily_auto(
                         warnings.append(f"{fname}: Skipped — no Sales Report, Orders, or earn_more_report sheet (sheets: {', '.join(xl_sheets[:4])})")
                         return
                 if not df.empty:
-                    sess.flipkart_df = _merge_platform(sess.flipkart_df, df)
+                    sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
                     save_daily_file("flipkart", fname, df)
                     detected.append(f"Flipkart ({fname})")
                 else:
@@ -851,7 +808,7 @@ async def upload_daily(
                 df, msg = parse_mtr_csv(raw, fobj.filename or f"{label}.csv")
                 del raw
                 if not df.empty:
-                    sess.mtr_df = _merge_mtr(sess.mtr_df, df)
+                    sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
                     detected.append(label)
                     if msg != "OK":
                         warnings.append(f"{label}: {msg}")
@@ -868,7 +825,7 @@ async def upload_daily(
             df, msg = _parse_myntra_csv(raw, myntra.filename or "myntra.csv", sess.sku_mapping)
             del raw
             if not df.empty:
-                sess.myntra_df = _merge_platform(sess.myntra_df, df)
+                sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
                 detected.append("Myntra")
                 if msg != "OK":
                     warnings.append(f"Myntra: {msg}")
@@ -885,7 +842,7 @@ async def upload_daily(
             df, _count, _skipped = load_meesho_from_zip(raw)
             del raw
             if not df.empty:
-                sess.meesho_df = _merge_platform(sess.meesho_df, df)
+                sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
                 detected.append("Meesho")
                 if _skipped:
                     warnings.append(f"Meesho: {'; '.join(_skipped[:3])}")
@@ -902,7 +859,7 @@ async def upload_daily(
             df = _parse_flipkart_xlsx(raw, flipkart.filename or "flipkart.xlsx", sess.sku_mapping)
             del raw
             if not df.empty:
-                sess.flipkart_df = _merge_platform(sess.flipkart_df, df)
+                sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
                 detected.append("Flipkart")
             else:
                 warnings.append("Flipkart: No data extracted")

@@ -263,6 +263,21 @@ def load_all_platforms() -> Dict[str, pd.DataFrame]:
     return result
 
 
+def merge_platform_data(existing: pd.DataFrame, new_df: pd.DataFrame, platform: str) -> pd.DataFrame:
+    """
+    Merge two platform DataFrames with proper deduplication.
+    Safe to call from any module. Uses _dedup_platform_df internally.
+    - Amazon: MTR rows (Invoice_Number filled) take priority over FBA rows (no Invoice_Number)
+    - Other platforms: dedup by OrderId, newer data (new_df) wins
+    """
+    if existing.empty:
+        return new_df.copy() if not new_df.empty else new_df
+    if new_df.empty:
+        return existing
+    combined = pd.concat([existing, new_df], ignore_index=True)
+    return _dedup_platform_df(combined, platform)
+
+
 def list_uploads() -> List[dict]:
     """Return metadata for all uploads (newest first), no blob."""
     conn = _get_conn()

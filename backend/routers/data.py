@@ -92,15 +92,49 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             ok, _, loaded = load_cache_from_drive()
             if ok and loaded:
                 if need_sales_cache:
-                    for key in ["sales_df", "mtr_df", "meesho_df", "myntra_df", "flipkart_df", "snapdeal_df"]:
-                        # Only use GitHub cache if daily_store didn't already provide this data.
-                        # This prevents the cache from overwriting fresher data the user just uploaded.
-                        current = getattr(sess, key, None)
-                        if current is not None and isinstance(current, pd.DataFrame) and not current.empty:
+                    from ..services.daily_store import merge_platform_data as _mpd
+                    _platform_keys = {
+                        "mtr_df":      "amazon",
+                        "meesho_df":   "meesho",
+                        "myntra_df":   "myntra",
+                        "flipkart_df": "flipkart",
+                        "snapdeal_df": "snapdeal",
+                    }
+                    _any_merged = False
+                    for key, platform in _platform_keys.items():
+                        cached = loaded.get(key)
+                        if cached is None or (isinstance(cached, pd.DataFrame) and cached.empty):
                             continue
-                        val = loaded.get(key)
+                        current = getattr(sess, key, None)
+                        if current is None or (isinstance(current, pd.DataFrame) and current.empty):
+                            # daily_store had nothing — use GitHub cache directly
+                            setattr(sess, key, cached)
+                        else:
+                            # Both have data — merge with dedup (daily_store/current wins for same orders)
+                            setattr(sess, key, _mpd(cached, current, platform))
+                        _any_merged = True
+                    # Also handle sales_df: prefer to rebuild from merged platform DFs rather than
+                    # using the cached sales_df directly (avoids stale aggregations)
+                    if _any_merged:
+                        try:
+                            sess.sales_df = build_sales_df(
+                                mtr_df=sess.mtr_df,
+                                myntra_df=sess.myntra_df,
+                                meesho_df=sess.meesho_df,
+                                flipkart_df=sess.flipkart_df,
+                                snapdeal_df=sess.snapdeal_df,
+                                sku_mapping=sess.sku_mapping,
+                            )
+                            sess._quarterly_cache.clear()
+                        except Exception:
+                            pass
+                    elif not sess.sales_df.empty:
+                        pass  # already built above
+                    else:
+                        # Fallback: use cached sales_df if rebuild failed
+                        val = loaded.get("sales_df")
                         if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                            setattr(sess, key, val)
+                            sess.sales_df = val
                     if not sess.sku_mapping and loaded.get("sku_mapping"):
                         sess.sku_mapping = loaded["sku_mapping"]
                     sess._quarterly_cache.clear()
