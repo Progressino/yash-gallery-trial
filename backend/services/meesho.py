@@ -157,9 +157,8 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     status_col = next((c for c in df.columns if "reason" in c or "order status" in c
                        or c == "status"), None)
     def _txn(s):
-        s = str(s).strip().upper()
-        if "RETURN" in s or "RTO" in s: return "Refund"
-        if "CANCEL" in s: return "Cancel"
+        # All rows in a daily Meesho order CSV represent orders placed on that date.
+        # Count all as Shipment (gross order count); returns come from separate return reports.
         return "Shipment"
     df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"
 

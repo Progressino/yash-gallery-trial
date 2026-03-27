@@ -94,7 +94,7 @@ def _parse_flipkart_xlsx(
         def _get_month(d):
             return file_month if file_month else d.to_period("M").strftime("%Y-%m")
 
-        for col in ["Final Sale Units", "Return Units", "Cancellation Units",
+        for col in ["Gross Units", "Final Sale Units", "Return Units", "Cancellation Units",
                     "Final Sale Amount", "Return Amount"]:
             xl[col] = pd.to_numeric(xl.get(col, 0), errors="coerce").fillna(0)
 
@@ -115,14 +115,14 @@ def _parse_flipkart_xlsx(
 
         rows: List[pd.DataFrame] = []
 
-        # Shipment rows
-        ship = xl[xl["Final Sale Units"] > 0].copy()
+        # Shipment rows — use Gross Units (all orders placed, including cancelled)
+        ship = xl[xl["Gross Units"] > 0].copy()
         if not ship.empty:
             rows.append(pd.DataFrame({
                 "Date":           ship["Date"],
                 "Month":          ship["Date"].apply(_get_month),
                 "TxnType":        "Shipment",
-                "Quantity":       ship["Final Sale Units"].astype("float32"),
+                "Quantity":       ship["Gross Units"].astype("float32"),
                 "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
                 "OMS_SKU":        ship["OMS_SKU"],
                 "State":          "",
@@ -298,7 +298,7 @@ def _parse_flipkart_earn_more(
             return file_month if file_month else d.to_period("M").strftime("%Y-%m")
 
         # Normalize units columns
-        for col in ["Final Sale Units", "Return Units", "Cancellation Units",
+        for col in ["Gross Units", "Final Sale Units", "Return Units", "Cancellation Units",
                     "Final Sale Amount", "Return Amount"]:
             xl[col] = pd.to_numeric(xl.get(col, 0), errors="coerce").fillna(0)
 
@@ -309,14 +309,14 @@ def _parse_flipkart_earn_more(
 
         rows: List[pd.DataFrame] = []
 
-        # Shipment rows
-        ship = xl[xl["Final Sale Units"] > 0].copy()
+        # Shipment rows — use Gross Units (all orders placed, including cancelled)
+        ship = xl[xl["Gross Units"] > 0].copy()
         if not ship.empty:
             rows.append(pd.DataFrame({
                 "Date":           ship["Date"],
                 "Month":          ship["Date"].apply(_get_month),
                 "TxnType":        "Shipment",
-                "Quantity":       ship["Final Sale Units"].astype("float32"),
+                "Quantity":       ship["Gross Units"].astype("float32"),
                 "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
                 "OMS_SKU":        ship["OMS_SKU"],
                 "State":          "",
@@ -334,21 +334,6 @@ def _parse_flipkart_earn_more(
                 "Quantity":       ret["Return Units"].astype("float32"),
                 "Invoice_Amount": ret["Return Amount"].astype("float32"),
                 "OMS_SKU":        ret["OMS_SKU"],
-                "State":          "",
-                "OrderId":        "",
-                "BuyerInvoiceId": "",
-            }))
-
-        # Cancel rows
-        can = xl[xl["Cancellation Units"] > 0].copy()
-        if not can.empty:
-            rows.append(pd.DataFrame({
-                "Date":           can["Date"],
-                "Month":          can["Date"].apply(_get_month),
-                "TxnType":        "Cancel",
-                "Quantity":       can["Cancellation Units"].astype("float32"),
-                "Invoice_Amount": can["Cancellation Amount"].astype("float32"),
-                "OMS_SKU":        can["OMS_SKU"],
                 "State":          "",
                 "OrderId":        "",
                 "BuyerInvoiceId": "",
