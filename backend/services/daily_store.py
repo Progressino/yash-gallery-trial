@@ -145,7 +145,10 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
     caused by overlapping file uploads.
     - Amazon (mtr_df): MTR rows (Invoice_Number filled) take priority over
       FBA Shipment Report rows (no Invoice_Number) for the same Order_Id.
-    - Other platforms: deduplicate by OrderId.
+    - Other platforms: rows WITH a real OrderId are deduped by OrderId;
+      rows WITHOUT an OrderId (aggregated/summary data) are deduped by
+      (Date, OMS_SKU, TxnType) to prevent double-counting the same
+      daily-summary row without destroying all aggregated data.
     """
     if df.empty:
         return df
@@ -164,7 +167,19 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
             )
             return pd.concat([inv_rows, no_inv], ignore_index=True)
         elif "OrderId" in df.columns:
-            return df.drop_duplicates(subset=["OrderId"], keep="last")
+            has_id = df["OrderId"].astype(str).str.strip() != ""
+            # Rows with a real OrderId: dedup by OrderId (one row per order)
+            with_id = df[has_id].drop_duplicates(subset=["OrderId"], keep="last")
+            # Rows without OrderId (aggregated data): dedup by Date+SKU+TxnType
+            no_id = df[~has_id]
+            sku_col = next((c for c in ("OMS_SKU", "SKU") if c in no_id.columns), None)
+            txn_col = next((c for c in ("TxnType", "Transaction_Type") if c in no_id.columns), None)
+            date_col = "Date" if "Date" in no_id.columns else None
+            if sku_col and txn_col and date_col:
+                no_id = no_id.drop_duplicates(subset=[date_col, sku_col, txn_col], keep="last")
+            else:
+                no_id = no_id.drop_duplicates(keep="last")
+            return pd.concat([with_id, no_id], ignore_index=True)
     except Exception:
         pass
     return df
