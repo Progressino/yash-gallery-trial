@@ -170,15 +170,11 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
             has_id = df["OrderId"].astype(str).str.strip() != ""
             # Rows with a real OrderId: dedup by OrderId (one row per order)
             with_id = df[has_id].drop_duplicates(subset=["OrderId"], keep="last")
-            # Rows without OrderId (aggregated data): dedup by Date+SKU+TxnType
+            # Rows without OrderId (aggregated/summary data from multi-seller exports):
+            # Do NOT dedup — two sellers can sell the same SKU on the same date.
+            # Duplicate-file protection is already handled at save_daily_file() via
+            # date-range overlap deletion, so no duplicates exist in the DB.
             no_id = df[~has_id]
-            sku_col = next((c for c in ("OMS_SKU", "SKU") if c in no_id.columns), None)
-            txn_col = next((c for c in ("TxnType", "Transaction_Type") if c in no_id.columns), None)
-            date_col = "Date" if "Date" in no_id.columns else None
-            if sku_col and txn_col and date_col:
-                no_id = no_id.drop_duplicates(subset=[date_col, sku_col, txn_col], keep="last")
-            else:
-                no_id = no_id.drop_duplicates(keep="last")
             return pd.concat([with_id, no_id], ignore_index=True)
     except Exception:
         pass
