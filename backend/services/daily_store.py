@@ -145,10 +145,10 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
     caused by overlapping file uploads.
     - Amazon (mtr_df): MTR rows (Invoice_Number filled) take priority over
       FBA Shipment Report rows (no Invoice_Number) for the same Order_Id.
-    - Other platforms: rows WITH a real OrderId are deduped by OrderId;
-      rows WITHOUT an OrderId (aggregated/summary data) are deduped by
-      (Date, OMS_SKU, TxnType) to prevent double-counting the same
-      daily-summary row without destroying all aggregated data.
+    - Other platforms: rows WITH a real OrderId are deduped by
+      (OrderId, SKU, TxnType, Date) — composite key preserves multi-SKU orders
+      (same store order id, different SKUs) while preventing re-upload duplicates.
+      Rows WITHOUT an OrderId (aggregated/summary data) are kept as-is.
     """
     if df.empty:
         return df
@@ -168,12 +168,18 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
             return pd.concat([inv_rows, no_inv], ignore_index=True)
         elif "OrderId" in df.columns:
             has_id = df["OrderId"].astype(str).str.strip() != ""
-            # Rows with a real OrderId: dedup by OrderId (one row per order)
-            with_id = df[has_id].drop_duplicates(subset=["OrderId"], keep="last")
-            # Rows without OrderId (aggregated/summary data from multi-seller exports):
-            # Do NOT dedup — two sellers can sell the same SKU on the same date.
-            # Duplicate-file protection is already handled at save_daily_file() via
-            # date-range overlap deletion, so no duplicates exist in the DB.
+            # Rows with a real OrderId: dedup by (OrderId, SKU/OMS_SKU, TxnType, Date).
+            # Using OrderId alone would collapse multi-item orders (same store order id,
+            # different SKUs) into a single row, losing valid line items.
+            sku_col = "OMS_SKU" if "OMS_SKU" in df.columns else ("SKU" if "SKU" in df.columns else None)
+            date_col = "Date" if "Date" in df.columns else None
+            txn_col  = "TxnType" if "TxnType" in df.columns else None
+            key = ["OrderId"]
+            if sku_col:  key.append(sku_col)
+            if txn_col:  key.append(txn_col)
+            if date_col: key.append(date_col)
+            with_id = df[has_id].drop_duplicates(subset=key, keep="last")
+            # Rows without OrderId (aggregated/summary data): do NOT dedup.
             no_id = df[~has_id]
             return pd.concat([with_id, no_id], ignore_index=True)
     except Exception:
