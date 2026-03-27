@@ -32,11 +32,23 @@ def _parse_date_flexible(series: pd.Series) -> pd.Series:
                 return parsed
         except Exception:
             continue
-    # Fallback: handle ISO 8601 with timezone (e.g. "2026-02-19T23:58:49+05:30")
+    # Fallback: ISO 8601 with timezone offset (e.g. "2026-03-23T22:37:50+05:30").
+    # Strip the offset and keep the LOCAL datetime — do NOT convert to UTC, because
+    # converting IST→UTC shifts early-morning dates (before 05:30 IST) to the previous
+    # day, causing March 23 orders to appear as March 22.
+    import re as _re
+    try:
+        stripped = series.astype(str).str.replace(r'\s*[+-]\d{2}:?\d{2}$', '', regex=True)
+        parsed = pd.to_datetime(stripped, format="%Y-%m-%dT%H:%M:%S", errors="coerce")
+        if parsed.notna().sum() >= threshold:
+            return parsed
+    except Exception:
+        pass
+    # Last resort UTC conversion (may shift dates for non-IST timezones)
     try:
         parsed = pd.to_datetime(series, utc=True, errors="coerce")
         if parsed.notna().sum() >= threshold:
-            return parsed.dt.tz_convert(None)   # strip tz → tz-naive datetime
+            return parsed.dt.tz_convert(None)
     except Exception:
         pass
     return pd.to_datetime(series, dayfirst=True, errors="coerce")
