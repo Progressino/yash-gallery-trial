@@ -92,16 +92,16 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             ok, _, loaded = load_cache_from_drive()
             if ok and loaded:
                 if need_sales_cache:
-                    from ..services.daily_store import merge_platform_data as _mpd
+                    from ..services.daily_store import _dedup_platform_df as _dedup
                     _platform_keys = {
-                        "mtr_df":      "amazon",
-                        "meesho_df":   "meesho",
-                        "myntra_df":   "myntra",
-                        "flipkart_df": "flipkart",
-                        "snapdeal_df": "snapdeal",
+                        "mtr_df":      ("amazon",   "Date"),
+                        "meesho_df":   ("meesho",   "Date"),
+                        "myntra_df":   ("myntra",   "Date"),
+                        "flipkart_df": ("flipkart", "Date"),
+                        "snapdeal_df": ("snapdeal", "Date"),
                     }
                     _any_merged = False
-                    for key, platform in _platform_keys.items():
+                    for key, (platform, date_col) in _platform_keys.items():
                         cached = loaded.get(key)
                         if cached is None or (isinstance(cached, pd.DataFrame) and cached.empty):
                             continue
@@ -110,8 +110,31 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
                             # daily_store had nothing — use GitHub cache directly
                             setattr(sess, key, cached)
                         else:
-                            # Both have data — merge with dedup (daily_store/current wins for same orders)
-                            setattr(sess, key, _mpd(cached, current, platform))
+                            # Both have data.
+                            # Strategy: daily_store is authoritative for its own date range.
+                            # Only take GitHub cache rows for dates NOT covered by daily_store.
+                            # This prevents inflated/stale cache data from contaminating fresh uploads.
+                            try:
+                                if date_col in current.columns and date_col in cached.columns:
+                                    cur_dates = pd.to_datetime(current[date_col], errors="coerce").dropna()
+                                    if not cur_dates.empty:
+                                        min_d = cur_dates.min()
+                                        max_d = cur_dates.max()
+                                        cached_dates = pd.to_datetime(cached[date_col], errors="coerce")
+                                        # Only keep cached rows that fall OUTSIDE the daily_store date range
+                                        outside = cached[(cached_dates < min_d) | (cached_dates > max_d)]
+                                        if outside.empty:
+                                            pass  # nothing to add from cache — keep current as-is
+                                        else:
+                                            combined = pd.concat([outside, current], ignore_index=True)
+                                            setattr(sess, key, _dedup(combined, platform))
+                                            _any_merged = True
+                                        continue  # skip the fallback below
+                            except Exception:
+                                pass
+                            # Fallback: simple concat + dedup
+                            combined = pd.concat([cached, current], ignore_index=True)
+                            setattr(sess, key, _dedup(combined, platform))
                         _any_merged = True
                     # Also handle sales_df: prefer to rebuild from merged platform DFs rather than
                     # using the cached sales_df directly (avoids stale aggregations)
