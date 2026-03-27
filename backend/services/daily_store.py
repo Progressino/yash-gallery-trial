@@ -205,19 +205,14 @@ def save_daily_file(
 
     conn = _get_conn()
 
-    # Delete existing entries for this platform that overlap with [date_from, date_to].
-    # Overlap condition: existing.date_from <= new.date_to AND existing.date_to >= new.date_from
-    # Also delete entries where date_from/date_to are NULL but file_date falls in range.
+    # Delete only entries with the same filename (exact re-upload replacement).
+    # Do NOT delete based on date range overlap — multiple seller accounts legitimately
+    # upload different files covering the same date range. Deduplication at load time
+    # (via _dedup_platform_df) prevents double-counting when the same orders appear
+    # in multiple files.
     conn.execute(
-        """DELETE FROM daily_uploads
-           WHERE platform=?
-             AND (
-               (date_from IS NOT NULL AND date_to IS NOT NULL
-                AND date_from <= ? AND date_to >= ?)
-               OR
-               (date_from IS NULL AND file_date >= ? AND file_date <= ?)
-             )""",
-        (platform, date_to, date_from, date_from, date_to),
+        "DELETE FROM daily_uploads WHERE platform=? AND filename=?",
+        (platform, filename),
     )
 
     conn.execute(
