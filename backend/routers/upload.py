@@ -640,13 +640,15 @@ async def upload_daily_auto(
 
     def _handle_one(fname: str, raw: bytes) -> None:
         """Process a single (non-RAR) file and mutate detected/warnings."""
+        from ..services.daily_store import load_platform_data as _load_platform
         platform = _detect_platform(fname, raw)
         try:
             if platform == "amazon_b2c":
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
-                    sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
                     save_daily_file("amazon", fname, df)
+                    sess.mtr_df = _load_platform("amazon")  # reload clean from DB
+                    sess.daily_restored = False  # force cache re-merge on next data request
                     detected.append(f"Amazon ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -656,8 +658,9 @@ async def upload_daily_auto(
             elif platform == "amazon_b2b":
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
-                    sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
                     save_daily_file("amazon", fname, df)
+                    sess.mtr_df = _load_platform("amazon")
+                    sess.daily_restored = False
                     detected.append(f"Amazon B2B ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -668,8 +671,9 @@ async def upload_daily_auto(
                 from ..services.myntra import _parse_myntra_csv
                 df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
                 if not df.empty:
-                    sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
                     save_daily_file("myntra", fname, df)
+                    sess.myntra_df = _load_platform("myntra")
+                    sess.daily_restored = False
                     detected.append(f"Myntra ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -679,8 +683,9 @@ async def upload_daily_auto(
             elif platform == "meesho":
                 df, _count, _skipped = load_meesho_from_zip(raw)
                 if not df.empty:
-                    sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
                     save_daily_file("meesho", fname, df)
+                    sess.meesho_df = _load_platform("meesho")
+                    sess.daily_restored = False
                     detected.append(f"Meesho ({fname})")
                     if _skipped:
                         warnings.append(f"{fname}: {'; '.join(_skipped[:2])}")
@@ -691,8 +696,9 @@ async def upload_daily_auto(
                 from ..services.meesho import parse_meesho_csv
                 df, msg = parse_meesho_csv(raw)
                 if not df.empty:
-                    sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
                     save_daily_file("meesho", fname, df)
+                    sess.meesho_df = _load_platform("meesho")
+                    sess.daily_restored = False
                     detected.append(f"Meesho ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -717,8 +723,9 @@ async def upload_daily_auto(
                         warnings.append(f"{fname}: Skipped — no Sales Report, Orders, or earn_more_report sheet (sheets: {', '.join(xl_sheets[:4])})")
                         return
                 if not df.empty:
-                    sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
                     save_daily_file("flipkart", fname, df)
+                    sess.flipkart_df = _load_platform("flipkart")
+                    sess.daily_restored = False
                     detected.append(f"Flipkart ({fname})")
                 else:
                     warnings.append(f"{fname}: No data extracted from Flipkart file")
