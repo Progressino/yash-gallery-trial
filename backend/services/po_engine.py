@@ -8,8 +8,21 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+import re
+
 from .helpers import map_to_oms_sku, get_parent_sku
 from .myntra import myntra_to_sales_rows
+
+# Strip "PL" infix in Amazon seller SKUs (e.g. 1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL)
+# Must match the same pattern used in inventory.py _resolve_amz_sku.
+_PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
+
+
+def _strip_pl(sku: str, mapping: Dict[str, str]) -> str:
+    """Map an Amazon seller SKU to OMS SKU, stripping PL infix if needed."""
+    raw = str(sku).strip().upper()
+    stripped = _PL_RE.sub(r"\1\2", raw)
+    return mapping.get(stripped, mapping.get(raw, stripped))
 
 
 def get_indian_fy_quarter(date: pd.Timestamp) -> tuple:
@@ -40,7 +53,7 @@ def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
     m["TxnDate"]  = pd.to_datetime(m["TxnDate"], errors="coerce")
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
     m = m.dropna(subset=["TxnDate"])
-    m["Sku"] = m["Sku"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+    m["Sku"] = m["Sku"].apply(lambda x: _strip_pl(x, sku_mapping))
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
     m["Units_Effective"] = np.where(
@@ -79,7 +92,11 @@ def calculate_quarterly_history(
             tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
             tmp["TxnType"] = mtr_df[mtr_txn_col].values if mtr_txn_col else "Shipment"
             if sku_mapping:
-                tmp["SKU"] = tmp["SKU"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+                # Use _strip_pl so "1001PLYKBEIGE-5XL" resolves to "1001YKBEIGE-5XL"
+                # matching the same stripping done in inventory._resolve_amz_sku.
+                tmp["SKU"] = tmp["SKU"].apply(lambda x: _strip_pl(x, sku_mapping))
+            else:
+                tmp["SKU"] = tmp["SKU"].apply(lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper()))
             parts.append(tmp.dropna(subset=["Date"]))
 
     if myntra_df is not None and not myntra_df.empty:

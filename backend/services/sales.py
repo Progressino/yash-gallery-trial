@@ -2,6 +2,7 @@
 Sales aggregation — build + dedup logic extracted from app.py.
 """
 import gc
+import re
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -12,6 +13,15 @@ from .myntra import myntra_to_sales_rows
 from .meesho import meesho_to_sales_rows
 from .flipkart import flipkart_to_sales_rows
 from .snapdeal import snapdeal_to_sales_rows
+
+# Strip "PL" infix in Amazon seller SKUs (mirrors inventory._PL_RE)
+_PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
+
+
+def _resolve_mtr_sku(sku, mapping: Dict[str, str]) -> str:
+    raw = str(sku).strip().upper()
+    stripped = _PL_RE.sub(r"\1\2", raw)
+    return mapping.get(stripped, mapping.get(raw, stripped))
 
 
 def _mtr_to_sales_df(
@@ -34,7 +44,7 @@ def _mtr_to_sales_df(
     m["TxnDate"]  = pd.to_datetime(m["TxnDate"], errors="coerce")
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
     m = m.dropna(subset=["TxnDate"])
-    m["Sku"] = m["Sku"].apply(lambda x: map_to_oms_sku(x, sku_mapping))
+    m["Sku"] = m["Sku"].apply(lambda x: _resolve_mtr_sku(x, sku_mapping))
 
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
