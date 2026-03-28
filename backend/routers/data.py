@@ -72,100 +72,24 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         except Exception:
             pass
 
-    # Check how much history is in sales_df
-    sales_history_days = 0
-    if not sess.sales_df.empty and "TxnDate" in sess.sales_df.columns:
-        try:
-            dates = pd.to_datetime(sess.sales_df["TxnDate"], errors="coerce").dropna()
-            if not dates.empty:
-                sales_history_days = (dates.max() - dates.min()).days
-        except Exception:
-            pass
-
-    # If sales_df has < 90 days of history, load full 2-year history from GitHub cache.
-    # Also always restore inventory (always lost on restart since there's no daily SQLite for it).
-    need_sales_cache = sales_history_days < 90
-    need_inventory   = sess.inventory_df_variant.empty
-    if need_sales_cache or need_inventory:
+    # Restore inventory from GitHub cache (inventory has no SQLite backing so it's always
+    # lost on server restart — this is the only place it can be auto-recovered).
+    # Sales/platform data is intentionally NOT auto-merged from cache here; it is loaded
+    # exclusively from the SQLite daily_store above so that metrics are always consistent
+    # regardless of which GitHub cache snapshot was last saved.
+    # Users can explicitly pull historical data via the "Load Cache" button when needed.
+    need_inventory = sess.inventory_df_variant.empty
+    if need_inventory:
         try:
             from ..services.github_cache import load_cache_from_drive
             ok, _, loaded = load_cache_from_drive()
             if ok and loaded:
-                if need_sales_cache:
-                    from ..services.daily_store import _dedup_platform_df as _dedup
-                    _platform_keys = {
-                        "mtr_df":      ("amazon",   "Date"),
-                        "meesho_df":   ("meesho",   "Date"),
-                        "myntra_df":   ("myntra",   "Date"),
-                        "flipkart_df": ("flipkart", "Date"),
-                        "snapdeal_df": ("snapdeal", "Date"),
-                    }
-                    _any_merged = False
-                    for key, (platform, date_col) in _platform_keys.items():
-                        cached = loaded.get(key)
-                        if cached is None or (isinstance(cached, pd.DataFrame) and cached.empty):
-                            continue
-                        current = getattr(sess, key, None)
-                        if current is None or (isinstance(current, pd.DataFrame) and current.empty):
-                            # daily_store had nothing — use GitHub cache directly
-                            setattr(sess, key, cached)
-                        else:
-                            # Both have data.
-                            # Strategy: daily_store is authoritative for its own date range.
-                            # Only take GitHub cache rows for dates NOT covered by daily_store.
-                            # This prevents inflated/stale cache data from contaminating fresh uploads.
-                            try:
-                                if date_col in current.columns and date_col in cached.columns:
-                                    cur_dates = pd.to_datetime(current[date_col], errors="coerce").dropna()
-                                    if not cur_dates.empty:
-                                        min_d = cur_dates.min()
-                                        max_d = cur_dates.max()
-                                        cached_dates = pd.to_datetime(cached[date_col], errors="coerce")
-                                        # Only keep cached rows that fall OUTSIDE the daily_store date range
-                                        outside = cached[(cached_dates < min_d) | (cached_dates > max_d)]
-                                        if outside.empty:
-                                            pass  # nothing to add from cache — keep current as-is
-                                        else:
-                                            combined = pd.concat([outside, current], ignore_index=True)
-                                            setattr(sess, key, _dedup(combined, platform))
-                                            _any_merged = True
-                                        continue  # skip the fallback below
-                            except Exception:
-                                pass
-                            # Fallback: simple concat + dedup
-                            combined = pd.concat([cached, current], ignore_index=True)
-                            setattr(sess, key, _dedup(combined, platform))
-                        _any_merged = True
-                    # Also handle sales_df: prefer to rebuild from merged platform DFs rather than
-                    # using the cached sales_df directly (avoids stale aggregations)
-                    if _any_merged:
-                        try:
-                            sess.sales_df = build_sales_df(
-                                mtr_df=sess.mtr_df,
-                                myntra_df=sess.myntra_df,
-                                meesho_df=sess.meesho_df,
-                                flipkart_df=sess.flipkart_df,
-                                snapdeal_df=sess.snapdeal_df,
-                                sku_mapping=sess.sku_mapping,
-                            )
-                            sess._quarterly_cache.clear()
-                        except Exception:
-                            pass
-                    elif not sess.sales_df.empty:
-                        pass  # already built above
-                    else:
-                        # Fallback: use cached sales_df if rebuild failed
-                        val = loaded.get("sales_df")
-                        if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                            sess.sales_df = val
-                    if not sess.sku_mapping and loaded.get("sku_mapping"):
-                        sess.sku_mapping = loaded["sku_mapping"]
-                    sess._quarterly_cache.clear()
-                if need_inventory:
-                    for key in ["inventory_df_variant", "inventory_df_parent"]:
-                        val = loaded.get(key)
-                        if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                            setattr(sess, key, val)
+                for key in ["inventory_df_variant", "inventory_df_parent"]:
+                    val = loaded.get(key)
+                    if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                        setattr(sess, key, val)
+                if not sess.sku_mapping and loaded.get("sku_mapping"):
+                    sess.sku_mapping = loaded["sku_mapping"]
         except Exception:
             pass
 
