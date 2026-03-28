@@ -315,7 +315,10 @@ def create_pos_from_pr(pr_id: int, lines_data: list, delivery_date: str = '', pa
             conn.execute("UPDATE pr_lines SET po_qty = po_qty + ? WHERE pr_id=? AND material_code=?",
                 (qty, pr_id, ln['material_code']))
         po_numbers.append(num)
-    conn.execute("UPDATE pr_headers SET status='PO Created' WHERE id=?", (pr_id,))
+    # Set status: 'PO Created' only if all lines are fully covered, else 'Partial PO'
+    all_lines = conn.execute("SELECT required_qty, po_qty FROM pr_lines WHERE pr_id=?", (pr_id,)).fetchall()
+    all_covered = all((l['po_qty'] or 0) >= (l['required_qty'] or 0) for l in all_lines)
+    conn.execute("UPDATE pr_headers SET status=? WHERE id=?", ('PO Created' if all_covered else 'Partial PO', pr_id))
     conn.commit(); conn.close()
     return po_numbers
 
@@ -357,6 +360,40 @@ def create_po(data: dict):
 
 def update_po_status(poid: int, status: str):
     conn = _connect(); conn.execute("UPDATE po_headers SET status=? WHERE id=?", (status, poid))
+    conn.commit(); conn.close()
+
+def update_po(poid: int, data: dict):
+    """Update a Draft PO header fields and/or lines."""
+    conn = _connect()
+    allowed = ['supplier_id','supplier_name','payment_terms','delivery_location','delivery_date','so_reference','remarks']
+    sets = ', '.join(f"{k}=?" for k in data if k in allowed)
+    vals = [data[k] for k in data if k in allowed]
+    if sets:
+        conn.execute(f"UPDATE po_headers SET {sets} WHERE id=? AND status='Draft'", vals + [poid])
+    if 'lines' in data:
+        conn.execute("DELETE FROM po_lines WHERE po_id=?", (poid,))
+        subtotal = 0; gst_total = 0
+        for ln in data['lines']:
+            qty = ln.get('po_qty', 0); rate = ln.get('rate', 0)
+            amt = qty * rate; gst = amt * (ln.get('gst_pct', 0) / 100)
+            subtotal += amt; gst_total += gst
+            conn.execute("""INSERT INTO po_lines(po_id,material_code,material_name,material_type,po_qty,unit,rate,gst_pct,amount,remarks)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (poid, ln['material_code'], ln.get('material_name',''), ln.get('material_type','RM'),
+                 qty, ln.get('unit','PCS'), rate, ln.get('gst_pct',0), amt, ln.get('remarks','')))
+        conn.execute("UPDATE po_headers SET subtotal=?,gst_amount=?,total=? WHERE id=?",
+            (subtotal, gst_total, subtotal + gst_total, poid))
+    conn.commit(); conn.close()
+
+def mark_pr_lines_ordered(pr_id: int, updates: list):
+    """Update po_qty for PR lines after JWO creation; updates = [{material_code, qty}]."""
+    conn = _connect()
+    for u in updates:
+        conn.execute("UPDATE pr_lines SET po_qty = po_qty + ? WHERE pr_id=? AND material_code=?",
+            (u['qty'], pr_id, u['material_code']))
+    all_lines = conn.execute("SELECT required_qty, po_qty FROM pr_lines WHERE pr_id=?", (pr_id,)).fetchall()
+    all_covered = all((l['po_qty'] or 0) >= (l['required_qty'] or 0) for l in all_lines)
+    conn.execute("UPDATE pr_headers SET status=? WHERE id=?", ('PO Created' if all_covered else 'Partial PO', pr_id))
     conn.commit(); conn.close()
 
 # ── Job Work Orders ───────────────────────────────────────────────────────────

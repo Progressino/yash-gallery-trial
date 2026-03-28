@@ -11,14 +11,14 @@ interface Processor { id: number; processor_code: string; processor_name: string
 interface PRLine { id: number; material_code: string; material_name: string; material_type: string; required_qty: number; po_qty: number; unit: string; required_by_date: string }
 interface PR { id: number; pr_number: string; pr_date: string; requested_by: string; department: string; priority: string; status: string; so_reference: string; pr_type: string; source: string; required_by_date: string; lines: PRLine[] }
 interface PO { id: number; po_number: string; po_date: string; supplier_name: string; status: string; total: number; delivery_date: string; pr_reference: string; so_reference: string; lines: POLine[] }
-interface POLine { id: number; material_code: string; material_name: string; po_qty: number; unit: string; rate: number; gst_pct: number; amount: number }
+interface POLine { id: number; material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number; amount: number }
 interface JWO { id: number; jwo_number: string; jwo_date: string; processor_name: string; status: string; total: number; expected_return_date: string; lines: JWOLine[] }
 interface JWOLine { id: number; input_material: string; output_material: string; output_qty: number; process_type: string; rate: number; amount: number }
 interface GRN { id: number; grn_number: string; grn_date: string; grn_type: string; party_name: string; status: string; total_value: number; lines: GRNLine[] }
 interface GRNLine { id: number; material_code: string; received_qty: number; accepted_qty: number; rejected_qty: number; qc_status: string; rate: number; amount: number }
 interface MRPLineItem { material_code: string; material_name: string; material_type: string; required_qty: number; net_req: number; unit: string; inputs?: { material_code: string; material_name: string; quantity: number; unit: string }[] }
 interface MRPLinesResult { so_number: string; purchase_items: MRPLineItem[]; sfg_items: MRPLineItem[]; error?: string; warning?: string }
-interface POFromPRLine { supplier_id?: number; supplier_name: string; qty: number; rate: number; gst_pct: number }
+interface POFromPRLine { supplier_id?: number; supplier_name: string; processor_id?: number; processor_name?: string; qty: number; rate: number; gst_pct: number; order_type?: 'PO' | 'JWO' }
 
 const SUP_TYPES = ['Fabric Supplier', 'Accessories Supplier', 'Job Work', 'Others']
 const PROC_TYPES = ['Printing Unit', 'Dyeing Unit', 'Embroidery', 'Others']
@@ -33,6 +33,7 @@ const GST_RATES = [0, 5, 12, 18, 28]
 const statusColor = (s: string) => {
   if (['Approved', 'Received', 'Verified', 'Posted', 'Closed'].includes(s)) return 'bg-green-100 text-green-700'
   if (['Draft', 'Pending Approval'].includes(s)) return 'bg-yellow-100 text-yellow-700'
+  if (s === 'Partial PO') return 'bg-orange-100 text-orange-700'
   if (['PO Created', 'Sent to Supplier', 'In Process', 'Confirmed', 'Issued to Processor'].includes(s)) return 'bg-blue-100 text-blue-700'
   if (['Rejected', 'Cancelled'].includes(s)) return 'bg-red-100 text-red-700'
   return 'bg-gray-100 text-gray-600'
@@ -75,6 +76,11 @@ export default function Purchase() {
   const [poFromPRMeta, setPoFromPRMeta] = useState({ delivery_date: '', payment_terms: 'Immediate' })
   const [createdPOs, setCreatedPOs] = useState<string[]>([])
 
+  // Edit Draft PO
+  const [editingPO, setEditingPO] = useState<number | null>(null)
+  const [editPOForm, setEditPOForm] = useState({ supplier_id: undefined as number | undefined, supplier_name: '', delivery_date: '', payment_terms: '', so_reference: '', remarks: '' })
+  const [editPOLines, setEditPOLines] = useState<{ material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number }[]>([])
+
   // PO / JWO / GRN forms
   const [showPOForm, setShowPOForm] = useState(false)
   const [poForm, setPOForm] = useState({ supplier_id: undefined as number | undefined, supplier_name: '', delivery_date: '', payment_terms: '', delivery_location: '', pr_reference: '', so_reference: '', remarks: '' })
@@ -88,7 +94,7 @@ export default function Purchase() {
 
   const { data: stats } = useQuery<Stats>({ queryKey: ['purchase-stats'], queryFn: () => api.get('/purchase/stats').then(r => r.data) })
   const { data: suppliers = [] } = useQuery<Supplier[]>({ queryKey: ['suppliers'], queryFn: () => api.get('/purchase/suppliers').then(r => r.data), enabled: tab === 'suppliers' || tab === 'po' || tab === 'dashboard' || tab === 'pr' })
-  const { data: processors = [] } = useQuery<Processor[]>({ queryKey: ['processors'], queryFn: () => api.get('/purchase/processors').then(r => r.data), enabled: tab === 'processors' || tab === 'jwo' })
+  const { data: processors = [] } = useQuery<Processor[]>({ queryKey: ['processors'], queryFn: () => api.get('/purchase/processors').then(r => r.data), enabled: tab === 'processors' || tab === 'jwo' || tab === 'pr' })
   const { data: prs = [] } = useQuery<PR[]>({ queryKey: ['prs', filterStatus], queryFn: () => api.get('/purchase/pr' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'pr' })
   const { data: pos = [] } = useQuery<PO[]>({ queryKey: ['pos', filterStatus], queryFn: () => api.get('/purchase/po' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'po' })
   const { data: jwos = [] } = useQuery<JWO[]>({ queryKey: ['jwos', filterStatus], queryFn: () => api.get('/purchase/jwo' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'jwo' })
@@ -106,6 +112,7 @@ export default function Purchase() {
   const updateJWOStatusMut = useMutation({ mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/jwo/${id}/status`, { status }), onSuccess: () => qc.invalidateQueries({ queryKey: ['jwos'] }) })
   const createGRNMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/grn', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grns'] }); invalidate(); setShowGRNForm(false); setGRNLines([]) } })
   const verifyGRNMut = useMutation({ mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/grn/${id}/verify`, { status }), onSuccess: () => qc.invalidateQueries({ queryKey: ['grns'] }) })
+  const updatePOMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/purchase/po/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['pos'] }); setEditingPO(null) } })
 
   const TABS: [Tab, string][] = [
     ['dashboard', '📊 Dashboard'],
@@ -167,7 +174,11 @@ export default function Purchase() {
     const init: Record<string, POFromPRLine> = {}
     pr.lines.forEach(l => {
       const pending = l.required_qty - (l.po_qty || 0)
-      if (pending > 0) init[`${pr.id}-${l.material_code}`] = { supplier_name: '', qty: pending, rate: 0, gst_pct: 12 }
+      if (pending > 0) init[`${pr.id}-${l.material_code}`] = {
+        supplier_name: '', processor_name: '',
+        qty: pending, rate: 0, gst_pct: 12,
+        order_type: l.material_type === 'SFG' ? 'JWO' : 'PO',
+      }
     })
     setPoFromPRLines(init)
     setPoFromPRMeta({ delivery_date: '', payment_terms: 'Immediate' })
@@ -181,34 +192,73 @@ export default function Purchase() {
   }
 
   const submitPOFromPR = async (pr: PR) => {
-    const lines = pr.lines
-      .filter(l => (l.required_qty - (l.po_qty || 0)) > 0)
-      .map(l => {
-        const key = `${pr.id}-${l.material_code}`
-        const ld = poFromPRLines[key] || { supplier_name: '', qty: 0, rate: 0, gst_pct: 12 }
-        const sup = suppliers.find(s => s.id === ld.supplier_id)
-        return {
-          material_code: l.material_code,
-          material_name: l.material_name,
-          material_type: l.material_type,
-          unit: l.unit,
-          qty: ld.qty,
-          rate: ld.rate,
-          gst_pct: ld.gst_pct,
-          supplier_id: ld.supplier_id,
-          supplier_name: ld.supplier_name || sup?.supplier_name || '',
-        }
-      })
-      .filter(l => l.supplier_name || l.supplier_id)
+    const pendingLines = pr.lines.filter(l => (l.required_qty - (l.po_qty || 0)) > 0)
 
-    if (lines.length === 0) { alert('Please assign at least one supplier.'); return }
+    // Separate PO lines and JWO lines
+    const poLines: object[] = []
+    const jwoByProcessor: Record<string, { processor_id?: number; processor_name: string; lines: object[] }> = {}
+
+    for (const l of pendingLines) {
+      const key = `${pr.id}-${l.material_code}`
+      const ld = poFromPRLines[key] || { order_type: 'PO', supplier_name: '', qty: 0, rate: 0, gst_pct: 12 }
+      const orderType = ld.order_type || (l.material_type === 'SFG' ? 'JWO' : 'PO')
+
+      if (orderType === 'JWO') {
+        if (!ld.processor_id && !ld.processor_name) continue
+        const procKey = `${ld.processor_id}-${ld.processor_name}`
+        if (!jwoByProcessor[procKey]) {
+          jwoByProcessor[procKey] = { processor_id: ld.processor_id, processor_name: ld.processor_name || '', lines: [] }
+        }
+        jwoByProcessor[procKey].lines.push({
+          input_material: l.material_code, input_qty: ld.qty, input_unit: l.unit,
+          output_material: l.material_code, output_qty: ld.qty, output_unit: l.unit,
+          process_type: 'Processing', rate: ld.rate, amount: ld.qty * ld.rate,
+        })
+      } else {
+        if (!ld.supplier_id && !ld.supplier_name) continue
+        const sup = suppliers.find(s => s.id === ld.supplier_id)
+        poLines.push({
+          material_code: l.material_code, material_name: l.material_name,
+          material_type: l.material_type, unit: l.unit,
+          qty: ld.qty, rate: ld.rate, gst_pct: ld.gst_pct,
+          supplier_id: ld.supplier_id, supplier_name: ld.supplier_name || sup?.supplier_name || '',
+        })
+      }
+    }
+
+    if (poLines.length === 0 && Object.keys(jwoByProcessor).length === 0) {
+      alert('Please assign at least one supplier or processor.')
+      return
+    }
+
     try {
-      const r = await api.post('/purchase/po/from-pr', { pr_id: pr.id, ...poFromPRMeta, lines })
-      setCreatedPOs(r.data.po_numbers || [])
+      const created: string[] = []
+
+      if (poLines.length > 0) {
+        const r = await api.post('/purchase/po/from-pr', { pr_id: pr.id, ...poFromPRMeta, lines: poLines })
+        created.push(...(r.data.po_numbers || []))
+      }
+
+      for (const { processor_id, processor_name, lines } of Object.values(jwoByProcessor)) {
+        const r = await api.post('/purchase/jwo', {
+          processor_id, processor_name,
+          pr_reference: pr.pr_number, so_reference: pr.so_reference,
+          expected_return_date: poFromPRMeta.delivery_date, lines,
+        })
+        created.push(r.data.jwo_number)
+        // Update PR line po_qty for JWO-fulfilled lines
+        const jwoUpdates = (lines as { output_material: string; output_qty: number }[]).map(ln => ({
+          material_code: ln.output_material, qty: ln.output_qty,
+        }))
+        await api.post(`/purchase/pr/${pr.id}/mark-ordered`, { updates: jwoUpdates })
+      }
+
+      setCreatedPOs(created)
       qc.invalidateQueries({ queryKey: ['prs'] })
       qc.invalidateQueries({ queryKey: ['pos'] })
+      qc.invalidateQueries({ queryKey: ['jwos'] })
       invalidate()
-    } catch { alert('Failed to create POs.') }
+    } catch { alert('Failed to create orders.') }
   }
 
   return (
@@ -385,7 +435,7 @@ export default function Purchase() {
             {prSubTab === 'list' && (
               <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
                 <option value="">All Statuses</option>
-                {['Pending Approval','Approved','Rejected','PO Created','Closed'].map(s => <option key={s}>{s}</option>)}
+                {['Pending Approval','Approved','Rejected','Partial PO','PO Created','Closed'].map(s => <option key={s}>{s}</option>)}
               </select>
             )}
           </div>
@@ -483,13 +533,13 @@ export default function Purchase() {
                           </table>
                         </div>
 
-                        {/* Create PO from PR (approved Purchase PRs only) */}
-                        {pr.status === 'Approved' && pr.pr_type !== 'Job Work' && totalPending > 0 && (
+                        {/* Create Order from PR (approved PRs with pending lines) */}
+                        {['Approved', 'Partial PO', 'PO Created'].includes(pr.status) && totalPending > 0 && (
                           <div className="border-t pt-4">
                             {showCreatePO !== pr.id ? (
                               <button onClick={() => openCreatePO(pr)}
                                 className="flex items-center gap-2 px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">
-                                🛒 Create Purchase Order from this PR
+                                {pr.pr_type === 'Job Work' ? '⚙️ Create Job Work Order from this PR' : '🛒 Create Order from this PR'}
                               </button>
                             ) : (
                               <div className="space-y-4">
@@ -498,17 +548,17 @@ export default function Purchase() {
                                   <button onClick={() => setShowCreatePO(null)} className="text-gray-400 hover:text-gray-600 text-sm">✕ Close</button>
                                 </div>
                                 <p className="text-xs text-blue-700 bg-blue-50 px-3 py-2 rounded-lg">
-                                  Har item ke liye alag supplier select karo — same supplier wali lines ek hi PO mein merge ho jaayengi automatically.
+                                  For each item assign a supplier (PO) or processor (JWO). SFG items default to JWO. Same supplier lines merge into one PO automatically.
                                 </p>
 
                                 <div className="grid grid-cols-2 gap-3">
                                   <div>
-                                    <label className="text-xs text-gray-500">Default Delivery Date</label>
+                                    <label className="text-xs text-gray-500">Default Delivery / Return Date</label>
                                     <input type="date" value={poFromPRMeta.delivery_date} onChange={e => setPoFromPRMeta(m => ({ ...m, delivery_date: e.target.value }))}
                                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
                                   </div>
                                   <div>
-                                    <label className="text-xs text-gray-500">Payment Terms</label>
+                                    <label className="text-xs text-gray-500">Payment Terms (PO)</label>
                                     <select value={poFromPRMeta.payment_terms} onChange={e => setPoFromPRMeta(m => ({ ...m, payment_terms: e.target.value }))}
                                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
                                       {PAYMENT_TERMS.map(t => <option key={t}>{t}</option>)}
@@ -516,29 +566,54 @@ export default function Purchase() {
                                   </div>
                                 </div>
 
-                                <p className="text-xs text-gray-500 font-medium">Har item ke liye supplier + qty + rate bharein:</p>
+                                <p className="text-xs text-gray-500 font-medium">Fill supplier / processor + qty + rate for each pending item:</p>
                                 {pr.lines.filter(l => (l.required_qty - (l.po_qty || 0)) > 0).map(l => {
                                   const key = `${pr.id}-${l.material_code}`
-                                  const ld = poFromPRLines[key] || { supplier_name: '', qty: l.required_qty - (l.po_qty || 0), rate: 0, gst_pct: 12 }
+                                  const defaultType = l.material_type === 'SFG' ? 'JWO' : 'PO'
+                                  const ld = poFromPRLines[key] || { order_type: defaultType, supplier_name: '', processor_name: '', qty: l.required_qty - (l.po_qty || 0), rate: 0, gst_pct: 12 }
+                                  const isJWO = (ld.order_type || defaultType) === 'JWO'
                                   return (
                                     <div key={l.id} className="border border-gray-200 rounded-lg p-3 space-y-2">
-                                      <div>
-                                        <p className="font-medium text-sm text-gray-800">{l.material_name || l.material_code}</p>
-                                        <p className="text-xs text-gray-400">{l.material_type} | Pending: {l.required_qty - (l.po_qty || 0)} {l.unit}</p>
+                                      <div className="flex items-start justify-between gap-2">
+                                        <div>
+                                          <p className="font-medium text-sm text-gray-800">{l.material_name || l.material_code}</p>
+                                          <p className="text-xs text-gray-400">{l.material_type} | Pending: {l.required_qty - (l.po_qty || 0)} {l.unit}</p>
+                                        </div>
+                                        {/* Order type toggle — always shown so user can override */}
+                                        <div className="flex gap-0.5 bg-gray-100 p-0.5 rounded-lg shrink-0">
+                                          {(['PO', 'JWO'] as const).map(type => (
+                                            <button key={type}
+                                              onClick={() => setPoFromPRLines(prev => ({ ...prev, [key]: { ...(prev[key] || ld), order_type: type, supplier_id: undefined, supplier_name: '', processor_id: undefined, processor_name: '' } }))}
+                                              className={`px-2.5 py-0.5 rounded text-xs font-medium transition-colors ${(ld.order_type || defaultType) === type ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                                              {type === 'PO' ? '🛒 PO' : '⚙️ JWO'}
+                                            </button>
+                                          ))}
+                                        </div>
                                       </div>
                                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                                         <div>
-                                          <label className="text-xs text-gray-400">Supplier</label>
-                                          <select value={ld.supplier_id || ''}
-                                            onChange={e => {
-                                              const s = suppliers.find(x => x.id === +e.target.value)
-                                              updatePOLine(pr.id, l.material_code, 'supplier_id', +e.target.value)
-                                              updatePOLine(pr.id, l.material_code, 'supplier_name', s?.supplier_name || '')
-                                            }}
-                                            className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-0.5">
-                                            <option value="">Select supplier</option>
-                                            {suppliers.map(s => <option key={s.id} value={s.id}>{s.supplier_name}</option>)}
-                                          </select>
+                                          <label className="text-xs text-gray-400">{isJWO ? 'Processor' : 'Supplier'}</label>
+                                          {isJWO ? (
+                                            <select value={ld.processor_id || ''}
+                                              onChange={e => {
+                                                const p = processors.find(x => x.id === +e.target.value)
+                                                setPoFromPRLines(prev => ({ ...prev, [key]: { ...(prev[key] || ld), processor_id: +e.target.value || undefined, processor_name: p?.processor_name || '' } }))
+                                              }}
+                                              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-0.5">
+                                              <option value="">Select processor</option>
+                                              {processors.map(p => <option key={p.id} value={p.id}>{p.processor_name}</option>)}
+                                            </select>
+                                          ) : (
+                                            <select value={ld.supplier_id || ''}
+                                              onChange={e => {
+                                                const s = suppliers.find(x => x.id === +e.target.value)
+                                                setPoFromPRLines(prev => ({ ...prev, [key]: { ...(prev[key] || ld), supplier_id: +e.target.value || undefined, supplier_name: s?.supplier_name || '' } }))
+                                              }}
+                                              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-0.5">
+                                              <option value="">Select supplier</option>
+                                              {suppliers.map(s => <option key={s.id} value={s.id}>{s.supplier_name}</option>)}
+                                            </select>
+                                          )}
                                         </div>
                                         <div>
                                           <label className="text-xs text-gray-400">Qty</label>
@@ -559,11 +634,15 @@ export default function Purchase() {
                                           </div>
                                         </div>
                                         <div>
-                                          <label className="text-xs text-gray-400">GST%</label>
-                                          <select value={ld.gst_pct} onChange={e => updatePOLine(pr.id, l.material_code, 'gst_pct', +e.target.value)}
-                                            className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-0.5">
-                                            {GST_RATES.map(g => <option key={g} value={g}>{g}%</option>)}
-                                          </select>
+                                          <label className="text-xs text-gray-400">{isJWO ? 'Process Rate' : 'GST%'}</label>
+                                          {isJWO ? (
+                                            <p className="text-xs text-gray-400 mt-1.5">N/A for JWO</p>
+                                          ) : (
+                                            <select value={ld.gst_pct} onChange={e => updatePOLine(pr.id, l.material_code, 'gst_pct', +e.target.value)}
+                                              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-0.5">
+                                              {GST_RATES.map(g => <option key={g} value={g}>{g}%</option>)}
+                                            </select>
+                                          )}
                                         </div>
                                       </div>
                                     </div>
@@ -874,19 +953,134 @@ export default function Purchase() {
                   </div>
                 </div>
                 {expanded === po.id && (
-                  <div className="border-t px-4 pb-3">
-                    <table className="w-full text-xs mt-3">
-                      <thead><tr className="text-gray-400 uppercase"><th className="text-left">Code</th><th className="text-left">Name</th><th className="text-right">Qty</th><th className="text-right">Rate</th><th className="text-right">Amount</th></tr></thead>
-                      <tbody>{po.lines.map(l => (
-                        <tr key={l.id} className="border-t border-gray-50">
-                          <td className="py-1.5 font-medium">{l.material_code}</td>
-                          <td className="py-1.5">{l.material_name}</td>
-                          <td className="py-1.5 text-right">{l.po_qty}</td>
-                          <td className="py-1.5 text-right">{fmt(l.rate)}</td>
-                          <td className="py-1.5 text-right font-medium">{fmt(l.amount)}</td>
-                        </tr>
-                      ))}</tbody>
-                    </table>
+                  <div className="border-t px-4 pb-4 space-y-3 mt-0">
+                    {editingPO === po.id ? (
+                      /* ── Edit form ── */
+                      <div className="space-y-3 pt-3">
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                          <div>
+                            <label className="text-xs text-gray-500">Supplier</label>
+                            <select value={editPOForm.supplier_id ?? ''} onChange={e => {
+                              const s = suppliers.find(x => x.id === +e.target.value)
+                              setEditPOForm(f => ({ ...f, supplier_id: +e.target.value || undefined, supplier_name: s?.supplier_name || '' }))
+                            }} className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                              <option value="">Select supplier</option>
+                              {suppliers.map(s => <option key={s.id} value={s.id}>{s.supplier_name}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">Delivery Date</label>
+                            <input type="date" value={editPOForm.delivery_date} onChange={e => setEditPOForm(f => ({ ...f, delivery_date: e.target.value }))}
+                              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">Payment Terms</label>
+                            <select value={editPOForm.payment_terms} onChange={e => setEditPOForm(f => ({ ...f, payment_terms: e.target.value }))}
+                              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                              <option value="">—</option>
+                              {PAYMENT_TERMS.map(t => <option key={t}>{t}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">SO Reference</label>
+                            <input value={editPOForm.so_reference} onChange={e => setEditPOForm(f => ({ ...f, so_reference: e.target.value }))}
+                              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
+                          </div>
+                          <div className="col-span-2">
+                            <label className="text-xs text-gray-500">Remarks</label>
+                            <input value={editPOForm.remarks} onChange={e => setEditPOForm(f => ({ ...f, remarks: e.target.value }))}
+                              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
+                          </div>
+                        </div>
+
+                        {/* Editable lines */}
+                        <div>
+                          <div className="flex justify-between mb-2">
+                            <p className="text-xs font-semibold text-gray-600">PO Lines</p>
+                            <button onClick={() => setEditPOLines(l => [...l, { material_code: '', material_name: '', material_type: 'RM', po_qty: 0, unit: 'PCS', rate: 0, gst_pct: 0 }])}
+                              className="text-xs text-blue-600 hover:underline">+ Add Line</button>
+                          </div>
+                          <table className="w-full text-xs">
+                            <thead><tr className="text-gray-400 uppercase border-b">
+                              <th className="text-left pb-1">Code</th>
+                              <th className="text-left pb-1">Name</th>
+                              <th className="text-left pb-1">Type</th>
+                              <th className="text-right pb-1">Qty</th>
+                              <th className="text-right pb-1">Rate ₹</th>
+                              <th className="text-right pb-1">GST%</th>
+                              <th className="text-right pb-1">Amount</th>
+                              <th className="pb-1"></th>
+                            </tr></thead>
+                            <tbody>
+                              {editPOLines.map((ln, i) => (
+                                <tr key={i} className="border-t border-gray-50">
+                                  <td className="py-1"><input value={ln.material_code} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_code: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" placeholder="Code" /></td>
+                                  <td className="py-1"><input value={ln.material_name} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_name: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" placeholder="Name" /></td>
+                                  <td className="py-1">
+                                    <select value={ln.material_type} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_type: e.target.value } : x))} className="w-full border rounded px-1.5 py-1">
+                                      {MAT_TYPES.map(t => <option key={t}>{t}</option>)}
+                                    </select>
+                                  </td>
+                                  <td className="py-1"><input type="number" value={ln.po_qty} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, po_qty: +e.target.value } : x))} className="w-16 border rounded px-1.5 py-1 text-right" /></td>
+                                  <td className="py-1"><input type="number" value={ln.rate} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="w-20 border rounded px-1.5 py-1 text-right" /></td>
+                                  <td className="py-1">
+                                    <select value={ln.gst_pct} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, gst_pct: +e.target.value } : x))} className="w-full border rounded px-1.5 py-1">
+                                      {GST_RATES.map(g => <option key={g} value={g}>{g}%</option>)}
+                                    </select>
+                                  </td>
+                                  <td className="py-1 text-right font-medium pr-1">{fmt(ln.po_qty * ln.rate)}</td>
+                                  <td className="py-1"><button onClick={() => setEditPOLines(l => l.filter((_, j) => j !== i))} className="text-red-400 px-1">✕</button></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {editPOLines.length > 0 && (
+                            <p className="text-xs font-semibold text-right text-gray-700 mt-1 pr-6">
+                              Total: {fmt(editPOLines.reduce((s, l) => s + l.po_qty * l.rate, 0))}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            onClick={() => updatePOMut.mutate({ id: po.id, data: { ...editPOForm, lines: editPOLines } })}
+                            disabled={updatePOMut.isPending}
+                            className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
+                            {updatePOMut.isPending ? 'Saving…' : 'Save Changes'}
+                          </button>
+                          <button onClick={() => setEditingPO(null)} className="px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600">Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* ── Read-only view ── */
+                      <div className="space-y-2 pt-3">
+                        {po.status === 'Draft' && (
+                          <div className="flex justify-end">
+                            <button onClick={() => {
+                              const sup = suppliers.find(s => s.supplier_name === po.supplier_name)
+                              setEditingPO(po.id)
+                              setEditPOForm({ supplier_id: sup?.id, supplier_name: po.supplier_name, delivery_date: po.delivery_date || '', payment_terms: po.lines.length ? '' : '', so_reference: po.so_reference || '', remarks: '' })
+                              setEditPOLines(po.lines.map(l => ({ material_code: l.material_code, material_name: l.material_name, material_type: l.material_type || 'RM', po_qty: l.po_qty, unit: l.unit, rate: l.rate, gst_pct: l.gst_pct })))
+                            }}
+                              className="text-xs px-3 py-1 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">
+                              ✏️ Edit
+                            </button>
+                          </div>
+                        )}
+                        <table className="w-full text-xs">
+                          <thead><tr className="text-gray-400 uppercase border-b"><th className="text-left pb-1">Code</th><th className="text-left pb-1">Name</th><th className="text-right pb-1">Qty</th><th className="text-right pb-1">Rate</th><th className="text-right pb-1">Amount</th></tr></thead>
+                          <tbody>{po.lines.map(l => (
+                            <tr key={l.id} className="border-t border-gray-50">
+                              <td className="py-1.5 font-medium">{l.material_code}</td>
+                              <td className="py-1.5">{l.material_name}</td>
+                              <td className="py-1.5 text-right">{l.po_qty}</td>
+                              <td className="py-1.5 text-right">{fmt(l.rate)}</td>
+                              <td className="py-1.5 text-right font-medium">{fmt(l.amount)}</td>
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

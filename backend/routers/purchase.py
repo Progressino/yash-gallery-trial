@@ -5,8 +5,8 @@ from typing import Optional, List
 from ..db.purchase_db import (
     list_suppliers, create_supplier, update_supplier,
     list_processors, create_processor,
-    list_prs, create_pr, approve_pr, reject_pr, update_pr_status, create_pos_from_pr,
-    list_pos, create_po, update_po_status,
+    list_prs, create_pr, approve_pr, reject_pr, update_pr_status, create_pos_from_pr, mark_pr_lines_ordered,
+    list_pos, create_po, update_po_status, update_po,
     list_jwos, create_jwo, update_jwo_status,
     list_grns, create_grn, update_grn_status,
     get_purchase_stats
@@ -218,6 +218,14 @@ def patch_pr_status(prid: int, body: StatusUpdate):
     update_pr_status(prid, body.status)
     return {"ok": True}
 
+class MarkOrderedIn(BaseModel):
+    updates: List[dict] = []
+
+@router.post("/pr/{prid}/mark-ordered")
+def post_mark_pr_ordered(prid: int, body: MarkOrderedIn):
+    mark_pr_lines_ordered(prid, body.updates)
+    return {"ok": True}
+
 @router.post("/po/from-pr")
 def post_po_from_pr(body: POFromPRIn):
     po_numbers = create_pos_from_pr(
@@ -241,6 +249,11 @@ def post_po(body: POIn):
 @router.patch("/po/{poid}/status")
 def patch_po_status(poid: int, body: StatusUpdate):
     update_po_status(poid, body.status)
+    return {"ok": True}
+
+@router.patch("/po/{poid}")
+def patch_po(poid: int, body: dict):
+    update_po(poid, body)
     return {"ok": True}
 
 # ── Job Work Orders ───────────────────────────────────────────────────────────
