@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -169,7 +169,25 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads'
+type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'coa' | 'trial-balance'
+
+// ── Chart of Accounts types ───────────────────────────────────────
+interface CoALedger {
+  id: number; name: string; group_id: number | null; group_name: string; opening_balance: number
+}
+interface CoAGroup {
+  id: number; name: string; parent_group: string; nature: string
+  children: CoAGroup[]
+  ledgers: CoALedger[]
+}
+
+// ── Trial Balance types ───────────────────────────────────────────
+interface TBRow {
+  ledger: string; group: string; nature: string
+  opening_balance: number
+  period_dr: number; period_cr: number
+  debit: number; credit: number; closing: number
+}
 type MastersSubTab = 'ledger-groups' | 'ledgers' | 'gst-classifications' | 'tds-sections' | 'voucher-types'
 
 const VOUCHER_COLORS: Record<string, string> = {
@@ -426,6 +444,8 @@ export default function Finance() {
           ['gst','GST Summary'],
           ['expenses','Expenses'],
           ['masters','Masters'],
+          ['coa','Chart of Accounts'],
+          ['trial-balance','Trial Balance'],
           ['sales-uploads','Sales Uploads'],
         ] as [FinanceTab, string][]).map(([id, label]) => (
           <button key={id} onClick={() => setActiveTab(id)}
@@ -751,6 +771,12 @@ export default function Finance() {
 
       {/* ── Tab: Sales Uploads ── */}
       {activeTab === 'sales-uploads' && <SalesUploadsTab />}
+
+      {/* ── Tab: Chart of Accounts ── */}
+      {activeTab === 'coa' && <ChartOfAccountsTab />}
+
+      {/* ── Tab: Trial Balance ── */}
+      {activeTab === 'trial-balance' && <TrialBalanceTab />}
     </div>
   )
 }
@@ -2979,6 +3005,270 @@ function NatureBadge({ nature }: { nature: string }) {
     liability: 'bg-purple-50 text-purple-700',
   }[nature] ?? 'bg-gray-100 text-gray-600'
   return <span className={`text-xs px-1.5 py-0.5 rounded capitalize ${cls}`}>{nature}</span>
+}
+
+// ── Chart of Accounts Tab ─────────────────────────────────────────
+function ChartOfAccountsTab() {
+  const { data, isLoading } = useQuery<{ groups: CoAGroup[] }>({
+    queryKey: ['finance-coa'],
+    queryFn: async () => { const { data } = await api.get('/finance/chart-of-accounts'); return data },
+    staleTime: 60 * 1000,
+  })
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
+  const toggle = (id: number) => setCollapsed(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+
+  const NATURE_SECTIONS: { nature: string; label: string; color: string }[] = [
+    { nature: 'asset',     label: 'Assets',      color: 'bg-blue-50 border-blue-200' },
+    { nature: 'liability', label: 'Liabilities',  color: 'bg-amber-50 border-amber-200' },
+    { nature: 'income',    label: 'Income',       color: 'bg-green-50 border-green-200' },
+    { nature: 'expense',   label: 'Expenses',     color: 'bg-red-50 border-red-200' },
+  ]
+
+  const totalLedgers = (g: CoAGroup): number =>
+    g.ledgers.length + g.children.reduce((s, c) => s + totalLedgers(c), 0)
+
+  const renderGroup = (g: CoAGroup, depth: number = 0): React.ReactNode => {
+    const isCollapsed = collapsed.has(g.id)
+    const hasContent = g.children.length > 0 || g.ledgers.length > 0
+    const indentPx = depth * 20
+    const bgClass = depth === 0 ? 'bg-gray-50' : depth === 1 ? 'bg-white' : 'bg-gray-50/40'
+    return (
+      <div key={g.id}>
+        {/* Group header row */}
+        <div
+          className={`flex items-center gap-2 px-3 py-2 border-b border-gray-100 cursor-pointer hover:bg-blue-50/50 ${bgClass}`}
+          style={{ paddingLeft: `${12 + indentPx}px` }}
+          onClick={() => hasContent && toggle(g.id)}
+        >
+          {hasContent ? (
+            <span className="text-gray-400 text-xs w-3 flex-shrink-0">{isCollapsed ? '▶' : '▼'}</span>
+          ) : (
+            <span className="w-3 flex-shrink-0" />
+          )}
+          <span className={`font-semibold ${depth === 0 ? 'text-sm text-gray-800' : 'text-xs text-gray-700'}`}>
+            {g.name}
+          </span>
+          <NatureBadge nature={g.nature} />
+          {totalLedgers(g) > 0 && (
+            <span className="ml-auto text-xs text-gray-400">{totalLedgers(g)} ledger{totalLedgers(g) !== 1 ? 's' : ''}</span>
+          )}
+        </div>
+        {/* Children & ledgers */}
+        {!isCollapsed && (
+          <>
+            {g.children.map(child => renderGroup(child, depth + 1))}
+            {g.ledgers.map(ldr => (
+              <div key={ldr.id}
+                className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-50 bg-white hover:bg-gray-50"
+                style={{ paddingLeft: `${28 + indentPx}px` }}>
+                <span className="text-gray-300 text-xs">•</span>
+                <span className="text-xs text-gray-700 flex-1">{ldr.name}</span>
+                {ldr.opening_balance !== 0 && (
+                  <span className={`text-xs font-medium ${ldr.opening_balance >= 0 ? 'text-blue-600' : 'text-red-500'}`}>
+                    {ldr.opening_balance >= 0 ? 'Dr' : 'Cr'} ₹{Math.abs(ldr.opening_balance).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                  </span>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    )
+  }
+
+  if (isLoading) return <div className="p-8 text-center text-gray-400">Loading chart of accounts…</div>
+  if (!data) return null
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800">Chart of Accounts</h3>
+          <p className="text-xs text-gray-500 mt-0.5">Hierarchical view of all account groups and ledgers</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => setCollapsed(new Set())}
+            className="px-3 py-1.5 text-xs bg-white border border-gray-200 rounded hover:bg-gray-50">Expand All</button>
+          <button onClick={() => setCollapsed(new Set(data.groups.flatMap(g => collectIds(g))))}
+            className="px-3 py-1.5 text-xs bg-white border border-gray-200 rounded hover:bg-gray-50">Collapse All</button>
+        </div>
+      </div>
+
+      {NATURE_SECTIONS.map(({ nature, label, color }) => {
+        const sectionGroups = data.groups.filter(g => g.nature === nature)
+        if (sectionGroups.length === 0) return null
+        return (
+          <div key={nature} className={`border rounded-xl overflow-hidden ${color}`}>
+            <div className={`px-4 py-2 border-b ${color} flex items-center gap-2`}>
+              <span className="text-sm font-bold text-gray-800">{label}</span>
+              <span className="text-xs text-gray-500">
+                ({sectionGroups.reduce((s, g) => s + totalLedgers(g), 0)} ledgers)
+              </span>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {sectionGroups.map(g => renderGroup(g, 0))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function collectIds(g: CoAGroup): number[] {
+  return [g.id, ...g.children.flatMap(collectIds)]
+}
+
+// ── Trial Balance Tab ──────────────────────────────────────────────
+function TrialBalanceTab() {
+  const now = new Date()
+  const firstOfYear = `${now.getFullYear()}-04-01`  // Indian FY starts April
+  const todayStr = now.toISOString().slice(0, 10)
+  const [startDate, setStartDate] = useState(firstOfYear)
+  const [endDate,   setEndDate]   = useState(todayStr)
+  const [search,    setSearch]    = useState('')
+
+  const { data, isLoading, refetch } = useQuery<{
+    rows: TBRow[]; total_debit: number; total_credit: number; balanced: boolean
+  }>({
+    queryKey: ['finance-trial-balance', startDate, endDate],
+    queryFn: async () => {
+      const { data } = await api.get(`/finance/trial-balance?start_date=${startDate}&end_date=${endDate}`)
+      return data
+    },
+    staleTime: 30 * 1000,
+  })
+
+  const filtered = useMemo(() => {
+    if (!data?.rows) return []
+    const q = search.toLowerCase()
+    return q ? data.rows.filter(r => r.ledger.toLowerCase().includes(q) || r.group.toLowerCase().includes(q)) : data.rows
+  }, [data, search])
+
+  const NATURE_COLORS: Record<string, string> = {
+    asset:     'text-blue-700 bg-blue-50',
+    liability: 'text-amber-700 bg-amber-50',
+    income:    'text-green-700 bg-green-50',
+    expense:   'text-red-700 bg-red-50',
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Controls */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+        <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">From Date</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">To Date</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+          </div>
+          <button onClick={() => refetch()}
+            className="px-4 py-1.5 text-xs font-semibold bg-[#002B5B] text-white rounded hover:bg-blue-900">
+            Refresh
+          </button>
+          <div className="flex flex-col gap-1 ml-auto">
+            <label className="text-xs text-gray-500">Search Ledger</label>
+            <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter by name or group…"
+              className="text-xs border border-gray-200 rounded px-2 py-1.5 w-48 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+          </div>
+        </div>
+        {data && (
+          <div className={`mt-3 flex items-center gap-2 text-xs font-medium ${data.balanced ? 'text-green-700' : 'text-red-600'}`}>
+            <span>{data.balanced ? '✓' : '✗'}</span>
+            <span>
+              {data.balanced
+                ? 'Trial balance tallies — Total Dr = Total Cr'
+                : `Difference: ₹${Math.abs(data.total_debit - data.total_credit).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Table */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400">Loading trial balance…</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600">Ledger</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600">Group</th>
+                  <th className="px-4 py-3 text-right font-semibold text-gray-600">Opening Bal</th>
+                  <th className="px-4 py-3 text-right font-semibold text-gray-600 bg-blue-50">Period Dr (₹)</th>
+                  <th className="px-4 py-3 text-right font-semibold text-gray-600 bg-red-50">Period Cr (₹)</th>
+                  <th className="px-4 py-3 text-right font-semibold text-gray-600 border-l-2 border-gray-300">Closing Dr (₹)</th>
+                  <th className="px-4 py-3 text-right font-semibold text-gray-600">Closing Cr (₹)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {filtered.map((row, i) => {
+                  const closingDr = row.closing >= 0 ? row.closing : 0
+                  const closingCr = row.closing < 0 ? Math.abs(row.closing) : 0
+                  return (
+                    <tr key={i} className="hover:bg-gray-50">
+                      <td className="px-4 py-2.5 font-medium text-gray-800">{row.ledger}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`px-1.5 py-0.5 rounded text-xs ${NATURE_COLORS[row.nature] || 'bg-gray-100 text-gray-600'}`}>
+                          {row.group || '—'}
+                        </span>
+                      </td>
+                      <td className={`px-4 py-2.5 text-right ${row.opening_balance >= 0 ? 'text-blue-600' : 'text-red-500'}`}>
+                        {row.opening_balance !== 0
+                          ? `${row.opening_balance >= 0 ? '' : '('}₹${Math.abs(row.opening_balance).toLocaleString('en-IN', { maximumFractionDigits: 2 })}${row.opening_balance < 0 ? ')' : ''}`
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-blue-700 bg-blue-50/30 font-medium">
+                        {row.period_dr > 0 ? `₹${row.period_dr.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-red-600 bg-red-50/30 font-medium">
+                        {row.period_cr > 0 ? `₹${row.period_cr.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-semibold text-blue-700 border-l-2 border-gray-200">
+                        {closingDr > 0 ? `₹${closingDr.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-semibold text-red-600">
+                        {closingCr > 0 ? `₹${closingCr.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+              {data && (
+                <tfoot>
+                  <tr className="bg-gray-800 text-white font-bold">
+                    <td className="px-4 py-3" colSpan={2}>TOTAL</td>
+                    <td className="px-4 py-3 text-right">—</td>
+                    <td className="px-4 py-3 text-right">
+                      ₹{filtered.reduce((s, r) => s + r.period_dr, 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      ₹{filtered.reduce((s, r) => s + r.period_cr, 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                    </td>
+                    <td className="px-4 py-3 text-right border-l-2 border-gray-600">
+                      ₹{filtered.reduce((s, r) => s + (r.closing >= 0 ? r.closing : 0), 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      ₹{filtered.reduce((s, r) => s + (r.closing < 0 ? Math.abs(r.closing) : 0), 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+            {filtered.length === 0 && !isLoading && (
+              <div className="p-8 text-center text-gray-400">No ledger movements found for this period.</div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 // ── P&L Row helper ───────────────────────────────────────────────

@@ -36,6 +36,7 @@ from ..db.finance_db import (
     list_finance_sales_uploads, create_finance_sales_upload, delete_finance_sales_upload,
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
     list_vouchers, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances,
+    get_chart_of_accounts, get_trial_balance,
 )
 from ..services.finance import get_pl_statement, get_gst_summary, get_platform_revenue
 
@@ -541,6 +542,21 @@ def get_gstr3b(
 def ledger_balances():
     """Sum of payments/receipts per ledger."""
     return get_ledger_balances()
+
+
+@router.get("/chart-of-accounts")
+def chart_of_accounts():
+    """Return hierarchical Chart of Accounts tree."""
+    return get_chart_of_accounts()
+
+
+@router.get("/trial-balance")
+def trial_balance(
+    start_date: Optional[str] = None,
+    end_date:   Optional[str] = None,
+):
+    """Return trial balance with Dr/Cr per ledger for a given date range."""
+    return get_trial_balance(start_date=start_date, end_date=end_date)
 
 
 # ── Finance Sales Uploads ─────────────────────────────────────────

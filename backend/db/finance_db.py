@@ -184,6 +184,25 @@ def init_db() -> None:
             pass  # column already exists
     conn.commit()
 
+    # ── Migrate ledger_groups — fix missing parent_group assignments ──
+    parent_fixes = [
+        ('Bank Accounts',   'Current Assets'),
+        ('Cash-in-Hand',    'Current Assets'),
+        ('Sundry Debtors',  'Current Assets'),
+        ('Sundry Creditors','Current Liabilities'),
+        ('Duties & Taxes',  'Current Liabilities'),
+    ]
+    for grp_name, parent_name in parent_fixes:
+        row = conn.execute(
+            "SELECT id, parent_group FROM ledger_groups WHERE name=?", (grp_name,)
+        ).fetchone()
+        if row and not (row['parent_group'] or '').strip():
+            conn.execute(
+                "UPDATE ledger_groups SET parent_group=? WHERE name=?",
+                (parent_name, grp_name),
+            )
+    conn.commit()
+
     # ── Migrate ledgers table — add new columns if missing ────────
     for col_ddl in [
         "ALTER TABLE ledgers ADD COLUMN alias TEXT DEFAULT ''",
@@ -1020,3 +1039,128 @@ def delete_voucher_type(voucher_type_id: int) -> bool:
     deleted = cur.rowcount > 0
     conn.close()
     return deleted
+
+
+# ── Chart of Accounts ─────────────────────────────────────────────
+
+def get_chart_of_accounts() -> dict:
+    """Return a hierarchical Chart of Accounts tree: primary groups → sub-groups → ledgers."""
+    conn = _connect()
+    groups = [dict(r) for r in conn.execute(
+        "SELECT * FROM ledger_groups ORDER BY name"
+    ).fetchall()]
+    ledgers = [dict(r) for r in conn.execute(
+        "SELECT id, name, group_id, group_name, opening_balance FROM ledgers WHERE is_active=1 ORDER BY name"
+    ).fetchall()]
+    conn.close()
+
+    group_by_name = {g['name']: g for g in groups}
+    ledgers_by_gid: dict = {}
+    for ldr in ledgers:
+        gid = ldr.get('group_id')
+        if gid:
+            ledgers_by_gid.setdefault(gid, []).append(ldr)
+
+    def build_node(g: dict) -> dict:
+        node = dict(g)
+        node['children'] = sorted(
+            [build_node(child) for child in groups
+             if (child.get('parent_group') or '') == g['name']],
+            key=lambda c: c['name'],
+        )
+        node['ledgers'] = ledgers_by_gid.get(g['id'], [])
+        return node
+
+    # Primary groups = no parent_group or parent not in group_by_name
+    nature_order = {'asset': 0, 'liability': 1, 'income': 2, 'expense': 3}
+    primary = sorted(
+        [build_node(g) for g in groups
+         if not (g.get('parent_group') or '').strip()
+         or g.get('parent_group') not in group_by_name],
+        key=lambda n: (nature_order.get(n['nature'], 9), n['name']),
+    )
+
+    return {'groups': primary}
+
+
+# ── Trial Balance ─────────────────────────────────────────────────
+
+def get_trial_balance(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """Return trial balance: opening balance + period Dr/Cr movements per ledger."""
+    conn = _connect()
+
+    ledgers = [dict(r) for r in conn.execute("""
+        SELECT l.id, l.name, l.group_id, l.group_name, l.opening_balance,
+               lg.nature AS group_nature
+        FROM ledgers l
+        LEFT JOIN ledger_groups lg ON l.group_id = lg.id
+        WHERE l.is_active = 1
+        ORDER BY lg.nature, l.name
+    """).fetchall()]
+
+    q = """
+        SELECT evl.expense_head,
+               SUM(CASE WHEN evl.is_debit=1 THEN evl.amount ELSE 0 END) AS dr,
+               SUM(CASE WHEN evl.is_debit=0 THEN evl.amount ELSE 0 END) AS cr
+        FROM expense_voucher_lines evl
+        JOIN expense_vouchers ev ON evl.voucher_id = ev.id
+        WHERE 1=1
+    """
+    params: list = []
+    if start_date:
+        q += " AND ev.voucher_date >= ?"
+        params.append(start_date)
+    if end_date:
+        q += " AND ev.voucher_date <= ?"
+        params.append(end_date)
+    q += " GROUP BY evl.expense_head"
+
+    movements: dict = {}
+    for row in conn.execute(q, params).fetchall():
+        movements[row['expense_head']] = {
+            'dr': float(row['dr'] or 0),
+            'cr': float(row['cr'] or 0),
+        }
+    conn.close()
+
+    rows = []
+    total_dr = 0.0
+    total_cr = 0.0
+
+    for ldr in ledgers:
+        ob = float(ldr.get('opening_balance') or 0)
+        mvmt = movements.get(ldr['name'], {'dr': 0.0, 'cr': 0.0})
+
+        # Opening balance: positive → Dr side (asset/expense convention)
+        ob_dr = ob if ob >= 0 else 0.0
+        ob_cr = abs(ob) if ob < 0 else 0.0
+
+        dr = round(ob_dr + mvmt['dr'], 2)
+        cr = round(ob_cr + mvmt['cr'], 2)
+
+        if dr == 0 and cr == 0:
+            continue
+
+        rows.append({
+            'ledger':          ldr['name'],
+            'group':           ldr.get('group_name') or '',
+            'nature':          ldr.get('group_nature') or '',
+            'opening_balance': ob,
+            'period_dr':       round(mvmt['dr'], 2),
+            'period_cr':       round(mvmt['cr'], 2),
+            'debit':           dr,
+            'credit':          cr,
+            'closing':         round(dr - cr, 2),
+        })
+        total_dr += dr
+        total_cr += cr
+
+    return {
+        'rows':         rows,
+        'total_debit':  round(total_dr, 2),
+        'total_credit': round(total_cr, 2),
+        'balanced':     abs(total_dr - total_cr) < 0.01,
+    }
