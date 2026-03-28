@@ -135,10 +135,10 @@ export default function POEngine() {
     }
   }
 
-  // ── Quarterly columns (non-metadata) ──
+  // ── Quarterly columns (non-metadata) — newest first so recent data is immediately visible ──
   const qCols = quarterly?.columns ?? []
   const quarterCols = useMemo(() =>
-    qCols.filter(c => !['OMS_SKU','Avg_Monthly','ADS','Units_90d','Units_30d','Freq_30d','Status'].includes(c)),
+    [...qCols.filter(c => !['OMS_SKU','Avg_Monthly','ADS','Units_90d','Units_30d','Freq_30d','Status'].includes(c))].reverse(),
     [qCols]
   )
 

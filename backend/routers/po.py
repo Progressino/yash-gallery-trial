@@ -77,6 +77,9 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if sess is None:
         return {"loaded": False}
 
+    from ..routers.data import _restore_daily_if_needed
+    _restore_daily_if_needed(sess)
+
     cache_key = (group_by_parent, n_quarters)
     if cache_key in sess._quarterly_cache:
         return sess._quarterly_cache[cache_key]
