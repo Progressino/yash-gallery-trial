@@ -124,6 +124,11 @@ def calculate_quarterly_history(
     if hist.empty:
         return pd.DataFrame()
 
+    # Normalize SKUs: strip PL infix from all sources (fixes stale sales_df with old PL SKUs)
+    hist["SKU"] = hist["SKU"].apply(
+        lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper()) if isinstance(x, str) else str(x)
+    )
+
     if group_by_parent:
         hist["SKU"] = hist["SKU"].apply(get_parent_sku)
 
