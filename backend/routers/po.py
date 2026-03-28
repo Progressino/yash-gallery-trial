@@ -73,10 +73,18 @@ def po_calculate(request: Request, body: PORequest):
 
 @router.get("/quarterly-debug")
 def po_quarterly_debug(request: Request):
-    """Diagnostic endpoint — bypasses cache, returns sample of quarterly computation."""
+    """Diagnostic endpoint — clears quarterly cache, recomputes, returns sample."""
     sess = request.state.session
     if sess is None:
         return {"ok": False, "reason": "No session"}
+
+    # Also report & clear the live cache so next Calculate PO gets fresh data
+    cache_key = (False, 8)
+    cached = sess._quarterly_cache.get(cache_key)
+    cached_rows = len(cached.get("rows", [])) if cached else 0
+    cached_sample_sku = cached["rows"][0].get("OMS_SKU") if cached and cached.get("rows") else None
+    sess._quarterly_cache.clear()  # force fresh on next po/quarterly call
+
     from ..services.po_engine import calculate_quarterly_history
     pivot = calculate_quarterly_history(
         sales_df=sess.sales_df,
@@ -86,19 +94,27 @@ def po_quarterly_debug(request: Request):
         group_by_parent=False,
         n_quarters=8,
     )
-    import json
     sales_skus  = sorted(str(x) for x in sess.sales_df["Sku"].unique()[:10]) if not sess.sales_df.empty and "Sku" in sess.sales_df.columns else []
     inv_skus    = sorted(str(x) for x in sess.inventory_df_variant["OMS_SKU"].unique()[:10]) if not sess.inventory_df_variant.empty else []
     q_skus      = sorted(str(x) for x in pivot["OMS_SKU"].unique()[:10]) if not pivot.empty else []
     q_cols      = [str(c) for c in pivot.columns] if not pivot.empty else []
-    # Convert sample row to JSON-safe types
+    # Count how many quarterly SKUs actually exist in the inventory
+    if not pivot.empty and not sess.inventory_df_variant.empty:
+        inv_set = set(sess.inventory_df_variant["OMS_SKU"].astype(str))
+        matched = int(pivot["OMS_SKU"].astype(str).isin(inv_set).sum())
+    else:
+        matched = 0
     sample_row  = {str(k): (None if str(v) in ("nan", "NaN") else float(v) if hasattr(v, '__float__') else str(v))
                    for k, v in (pivot.fillna(0).iloc[0].to_dict().items() if not pivot.empty else {}.items())}
     return {
         "ok": True,
+        "cache_had_rows": cached_rows,
+        "cache_sample_sku": cached_sample_sku,
+        "cache_cleared": True,
         "sales_rows": int(len(sess.sales_df)),
         "inv_rows": int(len(sess.inventory_df_variant)),
         "quarterly_rows": int(len(pivot)) if not pivot.empty else 0,
+        "quarterly_skus_matching_inventory": matched,
         "quarterly_columns": q_cols,
         "sales_sku_sample": sales_skus,
         "inv_sku_sample": inv_skus,
