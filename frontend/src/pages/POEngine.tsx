@@ -113,6 +113,7 @@ export default function POEngine() {
   // ephemeral UI state (no need to persist across navigation)
   const [loading, setLoading]       = useState(false)
   const [raiseModal, setRaiseModal] = useState(false)
+  const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
 
   // ── Calculate PO + quarterly in parallel ──
   const run = async () => {
@@ -145,13 +146,21 @@ export default function POEngine() {
   // ── Quarter lookup map ──
   const quarterMap = useMemo(() => {
     const map: Record<string, Record<string, number | string>> = {}
-    for (const row of quarterly?.rows ?? []) {
-      map[String(row.OMS_SKU)] = {}
+    const rows = quarterly?.rows ?? []
+    if (rows.length > 0 && quarterCols.length > 0) {
+      // Debug: log first row to verify column key format matches quarterCols
+      const firstRow = rows[0]
+      const sampleCol = quarterCols[0]
+      console.debug('[PO quarterly] quarterCols sample:', sampleCol, '| row keys:', Object.keys(firstRow).slice(0, 5), '| sample value:', firstRow[sampleCol])
+    }
+    for (const row of rows) {
+      const omsSku = String(row.OMS_SKU).toUpperCase()
+      map[omsSku] = {}
       for (const c of quarterCols) {
-        map[String(row.OMS_SKU)][c] = Number(row[c] ?? 0)
+        map[omsSku][c] = Number(row[c] ?? 0)
       }
-      map[String(row.OMS_SKU)]['Status'] = row['Status'] as string
-      map[String(row.OMS_SKU)]['Avg_Monthly'] = Number(row['Avg_Monthly'] ?? 0)
+      map[omsSku]['Status'] = row['Status'] as string
+      map[omsSku]['Avg_Monthly'] = Number(row['Avg_Monthly'] ?? 0)
     }
     return map
   }, [quarterly, quarterCols])
@@ -424,6 +433,20 @@ export default function POEngine() {
                     ✓ {quarterCols.length} quarters loaded
                   </span>
                 )}
+                {result?.ok && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        const r = await api.get('/po/quarterly-debug')
+                        setDebugInfo(r.data)
+                      } catch { setDebugInfo({ error: 'fetch failed' }) }
+                    }}
+                    className="text-xs px-2 py-1 rounded border border-gray-200 text-gray-400 hover:bg-gray-50"
+                    title="Show quarterly data diagnostic"
+                  >
+                    🔍 Diag
+                  </button>
+                )}
                 <div className="ml-auto flex gap-2">
                   {someSelected && (
                     <button
@@ -441,6 +464,17 @@ export default function POEngine() {
                   </button>
                 </div>
               </div>
+
+              {/* Diagnostic panel */}
+              {debugInfo && (
+                <div className="text-xs bg-yellow-50 border border-yellow-200 rounded-lg p-3 font-mono overflow-auto max-h-64">
+                  <div className="flex justify-between mb-1">
+                    <span className="font-bold text-yellow-800">🔍 Quarterly Diagnostic</span>
+                    <button onClick={() => setDebugInfo(null)} className="text-yellow-600 hover:text-yellow-900">✕</button>
+                  </div>
+                  <pre className="text-yellow-900 whitespace-pre-wrap">{JSON.stringify(debugInfo, null, 2)}</pre>
+                </div>
+              )}
 
               {/* Pipeline info banner */}
               <div className="flex items-center gap-2 text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg px-4 py-2">

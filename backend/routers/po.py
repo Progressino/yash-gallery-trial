@@ -71,6 +71,42 @@ def po_calculate(request: Request, body: PORequest):
     }
 
 
+@router.get("/quarterly-debug")
+def po_quarterly_debug(request: Request):
+    """Diagnostic endpoint — bypasses cache, returns sample of quarterly computation."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "reason": "No session"}
+    from ..services.po_engine import calculate_quarterly_history
+    pivot = calculate_quarterly_history(
+        sales_df=sess.sales_df,
+        mtr_df=sess.mtr_df if not sess.mtr_df.empty else None,
+        myntra_df=sess.myntra_df if not sess.myntra_df.empty else None,
+        sku_mapping=sess.sku_mapping or None,
+        group_by_parent=False,
+        n_quarters=8,
+    )
+    import json
+    sales_skus  = sorted(str(x) for x in sess.sales_df["Sku"].unique()[:10]) if not sess.sales_df.empty and "Sku" in sess.sales_df.columns else []
+    inv_skus    = sorted(str(x) for x in sess.inventory_df_variant["OMS_SKU"].unique()[:10]) if not sess.inventory_df_variant.empty else []
+    q_skus      = sorted(str(x) for x in pivot["OMS_SKU"].unique()[:10]) if not pivot.empty else []
+    q_cols      = [str(c) for c in pivot.columns] if not pivot.empty else []
+    # Convert sample row to JSON-safe types
+    sample_row  = {str(k): (None if str(v) in ("nan", "NaN") else float(v) if hasattr(v, '__float__') else str(v))
+                   for k, v in (pivot.fillna(0).iloc[0].to_dict().items() if not pivot.empty else {}.items())}
+    return {
+        "ok": True,
+        "sales_rows": int(len(sess.sales_df)),
+        "inv_rows": int(len(sess.inventory_df_variant)),
+        "quarterly_rows": int(len(pivot)) if not pivot.empty else 0,
+        "quarterly_columns": q_cols,
+        "sales_sku_sample": sales_skus,
+        "inv_sku_sample": inv_skus,
+        "quarterly_sku_sample": q_skus,
+        "sample_row": sample_row,
+    }
+
+
 @router.get("/quarterly")
 def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: int = 8):
     sess = request.state.session

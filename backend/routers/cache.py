@@ -71,6 +71,8 @@ def cache_load(request: Request):
                 ].reset_index(drop=True)
         for key, val in loaded.items():
             setattr(sess, key, val)
+        # Invalidate quarterly cache — sales data changed
+        sess._quarterly_cache.clear()
 
         # Merge saved daily uploads into the session (last 30 days, from SQLite)
         # Use _merge_platform_data (not pd.concat) to prevent duplicates when
