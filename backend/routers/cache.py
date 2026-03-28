@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest
-from ..services.daily_store import load_all_platforms
+from ..services.daily_store import load_all_platforms, merge_platform_data as _merge_platform_data
 
 router = APIRouter()
 
@@ -73,16 +73,18 @@ def cache_load(request: Request):
             setattr(sess, key, val)
 
         # Merge saved daily uploads into the session (last 30 days, from SQLite)
+        # Use _merge_platform_data (not pd.concat) to prevent duplicates when
+        # the GitHub cache and SQLite daily store overlap for the same period.
         try:
             daily_data = load_all_platforms()
             if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
-                sess.mtr_df = pd.concat([sess.mtr_df, daily_data["amazon"]], ignore_index=True) if not sess.mtr_df.empty else daily_data["amazon"]
+                sess.mtr_df = _merge_platform_data(sess.mtr_df, daily_data["amazon"], "amazon")
             if daily_data.get("myntra") is not None and not daily_data["myntra"].empty:
-                sess.myntra_df = pd.concat([sess.myntra_df, daily_data["myntra"]], ignore_index=True) if not sess.myntra_df.empty else daily_data["myntra"]
+                sess.myntra_df = _merge_platform_data(sess.myntra_df, daily_data["myntra"], "myntra")
             if daily_data.get("meesho") is not None and not daily_data["meesho"].empty:
-                sess.meesho_df = pd.concat([sess.meesho_df, daily_data["meesho"]], ignore_index=True) if not sess.meesho_df.empty else daily_data["meesho"]
+                sess.meesho_df = _merge_platform_data(sess.meesho_df, daily_data["meesho"], "meesho")
             if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
-                sess.flipkart_df = pd.concat([sess.flipkart_df, daily_data["flipkart"]], ignore_index=True) if not sess.flipkart_df.empty else daily_data["flipkart"]
+                sess.flipkart_df = _merge_platform_data(sess.flipkart_df, daily_data["flipkart"], "flipkart")
             if daily_data:
                 n_days = sum(1 for v in daily_data.values() if not v.empty)
                 msg += f" + {n_days} platform(s) of daily data loaded from local store."

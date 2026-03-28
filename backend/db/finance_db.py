@@ -223,20 +223,20 @@ def init_db() -> None:
             pass  # column already exists
     conn.commit()
 
-    # ── Seed ledger_groups ────────────────────────────────────────
+    # ── Seed ledger_groups (primary groups, fresh install only) ─────
     count = conn.execute("SELECT COUNT(*) FROM ledger_groups").fetchone()[0]
     if count == 0:
         seed_groups = [
             ('Direct Expenses',   '', 'expense'),
             ('Indirect Expenses', '', 'expense'),
-            ('Direct Income',     '', 'income'),
-            ('Indirect Income',   '', 'income'),
+            ('Direct Incomes',    '', 'income'),
+            ('Indirect Incomes',  '', 'income'),
             ('Purchase Accounts', '', 'expense'),
             ('Sales Accounts',    '', 'income'),
             ('Sundry Creditors',  '', 'liability'),
             ('Sundry Debtors',    '', 'asset'),
             ('Bank Accounts',     '', 'asset'),
-            ('Cash-in-Hand',      '', 'asset'),
+            ('Cash-in-hand',      '', 'asset'),
             ('Duties & Taxes',    '', 'liability'),
             ('Capital Account',   '', 'liability'),
         ]
@@ -246,26 +246,105 @@ def init_db() -> None:
         )
         conn.commit()
 
-    # ── Seed additional Tally ledger groups (INSERT OR IGNORE) ────
-    extra_groups = [
-        ('Reserve & Surplus',           'Capital Account',   'liability'),
-        ('Bank Overdraft',              'Loans Liabilities', 'liability'),
-        ('Secured Loans',               'Loans Liabilities', 'liability'),
-        ('Unsecured Loans',             'Loans Liabilities', 'liability'),
-        ('Loans Liabilities',           '',                  'liability'),
-        ('Fixed Assets',                '',                  'asset'),
-        ('Investments',                 '',                  'asset'),
-        ('Current Assets',              '',                  'asset'),
-        ('Current Liabilities',         '',                  'liability'),
-        ('Deposit Assets',              'Current Assets',    'asset'),
-        ('Loans & Advances (Assets)',   'Current Assets',    'asset'),
-        ('Stock in Hand',               'Current Assets',    'asset'),
-        ('Provision',                   'Current Liabilities', 'liability'),
-        ('Miscellaneous Expenses',      '',                  'asset'),
-        ('Suspense Account',            '',                  'asset'),
-        ('Branch/Division',             '',                  'asset'),
+    # ── Rename groups to exact Tally names (idempotent) ───────────
+    rename_map = [
+        ('Direct Income',             'Direct Incomes'),
+        ('Indirect Income',           'Indirect Incomes'),
+        ('Cash-in-Hand',              'Cash-in-hand'),
+        ('Loans Liabilities',         'Loans (Liability)'),
+        ('Miscellaneous Expenses',    'Misc. Expenses (ASSET)'),
+        ('Suspense Account',          'Suspense A/c'),
+        ('Bank Overdraft',            'Bank OD A/c'),
+        ('Deposit Assets',            'Deposits (Asset)'),
+        ('Loans & Advances (Assets)', 'Loans & Advances (Asset)'),
+        ('Stock in Hand',             'Stock-in-hand'),
+        ('Provision',                 'Provisions'),
+        ('Reserve & Surplus',         'Reserves & Surplus'),
+        ('Branch/Division',           'Branch / Divisions'),
     ]
-    for grp in extra_groups:
+    for old_name, new_name in rename_map:
+        exists_old = conn.execute("SELECT 1 FROM ledger_groups WHERE name=?", (old_name,)).fetchone()
+        exists_new = conn.execute("SELECT 1 FROM ledger_groups WHERE name=?", (new_name,)).fetchone()
+        if exists_old and not exists_new:
+            conn.execute("UPDATE ledger_groups SET name=? WHERE name=?", (new_name, old_name))
+    conn.commit()
+
+    # ── Insert all 71 Tally groups (INSERT OR IGNORE) ─────────────
+    all_71_groups = [
+        # (name, parent_group, nature)
+        ('Branch / Divisions',          '',                    'asset'),
+        ('Capital Account',             '',                    'liability'),
+        ('Reserves & Surplus',          'Capital Account',     'liability'),
+        ('Current Assets',              '',                    'asset'),
+        ('Bank Accounts',               'Current Assets',      'asset'),
+        ('Cash-in-hand',                'Current Assets',      'asset'),
+        ('Deposits (Asset)',             'Current Assets',      'asset'),
+        ('Loans & Advances (Asset)',     'Current Assets',      'asset'),
+        ('Prepaid Expenses',            'Current Assets',      'asset'),
+        ('Stock-in-hand',               'Current Assets',      'asset'),
+        ('Sundry Debtors',              'Current Assets',      'asset'),
+        ('Online Portal',               'Sundry Debtors',      'asset'),
+        ('Portal TDS',                  'Sundry Debtors',      'asset'),
+        ('Shopfiy',                     'Sundry Debtors',      'asset'),
+        ('Current Liabilities',         '',                    'liability'),
+        ('Duties & Taxes',              'Current Liabilities', 'liability'),
+        ('CGST',                        'Duties & Taxes',      'liability'),
+        ('IGST',                        'Duties & Taxes',      'liability'),
+        ('RCM Tax',                     'Duties & Taxes',      'liability'),
+        ('SGST',                        'Duties & Taxes',      'liability'),
+        ('TDS Working',                 'Duties & Taxes',      'liability'),
+        ('PF Or ESIC',                  'Current Liabilities', 'liability'),
+        ('ESIC',                        'PF Or ESIC',          'liability'),
+        ('Esic and PF Other Charges',   'PF Or ESIC',          'liability'),
+        ('PF',                          'PF Or ESIC',          'liability'),
+        ('Provisions',                  'Current Liabilities', 'liability'),
+        ('Salary Exempt',               'Current Liabilities', 'liability'),
+        ('Salary & Wages Payable',      'Current Liabilities', 'liability'),
+        ('Sundry Creditors',            'Current Liabilities', 'liability'),
+        ('Creditors for Expenses',      'Sundry Creditors',    'liability'),
+        ('In House Job Work',           'Sundry Creditors',    'liability'),
+        ('MSME',                        'Sundry Creditors',    'liability'),
+        ('Non MSME',                    'Sundry Creditors',    'liability'),
+        ('Transport Contractors',       'Sundry Creditors',    'liability'),
+        ('Direct Expenses',             '',                    'expense'),
+        ('Electricity Direct Exp.',     'Direct Expenses',     'expense'),
+        ('FREIGHT EXPENSES',            'Direct Expenses',     'expense'),
+        ('Job Work',                    'Direct Expenses',     'expense'),
+        ('PACKING MATERIAL',            'Direct Expenses',     'expense'),
+        ('Direct Incomes',              '',                    'income'),
+        ('Fixed Assets',                '',                    'asset'),
+        ('Computers & Peripherals',     'Fixed Assets',        'asset'),
+        ('Furniture',                   'Fixed Assets',        'asset'),
+        ('Office Equipment',            'Fixed Assets',        'asset'),
+        ('Plant & Machinery',           'Fixed Assets',        'asset'),
+        ('Sewing Machine',              'Fixed Assets',        'asset'),
+        ('Solar & Power Backup Assets', 'Fixed Assets',        'asset'),
+        ('Indirect Expenses',           '',                    'expense'),
+        ('Advertisements',              'Indirect Expenses',   'expense'),
+        ('Bank Charges',                'Indirect Expenses',   'expense'),
+        ('Commission Charges',          'Indirect Expenses',   'expense'),
+        ('Contribution PF Or Esic',     'Indirect Expenses',   'expense'),
+        ('E-Commerce Portal Expenses',  'Indirect Expenses',   'expense'),
+        ('Fixed Fee',                   'Indirect Expenses',   'expense'),
+        ('Interest',                    'Indirect Expenses',   'expense'),
+        ('Internet & Recharges Expe.',  'Indirect Expenses',   'expense'),
+        ('Legal and Professional Exp.', 'Indirect Expenses',   'expense'),
+        ('Office Expenses',             'Indirect Expenses',   'expense'),
+        ('PRINTING & STATIONERY',       'Indirect Expenses',   'expense'),
+        ('Repaire & Maintenance Exp.',  'Indirect Expenses',   'expense'),
+        ('Indirect Incomes',            '',                    'income'),
+        ('Investments',                 '',                    'asset'),
+        ('Loans (Liability)',            '',                    'liability'),
+        ('Bank OD A/c',                 'Loans (Liability)',    'liability'),
+        ('Secured Loans',               'Loans (Liability)',    'liability'),
+        ('Unsecured Loans',             'Loans (Liability)',    'liability'),
+        ('Misc. Expenses (ASSET)',       '',                    'asset'),
+        ('Purchase Accounts',           '',                    'expense'),
+        ('Raw Material',                'Purchase Accounts',   'expense'),
+        ('Sales Accounts',              '',                    'income'),
+        ('Suspense A/c',                '',                    'liability'),
+    ]
+    for grp in all_71_groups:
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO ledger_groups (name, parent_group, nature) VALUES (?,?,?)",
@@ -273,6 +352,72 @@ def init_db() -> None:
             )
         except Exception:
             pass
+    conn.commit()
+
+    # ── Fix parent_group for all groups to match Tally hierarchy ──
+    parent_corrections = [
+        ('Reserves & Surplus',          'Capital Account'),
+        ('Bank Accounts',               'Current Assets'),
+        ('Cash-in-hand',                'Current Assets'),
+        ('Deposits (Asset)',             'Current Assets'),
+        ('Loans & Advances (Asset)',     'Current Assets'),
+        ('Prepaid Expenses',            'Current Assets'),
+        ('Stock-in-hand',               'Current Assets'),
+        ('Sundry Debtors',              'Current Assets'),
+        ('Online Portal',               'Sundry Debtors'),
+        ('Portal TDS',                  'Sundry Debtors'),
+        ('Shopfiy',                     'Sundry Debtors'),
+        ('Duties & Taxes',              'Current Liabilities'),
+        ('PF Or ESIC',                  'Current Liabilities'),
+        ('Provisions',                  'Current Liabilities'),
+        ('Salary Exempt',               'Current Liabilities'),
+        ('Salary & Wages Payable',      'Current Liabilities'),
+        ('Sundry Creditors',            'Current Liabilities'),
+        ('CGST',                        'Duties & Taxes'),
+        ('IGST',                        'Duties & Taxes'),
+        ('RCM Tax',                     'Duties & Taxes'),
+        ('SGST',                        'Duties & Taxes'),
+        ('TDS Working',                 'Duties & Taxes'),
+        ('ESIC',                        'PF Or ESIC'),
+        ('Esic and PF Other Charges',   'PF Or ESIC'),
+        ('PF',                          'PF Or ESIC'),
+        ('Creditors for Expenses',      'Sundry Creditors'),
+        ('In House Job Work',           'Sundry Creditors'),
+        ('MSME',                        'Sundry Creditors'),
+        ('Non MSME',                    'Sundry Creditors'),
+        ('Transport Contractors',       'Sundry Creditors'),
+        ('Electricity Direct Exp.',     'Direct Expenses'),
+        ('FREIGHT EXPENSES',            'Direct Expenses'),
+        ('Job Work',                    'Direct Expenses'),
+        ('PACKING MATERIAL',            'Direct Expenses'),
+        ('Computers & Peripherals',     'Fixed Assets'),
+        ('Furniture',                   'Fixed Assets'),
+        ('Office Equipment',            'Fixed Assets'),
+        ('Plant & Machinery',           'Fixed Assets'),
+        ('Sewing Machine',              'Fixed Assets'),
+        ('Solar & Power Backup Assets', 'Fixed Assets'),
+        ('Advertisements',              'Indirect Expenses'),
+        ('Bank Charges',                'Indirect Expenses'),
+        ('Commission Charges',          'Indirect Expenses'),
+        ('Contribution PF Or Esic',     'Indirect Expenses'),
+        ('E-Commerce Portal Expenses',  'Indirect Expenses'),
+        ('Fixed Fee',                   'Indirect Expenses'),
+        ('Interest',                    'Indirect Expenses'),
+        ('Internet & Recharges Expe.',  'Indirect Expenses'),
+        ('Legal and Professional Exp.', 'Indirect Expenses'),
+        ('Office Expenses',             'Indirect Expenses'),
+        ('PRINTING & STATIONERY',       'Indirect Expenses'),
+        ('Repaire & Maintenance Exp.',  'Indirect Expenses'),
+        ('Bank OD A/c',                 'Loans (Liability)'),
+        ('Secured Loans',               'Loans (Liability)'),
+        ('Unsecured Loans',             'Loans (Liability)'),
+        ('Raw Material',                'Purchase Accounts'),
+    ]
+    for grp_name, correct_parent in parent_corrections:
+        conn.execute(
+            "UPDATE ledger_groups SET parent_group=? WHERE name=? AND parent_group!=?",
+            (correct_parent, grp_name, correct_parent),
+        )
     conn.commit()
 
     # ── Seed gst_classifications ──────────────────────────────────
@@ -342,8 +487,8 @@ def init_db() -> None:
 
     seed_ledgers = [
         # name, group_name, gstin, tds_applicable, tds_section, state
-        ('Cash',                         'Cash-in-Hand',      '', 0, '', 'Rajasthan'),
-        ('Petty Cash',                   'Cash-in-Hand',      '', 0, '', 'Rajasthan'),
+        ('Cash',                         'Cash-in-hand',      '', 0, '', 'Rajasthan'),
+        ('Petty Cash',                   'Cash-in-hand',      '', 0, '', 'Rajasthan'),
         ('SBI Current Account',          'Bank Accounts',     '', 0, '', 'Rajasthan'),
         ('HDFC Current Account',         'Bank Accounts',     '', 0, '', 'Rajasthan'),
         ('ICICI Current Account',        'Bank Accounts',     '', 0, '', 'Rajasthan'),
@@ -400,6 +545,30 @@ def init_db() -> None:
                    VALUES (?,?,?,?,?,?,?,0,?,?,1)""",
                 (name, '', gid, group_name, gstin, tds_app, tds_sec, state, 'India'),
             )
+    conn.commit()
+
+    # ── Fix ledger group_name/group_id for renamed groups ─────────
+    ledger_group_renames = [
+        ('Cash-in-Hand', 'Cash-in-hand'),
+        ('Direct Income', 'Direct Incomes'),
+        ('Indirect Income', 'Indirect Incomes'),
+        ('Loans Liabilities', 'Loans (Liability)'),
+        ('Miscellaneous Expenses', 'Misc. Expenses (ASSET)'),
+        ('Suspense Account', 'Suspense A/c'),
+        ('Bank Overdraft', 'Bank OD A/c'),
+        ('Deposit Assets', 'Deposits (Asset)'),
+        ('Loans & Advances (Assets)', 'Loans & Advances (Asset)'),
+        ('Stock in Hand', 'Stock-in-hand'),
+        ('Provision', 'Provisions'),
+        ('Reserve & Surplus', 'Reserves & Surplus'),
+        ('Branch/Division', 'Branch / Divisions'),
+    ]
+    for old_gname, new_gname in ledger_group_renames:
+        new_gid = _grp_id(new_gname)
+        conn.execute(
+            "UPDATE ledgers SET group_name=?, group_id=? WHERE group_name=?",
+            (new_gname, new_gid, old_gname),
+        )
     conn.commit()
 
     conn.close()
