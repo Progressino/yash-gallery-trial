@@ -33,17 +33,24 @@ echo ""
 echo "▶  Starting containers…"
 $COMPOSE up -d
 
-# 4. Health check
+# 4. Health check (hit backend container directly on port 8000, bypassing nginx HTTPS redirect)
 echo ""
 echo "🩺 Health check…"
-sleep 3
-if curl -sf http://localhost/api/health > /dev/null; then
-  echo "   ✅ Backend healthy"
-else
-  echo "   ❌ Backend not responding — check logs:"
-  echo "      docker compose -f docker-compose.prod.yml logs backend"
-  exit 1
-fi
+sleep 5
+HEALTH_URL="http://localhost:8000/api/health"
+for i in 1 2 3; do
+  if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
+    echo "   ✅ Backend healthy"
+    break
+  fi
+  if [ "$i" -eq 3 ]; then
+    echo "   ❌ Backend not responding after 3 attempts — check logs:"
+    echo "      docker compose -f docker-compose.prod.yml logs backend"
+    exit 1
+  fi
+  echo "   ⏳ Attempt $i failed, retrying in 3s…"
+  sleep 3
+done
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
