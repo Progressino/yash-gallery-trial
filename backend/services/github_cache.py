@@ -55,9 +55,21 @@ def _get_gh_release() -> Tuple[Optional[int], Dict, Optional[str]]:
             headers=headers, timeout=15,
         )
         if r.status_code == 200:
-            rel    = r.json()
-            assets = {a["name"]: (a["id"], a["browser_download_url"]) for a in rel.get("assets", [])}
-            return rel["id"], assets, None
+            rel        = r.json()
+            release_id = rel["id"]
+            # Verify the release hasn't been deleted (tag can outlive the release)
+            r_check = requests.get(
+                f"{_GH_API}/repos/{repo}/releases/{release_id}",
+                headers=headers, timeout=15,
+            )
+            if r_check.status_code == 200:
+                assets = {a["name"]: (a["id"], a["browser_download_url"]) for a in rel.get("assets", [])}
+                return release_id, assets, None
+            # Stale tag — delete it so we can recreate the release with the same tag name
+            requests.delete(
+                f"{_GH_API}/repos/{repo}/git/refs/tags/{_CACHE_RELEASE_TAG}",
+                headers=headers, timeout=15,
+            )
         # Create release
         r = requests.post(
             f"{_GH_API}/repos/{repo}/releases",
