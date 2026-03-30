@@ -2648,17 +2648,21 @@ function VoucherTypesSubTab() {
 
 // ── Sales Uploads Tab ─────────────────────────────────────────────
 const PLATFORM_FILE_HINTS: Record<string, string> = {
-  Amazon:   'ZIP file containing Amazon MTR CSV reports',
-  Myntra:   'ZIP file containing Myntra settlement CSVs',
-  Meesho:   'ZIP file containing Meesho payment reports',
-  Flipkart: 'ZIP file containing Flipkart settlement reports',
-  Snapdeal: 'ZIP file containing Snapdeal payment reports',
+  Amazon:           'ZIP containing Amazon MTR CSV reports (B2C/B2B)',
+  Myntra:           'ZIP containing Myntra settlement CSVs',
+  Meesho:           'ZIP containing Meesho orders or gst_* finance ZIP',
+  Flipkart:         'ZIP containing Flipkart order/settlement reports',
+  Snapdeal:         'Snapdeal settlement XLSX (monthly finance report)',
+  'Monthly Package':'Full monthly sales ZIP — auto-detects all platforms',
 }
 
 interface UploadResult {
-  id: number; platform: string; period: string; filename: string
+  id?: number; platform: string; period: string; filename: string
   total_revenue: number; total_orders: number; total_returns: number
-  net_revenue: number; rows_parsed: number
+  net_revenue: number; rows_parsed?: number
+  // Monthly package fields
+  saved?: { platform: string; id: number; orders: number; revenue: number; returns: number; net_revenue: number; note?: string }[]
+  skipped?: string[]
 }
 
 function SalesUploadsTab() {
@@ -2692,17 +2696,22 @@ function SalesUploadsTab() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['finance-sales-uploads'] }),
   })
 
+  const isPackage = platform === 'Monthly Package'
+
   async function handleFile(file: File) {
     if (!period) { setErr('Select a period (month) before uploading.'); return }
     setErr(''); setResult(null); setUploading(true)
     try {
       const fd = new FormData()
       fd.append('file',        file)
-      fd.append('platform',    platform)
       fd.append('period',      period)
       fd.append('uploaded_by', uploadedBy)
       fd.append('notes',       notes)
-      const { data } = await api.post('/finance/sales-uploads/upload-file', fd, {
+      const endpoint = isPackage
+        ? '/finance/sales-uploads/upload-monthly-package'
+        : '/finance/sales-uploads/upload-file'
+      if (!isPackage) fd.append('platform', platform)
+      const { data } = await api.post(endpoint, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setResult(data)
@@ -2740,7 +2749,7 @@ function SalesUploadsTab() {
             <label className="text-xs text-gray-500">Platform *</label>
             <select value={platform} onChange={e => { setPlatform(e.target.value); setResult(null) }}
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
-              {['Amazon','Myntra','Meesho','Flipkart','Snapdeal'].map(p => <option key={p}>{p}</option>)}
+              {['Monthly Package','Amazon','Myntra','Meesho','Flipkart','Snapdeal'].map(p => <option key={p}>{p}</option>)}
             </select>
           </div>
           <div className="flex flex-col gap-1">
@@ -2774,13 +2783,18 @@ function SalesUploadsTab() {
           {uploading ? (
             <div className="space-y-2">
               <div className="w-8 h-8 border-2 border-[#002B5B] border-t-transparent rounded-full animate-spin mx-auto" />
-              <p className="text-sm text-gray-500">Parsing {platform} file…</p>
+              <p className="text-sm text-gray-500">{isPackage ? 'Processing all platforms…' : `Parsing ${platform} file…`}</p>
             </div>
           ) : (
             <div className="space-y-2">
-              <div className="text-3xl">📂</div>
-              <p className="text-sm font-medium text-gray-700">Drop {platform} sales file here</p>
+              <div className="text-3xl">{isPackage ? '📦' : '📂'}</div>
+              <p className="text-sm font-medium text-gray-700">
+                {isPackage ? 'Drop monthly sales ZIP here' : `Drop ${platform} sales file here`}
+              </p>
               <p className="text-xs text-gray-400">{PLATFORM_FILE_HINTS[platform]}</p>
+              {isPackage && (
+                <p className="text-xs text-amber-600">Parses Amazon, Myntra, Meesho, Snapdeal automatically. Flipkart PDFs counted as invoice records.</p>
+              )}
               <p className="text-xs text-gray-400">or <span className="text-[#002B5B] font-medium underline">click to browse</span></p>
             </div>
           )}
@@ -2793,26 +2807,70 @@ function SalesUploadsTab() {
         {/* Parse result */}
         {result && (
           <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="text-green-600 text-lg">✅</span>
-              <div>
-                <p className="text-sm font-semibold text-green-800">Upload saved — {result.rows_parsed.toLocaleString()} rows parsed</p>
-                <p className="text-xs text-green-600">{result.filename} · {result.platform} · {result.period}</p>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                { label: 'Gross Revenue', value: fmt(result.total_revenue), color: 'text-gray-800' },
-                { label: 'Returns',       value: fmt(result.total_returns), color: 'text-red-600'  },
-                { label: 'Net Revenue',   value: fmt(result.net_revenue),   color: 'text-green-700'},
-                { label: 'Orders',        value: result.total_orders.toLocaleString(), color: 'text-gray-700' },
-              ].map(({ label, value, color }) => (
-                <div key={label} className="bg-white rounded-lg p-3 border border-green-100 text-center">
-                  <p className="text-xs text-gray-500 mb-1">{label}</p>
-                  <p className={`text-sm font-bold ${color}`}>{value}</p>
+            {result.saved ? (
+              /* Monthly package result */
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="text-green-600 text-lg">✅</span>
+                  <div>
+                    <p className="text-sm font-semibold text-green-800">Monthly package processed — {result.saved.length} platform{result.saved.length !== 1 ? 's' : ''} saved</p>
+                    <p className="text-xs text-green-600">{result.period}</p>
+                  </div>
                 </div>
-              ))}
-            </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  {[
+                    { label: 'Total Revenue', value: fmt(result.total_revenue), color: 'text-gray-800' },
+                    { label: 'Total Returns', value: fmt(result.total_returns), color: 'text-red-600'  },
+                    { label: 'Net Revenue',   value: fmt(result.net_revenue),   color: 'text-green-700'},
+                  ].map(({ label, value, color }) => (
+                    <div key={label} className="bg-white rounded-lg p-3 border border-green-100 text-center">
+                      <p className="text-xs text-gray-500 mb-1">{label}</p>
+                      <p className={`text-sm font-bold ${color}`}>{value}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="space-y-1.5">
+                  {result.saved.map((r, i) => (
+                    <div key={i} className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-green-100 text-xs">
+                      <span className="font-medium text-gray-700">{r.platform}</span>
+                      {r.note
+                        ? <span className="text-amber-600">{r.note}</span>
+                        : <span className="text-gray-500">Rev {fmt(r.revenue)} · Ret {fmt(r.returns)} · {r.orders.toLocaleString()} orders</span>
+                      }
+                    </div>
+                  ))}
+                  {result.skipped && result.skipped.length > 0 && (
+                    <div className="text-xs text-amber-600 mt-1">
+                      Skipped: {result.skipped.join(' | ')}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              /* Single platform result */
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="text-green-600 text-lg">✅</span>
+                  <div>
+                    <p className="text-sm font-semibold text-green-800">Upload saved — {(result.rows_parsed ?? result.total_orders).toLocaleString()} rows parsed</p>
+                    <p className="text-xs text-green-600">{result.filename} · {result.platform} · {result.period}</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { label: 'Gross Revenue', value: fmt(result.total_revenue), color: 'text-gray-800' },
+                    { label: 'Returns',       value: fmt(result.total_returns), color: 'text-red-600'  },
+                    { label: 'Net Revenue',   value: fmt(result.net_revenue),   color: 'text-green-700'},
+                    { label: 'Orders',        value: result.total_orders.toLocaleString(), color: 'text-gray-700' },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} className="bg-white rounded-lg p-3 border border-green-100 text-center">
+                      <p className="text-xs text-gray-500 mb-1">{label}</p>
+                      <p className={`text-sm font-bold ${color}`}>{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
