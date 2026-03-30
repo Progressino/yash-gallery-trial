@@ -67,8 +67,14 @@ def login(body: LoginRequest, response: Response):
 
 
 @router.post("/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response):
+    # Destroy the server-side session so next login starts with clean state
+    sid = request.cookies.get("session_id")
+    if sid:
+        from ..session import store as _store
+        _store.delete(sid)
     response.delete_cookie("auth_token")
+    response.delete_cookie("session_id")
     return {"ok": True}
 
 
