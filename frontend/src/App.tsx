@@ -3,7 +3,8 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import Layout from './components/Layout'
 import Login from './pages/Login'
-import api from './api/client'
+import api, { cacheLoad, getCoverage } from './api/client'
+import { useSession } from './store/session'
 
 const Dashboard   = lazy(() => import('./pages/Dashboard'))
 const Upload      = lazy(() => import('./pages/Upload'))
@@ -27,6 +28,8 @@ const Admin       = lazy(() => import('./pages/Admin'))
 const qc = new QueryClient()
 
 function ProtectedRoute() {
+  const setCoverage = useSession(s => s.setCoverage)
+
   const { data, isLoading, isError } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
@@ -35,6 +38,27 @@ function ProtectedRoute() {
     },
     retry: false,
     staleTime: 5 * 60 * 1000,
+  })
+
+  // Auto-restore session data after server restart or session expiry.
+  // If the user has a valid auth token but an empty session (no sales data),
+  // automatically reload from GitHub cache — same as what Login.tsx does.
+  useQuery({
+    queryKey: ['session-auto-restore'],
+    queryFn: async () => {
+      const coverage = await getCoverage()
+      if (!coverage.mtr && !coverage.sales) {
+        await cacheLoad()
+        const refreshed = await getCoverage()
+        setCoverage(refreshed)
+      } else {
+        setCoverage(coverage)
+      }
+      return true
+    },
+    enabled: !!data,   // only run once authenticated
+    retry: false,
+    staleTime: Infinity,  // run once per app load, not on every navigation
   })
 
   if (isLoading) {

@@ -53,7 +53,7 @@ class AppSession:
 class SessionStore:
     """Thread-safe in-memory session store."""
 
-    _TTL_SECONDS = 4 * 3600  # 4 hours idle timeout
+    _TTL_SECONDS = 12 * 3600  # 12 hours idle timeout
 
     def __init__(self):
         self._sessions: dict[str, AppSession] = {}

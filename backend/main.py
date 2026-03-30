@@ -100,7 +100,7 @@ async def session_middleware(request: Request, call_next):
         value=sid,
         httponly=True,
         samesite="lax",
-        max_age=4 * 3600,   # 4 hours
+        max_age=12 * 3600,  # 12 hours
     )
     return response
 
