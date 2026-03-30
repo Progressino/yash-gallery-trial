@@ -37,6 +37,7 @@ from ..db.finance_db import (
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
     list_vouchers, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances,
     get_chart_of_accounts, get_trial_balance,
+    list_tally_pl, upsert_tally_pl, delete_tally_pl,
 )
 from ..services.finance import get_pl_statement, get_gst_summary, get_platform_revenue
 
@@ -57,6 +58,18 @@ class ExpenseCreate(BaseModel):
 
 class PinVerify(BaseModel):
     pin: str
+
+
+class TallyPLUpsert(BaseModel):
+    fy:                str
+    opening_stock:     float = 0.0
+    purchases:         float = 0.0
+    direct_expenses:   float = 0.0
+    indirect_expenses: float = 0.0
+    sales:             float = 0.0
+    closing_stock:     float = 0.0
+    indirect_incomes:  float = 0.0
+    notes:             str   = ""
 
 
 class LedgerGroupCreate(BaseModel):
@@ -265,6 +278,44 @@ def platform_revenue(
         start_date  = start_date,
         end_date    = end_date,
     )
+
+
+# ── Tally / Accountant P&L ────────────────────────────────────────
+
+@router.get("/tally-pl")
+def get_tally_pl():
+    rows = list_tally_pl()
+    # Compute derived fields for each row
+    for r in rows:
+        cogs = r["purchases"] + r["direct_expenses"] + r["opening_stock"] - r["closing_stock"]
+        gross_profit = r["sales"] + r["indirect_incomes"] - cogs
+        net_profit   = gross_profit - r["indirect_expenses"]
+        r["cogs"]         = round(cogs, 2)
+        r["gross_profit"] = round(gross_profit, 2)
+        r["net_profit"]   = round(net_profit, 2)
+    return rows
+
+
+@router.post("/tally-pl")
+def save_tally_pl(body: TallyPLUpsert):
+    return upsert_tally_pl(
+        fy                = body.fy,
+        opening_stock     = body.opening_stock,
+        purchases         = body.purchases,
+        direct_expenses   = body.direct_expenses,
+        indirect_expenses = body.indirect_expenses,
+        sales             = body.sales,
+        closing_stock     = body.closing_stock,
+        indirect_incomes  = body.indirect_incomes,
+        notes             = body.notes,
+    )
+
+
+@router.delete("/tally-pl/{fy}")
+def remove_tally_pl(fy: str):
+    if not delete_tally_pl(fy):
+        raise HTTPException(status_code=404, detail="FY not found")
+    return {"ok": True}
 
 
 # ── Expenses (original) ───────────────────────────────────────────

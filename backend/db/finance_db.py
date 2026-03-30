@@ -159,6 +159,23 @@ def init_db() -> None:
         )
     """)
 
+    # ── Tally / Accountant P&L ─────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tally_pl (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            fy                TEXT    NOT NULL UNIQUE,
+            opening_stock     REAL    NOT NULL DEFAULT 0,
+            purchases         REAL    NOT NULL DEFAULT 0,
+            direct_expenses   REAL    NOT NULL DEFAULT 0,
+            indirect_expenses REAL    NOT NULL DEFAULT 0,
+            sales             REAL    NOT NULL DEFAULT 0,
+            closing_stock     REAL    NOT NULL DEFAULT 0,
+            indirect_incomes  REAL    NOT NULL DEFAULT 0,
+            notes             TEXT    DEFAULT '',
+            updated_at        TEXT    DEFAULT (datetime('now'))
+        )
+    """)
+
     conn.commit()
 
     # ── Migrate expense_vouchers — add payment/bank columns ───────
@@ -1333,3 +1350,46 @@ def get_trial_balance(
         'total_credit': round(total_cr, 2),
         'balanced':     abs(total_dr - total_cr) < 0.01,
     }
+
+
+# ── Tally / Accountant P&L ────────────────────────────────────────
+
+def list_tally_pl() -> list:
+    conn = _connect()
+    rows = conn.execute("SELECT * FROM tally_pl ORDER BY fy DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_tally_pl(fy: str, opening_stock: float, purchases: float,
+                    direct_expenses: float, indirect_expenses: float,
+                    sales: float, closing_stock: float,
+                    indirect_incomes: float, notes: str = "") -> dict:
+    conn = _connect()
+    conn.execute("""
+        INSERT INTO tally_pl
+            (fy, opening_stock, purchases, direct_expenses,
+             indirect_expenses, sales, closing_stock, indirect_incomes,
+             notes, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(fy) DO UPDATE SET
+            opening_stock     = excluded.opening_stock,
+            purchases         = excluded.purchases,
+            direct_expenses   = excluded.direct_expenses,
+            indirect_expenses = excluded.indirect_expenses,
+            sales             = excluded.sales,
+            closing_stock     = excluded.closing_stock,
+            indirect_incomes  = excluded.indirect_incomes,
+            notes             = excluded.notes,
+            updated_at        = datetime('now')
+    """, (fy, opening_stock, purchases, direct_expenses,
+          indirect_expenses, sales, closing_stock, indirect_incomes, notes))
+    conn.commit()
+    row = conn.execute("SELECT * FROM tally_pl WHERE fy=?", (fy,)).fetchone()
+    return dict(row)
+
+
+def delete_tally_pl(fy: str) -> bool:
+    conn = _connect()
+    cur = conn.execute("DELETE FROM tally_pl WHERE fy=?", (fy,))
+    conn.commit()
+    return cur.rowcount > 0

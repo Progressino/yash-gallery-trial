@@ -7,6 +7,14 @@ import {
 import api from '../api/client'
 
 // ── Types ────────────────────────────────────────────────────────
+interface TallyPL {
+  id: number; fy: string
+  opening_stock: number; purchases: number; direct_expenses: number
+  indirect_expenses: number; sales: number; closing_stock: number
+  indirect_incomes: number; notes: string; updated_at: string
+  cogs: number; gross_profit: number; net_profit: number
+}
+
 interface PLStatement {
   gross_revenue:    number
   returns_value:    number
@@ -270,6 +278,12 @@ export default function Finance() {
     staleTime: 2 * 60 * 1000,
   })
 
+  const { data: tallyRows = [], refetch: refetchTally } = useQuery<TallyPL[]>({
+    queryKey: ['finance-tally-pl'],
+    queryFn:  async () => { const { data } = await api.get('/finance/tally-pl'); return data },
+    staleTime: Infinity,
+  })
+
   const { data: gst, isLoading: loadGST } = useQuery<GSTSummary>({
     queryKey: ['finance-gst', dateStart, dateEnd],
     queryFn:  async () => { const { data } = await api.get(`/finance/gst?${dateQ}`); return data },
@@ -531,6 +545,9 @@ export default function Finance() {
               )}
             </div>
           </div>
+
+          {/* ── Tally / Accountant P&L ── */}
+          <TallyPLSection tallyRows={tallyRows} refetch={refetchTally} appPL={pl ?? null} />
         </div>
       )}
 
@@ -3449,5 +3466,216 @@ function PLRow({
         {signedDisplay}
       </td>
     </tr>
+  )
+}
+
+// ── Tally / Accountant P&L Section ──────────────────────────────
+const BLANK_TALLY = {
+  fy: '', opening_stock: 0, purchases: 0, direct_expenses: 0,
+  indirect_expenses: 0, sales: 0, closing_stock: 0, indirect_incomes: 0, notes: '',
+}
+
+function TallyPLSection({
+  tallyRows, refetch, appPL,
+}: {
+  tallyRows: TallyPL[]
+  refetch: () => void
+  appPL: PLStatement | null
+}) {
+  const qc = useQueryClient()
+  const [form, setForm]     = useState<typeof BLANK_TALLY>({ ...BLANK_TALLY })
+  const [editing, setEditing] = useState(false)
+  const [saving,  setSaving]  = useState(false)
+  const [err,     setErr]     = useState('')
+
+  // Determine which Tally row to show in comparison (default: latest FY)
+  const [selectedFY, setSelectedFY] = useState<string>('')
+  const tally = tallyRows.find(r => r.fy === selectedFY) ?? tallyRows[0] ?? null
+
+  function openForm(row?: TallyPL) {
+    if (row) {
+      setForm({
+        fy: row.fy, opening_stock: row.opening_stock, purchases: row.purchases,
+        direct_expenses: row.direct_expenses, indirect_expenses: row.indirect_expenses,
+        sales: row.sales, closing_stock: row.closing_stock,
+        indirect_incomes: row.indirect_incomes, notes: row.notes,
+      })
+    } else {
+      setForm({ ...BLANK_TALLY })
+    }
+    setErr(''); setEditing(true)
+  }
+
+  async function handleSave() {
+    if (!form.fy) { setErr('Financial Year is required (e.g. 2025-26)'); return }
+    setSaving(true); setErr('')
+    try {
+      await api.post('/finance/tally-pl', form)
+      await qc.invalidateQueries({ queryKey: ['finance-tally-pl'] })
+      refetch()
+      setSelectedFY(form.fy)
+      setEditing(false)
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setErr(msg || 'Save failed')
+    } finally { setSaving(false) }
+  }
+
+  async function handleDelete(fy: string) {
+    if (!window.confirm(`Delete Tally figures for ${fy}?`)) return
+    await api.delete(`/finance/tally-pl/${encodeURIComponent(fy)}`)
+    await qc.invalidateQueries({ queryKey: ['finance-tally-pl'] })
+    refetch()
+    if (selectedFY === fy) setSelectedFY('')
+  }
+
+  const f = (v: number) => `₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+
+  type CompRow = { label: string; tally: number | null; app: number | null; indent?: boolean; bold?: boolean; colored?: boolean }
+  const compRows: CompRow[] = tally ? [
+    { label: 'Sales',              tally: tally.sales,             app: appPL?.gross_revenue ?? null },
+    { label: 'Closing Stock',      tally: tally.closing_stock,     app: null,                        indent: true },
+    { label: 'Indirect Incomes',   tally: tally.indirect_incomes,  app: null,                        indent: true },
+    { label: 'Opening Stock',      tally: -tally.opening_stock,    app: null,                        indent: true },
+    { label: 'Purchases',          tally: -tally.purchases,        app: -(appPL?.cogs ?? 0) || null, indent: true },
+    { label: 'Direct Expenses',    tally: -tally.direct_expenses,  app: null,                        indent: true },
+    { label: 'Gross Profit',       tally: tally.gross_profit,      app: appPL?.gross_profit ?? null, bold: true, colored: true },
+    { label: 'Indirect Expenses',  tally: -tally.indirect_expenses,app: -(appPL?.total_expenses ?? 0) || null, indent: true },
+    { label: 'Net Profit',         tally: tally.net_profit,        app: appPL?.net_profit ?? null,   bold: true, colored: true },
+  ] : []
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      {/* Header */}
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-700">Accountant P&amp;L (Tally)</h3>
+          <p className="text-xs text-gray-400 mt-0.5">Official figures from your CA / Tally export</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {tallyRows.length > 0 && (
+            <select
+              value={selectedFY || tally?.fy || ''}
+              onChange={e => setSelectedFY(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none"
+            >
+              {tallyRows.map(r => <option key={r.fy} value={r.fy}>{r.fy}</option>)}
+            </select>
+          )}
+          <button
+            onClick={() => openForm(tally ?? undefined)}
+            className="text-xs px-3 py-1.5 bg-[#002B5B] text-white rounded-lg hover:bg-[#003f80] transition-colors font-medium"
+          >
+            {tally ? 'Edit' : '+ Add Tally Figures'}
+          </button>
+          {tally && (
+            <button onClick={() => handleDelete(tally.fy)} className="text-xs px-2 py-1.5 text-red-500 hover:text-red-700 transition-colors">✕</button>
+          )}
+        </div>
+      </div>
+
+      {/* Comparison table */}
+      {tally ? (
+        <div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-100">
+                <th className="px-5 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Particulars</th>
+                <th className="px-5 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wide">Tally ({tally.fy})</th>
+                <th className="px-5 py-2 text-right text-xs font-semibold text-blue-500 uppercase tracking-wide">App (computed)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {compRows.map((row, i) => {
+                const tv = row.tally
+                const av = row.app
+                const tallyColor = row.colored ? (tv !== null && tv >= 0 ? 'text-green-700 font-bold' : 'text-red-600 font-bold') : row.bold ? 'font-semibold text-gray-800' : 'text-gray-600'
+                const appColor   = row.colored ? (av !== null && av >= 0 ? 'text-green-700 font-bold' : 'text-red-600 font-bold') : row.bold ? 'font-semibold text-gray-800' : 'text-gray-400'
+                // highlight big difference
+                const diff = (tv !== null && av !== null) ? Math.abs(tv - av) / (Math.abs(tv) || 1) : 0
+                const rowBg = (row.bold && diff > 0.15) ? 'bg-red-50' : row.bold ? 'bg-gray-50' : ''
+                return (
+                  <tr key={i} className={`border-t border-gray-50 ${rowBg}`}>
+                    <td className={`px-5 py-2.5 text-gray-700 ${row.indent ? 'pl-8 text-xs' : ''} ${row.bold ? 'font-semibold' : ''}`}>{row.label}</td>
+                    <td className={`px-5 py-2.5 text-right ${tallyColor} ${row.indent ? 'text-xs' : ''}`}>
+                      {tv !== null ? (tv < 0 ? `(${f(tv)})` : f(tv)) : '—'}
+                    </td>
+                    <td className={`px-5 py-2.5 text-right ${appColor} ${row.indent ? 'text-xs' : ''}`}>
+                      {av !== null ? (av < 0 ? `(${f(av)})` : f(av)) : '—'}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          {tally.notes && (
+            <div className="px-5 py-2 text-xs text-gray-400 border-t border-gray-50">Notes: {tally.notes}</div>
+          )}
+          <div className="px-5 py-2 text-xs text-gray-400 border-t border-gray-50">
+            Last updated: {tally.updated_at?.split('T')[0] ?? ''}
+          </div>
+        </div>
+      ) : (
+        <div className="p-8 text-center text-sm text-gray-400">
+          No Tally figures saved yet. Click &ldquo;+ Add Tally Figures&rdquo; to enter your accountant&rsquo;s P&amp;L.
+        </div>
+      )}
+
+      {/* Entry Form Modal */}
+      {editing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-800">Tally P&amp;L Figures</h3>
+              <button onClick={() => setEditing(false)} className="text-gray-400 hover:text-gray-600 text-lg">✕</button>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Financial Year *</label>
+                <input value={form.fy} onChange={e => setForm(f => ({ ...f, fy: e.target.value }))}
+                  placeholder="e.g. 2025-26"
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {([
+                  ['Opening Stock',    'opening_stock'],
+                  ['Purchases',        'purchases'],
+                  ['Direct Expenses',  'direct_expenses'],
+                  ['Indirect Expenses','indirect_expenses'],
+                  ['Sales',            'sales'],
+                  ['Closing Stock',    'closing_stock'],
+                  ['Indirect Incomes', 'indirect_incomes'],
+                ] as [string, keyof typeof BLANK_TALLY][]).map(([label, key]) => (
+                  <div key={key}>
+                    <label className="text-xs text-gray-500 block mb-1">{label}</label>
+                    <input
+                      type="number" step="0.01" min="0"
+                      value={(form[key] as number) || ''}
+                      onChange={e => setForm(f => ({ ...f, [key]: parseFloat(e.target.value) || 0 }))}
+                      className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                    />
+                  </div>
+                ))}
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Notes (optional)</label>
+                <input value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+                  placeholder="e.g. Audited figures"
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+              </div>
+              {err && <p className="text-xs text-red-600">{err}</p>}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex gap-2 justify-end">
+              <button onClick={() => setEditing(false)}
+                className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+              <button onClick={handleSave} disabled={saving}
+                className="px-4 py-2 text-sm bg-[#002B5B] text-white rounded-lg hover:bg-[#003f80] disabled:opacity-50 font-medium">
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
