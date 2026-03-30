@@ -255,9 +255,24 @@ def calculate_po_base(
         {"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0}
     )
 
-    denom        = max(period_days, min_denominator)
+    # Per-SKU denominator: days from first sale within window to max_date.
+    # This prevents diluting ADS for recently-launched products that don't
+    # have a full period_days of sales history yet.
+    sku_first = (
+        recent.groupby("Sku")["TxnDate"].min()
+        .reset_index()
+        .rename(columns={"Sku": "OMS_SKU", "TxnDate": "First_Sale_Date"})
+    )
+    po_df = po_df.merge(sku_first, on="OMS_SKU", how="left")
+    po_df["Eff_Days"] = (
+        (max_date - po_df["First_Sale_Date"]).dt.days
+        .fillna(period_days)                          # no sales → use full window (ADS stays 0)
+        .clip(lower=min_denominator, upper=period_days)
+        .astype(float)
+    )
+
     demand_units = po_df["Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["Sold_Units"]
-    po_df["Recent_ADS"] = (demand_units / denom).fillna(0)
+    po_df["Recent_ADS"] = (demand_units / po_df["Eff_Days"]).fillna(0)
 
     if use_seasonality and sku_mapping:
         hist_parts = [df]

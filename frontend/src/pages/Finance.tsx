@@ -2665,6 +2665,13 @@ interface UploadResult {
   skipped?: string[]
 }
 
+interface PreviewResult {
+  preview: true; period: string
+  platforms: { platform: string; orders: number; revenue: number; returns: number; net_revenue: number; note?: string }[]
+  skipped: string[]
+  total_revenue: number; total_returns: number; net_revenue: number
+}
+
 function SalesUploadsTab() {
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
@@ -2676,6 +2683,9 @@ function SalesUploadsTab() {
   const [dragging,    setDragging]    = useState(false)
   const [uploading,   setUploading]   = useState(false)
   const [result,      setResult]      = useState<UploadResult | null>(null)
+  const [preview,     setPreview]     = useState<PreviewResult | null>(null)
+  const [pendingFile, setPendingFile] = useState<File | null>(null)
+  const [confirming,  setConfirming]  = useState(false)
   const [err,         setErr]         = useState('')
   const [filterPlatform, setFilterPlatform] = useState('')
   const [filterPeriod,   setFilterPeriod]   = useState('')
@@ -2700,26 +2710,53 @@ function SalesUploadsTab() {
 
   async function handleFile(file: File) {
     if (!period) { setErr('Select a period (month) before uploading.'); return }
-    setErr(''); setResult(null); setUploading(true)
+    setErr(''); setResult(null); setPreview(null); setPendingFile(null); setUploading(true)
     try {
       const fd = new FormData()
-      fd.append('file',        file)
-      fd.append('period',      period)
-      fd.append('uploaded_by', uploadedBy)
-      fd.append('notes',       notes)
-      const endpoint = isPackage
-        ? '/finance/sales-uploads/upload-monthly-package'
-        : '/finance/sales-uploads/upload-file'
-      if (!isPackage) fd.append('platform', platform)
-      const { data } = await api.post(endpoint, fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-      setResult(data)
-      qc.invalidateQueries({ queryKey: ['finance-sales-uploads'] })
+      fd.append('file',   file)
+      fd.append('period', period)
+      if (isPackage) {
+        // Preview first — don't save yet
+        const { data } = await api.post('/finance/sales-uploads/preview-monthly-package', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+        setPreview(data as PreviewResult)
+        setPendingFile(file)
+      } else {
+        fd.append('uploaded_by', uploadedBy)
+        fd.append('notes',       notes)
+        fd.append('platform',    platform)
+        const { data } = await api.post('/finance/sales-uploads/upload-file', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+        setResult(data)
+        qc.invalidateQueries({ queryKey: ['finance-sales-uploads'] })
+      }
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       setErr(msg || 'Upload failed. Check the file format.')
     } finally { setUploading(false) }
+  }
+
+  async function confirmSave() {
+    if (!pendingFile || !period) return
+    setErr(''); setConfirming(true)
+    try {
+      const fd = new FormData()
+      fd.append('file',        pendingFile)
+      fd.append('period',      period)
+      fd.append('uploaded_by', uploadedBy)
+      fd.append('notes',       notes)
+      const { data } = await api.post('/finance/sales-uploads/upload-monthly-package', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      setPreview(null); setPendingFile(null)
+      setResult(data)
+      qc.invalidateQueries({ queryKey: ['finance-sales-uploads'] })
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setErr(msg || 'Save failed.')
+    } finally { setConfirming(false) }
   }
 
   function onDrop(e: React.DragEvent) {
@@ -2747,7 +2784,7 @@ function SalesUploadsTab() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="flex flex-col gap-1">
             <label className="text-xs text-gray-500">Platform *</label>
-            <select value={platform} onChange={e => { setPlatform(e.target.value); setResult(null) }}
+            <select value={platform} onChange={e => { setPlatform(e.target.value); setResult(null); setPreview(null); setPendingFile(null) }}
               className="text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300">
               {['Monthly Package','Amazon','Myntra','Meesho','Flipkart','Snapdeal'].map(p => <option key={p}>{p}</option>)}
             </select>
@@ -2802,6 +2839,63 @@ function SalesUploadsTab() {
 
         {err && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-700">{err}</div>
+        )}
+
+        {/* Preview panel — shown before saving Monthly Package */}
+        {preview && !result && (
+          <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-amber-500 text-lg">🔍</span>
+                <div>
+                  <p className="text-sm font-semibold text-amber-800">Preview — not saved yet</p>
+                  <p className="text-xs text-amber-600">{preview.period} · {preview.platforms.length} platform{preview.platforms.length !== 1 ? 's' : ''} detected · verify numbers before saving</p>
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {[
+                { label: 'Total Revenue', value: fmt(preview.total_revenue), color: 'text-gray-800' },
+                { label: 'Total Returns', value: fmt(preview.total_returns), color: 'text-red-600'  },
+                { label: 'Net Revenue',   value: fmt(preview.net_revenue),   color: 'text-amber-700'},
+              ].map(({ label, value, color }) => (
+                <div key={label} className="bg-white rounded-lg p-3 border border-amber-200 text-center">
+                  <p className="text-xs text-gray-500 mb-1">{label}</p>
+                  <p className={`text-sm font-bold ${color}`}>{value}</p>
+                </div>
+              ))}
+            </div>
+            <div className="space-y-1.5">
+              {preview.platforms.map((r, i) => (
+                <div key={i} className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-amber-200 text-xs">
+                  <span className="font-medium text-gray-700">{r.platform}</span>
+                  {r.note
+                    ? <span className="text-amber-600">{r.note}</span>
+                    : <span className="text-gray-500">Rev {fmt(r.revenue)} · Ret {fmt(r.returns)} · {r.orders.toLocaleString()} orders</span>
+                  }
+                </div>
+              ))}
+              {preview.skipped.length > 0 && (
+                <div className="text-xs text-amber-600 mt-1">Skipped: {preview.skipped.join(' | ')}</div>
+              )}
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={confirmSave}
+                disabled={confirming}
+                className="flex-1 bg-[#002B5B] text-white text-xs font-semibold rounded-lg px-4 py-2 hover:bg-[#003f80] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {confirming ? 'Saving…' : 'Looks correct — Save to Finance'}
+              </button>
+              <button
+                onClick={() => { setPreview(null); setPendingFile(null) }}
+                disabled={confirming}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         )}
 
         {/* Parse result */}
