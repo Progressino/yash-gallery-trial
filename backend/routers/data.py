@@ -789,10 +789,16 @@ def debug_coverage(request: Request):
         "session": {
             "mtr_df":      _df_info(sess.mtr_df,      "Date", "Transaction_Type"),
             "myntra_df":   _df_info(sess.myntra_df,   "Date", "TxnType"),
-            "meesho_df":   _df_info(sess.meesho_df,   "Date", "TxnType"),
+            "meesho_df":   {**_df_info(sess.meesho_df, "Date", "TxnType"),
+                            "columns": list(sess.meesho_df.columns) if not sess.meesho_df.empty else [],
+                            "sku_sample": sess.meesho_df["SKU"].dropna().unique()[:5].tolist()
+                                          if not sess.meesho_df.empty and "SKU" in sess.meesho_df.columns else "NO SKU COLUMN"},
             "flipkart_df": _df_info(sess.flipkart_df, "Date", "TxnType"),
             "snapdeal_df": _df_info(sess.snapdeal_df, "Date", "TxnType"),
-            "sales_df":    _df_info(sess.sales_df,    "TxnDate", "Transaction Type"),
+            "sales_df":    {**_df_info(sess.sales_df, "TxnDate", "Transaction Type"),
+                            "meesho_skus": sess.sales_df[sess.sales_df["Source"].astype(str) == "Meesho"]["Sku"]
+                                           .value_counts().head(5).to_dict()
+                                           if not sess.sales_df.empty and "Source" in sess.sales_df.columns else {}},
             "sku_mapping_len": len(sess.sku_mapping),
         },
         "warm_cache": {
