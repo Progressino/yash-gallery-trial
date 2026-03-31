@@ -36,6 +36,7 @@ interface DeepDiveData {
   daily:         DailyRow[]
   first_sale:    string | null
   last_sale:     string | null
+  meesho_note:   string | null
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -411,46 +412,57 @@ export default function SKUDeepDive() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
             {/* Platform breakdown */}
-            {data.by_platform.length > 0 && (
+            {(data.by_platform.length > 0 || data.meesho_note) && (
               <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
                 <h2 className="text-sm font-semibold text-gray-700 mb-4">Platform Breakdown</h2>
-                <div className="space-y-3">
-                  {data.by_platform.map(p => {
-                    const total = data.summary.shipped || 1
-                    const pct   = Math.round(p.shipped / total * 100)
-                    const color = PLATFORM_COLORS[p.platform] ?? '#6366f1'
-                    return (
-                      <div key={p.platform}>
-                        <div className="flex items-center justify-between mb-1 text-xs">
-                          <span className="font-medium text-gray-700">{p.platform}</span>
-                          <span className="text-gray-500">{fmt(p.shipped)} units &nbsp;·&nbsp; {p.return_rate}% returns</span>
-                        </div>
-                        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: color }} />
-                        </div>
-                        <div className="flex justify-between text-xs text-gray-400 mt-0.5">
-                          <span>{pct}% of total</span>
-                          <span>{fmt(p.returns)} returns</span>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-                <div className="mt-4">
-                  <ResponsiveContainer width="100%" height={140}>
-                    <BarChart data={data.by_platform} layout="vertical" barCategoryGap="20%">
-                      <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" horizontal={false} />
-                      <XAxis type="number" tick={{ fontSize: 10, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
-                      <YAxis dataKey="platform" type="category" tick={{ fontSize: 11, fill: '#6b7280' }} axisLine={false} tickLine={false} width={60} />
-                      <Tooltip content={<ChartTooltip />} />
-                      <Bar dataKey="shipped" name="Shipped" radius={[0, 4, 4, 0]}>
-                        {data.by_platform.map(p => (
-                          <Cell key={p.platform} fill={PLATFORM_COLORS[p.platform] ?? '#6366f1'} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+                {data.by_platform.length > 0 ? (
+                  <>
+                    <div className="space-y-3">
+                      {data.by_platform.map(p => {
+                        const total = data.summary.shipped || 1
+                        const pct   = Math.round(p.shipped / total * 100)
+                        const color = PLATFORM_COLORS[p.platform] ?? '#6366f1'
+                        return (
+                          <div key={p.platform}>
+                            <div className="flex items-center justify-between mb-1 text-xs">
+                              <span className="font-medium text-gray-700">{p.platform}</span>
+                              <span className="text-gray-500">{fmt(p.shipped)} units &nbsp;·&nbsp; {p.return_rate}% returns</span>
+                            </div>
+                            <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                              <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: color }} />
+                            </div>
+                            <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+                              <span>{pct}% of total</span>
+                              <span>{fmt(p.returns)} returns</span>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <div className="mt-4">
+                      <ResponsiveContainer width="100%" height={140}>
+                        <BarChart data={data.by_platform} layout="vertical" barCategoryGap="20%">
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" horizontal={false} />
+                          <XAxis type="number" tick={{ fontSize: 10, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
+                          <YAxis dataKey="platform" type="category" tick={{ fontSize: 11, fill: '#6b7280' }} axisLine={false} tickLine={false} width={60} />
+                          <Tooltip content={<ChartTooltip />} />
+                          <Bar dataKey="shipped" name="Shipped" radius={[0, 4, 4, 0]}>
+                            {data.by_platform.map(p => (
+                              <Cell key={p.platform} fill={PLATFORM_COLORS[p.platform] ?? '#6366f1'} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </>
+                ) : null}
+                {/* Meesho TCS notice — shown when Meesho is loaded but has no per-SKU data */}
+                {data.meesho_note && (
+                  <div className={`flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 ${data.by_platform.length > 0 ? 'mt-4' : ''}`}>
+                    <span className="text-amber-500 text-sm mt-0.5">⚠️</span>
+                    <p className="text-xs text-amber-700 leading-relaxed">{data.meesho_note}</p>
+                  </div>
+                )}
               </div>
             )}
 

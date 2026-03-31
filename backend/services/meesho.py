@@ -27,12 +27,27 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
         return None
 
     def _get_sku_col(df) -> pd.Series:
-        """Return the best SKU column as a Series, or empty strings if none found."""
+        """Return the best SKU column as a Series, or empty strings if none found.
+        Tries a broad list of Meesho column name variants across TCS, Order, and
+        Dispatch report formats."""
         cols_lower = {c.lower().strip(): c for c in df.columns}
-        for candidate in ["sku", "product_sku", "seller_sku", "sub_catalog_name",
-                          "catalog_name", "item_sku", "product_name"]:
+        for candidate in [
+            # Standard SKU fields
+            "sku", "product_sku", "seller_sku", "item_sku",
+            # Meesho catalog/product name fields (Order & Dispatch reports)
+            "sub_catalog_name", "catalog_name", "product_name", "item_name",
+            # Meesho ID-based fields that can act as product identifiers
+            "sub_catalog_id", "catalog_id", "product_id", "supplier_sku",
+            # Additional aliases seen in various Meesho export formats
+            "article_name", "article_id", "product_code", "item_code",
+            "variant_name", "variant_id", "style_code", "style_id",
+        ]:
             if candidate in cols_lower:
-                return df[cols_lower[candidate]].astype(str).str.strip()
+                series = df[cols_lower[candidate]].astype(str).str.strip()
+                # Only use this column if it has non-empty, non-null values
+                non_empty = series[series.str.len() > 0].dropna()
+                if len(non_empty) > 0:
+                    return series
         return pd.Series([""] * len(df), dtype=str)
 
     if "tcs_sales.xlsx" in files:

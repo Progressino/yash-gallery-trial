@@ -207,6 +207,28 @@ def sku_deepdive(
     sess = _sess(request)
     df   = sess.sales_df
 
+    # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format)
+    meesho_note: str | None = None
+    if not sess.meesho_df.empty:
+        meesho_skus_in_sales = (
+            sess.sales_df[sess.sales_df["Source"].astype(str) == "Meesho"]["Sku"]
+            .dropna().unique().tolist()
+            if not sess.sales_df.empty and "Source" in sess.sales_df.columns else []
+        )
+        if meesho_skus_in_sales == ["MEESHO_TOTAL"] or set(meesho_skus_in_sales) == {"MEESHO_TOTAL"}:
+            meesho_total_units = int(
+                sess.sales_df[
+                    (sess.sales_df["Source"].astype(str) == "Meesho") &
+                    (sess.sales_df["Transaction Type"].astype(str) == "Shipment")
+                ]["Quantity"].sum()
+            ) if not sess.sales_df.empty else 0
+            meesho_note = (
+                f"Meesho data loaded ({meesho_total_units:,} total units) but your uploaded "
+                f"Meesho TCS ZIP reports don't include per-SKU data. "
+                f"To see Meesho in SKU breakdown, upload the Meesho Order Report CSV "
+                f"(Supplier Panel → Reports → Order Reports)."
+            )
+
     if df.empty:
         return {"loaded": False, "message": "No sales data loaded"}
 
@@ -253,6 +275,7 @@ def sku_deepdive(
             "daily":        [],
             "first_sale":   None,
             "last_sale":    None,
+            "meesho_note":  meesho_note,
         }
 
     qty    = pd.to_numeric(sku_df["Quantity"],       errors="coerce").fillna(0)
@@ -354,6 +377,7 @@ def sku_deepdive(
         "daily":       daily,
         "first_sale":  str(sku_df["TxnDate"].min().date()),
         "last_sale":   str(sku_df["TxnDate"].max().date()),
+        "meesho_note": meesho_note,
     }
 
 
