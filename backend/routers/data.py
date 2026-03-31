@@ -550,6 +550,52 @@ def delete_daily_upload(upload_id: int, _request: Request):
     return {"ok": True, "message": f"Deleted upload {upload_id}"}
 
 
+# ── Data Debug / Coverage ────────────────────────────────────
+
+@router.get("/debug-coverage")
+def debug_coverage(request: Request):
+    """
+    Returns row counts, date ranges, and sample transaction types
+    for each loaded DataFrame. Useful for diagnosing data integrity
+    issues on production without redeploying.
+    """
+    import pandas as pd
+    sess = _sess(request)
+
+    def _df_info(df: pd.DataFrame, date_col: str, txn_col: str | None = None) -> dict:
+        if df.empty:
+            return {"loaded": False, "rows": 0}
+        out: dict = {"loaded": True, "rows": len(df)}
+        try:
+            dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+            if not dates.empty:
+                out["min_date"] = str(dates.min().date())
+                out["max_date"] = str(dates.max().date())
+                out["tz_aware"] = dates.dt.tz is not None
+        except Exception as e:
+            out["date_error"] = str(e)
+        if txn_col and txn_col in df.columns:
+            out["txn_type_counts"] = df[txn_col].astype(str).value_counts().head(10).to_dict()
+        return out
+
+    from backend.main import _warm_cache, _warm_cache_loaded_at  # type: ignore
+    return {
+        "session": {
+            "mtr_df":      _df_info(sess.mtr_df,      "Date", "Transaction_Type"),
+            "myntra_df":   _df_info(sess.myntra_df,   "Date", "TxnType"),
+            "meesho_df":   _df_info(sess.meesho_df,   "Date", "TxnType"),
+            "flipkart_df": _df_info(sess.flipkart_df, "Date", "TxnType"),
+            "snapdeal_df": _df_info(sess.snapdeal_df, "Date", "TxnType"),
+            "sales_df":    _df_info(sess.sales_df,    "TxnDate", "Transaction Type"),
+            "sku_mapping_len": len(sess.sku_mapping),
+        },
+        "warm_cache": {
+            "loaded_at": _warm_cache_loaded_at.isoformat() if _warm_cache_loaded_at else None,
+            "keys":      list(_warm_cache.keys()),
+        },
+    }
+
+
 # ── AI Dashboard Endpoints ────────────────────────────────────
 
 @router.get("/platform-summary")

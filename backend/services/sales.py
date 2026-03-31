@@ -2,11 +2,14 @@
 Sales aggregation — build + dedup logic extracted from app.py.
 """
 import gc
+import logging
 import re
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+
+log = logging.getLogger("erp.sales")
 
 from .helpers import _downcast_sales, map_to_oms_sku
 from .myntra import myntra_to_sales_rows
@@ -132,6 +135,8 @@ def get_sales_summary(
     df = sales_df.copy()
     df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
     df = df.dropna(subset=["TxnDate"])
+    if df["TxnDate"].dt.tz is not None:
+        df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
 
     if start_date:
         df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
@@ -178,6 +183,8 @@ def get_top_skus(
     df = sales_df[sales_df["Transaction Type"] == "Shipment"].copy()
     if start_date or end_date:
         df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+        if df["TxnDate"].dt.tz is not None:
+            df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
         if start_date:
             df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
         if end_date:
@@ -218,6 +225,10 @@ def _compute_platform_metrics(
         d = d.dropna(subset=["_Date"])
         if d.empty:
             return stub
+
+        # Strip timezone so tz-naive comparisons don't raise TypeError
+        if hasattr(d["_Date"], "dt") and d["_Date"].dt.tz is not None:
+            d["_Date"] = d["_Date"].dt.tz_localize(None)
 
         # Apply date filter if provided
         if start_date:
@@ -299,7 +310,8 @@ def _compute_platform_metrics(
             "trend_direction": trend_direction,
             "monthly": monthly, "by_state": by_state,
         }
-    except Exception:
+    except Exception as _exc:
+        log.warning("_compute_platform_metrics failed for %s: %s", platform_name, _exc, exc_info=True)
         return stub
 
 
