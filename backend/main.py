@@ -110,52 +110,61 @@ def _copy_warm_cache_to_session(sess) -> bool:
     return True
 
 
-def _do_amazon_sync_all() -> None:
+def _do_marketplace_sync_all() -> None:
     """
-    Called daily at 6AM IST. Pulls last 2 days of Amazon data via SP-API
-    and merges results into the warm cache + SQLite daily store.
+    Called daily at 6AM IST. Pulls last 2 days of data from all connected
+    marketplace APIs and merges results into warm cache + SQLite daily store.
     """
     from .db.marketplace_db import get_credentials, save_sync_log
-    from .services.amazon_sp_api import sync_amazon_data
     from .services.daily_store import merge_platform_data, save_daily_file
+    from datetime import date as _date
     import pandas as pd
 
-    creds = get_credentials("amazon")
-    if not creds:
-        return  # Not connected — nothing to do
+    # Map: platform → (sync_fn, cache_key, db_platform)
+    _PLATFORM_MAP = {
+        "amazon":   ("amazon_sp_api",  "sync_amazon_data",   "mtr_df",      "amazon"),
+        "flipkart": ("flipkart_api",   "sync_flipkart_data", "flipkart_df", "flipkart"),
+        "myntra":   ("myntra_api",     "sync_myntra_data",   "myntra_df",   "myntra"),
+        "meesho":   ("meesho_api",     "sync_meesho_data",   "meesho_df",   "meesho"),
+    }
 
-    log.info("Scheduled Amazon SP-API sync starting…")
-    try:
-        df, msg = sync_amazon_data(creds, days_back=2)
-    except Exception as e:
-        log.exception("Scheduled Amazon sync failed: %s", e)
-        save_sync_log("amazon", "error", 0, message=str(e))
-        return
+    for platform, (module, fn_name, cache_key, db_platform) in _PLATFORM_MAP.items():
+        creds = get_credentials(platform)
+        if not creds:
+            continue
+        log.info("Scheduled %s sync starting…", platform)
+        try:
+            import importlib
+            mod = importlib.import_module(f".services.{module}", package="backend")
+            sync_fn = getattr(mod, fn_name)
+            df, msg = sync_fn(creds, days_back=2)
+        except Exception as e:
+            log.exception("Scheduled %s sync failed: %s", platform, e)
+            save_sync_log(platform, "error", 0, message=str(e))
+            continue
 
-    if df.empty:
-        save_sync_log("amazon", "partial", 0, message=msg)
-        log.info("Scheduled Amazon sync: no new data — %s", msg)
-        return
+        if df.empty:
+            save_sync_log(platform, "partial", 0, message=msg)
+            log.info("Scheduled %s: no new data — %s", platform, msg)
+            continue
 
-    # Persist to SQLite
-    try:
-        from datetime import date as _date
-        save_daily_file("amazon", f"sp-api-{_date.today()}.csv", df)
-    except Exception as e:
-        log.warning("Scheduled Amazon sync: daily store save failed: %s", e)
+        try:
+            save_daily_file(db_platform, f"api-{platform}-{_date.today()}.csv", df)
+        except Exception as e:
+            log.warning("Scheduled %s: daily store save failed: %s", platform, e)
 
-    # Merge into warm cache
-    try:
-        existing = _warm_cache.get("mtr_df", pd.DataFrame())
-        _warm_cache["mtr_df"] = merge_platform_data(existing, df, "amazon")
-        log.info("Scheduled Amazon sync: warm cache updated with %d rows", len(df))
-    except Exception as e:
-        log.warning("Scheduled Amazon sync: warm cache merge failed: %s", e)
+        try:
+            existing = _warm_cache.get(cache_key, pd.DataFrame())
+            _warm_cache[cache_key] = merge_platform_data(existing, df, db_platform)
+            log.info("Scheduled %s: warm cache updated with %d rows", platform, len(df))
+        except Exception as e:
+            log.warning("Scheduled %s: warm cache merge failed: %s", platform, e)
 
-    date_from = str(df["Date"].min().date()) if "Date" in df.columns else ""
-    date_to   = str(df["Date"].max().date()) if "Date" in df.columns else ""
-    save_sync_log("amazon", "success", len(df), date_from, date_to, msg)
-    log.info("Scheduled Amazon SP-API sync complete: %s", msg)
+        date_col  = "Date"
+        date_from = str(df[date_col].min().date()) if date_col in df.columns and not df.empty else ""
+        date_to   = str(df[date_col].max().date()) if date_col in df.columns and not df.empty else ""
+        save_sync_log(platform, "success", len(df), date_from, date_to, msg)
+        log.info("Scheduled %s sync complete: %s", platform, msg)
 
 
 async def _warm_cache_scheduler():
@@ -171,8 +180,8 @@ async def _warm_cache_scheduler():
         log.info("Running scheduled warm-cache refresh…")
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _do_load_warm_cache)
-        # Run Amazon SP-API sync after cache refresh
-        await loop.run_in_executor(None, _do_amazon_sync_all)
+        # Run all marketplace API syncs after cache refresh
+        await loop.run_in_executor(None, _do_marketplace_sync_all)
 
 
 @asynccontextmanager

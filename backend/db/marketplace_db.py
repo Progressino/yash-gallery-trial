@@ -48,15 +48,22 @@ def _conn():
 
 def init_db():
     with _conn() as con:
+        # Schema migration: add extra_data column if it doesn't exist yet
+        try:
+            con.execute("ALTER TABLE marketplace_credentials ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'")
+        except Exception:
+            pass  # column already exists
+
         con.executescript("""
             CREATE TABLE IF NOT EXISTS marketplace_credentials (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform       TEXT NOT NULL UNIQUE,
                 client_id      TEXT NOT NULL,
                 client_secret  TEXT NOT NULL,
-                refresh_token  TEXT NOT NULL,
-                seller_id      TEXT NOT NULL,
+                refresh_token  TEXT NOT NULL DEFAULT '',
+                seller_id      TEXT NOT NULL DEFAULT '',
                 marketplace_id TEXT NOT NULL DEFAULT 'A21TJRUUN4KGV',
+                extra_data     TEXT NOT NULL DEFAULT '{}',
                 created_at     TEXT DEFAULT (datetime('now')),
                 updated_at     TEXT DEFAULT (datetime('now'))
             );
@@ -80,45 +87,56 @@ def save_credentials(
     platform: str,
     client_id: str,
     client_secret: str,
-    refresh_token: str,
-    seller_id: str,
+    refresh_token: str = "",
+    seller_id: str = "",
     marketplace_id: str = "A21TJRUUN4KGV",
+    extra_data: dict | None = None,
 ) -> None:
     """Upsert credentials (client_secret + refresh_token encrypted)."""
+    import json
     enc_secret = _encrypt(client_secret)
-    enc_token  = _encrypt(refresh_token)
+    enc_token  = _encrypt(refresh_token) if refresh_token else ""
+    extra_json = json.dumps(extra_data or {})
     with _conn() as con:
         con.execute("""
             INSERT INTO marketplace_credentials
-                (platform, client_id, client_secret, refresh_token, seller_id, marketplace_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                (platform, client_id, client_secret, refresh_token, seller_id, marketplace_id, extra_data, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(platform) DO UPDATE SET
                 client_id      = excluded.client_id,
                 client_secret  = excluded.client_secret,
                 refresh_token  = excluded.refresh_token,
                 seller_id      = excluded.seller_id,
                 marketplace_id = excluded.marketplace_id,
+                extra_data     = excluded.extra_data,
                 updated_at     = datetime('now')
-        """, (platform, client_id, enc_secret, enc_token, seller_id, marketplace_id))
+        """, (platform, client_id, enc_secret, enc_token, seller_id, marketplace_id, extra_json))
 
 
 def get_credentials(platform: str) -> Optional[dict]:
     """Return decrypted credentials dict, or None if not found."""
+    import json
     with _conn() as con:
         row = con.execute(
-            "SELECT client_id, client_secret, refresh_token, seller_id, marketplace_id, updated_at "
+            "SELECT client_id, client_secret, refresh_token, seller_id, marketplace_id, "
+            "COALESCE(extra_data, '{}'), updated_at "
             "FROM marketplace_credentials WHERE platform = ?", (platform,)
         ).fetchone()
     if not row:
         return None
-    client_id, enc_secret, enc_token, seller_id, marketplace_id, updated_at = row
+    client_id, enc_secret, enc_token, seller_id, marketplace_id, extra_json, updated_at = row
+    try:
+        extra = json.loads(extra_json or "{}")
+    except Exception:
+        extra = {}
     return {
         "platform":       platform,
         "client_id":      client_id,
         "client_secret":  _decrypt(enc_secret),
-        "refresh_token":  _decrypt(enc_token),
+        "refresh_token":  _decrypt(enc_token) if enc_token else "",
         "seller_id":      seller_id,
         "marketplace_id": marketplace_id,
+        "extra_data":     extra,
         "updated_at":     updated_at,
     }
 
