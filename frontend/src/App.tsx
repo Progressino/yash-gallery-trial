@@ -25,6 +25,7 @@ const Production  = lazy(() => import('./pages/Production'))
 const GreyFabric  = lazy(() => import('./pages/GreyFabric'))
 const Admin                  = lazy(() => import('./pages/Admin'))
 const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
+const SKUDeepDive            = lazy(() => import('./pages/SKUDeepDive'))
 
 const qc = new QueryClient()
 
@@ -104,6 +105,7 @@ export default function App() {
               <Route path="grey"      element={<GreyFabric />} />
               <Route path="admin"       element={<Admin />} />
               <Route path="marketplace-connections" element={<MarketplaceConnections />} />
+              <Route path="sku-deepdive" element={<SKUDeepDive />} />
             </Route>
           </Route>
         </Routes>

@@ -151,6 +151,170 @@ def top_skus(
     return get_top_skus(sess.sales_df, limit=limit, start_date=start_date, end_date=end_date)
 
 
+# ── SKU List (for search autocomplete) ───────────────────────
+
+@router.get("/sku-list")
+def sku_list(request: Request, q: Optional[str] = None, limit: int = 100):
+    """Return unique SKUs in sales_df, optionally filtered by search query."""
+    import pandas as pd
+    sess = _sess(request)
+    df   = sess.sales_df
+    if df.empty or "Sku" not in df.columns:
+        return []
+    skus = (
+        df[df["Transaction Type"].astype(str) == "Shipment"]["Sku"]
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    # Filter out noise rows
+    skus = [s for s in skus if s and s.lower() not in ("nan", "none", "") and not s.lower().endswith("_total")]
+    if q:
+        q_lower = q.strip().lower()
+        skus = [s for s in skus if q_lower in s.lower()]
+    skus.sort()
+    return skus[:limit]
+
+
+# ── SKU Deepdive ──────────────────────────────────────────────
+
+@router.get("/sku-deepdive")
+def sku_deepdive(
+    request: Request,
+    sku: str,
+    start_date: Optional[str] = None,
+    end_date:   Optional[str] = None,
+):
+    """
+    Full sales breakdown for a single SKU.
+    Returns: summary KPIs, monthly trend, platform breakdown, daily trend.
+    Default window: last 90 days.
+    """
+    import pandas as pd
+    sess = _sess(request)
+    df   = sess.sales_df
+
+    if df.empty:
+        return {"loaded": False, "message": "No sales data loaded"}
+
+    # Normalise dates
+    df = df.copy()
+    df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+    if df["TxnDate"].dt.tz is not None:
+        df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
+    df = df.dropna(subset=["TxnDate"])
+
+    # Default to last 90 days if no range supplied
+    if not start_date and not end_date:
+        end_ts   = df["TxnDate"].max()
+        start_ts = end_ts - pd.Timedelta(days=90)
+    else:
+        start_ts = pd.Timestamp(start_date) if start_date else df["TxnDate"].min()
+        end_ts   = pd.Timestamp(end_date)   if end_date   else df["TxnDate"].max()
+
+    # Filter to SKU + date window
+    sku_df = df[
+        (df["Sku"].astype(str) == sku) &
+        (df["TxnDate"] >= start_ts) &
+        (df["TxnDate"] <= end_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+    ].copy()
+
+    if sku_df.empty:
+        return {
+            "loaded":   True,
+            "sku":      sku,
+            "summary":  {"shipped": 0, "returns": 0, "net_units": 0, "return_rate": 0.0, "ads": 0.0},
+            "monthly":  [],
+            "by_platform": [],
+            "daily":    [],
+            "first_sale": None,
+            "last_sale":  None,
+        }
+
+    qty    = pd.to_numeric(sku_df["Quantity"],       errors="coerce").fillna(0)
+    eff    = pd.to_numeric(sku_df["Units_Effective"], errors="coerce").fillna(0)
+    txn    = sku_df["Transaction Type"].astype(str).str.strip()
+    shipped  = int(qty[txn == "Shipment"].sum())
+    returns  = int(qty[txn == "Refund"].sum())
+    net_units = int(eff.sum())
+    rr       = round(returns / shipped * 100, 1) if shipped > 0 else 0.0
+    period_days = max((end_ts - start_ts).days, 1)
+    ads      = round(shipped / period_days, 2)
+
+    # Monthly trend
+    sku_df["_month"] = sku_df["TxnDate"].dt.to_period("M").astype(str)
+    monthly_raw = (
+        sku_df.assign(_qty=qty, _eff=eff)
+        .groupby(["_month", "Transaction Type"])
+        .agg(units=("_qty", "sum"))
+        .reset_index()
+        .pivot_table(index="_month", columns="Transaction Type", values="units", fill_value=0)
+        .reset_index()
+    )
+    monthly_raw.columns.name = None
+    monthly_raw = monthly_raw.rename(columns={
+        "_month":   "month",
+        "Shipment": "shipped",
+        "Refund":   "returns",
+        "Cancel":   "cancels",
+    })
+    for col in ["shipped", "returns", "cancels"]:
+        if col not in monthly_raw.columns:
+            monthly_raw[col] = 0
+    monthly_raw["net"] = monthly_raw["shipped"] - monthly_raw.get("returns", 0)
+    monthly = monthly_raw.sort_values("month")[["month", "shipped", "returns", "cancels", "net"]].to_dict("records")
+
+    # Platform breakdown
+    plat_grp = (
+        sku_df.assign(_qty=qty)
+        .groupby(["Source", "Transaction Type"])
+        .agg(units=("_qty", "sum"))
+        .reset_index()
+        .pivot_table(index="Source", columns="Transaction Type", values="units", fill_value=0)
+        .reset_index()
+    )
+    plat_grp.columns.name = None
+    plat_grp = plat_grp.rename(columns={"Shipment": "shipped", "Refund": "returns"})
+    if "shipped" not in plat_grp.columns:
+        plat_grp["shipped"] = 0
+    if "returns" not in plat_grp.columns:
+        plat_grp["returns"] = 0
+    plat_grp["return_rate"] = (plat_grp["returns"] / plat_grp["shipped"].replace(0, float("nan")) * 100).fillna(0).round(1)
+    plat_grp = plat_grp.rename(columns={"Source": "platform"})
+    by_platform = plat_grp[["platform", "shipped", "returns", "return_rate"]].sort_values("shipped", ascending=False).to_dict("records")
+
+    # Daily trend (shipments only)
+    daily_grp = (
+        sku_df[txn == "Shipment"]
+        .assign(_qty=qty[txn == "Shipment"])
+        .groupby(sku_df["TxnDate"].dt.strftime("%Y-%m-%d"))
+        .agg(units=("_qty", "sum"))
+        .reset_index()
+        .rename(columns={"TxnDate": "date"})
+        .sort_values("date")
+    )
+    daily = daily_grp.to_dict("records")
+
+    return {
+        "loaded":   True,
+        "sku":      sku,
+        "start_date": str(start_ts.date()),
+        "end_date":   str(end_ts.date()),
+        "summary": {
+            "shipped":     shipped,
+            "returns":     returns,
+            "net_units":   net_units,
+            "return_rate": rr,
+            "ads":         ads,
+        },
+        "monthly":     monthly,
+        "by_platform": by_platform,
+        "daily":       daily,
+        "first_sale":  str(sku_df["TxnDate"].min().date()),
+        "last_sale":   str(sku_df["TxnDate"].max().date()),
+    }
+
+
 # ── Daily Breakdown ───────────────────────────────────────────
 
 @router.get("/daily-breakdown")

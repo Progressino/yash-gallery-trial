@@ -16,8 +16,9 @@ const NAV_GROUPS = [
       { to: '/meesho',    label: '🛒 Meesho' },
       { to: '/flipkart',  label: '🟡 Flipkart' },
       { to: '/snapdeal',  label: '🔴 Snapdeal' },
-      { to: '/forecast',  label: '📈 AI Forecast' },
-      { to: '/finance',   label: '💰 Finance' },
+      { to: '/forecast',    label: '📈 AI Forecast' },
+      { to: '/finance',     label: '💰 Finance' },
+      { to: '/sku-deepdive', label: '🔬 SKU Deepdive' },
     ],
   },
   {

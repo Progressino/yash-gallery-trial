@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell,
@@ -120,6 +121,7 @@ const PRESETS = [
 
 // ── Main Dashboard ──────────────────────────────────────────────
 export default function Dashboard() {
+  const navigate = useNavigate()
   const setCoverage = useSession((s) => s.setCoverage)
   const [dateStart, setDateStart] = useState(() => daysAgo(90))
   const [dateEnd,   setDateEnd]   = useState(TODAY)
@@ -540,11 +542,18 @@ export default function Dashboard() {
               {skuSearch ? 'No SKUs match your search' : 'No SKU data'}
             </div>
           ) : (
+            <p className="text-[10px] text-blue-500 mb-2">Click any bar to open SKU Deepdive →</p>
             <ResponsiveContainer width="100%" height={Math.max(200, topSkusFiltered.length * 28)}>
               <BarChart
                 data={topSkusFiltered}
                 layout="vertical"
                 margin={{ top: 0, right: 20, left: 0, bottom: 0 }}
+                style={{ cursor: 'pointer' }}
+                onClick={(e) => {
+                  if (e?.activePayload?.[0]?.payload?.sku) {
+                    navigate(`/sku-deepdive?sku=${encodeURIComponent(e.activePayload[0].payload.sku)}`)
+                  }
+                }}
               >
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F3F4F6" />
                 <XAxis type="number" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
@@ -552,13 +561,20 @@ export default function Dashboard() {
                   type="category"
                   dataKey="sku"
                   width={140}
-                  tick={{ fontSize: 10, fill: '#4B5563' }}
+                  tick={{ fontSize: 10, fill: '#4B5563', cursor: 'pointer' }}
                 />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8 }}
                   formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), 'Units']}
+                  cursor={{ fill: 'rgba(0,43,91,0.06)' }}
                 />
-                <Bar dataKey="units" radius={[0, 4, 4, 0]}>
+                <Bar
+                  dataKey="units"
+                  radius={[0, 4, 4, 0]}
+                  onClick={(data) => {
+                    if (data?.sku) navigate(`/sku-deepdive?sku=${encodeURIComponent(data.sku)}`)
+                  }}
+                >
                   {topSkusFiltered.map((_, index) => (
                     <Cell key={index} fill={SKU_COLORS[index % SKU_COLORS.length]} />
                   ))}
