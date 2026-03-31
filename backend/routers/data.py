@@ -286,7 +286,16 @@ def sku_deepdive(
     net_units = int(eff.sum())
     rr       = round(returns / shipped * 100, 1) if shipped > 0 else 0.0
     period_days = max((end_ts - start_ts).days, 1)
-    ads      = round(shipped / period_days, 2)
+    # Use effective days (first shipment → end of period) so ADS isn't diluted
+    # for products that launched mid-window — matches PO engine Eff_Days logic.
+    ship_dates = sku_df.loc[txn == "Shipment", "TxnDate"]
+    if not ship_dates.empty:
+        first_ship_ts = ship_dates.min()
+        eff_days = max((end_ts - first_ship_ts).days, 7)
+        eff_days = min(eff_days, period_days)
+    else:
+        eff_days = period_days
+    ads      = round(shipped / eff_days, 2) if shipped > 0 else 0.0
 
     # Monthly trend
     sku_df["_month"] = sku_df["TxnDate"].dt.to_period("M").astype(str)

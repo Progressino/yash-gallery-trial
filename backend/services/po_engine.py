@@ -356,8 +356,9 @@ def calculate_po_base(
     )
 
     # Safety-stock-aware PO calculation, rounded up to nearest 5
+    # grace_days added to target stock so the buffer covers the urgency window
     lead_demand  = po_df["ADS"] * lead_time
-    target_stock = po_df["ADS"] * target_days
+    target_stock = po_df["ADS"] * (target_days + grace_days)
     base_req     = lead_demand + target_stock
     safety       = base_req * (safety_pct / 100.0)
     total_req    = base_req + safety
