@@ -220,6 +220,23 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "sub_catalog_id", "catalog_id", "supplier_sku", "style_code",
     )), None)
 
+    # Size column — Meesho Order CSV stores size separately (e.g. "3XL", "XL")
+    # Combine with SKU to build the full variant SKU: "1898YKYELLOW" + "3XL" → "1898YKYELLOW-3XL"
+    size_col = next((c for c in df.columns if c in ("size", "size_name", "variant_size")), None)
+
+    if sku_col:
+        base_sku = df[sku_col].fillna("").astype(str).str.strip()
+        if size_col:
+            size_val = df[size_col].fillna("").astype(str).str.strip()
+            sku_series = base_sku.where(
+                base_sku == "" ,
+                base_sku + "-" + size_val
+            ).str.strip("-")
+        else:
+            sku_series = base_sku
+    else:
+        sku_series = ""
+
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "TxnType":        df["_TxnType"],
@@ -227,7 +244,7 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "Invoice_Amount": df["_Rev"].astype("float32"),
         "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
         "OrderId":        df[order_col].fillna("").astype(str) if order_col else "",
-        "SKU":            df[sku_col].fillna("").astype(str).str.strip() if sku_col else "",
+        "SKU":            sku_series,
     })
     out["OMS_SKU"] = out["SKU"]   # alias expected by platform_metrics / PO engine
     out["Month"]   = out["Date"].dt.to_period("M").astype(str)
