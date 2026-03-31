@@ -94,8 +94,10 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 df["_Month"] = None
             rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
-    if "forwardreports.xlsx" in files and not rows:
-        with inner_zf.open(files["forwardreports.xlsx"]) as fh:
+    # ForwardReports = shipments (used when no TCS data present)
+    _fwd_key = next((k for k in ["forwardreports.xlsx"] if k in files), None)
+    if _fwd_key and not rows:
+        with inner_zf.open(files[_fwd_key]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=False)
@@ -114,10 +116,12 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Month"]   = None
             rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
-    if "reverse.xlsx" in files and not any(
+    # Reverse / AdjustmentFileReverse = returns (mutually exclusive filenames)
+    _rev_key = next((k for k in ["reverse.xlsx", "adjustmentfilereverse.xlsx"] if k in files), None)
+    if _rev_key and not any(
         (r["_TxnType"] == "Refund").any() for r in rows if not r.empty
     ):
-        with inner_zf.open(files["reverse.xlsx"]) as fh:
+        with inner_zf.open(files[_rev_key]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=True)
