@@ -74,7 +74,7 @@ def build_sales_df(
     sales_parts: List[pd.DataFrame] = []
 
     if not meesho_df.empty:
-        sales_parts.append(_downcast_sales(meesho_to_sales_rows(meesho_df)))
+        sales_parts.append(_downcast_sales(meesho_to_sales_rows(meesho_df, sku_mapping=sku_mapping or None)))
     if not myntra_df.empty:
         sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df)))
     if not flipkart_df.empty:

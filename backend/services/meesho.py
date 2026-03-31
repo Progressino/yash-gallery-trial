@@ -26,6 +26,15 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 return cols_lower[candidate]
         return None
 
+    def _get_sku_col(df) -> pd.Series:
+        """Return the best SKU column as a Series, or empty strings if none found."""
+        cols_lower = {c.lower().strip(): c for c in df.columns}
+        for candidate in ["sku", "product_sku", "seller_sku", "sub_catalog_name",
+                          "catalog_name", "item_sku", "product_name"]:
+            if candidate in cols_lower:
+                return df[cols_lower[candidate]].astype(str).str.strip()
+        return pd.Series([""] * len(df), dtype=str)
+
     if "tcs_sales.xlsx" in files:
         with inner_zf.open(files["tcs_sales.xlsx"]) as fh:
             df = pd.read_excel(fh)
@@ -36,6 +45,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_SKU"]     = _get_sku_col(df)
             df["_TxnType"] = "Shipment"
             if "financial_year" in df.columns and "month_number" in df.columns:
                 df["_Month"] = df.apply(
@@ -45,7 +55,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 )
             else:
                 df["_Month"] = None
-            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_Month"]])
+            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
     if "tcs_sales_return.xlsx" in files:
         with inner_zf.open(files["tcs_sales_return.xlsx"]) as fh:
@@ -57,6 +67,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_SKU"]     = _get_sku_col(df)
             df["_TxnType"] = "Refund"
             if "financial_year" in df.columns and "month_number" in df.columns:
                 df["_Month"] = df.apply(
@@ -66,7 +77,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 )
             else:
                 df["_Month"] = None
-            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_Month"]])
+            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
     if "forwardreports.xlsx" in files and not rows:
         with inner_zf.open(files["forwardreports.xlsx"]) as fh:
@@ -78,6 +89,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_SKU"]     = _get_sku_col(df)
             def _meesho_txn(s):
                 s = str(s).lower()
                 if "return" in s or "rto" in s: return "Refund"
@@ -85,7 +97,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 return "Shipment"
             df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
             df["_Month"]   = None
-            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_Month"]])
+            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
     if "reverse.xlsx" in files and not any(
         (r["_TxnType"] == "Refund").any() for r in rows if not r.empty
@@ -99,19 +111,22 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
+            df["_SKU"]     = _get_sku_col(df)
             df["_TxnType"] = "Refund"
             df["_Month"]   = None
-            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_Month"]])
+            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
     if not rows:
         return pd.DataFrame()
 
     out = pd.concat(rows, ignore_index=True)
-    out.columns = ["Date", "TxnType", "Quantity", "Invoice_Amount", "State", "OrderId", "_Month"]
+    out.columns = ["Date", "TxnType", "Quantity", "Invoice_Amount", "State", "OrderId", "SKU", "_Month"]
     out["Date"]           = pd.to_datetime(out["Date"], errors="coerce")
     out["Quantity"]       = out["Quantity"].astype("float32")
     out["Invoice_Amount"] = out["Invoice_Amount"].astype("float32")
     out["State"]          = out["State"].astype(str).str.upper().str.strip()
+    out["SKU"]            = out["SKU"].astype(str).str.strip()
+    out["OMS_SKU"]        = out["SKU"]   # alias expected by platform_metrics / PO engine
     out["Month"]          = out["_Month"].where(
         out["_Month"].notna(),
         out["Date"].dt.to_period("M").astype(str)
@@ -178,6 +193,11 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     order_col = next((c for c in df.columns if "sub order" in c or "order no" in c
                       or "packet id" in c or "packet" in c), None)
 
+    # SKU: try common Meesho column names
+    sku_col = next((c for c in df.columns if c in ("sku", "product_sku", "seller_sku",
+                                                    "sub_catalog_name", "catalog_name",
+                                                    "item_sku", "product_name")), None)
+
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "TxnType":        df["_TxnType"],
@@ -185,6 +205,7 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "Invoice_Amount": df["_Rev"].astype("float32"),
         "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
         "OrderId":        df[order_col].fillna("").astype(str) if order_col else "",
+        "SKU":            df[sku_col].fillna("").astype(str).str.strip() if sku_col else "",
     })
     out["Month"] = out["Date"].dt.to_period("M").astype(str)
     return out.dropna(subset=["Date"]), "OK"
@@ -226,11 +247,38 @@ def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]
     return combined, len(items), skipped
 
 
-def meesho_to_sales_rows(meesho_df: pd.DataFrame) -> pd.DataFrame:
+def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = None) -> pd.DataFrame:
+    """
+    Convert meesho_df to the unified sales_df schema.
+    Uses SKU column if present; applies sku_mapping to resolve OMS SKU.
+    Falls back to 'MEESHO_TOTAL' only when no SKU data is available.
+    """
     if meesho_df.empty:
         return pd.DataFrame()
+
+    from .helpers import map_to_oms_sku
+
+    # Resolve OMS SKU: use the SKU column from the parsed data if available
+    if "SKU" in meesho_df.columns:
+        raw_sku = meesho_df["SKU"].astype(str).str.strip()
+        has_sku = raw_sku.str.len() > 0
+        # Apply sku_mapping if provided; otherwise use the raw SKU directly
+        if sku_mapping:
+            resolved = raw_sku.apply(
+                lambda s: map_to_oms_sku(s, sku_mapping) if s and s not in ("", "nan", "None") else ""
+            )
+        else:
+            resolved = raw_sku
+        # Fall back to MEESHO_TOTAL only for rows where SKU is genuinely missing
+        sku_series = resolved.where(
+            has_sku & resolved.str.len() > 0 & ~resolved.isin(["nan", "None", ""]),
+            "MEESHO_TOTAL"
+        )
+    else:
+        sku_series = "MEESHO_TOTAL"
+
     out = pd.DataFrame({
-        "Sku":              "MEESHO_TOTAL",
+        "Sku":              sku_series,
         "TxnDate":          meesho_df["Date"],
         "Transaction Type": meesho_df["TxnType"],
         "Quantity":         meesho_df["Quantity"],
