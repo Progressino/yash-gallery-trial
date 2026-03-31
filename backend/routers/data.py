@@ -154,25 +154,34 @@ def top_skus(
 # ── SKU List (for search autocomplete) ───────────────────────
 
 @router.get("/sku-list")
-def sku_list(request: Request, q: Optional[str] = None, limit: int = 100):
-    """Return unique SKUs in sales_df, optionally filtered by search query."""
+def sku_list(request: Request, q: Optional[str] = None, limit: int = 100, include_parents: bool = False):
+    """Return unique SKUs in sales_df, optionally filtered by search query.
+    When include_parents=True also returns deduplicated parent/base SKUs marked with a flag."""
     import pandas as pd
+    from ..services.helpers import get_parent_sku
     sess = _sess(request)
     df   = sess.sales_df
     if df.empty or "Sku" not in df.columns:
         return []
-    skus = (
-        df[df["Transaction Type"].astype(str) == "Shipment"]["Sku"]
-        .astype(str)
-        .unique()
-        .tolist()
-    )
+    shipped = df[df["Transaction Type"].astype(str) == "Shipment"]["Sku"].astype(str)
+    skus = shipped.unique().tolist()
     # Filter out noise rows
     skus = [s for s in skus if s and s.lower() not in ("nan", "none", "") and not s.lower().endswith("_total")]
     if q:
         q_lower = q.strip().lower()
         skus = [s for s in skus if q_lower in s.lower()]
-    skus.sort()
+    skus = sorted(skus)
+
+    if include_parents:
+        parents = sorted({get_parent_sku(s) for s in skus if get_parent_sku(s) != s})
+        if q:
+            q_lower = q.strip().lower()
+            parents = [p for p in parents if q_lower in p.lower()]
+        # Return as dicts with type flag so frontend can distinguish
+        result = [{"sku": s, "type": "variant"} for s in skus[:limit]]
+        result = [{"sku": p, "type": "parent"} for p in parents[:20]] + result
+        return result[:limit]
+
     return skus[:limit]
 
 
@@ -184,13 +193,17 @@ def sku_deepdive(
     sku: str,
     start_date: Optional[str] = None,
     end_date:   Optional[str] = None,
+    all_sizes:  bool = False,   # if True, match all SKUs that share the same base (parent) SKU
 ):
     """
-    Full sales breakdown for a single SKU.
-    Returns: summary KPIs, monthly trend, platform breakdown, daily trend.
+    Full sales breakdown for a single SKU (or all sizes of a base SKU).
+    Returns: summary KPIs, monthly trend, platform breakdown, daily trend, sizes breakdown.
     Default window: last 90 days.
+    When all_sizes=True the `sku` param is treated as the base/parent SKU and all
+    size variants (e.g. 1898YKYELLOW-3XL, 1898YKYELLOW-2XL …) are aggregated together.
     """
     import pandas as pd
+    from ..services.helpers import get_parent_sku
     sess = _sess(request)
     df   = sess.sales_df
 
@@ -212,23 +225,34 @@ def sku_deepdive(
         start_ts = pd.Timestamp(start_date) if start_date else df["TxnDate"].min()
         end_ts   = pd.Timestamp(end_date)   if end_date   else df["TxnDate"].max()
 
+    # Resolve matching SKUs — exact or all-sizes (prefix) mode
+    sku_upper = sku.strip().upper()
+    if all_sizes:
+        df["_parent"] = df["Sku"].astype(str).apply(get_parent_sku).str.upper()
+        sku_mask = df["_parent"] == sku_upper
+    else:
+        sku_mask = df["Sku"].astype(str).str.upper() == sku_upper
+
     # Filter to SKU + date window
     sku_df = df[
-        (df["Sku"].astype(str) == sku) &
+        sku_mask &
         (df["TxnDate"] >= start_ts) &
         (df["TxnDate"] <= end_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
     ].copy()
 
     if sku_df.empty:
         return {
-            "loaded":   True,
-            "sku":      sku,
-            "summary":  {"shipped": 0, "returns": 0, "net_units": 0, "return_rate": 0.0, "ads": 0.0},
-            "monthly":  [],
-            "by_platform": [],
-            "daily":    [],
-            "first_sale": None,
-            "last_sale":  None,
+            "loaded":       True,
+            "sku":          sku,
+            "all_sizes":    all_sizes,
+            "matched_skus": [],
+            "summary":      {"shipped": 0, "returns": 0, "net_units": 0, "return_rate": 0.0, "ads": 0.0},
+            "monthly":      [],
+            "by_platform":  [],
+            "by_size":      [],
+            "daily":        [],
+            "first_sale":   None,
+            "last_sale":    None,
         }
 
     qty    = pd.to_numeric(sku_df["Quantity"],       errors="coerce").fillna(0)
@@ -295,9 +319,26 @@ def sku_deepdive(
     )
     daily = daily_grp.to_dict("records")
 
+    # Sizes breakdown (only meaningful in all_sizes mode)
+    matched_skus = sorted(sku_df["Sku"].astype(str).unique().tolist())
+    if all_sizes and len(matched_skus) > 1:
+        sz_grp = (
+            sku_df[txn == "Shipment"]
+            .assign(_qty=qty[txn == "Shipment"])
+            .groupby("Sku")
+            .agg(shipped=("_qty", "sum"))
+            .reset_index()
+            .sort_values("shipped", ascending=False)
+        )
+        by_size = sz_grp.rename(columns={"Sku": "sku"}).to_dict("records")
+    else:
+        by_size = []
+
     return {
-        "loaded":   True,
-        "sku":      sku,
+        "loaded":     True,
+        "sku":        sku,
+        "all_sizes":  all_sizes,
+        "matched_skus": matched_skus,
         "start_date": str(start_ts.date()),
         "end_date":   str(end_ts.date()),
         "summary": {
@@ -309,6 +350,7 @@ def sku_deepdive(
         },
         "monthly":     monthly,
         "by_platform": by_platform,
+        "by_size":     by_size,
         "daily":       daily,
         "first_sale":  str(sku_df["TxnDate"].min().date()),
         "last_sale":   str(sku_df["TxnDate"].max().date()),

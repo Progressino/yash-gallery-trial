@@ -19,19 +19,23 @@ interface Summary {
 
 interface MonthRow  { month: string; shipped: number; returns: number; cancels: number; net: number }
 interface PlatRow   { platform: string; shipped: number; returns: number; return_rate: number }
+interface SizeRow   { sku: string; shipped: number }
 interface DailyRow  { date: string; units: number }
 
 interface DeepDiveData {
-  loaded:      boolean
-  sku:         string
-  start_date:  string
-  end_date:    string
-  summary:     Summary
-  monthly:     MonthRow[]
-  by_platform: PlatRow[]
-  daily:       DailyRow[]
-  first_sale:  string | null
-  last_sale:   string | null
+  loaded:        boolean
+  sku:           string
+  all_sizes:     boolean
+  matched_skus:  string[]
+  start_date:    string
+  end_date:      string
+  summary:       Summary
+  monthly:       MonthRow[]
+  by_platform:   PlatRow[]
+  by_size:       SizeRow[]
+  daily:         DailyRow[]
+  first_sale:    string | null
+  last_sale:     string | null
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -43,6 +47,8 @@ const PLATFORM_COLORS: Record<string, string> = {
   Flipkart: '#eab308',
   Snapdeal: '#ef4444',
 }
+
+const SIZE_COLORS = ['#6366f1','#8b5cf6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899','#84cc16']
 
 const PRESET_RANGES = [
   { label: '30D',  days: 30  },
@@ -87,20 +93,27 @@ function KPICard({ label, value, sub, color = 'text-gray-900' }: {
 
 // ── SKU Search ────────────────────────────────────────────────────────────────
 
+interface SkuSuggestion { sku: string; type: 'variant' | 'parent' }
+
 function SKUSearch({ value, onChange }: { value: string; onChange: (s: string) => void }) {
-  const [q, setQ]           = useState(value)
-  const [open, setOpen]     = useState(false)
+  const [q, setQ]             = useState(value)
+  const [open, setOpen]       = useState(false)
   const [focused, setFocused] = useState(false)
 
-  const { data: suggestions = [] } = useQuery<string[]>({
-    queryKey: ['sku-list', q],
+  const { data: rawSuggestions = [] } = useQuery<(string | SkuSuggestion)[]>({
+    queryKey: ['sku-list-parents', q],
     queryFn:  async () => {
-      const { data } = await api.get(`/data/sku-list?q=${encodeURIComponent(q)}&limit=30`)
+      const { data } = await api.get(`/data/sku-list?q=${encodeURIComponent(q)}&limit=30&include_parents=true`)
       return data
     },
     enabled: focused && q.length >= 1,
     staleTime: 60_000,
   })
+
+  // Normalise — backend returns either strings (legacy) or {sku, type} objects
+  const suggestions: SkuSuggestion[] = rawSuggestions.map(s =>
+    typeof s === 'string' ? { sku: s, type: 'variant' as const } : s
+  )
 
   useEffect(() => { setQ(value) }, [value])
 
@@ -110,7 +123,7 @@ function SKUSearch({ value, onChange }: { value: string; onChange: (s: string) =
         <span className="text-gray-400">🔍</span>
         <input
           className="flex-1 text-sm outline-none bg-transparent"
-          placeholder="Search SKU…"
+          placeholder="Search SKU or base SKU…"
           value={q}
           onChange={e => { setQ(e.target.value); setOpen(true) }}
           onFocus={() => { setFocused(true); setOpen(true) }}
@@ -125,11 +138,14 @@ function SKUSearch({ value, onChange }: { value: string; onChange: (s: string) =
         <ul className="absolute z-20 w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg max-h-56 overflow-y-auto">
           {suggestions.map(s => (
             <li
-              key={s}
-              onMouseDown={() => { onChange(s); setQ(s); setOpen(false) }}
-              className={`px-4 py-2 text-sm cursor-pointer hover:bg-indigo-50 hover:text-indigo-700 ${s === value ? 'bg-indigo-50 font-medium text-indigo-700' : 'text-gray-700'}`}
+              key={s.sku + s.type}
+              onMouseDown={() => { onChange(s.sku); setQ(s.sku); setOpen(false) }}
+              className={`px-4 py-2 text-sm cursor-pointer hover:bg-indigo-50 hover:text-indigo-700 flex items-center justify-between ${s.sku === value ? 'bg-indigo-50 font-medium text-indigo-700' : 'text-gray-700'}`}
             >
-              {s}
+              <span>{s.sku}</span>
+              {s.type === 'parent' && (
+                <span className="text-[10px] bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded font-medium">all sizes</span>
+              )}
             </li>
           ))}
         </ul>
@@ -140,12 +156,12 @@ function SKUSearch({ value, onChange }: { value: string; onChange: (s: string) =
 
 // ── Custom Tooltip ────────────────────────────────────────────────────────────
 
-function ChartTooltip({ active, payload, label }: any) {
+function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: {name:string;value:number;color:string}[]; label?: string }) {
   if (!active || !payload?.length) return null
   return (
     <div className="bg-white border border-gray-200 rounded-xl shadow-lg px-4 py-3 text-xs">
       <p className="font-semibold text-gray-700 mb-2">{label}</p>
-      {payload.map((p: any) => (
+      {payload.map((p) => (
         <p key={p.name} style={{ color: p.color }}>
           {p.name}: <span className="font-bold">{fmt(p.value)}</span>
         </p>
@@ -163,40 +179,47 @@ export default function SKUDeepDive() {
   const skuParam      = searchParams.get('sku') || ''
   const startParam    = searchParams.get('start') || dateNDaysAgo(90)
   const endParam      = searchParams.get('end')   || today()
-  const [activeSku, setActiveSku] = useState(skuParam)
-  const [start, setStart]         = useState(startParam)
-  const [end, setEnd]             = useState(endParam)
-  const [activePreset, setPreset] = useState<number | null>(90)
+  const allSizesParam = searchParams.get('all_sizes') === '1'
 
-  // Sync URL params → state on initial load
+  const [activeSku,  setActiveSku]  = useState(skuParam)
+  const [start,      setStart]      = useState(startParam)
+  const [end,        setEnd]        = useState(endParam)
+  const [allSizes,   setAllSizes]   = useState(allSizesParam)
+  const [activePreset, setPreset]   = useState<number | null>(90)
+
+  // Sync URL → state on initial load
   useEffect(() => {
     if (skuParam) setActiveSku(skuParam)
-  }, [skuParam])
+    setAllSizes(allSizesParam)
+  }, [skuParam, allSizesParam])
 
-  const apply = useCallback((sku: string, s: string, e: string) => {
+  const apply = useCallback((sku: string, s: string, e: string, allSz: boolean) => {
     const p: Record<string, string> = {}
-    if (sku) p.sku   = sku
-    if (s)   p.start = s
-    if (e)   p.end   = e
+    if (sku)   p.sku   = sku
+    if (s)     p.start = s
+    if (e)     p.end   = e
+    if (allSz) p.all_sizes = '1'
     setSearchParams(p, { replace: true })
     setActiveSku(sku)
     setStart(s)
     setEnd(e)
+    setAllSizes(allSz)
   }, [setSearchParams])
 
   const handlePreset = (days: number) => {
     setPreset(days)
     const s = days > 0 ? dateNDaysAgo(days) : ''
     const e = days > 0 ? today() : ''
-    apply(activeSku, s, e)
+    apply(activeSku, s, e, allSizes)
   }
 
   const { data, isLoading, isFetching } = useQuery<DeepDiveData>({
-    queryKey: ['sku-deepdive', activeSku, start, end],
+    queryKey: ['sku-deepdive', activeSku, start, end, allSizes],
     queryFn: async () => {
       const params = new URLSearchParams({ sku: activeSku })
-      if (start) params.set('start_date', start)
-      if (end)   params.set('end_date', end)
+      if (start)    params.set('start_date', start)
+      if (end)      params.set('end_date', end)
+      if (allSizes) params.set('all_sizes', 'true')
       const { data } = await api.get(`/data/sku-deepdive?${params}`)
       return data
     },
@@ -226,8 +249,23 @@ export default function SKUDeepDive() {
       <div className="flex flex-wrap gap-3 items-center bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
         <SKUSearch
           value={activeSku}
-          onChange={sku => apply(sku, start, end)}
+          onChange={sku => apply(sku, start, end, allSizes)}
         />
+
+        {/* All-sizes toggle */}
+        {activeSku && (
+          <button
+            onClick={() => apply(activeSku, start, end, !allSizes)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg font-medium border transition ${
+              allSizes
+                ? 'bg-indigo-600 text-white border-indigo-600'
+                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+            }`}
+            title={allSizes ? 'Showing all sizes combined — click to filter to exact SKU' : 'Click to view all sizes of this base SKU combined'}
+          >
+            📦 {allSizes ? 'All Sizes (on)' : 'All Sizes'}
+          </button>
+        )}
 
         {/* Preset range pills */}
         <div className="flex gap-1.5 flex-wrap">
@@ -252,7 +290,7 @@ export default function SKUDeepDive() {
             type="date"
             value={start}
             onChange={e => { setPreset(null); setStart(e.target.value) }}
-            onBlur={() => apply(activeSku, start, end)}
+            onBlur={() => apply(activeSku, start, end, allSizes)}
             className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
           />
           <span>→</span>
@@ -260,7 +298,7 @@ export default function SKUDeepDive() {
             type="date"
             value={end}
             onChange={e => { setPreset(null); setEnd(e.target.value) }}
-            onBlur={() => apply(activeSku, start, end)}
+            onBlur={() => apply(activeSku, start, end, allSizes)}
             className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
           />
         </div>
@@ -271,13 +309,13 @@ export default function SKUDeepDive() {
         <div className="text-center py-20 text-gray-400">
           <p className="text-4xl mb-4">🔍</p>
           <p className="font-medium text-gray-500">Search for a SKU above to see its full sales breakdown</p>
-          <p className="text-sm mt-1">Type at least 1 character to see suggestions</p>
+          <p className="text-sm mt-1">Type at least 1 character to see suggestions · Select a base SKU (tagged "all sizes") to aggregate across all sizes</p>
         </div>
       )}
 
       {/* ── Loading ── */}
       {activeSku && loading && (
-        <div className="text-center py-16 text-gray-400 text-sm">Loading deepdive for <strong>{activeSku}</strong>…</div>
+        <div className="text-center py-16 text-gray-400 text-sm">Loading deepdive for <strong>{activeSku}</strong>{allSizes ? ' (all sizes)' : ''}…</div>
       )}
 
       {/* ── No data ── */}
@@ -293,8 +331,8 @@ export default function SKUDeepDive() {
       {activeSku && !loading && data?.loaded && data.summary.shipped === 0 && (
         <div className="text-center py-16 text-gray-400">
           <p className="text-3xl mb-3">📊</p>
-          <p className="font-medium text-gray-500">No orders found for <strong>{activeSku}</strong> in this date range</p>
-          <p className="text-sm mt-1">Try expanding the date range or check the SKU spelling</p>
+          <p className="font-medium text-gray-500">No orders found for <strong>{activeSku}</strong>{allSizes ? ' (any size)' : ''} in this date range</p>
+          <p className="text-sm mt-1">Try expanding the date range or enabling "All Sizes"</p>
         </div>
       )}
 
@@ -302,12 +340,17 @@ export default function SKUDeepDive() {
       {activeSku && !loading && data?.loaded && s && s.shipped > 0 && (
         <>
           {/* SKU banner */}
-          <div className="bg-indigo-600 text-white rounded-2xl px-6 py-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="bg-indigo-600 text-white rounded-2xl px-6 py-4 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-xs text-indigo-200 mb-0.5">SKU</p>
+              <p className="text-xs text-indigo-200 mb-0.5">{allSizes ? 'BASE SKU (all sizes)' : 'SKU'}</p>
               <p className="text-xl font-bold tracking-wide">{data.sku}</p>
+              {allSizes && data.matched_skus.length > 0 && (
+                <p className="text-xs text-indigo-200 mt-1">
+                  {data.matched_skus.length} size{data.matched_skus.length > 1 ? 's' : ''}: {data.matched_skus.join(', ')}
+                </p>
+              )}
             </div>
-            <div className="flex gap-6 text-sm">
+            <div className="flex gap-6 text-sm flex-wrap">
               {data.first_sale && (
                 <div>
                   <p className="text-indigo-200 text-xs">First sale</p>
@@ -364,7 +407,7 @@ export default function SKUDeepDive() {
             </div>
           )}
 
-          {/* Platform breakdown + Daily trend — side by side on wide screens */}
+          {/* Platform breakdown + Sizes breakdown + Daily trend */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
             {/* Platform breakdown */}
@@ -380,13 +423,10 @@ export default function SKUDeepDive() {
                       <div key={p.platform}>
                         <div className="flex items-center justify-between mb-1 text-xs">
                           <span className="font-medium text-gray-700">{p.platform}</span>
-                          <span className="text-gray-500">{fmt(p.shipped)} units &nbsp;·&nbsp; {p.return_rate}% return rate</span>
+                          <span className="text-gray-500">{fmt(p.shipped)} units &nbsp;·&nbsp; {p.return_rate}% returns</span>
                         </div>
                         <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                          <div
-                            className="h-full rounded-full transition-all duration-500"
-                            style={{ width: `${pct}%`, backgroundColor: color }}
-                          />
+                          <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: color }} />
                         </div>
                         <div className="flex justify-between text-xs text-gray-400 mt-0.5">
                           <span>{pct}% of total</span>
@@ -396,8 +436,6 @@ export default function SKUDeepDive() {
                     )
                   })}
                 </div>
-
-                {/* Donut-style mini chart */}
                 <div className="mt-4">
                   <ResponsiveContainer width="100%" height={140}>
                     <BarChart data={data.by_platform} layout="vertical" barCategoryGap="20%">
@@ -408,6 +446,59 @@ export default function SKUDeepDive() {
                       <Bar dataKey="shipped" name="Shipped" radius={[0, 4, 4, 0]}>
                         {data.by_platform.map(p => (
                           <Cell key={p.platform} fill={PLATFORM_COLORS[p.platform] ?? '#6366f1'} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+
+            {/* Sizes breakdown — shown when all_sizes=true */}
+            {allSizes && data.by_size.length > 0 && (
+              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+                <h2 className="text-sm font-semibold text-gray-700 mb-4">Size Breakdown</h2>
+                <div className="space-y-3">
+                  {data.by_size.map((row, i) => {
+                    const total = data.summary.shipped || 1
+                    const pct   = Math.round(row.shipped / total * 100)
+                    const color = SIZE_COLORS[i % SIZE_COLORS.length]
+                    return (
+                      <div key={row.sku}>
+                        <div className="flex items-center justify-between mb-1 text-xs">
+                          <button
+                            className="font-medium text-gray-700 hover:text-indigo-600 hover:underline text-left"
+                            onClick={() => apply(row.sku, start, end, false)}
+                            title="Click to drill into this size"
+                          >
+                            {row.sku}
+                          </button>
+                          <span className="text-gray-500">{fmt(row.shipped)} units · {pct}%</span>
+                        </div>
+                        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: color }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="mt-4">
+                  <ResponsiveContainer width="100%" height={Math.max(120, data.by_size.length * 28)}>
+                    <BarChart data={data.by_size} layout="vertical" barCategoryGap="20%">
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" horizontal={false} />
+                      <XAxis type="number" tick={{ fontSize: 10, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
+                      <YAxis
+                        dataKey="sku"
+                        type="category"
+                        tick={{ fontSize: 10, fill: '#6b7280' }}
+                        axisLine={false} tickLine={false}
+                        width={130}
+                        tickFormatter={v => v.split('-').pop() ?? v}
+                      />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Bar dataKey="shipped" name="Shipped" radius={[0, 4, 4, 0]}>
+                        {data.by_size.map((_, i) => (
+                          <Cell key={i} fill={SIZE_COLORS[i % SIZE_COLORS.length]} />
                         ))}
                       </Bar>
                     </BarChart>
