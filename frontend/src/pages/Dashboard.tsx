@@ -542,6 +542,7 @@ export default function Dashboard() {
               {skuSearch ? 'No SKUs match your search' : 'No SKU data'}
             </div>
           ) : (
+            <div>
             <p className="text-[10px] text-blue-500 mb-2">Click any bar to open SKU Deepdive →</p>
             <ResponsiveContainer width="100%" height={Math.max(200, topSkusFiltered.length * 28)}>
               <BarChart
@@ -581,6 +582,7 @@ export default function Dashboard() {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
+            </div>
           )}
         </div>
 
