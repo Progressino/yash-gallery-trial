@@ -192,6 +192,11 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             if df.empty:
                 return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
             sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+            sess.sales_df  = build_sales_df(
+                mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
+                flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
+                sku_mapping=sess.sku_mapping,
+            )
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
             skus  = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum()) if "SKU" in sess.meesho_df.columns else 0
@@ -212,6 +217,11 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                     message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
             sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+            sess.sales_df  = build_sales_df(
+                mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
+                flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
+                sku_mapping=sess.sku_mapping,
+            )
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
             background_tasks.add_task(_auto_save_cache, sess)
