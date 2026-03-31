@@ -153,12 +153,13 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🛒 Meesho" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']}>
+        <UploadCard title="🛒 Meesho" subtitle="Upload ZIPs (TCS/ledger) or Order Report CSVs — select multiple" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']}>
           <FileUpload
-            label="Upload .zip"
-            accept={{ 'application/zip': ['.zip'] }}
+            label="Upload .zip or .csv (select multiple)"
+            accept={{ 'application/zip': ['.zip'], 'text/csv': ['.csv'] }}
             onUpload={handle('meesho', (file: File) => uploadMeesho(file))}
             uploading={loading['meesho']}
+            multiple
           />
         </UploadCard>
 
