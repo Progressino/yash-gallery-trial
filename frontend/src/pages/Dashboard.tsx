@@ -572,8 +572,9 @@ export default function Dashboard() {
                 <Bar
                   dataKey="units"
                   radius={[0, 4, 4, 0]}
-                  onClick={(data) => {
-                    if (data?.sku) navigate(`/sku-deepdive?sku=${encodeURIComponent(data.sku)}`)
+                  onClick={(data: unknown) => {
+                    const d = data as { sku?: string }
+                    if (d?.sku) navigate(`/sku-deepdive?sku=${encodeURIComponent(d.sku)}`)
                   }}
                 >
                   {topSkusFiltered.map((_, index) => (
