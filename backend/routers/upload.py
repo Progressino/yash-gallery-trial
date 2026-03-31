@@ -178,29 +178,51 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
 async def upload_meesho(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     sess = _get_session(request)
     try:
-        zip_bytes = await file.read()
-        df, zip_count, skipped = load_meesho_from_zip(zip_bytes)
-        del zip_bytes
-        gc.collect()
+        raw_bytes = await file.read()
+        fname = (file.filename or "").lower()
 
-        if df.empty:
+        # Auto-detect: CSV order report vs ZIP (TCS / monthly archive)
+        is_csv = fname.endswith(".csv") or (not fname.endswith(".zip") and raw_bytes[:3] != b"PK\x03")
+
+        if is_csv:
+            from ..services.meesho import parse_meesho_csv
+            df, msg = parse_meesho_csv(raw_bytes)
+            del raw_bytes
+            gc.collect()
+            if df.empty:
+                return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
+            sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+            total = len(sess.meesho_df)
+            years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            skus  = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum()) if "SKU" in sess.meesho_df.columns else 0
+            background_tasks.add_task(_auto_save_cache, sess)
             return UploadResponse(
-                ok=False,
-                message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
+                ok=True,
+                message=f"Meesho Order CSV: added {len(df):,} rows ({skus:,} with SKU). Total: {total:,} rows.",
+                rows=total,
+                years=years,
             )
-
-        sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
-        total = len(sess.meesho_df)
-        years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
-        background_tasks.add_task(_auto_save_cache, sess)
-        return UploadResponse(
-            ok=True,
-            message=f"Meesho: added {len(df):,} rows ({zip_count} monthly ZIPs). Total: {total:,} rows.",
-            rows=total,
-            years=years,
-        )
+        else:
+            df, zip_count, skipped = load_meesho_from_zip(raw_bytes)
+            del raw_bytes
+            gc.collect()
+            if df.empty:
+                return UploadResponse(
+                    ok=False,
+                    message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
+                )
+            sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+            total = len(sess.meesho_df)
+            years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            background_tasks.add_task(_auto_save_cache, sess)
+            return UploadResponse(
+                ok=True,
+                message=f"Meesho: added {len(df):,} rows ({zip_count} monthly ZIPs). Total: {total:,} rows.",
+                rows=total,
+                years=years,
+            )
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse Meesho ZIP: {e}")
+        raise HTTPException(status_code=422, detail=f"Failed to parse Meesho file: {e}")
 
 
 # ── Flipkart ──────────────────────────────────────────────────

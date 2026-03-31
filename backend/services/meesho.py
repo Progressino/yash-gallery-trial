@@ -183,13 +183,14 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
 
-    # Status: "reason for credit entry" (SHIPPED/CANCELLED/RETURNED) or "order status"
+    # Status: "reason for credit entry" (DELIVERED/RETURNED/RTO/CANCELLED) or "order status"
     status_col = next((c for c in df.columns if "reason" in c or "order status" in c
                        or c == "status"), None)
     def _txn(s):
-        # All rows in a daily Meesho order CSV represent orders placed on that date.
-        # Count all as Shipment (gross order count); returns come from separate return reports.
-        return "Shipment"
+        s = str(s).lower().strip()
+        if "return" in s or "rto" in s:   return "Refund"
+        if "cancel" in s:                  return "Cancel"
+        return "Shipment"  # DELIVERED, SHIPPED, etc.
     df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"
 
     # Quantity
@@ -204,14 +205,16 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     # State
     state_col = next((c for c in df.columns if "customer state" in c or c == "state"), None)
 
-    # Order ID
+    # Order ID: prefer "sub order no" / "packet id"
     order_col = next((c for c in df.columns if "sub order" in c or "order no" in c
                       or "packet id" in c or "packet" in c), None)
 
-    # SKU: try common Meesho column names
-    sku_col = next((c for c in df.columns if c in ("sku", "product_sku", "seller_sku",
-                                                    "sub_catalog_name", "catalog_name",
-                                                    "item_sku", "product_name")), None)
+    # SKU: "sku" column is present in Meesho Order Report CSV; fall back to broader list
+    sku_col = next((c for c in df.columns if c in (
+        "sku", "product_sku", "seller_sku", "item_sku",
+        "sub_catalog_name", "catalog_name", "product_name", "item_name",
+        "sub_catalog_id", "catalog_id", "supplier_sku", "style_code",
+    )), None)
 
     out = pd.DataFrame({
         "Date":           df["_Date"],
@@ -222,7 +225,8 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "OrderId":        df[order_col].fillna("").astype(str) if order_col else "",
         "SKU":            df[sku_col].fillna("").astype(str).str.strip() if sku_col else "",
     })
-    out["Month"] = out["Date"].dt.to_period("M").astype(str)
+    out["OMS_SKU"] = out["SKU"]   # alias expected by platform_metrics / PO engine
+    out["Month"]   = out["Date"].dt.to_period("M").astype(str)
     return out.dropna(subset=["Date"]), "OK"
 
 
