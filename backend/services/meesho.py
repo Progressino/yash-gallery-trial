@@ -320,10 +320,8 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
         else:
             resolved = raw_sku
         # Fall back to MEESHO_TOTAL only for rows where SKU is genuinely missing
-        sku_series = resolved.where(
-            has_sku & resolved.str.len() > 0 & ~resolved.isin(["nan", "None", ""]),
-            "MEESHO_TOTAL"
-        )
+        good = has_sku & (resolved.str.len() > 0) & (~resolved.isin(["nan", "None", ""]))
+        sku_series = resolved.where(good, "MEESHO_TOTAL")
     else:
         sku_series = "MEESHO_TOTAL"
 
