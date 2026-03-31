@@ -25,6 +25,8 @@ services:
       - PURCHASE_DB_PATH=/data/purchase.db
       - TNA_DB_PATH=/data/tna.db
       - USERS_DB_PATH=/data/users.db
+      - MARKETPLACE_DB_PATH=/data/marketplace.db
+      - MARKETPLACE_ENCRYPTION_KEY=${MARKETPLACE_ENCRYPTION_KEY}
     volumes:
       - /root/app-data/finance:/data
     expose:

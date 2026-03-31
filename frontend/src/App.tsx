@@ -23,7 +23,8 @@ const Purchase    = lazy(() => import('./pages/Purchase'))
 const TNA         = lazy(() => import('./pages/TNA'))
 const Production  = lazy(() => import('./pages/Production'))
 const GreyFabric  = lazy(() => import('./pages/GreyFabric'))
-const Admin       = lazy(() => import('./pages/Admin'))
+const Admin                  = lazy(() => import('./pages/Admin'))
+const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
 
 const qc = new QueryClient()
 
@@ -101,7 +102,8 @@ export default function App() {
               <Route path="tna"       element={<TNA />} />
               <Route path="production" element={<Production />} />
               <Route path="grey"      element={<GreyFabric />} />
-              <Route path="admin"     element={<Admin />} />
+              <Route path="admin"       element={<Admin />} />
+              <Route path="marketplace-connections" element={<MarketplaceConnections />} />
             </Route>
           </Route>
         </Routes>

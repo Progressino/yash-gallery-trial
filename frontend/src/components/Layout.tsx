@@ -32,6 +32,7 @@ const NAV_GROUPS = [
       { to: '/inventory',  label: '📦 Inventory' },
       { to: '/po',         label: '🎯 PO Engine' },
       { to: '/admin',      label: '🔐 Admin' },
+      { to: '/marketplace-connections', label: '🔗 Marketplace API' },
     ],
   },
 ]

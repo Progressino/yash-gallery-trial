@@ -25,8 +25,10 @@ from .routers.tna import router as tna_router
 from .routers.production import router as production_router
 from .routers.grey import router as grey_router
 from .routers.erp_admin import router as erp_admin_router
+from .routers.marketplace_connect import router as marketplace_router
 from .db.finance_db import init_db
 from .db.item_db import init_db as init_item_db
+from .db.marketplace_db import init_db as init_marketplace_db
 from .db.sales_db import init_db as init_sales_db
 from .db.purchase_db import init_db as init_purchase_db
 from .db.tna_db import init_db as init_tna_db
@@ -36,6 +38,7 @@ from .db.users_db import init_db as init_users_db
 
 init_db()
 init_item_db()
+init_marketplace_db()
 init_sales_db()
 init_purchase_db()
 init_tna_db()
@@ -107,8 +110,56 @@ def _copy_warm_cache_to_session(sess) -> bool:
     return True
 
 
+def _do_amazon_sync_all() -> None:
+    """
+    Called daily at 6AM IST. Pulls last 2 days of Amazon data via SP-API
+    and merges results into the warm cache + SQLite daily store.
+    """
+    from .db.marketplace_db import get_credentials, save_sync_log
+    from .services.amazon_sp_api import sync_amazon_data
+    from .services.daily_store import merge_platform_data, save_daily_file
+    import pandas as pd
+
+    creds = get_credentials("amazon")
+    if not creds:
+        return  # Not connected — nothing to do
+
+    log.info("Scheduled Amazon SP-API sync starting…")
+    try:
+        df, msg = sync_amazon_data(creds, days_back=2)
+    except Exception as e:
+        log.exception("Scheduled Amazon sync failed: %s", e)
+        save_sync_log("amazon", "error", 0, message=str(e))
+        return
+
+    if df.empty:
+        save_sync_log("amazon", "partial", 0, message=msg)
+        log.info("Scheduled Amazon sync: no new data — %s", msg)
+        return
+
+    # Persist to SQLite
+    try:
+        from datetime import date as _date
+        save_daily_file("amazon", f"sp-api-{_date.today()}.csv", df)
+    except Exception as e:
+        log.warning("Scheduled Amazon sync: daily store save failed: %s", e)
+
+    # Merge into warm cache
+    try:
+        existing = _warm_cache.get("mtr_df", pd.DataFrame())
+        _warm_cache["mtr_df"] = merge_platform_data(existing, df, "amazon")
+        log.info("Scheduled Amazon sync: warm cache updated with %d rows", len(df))
+    except Exception as e:
+        log.warning("Scheduled Amazon sync: warm cache merge failed: %s", e)
+
+    date_from = str(df["Date"].min().date()) if "Date" in df.columns else ""
+    date_to   = str(df["Date"].max().date()) if "Date" in df.columns else ""
+    save_sync_log("amazon", "success", len(df), date_from, date_to, msg)
+    log.info("Scheduled Amazon SP-API sync complete: %s", msg)
+
+
 async def _warm_cache_scheduler():
-    """Background task: refresh cache at 06:00 IST every day."""
+    """Background task: refresh cache + run Amazon sync at 06:00 IST every day."""
     while True:
         now = datetime.now(IST)
         target = now.replace(hour=6, minute=0, second=0, microsecond=0)
@@ -118,7 +169,10 @@ async def _warm_cache_scheduler():
         log.info("Next warm-cache refresh at %s IST (in %.0fs)", target.strftime("%Y-%m-%d %H:%M"), wait_seconds)
         await asyncio.sleep(wait_seconds)
         log.info("Running scheduled warm-cache refresh…")
-        await asyncio.get_event_loop().run_in_executor(None, _do_load_warm_cache)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _do_load_warm_cache)
+        # Run Amazon SP-API sync after cache refresh
+        await loop.run_in_executor(None, _do_amazon_sync_all)
 
 
 @asynccontextmanager
@@ -219,6 +273,7 @@ app.include_router(tna_router,         prefix="/api/tna",        tags=["tna"])
 app.include_router(production_router,  prefix="/api/production", tags=["production"])
 app.include_router(grey_router,        prefix="/api/grey",       tags=["grey"])
 app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])
+app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketplace"])
 
 
 @app.get("/api/health")
