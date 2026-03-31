@@ -93,6 +93,14 @@ def cache_load(request: Request):
         except Exception as e:
             msg += f" (daily store warning: {e})"
 
+    # Also refresh the server-level warm cache so future sessions get fresh data
+    if ok:
+        try:
+            import backend.main as _main
+            _main._do_load_warm_cache()
+        except Exception:
+            pass
+
     return CacheStatusResponse(ok=ok, message=msg)
 
 

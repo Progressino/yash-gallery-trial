@@ -6,6 +6,11 @@ Session state is stored server-side keyed by a UUID cookie.
 from dotenv import load_dotenv
 load_dotenv()   # loads .env from cwd (run from repo root or backend/)
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -38,10 +43,99 @@ init_production_db()
 init_grey_db()
 init_users_db()
 
+log = logging.getLogger("erp.cache_warmer")
+
+# ── Shared warm cache (app-level, not per-session) ────────────────
+# Populated at startup and refreshed daily at 06:00 IST.
+# New/empty sessions copy from here so users never wait for a GitHub download.
+_warm_cache: dict = {}
+_warm_cache_loaded_at: datetime | None = None
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _do_load_warm_cache() -> bool:
+    """Download from GitHub and store in module-level _warm_cache. Thread-safe (GIL)."""
+    global _warm_cache, _warm_cache_loaded_at
+    try:
+        from .services.github_cache import load_cache_from_drive
+        from .services.daily_store import load_all_platforms, merge_platform_data as _merge
+        import pandas as pd
+
+        ok, msg, loaded = load_cache_from_drive()
+        if not ok or not loaded:
+            log.warning("Warm-cache load failed: %s", msg)
+            return False
+
+        # Sanitise Snapdeal — strip invalid SKUs
+        if "snapdeal_df" in loaded and isinstance(loaded["snapdeal_df"], pd.DataFrame):
+            snap = loaded["snapdeal_df"]
+            if not snap.empty and "OMS_SKU" in snap.columns:
+                bad = snap["OMS_SKU"].astype(str).str.upper()
+                loaded["snapdeal_df"] = snap[
+                    ~(bad.isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])
+                      | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
+                ].reset_index(drop=True)
+
+        # Merge daily SQLite store on top
+        try:
+            daily = load_all_platforms()
+            for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
+                               ("meesho","meesho_df"),("flipkart","flipkart_df")]:
+                if daily.get(plat) is not None and not daily[plat].empty:
+                    loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
+        except Exception as e:
+            log.warning("Daily-store merge warning: %s", e)
+
+        _warm_cache = loaded
+        _warm_cache_loaded_at = datetime.now(IST)
+        log.info("Warm cache loaded at %s — %s", _warm_cache_loaded_at.strftime("%H:%M IST"), msg)
+        return True
+
+    except Exception as e:
+        log.exception("Warm cache load error: %s", e)
+        return False
+
+
+def _copy_warm_cache_to_session(sess) -> bool:
+    """Copy _warm_cache into an AppSession. Returns True if data was available."""
+    if not _warm_cache:
+        return False
+    for key, val in _warm_cache.items():
+        setattr(sess, key, val)
+    sess._quarterly_cache.clear()
+    return True
+
+
+async def _warm_cache_scheduler():
+    """Background task: refresh cache at 06:00 IST every day."""
+    while True:
+        now = datetime.now(IST)
+        target = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        log.info("Next warm-cache refresh at %s IST (in %.0fs)", target.strftime("%Y-%m-%d %H:%M"), wait_seconds)
+        await asyncio.sleep(wait_seconds)
+        log.info("Running scheduled warm-cache refresh…")
+        await asyncio.get_event_loop().run_in_executor(None, _do_load_warm_cache)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: load cache in background so server is ready immediately
+    asyncio.get_event_loop().run_in_executor(None, _do_load_warm_cache)
+    # Schedule daily 6AM IST refresh
+    task = asyncio.create_task(_warm_cache_scheduler())
+    yield
+    task.cancel()
+
+
 app = FastAPI(
     title="Yash Gallery ERP API",
     version="1.0.0",
     description="FastAPI backend for the Yash Gallery ERP system",
+    lifespan=lifespan,
 )
 
 # ── CORS (allow Vite dev server + production domain) ─────────
@@ -88,9 +182,15 @@ SESSION_COOKIE = "session_id"
 @app.middleware("http")
 async def session_middleware(request: Request, call_next):
     sid = request.cookies.get(SESSION_COOKIE)
+    is_new = not (sid and store.get(sid))
     sid, session = store.get_or_create(sid)
     request.state.session_id = sid
     request.state.session = session
+
+    # If this is a brand-new session and warm cache is ready, pre-populate it
+    # so the user has data immediately without a manual cache load.
+    if is_new and session.mtr_df.empty and session.sales_df.empty:
+        _copy_warm_cache_to_session(session)
 
     response: Response = await call_next(request)
 
@@ -123,4 +223,9 @@ app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admi
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "sessions": store.count}
+    return {
+        "status": "ok",
+        "sessions": store.count,
+        "warm_cache": bool(_warm_cache),
+        "warm_cache_loaded_at": _warm_cache_loaded_at.isoformat() if _warm_cache_loaded_at else None,
+    }
