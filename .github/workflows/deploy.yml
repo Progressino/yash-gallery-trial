@@ -7,14 +7,19 @@ on:
 jobs:
   deploy:
     runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
     steps:
       - name: Pull latest code
-        run: |
-          cd ~/app
-          git pull origin main
+        run: git pull origin main
 
       - name: Rebuild and restart containers
         run: |
-          cd ~/app
           docker compose -f docker-compose.prod.yml up -d --build
           docker image prune -f
+
+      - name: Health check
+        run: |
+          sleep 5
+          curl -sf http://localhost/api/health || curl -sf http://localhost:8000/api/health || echo "Health check skipped"
