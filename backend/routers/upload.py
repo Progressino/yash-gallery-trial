@@ -125,6 +125,7 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
                 message=f"No valid CSV files found. Issues: {'; '.join(skipped[:5])}",
             )
 
+        save_daily_file("amazon", file.filename or "mtr-upload.zip", df)
         sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
         total = len(sess.mtr_df)
         years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -158,6 +159,7 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
+        save_daily_file("myntra", file.filename or "myntra-upload.zip", df)
         sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
         total = len(sess.myntra_df)
         years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -191,6 +193,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             gc.collect()
             if df.empty:
                 return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
+            save_daily_file("meesho", file.filename or "meesho-orders.csv", df)
             sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
             sess.sales_df  = build_sales_df(
                 mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
@@ -216,6 +219,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                     ok=False,
                     message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
+            save_daily_file("meesho", file.filename or "meesho-upload.zip", df)
             sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
             sess.sales_df  = build_sales_df(
                 mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
@@ -254,6 +258,7 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
+        save_daily_file("flipkart", file.filename or "flipkart-upload.zip", df)
         sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
         total = len(sess.flipkart_df)
         years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
