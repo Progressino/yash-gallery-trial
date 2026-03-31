@@ -192,9 +192,10 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
                        or c == "status"), None)
     def _txn(s):
         s = str(s).lower().strip()
-        if "return" in s or "rto" in s:   return "Refund"
-        if "cancel" in s:                  return "Cancel"
-        return "Shipment"  # DELIVERED, SHIPPED, etc.
+        if "return" in s or "rto" in s:                          return "Refund"
+        if "cancel" in s:                                         return "Cancel"
+        if s in ("ready_to_ship", "hold", "pending", "new"):     return "Cancel"  # pre-shipment, exclude
+        return "Shipment"  # DELIVERED, SHIPPED, DOOR_STEP_EXCHANGED, etc.
     df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"
 
     # Quantity
@@ -220,16 +221,25 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "sub_catalog_id", "catalog_id", "supplier_sku", "style_code",
     )), None)
 
-    # Size column — Meesho Order CSV stores size separately (e.g. "3XL", "XL")
-    # Combine with SKU to build the full variant SKU: "1898YKYELLOW" + "3XL" → "1898YKYELLOW-3XL"
+    # Size column — Meesho Order CSV stores size separately (e.g. "3XL", "XXXL", "XL")
+    # Combine with SKU to build the full variant SKU: "1898YKYELLOW" + "XXXL" → "1898YKYELLOW-3XL"
     size_col = next((c for c in df.columns if c in ("size", "size_name", "variant_size")), None)
+
+    import re as _re
+    def _norm_size(s: str) -> str:
+        """Normalize Meesho size format to OMS format: XXXL→3XL, XXXXL→4XL, etc."""
+        s = s.strip().upper()
+        m = _re.match(r'^(X{3,})L$', s)   # 3+ X's followed by L (XXXL, XXXXL, …)
+        if m:
+            return f"{len(m.group(1))}XL"
+        return s
 
     if sku_col:
         base_sku = df[sku_col].fillna("").astype(str).str.strip()
         if size_col:
-            size_val = df[size_col].fillna("").astype(str).str.strip()
+            size_val = df[size_col].fillna("").astype(str).apply(_norm_size)
             sku_series = base_sku.where(
-                base_sku == "" ,
+                base_sku == "",
                 base_sku + "-" + size_val
             ).str.strip("-")
         else:
