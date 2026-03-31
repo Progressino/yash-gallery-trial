@@ -62,13 +62,43 @@ def _do_load_warm_cache() -> bool:
     global _warm_cache, _warm_cache_loaded_at
     try:
         from .services.github_cache import load_cache_from_drive
-        from .services.daily_store import load_all_platforms, merge_platform_data as _merge
+        from .services.daily_store import load_all_platforms, merge_platform_data as _merge, save_daily_file
         import pandas as pd
 
         ok, msg, loaded = load_cache_from_drive()
         if not ok or not loaded:
-            log.warning("Warm-cache load failed: %s", msg)
-            return False
+            log.warning("Warm-cache load failed: %s — falling back to SQLite only", msg)
+            # GitHub failed — build cache entirely from SQLite daily store
+            try:
+                daily = load_all_platforms()
+                if daily:
+                    loaded = {
+                        "mtr_df":      daily.get("amazon",   pd.DataFrame()),
+                        "myntra_df":   daily.get("myntra",   pd.DataFrame()),
+                        "meesho_df":   daily.get("meesho",   pd.DataFrame()),
+                        "flipkart_df": daily.get("flipkart", pd.DataFrame()),
+                        "snapdeal_df": pd.DataFrame(),
+                        "sales_df":    pd.DataFrame(),
+                        "sku_mapping": {},
+                        "inventory_df_variant": pd.DataFrame(),
+                        "inventory_df_parent":  pd.DataFrame(),
+                    }
+                    # Rebuild sales_df from what SQLite has
+                    if any(not v.empty for v in [loaded["mtr_df"], loaded["myntra_df"],
+                                                  loaded["meesho_df"], loaded["flipkart_df"]]):
+                        from .services.sales import build_sales_df
+                        loaded["sales_df"] = build_sales_df(
+                            mtr_df=loaded["mtr_df"], myntra_df=loaded["myntra_df"],
+                            meesho_df=loaded["meesho_df"], flipkart_df=loaded["flipkart_df"],
+                            snapdeal_df=loaded["snapdeal_df"],
+                        )
+                    log.info("Warm cache rebuilt from SQLite: %d sales rows",
+                             len(loaded.get("sales_df", pd.DataFrame())))
+                else:
+                    return False
+            except Exception as e2:
+                log.warning("SQLite fallback also failed: %s", e2)
+                return False
 
         # Sanitise Snapdeal — strip invalid SKUs
         if "snapdeal_df" in loaded and isinstance(loaded["snapdeal_df"], pd.DataFrame):
@@ -80,7 +110,7 @@ def _do_load_warm_cache() -> bool:
                       | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
                 ].reset_index(drop=True)
 
-        # Merge daily SQLite store on top
+        # Merge daily SQLite store on top of GitHub cache
         try:
             daily = load_all_platforms()
             for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
@@ -89,6 +119,19 @@ def _do_load_warm_cache() -> bool:
                     loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
         except Exception as e:
             log.warning("Daily-store merge warning: %s", e)
+
+        # Back up combined data to SQLite so future restarts survive GitHub failures
+        try:
+            for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
+                               ("meesho","meesho_df"),("flipkart","flipkart_df")]:
+                df = loaded.get(key)
+                if df is not None and not df.empty:
+                    sqlite_rows = len(daily.get(plat, pd.DataFrame())) if 'daily' in dir() else 0
+                    if len(df) > sqlite_rows:
+                        save_daily_file(plat, f"_cache_backup_{plat}", df)
+                        log.info("SQLite backup updated for %s: %d rows", plat, len(df))
+        except Exception as e:
+            log.warning("SQLite backup warning: %s", e)
 
         _warm_cache = loaded
         _warm_cache_loaded_at = datetime.now(IST)
