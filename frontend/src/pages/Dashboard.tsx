@@ -550,10 +550,10 @@ export default function Dashboard() {
                 layout="vertical"
                 margin={{ top: 0, right: 20, left: 0, bottom: 0 }}
                 style={{ cursor: 'pointer' }}
-                onClick={(e) => {
-                  if (e?.activePayload?.[0]?.payload?.sku) {
-                    navigate(`/sku-deepdive?sku=${encodeURIComponent(e.activePayload[0].payload.sku)}`)
-                  }
+                onClick={(e: unknown) => {
+                  const ev = e as { activePayload?: { payload?: { sku?: string } }[] }
+                  const sku = ev?.activePayload?.[0]?.payload?.sku
+                  if (sku) navigate(`/sku-deepdive?sku=${encodeURIComponent(sku)}`)
                 }}
               >
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F3F4F6" />
