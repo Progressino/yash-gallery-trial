@@ -134,19 +134,6 @@ def _do_load_warm_cache() -> bool:
         except Exception as e:
             log.warning("Daily-store merge warning: %s", e)
 
-        # Back up combined data to SQLite so future restarts survive GitHub failures
-        try:
-            for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
-                               ("meesho","meesho_df"),("flipkart","flipkart_df")]:
-                df = loaded.get(key)
-                if df is not None and not df.empty:
-                    sqlite_rows = len(daily.get(plat, pd.DataFrame())) if 'daily' in dir() else 0
-                    if len(df) > sqlite_rows:
-                        save_daily_file(plat, f"_cache_backup_{plat}", df)
-                        log.info("SQLite backup updated for %s: %d rows", plat, len(df))
-        except Exception as e:
-            log.warning("SQLite backup warning: %s", e)
-
         _warm_cache = loaded
         _warm_cache_loaded_at = datetime.now(IST)
         log.info("Warm cache loaded at %s — %s", _warm_cache_loaded_at.strftime("%H:%M IST"), msg)
