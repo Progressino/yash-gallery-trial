@@ -90,6 +90,7 @@ def _do_load_warm_cache() -> bool:
                         loaded["sales_df"] = build_sales_df(
                             mtr_df=loaded["mtr_df"], myntra_df=loaded["myntra_df"],
                             meesho_df=loaded["meesho_df"], flipkart_df=loaded["flipkart_df"],
+                            sku_mapping=loaded.get("sku_mapping") or {},
                             snapdeal_df=loaded["snapdeal_df"],
                         )
                     log.info("Warm cache rebuilt from SQLite: %d sales rows",
@@ -110,13 +111,26 @@ def _do_load_warm_cache() -> bool:
                       | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
                 ].reset_index(drop=True)
 
-        # Merge daily SQLite store on top of GitHub cache
+        # Merge daily SQLite store on top of GitHub cache, then rebuild sales_df
         try:
             daily = load_all_platforms()
+            merged_any = False
             for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
                                ("meesho","meesho_df"),("flipkart","flipkart_df")]:
                 if daily.get(plat) is not None and not daily[plat].empty:
                     loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
+                    merged_any = True
+            if merged_any:
+                from .services.sales import build_sales_df
+                loaded["sales_df"] = build_sales_df(
+                    mtr_df=loaded.get("mtr_df", pd.DataFrame()),
+                    myntra_df=loaded.get("myntra_df", pd.DataFrame()),
+                    meesho_df=loaded.get("meesho_df", pd.DataFrame()),
+                    flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
+                    sku_mapping=loaded.get("sku_mapping") or {},
+                    snapdeal_df=loaded.get("snapdeal_df"),
+                )
+                log.info("sales_df rebuilt after SQLite merge: %d rows", len(loaded["sales_df"]))
         except Exception as e:
             log.warning("Daily-store merge warning: %s", e)
 
