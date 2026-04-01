@@ -67,7 +67,7 @@ interface QuarterlyResult {
 
 const PO_DISPLAY_COLS = [
   'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
-  'Sold_Units', 'ADS', 'Gross_PO_Qty',
+  'Sold_Units', 'ADS', 'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
   'PO_Pipeline_Total', 'Projected_Running_Days', 'PO_Qty',
 ]
@@ -78,6 +78,7 @@ const COL_LABEL: Record<string, string> = {
   'Pending_Cutting':          '✂️ Pend. Cutting',
   'Balance_to_Dispatch':      '📦 Bal. Dispatch',
   'Projected_Running_Days':   '📅 Proj. Run Days',
+  'Cutting_Ratio':            '✂️ Cut Ratio',
 }
 
 const PRIORITY_ORDER: Record<string, number> = {
@@ -143,7 +144,7 @@ export default function POEngine() {
   // ── Quarterly columns (non-metadata) — newest first so recent data is immediately visible ──
   const qCols = quarterly?.columns ?? []
   const quarterCols = useMemo(() =>
-    [...qCols.filter(c => !['OMS_SKU','Avg_Monthly','ADS','Units_90d','Units_30d','Freq_30d','Status'].includes(c))].reverse(),
+    [...qCols.filter(c => !['OMS_SKU','Avg_Monthly','ADS','Units_90d','Units_30d','Freq_30d','Status','Cutting_Ratio','Projected_Running_Days'].includes(c))].reverse(),
     [qCols]
   )
 
@@ -606,6 +607,14 @@ export default function POEngine() {
                                           ? Number(row[col] ?? 0) > 0
                                             ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{Number(row[col]).toLocaleString()}</span>
                                             : <span className="text-gray-300">—</span>
+                                          : col === 'Cutting_Ratio'
+                                            ? Number(row[col] ?? 0) > 0
+                                              ? <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
+                                                  {(Number(row[col]) * 100).toFixed(1)}%
+                                                </span>
+                                              : <span className="text-gray-300">—</span>
+                                          : col === 'Projected_Running_Days'
+                                            ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
                                           : col === 'PO_Qty'
                                             ? <QtyInput
                                                 value={finalQty}
