@@ -275,28 +275,10 @@ def calculate_po_base(
     po_df["Recent_ADS"] = (demand_units / po_df["Eff_Days"]).fillna(0)
 
     if use_seasonality and sku_mapping:
-        hist_parts = [df]
-
-        if mtr_df is not None and not mtr_df.empty:
-            mtr_sales = _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent)
-            if not mtr_sales.empty:
-                hist_parts.append(mtr_sales)
-
-        if myntra_df is not None and not myntra_df.empty:
-            myn_sales = myntra_to_sales_rows(myntra_df)
-            if not myn_sales.empty:
-                myn_sales["TxnDate"] = pd.to_datetime(myn_sales["TxnDate"], errors="coerce")
-                if group_by_parent:
-                    myn_sales["Sku"] = myn_sales["Sku"].apply(get_parent_sku)
-                hist_parts.append(myn_sales)
-
-        if len(hist_parts) > 1:
-            hist_df = pd.concat(hist_parts, ignore_index=True)
-            hist_df = hist_df.drop_duplicates(
-                subset=["Sku", "TxnDate", "Transaction Type"], keep="last"
-            )
-        else:
-            hist_df = df
+        # sales_df is already the unified dataset across platforms.
+        # Re-appending mtr/myntra and de-duplicating by (Sku, TxnDate, Transaction Type)
+        # can collapse legitimate same-day multi-order sales and undercount YoY demand.
+        hist_df = df
 
         ly_trailing_end   = max_date - timedelta(days=365)
         ly_trailing_start = ly_trailing_end - timedelta(days=period_days)
