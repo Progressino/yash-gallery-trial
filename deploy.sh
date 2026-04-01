@@ -39,7 +39,7 @@ echo ""
 echo "🩺 Health check…"
 sleep 5
 for i in 1 2 3; do
-  if $COMPOSE exec -T backend curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+  if $COMPOSE exec -T backend python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" > /dev/null 2>&1; then
     echo "   ✅ Backend healthy"
     break
   fi
