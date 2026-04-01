@@ -72,24 +72,31 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         except Exception:
             pass
 
-    # Restore inventory from GitHub cache (inventory has no SQLite backing so it's always
-    # lost on server restart — this is the only place it can be auto-recovered).
-    # Sales/platform data is intentionally NOT auto-merged from cache here; it is loaded
-    # exclusively from the SQLite daily_store above so that metrics are always consistent
-    # regardless of which GitHub cache snapshot was last saved.
-    # Users can explicitly pull historical data via the "Load Cache" button when needed.
+    # Restore inventory from warm cache (fast — already in memory) or GitHub as fallback.
+    # Inventory has no SQLite backing so it's always lost on server restart.
     need_inventory = sess.inventory_df_variant.empty
     if need_inventory:
         try:
-            from ..services.github_cache import load_cache_from_drive
-            ok, _, loaded = load_cache_from_drive()
-            if ok and loaded:
+            import backend.main as _main
+            if _main._warm_cache:
+                # Fast path: copy from in-memory warm cache — no network call
                 for key in ["inventory_df_variant", "inventory_df_parent"]:
-                    val = loaded.get(key)
+                    val = _main._warm_cache.get(key)
                     if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
                         setattr(sess, key, val)
-                if not sess.sku_mapping and loaded.get("sku_mapping"):
-                    sess.sku_mapping = loaded["sku_mapping"]
+                if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
+                    sess.sku_mapping = _main._warm_cache["sku_mapping"]
+            else:
+                # Warm cache not ready yet — fall back to GitHub download
+                from ..services.github_cache import load_cache_from_drive
+                ok, _, loaded = load_cache_from_drive()
+                if ok and loaded:
+                    for key in ["inventory_df_variant", "inventory_df_parent"]:
+                        val = loaded.get(key)
+                        if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                            setattr(sess, key, val)
+                    if not sess.sku_mapping and loaded.get("sku_mapping"):
+                        sess.sku_mapping = loaded["sku_mapping"]
         except Exception:
             pass
 

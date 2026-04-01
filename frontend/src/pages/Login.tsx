@@ -1,12 +1,9 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import api, { getCoverage } from '../api/client'
-import { useSession } from '../store/session'
-
+import api from '../api/client'
 export default function Login() {
   const nav = useNavigate()
-  const setCoverage = useSession(s => s.setCoverage)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError]       = useState('')
@@ -21,15 +18,6 @@ export default function Login() {
     try {
       setLoadStep('Signing in…')
       await api.post('/auth/login', { username, password })
-      // Don't block on cache load here — session middleware pre-populates data
-      // from warm cache on the first authenticated request. ProtectedRoute will
-      // trigger a background restore if the session is still empty.
-      try {
-        const coverage = await getCoverage()
-        setCoverage(coverage)
-      } catch {
-        // Non-critical — ProtectedRoute will re-check
-      }
       nav('/', { replace: true })
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status
