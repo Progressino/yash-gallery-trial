@@ -114,6 +114,8 @@ export default function POEngine() {
   const [loading, setLoading]       = useState(false)
   const [raiseModal, setRaiseModal] = useState(false)
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
+  // Cutting planner: parentSku → total pieces of material available
+  const [materialQty, setMaterialQty] = useState<Record<string, number>>({})
 
   // ── Calculate PO + quarterly in parallel ──
   const run = async () => {
@@ -676,6 +678,13 @@ export default function POEngine() {
                               : c.replace(/_/g, ' ')}
                         </th>
                       ))}
+                      {/* Cutting planner columns */}
+                      <th className="px-2 py-3 bg-amber-50 text-amber-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-amber-100">
+                        ── CUTTING PLANNER ──
+                      </th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">Cut Ratio</th>
+                      <th className="text-center px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">🧵 Material Avail.</th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">✂️ Sug. Cut</th>
                       {quarterCols.length > 0 && (
                         <>
                           <th className="px-2 py-3 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-indigo-100">
@@ -784,6 +793,27 @@ export default function POEngine() {
                               </td>
                             </>
                           )}
+                          {/* Cutting planner — parent row: spacer + spacer + material input + spacer */}
+                          <td className="px-2 py-2.5 bg-amber-50 border-l border-r border-amber-100" />
+                          <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right text-xs text-amber-400">100%</td>
+                          <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-center">
+                            <input
+                              type="number" min={0} step={5}
+                              placeholder="e.g. 500"
+                              value={materialQty[group.parentSku] ?? ''}
+                              onChange={e => {
+                                const v = parseInt(e.target.value, 10)
+                                setMaterialQty(prev => ({ ...prev, [group.parentSku]: isNaN(v) ? 0 : v }))
+                              }}
+                              onClick={e => e.stopPropagation()}
+                              className="w-24 border border-amber-300 rounded px-2 py-1 text-xs text-center focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
+                            />
+                          </td>
+                          <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right font-bold text-amber-700 text-sm">
+                            {(materialQty[group.parentSku] ?? 0) > 0
+                              ? materialQty[group.parentSku].toLocaleString()
+                              : <span className="text-amber-200 font-normal text-xs">enter qty →</span>}
+                          </td>
                         </tr>
                       )
 
@@ -869,6 +899,27 @@ export default function POEngine() {
                                 </td>
                               </>
                             )}
+                            {/* Cutting planner — variant row */}
+                            {(() => {
+                              const ratio = Number(variant['Cutting_Ratio'] ?? 0)
+                              const matQty = materialQty[group.parentSku] ?? 0
+                              const sugCut = matQty > 0 ? Math.round((matQty * ratio) / 5) * 5 : 0
+                              const pct = ratio > 0 ? (ratio * 100).toFixed(1) + '%' : '—'
+                              return (
+                                <>
+                                  <td className="px-2 py-2 bg-amber-50/30 border-l border-r border-amber-100" />
+                                  <td className="px-3 py-2 text-right whitespace-nowrap bg-amber-50/30 border-r border-amber-100">
+                                    <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">{pct}</span>
+                                  </td>
+                                  <td className="px-3 py-2 bg-amber-50/30 border-r border-amber-100" />
+                                  <td className="px-3 py-2 text-right whitespace-nowrap bg-amber-50/30 border-r border-amber-100">
+                                    {sugCut > 0
+                                      ? <span className="text-sm font-bold text-amber-800">{sugCut.toLocaleString()}</span>
+                                      : <span className="text-gray-300 text-xs">—</span>}
+                                  </td>
+                                </>
+                              )
+                            })()}
                           </tr>
                         )
                       })
