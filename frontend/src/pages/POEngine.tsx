@@ -568,10 +568,10 @@ export default function POEngine() {
               {!groupedView && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
                 <table className="w-full text-sm border-collapse">
-                  <thead>
+                  <thead className="sticky top-0 z-30">
                     <tr className="bg-gray-50 border-b border-gray-200">
                       {/* Checkbox */}
-                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-20">
+                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-40">
                         <input
                           type="checkbox"
                           checked={allVisibleSelected}
@@ -584,7 +584,7 @@ export default function POEngine() {
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
                           className={`text-left px-4 py-3 font-semibold whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-20 shadow-sm text-gray-600' : ''}
+                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-40 shadow-sm text-gray-600' : ''}
                             ${c === 'PO_Qty' ? 'text-orange-600' : ''}
                             ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
@@ -742,13 +742,13 @@ export default function POEngine() {
               {groupedView && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
                 <table className="w-full text-sm border-collapse">
-                  <thead>
+                  <thead className="sticky top-0 z-30">
                     <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-20 w-14" />
+                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-40 w-14" />
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
                           className={`text-left px-4 py-3 font-semibold whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-20 shadow-sm text-gray-600' : ''}
+                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-40 shadow-sm text-gray-600' : ''}
                             ${c === 'PO_Qty' ? 'text-orange-600' : ''}
                             ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
