@@ -293,9 +293,11 @@ async def session_middleware(request: Request, call_next):
     request.state.session_id = sid
     request.state.session = session
 
-    # If this is a brand-new session and warm cache is ready, pre-populate it
-    # so the user has data immediately without a manual cache load.
-    if is_new and session.mtr_df.empty and session.sales_df.empty:
+    # Pre-populate session from warm cache whenever the session has no data —
+    # not just on brand-new sessions. This handles the race condition where
+    # the cache was still loading when the session was first created, and also
+    # re-fills sessions whose in-memory data was lost after a deploy.
+    if session.mtr_df.empty and session.sales_df.empty:
         _copy_warm_cache_to_session(session)
 
     response: Response = await call_next(request)
