@@ -444,4 +444,13 @@ def calculate_po_base(
         0.0,
     )
 
+    # Projected Running Days = (current stock + full pipeline) / ADS
+    # Shows how many days stock will last once all pipeline orders arrive
+    total_supply = po_df[inv_col] + po_df["PO_Pipeline_Total"] + po_df["Gross_PO_Qty"]
+    po_df["Projected_Running_Days"] = np.where(
+        po_df["ADS"] > 0,
+        (total_supply / po_df["ADS"]).round(1),
+        999.0,
+    )
+
     return po_df

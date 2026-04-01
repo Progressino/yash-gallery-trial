@@ -27,6 +27,7 @@ interface ParentGroup {
   worstPriority: string
   totalInventory: number
   worstDaysLeft: number
+  worstProjectedDays: number
   totalSoldUnits: number
   totalADS: number
   totalGrossQty: number
@@ -68,14 +69,15 @@ const PO_DISPLAY_COLS = [
   'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
   'Sold_Units', 'ADS', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
-  'PO_Pipeline_Total', 'PO_Qty',
+  'PO_Pipeline_Total', 'Projected_Running_Days', 'PO_Qty',
 ]
 
 const COL_LABEL: Record<string, string> = {
-  'PO_Pipeline_Total':   '🏭 Total Pipeline',
-  'PO_Qty_Ordered':      '📋 PO Ordered',
-  'Pending_Cutting':     '✂️ Pend. Cutting',
-  'Balance_to_Dispatch': '📦 Bal. Dispatch',
+  'PO_Pipeline_Total':        '🏭 Total Pipeline',
+  'PO_Qty_Ordered':           '📋 PO Ordered',
+  'Pending_Cutting':          '✂️ Pend. Cutting',
+  'Balance_to_Dispatch':      '📦 Bal. Dispatch',
+  'Projected_Running_Days':   '📅 Proj. Run Days',
 }
 
 const PRIORITY_ORDER: Record<string, number> = {
@@ -250,7 +252,7 @@ export default function POEngine() {
       if (!groupMap.has(parentSku)) {
         groupMap.set(parentSku, {
           parentSku, variants: [],
-          worstPriority: '⚪ OK', totalInventory: 0, worstDaysLeft: 999,
+          worstPriority: '⚪ OK', totalInventory: 0, worstDaysLeft: 999, worstProjectedDays: 999,
           totalSoldUnits: 0, totalADS: 0, totalGrossQty: 0,
           totalPOOrdered: 0, totalPendingCutting: 0, totalBalanceDispatch: 0,
           totalPipeline: 0, totalFinalQty: 0, quarterTotals: {}, avgMonthly: 0, worstStatus: '',
@@ -260,6 +262,7 @@ export default function POEngine() {
       g.variants.push({ ...row, finalQty })
       g.totalInventory      += Number(row['Total_Inventory'] ?? 0)
       g.worstDaysLeft        = Math.min(g.worstDaysLeft, Number(row['Days_Left'] ?? 999))
+      g.worstProjectedDays   = Math.min(g.worstProjectedDays, Number(row['Projected_Running_Days'] ?? 999))
       g.totalSoldUnits      += Number(row['Sold_Units'] ?? 0)
       g.totalADS            += Number(row['ADS'] ?? 0)
       g.totalGrossQty       += Number(row['Gross_PO_Qty'] ?? 0)
@@ -764,6 +767,8 @@ export default function POEngine() {
                                           🏭 {group.totalPipeline.toLocaleString()}
                                         </span>
                                       : <span className="text-gray-300">—</span>
+                                  : c === 'Projected_Running_Days'
+                                    ? <DaysLeftBadge days={group.worstProjectedDays} />
                                   : c === 'PO_Qty'
                                     ? <span className={`font-bold text-base ${group.totalFinalQty > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
                                         {group.totalFinalQty.toLocaleString()}
@@ -793,27 +798,41 @@ export default function POEngine() {
                               </td>
                             </>
                           )}
-                          {/* Cutting planner — parent row: spacer + spacer + material input + spacer */}
-                          <td className="px-2 py-2.5 bg-amber-50 border-l border-r border-amber-100" />
-                          <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right text-xs text-amber-400">100%</td>
-                          <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-center">
-                            <input
-                              type="number" min={0} step={5}
-                              placeholder="e.g. 500"
-                              value={materialQty[group.parentSku] ?? ''}
-                              onChange={e => {
-                                const v = parseInt(e.target.value, 10)
-                                setMaterialQty(prev => ({ ...prev, [group.parentSku]: isNaN(v) ? 0 : v }))
-                              }}
-                              onClick={e => e.stopPropagation()}
-                              className="w-24 border border-amber-300 rounded px-2 py-1 text-xs text-center focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
-                            />
-                          </td>
-                          <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right font-bold text-amber-700 text-sm">
-                            {(materialQty[group.parentSku] ?? 0) > 0
-                              ? materialQty[group.parentSku].toLocaleString()
-                              : <span className="text-amber-200 font-normal text-xs">enter qty →</span>}
-                          </td>
+                          {/* Cutting planner — parent row: auto-fills from total PO qty, overridable */}
+                          {(() => {
+                            const autoQty = group.totalFinalQty  // default = total PO qty
+                            const matQty  = materialQty[group.parentSku] !== undefined
+                              ? materialQty[group.parentSku]
+                              : autoQty
+                            return (
+                              <>
+                                <td className="px-2 py-2.5 bg-amber-50 border-l border-r border-amber-100" />
+                                <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right text-xs text-amber-600 font-semibold">100%</td>
+                                <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-center">
+                                  <input
+                                    type="number" min={0} step={5}
+                                    placeholder={autoQty > 0 ? String(autoQty) : 'qty'}
+                                    value={materialQty[group.parentSku] !== undefined ? materialQty[group.parentSku] : ''}
+                                    onChange={e => {
+                                      const v = parseInt(e.target.value, 10)
+                                      setMaterialQty(prev => ({ ...prev, [group.parentSku]: isNaN(v) ? 0 : v }))
+                                    }}
+                                    onBlur={e => { if (!e.target.value) setMaterialQty(prev => { const n={...prev}; delete n[group.parentSku]; return n }) }}
+                                    onClick={e => e.stopPropagation()}
+                                    className="w-24 border border-amber-300 rounded px-2 py-1 text-xs text-center focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
+                                  />
+                                  {materialQty[group.parentSku] === undefined && autoQty > 0 && (
+                                    <div className="text-[10px] text-amber-400 mt-0.5">auto (PO qty)</div>
+                                  )}
+                                </td>
+                                <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right font-bold text-amber-700 text-sm">
+                                  {matQty > 0
+                                    ? matQty.toLocaleString()
+                                    : <span className="text-amber-200 font-normal text-xs">—</span>}
+                                </td>
+                              </>
+                            )
+                          })()}
                         </tr>
                       )
 
@@ -869,6 +888,8 @@ export default function POEngine() {
                                     ? Number(variant[col] ?? 0) > 0
                                       ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{Number(variant[col]).toLocaleString()}</span>
                                       : <span className="text-gray-300">—</span>
+                                  : col === 'Projected_Running_Days'
+                                    ? <DaysLeftBadge days={Number(variant[col] ?? 999)} />
                                   : col === 'PO_Qty'
                                     ? <QtyInput value={finalQty} computed={computedQty}
                                         onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
@@ -902,7 +923,10 @@ export default function POEngine() {
                             {/* Cutting planner — variant row */}
                             {(() => {
                               const ratio = Number(variant['Cutting_Ratio'] ?? 0)
-                              const matQty = materialQty[group.parentSku] ?? 0
+                              const autoQty = group.totalFinalQty
+                              const matQty = materialQty[group.parentSku] !== undefined
+                                ? materialQty[group.parentSku]
+                                : autoQty
                               const sugCut = matQty > 0 ? Math.round((matQty * ratio) / 5) * 5 : 0
                               const pct = ratio > 0 ? (ratio * 100).toFixed(1) + '%' : '—'
                               return (
