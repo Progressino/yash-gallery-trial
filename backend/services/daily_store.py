@@ -242,9 +242,9 @@ def save_daily_file(
     return file_date, len(df)
 
 
-def load_platform_data(platform: str, months: int = 18) -> pd.DataFrame:
+def load_platform_data(platform: str, months: int = 48) -> pd.DataFrame:
     """Load and concatenate stored daily data for one platform, with deduplication.
-    Only loads files whose file_date falls within the last `months` months (default 18)
+    Only loads files whose file_date falls within the last `months` months (default 48)
     to cap memory usage on large datasets.
     """
     conn = _get_conn()
