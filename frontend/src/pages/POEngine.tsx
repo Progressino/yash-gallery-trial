@@ -92,7 +92,21 @@ const STATUS_COLORS: Record<string, string> = {
   'Not Moving':   'text-red-600 bg-red-50',
 }
 
-type Tab = 'po' | 'quarterly'
+type Tab = 'po' | 'quarterly' | 'shipment'
+const QUARTER_COL_RE = /^(Apr[-–]Jun|Jul[-–]Sep|Oct[-–]Dec|Jan[-–]Mar)\s+\d{4}$/i
+type Marketplace = 'amazon' | 'flipkart' | 'myntra' | 'meesho'
+
+interface ShipmentParams {
+  marketplace: Marketplace
+  period_days: number
+  lead_time: number
+  target_days: number
+  demand_basis: string
+  min_denominator: number
+  safety_pct: number
+  round_to: number
+  cap_to_oms_inventory: boolean
+}
 
 export default function POEngine() {
   const {
@@ -115,8 +129,24 @@ export default function POEngine() {
 
   // ephemeral UI state (no need to persist across navigation)
   const [loading, setLoading]       = useState(false)
+  const [shipLoading, setShipLoading] = useState(false)
   const [raiseModal, setRaiseModal] = useState(false)
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
+  const [shipment, setShipment] = useState<POResult | null>(null)
+  const [shipSearch, setShipSearch] = useState('')
+  const [shipGroupedView, setShipGroupedView] = useState(true)
+  const [shipCollapsedParents, setShipCollapsedParents] = useState<Set<string>>(new Set())
+  const [shipParams, setShipParams] = useState<ShipmentParams>({
+    marketplace: 'amazon',
+    period_days: 30,
+    lead_time: 7,
+    target_days: 14,
+    demand_basis: 'Sold',
+    min_denominator: 7,
+    safety_pct: 10,
+    round_to: 5,
+    cap_to_oms_inventory: true,
+  })
   // Cutting planner: parentSku → total pieces of material available
   const [materialQty, setMaterialQty] = useState<Record<string, number>>({})
 
@@ -141,10 +171,22 @@ export default function POEngine() {
     }
   }
 
+  const runShipment = async () => {
+    setShipLoading(true)
+    try {
+      const res = await api.post<POResult>('/shipment/calculate', shipParams)
+      setShipment(res.data)
+    } catch (e: unknown) {
+      setShipment({ ok: false, message: e instanceof Error ? e.message : 'Error' })
+    } finally {
+      setShipLoading(false)
+    }
+  }
+
   // ── Quarterly columns (non-metadata) — newest first so recent data is immediately visible ──
   const qCols = quarterly?.columns ?? []
   const quarterCols = useMemo(() =>
-    [...qCols.filter(c => !['OMS_SKU','Avg_Monthly','ADS','Units_90d','Units_30d','Freq_30d','Status','Cutting_Ratio','Projected_Running_Days'].includes(c))].reverse(),
+    [...qCols.filter(c => QUARTER_COL_RE.test(c.trim()))].reverse(),
     [qCols]
   )
 
@@ -314,6 +356,36 @@ export default function POEngine() {
     [qAllRows, qSearch]
   )
 
+  const shipmentColumns = shipment?.columns ?? []
+  const shipmentRows = useMemo(() =>
+    (shipment?.rows ?? []).filter(r =>
+      !shipSearch || String(r['OMS_SKU'] ?? '').toLowerCase().includes(shipSearch.toLowerCase())
+    ),
+    [shipment?.rows, shipSearch]
+  )
+  const shipNumericCols = useMemo(
+    () => shipmentColumns.filter(c => !['OMS_SKU', 'Priority'].includes(c)),
+    [shipmentColumns]
+  )
+  const shipmentParentGroups = useMemo(() => {
+    const groups = new Map<string, { parentSku: string; worstPriority: string; totals: Record<string, number>; rows: PORow[] }>()
+    for (const row of shipmentRows) {
+      const sku = String(row['OMS_SKU'] ?? '')
+      const parentSku = sku ? sku.split('-').slice(0, -1).join('-') || sku : ''
+      if (!groups.has(parentSku)) {
+        groups.set(parentSku, { parentSku, worstPriority: '⚪ OK', totals: {}, rows: [] })
+      }
+      const g = groups.get(parentSku)!
+      g.rows.push(row)
+      const p = String(row['Priority'] ?? '')
+      if ((PRIORITY_ORDER[p] ?? 9) < (PRIORITY_ORDER[g.worstPriority] ?? 9)) g.worstPriority = p
+      for (const c of shipNumericCols) {
+        g.totals[c] = (g.totals[c] ?? 0) + Number(row[c] ?? 0)
+      }
+    }
+    return Array.from(groups.values())
+  }, [shipmentRows, shipNumericCols])
+
   return (
     <div className="p-6 space-y-6">
       <div>
@@ -323,7 +395,7 @@ export default function POEngine() {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-gray-200">
-        {(['po', 'quarterly'] as Tab[]).map(t => (
+        {(['po', 'quarterly', 'shipment'] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
@@ -332,7 +404,7 @@ export default function POEngine() {
                 ? 'border-[#002B5B] text-[#002B5B] bg-white'
                 : 'border-transparent text-gray-500 hover:text-gray-700'}`}
           >
-            {t === 'po' ? '🎯 PO Recommendation' : '📊 Quarterly History'}
+            {t === 'po' ? '🎯 PO Recommendation' : t === 'quarterly' ? '📊 Quarterly History' : '🚚 Shipment Engine'}
           </button>
         ))}
       </div>
@@ -709,6 +781,7 @@ export default function POEngine() {
                         ── CUTTING PLANNER ──
                       </th>
                       <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">Cut Ratio</th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">PO Qty</th>
                       <th className="text-center px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">🧵 Material Avail.</th>
                       <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">✂️ Sug. Cut</th>
                     </tr>
@@ -817,6 +890,11 @@ export default function POEngine() {
                               <>
                                 <td className="px-2 py-2.5 bg-amber-50 border-l border-r border-amber-100" />
                                 <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right text-xs text-amber-600 font-semibold">100%</td>
+                                <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-right font-bold text-amber-700 text-sm">
+                                  {group.totalFinalQty > 0
+                                    ? group.totalFinalQty.toLocaleString()
+                                    : <span className="text-amber-200 font-normal text-xs">—</span>}
+                                </td>
                                 <td className="px-3 py-2.5 bg-amber-50/50 border-r border-amber-100 text-center">
                                   <input
                                     type="number" min={0} step={5}
@@ -943,6 +1021,11 @@ export default function POEngine() {
                                   <td className="px-2 py-2 bg-amber-50/30 border-l border-r border-amber-100" />
                                   <td className="px-3 py-2 text-right whitespace-nowrap bg-amber-50/30 border-r border-amber-100">
                                     <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">{pct}</span>
+                                  </td>
+                                  <td className="px-3 py-2 text-right whitespace-nowrap bg-amber-50/30 border-r border-amber-100">
+                                    {finalQty > 0
+                                      ? <span className="text-sm font-bold text-amber-800">{finalQty.toLocaleString()}</span>
+                                      : <span className="text-gray-300 text-xs">—</span>}
                                   </td>
                                   <td className="px-3 py-2 bg-amber-50/30 border-r border-amber-100" />
                                   <td className="px-3 py-2 text-right whitespace-nowrap bg-amber-50/30 border-r border-amber-100">
@@ -1085,6 +1168,186 @@ export default function POEngine() {
               <p className="text-xs text-gray-400">
                 Quarterly totals = forward shipments only. Avg/Month = last 4 quarters ÷ 3. Daily Avg = last 90d ÷ 90.
               </p>
+            </>
+          )}
+        </>
+      )}
+
+      {/* ── Shipment Engine Tab ── */}
+      {activeTab === 'shipment' && (
+        <>
+          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+            <h3 className="font-semibold text-[#002B5B] mb-4">Shipment Parameters</h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Marketplace</label>
+                <select
+                  value={shipParams.marketplace}
+                  onChange={e => setShipParams({ ...shipParams, marketplace: e.target.value as Marketplace })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                >
+                  <option value="amazon">Amazon</option>
+                  <option value="flipkart">Flipkart</option>
+                  <option value="myntra">Myntra</option>
+                  <option value="meesho">Meesho</option>
+                </select>
+              </div>
+              <Param label="Period (days)" type="number"
+                value={shipParams.period_days} onChange={v => setShipParams({ ...shipParams, period_days: +v })} />
+              <Param label="Lead Time (days)" type="number"
+                value={shipParams.lead_time} onChange={v => setShipParams({ ...shipParams, lead_time: +v })} />
+              <Param label="Target Cover (days)" type="number"
+                value={shipParams.target_days} onChange={v => setShipParams({ ...shipParams, target_days: +v })} />
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+              <Param label="Safety %" type="number"
+                value={shipParams.safety_pct} onChange={v => setShipParams({ ...shipParams, safety_pct: +v })} />
+              <Param label="Round To" type="number"
+                value={shipParams.round_to} onChange={v => setShipParams({ ...shipParams, round_to: +v })} />
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Demand Basis</label>
+                <select
+                  value={shipParams.demand_basis}
+                  onChange={e => setShipParams({ ...shipParams, demand_basis: e.target.value })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                >
+                  <option value="Sold">Sold</option>
+                  <option value="Net">Net</option>
+                </select>
+              </div>
+              <div className="flex items-end">
+                <Toggle
+                  label="Cap by OMS Inventory"
+                  checked={shipParams.cap_to_oms_inventory}
+                  onChange={v => setShipParams({ ...shipParams, cap_to_oms_inventory: v })}
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={runShipment}
+              disabled={shipLoading}
+              className="mt-5 px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
+            >
+              {shipLoading ? '⏳ Calculating…' : '🚚 Calculate Shipment'}
+            </button>
+
+            {shipment && !shipment.ok && (
+              <p className="mt-3 text-sm text-red-600 bg-red-50 rounded p-2">{shipment.message}</p>
+            )}
+          </div>
+
+          {shipment?.ok && (shipment.rows?.length ?? 0) > 0 && (
+            <>
+              <div className="flex items-center gap-3 flex-wrap">
+                <input
+                  value={shipSearch}
+                  onChange={e => setShipSearch(e.target.value)}
+                  placeholder="Search SKU…"
+                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                />
+                <button
+                  onClick={() => setShipGroupedView(!shipGroupedView)}
+                  className={`text-xs px-3 py-1.5 rounded border font-medium transition-colors ${
+                    shipGroupedView ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  📐 Size Families
+                </button>
+                <span className="text-xs text-gray-400">{shipmentRows.length} SKUs</span>
+              </div>
+              {!shipGroupedView && (
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
+                  <table className="w-full text-sm border-collapse">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        {shipmentColumns.map(c => (
+                          <th key={c} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">
+                            {c.replace(/_/g, ' ')}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shipmentRows.slice(0, 500).map((row, i) => (
+                        <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                          {shipmentColumns.map(c => (
+                            <td key={c} className="px-4 py-2 whitespace-nowrap text-gray-700">
+                              {c === 'Priority'
+                                ? <PriorityBadge priority={String(row[c] ?? '')} />
+                                : typeof row[c] === 'number'
+                                  ? Number(row[c]).toLocaleString(undefined, { maximumFractionDigits: 3 })
+                                  : row[c] ?? '—'}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {shipGroupedView && (
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
+                  <table className="w-full text-sm border-collapse">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        <th className="px-3 py-3 w-12" />
+                        {shipmentColumns.map(c => (
+                          <th key={c} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">
+                            {c.replace(/_/g, ' ')}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shipmentParentGroups.flatMap((group) => {
+                        const collapsed = shipCollapsedParents.has(group.parentSku)
+                        const parentRow = (
+                          <tr key={group.parentSku + '-p'} className="bg-slate-100 border-b border-slate-200">
+                            <td className="px-3 py-2">
+                              <button
+                                onClick={() => {
+                                  const next = new Set(shipCollapsedParents)
+                                  next.has(group.parentSku) ? next.delete(group.parentSku) : next.add(group.parentSku)
+                                  setShipCollapsedParents(next)
+                                }}
+                                className="text-gray-500 text-[10px] w-3 text-center font-mono leading-none"
+                              >
+                                {collapsed ? '▶' : '▼'}
+                              </button>
+                            </td>
+                            {shipmentColumns.map(c => (
+                              <td key={c} className="px-4 py-2.5 whitespace-nowrap font-semibold text-gray-800">
+                                {c === 'Priority'
+                                  ? <PriorityBadge priority={group.worstPriority} />
+                                  : c === 'OMS_SKU'
+                                    ? <span className="font-bold text-[#002B5B]">{group.parentSku}</span>
+                                    : Number(group.totals[c] ?? 0).toLocaleString(undefined, { maximumFractionDigits: 3 })}
+                              </td>
+                            ))}
+                          </tr>
+                        )
+                        const children = collapsed ? [] : group.rows.map((row, i) => (
+                          <tr key={group.parentSku + '-c-' + i} className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="px-3 py-2" />
+                            {shipmentColumns.map(c => (
+                              <td key={c} className="px-4 py-2 whitespace-nowrap text-gray-700">
+                                {c === 'Priority'
+                                  ? <PriorityBadge priority={String(row[c] ?? '')} />
+                                  : typeof row[c] === 'number'
+                                    ? Number(row[c]).toLocaleString(undefined, { maximumFractionDigits: 3 })
+                                    : row[c] ?? '—'}
+                              </td>
+                            ))}
+                          </tr>
+                        ))
+                        return [parentRow, ...children]
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </>
           )}
         </>

@@ -23,7 +23,7 @@ interface QuarterlyResult {
   rows?: QuarterlyRow[]
 }
 
-type Tab = 'po' | 'quarterly'
+type Tab = 'po' | 'quarterly' | 'shipment'
 
 interface POParams {
   period_days: number
