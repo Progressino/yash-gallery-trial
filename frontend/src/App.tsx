@@ -43,9 +43,9 @@ function ProtectedRoute() {
   })
 
   // Auto-restore session data after server restart or session expiry.
-  // If the user has a valid auth token but an empty session (no sales data),
-  // automatically reload from GitHub cache — same as what Login.tsx does.
-  useQuery({
+  // Runs in the background — the app renders immediately and shows a banner
+  // while restoring so the user isn't stuck on the login screen.
+  const { isFetching: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       const coverage = await getCoverage()
@@ -72,9 +72,20 @@ function ProtectedRoute() {
   }
   if (isError || !data) return <Navigate to="/login" replace />
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>
-      <Outlet />
-    </Suspense>
+    <>
+      {isRestoring && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
+          <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+          </svg>
+          Syncing your data…
+        </div>
+      )}
+      <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>
+        <Outlet />
+      </Suspense>
+    </>
   )
 }
 

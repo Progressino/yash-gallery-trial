@@ -57,6 +57,29 @@ def cache_load(request: Request):
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
 
+    # ── Fast path: warm cache already in memory — no GitHub download needed ──
+    try:
+        import backend.main as _main
+        if _main._warm_cache:
+            _main._copy_warm_cache_to_session(sess)
+            # Still layer in any newer SQLite daily uploads
+            try:
+                from ..services.daily_store import load_all_platforms, merge_platform_data as _mrg
+                daily_data = load_all_platforms()
+                if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
+                    sess.mtr_df = _mrg(sess.mtr_df, daily_data["amazon"], "amazon")
+                if daily_data.get("myntra") is not None and not daily_data["myntra"].empty:
+                    sess.myntra_df = _mrg(sess.myntra_df, daily_data["myntra"], "myntra")
+                if daily_data.get("meesho") is not None and not daily_data["meesho"].empty:
+                    sess.meesho_df = _mrg(sess.meesho_df, daily_data["meesho"], "meesho")
+                if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
+                    sess.flipkart_df = _mrg(sess.flipkart_df, daily_data["flipkart"], "flipkart")
+            except Exception:
+                pass
+            return CacheStatusResponse(ok=True, message="Loaded from warm cache.")
+    except Exception:
+        pass  # fall through to GitHub download
+
     ok, msg, loaded = load_cache_from_drive()
     if ok:
         import pandas as pd
