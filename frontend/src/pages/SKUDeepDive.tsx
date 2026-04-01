@@ -96,7 +96,7 @@ function KPICard({ label, value, sub, color = 'text-gray-900' }: {
 
 interface SkuSuggestion { sku: string; type: 'variant' | 'parent' }
 
-function SKUSearch({ value, onChange }: { value: string; onChange: (s: string) => void }) {
+function SKUSearch({ value, onChange }: { value: string; onChange: (s: string, type?: 'variant' | 'parent') => void }) {
   const [q, setQ]             = useState(value)
   const [open, setOpen]       = useState(false)
   const [focused, setFocused] = useState(false)
@@ -140,7 +140,7 @@ function SKUSearch({ value, onChange }: { value: string; onChange: (s: string) =
           {suggestions.map(s => (
             <li
               key={s.sku + s.type}
-              onMouseDown={() => { onChange(s.sku); setQ(s.sku); setOpen(false) }}
+              onMouseDown={() => { onChange(s.sku, s.type); setQ(s.sku); setOpen(false) }}
               className={`px-4 py-2 text-sm cursor-pointer hover:bg-indigo-50 hover:text-indigo-700 flex items-center justify-between ${s.sku === value ? 'bg-indigo-50 font-medium text-indigo-700' : 'text-gray-700'}`}
             >
               <span>{s.sku}</span>
@@ -250,7 +250,7 @@ export default function SKUDeepDive() {
       <div className="flex flex-wrap gap-3 items-center bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
         <SKUSearch
           value={activeSku}
-          onChange={sku => apply(sku, start, end, allSizes)}
+          onChange={(sku, type) => apply(sku, start, end, type === 'parent' ? true : allSizes)}
         />
 
         {/* All-sizes toggle */}
@@ -333,7 +333,18 @@ export default function SKUDeepDive() {
         <div className="text-center py-16 text-gray-400">
           <p className="text-3xl mb-3">📊</p>
           <p className="font-medium text-gray-500">No orders found for <strong>{activeSku}</strong>{allSizes ? ' (any size)' : ''} in this date range</p>
-          <p className="text-sm mt-1">Try expanding the date range or enabling "All Sizes"</p>
+          {!allSizes && (
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <p className="text-sm">If this is a base/parent SKU, enable All Sizes to see all variants combined:</p>
+              <button
+                onClick={() => apply(activeSku, start, end, true)}
+                className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg font-medium hover:bg-indigo-700 transition"
+              >
+                📦 Enable All Sizes for {activeSku}
+              </button>
+            </div>
+          )}
+          {allSizes && <p className="text-sm mt-1">Try expanding the date range — no shipments recorded for any size in this period</p>}
         </div>
       )}
 
