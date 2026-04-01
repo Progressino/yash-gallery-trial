@@ -434,15 +434,20 @@ def calculate_po_base(
     # Parent SKU — strip marketplace suffix + size/colour suffix
     po_df["Parent_SKU"] = po_df["OMS_SKU"].apply(get_parent_sku)
 
-    # Cutting ratio: each size's share of parent group total ADS demand.
-    # Used by the Cutting Planner — given N pieces of material, cut
-    # N * Cutting_Ratio for each size (rounded to nearest 5).
+    # Cutting ratio for the Cutting Planner:
+    # Prefer each size's share of net PO qty (actionable demand),
+    # and fall back to ADS share when the parent has no PO demand.
+    parent_po_sum = po_df.groupby("Parent_SKU")["PO_Qty"].transform("sum")
     parent_ads_sum = po_df.groupby("Parent_SKU")["ADS"].transform("sum")
     po_df["Cutting_Ratio"] = np.where(
-        parent_ads_sum > 0,
-        (po_df["ADS"] / parent_ads_sum).round(4),
-        0.0,
-    )
+        parent_po_sum > 0,
+        (po_df["PO_Qty"] / parent_po_sum),
+        np.where(
+            parent_ads_sum > 0,
+            (po_df["ADS"] / parent_ads_sum),
+            0.0,
+        ),
+    ).round(4)
 
     # Projected Running Days = (current stock + full pipeline) / ADS
     # Shows how many days stock will last once all pipeline orders arrive

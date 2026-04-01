@@ -690,13 +690,6 @@ export default function POEngine() {
                               : c.replace(/_/g, ' ')}
                         </th>
                       ))}
-                      {/* Cutting planner columns */}
-                      <th className="px-2 py-3 bg-amber-50 text-amber-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-amber-100">
-                        ── CUTTING PLANNER ──
-                      </th>
-                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">Cut Ratio</th>
-                      <th className="text-center px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">🧵 Material Avail.</th>
-                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">✂️ Sug. Cut</th>
                       {quarterCols.length > 0 && (
                         <>
                           <th className="px-2 py-3 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-indigo-100">
@@ -711,6 +704,13 @@ export default function POEngine() {
                           <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50">Status</th>
                         </>
                       )}
+                      {/* Cutting planner columns */}
+                      <th className="px-2 py-3 bg-amber-50 text-amber-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-amber-100">
+                        ── CUTTING PLANNER ──
+                      </th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">Cut Ratio</th>
+                      <th className="text-center px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">🧵 Material Avail.</th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">✂️ Sug. Cut</th>
                     </tr>
                   </thead>
                   <tbody>
