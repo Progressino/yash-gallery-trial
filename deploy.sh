@@ -31,6 +31,7 @@ $COMPOSE build --no-cache
 
 echo ""
 echo "▶  Starting containers…"
+$COMPOSE down --remove-orphans 2>/dev/null || true
 $COMPOSE up -d
 
 # 4. Health check (hit backend container directly on port 8000, bypassing nginx HTTPS redirect)
