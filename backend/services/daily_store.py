@@ -242,13 +242,17 @@ def save_daily_file(
     return file_date, len(df)
 
 
-def load_platform_data(platform: str) -> pd.DataFrame:
-    """Load and concatenate all stored daily data for one platform, with deduplication."""
+def load_platform_data(platform: str, months: int = 18) -> pd.DataFrame:
+    """Load and concatenate stored daily data for one platform, with deduplication.
+    Only loads files whose file_date falls within the last `months` months (default 18)
+    to cap memory usage on large datasets.
+    """
     conn = _get_conn()
+    cutoff = (datetime.date.today() - datetime.timedelta(days=months * 30)).isoformat()
     rows = conn.execute(
         "SELECT data_parquet FROM daily_uploads "
-        "WHERE platform=? ORDER BY file_date ASC",
-        (platform,),
+        "WHERE platform=? AND file_date >= ? ORDER BY file_date ASC",
+        (platform, cutoff),
     ).fetchall()
     conn.close()
 

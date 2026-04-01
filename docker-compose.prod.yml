@@ -31,6 +31,8 @@ services:
       - /root/app-data/finance:/data
     expose:
       - "8000"          # internal only, nginx proxies to it
+    mem_limit: 3g
+    memswap_limit: 5g   # allows up to 2g of swap before OOM
     restart: unless-stopped
 
   # ── React frontend + nginx reverse proxy ────────────────────
