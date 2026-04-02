@@ -255,43 +255,24 @@ def calculate_po_base(
         {"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0}
     )
 
-    # ADS uses a fixed 30-day window regardless of period_days.
-    # This reflects current sales velocity more accurately than a longer window.
-    ADS_WINDOW = 30
-    ads_cutoff = max_date - timedelta(days=ADS_WINDOW)
-    ads_recent = df[df["TxnDate"] >= ads_cutoff].copy()
-
-    ads_sold = (
-        ads_recent[ads_recent["Transaction Type"] == "Shipment"]
-        .groupby("Sku")["Quantity"].sum().reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "Quantity": "ADS_Sold_Units"})
-    )
-    ads_net = (
-        ads_recent.groupby("Sku")["Units_Effective"].sum().reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "ADS_Net_Units"})
-    )
-    # Per-SKU effective days: from first sale within 30-day window to max_date.
-    # Prevents diluting ADS for recently-launched SKUs.
-    ads_first = (
-        ads_recent.groupby("Sku")["TxnDate"].min()
+    # Per-SKU denominator: days from first sale within window to max_date.
+    # This prevents diluting ADS for recently-launched products that don't
+    # have a full period_days of sales history yet.
+    sku_first = (
+        recent.groupby("Sku")["TxnDate"].min()
         .reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "TxnDate": "ADS_First_Sale_Date"})
+        .rename(columns={"Sku": "OMS_SKU", "TxnDate": "First_Sale_Date"})
     )
-
-    po_df = po_df.merge(ads_sold, on="OMS_SKU", how="left")
-    po_df = po_df.merge(ads_net,  on="OMS_SKU", how="left")
-    po_df = po_df.merge(ads_first, on="OMS_SKU", how="left")
-    po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
-
+    po_df = po_df.merge(sku_first, on="OMS_SKU", how="left")
     po_df["Eff_Days"] = (
-        (max_date - po_df["ADS_First_Sale_Date"]).dt.days
-        .fillna(ADS_WINDOW)                           # no sales in 30d → ADS stays 0
-        .clip(lower=min_denominator, upper=ADS_WINDOW)
+        (max_date - po_df["First_Sale_Date"]).dt.days
+        .fillna(period_days)                          # no sales → use full window (ADS stays 0)
+        .clip(lower=min_denominator, upper=period_days)
         .astype(float)
     )
 
-    ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
-    po_df["Recent_ADS"] = (ads_demand / po_df["Eff_Days"]).fillna(0)
+    demand_units = po_df["Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["Sold_Units"]
+    po_df["Recent_ADS"] = (demand_units / po_df["Eff_Days"]).fillna(0)
 
     if use_seasonality and sku_mapping:
         # sales_df is already the unified dataset across platforms.
@@ -349,13 +330,6 @@ def calculate_po_base(
 
     inv_col = "Total_Inventory" if "Total_Inventory" in po_df.columns else po_df.columns[1]
 
-    # Days of stock remaining
-    po_df["Days_Left"] = np.where(
-        po_df["ADS"] > 0,
-        (po_df[inv_col] / po_df["ADS"]).round(1),
-        999.0,
-    )
-
     # Safety-stock-aware PO calculation, rounded up to nearest 5
     # grace_days added to target stock so the buffer covers the urgency window
     lead_demand  = po_df["ADS"] * lead_time
@@ -384,6 +358,14 @@ def calculate_po_base(
             po_df[_bc] = pd.to_numeric(po_df[_bc], errors="coerce").fillna(0).astype(int)
     else:
         po_df["PO_Pipeline_Total"] = 0
+
+    # Days of stock remaining — includes pipeline so "Running Days" matches
+    # the team's manual formula: (inventory + pipeline) / ADS
+    po_df["Days_Left"] = np.where(
+        po_df["ADS"] > 0,
+        ((po_df[inv_col] + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
+        999.0,
+    )
 
     # ── Inject PO-sheet SKUs missing from inventory ──────────────
     # If a SKU has an active pipeline order but isn't in the inventory file
@@ -458,12 +440,5 @@ def calculate_po_base(
         (total_supply / po_df["ADS"]).round(1),
         999.0,
     )
-
-    # Drop intermediate ADS calculation columns (not needed in output).
-    # Eff_Days is kept — it's the effective selling days used as the ADS denominator.
-    _drop_cols = [c for c in ["ADS_First_Sale_Date", "ADS_Sold_Units", "ADS_Net_Units",
-                               "First_Sale_Date"] if c in po_df.columns]
-    if _drop_cols:
-        po_df = po_df.drop(columns=_drop_cols)
 
     return po_df
