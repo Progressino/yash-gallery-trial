@@ -283,6 +283,11 @@ def calculate_po_base(
     po_df = po_df.merge(ads_first, on="OMS_SKU", how="left")
     po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
 
+    # Overwrite Sold_Units / Net_Units with 30-day figures so the table is
+    # consistent with ADS (both use the same 30-day window).
+    po_df["Sold_Units"] = po_df["ADS_Sold_Units"].astype(int)
+    po_df["Net_Units"]  = po_df["ADS_Net_Units"].clip(lower=0).astype(int)
+
     po_df["Eff_Days"] = (
         (max_date - po_df["ADS_First_Sale_Date"]).dt.days
         .fillna(ADS_WINDOW)                           # no sales in 30d → ADS stays 0

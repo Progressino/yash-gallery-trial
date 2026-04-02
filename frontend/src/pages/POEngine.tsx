@@ -67,7 +67,7 @@ interface QuarterlyResult {
 
 const PO_DISPLAY_COLS = [
   'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
-  'Sold_Units', 'ADS', 'Cutting_Ratio', 'Gross_PO_Qty',
+  'Sold_Units', 'Eff_Days', 'ADS', 'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
   'PO_Pipeline_Total', 'Projected_Running_Days', 'PO_Qty',
 ]
@@ -79,6 +79,8 @@ const COL_LABEL: Record<string, string> = {
   'Balance_to_Dispatch':      '📦 Bal. Dispatch',
   'Projected_Running_Days':   '📅 Proj. Run Days',
   'Cutting_Ratio':            '✂️ Cut Ratio',
+  'Eff_Days':                 '📅 Eff. Days',
+  'Sold_Units':               '📦 Sold (30d)',
 }
 
 const PRIORITY_ORDER: Record<string, number> = {
@@ -568,10 +570,10 @@ export default function POEngine() {
               {!groupedView && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
                 <table className="w-full text-sm border-collapse">
-                  <thead className="sticky top-0 z-30">
+                  <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
                       {/* Checkbox */}
-                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-40">
+                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-20">
                         <input
                           type="checkbox"
                           checked={allVisibleSelected}
@@ -584,7 +586,7 @@ export default function POEngine() {
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
                           className={`text-left px-4 py-3 font-semibold whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-40 shadow-sm text-gray-600' : ''}
+                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-20 shadow-sm text-gray-600' : ''}
                             ${c === 'PO_Qty' ? 'text-orange-600' : ''}
                             ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
@@ -742,13 +744,13 @@ export default function POEngine() {
               {groupedView && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
                 <table className="w-full text-sm border-collapse">
-                  <thead className="sticky top-0 z-30">
+                  <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-40 w-14" />
+                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-20 w-14" />
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
                           className={`text-left px-4 py-3 font-semibold whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-40 shadow-sm text-gray-600' : ''}
+                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-20 shadow-sm text-gray-600' : ''}
                             ${c === 'PO_Qty' ? 'text-orange-600' : ''}
                             ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
@@ -1256,6 +1258,12 @@ export default function POEngine() {
                   📐 Size Families
                 </button>
                 <span className="text-xs text-gray-400">{shipmentRows.length} SKUs</span>
+                <button
+                  onClick={() => downloadShipmentCsv(shipment?.rows ?? [], shipmentColumns)}
+                  className="ml-auto text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+                >
+                  ⬇ Export CSV
+                </button>
               </div>
               {!shipGroupedView && (
                 <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
@@ -1521,7 +1529,7 @@ function exportPOCsv(
   quarterCols: string[],
   quarterMap: Record<string, Record<string, number | string>>,
 ) {
-  const base = [...PO_DISPLAY_COLS, 'Eff_Days']
+  const base = [...PO_DISPLAY_COLS]
   const all  = [...base, ...quarterCols]
   const header = all.join(',')
   const body = rows.map(r => {
@@ -1550,6 +1558,12 @@ function downloadQCsv(rows: QuarterlyRow[], columns: string[]) {
   const header = columns.join(',')
   const body   = rows.map(r => columns.map(c => JSON.stringify(r[c] ?? '')).join(',')).join('\n')
   trigger(header + '\n' + body, 'quarterly_history.csv')
+}
+
+function downloadShipmentCsv(rows: PORow[], columns: string[]) {
+  const header = columns.join(',')
+  const body   = rows.map(r => columns.map(c => JSON.stringify(r[c] ?? '')).join(',')).join('\n')
+  trigger(header + '\n' + body, 'shipment_' + new Date().toISOString().slice(0, 10) + '.csv')
 }
 
 function trigger(csv: string, filename: string) {
