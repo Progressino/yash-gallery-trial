@@ -459,9 +459,10 @@ def calculate_po_base(
         999.0,
     )
 
-    # Drop intermediate ADS calculation columns (not needed in output)
+    # Drop intermediate ADS calculation columns (not needed in output).
+    # Eff_Days is kept — it's the effective selling days used as the ADS denominator.
     _drop_cols = [c for c in ["ADS_First_Sale_Date", "ADS_Sold_Units", "ADS_Net_Units",
-                               "Eff_Days", "First_Sale_Date"] if c in po_df.columns]
+                               "First_Sale_Date"] if c in po_df.columns]
     if _drop_cols:
         po_df = po_df.drop(columns=_drop_cols)
 

@@ -1521,7 +1521,7 @@ function exportPOCsv(
   quarterCols: string[],
   quarterMap: Record<string, Record<string, number | string>>,
 ) {
-  const base = PO_DISPLAY_COLS
+  const base = [...PO_DISPLAY_COLS, 'Eff_Days']
   const all  = [...base, ...quarterCols]
   const header = all.join(',')
   const body = rows.map(r => {
