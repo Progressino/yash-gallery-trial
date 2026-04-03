@@ -255,9 +255,11 @@ def calculate_po_base(
         {"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0}
     )
 
-    # ADS uses a fixed 30-day window regardless of period_days.
-    # This reflects current sales velocity more accurately than a longer window.
-    ADS_WINDOW = 30
+    # ADS uses the full period_days window to capture historical demand patterns.
+    # Using period_days (default 90d) instead of a fixed 30-day window gives a
+    # more stable ADS that accounts for seasonal variation and avoids over-reacting
+    # to a single month's volatility — this is how the team manually estimates demand.
+    ADS_WINDOW = period_days
     ads_cutoff = max_date - timedelta(days=ADS_WINDOW)
     ads_recent = df[df["TxnDate"] >= ads_cutoff].copy()
 
@@ -270,7 +272,7 @@ def calculate_po_base(
         ads_recent.groupby("Sku")["Units_Effective"].sum().reset_index()
         .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "ADS_Net_Units"})
     )
-    # Per-SKU effective days: from first sale within 30-day window to max_date.
+    # Per-SKU effective days: from first sale within the ADS window to max_date.
     # Prevents diluting ADS for recently-launched SKUs.
     ads_first = (
         ads_recent.groupby("Sku")["TxnDate"].min()
@@ -283,14 +285,13 @@ def calculate_po_base(
     po_df = po_df.merge(ads_first, on="OMS_SKU", how="left")
     po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
 
-    # Overwrite Sold_Units / Net_Units with 30-day figures so the table is
-    # consistent with ADS (both use the same 30-day window).
+    # Sold_Units / Net_Units reflect the full ADS window (period_days).
     po_df["Sold_Units"] = po_df["ADS_Sold_Units"].astype(int)
     po_df["Net_Units"]  = po_df["ADS_Net_Units"].clip(lower=0).astype(int)
 
     po_df["Eff_Days"] = (
         (max_date - po_df["ADS_First_Sale_Date"]).dt.days
-        .fillna(ADS_WINDOW)                           # no sales in 30d → ADS stays 0
+        .fillna(ADS_WINDOW)                            # no sales in window → ADS stays 0
         .clip(lower=min_denominator, upper=ADS_WINDOW)
         .astype(float)
     )

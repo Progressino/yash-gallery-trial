@@ -66,10 +66,9 @@ def _do_load_warm_cache() -> bool:
         import pandas as pd
 
         ok, msg, loaded = load_cache_from_drive()
-        github_ok = ok and bool(loaded)
-        if not github_ok:
+        if not ok or not loaded:
             log.warning("Warm-cache load failed: %s — falling back to SQLite only", msg)
-            # GitHub failed — build cache entirely from SQLite daily store (single load)
+            # GitHub failed — build cache entirely from SQLite daily store
             try:
                 daily = load_all_platforms()
                 if daily:
@@ -84,7 +83,6 @@ def _do_load_warm_cache() -> bool:
                         "inventory_df_variant": pd.DataFrame(),
                         "inventory_df_parent":  pd.DataFrame(),
                     }
-                    del daily  # free memory immediately
                     # Rebuild sales_df from what SQLite has
                     if any(not v.empty for v in [loaded["mtr_df"], loaded["myntra_df"],
                                                   loaded["meesho_df"], loaded["flipkart_df"]]):
@@ -113,32 +111,28 @@ def _do_load_warm_cache() -> bool:
                       | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
                 ].reset_index(drop=True)
 
-        # Only merge daily SQLite on top when GitHub was the primary source.
-        # When SQLite was already the primary source, skip to avoid double-loading
-        # (same data loaded twice → 2× memory → OOM).
-        if github_ok:
-            try:
-                daily = load_all_platforms()
-                merged_any = False
-                for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
-                                   ("meesho","meesho_df"),("flipkart","flipkart_df")]:
-                    if daily.get(plat) is not None and not daily[plat].empty:
-                        loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
-                        merged_any = True
-                del daily  # free memory immediately
-                if merged_any:
-                    from .services.sales import build_sales_df
-                    loaded["sales_df"] = build_sales_df(
-                        mtr_df=loaded.get("mtr_df", pd.DataFrame()),
-                        myntra_df=loaded.get("myntra_df", pd.DataFrame()),
-                        meesho_df=loaded.get("meesho_df", pd.DataFrame()),
-                        flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
-                        sku_mapping=loaded.get("sku_mapping") or {},
-                        snapdeal_df=loaded.get("snapdeal_df"),
-                    )
-                    log.info("sales_df rebuilt after SQLite merge: %d rows", len(loaded["sales_df"]))
-            except Exception as e:
-                log.warning("Daily-store merge warning: %s", e)
+        # Merge daily SQLite store on top of GitHub cache, then rebuild sales_df
+        try:
+            daily = load_all_platforms()
+            merged_any = False
+            for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
+                               ("meesho","meesho_df"),("flipkart","flipkart_df")]:
+                if daily.get(plat) is not None and not daily[plat].empty:
+                    loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
+                    merged_any = True
+            if merged_any:
+                from .services.sales import build_sales_df
+                loaded["sales_df"] = build_sales_df(
+                    mtr_df=loaded.get("mtr_df", pd.DataFrame()),
+                    myntra_df=loaded.get("myntra_df", pd.DataFrame()),
+                    meesho_df=loaded.get("meesho_df", pd.DataFrame()),
+                    flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
+                    sku_mapping=loaded.get("sku_mapping") or {},
+                    snapdeal_df=loaded.get("snapdeal_df"),
+                )
+                log.info("sales_df rebuilt after SQLite merge: %d rows", len(loaded["sales_df"]))
+        except Exception as e:
+            log.warning("Daily-store merge warning: %s", e)
 
         _warm_cache = loaded
         _warm_cache_loaded_at = datetime.now(IST)

@@ -13,14 +13,14 @@ router = APIRouter()
 class PORequest(BaseModel):
     period_days:      int   = 90
     lead_time:        int   = 30
-    target_days:      int   = 60
+    target_days:      int   = 210
     demand_basis:     str   = "Sold"       # "Sold" or "Net"
     use_seasonality:  bool  = False
     seasonal_weight:  float = 0.5
     group_by_parent:  bool  = False
     min_denominator:  int   = 7
-    grace_days:       int   = 7
-    safety_pct:       float = 20.0
+    grace_days:       int   = 0
+    safety_pct:       float = 0.0
 
 
 @router.post("/calculate")

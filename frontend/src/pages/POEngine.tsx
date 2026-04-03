@@ -80,7 +80,7 @@ const COL_LABEL: Record<string, string> = {
   'Projected_Running_Days':   '📅 Proj. Run Days',
   'Cutting_Ratio':            '✂️ Cut Ratio',
   'Eff_Days':                 '📅 Eff. Days',
-  'Sold_Units':               '📦 Sold (30d)',
+  'Sold_Units':               '📦 Sold Units',
 }
 
 const PRIORITY_ORDER: Record<string, number> = {
