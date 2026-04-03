@@ -97,6 +97,27 @@ def _gh_delete_asset(asset_id: int) -> None:
                     headers=headers, timeout=15)
 
 
+def _gh_delete_asset_by_name(release_id: int, filename: str) -> None:
+    """Delete an asset by name — handles the case where asset_id is stale."""
+    repo    = _gh_repo()
+    headers = _gh_headers()
+    if not repo or not headers:
+        return
+    # Re-fetch the release assets to get the latest asset list (avoids stale IDs)
+    try:
+        r = requests.get(
+            f"{_GH_API}/repos/{repo}/releases/{release_id}",
+            headers=headers, timeout=15,
+        )
+        if r.status_code == 200:
+            for asset in r.json().get("assets", []):
+                if asset["name"] == filename:
+                    _gh_delete_asset(asset["id"])
+                    return
+    except Exception:
+        pass
+
+
 def _gh_upload_asset(
     release_id: int, filename: str, data: bytes, existing_id: Optional[int] = None
 ) -> None:
@@ -105,19 +126,20 @@ def _gh_upload_asset(
     headers = _gh_headers()
     if not repo or not headers:
         raise RuntimeError("GitHub not configured")
-    if existing_id:
-        _gh_delete_asset(existing_id)
-        time.sleep(1)  # GitHub needs a moment after delete before re-upload
+    # Always delete by name (re-fetches latest asset list) to avoid stale IDs
+    _gh_delete_asset_by_name(release_id, filename)
+    time.sleep(2)  # GitHub needs a moment after delete before re-upload
     upload_url = f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets"
     upload_headers = {**headers, "Content-Type": "application/octet-stream"}
-    for attempt in range(3):
+    for attempt in range(4):
         r = requests.post(
             upload_url, headers=upload_headers,
             params={"name": filename}, data=data, timeout=300,
         )
-        if r.status_code == 422 and attempt < 2:
-            # Asset may still be deleting — wait and retry
-            time.sleep(2 * (attempt + 1))
+        if r.status_code == 422 and attempt < 3:
+            # Asset may still be deleting — re-delete and wait longer
+            _gh_delete_asset_by_name(release_id, filename)
+            time.sleep(3 * (attempt + 1))
             continue
         r.raise_for_status()
         return
@@ -180,8 +202,7 @@ def save_cache_to_drive(
                 manifest["row_counts"][ss_key] = len(data_obj)
             else:
                 continue
-            existing_id = assets.get(filename, (None,))[0]
-            _gh_upload_asset(release_id, filename, file_bytes, existing_id)
+            _gh_upload_asset(release_id, filename, file_bytes)
             manifest["files"][filename] = filename
         except Exception as e:
             # Log and continue — don't abort the whole save for one file failure
@@ -191,8 +212,7 @@ def save_cache_to_drive(
         progress_callback(total - 1, total, "Writing manifest…")
     try:
         manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
-        existing_id    = assets.get(_CACHE_MANIFEST_NAME, (None,))[0]
-        _gh_upload_asset(release_id, _CACHE_MANIFEST_NAME, manifest_bytes, existing_id)
+        _gh_upload_asset(release_id, _CACHE_MANIFEST_NAME, manifest_bytes)
     except Exception as e:
         return False, f"Failed writing manifest: {e}"
 
