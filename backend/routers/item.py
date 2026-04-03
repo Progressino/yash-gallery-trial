@@ -78,6 +78,7 @@ class ItemCreate(BaseModel):
     gst_applicability:  str   = "Applicable"
     type_of_supply:     str   = "Goods"
     gst_rate:           float = 0.0
+    procurement_type:   str   = ""           # e.g. Purchase, Make — Grey Fabric (GF) typically Purchase
     sizes:              List[str] = []       # triggers size variant generation
     routing_step_ids:   List[int] = []
 
@@ -96,6 +97,7 @@ class ItemUpdate(BaseModel):
     gst_applicability:  Optional[str]   = None
     type_of_supply:     Optional[str]   = None
     gst_rate:           Optional[float] = None
+    procurement_type:   Optional[str]   = None
     routing_step_ids:   Optional[List[int]] = None
 
 class BOMCreate(BaseModel):
@@ -279,6 +281,7 @@ def add_item(body: ItemCreate):
         gst_applicability = body.gst_applicability,
         type_of_supply    = body.type_of_supply,
         gst_rate          = body.gst_rate,
+        procurement_type  = body.procurement_type,
     )
     variant_ids: list[int] = []
     if body.sizes:

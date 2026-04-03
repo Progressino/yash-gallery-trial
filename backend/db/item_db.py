@@ -155,6 +155,7 @@ def init_db() -> None:
         "ALTER TABLE items ADD COLUMN gst_rate REAL DEFAULT 0",
         "ALTER TABLE items ADD COLUMN stock REAL DEFAULT 0",
         "ALTER TABLE items ADD COLUMN reserved REAL DEFAULT 0",
+        "ALTER TABLE items ADD COLUMN procurement_type TEXT DEFAULT ''",
     ]:
         try:
             conn.execute(col_ddl)
@@ -473,17 +474,19 @@ def create_item(
     gst_applicability: str = "Applicable",
     type_of_supply: str = "Goods",
     gst_rate: float = 0.0,
+    procurement_type: str = "",
 ) -> int:
     conn = _connect()
     cur = conn.execute(
         """INSERT INTO items
            (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
             selling_price, purchase_price, parent_id, size_label, launch_date, uom,
-            alias, gst_applicability, type_of_supply, gst_rate)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            alias, gst_applicability, type_of_supply, gst_rate, procurement_type)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
          selling_price, purchase_price, parent_id, size_label, launch_date, uom,
-         alias or '', gst_applicability or 'Applicable', type_of_supply or 'Goods', gst_rate or 0.0),
+         alias or '', gst_applicability or 'Applicable', type_of_supply or 'Goods', gst_rate or 0.0,
+         procurement_type or ''),
     )
     conn.commit()
     new_id = cur.lastrowid
@@ -495,7 +498,7 @@ def create_size_variants(parent_id: int, sizes: list[str]) -> list[int]:
     """Auto-generate size variant items linked to a parent item."""
     conn = _connect()
     parent = conn.execute(
-        "SELECT item_code, item_name, item_type_id, hsn_code, season, merchant_code, selling_price, purchase_price, uom FROM items WHERE id = ?",
+        "SELECT item_code, item_name, item_type_id, hsn_code, season, merchant_code, selling_price, purchase_price, uom, procurement_type FROM items WHERE id = ?",
         (parent_id,),
     ).fetchone()
     if parent is None:
@@ -514,12 +517,13 @@ def create_size_variants(parent_id: int, sizes: list[str]) -> list[int]:
         cur = conn.execute(
             """INSERT INTO items
                (item_code, item_name, item_type_id, hsn_code, season, merchant_code,
-                selling_price, purchase_price, parent_id, size_label, uom)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                selling_price, purchase_price, parent_id, size_label, uom, procurement_type)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (variant_code, parent["item_name"], parent["item_type_id"],
              parent["hsn_code"], parent["season"], parent["merchant_code"],
              parent["selling_price"], parent["purchase_price"],
-             parent_id, size, parent["uom"] or "PCS"),
+             parent_id, size, parent["uom"] or "PCS",
+             parent["procurement_type"] if parent["procurement_type"] is not None else ""),
         )
         new_ids.append(cur.lastrowid)
     conn.commit()
@@ -530,7 +534,7 @@ def create_size_variants(parent_id: int, sizes: list[str]) -> list[int]:
 def update_item(item_id: int, **fields) -> bool:
     allowed = {"item_code", "item_name", "item_type_id", "hsn_code", "season",
                "merchant_code", "selling_price", "purchase_price", "launch_date", "uom",
-               "alias", "gst_applicability", "type_of_supply", "gst_rate"}
+               "alias", "gst_applicability", "type_of_supply", "gst_rate", "procurement_type"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False

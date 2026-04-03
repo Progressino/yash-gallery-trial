@@ -32,6 +32,7 @@ interface Item {
   parent_id: number | null; size_label: string; launch_date: string
   uom: string; variant_count: number; created_at: string
   alias: string; gst_applicability: string; type_of_supply: string; gst_rate: number
+  procurement_type?: string
 }
 interface ItemDetail extends Item {
   variants: { id: number; item_code: string; size_label: string }[]
@@ -63,6 +64,7 @@ function lineAmt(l: BOMLine) { return netQty(l) * l.rate }
 
 // ── Blank form states ─────────────────────────────────────────────────────────
 const UOM_OPTIONS = ['PCS', 'MTR', 'KG', 'LTR', 'SET', 'PAIR', 'BOX', 'ROLL']
+const PROCUREMENT_TYPES = ['', 'Purchase', 'Make', 'Subcontract']
 
 const blankItem = () => ({
   item_code: '', item_name: '', item_type_id: 1,
@@ -70,6 +72,7 @@ const blankItem = () => ({
   selling_price: '', purchase_price: '', launch_date: '',
   uom: 'PCS',
   alias: '', gst_applicability: 'Applicable', type_of_supply: 'Goods', gst_rate: '',
+  procurement_type: '' as string,
   sizes: [] as string[], custom_size: '',
   routing_step_ids: [] as number[], size_group_id: '',
 })
@@ -131,6 +134,7 @@ export default function ItemMaster() {
     id: number; item_code: string; item_name: string; item_type_id: number
     hsn_code: string; season: string; merchant_code: string
     selling_price: string; purchase_price: string; launch_date: string; uom: string
+    procurement_type: string
   }>(null)
   const [editItemErr,  setEditItemErr]  = useState('')
 
@@ -252,6 +256,7 @@ export default function ItemMaster() {
       gst_applicability: newItem.gst_applicability,
       type_of_supply:    newItem.type_of_supply,
       gst_rate:          parseFloat(String(newItem.gst_rate)) || 0,
+      procurement_type:  newItem.procurement_type || '',
       sizes:             newItem.sizes,
       routing_step_ids:  newItem.routing_step_ids,
     })
@@ -780,7 +785,7 @@ export default function ItemMaster() {
                             <td className="px-4 py-3 text-center">
                               <div className="flex items-center justify-center gap-1">
                                 <button
-                                  onClick={e => { e.stopPropagation(); setEditItem({ id: item.id, item_code: item.item_code, item_name: item.item_name, item_type_id: item.item_type_id, hsn_code: item.hsn_code, season: item.season, merchant_code: item.merchant_code, selling_price: String(item.selling_price), purchase_price: String(item.purchase_price), launch_date: item.launch_date, uom: item.uom || 'PCS' }); setShowEditItem(true); setEditItemErr('') }}
+                                  onClick={e => { e.stopPropagation(); setEditItem({ id: item.id, item_code: item.item_code, item_name: item.item_name, item_type_id: item.item_type_id, hsn_code: item.hsn_code, season: item.season, merchant_code: item.merchant_code, selling_price: String(item.selling_price), purchase_price: String(item.purchase_price), launch_date: item.launch_date, uom: item.uom || 'PCS', procurement_type: item.procurement_type ?? '' }); setShowEditItem(true); setEditItemErr('') }}
                                   className="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 rounded hover:bg-blue-50 transition-colors">
                                   Edit
                                 </button>
@@ -901,10 +906,27 @@ export default function ItemMaster() {
                       <div className="space-y-1">
                         <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Item Type *</label>
                         <select value={newItem.item_type_id}
-                          onChange={e => setNewItem(p => ({ ...p, item_type_id: +e.target.value }))}
+                          onChange={e => {
+                            const id = +e.target.value
+                            const t = itemTypes.find(x => x.id === id)
+                            setNewItem(p => ({
+                              ...p,
+                              item_type_id: id,
+                              procurement_type: t?.code === 'GF' && !p.procurement_type ? 'Purchase' : p.procurement_type,
+                            }))
+                          }}
                           className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
                           {itemTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                         </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Procurement type</label>
+                        <select value={newItem.procurement_type}
+                          onChange={e => setNewItem(p => ({ ...p, procurement_type: e.target.value }))}
+                          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                          {PROCUREMENT_TYPES.map(p => <option key={p || '—'} value={p}>{p || '— Not set —'}</option>)}
+                        </select>
+                        <p className="text-[11px] text-gray-400">Grey Fabric (GF) is normally <b>Purchase</b>; tracked separately from FG in Grey Fabric module.</p>
                       </div>
                       {/* Merchant dropdown */}
                       <div className="space-y-1">
@@ -1106,6 +1128,14 @@ export default function ItemMaster() {
                           {UOM_OPTIONS.map(u => <option key={u}>{u}</option>)}
                         </select>
                       </div>
+                      <div className="space-y-1 col-span-2">
+                        <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Procurement type</label>
+                        <select value={editItem.procurement_type}
+                          onChange={e => setEditItem(p => p ? { ...p, procurement_type: e.target.value } : p)}
+                          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
+                          {PROCUREMENT_TYPES.map(p => <option key={p || '—'} value={p}>{p || '— Not set —'}</option>)}
+                        </select>
+                      </div>
                     </div>
                     {editItemErr && <p className="text-red-500 text-sm">{editItemErr}</p>}
                     <button
@@ -1121,6 +1151,7 @@ export default function ItemMaster() {
                           purchase_price: parseFloat(editItem.purchase_price) || 0,
                           launch_date:    editItem.launch_date,
                           uom:            editItem.uom,
+                          procurement_type: editItem.procurement_type || '',
                         }
                       })}
                       disabled={updateItemMut.isPending}
