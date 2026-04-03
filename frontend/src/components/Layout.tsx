@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
@@ -44,6 +44,34 @@ export default function Layout() {
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const autoLoadAttempted = useRef(false)
+
+  // On mount: check what the server session already has (warm cache auto-populated it).
+  // If the session has data, show green badges immediately without clicking "Load Cache".
+  // If it's empty, auto-trigger Load Cache so the user never needs to click it manually.
+  useEffect(() => {
+    if (autoLoadAttempted.current) return
+    autoLoadAttempted.current = true
+
+    getCoverage()
+      .then(c => {
+        setCoverage(c)
+        // Server session is empty — auto-load from cache
+        if (!c.sales && !c.mtr) {
+          setCacheLoading('load')
+          cacheLoad()
+            .then(res => {
+              if (res.ok) {
+                getCoverage().then(setCoverage).catch(() => {})
+                qc.invalidateQueries()
+              }
+            })
+            .catch(() => {})
+            .finally(() => setCacheLoading(null))
+        }
+      })
+      .catch(() => {})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const flash = (type: 'ok' | 'err', text: string) => {
     setCacheMsg({ type, text })
