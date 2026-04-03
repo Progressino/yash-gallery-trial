@@ -298,59 +298,43 @@ def calculate_po_base(
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = (ads_demand / po_df["Eff_Days"]).fillna(0)
 
-    if use_seasonality and sku_mapping:
-        # sales_df is already the unified dataset across platforms.
-        # Re-appending mtr/myntra and de-duplicating by (Sku, TxnDate, Transaction Type)
-        # can collapse legitimate same-day multi-order sales and undercount YoY demand.
-        hist_df = df
+    # ── Last-year same-window ADS (always computed) ──────────────────────────────
+    # For the same calendar window one year ago, compute LY_ADS.
+    # e.g. today = April 3, 2026 → LY window = April 3, 2025 → July 2, 2025
+    # If April 2025 sold more than recent 90 days suggest, the PO reflects that.
+    # This is the core seasonal-uplift logic the team uses manually.
+    ly_window_start = max_date - timedelta(days=365)
+    ly_window_end   = ly_window_start + timedelta(days=ADS_WINDOW)
+    ly_window = df[(df["TxnDate"] >= ly_window_start) & (df["TxnDate"] < ly_window_end)]
 
-        ly_trailing_end   = max_date - timedelta(days=365)
-        ly_trailing_start = ly_trailing_end - timedelta(days=period_days)
-        ly_fwd_start      = (max_date + timedelta(days=lead_time)) - timedelta(days=365)
-        ly_fwd_end        = (max_date + timedelta(days=lead_time + max(target_days, period_days))) - timedelta(days=365)
+    ly_sold_grp = (
+        ly_window[ly_window["Transaction Type"] == "Shipment"]
+        .groupby("Sku")["Quantity"].sum().reset_index()
+        .rename(columns={"Sku": "OMS_SKU", "Quantity": "LY_Sold_Units"})
+    )
+    ly_net_grp = (
+        ly_window.groupby("Sku")["Units_Effective"].sum().reset_index()
+        .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "LY_Net_Units"})
+    )
+    ly_summary = ly_sold_grp.merge(ly_net_grp, on="OMS_SKU", how="outer").fillna(0)
+    po_df = pd.merge(po_df, ly_summary, on="OMS_SKU", how="left").fillna(
+        {"LY_Sold_Units": 0, "LY_Net_Units": 0}
+    )
+    ly_demand_col = po_df["LY_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["LY_Sold_Units"]
+    po_df["LY_ADS"] = (ly_demand_col / ADS_WINDOW).round(3)
 
-        ly_sales_trailing = hist_df[
-            (hist_df["TxnDate"] >= ly_trailing_start) & (hist_df["TxnDate"] < ly_trailing_end)
-        ].copy()
-        ly_sales_fwd = hist_df[
-            (hist_df["TxnDate"] >= ly_fwd_start) & (hist_df["TxnDate"] < ly_fwd_end)
-        ].copy()
-
-        if not ly_sales_trailing.empty:
-            ly_sales      = ly_sales_trailing
-            ly_days_count = max((ly_trailing_end - ly_trailing_start).days, min_denominator)
-        elif not ly_sales_fwd.empty:
-            ly_sales      = ly_sales_fwd
-            ly_days_count = max((ly_fwd_end - ly_fwd_start).days, min_denominator)
-        else:
-            ly_broad_start = max_date - timedelta(days=730)
-            ly_broad_end   = max_date - timedelta(days=365)
-            ly_sales       = hist_df[
-                (hist_df["TxnDate"] >= ly_broad_start) & (hist_df["TxnDate"] < ly_broad_end)
-            ].copy()
-            ly_days_count = max((ly_broad_end - ly_broad_start).days, min_denominator)
-
-        if not ly_sales.empty:
-            ly_sold = (ly_sales[ly_sales["Transaction Type"] == "Shipment"]
-                       .groupby("Sku")["Quantity"].sum().reset_index())
-            ly_sold.columns = ["OMS_SKU", "LY_Sold_Units"]
-            ly_net = ly_sales.groupby("Sku")["Units_Effective"].sum().reset_index()
-            ly_net.columns = ["OMS_SKU", "LY_Net_Units"]
-            ly_summary = ly_sold.merge(ly_net, on="OMS_SKU", how="outer").fillna(0)
-            po_df = pd.merge(po_df, ly_summary, on="OMS_SKU", how="left").fillna(0)
-            ly_demand     = po_df["LY_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["LY_Sold_Units"]
-            po_df["LY_ADS"] = (ly_demand / ly_days_count).round(3)
-            po_df["ADS"] = np.where(
-                po_df["LY_ADS"] > 0,
-                (po_df["Recent_ADS"] * (1 - seasonal_weight)) + (po_df["LY_ADS"] * seasonal_weight),
-                po_df["Recent_ADS"],
-            )
-        else:
-            po_df["ADS"]    = po_df["Recent_ADS"]
-            po_df["LY_ADS"] = 0.0
+    if use_seasonality:
+        # User-selected weighted blend: seasonal_weight controls how much LY matters
+        po_df["ADS"] = np.where(
+            po_df["LY_ADS"] > 0,
+            (po_df["Recent_ADS"] * (1 - seasonal_weight)) + (po_df["LY_ADS"] * seasonal_weight),
+            po_df["Recent_ADS"],
+        )
     else:
-        po_df["ADS"]    = po_df["Recent_ADS"]
-        po_df["LY_ADS"] = 0
+        # Default: take the higher of recent ADS or last-year same-period ADS.
+        # Ensures seasonal peaks (e.g. April always sells better) are never under-ordered,
+        # even when recent weeks look quiet because the season hasn't started yet.
+        po_df["ADS"] = po_df[["Recent_ADS", "LY_ADS"]].max(axis=1)
 
     # PO formula uses OMS_Inventory (physical warehouse only) when available.
     # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
