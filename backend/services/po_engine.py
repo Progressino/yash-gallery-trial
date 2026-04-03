@@ -2,11 +2,13 @@
 PO Engine — extracted 1-for-1 from app.py.
 calculate_quarterly_history + calculate_po_base.
 """
+from collections import defaultdict
 from datetime import timedelta
 from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from pandas.tseries.offsets import MonthEnd
 
 import re
 
@@ -214,6 +216,74 @@ def calculate_quarterly_history(
     return pivot
 
 
+def _seasonal_adjacent_months_ads(
+    sales_df: pd.DataFrame,
+    max_date: pd.Timestamp,
+    group_by_parent: bool,
+    demand_basis: str,
+    years_lookback: int = 2,
+    min_denominator: int = 7,
+) -> pd.DataFrame:
+    """
+    Daily ADS from the same calendar month + following month in prior years.
+
+    Example: max_date in late March 2026 → use Mar+Apr of 2025 and 2024 per SKU.
+    If the last 30–90 days look weak but March/April historically move 4–5+ units
+    per day in aggregate, this lifts ADS so PO is appropriate before the season.
+
+    Per prior year we compute (units in that two-month window) / (days in window),
+    then take the mean across years (only years with any sales in the window
+    contribute — avoids diluting a clear seasonal peak with empty years).
+    """
+    if sales_df.empty or "TxnDate" not in sales_df.columns or "Sku" not in sales_df.columns:
+        return pd.DataFrame(columns=["OMS_SKU", "Seasonal_Month_ADS"])
+
+    work = sales_df.copy()
+    work["TxnDate"] = pd.to_datetime(work["TxnDate"], errors="coerce")
+    work = work.dropna(subset=["TxnDate"])
+    if work.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Seasonal_Month_ADS"])
+
+    if group_by_parent:
+        work = work.copy()
+        work["Sku"] = work["Sku"].apply(get_parent_sku)
+
+    m0 = int(max_date.month)
+    rate_lists: Dict[str, list] = defaultdict(list)
+
+    for yo in range(1, years_lookback + 1):
+        y = max_date.year - yo
+        if m0 == 12:
+            start = pd.Timestamp(year=y, month=12, day=1)
+            end = pd.Timestamp(year=y + 1, month=1, day=31)
+        else:
+            start = pd.Timestamp(year=y, month=m0, day=1)
+            end = pd.Timestamp(year=y, month=m0 + 1, day=1) + MonthEnd(0)
+        days_span = max((end.normalize() - start.normalize()).days + 1, min_denominator)
+
+        chunk = work[(work["TxnDate"] >= start) & (work["TxnDate"] <= end)]
+        if chunk.empty:
+            continue
+        if demand_basis == "Net":
+            g = chunk.groupby("Sku")["Units_Effective"].sum().clip(lower=0)
+        else:
+            ship = chunk[chunk["Transaction Type"].astype(str).str.strip() == "Shipment"]
+            g = ship.groupby("Sku")["Quantity"].sum()
+        for sku, qty in g.items():
+            if float(qty) <= 0:
+                continue
+            rate_lists[str(sku)].append(float(qty) / float(days_span))
+
+    if not rate_lists:
+        return pd.DataFrame(columns=["OMS_SKU", "Seasonal_Month_ADS"])
+
+    rows = [
+        {"OMS_SKU": sku, "Seasonal_Month_ADS": round(float(np.mean(rates)), 3)}
+        for sku, rates in rate_lists.items()
+    ]
+    return pd.DataFrame(rows)
+
+
 def calculate_po_base(
     sales_df: pd.DataFrame,
     inv_df: pd.DataFrame,
@@ -323,18 +393,25 @@ def calculate_po_base(
     ly_demand_col = po_df["LY_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["LY_Sold_Units"]
     po_df["LY_ADS"] = (ly_demand_col / ADS_WINDOW).round(3)
 
+    # Same calendar month + next month in prior years (e.g. Mar+Apr when run in March).
+    seasonal_df = _seasonal_adjacent_months_ads(
+        df, max_date, group_by_parent, demand_basis, years_lookback=2, min_denominator=min_denominator
+    )
+    po_df = po_df.merge(seasonal_df, on="OMS_SKU", how="left")
+    po_df["Seasonal_Month_ADS"] = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
+
     if use_seasonality:
-        # User-selected weighted blend: seasonal_weight controls how much LY matters
-        po_df["ADS"] = np.where(
+        # Weighted blend of recent vs rolling LY window, then floor by seasonal month-pair ADS.
+        blended = np.where(
             po_df["LY_ADS"] > 0,
             (po_df["Recent_ADS"] * (1 - seasonal_weight)) + (po_df["LY_ADS"] * seasonal_weight),
             po_df["Recent_ADS"],
         )
     else:
-        # Default: take the higher of recent ADS or last-year same-period ADS.
-        # Ensures seasonal peaks (e.g. April always sells better) are never under-ordered,
-        # even when recent weeks look quiet because the season hasn't started yet.
-        po_df["ADS"] = po_df[["Recent_ADS", "LY_ADS"]].max(axis=1)
+        blended = np.maximum(po_df["Recent_ADS"], po_df["LY_ADS"])
+
+    # Never below explicit same-month+next-month historical run-rate when that exists.
+    po_df["ADS"] = np.maximum(blended, po_df["Seasonal_Month_ADS"]).round(3)
 
     # PO formula uses OMS_Inventory (physical warehouse only) when available.
     # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
@@ -403,6 +480,7 @@ def calculate_po_base(
             ghost["Recent_ADS"]      = 0.0
             ghost["ADS"]             = 0.0
             ghost["LY_ADS"]          = 0.0
+            ghost["Seasonal_Month_ADS"] = 0.0
             ghost["Days_Left"]       = 999.0
             ghost["Gross_PO_Qty"]    = 0
             for c in ["PO_Pipeline_Total"] + _breakdown_cols:
