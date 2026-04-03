@@ -115,14 +115,16 @@ def _parse_flipkart_xlsx(
 
         rows: List[pd.DataFrame] = []
 
-        # Shipment rows — use Gross Units (all orders placed, including cancelled)
-        ship = xl[xl["Gross Units"] > 0].copy()
+        # Shipment rows — use Final Sale Units (excludes cancellations)
+        # Gross Units includes cancelled orders and would massively overcount.
+        xl["_ship_qty"] = pd.to_numeric(xl.get("Final Sale Units", xl.get("Gross Units", 0)), errors="coerce").fillna(0)
+        ship = xl[xl["_ship_qty"] > 0].copy()
         if not ship.empty:
             rows.append(pd.DataFrame({
                 "Date":           ship["Date"],
                 "Month":          ship["Date"].apply(_get_month),
                 "TxnType":        "Shipment",
-                "Quantity":       ship["Gross Units"].astype("float32"),
+                "Quantity":       ship["_ship_qty"].astype("float32"),
                 "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
                 "OMS_SKU":        ship["OMS_SKU"],
                 "State":          "",
