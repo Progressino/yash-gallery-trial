@@ -351,7 +351,16 @@ def calculate_po_base(
         po_df["ADS"]    = po_df["Recent_ADS"]
         po_df["LY_ADS"] = 0
 
-    inv_col = "Total_Inventory" if "Total_Inventory" in po_df.columns else po_df.columns[1]
+    # PO formula uses OMS_Inventory (physical warehouse only) when available.
+    # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
+    # already deployed and shouldn't reduce the warehouse replenishment order —
+    # this matches how the team manually calculates PO.
+    if "OMS_Inventory" in po_df.columns:
+        inv_col = "OMS_Inventory"
+    elif "Total_Inventory" in po_df.columns:
+        inv_col = "Total_Inventory"
+    else:
+        inv_col = po_df.columns[1]
 
     # PO calculation — total coverage = lead_time + target_days
     # Rounded up to nearest 10 to match team's manual formula
