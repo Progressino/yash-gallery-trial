@@ -27,6 +27,19 @@ def _resolve_mtr_sku(sku, mapping: Dict[str, str]) -> str:
     return mapping.get(stripped, mapping.get(raw, stripped))
 
 
+def canonical_sales_sku(sku) -> str:
+    """
+    Normalise seller / OMS tokens so Amazon PL listings match OMS (1023PLYK → 1023YK).
+    Apply to every platform row in build_sales_df before deduplication.
+    """
+    if pd.isna(sku):
+        return ""
+    t = str(sku).strip().upper()
+    if t in ("", "NAN", "NONE"):
+        return t
+    return _PL_RE.sub(r"\1\2", t)
+
+
 def _mtr_to_sales_df(
     mtr_df: pd.DataFrame,
     sku_mapping: Dict[str, str],
@@ -48,6 +61,26 @@ def _mtr_to_sales_df(
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
     m = m.dropna(subset=["TxnDate"])
     m["Sku"] = m["Sku"].apply(lambda x: _resolve_mtr_sku(x, sku_mapping))
+    m["Sku"] = m["Sku"].map(canonical_sales_sku)
+
+    # Line-level keys for build_sales_df dedup (Amazon MTR exposes Order_Id / Invoice_Number).
+    idx = m.index
+    if "Order_Id" in mtr_df.columns:
+        oid = mtr_df.loc[idx, "Order_Id"].astype(str).str.strip()
+        oid = oid.mask(oid.str.lower().isin(["", "nan", "none"]), np.nan)
+    else:
+        oid = pd.Series(np.nan, index=idx)
+    if "Invoice_Number" in mtr_df.columns:
+        inv = mtr_df.loc[idx, "Invoice_Number"].astype(str).str.strip()
+        inv = inv.mask(inv.str.lower().isin(["", "nan", "none"]), np.nan)
+    else:
+        inv = pd.Series(np.nan, index=idx)
+    need_syn = oid.isna() & inv.notna()
+    syn_key = (
+        "AMZINV:" + inv.astype(str) + ":" + m["Sku"].astype(str) + ":" + m["Transaction Type"].astype(str)
+    )
+    m["OrderId"] = oid
+    m.loc[need_syn, "OrderId"] = syn_key.loc[need_syn]
 
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
@@ -56,7 +89,7 @@ def _mtr_to_sales_df(
         m["Transaction Type"] == "Refund",  -m["Quantity"],
         np.where(m["Transaction Type"] == "Cancel", 0, m["Quantity"])
     )
-    return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective"]]
+    return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId"]]
 
 
 def build_sales_df(
@@ -84,8 +117,7 @@ def build_sales_df(
     if not mtr_df.empty and sku_mapping:
         _mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping)
         if not _mtr_sales.empty:
-            _mtr_sales["Source"]  = "Amazon"
-            _mtr_sales["OrderId"] = np.nan
+            _mtr_sales["Source"] = "Amazon"
             sales_parts.append(_downcast_sales(_mtr_sales))
         del _mtr_sales
         gc.collect()
@@ -97,16 +129,21 @@ def build_sales_df(
     del sales_parts
     gc.collect()
 
-    # Deduplicate: rows with valid OrderId by (OrderId, Source, Transaction Type)
+    # Unify PL vs YK seller spelling so the same physical SKU is not double-counted
+    # across listings (e.g. 1023PLYKPBLUE-5XL vs 1023YKPBLUE-5XL).
+    combined_sales["Sku"] = combined_sales["Sku"].map(canonical_sales_sku)
+
+    # Deduplicate: rows with valid OrderId by (OrderId, Sku, Source, Transaction Type)
+    # so multi-item orders keep one row per line SKU (previous logic collapsed lines).
     _oid_str   = combined_sales["OrderId"].astype(str).str.strip()
     _oid_valid = combined_sales["OrderId"].notna() & ~_oid_str.str.lower().isin(["", "nan", "none"])
     del _oid_str
 
     _with_oid    = combined_sales[_oid_valid].drop_duplicates(
-        subset=["OrderId", "Source", "Transaction Type"], keep="last"
+        subset=["OrderId", "Sku", "Source", "Transaction Type"], keep="last"
     )
     _without_oid = combined_sales[~_oid_valid].drop_duplicates(
-        subset=["Sku", "TxnDate", "Source", "Transaction Type"], keep="last"
+        subset=["Sku", "TxnDate", "Source", "Transaction Type", "Quantity"], keep="last"
     )
     del combined_sales, _oid_valid
     gc.collect()

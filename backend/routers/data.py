@@ -7,27 +7,28 @@ import re
 from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from ..models.schemas import CoverageResponse
-from ..services.sales import get_sales_summary, get_sales_by_source, get_top_skus, get_platform_summary, get_anomalies
+from ..services.sales import (
+    get_sales_summary,
+    get_sales_by_source,
+    get_top_skus,
+    get_platform_summary,
+    get_anomalies,
+    canonical_sales_sku,
+)
 from ..services.daily_store import list_uploads, get_summary, delete_upload
 from ..session import AppSession
 
 router = APIRouter()
 
-# Mirrors Amazon PL infix stripping in sales / PO (1023PLYKBLUE ↔ 1023YKPBLUE).
-_PL_INFIX_SKU = re.compile(r"^(\d+)PL(YK)", re.I)
-
 
 def _sku_deepdive_aliases(raw: str) -> Set[str]:
-    """Return uppercase SKU tokens that should match the same inventory row."""
+    """Return SKU tokens that should match the same row after PL/YK normalisation."""
     u = raw.strip().upper()
-    out = {u}
-    stripped = _PL_INFIX_SKU.sub(r"\1\2", u)
-    if stripped != u:
-        out.add(stripped)
+    out = {u, canonical_sales_sku(u)}
     m = re.match(r"^(\d+)(YK[A-Z0-9\-]+)$", u)
     if m and "PL" not in m.group(0):
         out.add(f"{m.group(1)}PL{m.group(2)}")
-    return out
+    return {x for x in out if x and x != "NAN"}
 
 
 def _sess(request: Request):
@@ -275,11 +276,17 @@ def sku_deepdive(
     # Resolve matching SKUs — exact or all-sizes (prefix) mode
     sku_variants = _sku_deepdive_aliases(sku)
     if all_sizes:
-        df["_parent"] = df["Sku"].astype(str).apply(get_parent_sku).str.upper()
-        parent_targets = {str(get_parent_sku(s)).strip().upper() for s in sku_variants}
+        df["_parent"] = df["Sku"].astype(str).apply(
+            lambda x: canonical_sales_sku(str(get_parent_sku(x)).strip())
+        )
+        parent_targets = {
+            canonical_sales_sku(str(get_parent_sku(s)).strip()) for s in sku_variants
+        }
         sku_mask = df["_parent"].isin(parent_targets)
     else:
-        sku_mask = df["Sku"].astype(str).str.upper().isin(sku_variants)
+        sku_mask = df["Sku"].astype(str).map(canonical_sales_sku).isin(
+            {canonical_sales_sku(s) for s in sku_variants}
+        )
 
     # Filter to SKU + date window
     sku_df = df[
