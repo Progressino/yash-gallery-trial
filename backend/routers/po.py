@@ -50,8 +50,6 @@ def po_calculate(request: Request, body: PORequest):
             safety_pct=body.safety_pct,
             use_seasonality=body.use_seasonality,
             seasonal_weight=body.seasonal_weight,
-            mtr_df=sess.mtr_df if not sess.mtr_df.empty else None,
-            myntra_df=sess.myntra_df if not sess.myntra_df.empty else None,
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=body.group_by_parent,
             existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
@@ -138,12 +136,11 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
 
     from ..services.po_engine import calculate_quarterly_history
 
-    # sales_df is already built from mtr_df + myntra_df + all other platforms.
-    # Passing mtr_df/myntra_df separately caused double-counting for Amazon & Myntra.
+    _boot = sess.sales_df.empty or "Sku" not in sess.sales_df.columns
     pivot = calculate_quarterly_history(
         sales_df=sess.sales_df,
-        mtr_df=None,
-        myntra_df=None,
+        mtr_df=sess.mtr_df if _boot and not sess.mtr_df.empty else None,
+        myntra_df=sess.myntra_df if _boot and not sess.myntra_df.empty else None,
         sku_mapping=sess.sku_mapping or None,
         group_by_parent=group_by_parent,
         n_quarters=n_quarters,

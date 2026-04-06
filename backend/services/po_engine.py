@@ -75,44 +75,44 @@ def calculate_quarterly_history(
 ) -> pd.DataFrame:
     parts = []
 
+    # Unified sales_df already contains Amazon + Myntra (via build_sales_df). Appending
+    # raw mtr_df / myntra_df on top doubled those channels in quarterly / Forecast.
     if not sales_df.empty and "Sku" in sales_df.columns:
         tmp = sales_df[["Sku", "TxnDate", "Quantity", "Transaction Type"]].copy()
         tmp.columns = ["SKU", "Date", "Qty", "TxnType"]
         tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
         tmp["Qty"]  = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
         parts.append(tmp.dropna(subset=["Date"]))
-
-    if mtr_df is not None and not mtr_df.empty:
-        mtr_sku_col  = next((c for c in mtr_df.columns if c in ["SKU", "Sku", "OMS_SKU"]),  None)
-        mtr_date_col = next((c for c in mtr_df.columns if c in ["Date", "TxnDate"]),         None)
-        mtr_qty_col  = next((c for c in mtr_df.columns if c in ["Quantity", "Qty"]),          None)
-        mtr_txn_col  = next((c for c in mtr_df.columns if c in ["Transaction_Type", "Transaction Type", "TxnType"]), None)
-        if mtr_sku_col and mtr_date_col and mtr_qty_col:
-            tmp = mtr_df[[mtr_sku_col, mtr_date_col, mtr_qty_col]].copy()
-            tmp.columns = ["SKU", "Date", "Qty"]
-            tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
-            tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
-            tmp["TxnType"] = mtr_df[mtr_txn_col].values if mtr_txn_col else "Shipment"
-            if sku_mapping:
-                # Use _strip_pl so "1001PLYKBEIGE-5XL" resolves to "1001YKBEIGE-5XL"
-                # matching the same stripping done in inventory._resolve_amz_sku.
-                tmp["SKU"] = tmp["SKU"].apply(lambda x: _strip_pl(x, sku_mapping))
-            else:
-                tmp["SKU"] = tmp["SKU"].apply(lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper()))
-            parts.append(tmp.dropna(subset=["Date"]))
-
-    if myntra_df is not None and not myntra_df.empty:
-        myn_sku_col  = next((c for c in myntra_df.columns if c in ["OMS_SKU", "Sku", "SKU"]), None)
-        myn_date_col = next((c for c in myntra_df.columns if c in ["Date", "TxnDate"]),        None)
-        myn_qty_col  = next((c for c in myntra_df.columns if c in ["Quantity", "Qty"]),        None)
-        myn_txn_col  = next((c for c in myntra_df.columns if c in ["TxnType", "Transaction Type"]), None)
-        if myn_sku_col and myn_date_col and myn_qty_col:
-            tmp = myntra_df[[myn_sku_col, myn_date_col, myn_qty_col]].copy()
-            tmp.columns = ["SKU", "Date", "Qty"]
-            tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
-            tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
-            tmp["TxnType"] = myntra_df[myn_txn_col].values if myn_txn_col else "Shipment"
-            parts.append(tmp.dropna(subset=["Date"]))
+    else:
+        # Bootstrap: no unified sales yet (e.g. SQLite-only) — stitch raw platform frames.
+        if mtr_df is not None and not mtr_df.empty:
+            mtr_sku_col  = next((c for c in mtr_df.columns if c in ["SKU", "Sku", "OMS_SKU"]),  None)
+            mtr_date_col = next((c for c in mtr_df.columns if c in ["Date", "TxnDate"]),         None)
+            mtr_qty_col  = next((c for c in mtr_df.columns if c in ["Quantity", "Qty"]),          None)
+            mtr_txn_col  = next((c for c in mtr_df.columns if c in ["Transaction_Type", "Transaction Type", "TxnType"]), None)
+            if mtr_sku_col and mtr_date_col and mtr_qty_col:
+                tmp = mtr_df[[mtr_sku_col, mtr_date_col, mtr_qty_col]].copy()
+                tmp.columns = ["SKU", "Date", "Qty"]
+                tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
+                tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
+                tmp["TxnType"] = mtr_df[mtr_txn_col].values if mtr_txn_col else "Shipment"
+                if sku_mapping:
+                    tmp["SKU"] = tmp["SKU"].apply(lambda x: _strip_pl(x, sku_mapping))
+                else:
+                    tmp["SKU"] = tmp["SKU"].apply(lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper()))
+                parts.append(tmp.dropna(subset=["Date"]))
+        if myntra_df is not None and not myntra_df.empty:
+            myn_sku_col  = next((c for c in myntra_df.columns if c in ["OMS_SKU", "Sku", "SKU"]), None)
+            myn_date_col = next((c for c in myntra_df.columns if c in ["Date", "TxnDate"]),        None)
+            myn_qty_col  = next((c for c in myntra_df.columns if c in ["Quantity", "Qty"]),        None)
+            myn_txn_col  = next((c for c in myntra_df.columns if c in ["TxnType", "Transaction Type"]), None)
+            if myn_sku_col and myn_date_col and myn_qty_col:
+                tmp = myntra_df[[myn_sku_col, myn_date_col, myn_qty_col]].copy()
+                tmp.columns = ["SKU", "Date", "Qty"]
+                tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
+                tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
+                tmp["TxnType"] = myntra_df[myn_txn_col].values if myn_txn_col else "Shipment"
+                parts.append(tmp.dropna(subset=["Date"]))
 
     if not parts:
         return pd.DataFrame()

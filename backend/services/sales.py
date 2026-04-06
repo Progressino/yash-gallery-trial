@@ -202,6 +202,15 @@ def build_sales_df(
     result = _drop_amazon_unkeyed_shadows(result)
     gc.collect()
 
+    # Exact duplicate lines (same channel line key) — catches merge/upload bugs.
+    _cols = [
+        c for c in ("Sku", "TxnDate", "Transaction Type", "Quantity", "Source", "OrderId")
+        if c in result.columns
+    ]
+    if _cols and not result.empty:
+        result = result.drop_duplicates(subset=_cols, keep="last")
+    gc.collect()
+
     return _downcast_sales(result)
 
 
