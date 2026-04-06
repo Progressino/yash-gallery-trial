@@ -308,6 +308,12 @@ def calculate_po_base(
     df = sales_df.copy()
     df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
     df = df.dropna(subset=["TxnDate"])
+    if df["TxnDate"].dt.tz is not None:
+        df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
+
+    _map = sku_mapping if sku_mapping is not None else {}
+    df["Sku"] = df["Sku"].apply(lambda s: _strip_pl(str(s).strip(), _map))
+    df["Sku"] = df["Sku"].astype(str).str.strip().str.upper()
 
     max_date = df["TxnDate"].max()
     cutoff   = max_date - timedelta(days=period_days)
@@ -366,28 +372,45 @@ def calculate_po_base(
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = (ads_demand / po_df["Eff_Days"]).fillna(0)
 
-    # Spreadsheet-style "1 MONTH SALE / 30": last 30 calendar days (inclusive) / 30.
-    # Manual Req.xlsx uses a fixed 30-day denominator; Recent_ADS uses Eff_Days inside
-    # period_days and can sit below that rate for new or spotty sellers.
+    # Spreadsheet-style FREQ = "1 MONTH SALE" / 30. Two cases from Req.xlsx:
+    # (a) Rolling last 30 calendar days / 30 — can be *below* Recent_ADS when units
+    #     are front-loaded (e.g. 21/30=0.7 < 21/27=0.778), so it must NOT be the
+    #     only floor.
+    # (b) Calendar month-to-date shipments / 30 — teams often type MTD as "month"
+    #     and still divide by 30; that reproduces FREQ when MTD > rolling/30.
     flat_sales = df.copy()
     if group_by_parent:
         flat_sales = flat_sales.copy()
         flat_sales["Sku"] = flat_sales["Sku"].apply(get_parent_sku)
-    flat_start = max_date.normalize() - timedelta(days=29)
-    flat_win = flat_sales[flat_sales["TxnDate"] >= flat_start]
     flat_denom = 30.0
+    flat_start_roll = max_date.normalize() - timedelta(days=29)
+    win_roll = flat_sales[flat_sales["TxnDate"] >= flat_start_roll]
+    month_start = max_date.normalize().replace(day=1)
+    win_mtd = flat_sales[
+        (flat_sales["TxnDate"] >= month_start) & (flat_sales["TxnDate"] <= max_date)
+    ]
     if demand_basis == "Net":
-        flat_g = (
-            flat_win.groupby("Sku")["Units_Effective"].sum().clip(lower=0).reset_index()
-            .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "Flat30_Units"})
+        roll_g = (
+            win_roll.groupby("Sku")["Units_Effective"].sum().clip(lower=0).reset_index()
+            .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "Roll30_Units"})
+        )
+        mtd_g = (
+            win_mtd.groupby("Sku")["Units_Effective"].sum().clip(lower=0).reset_index()
+            .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "MTD_Units"})
         )
     else:
-        flat_ship = flat_win[flat_win["Transaction Type"] == "Shipment"]
-        flat_g = (
-            flat_ship.groupby("Sku")["Quantity"].sum().reset_index()
-            .rename(columns={"Sku": "OMS_SKU", "Quantity": "Flat30_Units"})
+        roll_s = win_roll[win_roll["Transaction Type"] == "Shipment"]
+        mtd_s = win_mtd[win_mtd["Transaction Type"] == "Shipment"]
+        roll_g = roll_s.groupby("Sku")["Quantity"].sum().reset_index().rename(
+            columns={"Sku": "OMS_SKU", "Quantity": "Roll30_Units"}
         )
-    flat_g["Flat30_ADS"] = (pd.to_numeric(flat_g["Flat30_Units"], errors="coerce").fillna(0) / flat_denom).round(3)
+        mtd_g = mtd_s.groupby("Sku")["Quantity"].sum().reset_index().rename(
+            columns={"Sku": "OMS_SKU", "Quantity": "MTD_Units"}
+        )
+    flat_g = roll_g.merge(mtd_g, on="OMS_SKU", how="outer").fillna(0)
+    roll_rate = pd.to_numeric(flat_g["Roll30_Units"], errors="coerce").fillna(0) / flat_denom
+    mtd_rate = pd.to_numeric(flat_g["MTD_Units"], errors="coerce").fillna(0) / flat_denom
+    flat_g["Flat30_ADS"] = np.maximum(roll_rate, mtd_rate).round(3)
     po_df = po_df.merge(flat_g[["OMS_SKU", "Flat30_ADS"]], on="OMS_SKU", how="left")
     po_df["Flat30_ADS"] = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
 

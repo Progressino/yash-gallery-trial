@@ -80,7 +80,7 @@ const COL_LABEL: Record<string, string> = {
   'Recent_ADS':               '📉 Recent ADS',
   'LY_ADS':                   '📈 LY ADS',
   'Seasonal_Month_ADS':       '🌗 Season ADS (mo+1)',
-  'Flat30_ADS':               '📅 30d ADS (÷30)',
+  'Flat30_ADS':               '📅 Sheet FREQ (÷30)',
   'ADS':                      '⚡ ADS (Used)',
   'PO_Pipeline_Total':        '🏭 Total Pipeline',
   'PO_Qty_Ordered':           '📋 PO Ordered',
