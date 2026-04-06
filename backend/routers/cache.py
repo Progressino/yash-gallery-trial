@@ -2,21 +2,101 @@
 GitHub Releases cache router.
 POST /api/cache/save   → upload parquet files to GitHub Release
 POST /api/cache/load   → download from GitHub Release into session
+POST /api/cache/reload-fresh → clear warm + session, full GitHub download, daily merge, rebuild sales
 GET  /api/cache/status → check if cache exists
 """
-import dataclasses
-from fastapi import APIRouter, Request
+import logging
+from fastapi import APIRouter, Request, BackgroundTasks
 from pydantic import BaseModel
 
+import pandas as pd
+
+from ..services.sales import build_sales_df
 from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest
 from ..services.daily_store import load_all_platforms, merge_platform_data as _merge_platform_data
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 
 class CacheStatusResponse(BaseModel):
     ok: bool
     message: str
+
+
+class CacheReloadResponse(BaseModel):
+    ok: bool
+    message: str
+    sales_rows: int = 0
+
+
+def _sanitize_snapdeal_in_loaded(loaded: dict) -> None:
+    if "snapdeal_df" not in loaded or not isinstance(loaded["snapdeal_df"], pd.DataFrame):
+        return
+    snap = loaded["snapdeal_df"]
+    if snap.empty or "OMS_SKU" not in snap.columns:
+        return
+    _bad = snap["OMS_SKU"].astype(str).str.upper()
+    loaded["snapdeal_df"] = snap[
+        ~(_bad.isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])
+          | snap["OMS_SKU"].astype(str).str.match(r"^\d+$"))
+    ].reset_index(drop=True)
+
+
+def _merge_daily_store_into_session(sess) -> str:
+    """Layer SQLite daily uploads onto session platform DFs. Returns suffix for messages."""
+    try:
+        daily_data = load_all_platforms()
+        if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
+            sess.mtr_df = _merge_platform_data(sess.mtr_df, daily_data["amazon"], "amazon")
+        if daily_data.get("myntra") is not None and not daily_data["myntra"].empty:
+            sess.myntra_df = _merge_platform_data(sess.myntra_df, daily_data["myntra"], "myntra")
+        if daily_data.get("meesho") is not None and not daily_data["meesho"].empty:
+            sess.meesho_df = _merge_platform_data(sess.meesho_df, daily_data["meesho"], "meesho")
+        if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
+            sess.flipkart_df = _merge_platform_data(sess.flipkart_df, daily_data["flipkart"], "flipkart")
+        n = sum(1 for v in daily_data.values() if hasattr(v, "empty") and not v.empty)
+        return f" + {n} platform(s) daily store merged." if n else ""
+    except Exception as e:
+        return f" (daily store warning: {e})"
+
+
+def _rebuild_sales_in_session(sess) -> int:
+    """Rebuild unified sales_df with current server code; returns row count."""
+    if not sess.sku_mapping:
+        return 0
+    try:
+        sess.sales_df = build_sales_df(
+            mtr_df=sess.mtr_df,
+            myntra_df=sess.myntra_df,
+            meesho_df=sess.meesho_df,
+            flipkart_df=sess.flipkart_df,
+            snapdeal_df=sess.snapdeal_df,
+            sku_mapping=sess.sku_mapping,
+        )
+        return len(sess.sales_df)
+    except Exception as e:
+        _log.exception("rebuild sales: %s", e)
+        return len(sess.sales_df)
+
+
+def _auto_save_cache(sess) -> None:
+    session_data = {
+        "sales_df":             sess.sales_df,
+        "mtr_df":               sess.mtr_df,
+        "meesho_df":            sess.meesho_df,
+        "myntra_df":            sess.myntra_df,
+        "flipkart_df":          sess.flipkart_df,
+        "snapdeal_df":          sess.snapdeal_df,
+        "sku_mapping":          sess.sku_mapping,
+        "inventory_df_variant": sess.inventory_df_variant,
+        "inventory_df_parent":  sess.inventory_df_parent,
+    }
+    ok, msg = save_cache_to_drive(session_data)
+    if ok:
+        _log.info("reload-fresh cache save: %s", msg)
+    else:
+        _log.warning("reload-fresh cache save skipped: %s", msg)
 
 
 @router.get("/status")
@@ -62,65 +142,30 @@ def cache_load(request: Request):
         import backend.main as _main
         if _main._warm_cache:
             _main._copy_warm_cache_to_session(sess)
-            # Still layer in any newer SQLite daily uploads
-            try:
-                from ..services.daily_store import load_all_platforms, merge_platform_data as _mrg
-                daily_data = load_all_platforms()
-                if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
-                    sess.mtr_df = _mrg(sess.mtr_df, daily_data["amazon"], "amazon")
-                if daily_data.get("myntra") is not None and not daily_data["myntra"].empty:
-                    sess.myntra_df = _mrg(sess.myntra_df, daily_data["myntra"], "myntra")
-                if daily_data.get("meesho") is not None and not daily_data["meesho"].empty:
-                    sess.meesho_df = _mrg(sess.meesho_df, daily_data["meesho"], "meesho")
-                if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
-                    sess.flipkart_df = _mrg(sess.flipkart_df, daily_data["flipkart"], "flipkart")
-            except Exception:
-                pass
-            return CacheStatusResponse(ok=True, message="Loaded from warm cache.")
+            daily_note = _merge_daily_store_into_session(sess)
+            n_sales = _rebuild_sales_in_session(sess)
+            sess._quarterly_cache.clear()
+            _main.publish_warm_cache_from_session(sess)
+            return CacheStatusResponse(
+                ok=True,
+                message=f"Loaded from warm cache; sales rebuilt ({n_sales:,} rows).{daily_note}",
+            )
     except Exception:
         pass  # fall through to GitHub download
 
     ok, msg, loaded = load_cache_from_drive()
     if ok:
-        import pandas as pd
-        # Sanitise snapdeal_df — remove stale "UNKNOWN" / invalid SKUs from cached data
-        if "snapdeal_df" in loaded and isinstance(loaded["snapdeal_df"], pd.DataFrame):
-            snap = loaded["snapdeal_df"]
-            if not snap.empty and "OMS_SKU" in snap.columns:
-                _bad = snap["OMS_SKU"].astype(str).str.upper()
-                loaded["snapdeal_df"] = snap[
-                    ~(_bad.isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])
-                      | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
-                ].reset_index(drop=True)
+        _sanitize_snapdeal_in_loaded(loaded)
         for key, val in loaded.items():
-            setattr(sess, key, val)
-        # Invalidate quarterly cache — sales data changed
+            if hasattr(sess, key):
+                setattr(sess, key, val)
         sess._quarterly_cache.clear()
-
-        # Merge saved daily uploads into the session (last 30 days, from SQLite)
-        # Use _merge_platform_data (not pd.concat) to prevent duplicates when
-        # the GitHub cache and SQLite daily store overlap for the same period.
-        try:
-            daily_data = load_all_platforms()
-            if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
-                sess.mtr_df = _merge_platform_data(sess.mtr_df, daily_data["amazon"], "amazon")
-            if daily_data.get("myntra") is not None and not daily_data["myntra"].empty:
-                sess.myntra_df = _merge_platform_data(sess.myntra_df, daily_data["myntra"], "myntra")
-            if daily_data.get("meesho") is not None and not daily_data["meesho"].empty:
-                sess.meesho_df = _merge_platform_data(sess.meesho_df, daily_data["meesho"], "meesho")
-            if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
-                sess.flipkart_df = _merge_platform_data(sess.flipkart_df, daily_data["flipkart"], "flipkart")
-            if daily_data:
-                n_days = sum(1 for v in daily_data.values() if not v.empty)
-                msg += f" + {n_days} platform(s) of daily data loaded from local store."
-        except Exception as e:
-            msg += f" (daily store warning: {e})"
-
-    # Also refresh the server-level warm cache so future sessions get fresh data
-    if ok:
+        daily_note = _merge_daily_store_into_session(sess)
+        n_sales = _rebuild_sales_in_session(sess)
+        msg = f"{msg}{daily_note} Sales rebuilt: {n_sales:,} rows."
         try:
             import backend.main as _main
-            _main._do_load_warm_cache()
+            _main.publish_warm_cache_from_session(sess)
         except Exception:
             pass
 
@@ -128,12 +173,14 @@ def cache_load(request: Request):
 
 
 @router.delete("", response_model=CacheStatusResponse)
-def cache_clear(request: Request):
-    # Clear from session only (GitHub assets stay until next save)
+def cache_clear(request: Request, include_warm: bool = False):
+    # Clear from session; optional include_warm clears app-level cache (next load hits GitHub / rebuilds)
     sess = request.state.session
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
-    import pandas as pd
+    if include_warm:
+        import backend.main as _main
+        _main.clear_warm_cache()
     sess.sales_df    = pd.DataFrame()
     sess.mtr_df      = pd.DataFrame()
     sess.meesho_df   = pd.DataFrame()
@@ -141,4 +188,59 @@ def cache_clear(request: Request):
     sess.flipkart_df = pd.DataFrame()
     sess.snapdeal_df = pd.DataFrame()
     sess.sku_mapping = {}
-    return CacheStatusResponse(ok=True, message="Session data cleared.")
+    sess._quarterly_cache.clear()
+    msg = "Session and server warm cache cleared." if include_warm else "Session cleared."
+    return CacheStatusResponse(ok=True, message=msg)
+
+
+@router.post("/reload-fresh", response_model=CacheReloadResponse)
+def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
+    """
+    For operators who already uploaded to GitHub / SQLite: wipe in-memory warm + session,
+    pull fresh from GitHub, merge Tier-3 SQLite daily store, rebuild sales_df with current
+    server code, re-publish warm cache, and queue Save Cache to GitHub.
+    """
+    sess = request.state.session
+    if sess is None:
+        return CacheReloadResponse(ok=False, message="No session", sales_rows=0)
+
+    import backend.main as _main
+
+    _main.clear_warm_cache()
+    sess.sales_df    = pd.DataFrame()
+    sess.mtr_df      = pd.DataFrame()
+    sess.meesho_df   = pd.DataFrame()
+    sess.myntra_df   = pd.DataFrame()
+    sess.flipkart_df = pd.DataFrame()
+    sess.snapdeal_df = pd.DataFrame()
+    sess.sku_mapping = {}
+    sess._quarterly_cache.clear()
+
+    ok, msg, loaded = load_cache_from_drive()
+    if ok:
+        _sanitize_snapdeal_in_loaded(loaded)
+        for key, val in loaded.items():
+            if hasattr(sess, key):
+                setattr(sess, key, val)
+        daily_note = _merge_daily_store_into_session(sess)
+        n_sales = _rebuild_sales_in_session(sess)
+        msg = f"Full reload from GitHub.{daily_note} {msg}"
+    else:
+        if not _main._do_load_warm_cache():
+            return CacheReloadResponse(
+                ok=False,
+                message=msg or "No GitHub cache and could not rebuild from SQLite.",
+                sales_rows=0,
+            )
+        _main._copy_warm_cache_to_session(sess)
+        n_sales = len(sess.sales_df)
+        msg = "Reloaded from warm pipeline (GitHub unavailable; used SQLite and/or partial cache)."
+
+    sess._quarterly_cache.clear()
+    _main.publish_warm_cache_from_session(sess)
+    background_tasks.add_task(_auto_save_cache, sess)
+    return CacheReloadResponse(
+        ok=True,
+        message=f"{msg} Saving to GitHub in background…",
+        sales_rows=n_sales,
+    )

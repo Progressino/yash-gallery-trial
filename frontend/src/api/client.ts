@@ -155,6 +155,17 @@ export async function cacheLoad() {
   return data
 }
 
+/** Clear warm + session, re-download GitHub cache, merge Tier-3 SQLite, rebuild sales, re-save GitHub (background). */
+export async function cacheReloadFresh(): Promise<{ ok: boolean; message: string; sales_rows?: number }> {
+  const { data } = await api.post('/cache/reload-fresh')
+  return data
+}
+
+export async function cacheClear(includeWarm = false) {
+  const { data } = await api.delete('/cache', { params: includeWarm ? { include_warm: true } : {} })
+  return data
+}
+
 // ── 401 interceptor — redirect to /login on expired/missing token ─────────────
 api.interceptors.response.use(
   res => res,

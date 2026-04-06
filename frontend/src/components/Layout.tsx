@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
-import { cacheLoad, cacheSave, getCoverage } from '../api/client'
+import { cacheLoad, cacheSave, cacheReloadFresh, getCoverage } from '../api/client'
 import api from '../api/client'
 
 const NAV_GROUPS = [
@@ -42,7 +42,7 @@ export default function Layout() {
   const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, setCoverage } = useSession()
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
-  const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | null>(null)
+  const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | 'reload' | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const autoLoadAttempted = useRef(false)
 
@@ -109,6 +109,26 @@ export default function Layout() {
       flash(res.ok ? 'ok' : 'err', res.message)
     } catch {
       flash('err', 'Save failed')
+    } finally {
+      setCacheLoading(null)
+    }
+  }
+
+  /** Full pipeline: clears server warm cache + session, GitHub download, SQLite daily merge, rebuild sales (no browser file picking). */
+  const handleReloadFresh = async () => {
+    setCacheLoading('reload')
+    try {
+      const res = await cacheReloadFresh()
+      if (res.ok) {
+        const c = await getCoverage()
+        setCoverage(c)
+        qc.invalidateQueries()
+        flash('ok', res.message)
+      } else {
+        flash('err', res.message)
+      }
+    } catch {
+      flash('err', 'Fresh reload failed')
     } finally {
       setCacheLoading(null)
     }
@@ -211,6 +231,15 @@ export default function Layout() {
             className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-[#002B5B] hover:bg-gray-50 disabled:opacity-50"
           >
             {cacheLoading === 'save' ? 'Saving…' : '💾 Save Cache'}
+          </button>
+          <button
+            type="button"
+            onClick={handleReloadFresh}
+            disabled={cacheLoading !== null}
+            title="Clears server memory, re-downloads GitHub + Tier-3 SQLite, rebuilds sales with latest logic"
+            className="w-full py-1.5 rounded text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50"
+          >
+            {cacheLoading === 'reload' ? 'Rebuilding…' : '↻ Fresh reload (server)'}
           </button>
           {cacheMsg && (
             <p className={`text-xs leading-tight ${cacheMsg.type === 'ok' ? 'text-green-600' : 'text-red-500'}`}>

@@ -56,6 +56,46 @@ _warm_cache_loaded_at: datetime | None = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Keys persisted to GitHub data-cache release (must match github_cache._CACHE_FILES)
+_WARM_CACHE_KEYS = (
+    "sales_df",
+    "mtr_df",
+    "meesho_df",
+    "myntra_df",
+    "flipkart_df",
+    "snapdeal_df",
+    "sku_mapping",
+    "inventory_df_variant",
+    "inventory_df_parent",
+)
+
+
+def clear_warm_cache() -> None:
+    """Drop app-level warm cache so the next load re-downloads from GitHub / rebuilds from SQLite."""
+    global _warm_cache, _warm_cache_loaded_at
+    _warm_cache = {}
+    _warm_cache_loaded_at = None
+
+
+def publish_warm_cache_from_session(sess) -> None:
+    """Mirror session dataframes into _warm_cache after a full reload or rebuild."""
+    global _warm_cache, _warm_cache_loaded_at
+    import pandas as pd
+
+    out: dict = {}
+    for key in _WARM_CACHE_KEYS:
+        val = getattr(sess, key, None)
+        if val is None:
+            continue
+        if key == "sku_mapping" and not isinstance(val, dict):
+            out[key] = {}
+        elif hasattr(val, "empty"):
+            out[key] = val if isinstance(val, pd.DataFrame) else pd.DataFrame()
+        else:
+            out[key] = val
+    _warm_cache = out
+    _warm_cache_loaded_at = datetime.now(IST)
+
 
 def _do_load_warm_cache() -> bool:
     """Download from GitHub and store in module-level _warm_cache. Thread-safe (GIL)."""
