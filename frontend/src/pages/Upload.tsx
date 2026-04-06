@@ -96,6 +96,19 @@ export default function Upload() {
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">📁 Upload Data</h2>
         <p className="text-gray-500 text-sm mt-1">Manage your data files and build the sales dataset.</p>
+        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <p className="font-semibold text-[#002B5B] text-xs uppercase tracking-wide">Typical workflow</p>
+          <ul className="mt-2 space-y-1.5 text-xs text-gray-600 list-disc list-inside">
+            <li>
+              <strong>Tier 1</strong> — Load SKU mapping, then <em>historical bulk</em> data (e.g. ~2 years: Amazon MTR ZIP/RAR,
+              Myntra/Meesho/Flipkart/Snapdeal archives, inventory). Use this when onboarding or replacing base history.
+            </li>
+            <li>
+              <strong>Tier 3</strong> — <em>Daily</em> file drops (auto-detect). Append recent reports without re-uploading full history;
+              sales are rebuilt after each batch.
+            </li>
+          </ul>
+        </div>
       </div>
 
       {/* Toast */}
@@ -130,11 +143,15 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="2️⃣ Amazon" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']}>
+        <UploadCard title="2️⃣ Amazon" subtitle="MTR master ZIP or RAR — upload multiple; data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
-            label="Upload .zip"
-            accept={{ 'application/zip': ['.zip'] }}
+            label="Upload .zip or .rar"
+            accept={{
+              'application/zip': ['.zip'],
+              'application/vnd.rar': ['.rar'],
+              'application/x-rar-compressed': ['.rar'],
+            }}
             onUpload={handle('mtr', (file: File) => uploadMtr(file))}
             uploading={loading['mtr']}
           />
@@ -142,7 +159,7 @@ export default function Upload() {
       </Section>
 
       {/* Tier 1 — Platforms */}
-      <Section title="Tier 1 — Platform History">
+      <Section title="Tier 1 — Platform history (bulk / multi-year)">
         <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={handleClear('myntra')} clearing={loading['clear_myntra']}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
@@ -259,14 +276,14 @@ export default function Upload() {
       </Section>
 
       {/* Tier 3 — Daily Orders */}
-      <Section title="Tier 3 — Daily Orders (auto-detect)">
+      <Section title="Tier 3 — Daily orders (incremental; auto-detect)">
         <div className="col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-3">
           <div>
-            <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily Order Upload</h3>
+            <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily order upload</h3>
             <p className="text-xs text-gray-400">
-              Drop <strong>any mix</strong> of daily report files — platform is auto-detected from each file.
-              Accepted: Amazon MTR/FBA CSV, Myntra PPMP CSV, Meesho CSV or ZIP, Flipkart Sales Report or Payment XLSX.
-              Sales dataset is rebuilt automatically after upload.
+              For <strong>ongoing</strong> refreshes after Tier 1 history is loaded. Drop <strong>any mix</strong> of recent files —
+              platform is auto-detected per file. Accepted: Amazon MTR/FBA CSV, Myntra PPMP CSV, Meesho CSV or ZIP, Flipkart XLSX,
+              Snapdeal paths containing <code className="text-gray-600">snapdeal</code>, RAR bundles. Sales dataset rebuilds automatically.
             </p>
           </div>
           <DailyDropzone
