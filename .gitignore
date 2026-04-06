@@ -27,5 +27,8 @@ Thumbs.db
 # Data cache (large files)
 data_cache/
 
+# Local SQLite / dev databases (never commit)
+*.db
+
 # Claude Code internal files
 .claude/
