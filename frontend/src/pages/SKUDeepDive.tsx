@@ -23,20 +23,23 @@ interface SizeRow   { sku: string; shipped: number }
 interface DailyRow  { date: string; units: number }
 
 interface DeepDiveData {
-  loaded:        boolean
-  sku:           string
-  all_sizes:     boolean
-  matched_skus:  string[]
-  start_date:    string
-  end_date:      string
-  summary:       Summary
-  monthly:       MonthRow[]
-  by_platform:   PlatRow[]
-  by_size:       SizeRow[]
-  daily:         DailyRow[]
-  first_sale:    string | null
-  last_sale:     string | null
-  meesho_note:   string | null
+  loaded:         boolean
+  sku:            string
+  all_sizes:      boolean
+  matched_skus:   string[]
+  start_date?:    string
+  end_date?:      string
+  summary:        Summary
+  monthly:        MonthRow[]
+  by_platform:    PlatRow[]
+  by_size:        SizeRow[]
+  daily:          DailyRow[]
+  first_sale:     string | null
+  last_sale:      string | null
+  meesho_note:    string | null
+  source_filter?: string | null
+  filter_note?:   string | null
+  message?:       string
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -50,6 +53,15 @@ const PLATFORM_COLORS: Record<string, string> = {
 }
 
 const SIZE_COLORS = ['#6366f1','#8b5cf6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899','#84cc16']
+
+const CHANNEL_OPTIONS = [
+  { value: '', label: 'All channels' },
+  { value: 'Amazon', label: 'Amazon only' },
+  { value: 'Myntra', label: 'Myntra only' },
+  { value: 'Meesho', label: 'Meesho only' },
+  { value: 'Flipkart', label: 'Flipkart only' },
+  { value: 'Snapdeal', label: 'Snapdeal only' },
+]
 
 const PRESET_RANGES = [
   { label: '30D',  days: 30  },
@@ -181,11 +193,13 @@ export default function SKUDeepDive() {
   const startParam    = searchParams.get('start') ?? ''
   const endParam      = searchParams.get('end') ?? ''
   const allSizesParam = searchParams.get('all_sizes') === '1'
+  const sourceParam   = searchParams.get('source') ?? ''
 
   const [activeSku,  setActiveSku]  = useState(skuParam)
   const [start,      setStart]      = useState(startParam)
   const [end,        setEnd]        = useState(endParam)
   const [allSizes,   setAllSizes]   = useState(allSizesParam)
+  const [channel,    setChannel]    = useState(sourceParam)
   /** 0 = full loaded range (no date filter); matches total-sales exports */
   const [activePreset, setPreset]   = useState<number | null>(0)
 
@@ -193,35 +207,39 @@ export default function SKUDeepDive() {
   useEffect(() => {
     if (skuParam) setActiveSku(skuParam)
     setAllSizes(allSizesParam)
-  }, [skuParam, allSizesParam])
+    setChannel(sourceParam)
+  }, [skuParam, allSizesParam, sourceParam])
 
-  const apply = useCallback((sku: string, s: string, e: string, allSz: boolean) => {
+  const apply = useCallback((sku: string, s: string, e: string, allSz: boolean, ch: string) => {
     const p: Record<string, string> = {}
     if (sku)   p.sku   = sku
     if (s)     p.start = s
     if (e)     p.end   = e
     if (allSz) p.all_sizes = '1'
+    if (ch)    p.source = ch
     setSearchParams(p, { replace: true })
     setActiveSku(sku)
     setStart(s)
     setEnd(e)
     setAllSizes(allSz)
+    setChannel(ch)
   }, [setSearchParams])
 
   const handlePreset = (days: number) => {
     setPreset(days)
     const s = days > 0 ? dateNDaysAgo(days) : ''
     const e = days > 0 ? today() : ''
-    apply(activeSku, s, e, allSizes)
+    apply(activeSku, s, e, allSizes, channel)
   }
 
   const { data, isLoading, isFetching } = useQuery<DeepDiveData>({
-    queryKey: ['sku-deepdive', activeSku, start, end, allSizes],
+    queryKey: ['sku-deepdive', activeSku, start, end, allSizes, channel],
         queryFn: async () => {
       const params = new URLSearchParams({ sku: activeSku })
       if (start.trim()) params.set('start_date', start)
       if (end.trim())   params.set('end_date', end)
       if (allSizes) params.set('all_sizes', 'true')
+      if (channel.trim()) params.set('source', channel.trim())
       const { data } = await api.get(`/data/sku-deepdive?${params}`)
       return data
     },
@@ -253,13 +271,24 @@ export default function SKUDeepDive() {
       <div className="flex flex-wrap gap-3 items-center bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
         <SKUSearch
           value={activeSku}
-          onChange={(sku, type) => apply(sku, start, end, type === 'parent' ? true : allSizes)}
+          onChange={(sku, type) => apply(sku, start, end, type === 'parent' ? true : allSizes, channel)}
         />
+
+        <select
+          value={channel}
+          onChange={e => apply(activeSku, start, end, allSizes, e.target.value)}
+          className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-gray-700 min-w-[9rem]"
+          title="Compare to a single-marketplace export (e.g. Amazon MTR only)"
+        >
+          {CHANNEL_OPTIONS.map(o => (
+            <option key={o.value || 'all'} value={o.value}>{o.label}</option>
+          ))}
+        </select>
 
         {/* All-sizes toggle */}
         {activeSku && (
           <button
-            onClick={() => apply(activeSku, start, end, !allSizes)}
+            onClick={() => apply(activeSku, start, end, !allSizes, channel)}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg font-medium border transition ${
               allSizes
                 ? 'bg-indigo-600 text-white border-indigo-600'
@@ -294,7 +323,7 @@ export default function SKUDeepDive() {
             type="date"
             value={start}
             onChange={e => { setPreset(null); setStart(e.target.value) }}
-            onBlur={() => apply(activeSku, start, end, allSizes)}
+            onBlur={() => apply(activeSku, start, end, allSizes, channel)}
             className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
           />
           <span>→</span>
@@ -302,7 +331,7 @@ export default function SKUDeepDive() {
             type="date"
             value={end}
             onChange={e => { setPreset(null); setEnd(e.target.value) }}
-            onBlur={() => apply(activeSku, start, end, allSizes)}
+            onBlur={() => apply(activeSku, start, end, allSizes, channel)}
             className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
           />
         </div>
@@ -340,7 +369,7 @@ export default function SKUDeepDive() {
             <div className="mt-4 flex flex-col items-center gap-2">
               <p className="text-sm">If this is a base/parent SKU, enable All Sizes to see all variants combined:</p>
               <button
-                onClick={() => apply(activeSku, start, end, true)}
+                onClick={() => apply(activeSku, start, end, true, channel)}
                 className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg font-medium hover:bg-indigo-700 transition"
               >
                 📦 Enable All Sizes for {activeSku}
@@ -354,6 +383,11 @@ export default function SKUDeepDive() {
       {/* ── Results ── */}
       {activeSku && !loading && data?.loaded && s && s.shipped > 0 && (
         <>
+          {data.filter_note && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-sm px-4 py-2">
+              {data.filter_note}
+            </div>
+          )}
           {/* SKU banner */}
           <div className="bg-indigo-600 text-white rounded-2xl px-6 py-4 flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -494,7 +528,7 @@ export default function SKUDeepDive() {
                         <div className="flex items-center justify-between mb-1 text-xs">
                           <button
                             className="font-medium text-gray-700 hover:text-indigo-600 hover:underline text-left"
-                            onClick={() => apply(row.sku, start, end, false)}
+                            onClick={() => apply(row.sku, start, end, false, channel)}
                             title="Click to drill into this size"
                           >
                             {row.sku}

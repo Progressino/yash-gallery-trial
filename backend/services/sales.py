@@ -92,6 +92,53 @@ def _mtr_to_sales_df(
     return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId"]]
 
 
+def _drop_amazon_unkeyed_shadows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Amazon rows without OrderId (e.g. some FBA extracts) often duplicate rows that
+    already exist with the same shipment keyed by OrderId. Those land in separate
+    dedup buckets in build_sales_df and were both kept — inflating units.
+
+    For each (Sku, calendar day, Transaction Type, quantity) fingerprint that has
+    exactly one keyed Amazon row, drop unkeyed Amazon rows matching that fingerprint
+    (conservative: if multiple keyed rows share the fingerprint, we do not drop).
+    """
+    if df.empty or "Source" not in df.columns or "OrderId" not in df.columns:
+        return df
+
+    is_amz = df["Source"].astype(str) == "Amazon"
+    if not is_amz.any():
+        return df
+
+    amz = df.loc[is_amz].copy()
+    rest = df.loc[~is_amz].copy()
+
+    amz["_day"] = pd.to_datetime(amz["TxnDate"], errors="coerce").dt.normalize()
+    amz["_qtyk"] = pd.to_numeric(amz["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+
+    _oid_str = amz["OrderId"].astype(str).str.strip()
+    has_oid = amz["OrderId"].notna() & ~_oid_str.str.lower().isin(["", "nan", "none"])
+
+    keyed = amz.loc[has_oid]
+    unkeyed = amz.loc[~has_oid]
+    if keyed.empty or unkeyed.empty:
+        amz = amz.drop(columns=["_day", "_qtyk"], errors="ignore")
+        return pd.concat([rest, amz], ignore_index=True)
+
+    key_cols = ["Sku", "_day", "Transaction Type", "_qtyk"]
+    kc = keyed.groupby(key_cols).size()
+    single = kc[kc == 1].reset_index()[key_cols]
+    if single.empty:
+        amz = amz.drop(columns=["_day", "_qtyk"], errors="ignore")
+        return pd.concat([rest, amz], ignore_index=True)
+
+    unkeyed_merge = unkeyed.merge(single, on=key_cols, how="left", indicator=True)
+    kept_unkeyed = unkeyed_merge.loc[unkeyed_merge["_merge"] == "left_only"].drop(columns=["_merge"])
+
+    amz_out = pd.concat([keyed, kept_unkeyed], ignore_index=True)
+    amz_out = amz_out.drop(columns=["_day", "_qtyk"], errors="ignore")
+    return pd.concat([rest, amz_out], ignore_index=True)
+
+
 def build_sales_df(
     mtr_df: pd.DataFrame,
     myntra_df: pd.DataFrame,
@@ -150,6 +197,9 @@ def build_sales_df(
 
     result = pd.concat([_with_oid, _without_oid], ignore_index=True)
     del _with_oid, _without_oid
+    gc.collect()
+
+    result = _drop_amazon_unkeyed_shadows(result)
     gc.collect()
 
     return _downcast_sales(result)

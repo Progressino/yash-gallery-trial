@@ -219,6 +219,7 @@ def sku_deepdive(
     start_date: Optional[str] = None,
     end_date:   Optional[str] = None,
     all_sizes:  bool = False,   # if True, match all SKUs that share the same base (parent) SKU
+    source: Optional[str] = None,  # if set (e.g. "Amazon"), only rows from that channel — matches single-market exports
 ):
     """
     Full sales breakdown for a single SKU (or all sizes of a base SKU).
@@ -263,6 +264,33 @@ def sku_deepdive(
     if df["TxnDate"].dt.tz is not None:
         df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
     df = df.dropna(subset=["TxnDate"])
+
+    source_filter: Optional[str] = None
+    if source and str(source).strip():
+        source_filter = str(source).strip()
+        df = df[df["Source"].astype(str).str.strip() == source_filter]
+
+    if df.empty:
+        return {
+            "loaded":        bool(source_filter),
+            "sku":           sku,
+            "all_sizes":     all_sizes,
+            "matched_skus":  [],
+            "summary":       {"shipped": 0, "returns": 0, "net_units": 0, "return_rate": 0.0, "ads": 0.0},
+            "monthly":       [],
+            "by_platform":   [],
+            "by_size":       [],
+            "daily":         [],
+            "first_sale":    None,
+            "last_sale":     None,
+            "meesho_note":   meesho_note,
+            "source_filter": source_filter,
+            "filter_note":   (
+                f"No unified sales rows for channel “{source_filter}”. Try “All channels”."
+                if source_filter
+                else "No sales rows after date filter."
+            ),
+        }
 
     # Default: full loaded history (matches Excel "total sales" exports). Use explicit
     # start_date / end_date query params for a shorter window (e.g. last 90 days).
@@ -309,6 +337,8 @@ def sku_deepdive(
             "first_sale":   None,
             "last_sale":    None,
             "meesho_note":  meesho_note,
+            "source_filter": source_filter,
+            "filter_note":  None,
         }
 
     qty    = pd.to_numeric(sku_df["Quantity"],       errors="coerce").fillna(0)
@@ -420,6 +450,12 @@ def sku_deepdive(
         "first_sale":  str(sku_df["TxnDate"].min().date()),
         "last_sale":   str(sku_df["TxnDate"].max().date()),
         "meesho_note": meesho_note,
+        "source_filter": source_filter,
+        "filter_note":  (
+            f"Showing {source_filter} only — totals exclude other marketplaces."
+            if source_filter
+            else None
+        ),
     }
 
 
