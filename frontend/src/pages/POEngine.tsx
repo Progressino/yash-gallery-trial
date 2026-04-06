@@ -68,7 +68,7 @@ interface QuarterlyResult {
 
 const PO_DISPLAY_COLS = [
   'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
-  'Sold_Units', 'Eff_Days', 'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'ADS',
+  'Sold_Units', 'Eff_Days', 'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
   'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
   'PO_Pipeline_Total', 'Projected_Running_Days', 'PO_Qty',
@@ -80,6 +80,7 @@ const COL_LABEL: Record<string, string> = {
   'Recent_ADS':               '📉 Recent ADS',
   'LY_ADS':                   '📈 LY ADS',
   'Seasonal_Month_ADS':       '🌗 Season ADS (mo+1)',
+  'Flat30_ADS':               '📅 30d ADS (÷30)',
   'ADS':                      '⚡ ADS (Used)',
   'PO_Pipeline_Total':        '🏭 Total Pipeline',
   'PO_Qty_Ordered':           '📋 PO Ordered',

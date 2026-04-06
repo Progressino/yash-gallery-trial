@@ -325,10 +325,8 @@ def calculate_po_base(
         {"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0}
     )
 
-    # ADS uses the full period_days window to capture historical demand patterns.
-    # Using period_days (default 90d) instead of a fixed 30-day window gives a
-    # more stable ADS that accounts for seasonal variation and avoids over-reacting
-    # to a single month's volatility — this is how the team manually estimates demand.
+    # ADS starts from period_days-window Recent_ADS / LY blend, is floored by
+    # seasonal same-month+next-month history, and by Flat30_ADS (Req.xlsx FREQ).
     ADS_WINDOW = period_days
     ads_cutoff = max_date - timedelta(days=ADS_WINDOW)
     ads_recent = df[df["TxnDate"] >= ads_cutoff].copy()
@@ -367,6 +365,31 @@ def calculate_po_base(
     )
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = (ads_demand / po_df["Eff_Days"]).fillna(0)
+
+    # Spreadsheet-style "1 MONTH SALE / 30": last 30 calendar days (inclusive) / 30.
+    # Manual Req.xlsx uses a fixed 30-day denominator; Recent_ADS uses Eff_Days inside
+    # period_days and can sit below that rate for new or spotty sellers.
+    flat_sales = df.copy()
+    if group_by_parent:
+        flat_sales = flat_sales.copy()
+        flat_sales["Sku"] = flat_sales["Sku"].apply(get_parent_sku)
+    flat_start = max_date.normalize() - timedelta(days=29)
+    flat_win = flat_sales[flat_sales["TxnDate"] >= flat_start]
+    flat_denom = 30.0
+    if demand_basis == "Net":
+        flat_g = (
+            flat_win.groupby("Sku")["Units_Effective"].sum().clip(lower=0).reset_index()
+            .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "Flat30_Units"})
+        )
+    else:
+        flat_ship = flat_win[flat_win["Transaction Type"] == "Shipment"]
+        flat_g = (
+            flat_ship.groupby("Sku")["Quantity"].sum().reset_index()
+            .rename(columns={"Sku": "OMS_SKU", "Quantity": "Flat30_Units"})
+        )
+    flat_g["Flat30_ADS"] = (pd.to_numeric(flat_g["Flat30_Units"], errors="coerce").fillna(0) / flat_denom).round(3)
+    po_df = po_df.merge(flat_g[["OMS_SKU", "Flat30_ADS"]], on="OMS_SKU", how="left")
+    po_df["Flat30_ADS"] = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
 
     # ── Last-year same-window ADS (always computed) ──────────────────────────────
     # For the same calendar window one year ago, compute LY_ADS.
@@ -410,8 +433,11 @@ def calculate_po_base(
     else:
         blended = np.maximum(po_df["Recent_ADS"], po_df["LY_ADS"])
 
-    # Never below explicit same-month+next-month historical run-rate when that exists.
-    po_df["ADS"] = np.maximum(blended, po_df["Seasonal_Month_ADS"]).round(3)
+    # Never below: seasonal month-pair rate, or fixed 30-day run-rate (Req.xlsx FREQ).
+    po_df["ADS"] = np.maximum(
+        np.maximum(blended, po_df["Seasonal_Month_ADS"]),
+        po_df["Flat30_ADS"],
+    ).round(3)
 
     # PO formula uses OMS_Inventory (physical warehouse only) when available.
     # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
@@ -424,6 +450,8 @@ def calculate_po_base(
     else:
         inv_col = po_df.columns[1]
 
+    inv_vals = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
+
     # PO calculation — total coverage = lead_time + target_days
     # Rounded up to nearest 10 to match team's manual formula
     lead_demand  = po_df["ADS"] * lead_time
@@ -431,7 +459,7 @@ def calculate_po_base(
     base_req     = lead_demand + target_stock
     safety       = base_req * (safety_pct / 100.0)
     total_req    = base_req + safety
-    gross_po     = (total_req - po_df[inv_col]).clip(lower=0)
+    gross_po     = (total_req - inv_vals).clip(lower=0)
     po_df["Gross_PO_Qty"] = (np.ceil(gross_po / 10) * 10).astype(int)
 
     # Pipeline deduction from existing PO sheet
@@ -457,7 +485,7 @@ def calculate_po_base(
     # the team's manual formula: (inventory + pipeline) / ADS
     po_df["Days_Left"] = np.where(
         po_df["ADS"] > 0,
-        ((po_df[inv_col] + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
+        ((inv_vals + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
         999.0,
     )
 
@@ -481,6 +509,7 @@ def calculate_po_base(
             ghost["ADS"]             = 0.0
             ghost["LY_ADS"]          = 0.0
             ghost["Seasonal_Month_ADS"] = 0.0
+            ghost["Flat30_ADS"]      = 0.0
             ghost["Days_Left"]       = 999.0
             ghost["Gross_PO_Qty"]    = 0
             for c in ["PO_Pipeline_Total"] + _breakdown_cols:
@@ -494,9 +523,11 @@ def calculate_po_base(
     net_po = (po_df["Gross_PO_Qty"] - po_df["PO_Pipeline_Total"]).clip(lower=0)
     po_df["PO_Qty"] = (np.ceil(net_po / 10) * 10).astype(int)
 
-    # Stockout flag
+    inv_for_metrics = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
+
+    # Stockout flag (after ghost rows — length must match po_df)
     po_df["Stockout_Flag"] = np.where(
-        (po_df["ADS"] > 0) & (po_df[inv_col] <= 0), "OOS", ""
+        (po_df["ADS"] > 0) & (inv_for_metrics <= 0), "OOS", ""
     )
 
     # Priority classification (vectorised)
@@ -529,7 +560,7 @@ def calculate_po_base(
 
     # Projected Running Days = (current stock + full pipeline) / ADS
     # Shows how many days stock will last once all pipeline orders arrive
-    total_supply = po_df[inv_col] + po_df["PO_Pipeline_Total"] + po_df["Gross_PO_Qty"]
+    total_supply = inv_for_metrics + po_df["PO_Pipeline_Total"] + po_df["Gross_PO_Qty"]
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
         (total_supply / po_df["ADS"]).round(1),
