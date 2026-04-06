@@ -154,34 +154,32 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
         return df
     try:
         if platform == "amazon" and "Invoice_Number" in df.columns and "Order_Id" in df.columns:
-            has_inv = df["Invoice_Number"].astype(str).str.strip().replace("nan", "") != ""
-            inv_rows = df[has_inv].drop_duplicates(
-                subset=["Invoice_Number", "SKU", "Transaction_Type", "Date"], keep="last"
-            )
-            covered = set(inv_rows["Order_Id"].astype(str).str.strip().unique()) - {"", "nan"}
-            no_inv = df[~has_inv].copy()
-            if covered:
-                no_inv = no_inv[~no_inv["Order_Id"].astype(str).str.strip().isin(covered)]
-            no_inv = no_inv.drop_duplicates(
-                subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="last"
-            )
-            return pd.concat([inv_rows, no_inv], ignore_index=True)
+            from .mtr import dedup_amazon_mtr_dataframe
+            return dedup_amazon_mtr_dataframe(df)
         elif "OrderId" in df.columns:
-            has_id = df["OrderId"].astype(str).str.strip() != ""
-            # Rows with a real OrderId: dedup by (OrderId, SKU/OMS_SKU, TxnType, Date).
-            # Using OrderId alone would collapse multi-item orders (same store order id,
-            # different SKUs) into a single row, losing valid line items.
-            sku_col = "OMS_SKU" if "OMS_SKU" in df.columns else ("SKU" if "SKU" in df.columns else None)
-            date_col = "Date" if "Date" in df.columns else None
-            txn_col  = "TxnType" if "TxnType" in df.columns else None
+            d = df.copy()
+            has_id = d["OrderId"].astype(str).str.strip() != ""
+            sku_col = "OMS_SKU" if "OMS_SKU" in d.columns else ("SKU" if "SKU" in d.columns else None)
+            date_col = "Date" if "Date" in d.columns else None
+            txn_col  = "TxnType" if "TxnType" in d.columns else None
+            if date_col:
+                d["_ded_date"] = pd.to_datetime(d[date_col], errors="coerce").dt.normalize()
+            if "Quantity" in d.columns:
+                d["_qtyk"] = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0).round().astype("int64")
             key = ["OrderId"]
-            if sku_col:  key.append(sku_col)
-            if txn_col:  key.append(txn_col)
-            if date_col: key.append(date_col)
-            with_id = df[has_id].drop_duplicates(subset=key, keep="last")
-            # Rows without OrderId (aggregated/summary data): do NOT dedup.
-            no_id = df[~has_id]
-            return pd.concat([with_id, no_id], ignore_index=True)
+            if sku_col:
+                key.append(sku_col)
+            if txn_col:
+                key.append(txn_col)
+            if date_col:
+                key.append("_ded_date")
+            if "Quantity" in d.columns:
+                key.append("_qtyk")
+            with_id = d[has_id].drop_duplicates(subset=key, keep="last")
+            no_id = d[~has_id]
+            out = pd.concat([with_id, no_id], ignore_index=True)
+            out = out.drop(columns=["_ded_date", "_qtyk"], errors="ignore")
+            return out
     except Exception:
         pass
     return df
@@ -283,8 +281,10 @@ def merge_platform_data(existing: pd.DataFrame, new_df: pd.DataFrame, platform: 
     """
     Merge two platform DataFrames with proper deduplication.
     Safe to call from any module. Uses _dedup_platform_df internally.
-    - Amazon: MTR rows (Invoice_Number filled) take priority over FBA rows (no Invoice_Number)
-    - Other platforms: dedup by OrderId, newer data (new_df) wins
+    - Amazon: invoice/order/qty keys + PL SKU normalisation so overlapping Tier-1 ZIPs
+      do not double-count the same shipment.
+    - Other platforms: OrderId + SKU + txn + calendar day (and qty when present);
+      newer upload wins (keep last after concat [existing, new]).
     """
     if existing.empty:
         return new_df.copy() if not new_df.empty else new_df

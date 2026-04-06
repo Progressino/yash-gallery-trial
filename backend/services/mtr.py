@@ -253,21 +253,62 @@ def _collect_csv_entries(main_zip_file, depth: int = 0):
     return entries, skipped
 
 
-def mtr_deduplicate(combined: pd.DataFrame) -> pd.DataFrame:
-    """Remove duplicate MTR rows (invoice-keyed or order-keyed)."""
+def dedup_amazon_mtr_dataframe(combined: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse duplicate lines when multiple Tier-1 ZIPs / reports overlap (same
+    shipment appears in more than one file). Uses stable business keys instead
+    of raw timestamps so minor date differences do not create extra rows.
+
+    - Invoice rows: Invoice_Number + canonical SKU + transaction type + qty
+      (date omitted — avoids duplicate from report-vs-shipment date noise).
+    - Invoice rows suppress duplicate FBA-style lines for the same Amazon order.
+    - Order-keyed rows: Order_Id + canonical SKU + txn + qty (no calendar date).
+    - Rows with neither id: fallback on SKU + calendar day + txn + qty.
+    """
     if combined.empty:
         return combined
-    has_inv = combined["Invoice_Number"].astype(str).str.strip() != ""
-    dedup_a = combined[has_inv].drop_duplicates(
-        subset=["Invoice_Number", "SKU", "Transaction_Type", "Date"], keep="first"
+    req = {"Invoice_Number", "Order_Id", "SKU", "Transaction_Type", "Quantity", "Date"}
+    if not req.issubset(combined.columns):
+        return combined
+
+    from .sales import canonical_sales_sku  # lazy: avoids import cycles at module load
+
+    d = combined.copy()
+    inv_raw = d["Invoice_Number"].astype(str).str.strip()
+    has_inv = inv_raw.ne("") & ~inv_raw.str.lower().isin(["nan", "none", "-", "n/a", "na"])
+
+    d["_sk"] = d["SKU"].map(canonical_sales_sku)
+    d["_day"] = pd.to_datetime(d["Date"], errors="coerce").dt.normalize()
+    d["_qty"] = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+
+    inv_rows = d[has_inv].drop_duplicates(
+        subset=["Invoice_Number", "_sk", "Transaction_Type", "_qty"], keep="last"
     )
-    dedup_b = combined[~has_inv].drop_duplicates(
-        subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="first"
+    cov = set(inv_rows["Order_Id"].astype(str).str.strip().unique()) - {"", "nan", "none"}
+
+    rest = d[~has_inv].copy()
+    if cov:
+        oid = rest["Order_Id"].astype(str).str.strip()
+        rest = rest[~oid.isin(cov)]
+
+    oid_ok = rest["Order_Id"].astype(str).str.strip()
+    oid_ok = oid_ok.ne("") & ~oid_ok.str.lower().isin(["nan", "none"])
+    by_oid = rest[oid_ok].drop_duplicates(
+        subset=["Order_Id", "_sk", "Transaction_Type", "_qty"], keep="last"
     )
-    out = pd.concat([dedup_a, dedup_b], ignore_index=True)
-    del dedup_a, dedup_b
+    no_oid = rest[~oid_ok].drop_duplicates(
+        subset=["_sk", "Transaction_Type", "_day", "_qty"], keep="last"
+    )
+
+    out = pd.concat([inv_rows, by_oid, no_oid], ignore_index=True)
+    out = out.drop(columns=["_sk", "_day", "_qty"], errors="ignore")
     gc.collect()
-    return out
+    return _downcast_mtr(out)
+
+
+def mtr_deduplicate(combined: pd.DataFrame) -> pd.DataFrame:
+    """Backward-compatible name — delegates to dedup_amazon_mtr_dataframe."""
+    return dedup_amazon_mtr_dataframe(combined)
 
 
 def mtr_concat_and_dedup(dfs: List[pd.DataFrame]) -> pd.DataFrame:
