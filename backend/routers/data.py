@@ -3,7 +3,8 @@ Data query router — analytics endpoints.
 GET /api/data/coverage, sales-summary, sales-by-source, top-skus,
 mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 """
-from typing import List, Optional
+import re
+from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from ..models.schemas import CoverageResponse
 from ..services.sales import get_sales_summary, get_sales_by_source, get_top_skus, get_platform_summary, get_anomalies
@@ -11,6 +12,22 @@ from ..services.daily_store import list_uploads, get_summary, delete_upload
 from ..session import AppSession
 
 router = APIRouter()
+
+# Mirrors Amazon PL infix stripping in sales / PO (1023PLYKBLUE ↔ 1023YKPBLUE).
+_PL_INFIX_SKU = re.compile(r"^(\d+)PL(YK)", re.I)
+
+
+def _sku_deepdive_aliases(raw: str) -> Set[str]:
+    """Return uppercase SKU tokens that should match the same inventory row."""
+    u = raw.strip().upper()
+    out = {u}
+    stripped = _PL_INFIX_SKU.sub(r"\1\2", u)
+    if stripped != u:
+        out.add(stripped)
+    m = re.match(r"^(\d+)(YK[A-Z0-9\-]+)$", u)
+    if m and "PL" not in m.group(0):
+        out.add(f"{m.group(1)}PL{m.group(2)}")
+    return out
 
 
 def _sess(request: Request):
@@ -246,21 +263,23 @@ def sku_deepdive(
         df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
     df = df.dropna(subset=["TxnDate"])
 
-    # Default to last 90 days if no range supplied
+    # Default: full loaded history (matches Excel "total sales" exports). Use explicit
+    # start_date / end_date query params for a shorter window (e.g. last 90 days).
     if not start_date and not end_date:
+        start_ts = df["TxnDate"].min()
         end_ts   = df["TxnDate"].max()
-        start_ts = end_ts - pd.Timedelta(days=90)
     else:
         start_ts = pd.Timestamp(start_date) if start_date else df["TxnDate"].min()
         end_ts   = pd.Timestamp(end_date)   if end_date   else df["TxnDate"].max()
 
     # Resolve matching SKUs — exact or all-sizes (prefix) mode
-    sku_upper = sku.strip().upper()
+    sku_variants = _sku_deepdive_aliases(sku)
     if all_sizes:
         df["_parent"] = df["Sku"].astype(str).apply(get_parent_sku).str.upper()
-        sku_mask = df["_parent"] == sku_upper
+        parent_targets = {str(get_parent_sku(s)).strip().upper() for s in sku_variants}
+        sku_mask = df["_parent"].isin(parent_targets)
     else:
-        sku_mask = df["Sku"].astype(str).str.upper() == sku_upper
+        sku_mask = df["Sku"].astype(str).str.upper().isin(sku_variants)
 
     # Filter to SKU + date window
     sku_df = df[

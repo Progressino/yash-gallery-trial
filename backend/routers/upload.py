@@ -5,6 +5,7 @@ import gc
 import io
 import os
 import re
+import zipfile
 import shutil
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ from fastapi.responses import JSONResponse
 from ..session import store
 from ..models.schemas import UploadResponse
 from ..services.sku_mapping import parse_sku_mapping
-from ..services.mtr import load_mtr_from_zip, parse_mtr_csv
+from ..services.mtr import load_mtr_from_zip, load_mtr_from_extracted_files, parse_mtr_csv
 from ..services.myntra import load_myntra_from_zip
 from ..services.meesho import load_meesho_from_zip
 from ..services.flipkart import load_flipkart_from_zip
@@ -54,10 +55,12 @@ def _extract_rar_files(rar_bytes: bytes) -> list[tuple[str, bytes]]:
         result = []
         for root, _dirs, files in os.walk(tmpdir):
             for fname in files:
-                if fname == "upload.rar":
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, tmpdir).replace("\\", "/")
+                if rel == "upload.rar" or fname == "upload.rar":
                     continue
-                with open(os.path.join(root, fname), "rb") as fh:
-                    result.append((fname, fh.read()))
+                with open(full, "rb") as fh:
+                    result.append((rel, fh.read()))
         return result
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -114,9 +117,14 @@ async def upload_sku_mapping(request: Request, file: UploadFile = File(...)):
 async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     sess = _get_session(request)
     try:
-        zip_bytes = await file.read()
-        df, csv_count, skipped = load_mtr_from_zip(zip_bytes)
-        del zip_bytes
+        raw = await file.read()
+        fn = (file.filename or "").lower()
+        if raw[:6] == _RAR_MAGIC or fn.endswith(".rar"):
+            inner = _extract_rar_files(raw)
+            df, csv_count, skipped = load_mtr_from_extracted_files(inner)
+        else:
+            df, csv_count, skipped = load_mtr_from_zip(raw)
+        del raw
         gc.collect()
 
         if df.empty:
@@ -137,7 +145,7 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
             years=years,
         )
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse MTR ZIP: {e}")
+        raise HTTPException(status_code=422, detail=f"Failed to parse MTR archive (ZIP/RAR): {e}")
 
 
 # ── Myntra ────────────────────────────────────────────────────
@@ -597,21 +605,47 @@ async def upload_cogs(request: Request, file: UploadFile = File(...)):
 
 # ── Daily Orders — Auto-detect (drop all files, we figure it out) ─
 
-def _detect_platform(filename: str, header_bytes: bytes) -> str:
+def _detect_platform_zip(file_bytes: bytes, fn: str) -> str:
     """
-    Guess platform from filename + first ~3 KB of content.
-    Returns one of: 'amazon_b2c', 'amazon_b2b', 'myntra', 'meesho', 'flipkart', 'unknown'
+    Distinguish Meesho monthly ZIP vs Amazon MTR master ZIP (nested CSV/ZIPs).
     """
-    fn = (filename or "").lower()
-
-    # ZIP → Meesho monthly ZIP
-    if fn.endswith(".zip"):
+    if "meesho" in fn:
         return "meesho"
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            names = [n for n in zf.namelist() if "__MACOSX" not in n]
+            joined = " ".join(n.lower() for n in names)
+        if "tcs_sales" in joined or "forwardreports" in joined:
+            return "meesho"
+    except Exception:
+        pass
+    try:
+        probe, n_csv, _sk = load_mtr_from_zip(file_bytes)
+        if not probe.empty and n_csv > 0:
+            return "amazon_mtr_zip"
+    except Exception:
+        pass
+    return "meesho"
 
-    # XLSX → Flipkart Sales Report
+
+def _detect_platform(filename: str, file_bytes: bytes) -> str:
+    """
+    Guess platform from path/filename + file contents.
+    Returns: 'amazon_b2c', 'amazon_b2b', 'amazon_mtr_zip', 'myntra', 'meesho',
+    'meesho_csv', 'flipkart', 'snapdeal', 'unknown'
+    """
+    fn = (filename or "").lower().replace("\\", "/")
+
+    if "snapdeal" in fn:
+        return "snapdeal"
+
+    if fn.endswith(".zip"):
+        return _detect_platform_zip(file_bytes, fn)
+
     if fn.endswith((".xlsx", ".xls")):
         return "flipkart"
 
+    header_bytes = file_bytes[:3000]
     # CSV — filename hints first
     if "myntra" in fn or "ppmp" in fn or "seller_orders" in fn or "seller orders" in fn or "my ppmp" in fn:
         return "myntra"
@@ -680,7 +714,19 @@ async def upload_daily_auto(
         from ..services.daily_store import load_platform_data as _load_platform
         platform = _detect_platform(fname, raw)
         try:
-            if platform == "amazon_b2c":
+            if platform == "amazon_mtr_zip":
+                df_mtr, _n, sk_mtr = load_mtr_from_zip(raw)
+                if not df_mtr.empty:
+                    save_daily_file("amazon", fname, df_mtr)
+                    sess.mtr_df = _load_platform("amazon")
+                    sess.daily_restored = False
+                    detected.append(f"Amazon MTR ({fname})")
+                    if sk_mtr:
+                        warnings.append(f"{fname}: {'; '.join(sk_mtr[:2])}")
+                else:
+                    warnings.append(f"{fname}: No Amazon MTR CSVs — {'; '.join(sk_mtr[:3])}")
+
+            elif platform == "amazon_b2c":
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
                     save_daily_file("amazon", fname, df)
@@ -741,6 +787,23 @@ async def upload_daily_auto(
                         warnings.append(f"{fname}: {msg}")
                 else:
                     warnings.append(f"{fname}: {msg}")
+
+            elif platform == "snapdeal":
+                df_sd, _fc, skipped_sd, parse_info = load_snapdeal_from_zip(
+                    raw, sess.sku_mapping or {}, fname,
+                )
+                sess.snapdeal_parse_info.update(parse_info)
+                if df_sd.empty:
+                    warnings.append(f"{fname}: Snapdeal — {'; '.join(skipped_sd[:3])}")
+                else:
+                    if sess.snapdeal_df.empty:
+                        sess.snapdeal_df = df_sd
+                    else:
+                        sess.snapdeal_df = pd.concat(
+                            [sess.snapdeal_df, df_sd], ignore_index=True,
+                        ).drop_duplicates()
+                    sess.daily_restored = False
+                    detected.append(f"Snapdeal ({fname})")
 
             elif platform == "flipkart":
                 from ..services.flipkart import _parse_flipkart_xlsx, _parse_flipkart_orders_sheet, _parse_flipkart_earn_more

@@ -178,15 +178,16 @@ export default function SKUDeepDive() {
   const navigate = useNavigate()
 
   const skuParam      = searchParams.get('sku') || ''
-  const startParam    = searchParams.get('start') || dateNDaysAgo(90)
-  const endParam      = searchParams.get('end')   || today()
+  const startParam    = searchParams.get('start') ?? ''
+  const endParam      = searchParams.get('end') ?? ''
   const allSizesParam = searchParams.get('all_sizes') === '1'
 
   const [activeSku,  setActiveSku]  = useState(skuParam)
   const [start,      setStart]      = useState(startParam)
   const [end,        setEnd]        = useState(endParam)
   const [allSizes,   setAllSizes]   = useState(allSizesParam)
-  const [activePreset, setPreset]   = useState<number | null>(90)
+  /** 0 = full loaded range (no date filter); matches total-sales exports */
+  const [activePreset, setPreset]   = useState<number | null>(0)
 
   // Sync URL → state on initial load
   useEffect(() => {
@@ -216,10 +217,10 @@ export default function SKUDeepDive() {
 
   const { data, isLoading, isFetching } = useQuery<DeepDiveData>({
     queryKey: ['sku-deepdive', activeSku, start, end, allSizes],
-    queryFn: async () => {
+        queryFn: async () => {
       const params = new URLSearchParams({ sku: activeSku })
-      if (start)    params.set('start_date', start)
-      if (end)      params.set('end_date', end)
+      if (start.trim()) params.set('start_date', start)
+      if (end.trim())   params.set('end_date', end)
       if (allSizes) params.set('all_sizes', 'true')
       const { data } = await api.get(`/data/sku-deepdive?${params}`)
       return data
@@ -236,7 +237,9 @@ export default function SKUDeepDive() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">SKU Deep Dive</h1>
-          <p className="text-sm text-gray-400 mt-0.5">Full sales breakdown for any product SKU</p>
+          <p className="text-sm text-gray-400 mt-0.5">
+            Full sales breakdown for any product SKU · Default period is <strong>all loaded history</strong> (use presets to narrow)
+          </p>
         </div>
         <button
           onClick={() => navigate(-1)}

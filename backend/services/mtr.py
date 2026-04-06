@@ -253,6 +253,64 @@ def _collect_csv_entries(main_zip_file, depth: int = 0):
     return entries, skipped
 
 
+def mtr_deduplicate(combined: pd.DataFrame) -> pd.DataFrame:
+    """Remove duplicate MTR rows (invoice-keyed or order-keyed)."""
+    if combined.empty:
+        return combined
+    has_inv = combined["Invoice_Number"].astype(str).str.strip() != ""
+    dedup_a = combined[has_inv].drop_duplicates(
+        subset=["Invoice_Number", "SKU", "Transaction_Type", "Date"], keep="first"
+    )
+    dedup_b = combined[~has_inv].drop_duplicates(
+        subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="first"
+    )
+    out = pd.concat([dedup_a, dedup_b], ignore_index=True)
+    del dedup_a, dedup_b
+    gc.collect()
+    return out
+
+
+def mtr_concat_and_dedup(dfs: List[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate parsed MTR DataFrames and apply standard dedup + downcast."""
+    if not dfs:
+        return pd.DataFrame()
+    combined = pd.concat(dfs, ignore_index=True)
+    gc.collect()
+    combined = mtr_deduplicate(combined)
+    return _downcast_mtr(combined)
+
+
+def load_mtr_from_extracted_files(files: List[Tuple[str, bytes]]) -> Tuple[pd.DataFrame, int, List[str]]:
+    """
+    Build one MTR frame from extracted inner files (e.g. RAR contents): each
+    entry may be a nested MTR ZIP or a single MTR CSV. Cross-file dedup applied once.
+    """
+    parts: List[pd.DataFrame] = []
+    skipped: List[str] = []
+    parsed_files = 0
+    for name, blob in files:
+        lower = name.lower()
+        if lower.endswith(".zip"):
+            part, n_csv, sk = load_mtr_from_zip(blob)
+            skipped.extend(sk)
+            if not part.empty:
+                parts.append(part)
+                parsed_files += 1
+        elif lower.endswith(".csv"):
+            df, msg = parse_mtr_csv(blob, Path(name).name)
+            if df.empty:
+                skipped.append(f"{name}: {msg}")
+            else:
+                parts.append(df)
+                parsed_files += 1
+                if msg != "OK":
+                    skipped.append(f"{name}: Partial ({msg})")
+    if not parts:
+        return pd.DataFrame(), 0, skipped
+    combined = mtr_concat_and_dedup(parts)
+    return combined, parsed_files, skipped
+
+
 def load_mtr_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]]:
     """
     Load all MTR CSVs from a master ZIP.
@@ -289,20 +347,8 @@ def load_mtr_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]]:
         return pd.DataFrame(), 0, skipped
 
     csv_count = len(dfs)
-    combined = pd.concat(dfs, ignore_index=True)
+    combined = mtr_concat_and_dedup(dfs)
     del dfs
     gc.collect()
-
-    has_inv = combined["Invoice_Number"].str.strip() != ""
-    dedup_a = combined[has_inv].drop_duplicates(
-        subset=["Invoice_Number", "SKU", "Transaction_Type", "Date"], keep="first"
-    )
-    dedup_b = combined[~has_inv].drop_duplicates(
-        subset=["Order_Id", "SKU", "Transaction_Type", "Date"], keep="first"
-    )
-    combined = pd.concat([dedup_a, dedup_b], ignore_index=True)
-    del dedup_a, dedup_b
-    gc.collect()
-    combined = _downcast_mtr(combined)
 
     return combined, csv_count, skipped

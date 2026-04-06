@@ -376,6 +376,22 @@ def _parse_snapdeal_file(
                     continue
         else:
             xl = pd.ExcelFile(io.BytesIO(file_bytes))
+            # Snapdeal monthly *payment settlement* XLSX (Total_Suboders, Returns, …)
+            # has invoice lines but no seller SKU — cannot attribute to products in SKU Deepdive.
+            _tsheet = next(
+                (s for s in xl.sheet_names
+                 if "total" in s.lower().replace(" ", "") and "subod" in s.lower().replace(" ", "")),
+                None,
+            )
+            if _tsheet is not None:
+                probe_hdr = xl.parse(_tsheet, header=0, nrows=1, dtype=str)
+                col_txt = " ".join(str(c).lower() for c in probe_hdr.columns)
+                if "sku" not in col_txt and "style" not in col_txt and "product code" not in col_txt:
+                    return pd.DataFrame(), (
+                        "Snapdeal payment/settlement XLSX (no Seller SKU column). "
+                        "Use the Snapdeal **seller order / OMS** export for per-SKU sales."
+                    ), {}
+
             for sheet in xl.sheet_names:
                 if _should_skip_sheet(sheet):
                     continue
