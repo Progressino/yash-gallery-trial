@@ -90,6 +90,16 @@ def _auto_save_cache(sess) -> None:
     else:
         _log.warning("Auto-save cache skipped/failed: %s", msg)
 
+    sid = getattr(sess, "_persist_sid", None)
+    if sid:
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle
+
+            if persist_session_bundle(sid, sess):
+                _log.info("PostgreSQL session snapshot saved (%s…)", sid[:8])
+        except Exception:
+            _log.exception("PostgreSQL session snapshot failed")
+
 
 def _get_session(request: Request):
     sess = request.state.session

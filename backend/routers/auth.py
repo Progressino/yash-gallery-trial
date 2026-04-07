@@ -71,6 +71,13 @@ def logout(request: Request, response: Response):
     # Destroy the server-side session so next login starts with clean state
     sid = request.cookies.get("session_id")
     if sid:
+        try:
+            from ..db.forecast_session_pg import delete_session_bundle, pg_session_persist_enabled
+
+            if pg_session_persist_enabled():
+                delete_session_bundle(sid)
+        except Exception:
+            pass
         from ..session import store as _store
         _store.delete(sid)
     response.delete_cookie("auth_token")

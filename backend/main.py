@@ -35,6 +35,7 @@ from .db.tna_db import init_db as init_tna_db
 from .db.production_db import init_db as init_production_db
 from .db.grey_db import init_db as init_grey_db
 from .db.users_db import init_db as init_users_db
+from .db.forecast_session_pg import init_db as init_forecast_session_pg
 
 init_db()
 init_item_db()
@@ -45,6 +46,7 @@ init_tna_db()
 init_production_db()
 init_grey_db()
 init_users_db()
+init_forecast_session_pg()
 
 log = logging.getLogger("erp.cache_warmer")
 
@@ -333,19 +335,34 @@ async def session_middleware(request: Request, call_next):
     sid, session = store.get_or_create(sid)
     request.state.session_id = sid
     request.state.session = session
+    setattr(session, "_persist_sid", sid)
 
     # Pre-populate session from warm cache whenever the session has no data —
     # not just on brand-new sessions. This handles the race condition where
     # the cache was still loading when the session was first created, and also
     # re-fills sessions whose in-memory data was lost after a deploy.
+    copied_warm = False
     if (
         session.mtr_df.empty
         and session.sales_df.empty
         and not getattr(session, "pause_auto_data_restore", False)
     ):
-        _copy_warm_cache_to_session(session)
+        copied_warm = _copy_warm_cache_to_session(session)
 
     response: Response = await call_next(request)
+
+    try:
+        from .db.forecast_session_pg import debounced_persist_session, pg_session_persist_enabled
+
+        if pg_session_persist_enabled() and sid:
+            if copied_warm:
+                debounced_persist_session(sid, session, delay=5.0)
+            elif request.method in frozenset({"POST", "PUT", "DELETE", "PATCH"}) and request.url.path.startswith(
+                "/api/"
+            ):
+                debounced_persist_session(sid, session, delay=12.0)
+    except Exception:
+        pass
 
     # Set / refresh cookie on every response
     response.set_cookie(
@@ -353,7 +370,7 @@ async def session_middleware(request: Request, call_next):
         value=sid,
         httponly=True,
         samesite="lax",
-        max_age=12 * 3600,  # 12 hours
+        max_age=14 * 24 * 3600,  # 14 days — must stay stable while PostgreSQL stores session blobs by this id
     )
     return response
 

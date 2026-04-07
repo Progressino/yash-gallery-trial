@@ -24,7 +24,10 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-# 3. Build and (re)start containers
+# 3. Data dirs for bind mounts (PostgreSQL session store + SQLite ERP DBs)
+mkdir -p /root/app-data/postgres /root/app-data/finance
+
+# 4. Build and (re)start containers
 echo ""
 echo "📦 Building containers…"
 $COMPOSE build --no-cache
@@ -34,7 +37,7 @@ echo "▶  Starting containers…"
 $COMPOSE down --remove-orphans 2>/dev/null || true
 $COMPOSE up -d
 
-# 4. Health check (hit backend container directly on port 8000, bypassing nginx HTTPS redirect)
+# 5. Health check (hit backend container directly on port 8000, bypassing nginx HTTPS redirect)
 echo ""
 echo "🩺 Health check…"
 sleep 5

@@ -100,8 +100,31 @@ class SessionStore:
             sess = self._sessions[sid]
             sess.last_accessed = time.time()
             return sid, sess
+
+        # Cookie present but not in RAM (process restart, second worker, or cold start):
+        # restore from PostgreSQL so ~1M-row uploads are not "lost".
+        if sid:
+            try:
+                from .db.forecast_session_pg import load_session_from_pg, pg_session_persist_enabled
+
+                if pg_session_persist_enabled():
+                    loaded = load_session_from_pg(sid)
+                    if loaded is not None:
+                        self._sessions[sid] = loaded
+                        loaded.last_accessed = time.time()
+                        return sid, loaded
+            except Exception:
+                pass
+            # Reuse the same session_id for an empty session so the next persist
+            # uses the PK the browser already has (legacy behaviour rotated UUIDs).
+            empty = AppSession()
+            empty.last_accessed = time.time()
+            self._sessions[sid] = empty
+            return sid, empty
+
         new_id = str(uuid.uuid4())
         self._sessions[new_id] = AppSession()
+        self._sessions[new_id].last_accessed = time.time()
         return new_id, self._sessions[new_id]
 
     def get(self, sid: str) -> Optional[AppSession]:

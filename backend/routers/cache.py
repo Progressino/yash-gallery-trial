@@ -6,7 +6,7 @@ POST /api/cache/reload-fresh → clear warm + session, full GitHub download, dai
 GET  /api/cache/status → check if cache exists
 """
 import logging
-from fastapi import APIRouter, Request, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 import pandas as pd
@@ -115,6 +115,33 @@ def _auto_save_cache(sess) -> None:
         _log.info("reload-fresh cache save: %s", msg)
     else:
         _log.warning("reload-fresh cache save skipped: %s", msg)
+    sid = getattr(sess, "_persist_sid", None)
+    if sid:
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle
+
+            persist_session_bundle(sid, sess)
+        except Exception:
+            _log.exception("PostgreSQL session snapshot (reload-fresh) failed")
+
+
+def _persist_pg_session(request: Request, sess) -> None:
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
+    _persist_pg_session_bg(sid, sess)
+
+
+def _persist_pg_session_bg(session_id: str | None, sess) -> None:
+    if not session_id:
+        session_id = getattr(sess, "_persist_sid", None)
+    if not session_id:
+        return
+    try:
+        from ..db.forecast_session_pg import persist_session_bundle, pg_session_persist_enabled
+
+        if pg_session_persist_enabled():
+            persist_session_bundle(session_id, sess)
+    except Exception:
+        _log.exception("PostgreSQL session persist failed")
 
 
 @router.get("/status")
@@ -146,11 +173,13 @@ def cache_save(request: Request):
         "sku_mapping": sess.sku_mapping,
     }
     ok, msg = save_cache_to_drive(session_data)
+    if ok:
+        _persist_pg_session(request, sess)
     return CacheStatusResponse(ok=ok, message=msg)
 
 
 @router.post("/load", response_model=CacheStatusResponse)
-def cache_load(request: Request):
+def cache_load(request: Request, background_tasks: BackgroundTasks):
     sess = request.state.session
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
@@ -165,6 +194,7 @@ def cache_load(request: Request):
             sess._quarterly_cache.clear()
             _main.publish_warm_cache_from_session(sess)
             resume_auto_data_restore(sess)
+            background_tasks.add_task(_persist_pg_session_bg, request.state.session_id, sess)
             return CacheStatusResponse(
                 ok=True,
                 message=f"Loaded from warm cache; sales rebuilt ({n_sales:,} rows).{daily_note}",
@@ -188,6 +218,7 @@ def cache_load(request: Request):
         except Exception:
             pass
         resume_auto_data_restore(sess)
+        background_tasks.add_task(_persist_pg_session_bg, request.state.session_id, sess)
 
     return CacheStatusResponse(ok=ok, message=msg)
 
@@ -202,6 +233,7 @@ def cache_clear(request: Request, include_warm: bool = False):
         import backend.main as _main
         _main.clear_warm_cache()
     wipe_app_session(sess)
+    _persist_pg_session(request, sess)
     msg = "Session wiped (all data). Server warm cache cleared too." if include_warm else "Session wiped (all data)."
     return CacheStatusResponse(ok=True, message=msg)
 
@@ -246,6 +278,7 @@ def cache_reset_all(request: Request, body: ResetAllBody = ResetAllBody()):
         bits.append(f"Tier-3 daily store: removed {tier3_n} saved file(s).")
     if gh_msg:
         bits.append(gh_msg.strip())
+    _persist_pg_session(request, sess)
     return ResetAllResponse(ok=True, message=" ".join(bits), tier3_deleted=tier3_n)
 
 
@@ -296,6 +329,7 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
     sess._quarterly_cache.clear()
     _main.publish_warm_cache_from_session(sess)
     background_tasks.add_task(_auto_save_cache, sess)
+    background_tasks.add_task(_persist_pg_session_bg, request.state.session_id, sess)
     return CacheReloadResponse(
         ok=True,
         message=f"{msg} Saving to GitHub in background…",
