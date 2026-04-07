@@ -39,7 +39,7 @@ const NAV_GROUPS = [
 ]
 
 export default function Layout() {
-  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, pause_auto_data_restore, setCoverage } =
+  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, setCoverage } =
     useSession()
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
