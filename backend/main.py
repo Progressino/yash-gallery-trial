@@ -119,7 +119,7 @@ def _do_load_warm_cache() -> bool:
                         "myntra_df":   daily.get("myntra",   pd.DataFrame()),
                         "meesho_df":   daily.get("meesho",   pd.DataFrame()),
                         "flipkart_df": daily.get("flipkart", pd.DataFrame()),
-                        "snapdeal_df": pd.DataFrame(),
+                        "snapdeal_df": daily.get("snapdeal", pd.DataFrame()),
                         "sales_df":    pd.DataFrame(),
                         "sku_mapping": {},
                         "inventory_df_variant": pd.DataFrame(),
@@ -127,7 +127,8 @@ def _do_load_warm_cache() -> bool:
                     }
                     # Rebuild sales_df from what SQLite has
                     if any(not v.empty for v in [loaded["mtr_df"], loaded["myntra_df"],
-                                                  loaded["meesho_df"], loaded["flipkart_df"]]):
+                                                  loaded["meesho_df"], loaded["flipkart_df"],
+                                                  loaded["snapdeal_df"]]):
                         from .services.sales import build_sales_df
                         loaded["sales_df"] = build_sales_df(
                             mtr_df=loaded["mtr_df"], myntra_df=loaded["myntra_df"],
@@ -157,8 +158,13 @@ def _do_load_warm_cache() -> bool:
         try:
             daily = load_all_platforms()
             merged_any = False
-            for plat, key in [("amazon","mtr_df"),("myntra","myntra_df"),
-                               ("meesho","meesho_df"),("flipkart","flipkart_df")]:
+            for plat, key in [
+                ("amazon", "mtr_df"),
+                ("myntra", "myntra_df"),
+                ("meesho", "meesho_df"),
+                ("flipkart", "flipkart_df"),
+                ("snapdeal", "snapdeal_df"),
+            ]:
                 if daily.get(plat) is not None and not daily[plat].empty:
                     loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
                     merged_any = True

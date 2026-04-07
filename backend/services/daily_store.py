@@ -28,7 +28,13 @@ def _resolve_db_path() -> Path:
 
 
 _DB_PATH = _resolve_db_path()
-_MAX_FILES = 60   # keep at most 60 entries per platform
+def _max_files_per_platform() -> int:
+    raw = (os.environ.get("DAILY_UPLOADS_MAX_PER_PLATFORM") or "200").strip()
+    try:
+        n = int(raw)
+        return max(30, min(n, 5000))
+    except ValueError:
+        return 200
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -208,7 +214,7 @@ def save_daily_file(
     - Replaces any existing entries for the same platform whose date range
       overlaps with the new file's actual data date range (prevents duplication
       when re-uploading or uploading wider date-range reports).
-    - Auto-trims: only the latest _MAX_FILES entries per platform are kept.
+    - Auto-trims: only the latest ``DAILY_UPLOADS_MAX_PER_PLATFORM`` entries per platform.
     Returns (file_date, rows_saved).
     """
     if df.empty:
@@ -235,7 +241,8 @@ def save_daily_file(
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (platform, file_date, filename, len(df), parquet_bytes, date_from, date_to),
     )
-    # Trim: keep only the latest _MAX_FILES per platform
+    # Trim: keep only the latest N blobs per platform (see DAILY_UPLOADS_MAX_PER_PLATFORM).
+    cap = _max_files_per_platform()
     conn.execute(
         """DELETE FROM daily_uploads
            WHERE platform=? AND id NOT IN (
@@ -244,25 +251,35 @@ def save_daily_file(
                ORDER BY file_date DESC, id DESC
                LIMIT ?
            )""",
-        (platform, platform, _MAX_FILES),
+        (platform, platform, cap),
     )
     conn.commit()
     conn.close()
     return file_date, len(df)
 
 
-def load_platform_data(platform: str, months: int = 24) -> pd.DataFrame:
+def load_platform_data(platform: str, months: int | None = None) -> pd.DataFrame:
     """Load and concatenate stored daily data for one platform, with deduplication.
-    Only loads files whose file_date falls within the last `months` months (default 48)
-    to cap memory usage on large datasets.
+
+    ``months=None`` (default): load **all** blobs for the platform. Tier-1 bulk uploads
+    often carry ``file_date`` from the earliest row in the archive (e.g. 2024); a rolling
+    window would silently drop multi-year history and make yearly data look “not uploaded”.
+    Pass a positive ``months`` only if you need an intentional memory-bound window.
     """
     conn = _get_conn()
-    cutoff = (datetime.date.today() - datetime.timedelta(days=months * 30)).isoformat()
-    rows = conn.execute(
-        "SELECT data_parquet FROM daily_uploads "
-        "WHERE platform=? AND file_date >= ? ORDER BY file_date ASC",
-        (platform, cutoff),
-    ).fetchall()
+    if months is None:
+        rows = conn.execute(
+            "SELECT data_parquet FROM daily_uploads "
+            "WHERE platform=? ORDER BY file_date ASC",
+            (platform,),
+        ).fetchall()
+    else:
+        cutoff = (datetime.date.today() - datetime.timedelta(days=months * 30)).isoformat()
+        rows = conn.execute(
+            "SELECT data_parquet FROM daily_uploads "
+            "WHERE platform=? AND file_date >= ? ORDER BY file_date ASC",
+            (platform, cutoff),
+        ).fetchall()
     conn.close()
 
     dfs = []
@@ -281,7 +298,7 @@ def load_platform_data(platform: str, months: int = 24) -> pd.DataFrame:
 def load_all_platforms() -> Dict[str, pd.DataFrame]:
     """Return {platform: df} for all platforms that have stored data."""
     result: Dict[str, pd.DataFrame] = {}
-    for p in ("amazon", "myntra", "meesho", "flipkart"):
+    for p in ("amazon", "myntra", "meesho", "flipkart", "snapdeal"):
         df = load_platform_data(p)
         if not df.empty:
             result[p] = df

@@ -322,6 +322,8 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
+        save_daily_file("snapdeal", file.filename or "snapdeal-upload.zip", df)
+
         # Snapdeal may not have OrderId — dedup on all columns
         if sess.snapdeal_df.empty:
             sess.snapdeal_df = df

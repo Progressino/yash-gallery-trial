@@ -73,6 +73,8 @@ def _merge_daily_store_into_session(sess) -> str:
             sess.meesho_df = _merge_platform_data(sess.meesho_df, daily_data["meesho"], "meesho")
         if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
             sess.flipkart_df = _merge_platform_data(sess.flipkart_df, daily_data["flipkart"], "flipkart")
+        if daily_data.get("snapdeal") is not None and not daily_data["snapdeal"].empty:
+            sess.snapdeal_df = _merge_platform_data(sess.snapdeal_df, daily_data["snapdeal"], "snapdeal")
         n = sum(1 for v in daily_data.values() if hasattr(v, "empty") and not v.empty)
         return f" + {n} platform(s) daily store merged." if n else ""
     except Exception as e:

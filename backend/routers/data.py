@@ -71,6 +71,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         ("myntra",   "myntra_df"),
         ("meesho",   "meesho_df"),
         ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
     ]:
         if getattr(sess, attr).empty:
             df = load_platform_data(platform)
