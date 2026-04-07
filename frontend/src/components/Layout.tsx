@@ -255,15 +255,6 @@ export default function Layout() {
           </button>
           <button
             type="button"
-            onClick={handleReloadFresh}
-            disabled={cacheLoading !== null}
-            title="Clears server memory, re-downloads GitHub + Tier-3 SQLite, rebuilds sales with latest logic"
-            className="w-full py-1.5 rounded text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50"
-          >
-            {cacheLoading === 'reload' ? 'Rebuilding…' : '↻ Fresh reload (server)'}
-          </button>
-          <button
-            type="button"
             onClick={handleDeleteAll}
             disabled={cacheLoading !== null}
             title="Wipes session, server warm cache, Tier-3 SQLite, AND GitHub Release cache. Re-upload required."
