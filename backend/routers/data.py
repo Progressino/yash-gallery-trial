@@ -1,11 +1,13 @@
 """
 Data query router — analytics endpoints.
-GET /api/data/coverage, sales-summary, sales-by-source, top-skus,
+GET /api/data/coverage, sales-summary, sales-export, sales-by-source, top-skus,
 mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 """
+import io
 import re
 from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import StreamingResponse
 from ..models.schemas import CoverageResponse
 from ..services.sales import (
     get_sales_summary,
@@ -14,6 +16,7 @@ from ..services.sales import (
     get_platform_summary,
     get_anomalies,
     canonical_sales_sku,
+    filter_sales_for_export,
 )
 from ..services.daily_store import list_uploads, get_summary, delete_upload
 from ..session import AppSession
@@ -234,6 +237,62 @@ def sales_summary(
     sess = _sess(request)
     _restore_daily_if_needed(sess)
     return get_sales_summary(sess.sales_df, months=months, start_date=start_date, end_date=end_date)
+
+
+@router.get("/sales-export")
+def sales_export(
+    request: Request,
+    months: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    platforms: Optional[str] = None,
+):
+    """CSV of unified `sales_df` rows for the dashboard date range (and optional platform list)."""
+    import pandas as pd
+
+    sess = _sess(request)
+    _restore_daily_if_needed(sess)
+    if sess.sales_df.empty:
+        raise HTTPException(status_code=404, detail="No sales data loaded — upload or rebuild sales first.")
+
+    src_list: Optional[List[str]] = None
+    if platforms and platforms.strip():
+        src_list = [p.strip() for p in platforms.split(",") if p.strip()]
+
+    df = filter_sales_for_export(
+        sess.sales_df,
+        months=months,
+        start_date=start_date,
+        end_date=end_date,
+        sources=src_list,
+    )
+    if df.empty:
+        raise HTTPException(
+            status_code=404,
+            detail="No rows in this date range / platform filter — widen dates or include more platforms.",
+        )
+
+    out = df.copy()
+    out["TxnDate"] = pd.to_datetime(out["TxnDate"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    base_cols = ["TxnDate", "Sku", "Transaction Type", "Quantity", "Units_Effective", "Source"]
+    extra = [c for c in ("OrderId",) if c in out.columns]
+    cols = [c for c in base_cols + extra if c in out.columns]
+    export_df = out[cols]
+
+    buf = io.StringIO()
+    export_df.to_csv(buf, index=False)
+    body = buf.getvalue().encode("utf-8")
+
+    part_start = (start_date or "all").replace(":", "")
+    part_end = (end_date or "all").replace(":", "")
+    fname = f"intelligence-sales_{part_start}_{part_end}_{len(export_df)}_rows.csv"
+
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.get("/sales-by-source")

@@ -183,8 +183,17 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
 
     txn = g("transaction type").str.lower()
     txn_std = pd.Series("Shipment", index=raw.index, dtype=str)
-    txn_std[txn.str.contains("return|refund", na=False)] = "Refund"
+    txn_std[txn.str.contains(
+        r"return|refund|reimbursement|chargeback|reversal|credit\s*note|reimbursed",
+        na=False,
+    )] = "Refund"
     txn_std[txn.str.contains("cancel", na=False)] = "Cancel"
+
+    # Order / FBA reports often leave "transaction type" empty for every row; use order status.
+    os_lower = g("order status").str.lower()
+    still_ship = txn_std == "Shipment"
+    txn_std[still_ship & os_lower.str.contains(r"return|refund|reimbursed", na=False)] = "Refund"
+    txn_std[still_ship & os_lower.str.contains("cancel", na=False)] = "Cancel"
 
     # Resolve column aliases (MTR / Order Report / FBA Shipment Report)
     _sku_col      = next((c for c in ["sku", "merchant sku"] if c in raw.columns), None)
@@ -289,7 +298,11 @@ def dedup_amazon_mtr_dataframe(combined: pd.DataFrame) -> pd.DataFrame:
     rest = d[~has_inv].copy()
     if cov:
         oid = rest["Order_Id"].astype(str).str.strip()
-        rest = rest[~oid.isin(cov)]
+        txn_rest = rest["Transaction_Type"].astype(str).str.strip()
+        # Invoice-keyed shipments suppress duplicate FBA shipment lines for the same order.
+        # Refunds/credits usually share Order_Id but have no Invoice_Number — do not drop them.
+        suppress_oid = oid.isin(cov) & (txn_rest == "Shipment")
+        rest = rest[~suppress_oid]
 
     oid_ok = rest["Order_Id"].astype(str).str.strip()
     oid_ok = oid_ok.ne("") & ~oid_ok.str.lower().isin(["nan", "none"])

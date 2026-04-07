@@ -118,6 +118,42 @@ export async function getCoverage(): Promise<CoverageResponse> {
   return data
 }
 
+/** Line-level unified sales CSV for Intelligence dashboard (date range + optional platforms). */
+export async function downloadIntelligenceSalesCsv(opts: {
+  startDate?: string
+  endDate?: string
+  platforms?: string[]
+}): Promise<void> {
+  const p = new URLSearchParams()
+  p.set('months', '0')
+  if (opts.startDate) p.set('start_date', opts.startDate)
+  if (opts.endDate) p.set('end_date', opts.endDate)
+  if (opts.platforms?.length) p.set('platforms', opts.platforms.join(','))
+  const res = await fetch(`/api/data/sales-export?${p}`, { credentials: 'include' })
+  if (!res.ok) {
+    let msg = `Export failed (${res.status})`
+    try {
+      const j = (await res.json()) as { detail?: string }
+      if (typeof j.detail === 'string') msg = j.detail
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('Content-Disposition')
+  const m = cd?.match(/filename="([^"]+)"/i)
+  const filename = m?.[1] ?? 'intelligence-sales.csv'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 // ── Daily sales management ────────────────────────────────────
 
 export interface DailyUpload {

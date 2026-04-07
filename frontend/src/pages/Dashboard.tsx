@@ -5,7 +5,7 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell,
 } from 'recharts'
-import api, { getCoverage } from '../api/client'
+import api, { downloadIntelligenceSalesCsv, getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 
 interface DailyBreakdownRow { date: string; platform: string; units: number; returns: number }
@@ -123,6 +123,7 @@ const PRESETS = [
 export default function Dashboard() {
   const navigate = useNavigate()
   const setCoverage = useSession((s) => s.setCoverage)
+  const salesLoaded = useSession((s) => s.sales)
   const [dateStart, setDateStart] = useState(() => daysAgo(90))
   const [dateEnd,   setDateEnd]   = useState(TODAY)
   const [activePreset, setActivePreset] = useState<string>('90D')
@@ -132,6 +133,7 @@ export default function Dashboard() {
   const [hiddenPlatforms, setHiddenPlatforms] = useState<Set<string>>(new Set())
   const [skuSearch, setSkuSearch] = useState('')
   const [topSkuLimit, setTopSkuLimit] = useState(10)
+  const [exportingSales, setExportingSales] = useState(false)
 
   function applyPreset(label: string, startFn: () => string) {
     const s = startFn()
@@ -234,6 +236,30 @@ export default function Dashboard() {
 
   const chartData = useMemo(() => mergePlatformMonthly(filteredPlatforms), [filteredPlatforms])
 
+  const exportPlatforms = useMemo(() => {
+    if (hiddenPlatforms.size === 0) return undefined
+    const names = loadedPlatforms.filter(p => !hiddenPlatforms.has(p.platform)).map(p => p.platform)
+    return names.length ? names : undefined
+  }, [loadedPlatforms, hiddenPlatforms])
+
+  const allPlatformsHidden =
+    loadedPlatforms.length > 0 && loadedPlatforms.every(p => hiddenPlatforms.has(p.platform))
+
+  async function handleDownloadSalesCsv() {
+    try {
+      setExportingSales(true)
+      await downloadIntelligenceSalesCsv({
+        startDate: dateStart || undefined,
+        endDate: dateEnd || undefined,
+        platforms: exportPlatforms,
+      })
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Download failed')
+    } finally {
+      setExportingSales(false)
+    }
+  }
+
   // Top SKUs with search filter
   const topSkusFiltered = useMemo(() => {
     if (!topSkusRaw) return []
@@ -327,6 +353,21 @@ export default function Dashboard() {
               onChange={e => handleEndChange(e.target.value)}
               className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
             />
+          </div>
+          <div className="flex items-center gap-2 ml-auto">
+            <button
+              type="button"
+              onClick={() => void handleDownloadSalesCsv()}
+              disabled={!salesLoaded || exportingSales || allPlatformsHidden}
+              className="text-xs font-medium px-3 py-1 rounded-md border border-[#002B5B] text-[#002B5B] bg-white hover:bg-blue-50 disabled:opacity-45 disabled:cursor-not-allowed"
+              title={
+                allPlatformsHidden
+                  ? 'Show at least one platform to export.'
+                  : 'Download unified sales lines (SKU, date, channel, shipment/refund) for the selected dates. If you hide platforms below, they are excluded from the file.'
+              }
+            >
+              {exportingSales ? 'Preparing…' : 'Download CSV'}
+            </button>
           </div>
         </div>
         {/* Platform toggle row */}

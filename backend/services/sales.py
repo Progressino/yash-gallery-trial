@@ -255,6 +255,38 @@ def get_sales_summary(
     }
 
 
+def filter_sales_for_export(
+    sales_df: pd.DataFrame,
+    months: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Apply the same date window as get_sales_summary; optionally restrict Source(s)."""
+    if sales_df.empty:
+        return sales_df
+    df = sales_df.copy()
+    df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+    df = df.dropna(subset=["TxnDate"])
+    if df["TxnDate"].dt.tz is not None:
+        df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
+
+    if start_date:
+        df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
+    if end_date:
+        df = df[df["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+    elif not start_date and months > 0:
+        cutoff = df["TxnDate"].max() - pd.DateOffset(months=months)
+        df = df[df["TxnDate"] >= cutoff]
+
+    if sources:
+        want = {str(s).strip() for s in sources if str(s).strip()}
+        if want and "Source" in df.columns:
+            df = df[df["Source"].astype(str).str.strip().isin(want)]
+
+    return df
+
+
 def get_sales_by_source(sales_df: pd.DataFrame) -> List[dict]:
     """Returns pie chart data: [{source, units}]."""
     if sales_df.empty:
