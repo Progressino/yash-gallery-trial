@@ -39,6 +39,8 @@ export interface CoverageResponse {
   meesho_rows: number
   flipkart_rows: number
   snapdeal_rows: number
+  /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
+  pause_auto_data_restore?: boolean
 }
 
 // ── Upload helpers ────────────────────────────────────────────

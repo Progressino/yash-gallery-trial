@@ -16,7 +16,7 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 
-from ..session import store
+from ..session import store, resume_auto_data_restore
 from ..models.schemas import UploadResponse
 from ..services.sku_mapping import parse_sku_mapping
 from ..services.mtr import load_mtr_from_zip, load_mtr_from_extracted_files, parse_mtr_csv
@@ -34,6 +34,11 @@ from ..services.daily_store import save_daily_file, merge_platform_data as _merg
 router = APIRouter()
 
 _log = logging.getLogger(__name__)
+
+
+def _session_data_changed(sess) -> None:
+    """Undo pause_auto_data_restore after uploads / builds so Tier-3 merge and warm cache work again."""
+    resume_auto_data_restore(sess)
 
 _RAR_MAGIC = b"Rar!\x1a\x07"
 
@@ -102,6 +107,7 @@ async def upload_sku_mapping(request: Request, file: UploadFile = File(...)):
         file_bytes = await file.read()
         mapping = parse_sku_mapping(file_bytes)
         sess.sku_mapping = mapping
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"SKU mapping loaded: {len(mapping):,} entries",
@@ -138,6 +144,7 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
         total = len(sess.mtr_df)
         years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"Amazon MTR: added {len(df):,} rows ({csv_count} files). Total: {total:,} rows.",
@@ -172,6 +179,7 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
         total = len(sess.myntra_df)
         years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"Myntra: added {len(df):,} rows ({csv_count} CSVs). Total: {total:,} rows.",
@@ -212,6 +220,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
             skus  = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum()) if "SKU" in sess.meesho_df.columns else 0
             background_tasks.add_task(_auto_save_cache, sess)
+            _session_data_changed(sess)
             return UploadResponse(
                 ok=True,
                 message=f"Meesho Order CSV: added {len(df):,} rows ({skus:,} with SKU). Total: {total:,} rows.",
@@ -237,6 +246,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
             background_tasks.add_task(_auto_save_cache, sess)
+            _session_data_changed(sess)
             return UploadResponse(
                 ok=True,
                 message=f"Meesho: added {len(df):,} rows ({zip_count} monthly ZIPs). Total: {total:,} rows.",
@@ -271,6 +281,7 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
         total = len(sess.flipkart_df)
         years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"Flipkart: added {len(df):,} rows ({xlsx_count} files). Total: {total:,} rows.",
@@ -322,6 +333,7 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
 
         years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"Snapdeal loaded: {len(df):,} rows from {file_count} file(s)"
@@ -457,6 +469,7 @@ async def upload_inventory_auto(
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent  = df_parent
     sess.inventory_debug      = debug   # persist so /data/inventory can expose it
+    _session_data_changed(sess)
     background_tasks.add_task(_auto_save_cache, sess)
 
     parts = [f"{len(df_variant):,} total SKUs"]
@@ -506,6 +519,7 @@ async def upload_inventory(
 
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent  = df_parent
+    _session_data_changed(sess)
     background_tasks.add_task(_auto_save_cache, sess)
 
     # Build human-readable breakdown
@@ -535,6 +549,7 @@ async def upload_amazon_b2c(request: Request, file: UploadFile = File(...)):
             return UploadResponse(ok=False, message=f"B2C parse failed: {msg}")
 
         sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"Amazon B2C loaded: {len(df):,} rows. {msg if msg != 'OK' else ''}".strip(),
@@ -559,6 +574,7 @@ async def upload_amazon_b2b(request: Request, file: UploadFile = File(...)):
             return UploadResponse(ok=False, message=f"B2B parse failed: {msg}")
 
         sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"Amazon B2B loaded: {len(df):,} rows. {msg if msg != 'OK' else ''}".strip(),
@@ -577,6 +593,7 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
         file_bytes = await file.read()
         df = parse_existing_po(file_bytes, file.filename or "existing_po.xlsx")
         sess.existing_po_df = df
+        _session_data_changed(sess)
         return UploadResponse(
             ok=True,
             message=f"Existing PO loaded: {len(df):,} SKUs with pipeline quantities.",
@@ -596,6 +613,7 @@ async def upload_cogs(request: Request, file: UploadFile = File(...)):
         file_bytes = await file.read()
         df = parse_cogs_sheet(file_bytes, file.filename or "cogs.xlsx")
         sess.cogs_df = df
+        _session_data_changed(sess)
         return UploadResponse(ok=True, message=f"COGS sheet loaded: {len(df):,} SKUs.", rows=len(df))
     except ValueError as e:
         return UploadResponse(ok=False, message=str(e))
@@ -875,6 +893,7 @@ async def upload_daily_auto(
     except Exception as e:
         warnings.append(f"Sales rebuild warning: {e}")
 
+    _session_data_changed(sess)
     msg_parts = [f"Loaded {len(detected)} file(s): {', '.join(d.split('(')[0].strip() for d in detected)}."]
     if not sess.sales_df.empty:
         msg_parts.append(f"Sales rebuilt ({len(sess.sales_df):,} rows).")
@@ -979,6 +998,7 @@ async def upload_daily(
         warn_str = "; ".join(warnings) if warnings else "No valid files provided."
         return JSONResponse(content={"ok": False, "message": warn_str})
 
+    _session_data_changed(sess)
     msg_parts = [f"Daily data loaded — {', '.join(detected)}."]
     if warnings:
         msg_parts.append(f"Warnings: {'; '.join(warnings)}")
@@ -1011,6 +1031,7 @@ async def build_sales(request: Request, background_tasks: BackgroundTasks):
 
     sess.sales_df = sales_df
     sess._quarterly_cache.clear()  # invalidate quarterly cache on new sales data
+    _session_data_changed(sess)
     background_tasks.add_task(_auto_save_cache, sess)
     return JSONResponse(content={
         "ok": True,

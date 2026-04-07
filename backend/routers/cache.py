@@ -18,7 +18,7 @@ from ..services.daily_store import (
     merge_platform_data as _merge_platform_data,
     clear_all_daily_uploads,
 )
-from ..session import wipe_app_session
+from ..session import wipe_app_session, resume_auto_data_restore
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -163,6 +163,7 @@ def cache_load(request: Request):
             n_sales = _rebuild_sales_in_session(sess)
             sess._quarterly_cache.clear()
             _main.publish_warm_cache_from_session(sess)
+            resume_auto_data_restore(sess)
             return CacheStatusResponse(
                 ok=True,
                 message=f"Loaded from warm cache; sales rebuilt ({n_sales:,} rows).{daily_note}",
@@ -185,6 +186,7 @@ def cache_load(request: Request):
             _main.publish_warm_cache_from_session(sess)
         except Exception:
             pass
+        resume_auto_data_restore(sess)
 
     return CacheStatusResponse(ok=ok, message=msg)
 
@@ -283,6 +285,7 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
         n_sales = len(sess.sales_df)
         msg = "Reloaded from warm pipeline (GitHub unavailable; used SQLite and/or partial cache)."
 
+    resume_auto_data_restore(sess)
     sess._quarterly_cache.clear()
     _main.publish_warm_cache_from_session(sess)
     background_tasks.add_task(_auto_save_cache, sess)

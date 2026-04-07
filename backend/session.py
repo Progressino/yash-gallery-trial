@@ -45,6 +45,10 @@ class AppSession:
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session
 
+    # After "Clear all app data", block warm-cache copy, Tier-3 SQLite restore, and
+    # frontend auto Load-Cache until the user uploads again or clicks Load Cache.
+    pause_auto_data_restore: bool = False
+
     # ── PO Engine cache ───────────────────────────────────────
     # Keyed by (group_by_parent, n_quarters) — cleared when sales data changes
     _quarterly_cache: dict = field(default_factory=dict)
@@ -73,7 +77,14 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.snapdeal_parse_info = {}
     sess.inventory_debug = {}
     sess.daily_restored = False
+    sess.pause_auto_data_restore = True
     sess._quarterly_cache.clear()
+
+
+def resume_auto_data_restore(sess: AppSession) -> None:
+    """Re-enable automatic restores / merges after an explicit load or new upload."""
+    sess.pause_auto_data_restore = False
+    sess.daily_restored = False
 
 
 class SessionStore:

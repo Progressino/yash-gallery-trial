@@ -26,6 +26,7 @@ const empty: CoverageResponse = {
   meesho_rows: 0,
   flipkart_rows: 0,
   snapdeal_rows: 0,
+  pause_auto_data_restore: false,
 }
 
 export const useSession = create<SessionState>((set) => ({

@@ -49,7 +49,7 @@ function ProtectedRoute() {
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       const coverage = await getCoverage()
-      if (!coverage.mtr && !coverage.sales) {
+      if (!coverage.mtr && !coverage.sales && !coverage.pause_auto_data_restore) {
         await cacheLoad()
         const refreshed = await getCoverage()
         setCoverage(refreshed)

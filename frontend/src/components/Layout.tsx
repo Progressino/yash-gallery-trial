@@ -39,7 +39,8 @@ const NAV_GROUPS = [
 ]
 
 export default function Layout() {
-  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, setCoverage } = useSession()
+  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, pause_auto_data_restore, setCoverage } =
+    useSession()
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | 'reload' | null>(null)
@@ -56,8 +57,8 @@ export default function Layout() {
     getCoverage()
       .then(c => {
         setCoverage(c)
-        // Server session is empty — auto-load from cache
-        if (!c.sales && !c.mtr) {
+        // Server session is empty — auto-load from cache (not right after a full wipe)
+        if (!c.sales && !c.mtr && !c.pause_auto_data_restore) {
           setCacheLoading('load')
           cacheLoad()
             .then(res => {

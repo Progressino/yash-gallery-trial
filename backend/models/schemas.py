@@ -30,6 +30,8 @@ class CoverageResponse(BaseModel):
     meesho_rows: int = 0
     flipkart_rows: int = 0
     snapdeal_rows: int = 0
+    # After full wipe: True until user uploads or clicks Load Cache (blocks auto-restore)
+    pause_auto_data_restore: bool = False
 
 
 class ErrorResponse(BaseModel):

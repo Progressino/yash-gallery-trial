@@ -338,7 +338,11 @@ async def session_middleware(request: Request, call_next):
     # not just on brand-new sessions. This handles the race condition where
     # the cache was still loading when the session was first created, and also
     # re-fills sessions whose in-memory data was lost after a deploy.
-    if session.mtr_df.empty and session.sales_df.empty:
+    if (
+        session.mtr_df.empty
+        and session.sales_df.empty
+        and not getattr(session, "pause_auto_data_restore", False)
+    ):
         _copy_warm_cache_to_session(session)
 
     response: Response = await call_next(request)

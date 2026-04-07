@@ -45,6 +45,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     Skips platforms that already have session data.
     Also auto-restores SKU mapping from GitHub cache if missing.
     """
+    if getattr(sess, "pause_auto_data_restore", False):
+        return
     if sess.daily_restored:
         return
     sess.daily_restored = True  # Only attempt once per session
@@ -125,6 +127,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
 def get_coverage(request: Request):
     sess = _sess(request)
     _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
+    paused = getattr(sess, "pause_auto_data_restore", False)
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=not sess.mtr_df.empty,
@@ -142,6 +145,7 @@ def get_coverage(request: Request):
         meesho_rows=len(sess.meesho_df),
         flipkart_rows=len(sess.flipkart_df),
         snapdeal_rows=len(sess.snapdeal_df),
+        pause_auto_data_restore=paused,
     )
 
 
