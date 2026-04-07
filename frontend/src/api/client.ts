@@ -168,14 +168,16 @@ export async function cacheClear(includeWarm = false) {
   return data
 }
 
-/** Wipe session (+ optional warm cache + Tier-3 SQLite). GitHub Release cache is unchanged. */
+/** Wipe session + warm cache + optional Tier-3 SQLite + optional GitHub Release cache. */
 export async function resetAllAppData(opts?: {
   clearTier3Sqlite?: boolean
   clearWarmCache?: boolean
+  clearGithubCache?: boolean
 }): Promise<{ ok: boolean; message: string; tier3_deleted?: number }> {
   const { data } = await api.post('/cache/reset-all', {
     clear_tier3_sqlite: opts?.clearTier3Sqlite ?? false,
     clear_warm_cache: opts?.clearWarmCache !== false,
+    clear_github_cache: opts?.clearGithubCache ?? false,
   })
   return data
 }

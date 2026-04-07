@@ -285,6 +285,26 @@ def load_sku_mapping_from_drive() -> dict:
         return {}
 
 
+def delete_github_cache_assets() -> tuple[bool, str]:
+    """Delete all assets from the data-cache GitHub Release (parquet + manifest)."""
+    release_id, assets, err = _get_gh_release()
+    if err:
+        return False, f"GitHub not configured: {err}"
+    if not assets:
+        return True, "GitHub cache was already empty."
+    deleted = 0
+    errors = []
+    for name, (asset_id, _) in assets.items():
+        try:
+            _gh_delete_asset(asset_id)
+            deleted += 1
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    if errors:
+        return False, f"Deleted {deleted}/{len(assets)} assets. Errors: {'; '.join(errors[:3])}"
+    return True, f"Deleted {deleted} GitHub cache asset(s)."
+
+
 def get_cache_manifest() -> Optional[dict]:
     """Return the manifest JSON if a cache exists, else None."""
     _, assets, err = _get_gh_release()

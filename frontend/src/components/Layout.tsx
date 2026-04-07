@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
-import { cacheLoad, cacheSave, cacheReloadFresh, getCoverage } from '../api/client'
+import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage } from '../api/client'
 import api from '../api/client'
 
 const NAV_GROUPS = [
@@ -43,7 +43,7 @@ export default function Layout() {
     useSession()
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
-  const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | 'reload' | null>(null)
+  const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | 'reload' | 'delete' | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const autoLoadAttempted = useRef(false)
 
@@ -130,6 +130,26 @@ export default function Layout() {
       }
     } catch {
       flash('err', 'Fresh reload failed')
+    } finally {
+      setCacheLoading(null)
+    }
+  }
+
+  const handleDeleteAll = async () => {
+    if (!window.confirm('Delete ALL data including GitHub cache? You will need to re-upload everything.')) return
+    setCacheLoading('delete')
+    try {
+      const res = await resetAllAppData({ clearTier3Sqlite: true, clearWarmCache: true, clearGithubCache: true })
+      if (res.ok) {
+        const c = await getCoverage()
+        setCoverage(c)
+        qc.clear()
+        flash('ok', res.message)
+      } else {
+        flash('err', res.message)
+      }
+    } catch {
+      flash('err', 'Delete failed')
     } finally {
       setCacheLoading(null)
     }
@@ -241,6 +261,15 @@ export default function Layout() {
             className="w-full py-1.5 rounded text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50"
           >
             {cacheLoading === 'reload' ? 'Rebuilding…' : '↻ Fresh reload (server)'}
+          </button>
+          <button
+            type="button"
+            onClick={handleDeleteAll}
+            disabled={cacheLoading !== null}
+            title="Wipes session, server warm cache, Tier-3 SQLite, AND GitHub Release cache. Re-upload required."
+            className="w-full py-1.5 rounded text-xs font-semibold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+          >
+            {cacheLoading === 'delete' ? 'Deleting…' : '🗑️ Delete All Data'}
           </button>
           {cacheMsg && (
             <p className={`text-xs leading-tight ${cacheMsg.type === 'ok' ? 'text-green-600' : 'text-red-500'}`}>

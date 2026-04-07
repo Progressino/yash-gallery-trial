@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import pandas as pd
 
 from ..services.sales import build_sales_df
-from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest
+from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest, delete_github_cache_assets
 from ..services.daily_store import (
     load_all_platforms,
     merge_platform_data as _merge_platform_data,
@@ -39,6 +39,7 @@ class ResetAllBody(BaseModel):
     """Wipe this session clean so the user can upload from scratch."""
     clear_tier3_sqlite: bool = False  # delete all rows in server daily_sales.db (Tier-3 history)
     clear_warm_cache: bool = True     # clear shared in-memory cache for all sessions on this server
+    clear_github_cache: bool = False  # delete all assets from the GitHub Release cache
 
 
 class ResetAllResponse(BaseModel):
@@ -233,12 +234,18 @@ def cache_reset_all(request: Request, body: ResetAllBody = ResetAllBody()):
 
     wipe_app_session(sess)
 
+    gh_msg = ""
+    if body.clear_github_cache:
+        gh_ok, gh_result = delete_github_cache_assets()
+        gh_msg = f" GitHub cache: {gh_result}"
+
     bits = ["Session wiped (SKU map, all platforms, inventory, PO imports, sales)."]
     if body.clear_warm_cache:
-        bits.append("Server warm cache cleared — other browser tabs will load empty until new upload or Load Cache.")
+        bits.append("Server warm cache cleared.")
     if body.clear_tier3_sqlite:
-        bits.append(f"Tier-3 daily store: removed {tier3_n} saved file(s) from this server.")
-    bits.append("GitHub cache on the cloud was not changed.")
+        bits.append(f"Tier-3 daily store: removed {tier3_n} saved file(s).")
+    if gh_msg:
+        bits.append(gh_msg.strip())
     return ResetAllResponse(ok=True, message=" ".join(bits), tier3_deleted=tier3_n)
 
 
