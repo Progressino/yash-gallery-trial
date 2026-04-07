@@ -11,15 +11,20 @@ jobs:
       run:
         working-directory: /root/app
     steps:
-      - name: Pull latest code
-        run: git pull origin main
+      - name: Sync repo to origin/main
+        run: |
+          mkdir -p /root/app-data/postgres /root/app-data/finance
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
 
       - name: Rebuild and restart containers
         run: |
-          docker compose -f docker-compose.prod.yml up -d --build
-          docker image prune -f
+          docker compose -f docker-compose.prod.yml build
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          docker image prune -f || true
 
       - name: Health check
         run: |
-          sleep 5
+          sleep 8
           curl -sf http://localhost/api/health || curl -sf http://localhost:8000/api/health || echo "Health check skipped"

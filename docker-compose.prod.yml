@@ -23,9 +23,10 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U forecast -d forecast"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
+      start_period: 45s
 
   # ── FastAPI backend ──────────────────────────────────────────
   backend:
