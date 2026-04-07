@@ -7,6 +7,7 @@ import {
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
+  resetAllAppData, getDataQuality,
   type DailyUpload, type DailySummary,
 } from '../api/client'
 import { useSession } from '../store/session'
@@ -61,6 +62,9 @@ export default function Upload() {
   }
 
   const [dailyDetected, setDailyDetected] = useState<string[]>([])
+  const [resetClearTier3, setResetClearTier3] = useState(false)
+  const [resetClearWarm, setResetClearWarm] = useState(true)
+  const [qualityReport, setQualityReport] = useState<Awaited<ReturnType<typeof getDataQuality>> | null>(null)
 
   const handleDailyAuto = async (files: File[]) => {
     setL('daily', true)
@@ -79,6 +83,45 @@ export default function Upload() {
   }
 
   const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
+
+  const handleResetAllAppData = async () => {
+    const msg =
+      'Remove ALL data from this session (mapping, platforms, inventory, sales)?' +
+      (resetClearTier3 ? ' Tier-3 daily files on the server will be deleted too.' : '') +
+      (resetClearWarm ? ' Server warm cache will be cleared.' : '') +
+      ' Cloud GitHub cache is NOT deleted.'
+    if (!window.confirm(msg)) return
+    setL('reset_all', true)
+    try {
+      const res = await resetAllAppData({
+        clearTier3Sqlite: resetClearTier3,
+        clearWarmCache: resetClearWarm,
+      })
+      if (res.ok) {
+        showToast('success', res.message)
+        setQualityReport(null)
+        await refresh()
+        qc.invalidateQueries()
+      } else showToast('error', res.message)
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Reset failed')
+    } finally {
+      setL('reset_all', false)
+    }
+  }
+
+  const handleDataQuality = async () => {
+    setL('quality', true)
+    try {
+      const r = await getDataQuality()
+      setQualityReport(r)
+      showToast('success', 'Quality report loaded — see below.')
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Could not load report')
+    } finally {
+      setL('quality', false)
+    }
+  }
 
   const handleClear = (platform: string) => async () => {
     setL(`clear_${platform}`, true)
@@ -322,6 +365,143 @@ export default function Upload() {
           >
             {loading['build'] ? 'Building…' : coverage.sales ? '↻ Rebuild' : 'Build Sales'}
           </button>
+        </div>
+      )}
+
+      {/* Reset & data verification */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Start fresh & verify</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="rounded-xl border border-red-200 bg-red-50/60 p-5 space-y-3">
+            <h4 className="font-semibold text-red-900 text-sm">Clear all app data</h4>
+            <p className="text-xs text-red-900/80 leading-relaxed">
+              Wipes <strong>everything</strong> in this browser session: SKU map, all platform files, inventory,
+              existing PO sheet imports, combined sales, and PO quarterly cache. Use this before a clean Tier‑1 re-upload.
+              Your saved <strong>GitHub</strong> data cache is not deleted — use <strong>Save Cache</strong> after new uploads if you want the cloud updated.
+            </p>
+            <label className="flex items-center gap-2 text-xs text-red-900 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={resetClearWarm}
+                onChange={e => setResetClearWarm(e.target.checked)}
+              />
+              Also clear <strong>server warm cache</strong> (recommended — otherwise other tabs may still show old data until reload)
+            </label>
+            <label className="flex items-center gap-2 text-xs text-red-900 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={resetClearTier3}
+                onChange={e => setResetClearTier3(e.target.checked)}
+              />
+              Also delete <strong>Tier‑3 daily files</strong> stored on this server (SQLite)
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleResetAllAppData()}
+              disabled={loading['reset_all']}
+              className="w-full py-2 rounded-lg text-sm font-semibold text-white bg-red-700 hover:bg-red-800 disabled:opacity-50"
+            >
+              {loading['reset_all'] ? 'Working…' : '🗑️ Clear all app data…'}
+            </button>
+          </div>
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-5 space-y-3">
+            <h4 className="font-semibold text-emerald-900 text-sm">Check for duplicates / sanity</h4>
+            <p className="text-xs text-emerald-900/80 leading-relaxed">
+              Runs a read-only report: overlapping Amazon lines (Tier‑1 ZIP overlap), identical rows in unified sales,
+              shipment totals by channel, and Tier‑3 file counts. Compare a sample SKU in{' '}
+              <strong>SKU Deepdive</strong> (use <strong>one channel at a time</strong>) to your marketplace export.
+            </p>
+            <button
+              type="button"
+              onClick={() => void handleDataQuality()}
+              disabled={loading['quality']}
+              className="w-full py-2 rounded-lg text-sm font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50"
+            >
+              {loading['quality'] ? 'Running…' : '📋 Run data quality report'}
+            </button>
+            {qualityReport && (
+              <div className="mt-3 rounded-lg border border-emerald-200 bg-white p-3 text-xs space-y-2 max-h-72 overflow-y-auto">
+                <QualityReportView report={qualityReport} />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function QualityReportView({ report }: { report: Awaited<ReturnType<typeof getDataQuality>> }) {
+  const amz = report.checks.amazon_mtr as {
+    rows_in_session?: number
+    rows_after_dedup_key?: number
+    rows_collapsible?: number
+  } | undefined
+  const sales = report.checks.unified_sales_df as {
+    rows?: number
+    exact_duplicate_rows?: number
+    shipment_units_sum?: number
+    by_source?: { source: string; units: number }[]
+  } | undefined
+  const tier3 = report.checks.tier3_sqlite_summary as Record<
+    string,
+    { min_date?: string; max_date?: string; total_rows?: number; file_count?: number }
+  > | undefined
+
+  return (
+    <div className="space-y-3 text-gray-800">
+      <div>
+        <p className="font-semibold text-gray-600 text-[11px] uppercase tracking-wide mb-1">How to verify</p>
+        <ul className="list-disc list-inside text-gray-600 space-y-0.5 leading-relaxed">
+          {report.hints.map((h, i) => (
+            <li key={i}>{h}</li>
+          ))}
+        </ul>
+      </div>
+      {amz && (
+        <div className="border-t border-gray-100 pt-2">
+          <p className="font-semibold text-[#002B5B]">Amazon MTR (current session)</p>
+          <p className="mt-0.5">
+            {amz.rows_in_session?.toLocaleString()} rows ·{' '}
+            <span
+              className={
+                (amz.rows_collapsible ?? 0) > 0 ? 'text-amber-700 font-medium' : 'text-green-700'
+              }
+            >
+              {(amz.rows_collapsible ?? 0).toLocaleString()} would collapse
+            </span>{' '}
+            if dedup rules re-ran (overlapping ZIP lines).
+          </p>
+        </div>
+      )}
+      {sales && (
+        <div className="border-t border-gray-100 pt-2">
+          <p className="font-semibold text-[#002B5B]">Unified sales_df</p>
+          <p className="mt-0.5">
+            {sales.rows?.toLocaleString()} rows · {(sales.exact_duplicate_rows ?? 0).toLocaleString()} exact duplicate
+            lines · {(sales.shipment_units_sum ?? 0).toLocaleString()} shipment units (all channels)
+          </p>
+          {sales.by_source && sales.by_source.length > 0 && (
+            <ul className="mt-1 text-gray-600">
+              {sales.by_source.map(r => (
+                <li key={r.source}>
+                  {r.source}: {r.units.toLocaleString()} units
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {tier3 && Object.keys(tier3).length > 0 && (
+        <div className="border-t border-gray-100 pt-2">
+          <p className="font-semibold text-[#002B5B]">Tier‑3 files on server (SQLite)</p>
+          <ul className="mt-1 text-gray-600">
+            {Object.entries(tier3).map(([plat, s]) => (
+              <li key={plat}>
+                {plat}: {s.file_count ?? 0} file(s), ~{(s.total_rows ?? 0).toLocaleString()} rows
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

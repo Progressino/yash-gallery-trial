@@ -340,3 +340,14 @@ def delete_upload(upload_id: int) -> bool:
     changed = conn.total_changes > 0
     conn.close()
     return changed
+
+
+def clear_all_daily_uploads() -> int:
+    """Remove every Tier-3 daily snapshot from SQLite. Returns number of rows deleted."""
+    conn = _get_conn()
+    cur = conn.execute("SELECT COUNT(*) FROM daily_uploads")
+    n = int(cur.fetchone()[0])
+    conn.execute("DELETE FROM daily_uploads")
+    conn.commit()
+    conn.close()
+    return n

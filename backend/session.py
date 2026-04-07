@@ -50,6 +50,32 @@ class AppSession:
     _quarterly_cache: dict = field(default_factory=dict)
 
 
+def wipe_app_session(sess: AppSession) -> None:
+    """Clear every loaded dataset in this browser session (fresh upload from scratch)."""
+    sess.sku_mapping = {}
+    sess.sales_df = pd.DataFrame()
+    sess.mtr_df = pd.DataFrame()
+    sess.myntra_df = pd.DataFrame()
+    sess.meesho_df = pd.DataFrame()
+    sess.flipkart_df = pd.DataFrame()
+    sess.snapdeal_df = pd.DataFrame()
+    sess.inventory_df_variant = pd.DataFrame()
+    sess.inventory_df_parent = pd.DataFrame()
+    sess.daily_orders_df = pd.DataFrame()
+    sess.existing_po_df = pd.DataFrame()
+    sess.transfer_df = pd.DataFrame()
+    sess.cogs_df = pd.DataFrame()
+    sess.amazon_date_basis = "Shipment Date"
+    sess.include_replacements = False
+    sess.daily_sales_sources = []
+    sess.daily_sales_rows = 0
+    sess.load_warnings = []
+    sess.snapdeal_parse_info = {}
+    sess.inventory_debug = {}
+    sess.daily_restored = False
+    sess._quarterly_cache.clear()
+
+
 class SessionStore:
     """Thread-safe in-memory session store."""
 

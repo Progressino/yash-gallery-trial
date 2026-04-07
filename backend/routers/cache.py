@@ -13,7 +13,12 @@ import pandas as pd
 
 from ..services.sales import build_sales_df
 from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest
-from ..services.daily_store import load_all_platforms, merge_platform_data as _merge_platform_data
+from ..services.daily_store import (
+    load_all_platforms,
+    merge_platform_data as _merge_platform_data,
+    clear_all_daily_uploads,
+)
+from ..session import wipe_app_session
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -28,6 +33,18 @@ class CacheReloadResponse(BaseModel):
     ok: bool
     message: str
     sales_rows: int = 0
+
+
+class ResetAllBody(BaseModel):
+    """Wipe this session clean so the user can upload from scratch."""
+    clear_tier3_sqlite: bool = False  # delete all rows in server daily_sales.db (Tier-3 history)
+    clear_warm_cache: bool = True     # clear shared in-memory cache for all sessions on this server
+
+
+class ResetAllResponse(BaseModel):
+    ok: bool
+    message: str
+    tier3_deleted: int = 0
 
 
 def _sanitize_snapdeal_in_loaded(loaded: dict) -> None:
@@ -174,23 +191,53 @@ def cache_load(request: Request):
 
 @router.delete("", response_model=CacheStatusResponse)
 def cache_clear(request: Request, include_warm: bool = False):
-    # Clear from session; optional include_warm clears app-level cache (next load hits GitHub / rebuilds)
+    """Clear this browser session (all platforms, inventory, PO sheet, sales). Optional: server warm cache."""
     sess = request.state.session
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
     if include_warm:
         import backend.main as _main
         _main.clear_warm_cache()
-    sess.sales_df    = pd.DataFrame()
-    sess.mtr_df      = pd.DataFrame()
-    sess.meesho_df   = pd.DataFrame()
-    sess.myntra_df   = pd.DataFrame()
-    sess.flipkart_df = pd.DataFrame()
-    sess.snapdeal_df = pd.DataFrame()
-    sess.sku_mapping = {}
-    sess._quarterly_cache.clear()
-    msg = "Session and server warm cache cleared." if include_warm else "Session cleared."
+    wipe_app_session(sess)
+    msg = "Session wiped (all data). Server warm cache cleared too." if include_warm else "Session wiped (all data)."
     return CacheStatusResponse(ok=True, message=msg)
+
+
+@router.post("/reset-all", response_model=ResetAllResponse)
+def cache_reset_all(request: Request, body: ResetAllBody = ResetAllBody()):
+    """
+    Full fresh start: clear session + optionally Tier-3 SQLite + optionally warm cache.
+    Does not delete GitHub Release cache — next Save Cache updates the cloud after re-upload.
+    """
+    sess = request.state.session
+    if sess is None:
+        return ResetAllResponse(ok=False, message="No session", tier3_deleted=0)
+
+    tier3_n = 0
+    if body.clear_tier3_sqlite:
+        try:
+            tier3_n = clear_all_daily_uploads()
+        except Exception as e:
+            _log.warning("clear_all_daily_uploads: %s", e)
+            return ResetAllResponse(
+                ok=False,
+                message=f"Could not clear Tier-3 database: {e}",
+                tier3_deleted=0,
+            )
+
+    if body.clear_warm_cache:
+        import backend.main as _main
+        _main.clear_warm_cache()
+
+    wipe_app_session(sess)
+
+    bits = ["Session wiped (SKU map, all platforms, inventory, PO imports, sales)."]
+    if body.clear_warm_cache:
+        bits.append("Server warm cache cleared — other browser tabs will load empty until new upload or Load Cache.")
+    if body.clear_tier3_sqlite:
+        bits.append(f"Tier-3 daily store: removed {tier3_n} saved file(s) from this server.")
+    bits.append("GitHub cache on the cloud was not changed.")
+    return ResetAllResponse(ok=True, message=" ".join(bits), tier3_deleted=tier3_n)
 
 
 @router.post("/reload-fresh", response_model=CacheReloadResponse)

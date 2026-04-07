@@ -166,6 +166,27 @@ export async function cacheClear(includeWarm = false) {
   return data
 }
 
+/** Wipe session (+ optional warm cache + Tier-3 SQLite). GitHub Release cache is unchanged. */
+export async function resetAllAppData(opts?: {
+  clearTier3Sqlite?: boolean
+  clearWarmCache?: boolean
+}): Promise<{ ok: boolean; message: string; tier3_deleted?: number }> {
+  const { data } = await api.post('/cache/reset-all', {
+    clear_tier3_sqlite: opts?.clearTier3Sqlite ?? false,
+    clear_warm_cache: opts?.clearWarmCache !== false,
+  })
+  return data
+}
+
+export async function getDataQuality(): Promise<{
+  loaded: boolean
+  checks: Record<string, unknown>
+  hints: string[]
+}> {
+  const { data } = await api.get('/data/data-quality')
+  return data
+}
+
 // ── 401 interceptor — redirect to /login on expired/missing token ─────────────
 api.interceptors.response.use(
   res => res,

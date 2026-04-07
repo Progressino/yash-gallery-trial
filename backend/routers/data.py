@@ -145,6 +145,78 @@ def get_coverage(request: Request):
     )
 
 
+# ── Data quality (duplicate / sanity checks) ──────────────────
+
+@router.get("/data-quality")
+def data_quality_report(request: Request):
+    """
+    Lightweight diagnostics to spot overlapping uploads and sanity-check totals.
+    Does not modify session data.
+    """
+    import pandas as pd
+    sess = _sess(request)
+    _restore_daily_if_needed(sess)
+
+    hints = [
+        "Pick one SKU and date range, then in SKU Deepdive choose “Amazon only” (or another channel) and compare units to your marketplace export for the same window.",
+        "If “All channels” is much higher than a single channel export, you are summing every marketplace — that is expected, not a bug.",
+        "Amazon MTR “potential duplicate rows” uses the same collapse rules as uploads: if this number is large, overlapping Tier‑1 ZIPs were merging extra lines (now deduped when you re-upload or Rebuild).",
+        "After “Reset all data”, upload Tier‑1 first, click Build Sales, then add Tier‑3 dailies so history is not loaded twice from SQLite + bulk.",
+    ]
+
+    checks: dict = {}
+    loaded = (
+        bool(sess.sku_mapping)
+        or not sess.mtr_df.empty
+        or not sess.sales_df.empty
+        or not sess.myntra_df.empty
+    )
+
+    if not sess.mtr_df.empty and {
+        "Invoice_Number", "Order_Id", "SKU", "Transaction_Type", "Quantity", "Date",
+    }.issubset(sess.mtr_df.columns):
+        from ..services.mtr import dedup_amazon_mtr_dataframe
+
+        raw_n = len(sess.mtr_df)
+        ded_n = len(dedup_amazon_mtr_dataframe(sess.mtr_df.copy()))
+        checks["amazon_mtr"] = {
+            "rows_in_session":     raw_n,
+            "rows_after_dedup_key": ded_n,
+            "rows_collapsible":    max(0, raw_n - ded_n),
+            "note": (
+                "Rows that would merge if dedup rules were applied again to the current "
+                "Amazon frame (overlapping ZIPs / duplicate lines)."
+            ),
+        }
+
+    if not sess.sales_df.empty and "Sku" in sess.sales_df.columns:
+        s = sess.sales_df
+        key = [c for c in ("Sku", "TxnDate", "Transaction Type", "Quantity", "Source", "OrderId") if c in s.columns]
+        dup_extra = 0
+        if key:
+            uniq = s.drop_duplicates(subset=key, keep="first")
+            dup_extra = int(len(s) - len(uniq))
+        ship = s[s["Transaction Type"].astype(str).str.strip() == "Shipment"]
+        ship_units = int(pd.to_numeric(ship["Quantity"], errors="coerce").fillna(0).sum()) if not ship.empty else 0
+        checks["unified_sales_df"] = {
+            "rows":              len(s),
+            "exact_duplicate_rows": dup_extra,
+            "shipment_units_sum": ship_units,
+            "by_source":         get_sales_by_source(sess.sales_df),
+        }
+
+    try:
+        checks["tier3_sqlite_summary"] = get_summary()
+    except Exception:
+        checks["tier3_sqlite_summary"] = {}
+
+    return {
+        "loaded": loaded,
+        "checks": checks,
+        "hints":  hints,
+    }
+
+
 # ── Sales Dashboard KPIs ──────────────────────────────────────
 
 @router.get("/sales-summary")
