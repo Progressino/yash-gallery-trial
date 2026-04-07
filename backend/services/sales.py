@@ -332,6 +332,8 @@ def _compute_platform_metrics(
         if end_date:
             d = d[d["_Date"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
         if d.empty:
+            # Platform IS loaded but has no data in this date window — show as loaded with 0
+            stub["loaded"] = True
             return stub
 
         shipped_mask  = d[txn_col].astype(str).str.strip() == ship_val
