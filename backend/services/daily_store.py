@@ -8,6 +8,7 @@ DB path:  /data/daily_sales.db  (production VPS)
           ./daily_sales.db      (local dev fallback)
 """
 import io
+import os
 import re
 import sqlite3
 import datetime
@@ -16,7 +17,17 @@ from typing import Dict, List, Tuple
 
 import pandas as pd
 
-_DB_PATH = Path("/data/daily_sales.db") if Path("/data").exists() else Path("daily_sales.db")
+
+def _resolve_db_path() -> Path:
+    env = (os.environ.get("DAILY_SALES_DB") or "").strip()
+    if env:
+        return Path(env)
+    if Path("/data").exists():
+        return Path("/data/daily_sales.db")
+    return Path("daily_sales.db")
+
+
+_DB_PATH = _resolve_db_path()
 _MAX_FILES = 60   # keep at most 60 entries per platform
 
 
