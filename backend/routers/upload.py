@@ -889,8 +889,7 @@ async def upload_daily_auto(
         return JSONResponse(content={"ok": False, "message": warn_str})
 
     # Track loaded platforms & auto-rebuild sales_df
-    # Always rebuild — non-Amazon platforms don't need sku_mapping;
-    # Amazon rows are simply skipped when sku_mapping is empty.
+    # Always rebuild. Amazon merges even with an empty user map; bundled/Yash master fills gaps when set.
     sess.daily_sales_sources = list(set(sess.daily_sales_sources + detected))
     try:
         sess.sales_df = build_sales_df(

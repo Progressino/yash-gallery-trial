@@ -70,6 +70,31 @@ def test_build_sales_df_amazon_with_mapping():
     assert merged["Quantity"].sum() == 4
 
 
+def test_build_sales_df_amazon_with_empty_mapping_includes_rows():
+    """Without a SKU map file, Amazon MTR must still land in unified sales (PL-normalised SKU)."""
+    mtr = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-04-01"]),
+            "SKU": ["1023PLYKBLUE-3XL"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [2.0],
+            "Order_Id": ["O-99"],
+            "Invoice_Number": [""],
+        }
+    )
+    merged = build_sales_df(
+        mtr_df=mtr,
+        myntra_df=pd.DataFrame(),
+        meesho_df=pd.DataFrame(),
+        flipkart_df=pd.DataFrame(),
+        sku_mapping={},
+    )
+    assert not merged.empty
+    assert (merged["Source"] == "Amazon").all()
+    assert merged["Quantity"].sum() == 2
+    assert "1023YKBLUE-3XL" in merged["Sku"].astype(str).values or merged["Sku"].astype(str).str.contains("1023").any()
+
+
 def test_filter_sales_for_export_date_and_source():
     df = pd.DataFrame(
         {

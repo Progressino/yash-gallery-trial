@@ -42,7 +42,7 @@ def canonical_sales_sku(sku) -> str:
 
 def _mtr_to_sales_df(
     mtr_df: pd.DataFrame,
-    sku_mapping: Dict[str, str],
+    sku_mapping: Optional[Dict[str, str]] = None,
     group_by_parent: bool = False,
 ) -> pd.DataFrame:
     """Convert MTR DataFrame to sales rows format."""
@@ -60,7 +60,7 @@ def _mtr_to_sales_df(
     m["TxnDate"]  = pd.to_datetime(m["TxnDate"], errors="coerce")
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
     m = m.dropna(subset=["TxnDate"])
-    m["Sku"] = m["Sku"].apply(lambda x: _resolve_mtr_sku(x, sku_mapping))
+    m["Sku"] = m["Sku"].apply(lambda x: _resolve_mtr_sku(x, sku_mapping or {}))
     m["Sku"] = m["Sku"].map(canonical_sales_sku)
 
     # Line-level keys for build_sales_df dedup (Amazon MTR exposes Order_Id / Invoice_Number).
@@ -161,8 +161,10 @@ def build_sales_df(
         sales_parts.append(_downcast_sales(flipkart_to_sales_rows(flipkart_df)))
     if snapdeal_df is not None and not snapdeal_df.empty:
         sales_parts.append(_downcast_sales(snapdeal_to_sales_rows(snapdeal_df)))
-    if not mtr_df.empty and sku_mapping:
-        _mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping)
+    # Amazon: always merge when MTR rows exist. Empty sku_mapping is OK — _resolve_mtr_sku
+    # falls back to PL-stripped seller SKU (same as other channels without a map).
+    if not mtr_df.empty:
+        _mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping or {})
         if not _mtr_sales.empty:
             _mtr_sales["Source"] = "Amazon"
             sales_parts.append(_downcast_sales(_mtr_sales))

@@ -9,6 +9,7 @@ from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from ..models.schemas import CoverageResponse
+from ..services.helpers import map_to_oms_sku
 from ..services.sales import (
     get_sales_summary,
     get_sales_by_source,
@@ -278,7 +279,14 @@ def sales_export(
     base_cols = ["TxnDate", "Sku", "Transaction Type", "Quantity", "Units_Effective", "Source"]
     extra = [c for c in ("OrderId",) if c in out.columns]
     cols = [c for c in base_cols + extra if c in out.columns]
-    export_df = out[cols]
+    export_df = out[cols].copy()
+    cmap = sess.sku_mapping or {}
+    export_df["OMS_Sku"] = export_df["Sku"].astype(str).apply(
+        lambda s: canonical_sales_sku(map_to_oms_sku(s, cmap))
+    )
+    sku_pos = cols.index("Sku") + 1
+    ordered = cols[:sku_pos] + ["OMS_Sku"] + cols[sku_pos:]
+    export_df = export_df[ordered]
 
     buf = io.StringIO()
     export_df.to_csv(buf, index=False)

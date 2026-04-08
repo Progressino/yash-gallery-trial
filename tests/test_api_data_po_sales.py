@@ -139,3 +139,4 @@ def test_sales_export_csv(client, session_for_client):
     assert "text/csv" in (r.headers.get("content-type") or "")
     body = r.text
     assert "TxnDate" in body and "Amazon" in body and "Shipment" in body
+    assert "OMS_Sku" in body

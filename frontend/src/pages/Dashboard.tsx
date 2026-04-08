@@ -363,7 +363,7 @@ export default function Dashboard() {
               title={
                 allPlatformsHidden
                   ? 'Show at least one platform to export.'
-                  : 'Download unified sales lines (SKU, date, channel, shipment/refund) for the selected dates. If you hide platforms below, they are excluded from the file.'
+                  : 'Download unified sales (Sku + OMS_Sku from your mapping file, date, channel, shipment/refund). Amazon is included even before you upload a map (seller SKU is PL-normalised). Rebuild sales after changing mapping. Hidden platforms are excluded.'
               }
             >
               {exportingSales ? 'Preparing…' : 'Download CSV'}

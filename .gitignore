@@ -9,6 +9,7 @@
 !frontend/package-lock.json
 !frontend/tsconfig*.json
 !frontend/eslint.config.js
+!backend/data/yash_sku_mapping_master.json
 # node_modules
 frontend/node_modules/
 

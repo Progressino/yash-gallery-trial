@@ -177,7 +177,11 @@ export default function Upload() {
 
       {/* Tier 1 — Required */}
       <Section title="Tier 1 — Required">
-        <UploadCard title="1️⃣ SKU Mapping" subtitle="Upload Excel (.xlsx)" loaded={coverage.sku_mapping}>
+        <UploadCard
+          title="1️⃣ SKU Mapping"
+          subtitle="Master Yash map (~all panels) ships with the app. Upload your .xlsx to replace or extend it."
+          loaded={coverage.sku_mapping}
+        >
           <FileUpload
             label="Upload .xlsx"
             accept={{ 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }}

@@ -9,7 +9,44 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from .helpers import map_to_oms_sku
+from .helpers import canonical_pl_sku_key, clean_sku, map_to_oms_sku
+
+
+def resolve_myntra_row_to_oms(
+    mapping: Dict[str, str],
+    yrn_raw,
+    sku_raw,
+    style_raw=None,
+) -> str:
+    """
+    Map Myntra transaction lines to OMS SKU. YRN (your reference number) is tried first,
+    then seller / Myntra SKU, then Style ID — matching keys in the SKU master sheet.
+    """
+    y = clean_sku(yrn_raw) if yrn_raw is not None and str(yrn_raw).strip() not in ("", "nan", "None") else ""
+    s = clean_sku(sku_raw) if sku_raw is not None and str(sku_raw).strip() not in ("", "nan", "None") else ""
+    st = clean_sku(style_raw) if style_raw is not None and str(style_raw).strip() not in ("", "nan", "None") else ""
+
+    keys: List[str] = []
+    if y:
+        keys.append(y)
+    if s:
+        keys.append(s)
+    if st:
+        keys.append(st)
+    if not keys:
+        return ""
+
+    for k in keys:
+        if k in mapping:
+            return mapping[k]
+        alt = canonical_pl_sku_key(k)
+        if alt != k and alt in mapping:
+            return mapping[alt]
+    for k in keys:
+        o = map_to_oms_sku(k, mapping)
+        if o != k:
+            return o
+    return map_to_oms_sku(keys[0], mapping)
 
 
 def _parse_myntra_csv(
@@ -46,13 +83,40 @@ def _parse_myntra_csv(
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
 
-    # PPMP: "sku_id"; Seller Orders Report: "sku id" / "seller sku code" (daily PPMP CSV)
-    sku_col = next((c for c in df.columns if c in [
+    yrn_col = next((c for c in df.columns if "yrn" in c), None)
+    style_id_col = next(
+        (c for c in df.columns if "style" in c and "id" in c and "reverse" not in c),
+        None,
+    )
+
+    # PPMP / Seller Orders: map file uses "myntra sku code"; YRN is resolved to OMS via master sheet.
+    _sku_exact = {
         "sku_id", "skuid", "sku", "sku id", "seller sku", "seller sku code",
-    ]), None)
+        "myntra sku code", "seller_sku_code", "product sku", "article id", "article_id",
+    }
+    sku_col = next((c for c in df.columns if c in _sku_exact), None)
     if not sku_col:
-        return pd.DataFrame(), "No SKU column"
-    df["_OMS_SKU"] = df[sku_col].apply(lambda x: map_to_oms_sku(str(x).strip(), mapping))
+        sku_col = next(
+            (c for c in df.columns
+             if "sku" in c
+             and "oms" not in c
+             and "style" not in c
+             and "yrn" not in c
+             and "total" not in c),
+            None,
+        )
+    if not sku_col and not yrn_col and not style_id_col:
+        return pd.DataFrame(), "No SKU / YRN / Style ID column"
+
+    def _row_oms(row: pd.Series) -> str:
+        return resolve_myntra_row_to_oms(
+            mapping,
+            row[yrn_col] if yrn_col else None,
+            row[sku_col] if sku_col else None,
+            row[style_id_col] if style_id_col else None,
+        )
+
+    df["_OMS_SKU"] = df.apply(_row_oms, axis=1)
 
     qty_col = next((c for c in df.columns if c == "quantity"), None)
     df["_Qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1) if qty_col else 1.0

@@ -20,11 +20,29 @@ def clean_sku(sku) -> str:
     return str(sku).strip().replace('"""', "").replace("SKU:", "").strip().upper()
 
 
+# Match Amazon PL listing spellings (1023PLYK* → 1023YK*) for map lookups.
+_PL_YK = re.compile(r"^(\d+)PL(YK)", re.I)
+
+
+def canonical_pl_sku_key(sku: str) -> str:
+    c = clean_sku(sku)
+    if not c:
+        return c
+    return _PL_YK.sub(r"\1\2", c)
+
+
 def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
     if pd.isna(seller_sku):
         return seller_sku
     c = clean_sku(seller_sku)
-    return mapping.get(c, c)
+    if not c:
+        return c
+    if c in mapping:
+        return mapping[c]
+    alt = canonical_pl_sku_key(c)
+    if alt != c and alt in mapping:
+        return mapping[alt]
+    return c
 
 
 def get_parent_sku(oms_sku) -> str:

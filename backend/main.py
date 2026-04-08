@@ -355,6 +355,13 @@ async def session_middleware(request: Request, call_next):
     ):
         copied_warm = _copy_warm_cache_to_session(session)
 
+    try:
+        from .services.sku_mapping import ensure_default_sku_mapping_from_bundle
+
+        ensure_default_sku_mapping_from_bundle(session)
+    except Exception:
+        pass
+
     response: Response = await call_next(request)
 
     try:

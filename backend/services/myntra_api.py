@@ -19,6 +19,7 @@ import pandas as pd
 import requests
 
 from .helpers import map_to_oms_sku
+from .myntra import resolve_myntra_row_to_oms
 
 log = logging.getLogger("erp.myntra_api")
 
@@ -109,8 +110,15 @@ def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
     """Convert Myntra order list to myntra_df schema."""
     rows = []
     for o in orders:
-        sku_raw  = str(o.get("skuId") or o.get("sku_id") or o.get("sellerSku") or "").strip()
-        oms_sku  = map_to_oms_sku(sku_raw, sku_mapping) if sku_mapping else sku_raw
+        yrn_raw = str(
+            o.get("yrn") or o.get("yrnNumber") or o.get("yrn_number") or o.get("YRN") or ""
+        ).strip()
+        sku_raw = str(o.get("skuId") or o.get("sku_id") or o.get("sellerSku") or "").strip()
+        style_raw = str(o.get("styleId") or o.get("style_id") or o.get("styleCode") or "").strip()
+        if sku_mapping:
+            oms_sku = resolve_myntra_row_to_oms(sku_mapping, yrn_raw, sku_raw, style_raw or None)
+        else:
+            oms_sku = sku_raw or yrn_raw
         qty      = float(o.get("quantity", 1) or 1)
         fwd_st   = str(o.get("orderStatus") or o.get("forwardOrderStatus") or o.get("packetStatus") or "")
         rev_st   = o.get("reverseOrderStatus") or o.get("returnStatus") or ""
