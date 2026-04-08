@@ -33,6 +33,20 @@ def canonical_pl_sku_key(sku: str) -> str:
     return _PL_YK.sub(r"\1\2", c)
 
 
+def _glued_myntra_size_hyphen_variant(s: str) -> str:
+    """
+    PPMP sometimes omits hyphens around size: 1061YKBLUE4XLBLUE → 1061YKBLUE-4XL-BLUE.
+    Only when the token has no '-' yet (other normalizers handle spaced hyphens).
+    """
+    c = clean_sku(s)
+    if not c or "-" in c:
+        return ""
+    m = re.match(r"^(\d+YK[A-Z]+)((?:XXXL|XXL|[2345]XL))([A-Z]+)$", c)
+    if not m:
+        return ""
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+
 def normalized_sku_forms_for_lookup(value) -> List[str]:
     """
     Spacing around hyphens and stray dots before size suffix (e.g. GREEN.-3XL → GREEN-3XL),
@@ -44,6 +58,9 @@ def normalized_sku_forms_for_lookup(value) -> List[str]:
     if not c:
         return []
     bases = [c]
+    gl = _glued_myntra_size_hyphen_variant(c)
+    if gl and gl not in bases:
+        bases.append(gl)
     hy = _HYPHEN_SPACES.sub("-", c)
     if hy != c:
         bases.append(hy)

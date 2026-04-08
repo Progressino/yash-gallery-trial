@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from .helpers import canonical_pl_sku_key, clean_sku, map_to_oms_sku
+from .helpers import canonical_pl_sku_key, clean_sku, map_to_oms_sku, normalized_sku_forms_for_lookup
 
 
 def _tokens_for_myntra_lookup(raw) -> List[str]:
@@ -63,6 +63,9 @@ def _tokens_for_myntra_lookup(raw) -> List[str]:
     for t in list(out):
         for m in re.finditer(r"\d{6,}", t):
             add(m.group(0))
+    for t in list(out):
+        for nf in normalized_sku_forms_for_lookup(t):
+            add(nf)
     return out
 
 

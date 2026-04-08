@@ -3,7 +3,7 @@
 import pandas as pd
 
 from backend.services.mtr import dedup_amazon_mtr_dataframe
-from backend.services.helpers import sku_recognized_in_master
+from backend.services.helpers import map_to_oms_sku, sku_recognized_in_master
 from backend.services.sales import (
     build_sales_df,
     filter_sales_for_export,
@@ -132,6 +132,12 @@ def test_sku_recognized_hyphen_spacing_and_dot_before_size():
     m = {"1057KDBLUE-7-8": "OMS-A", "1556YKNGREEN-3XL": "OMS-B"}
     assert sku_recognized_in_master("1057KDBLUE -7-8", m)
     assert sku_recognized_in_master("1556YKNGREEN.-3XL", m)
+
+
+def test_map_glued_myntra_size_hyphens():
+    m = {"1061YKBLUE-4XL-BLUE": "OMS-G"}
+    assert map_to_oms_sku("1061YKBLUE4XLBLUE", m) == "OMS-G"
+    assert sku_recognized_in_master("1061YKBLUE4XLBLUE", m)
 
 
 def test_yrn_decimal_form_matches_integer_map_key():

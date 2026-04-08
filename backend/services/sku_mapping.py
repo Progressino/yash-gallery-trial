@@ -93,24 +93,33 @@ def _excel_lookup_keys_from_cell(raw) -> List[str]:
     return out
 
 
-def _yrn_embedded_numeric_keys(raw) -> List[str]:
+def _embedded_numeric_keys_from_cell(raw) -> List[str]:
     """
-    Master YRN cells are often full codes (e.g. YARYKASS100672680); PPMP / sales may expose
-    only the numeric tail (100672680). Register 6+ digit runs so both resolve to the same OMS.
+    Pull 6+ digit runs from cleaned text and from Excel-style normalized keys (int form of
+    scientific / float). Covers YARYKASS100506552 → 100506552 and 1.00506552E+8 strings.
     """
     if raw is None or (isinstance(raw, float) and math.isnan(raw)):
         return []
+    texts: List[str] = []
     t = _clean(raw)
-    if not t or t in ("STYLE ID", "YRN NUMBER", "YRN", "DATE"):
-        return []
+    if t and t not in ("STYLE ID", "YRN NUMBER", "YRN", "DATE"):
+        texts.append(t)
+    for k in _excel_lookup_keys_from_cell(raw):
+        if k and k not in texts:
+            texts.append(k)
     seen: set[str] = set()
     out: List[str] = []
-    for m in re.finditer(r"\d{6,}", t):
-        g = m.group(0)
-        if g not in seen:
-            seen.add(g)
-            out.append(g)
+    for b in texts:
+        for m in re.finditer(r"\d{6,}", b):
+            g = m.group(0)
+            if g not in seen:
+                seen.add(g)
+                out.append(g)
     return out
+
+
+def _sheet_is_myntra_tab(sheet_name: str) -> bool:
+    return "myntra" in str(sheet_name).lower()
 
 
 def _is_oms_column(name: str) -> bool:
@@ -260,6 +269,7 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=_sheet_name)
         if df.empty or len(df.columns) < 2:
             continue
+        embed_myntra_numerics = _sheet_is_myntra_tab(_sheet_name)
 
         # Excel merged cells often leave OMS blank on continuation rows — forward-fill OMS columns only.
         _oms_like = [c for c in df.columns if _is_oms_column(str(c))]
@@ -338,17 +348,32 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
             for ec in extra_key_cols:
                 _put_row_keys(row.get(ec, ""), o)
             if style_col:
-                for sid in _excel_lookup_keys_from_cell(row.get(style_col, "")):
+                raw_st = row.get(style_col, "")
+                for sid in _excel_lookup_keys_from_cell(raw_st):
                     if sid and o:
                         mapping.setdefault(sid, o)
+                # Myntra STYLE ID / catalog id often matches PPMP numeric-only columns.
+                if embed_myntra_numerics:
+                    for nid in _embedded_numeric_keys_from_cell(raw_st):
+                        if nid and o:
+                            mapping[nid] = o
             # YRN ↔ Myntra SKU code from PPMP; overwrite so YRN wins on conflicts.
             if yrn_col:
                 raw_y = row.get(yrn_col, "")
                 for yid in _excel_lookup_keys_from_cell(raw_y):
                     if yid and o:
                         mapping[yid] = o
-                for yid in _yrn_embedded_numeric_keys(raw_y):
+                for yid in _embedded_numeric_keys_from_cell(raw_y):
                     if yid and o:
                         mapping[yid] = o
+            # MYNTRA SKU CODE / primary seller col may be plain numeric or PREFIX+digits.
+            if embed_myntra_numerics:
+                for nid in _embedded_numeric_keys_from_cell(row.get(seller_col, "")):
+                    if nid and o:
+                        mapping[nid] = o
+                for ec in extra_key_cols:
+                    for nid in _embedded_numeric_keys_from_cell(row.get(ec, "")):
+                        if nid and o:
+                            mapping[nid] = o
 
     return mapping
