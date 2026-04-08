@@ -19,7 +19,7 @@ import pandas as pd
 import requests
 
 from .helpers import map_to_oms_sku
-from .myntra import resolve_myntra_row_to_oms
+from .myntra import resolve_myntra_row_keys_to_oms
 
 log = logging.getLogger("erp.myntra_api")
 
@@ -115,8 +115,13 @@ def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
         ).strip()
         sku_raw = str(o.get("skuId") or o.get("sku_id") or o.get("sellerSku") or "").strip()
         style_raw = str(o.get("styleId") or o.get("style_id") or o.get("styleCode") or "").strip()
+        article_raw = str(
+            o.get("articleId") or o.get("article_id") or o.get("packetArticleId") or ""
+        ).strip()
         if sku_mapping:
-            oms_sku = resolve_myntra_row_to_oms(sku_mapping, yrn_raw, sku_raw, style_raw or None)
+            oms_sku = resolve_myntra_row_keys_to_oms(
+                sku_mapping, [yrn_raw, sku_raw, style_raw, article_raw]
+            )
         else:
             oms_sku = sku_raw or yrn_raw
         qty      = float(o.get("quantity", 1) or 1)

@@ -42,6 +42,42 @@ def test_parse_myntra_style_and_yrn(tmp_path):
     assert m["YR1"] == "1001YKBEIGE-3XL"
 
 
+def test_meesho_pushpa_prefers_meesho_sku_column(tmp_path):
+    """MEESHO PUSHPA sheet: seller key is the Meesho SKU column → OMS."""
+    import pandas as pd
+
+    p = tmp_path / "m.xlsx"
+    df = pd.DataFrame(
+        {
+            "DATE": ["2025-01-01"],
+            "STYLE ID": [""],
+            "MEESHO SKU": ["1158YKGREEN-XL"],
+            "OMS SKU": ["1001YKGREEN-XL"],
+            "BRAND": ["X"],
+        }
+    )
+    df.to_excel(p, sheet_name="MEESHO PUSHPA", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["1158YKGREEN-XL"] == "1001YKGREEN-XL"
+
+
+def test_meesho_sheet_space_in_sku_maps_hyphen_key(tmp_path):
+    """Excel may use space before size; orders use hyphen — register both for Meesho sheets."""
+    import pandas as pd
+
+    p = tmp_path / "m.xlsx"
+    df = pd.DataFrame(
+        {
+            "MEESHO SKU": ["1158YKGREEN XL"],
+            "OMS SKU": ["1001YKGREEN-XL"],
+        }
+    )
+    df.to_excel(p, sheet_name="MEESHO PUSHPA", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["1158YKGREEN XL"] == "1001YKGREEN-XL"
+    assert m["1158YKGREEN-XL"] == "1001YKGREEN-XL"
+
+
 def test_bundled_json_loads(monkeypatch):
     if not bundled_sku_mapping_json_path().is_file():
         pytest.skip("bundled yash_sku_mapping_master.json not present")

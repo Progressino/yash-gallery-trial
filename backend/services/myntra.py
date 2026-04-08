@@ -12,41 +12,184 @@ import pandas as pd
 from .helpers import canonical_pl_sku_key, clean_sku, map_to_oms_sku
 
 
+def _tokens_for_myntra_lookup(raw) -> List[str]:
+    """Expand a cell value into string tokens (handles 88022920.0 vs 88022920, case)."""
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return []
+    s = str(raw).strip()
+    if not s or s.lower() in ("nan", "none", ""):
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(t: str):
+        tt = t.strip()
+        if not tt or tt.upper() in ("NAN", "NONE"):
+            return
+        if tt not in seen:
+            seen.add(tt)
+            out.append(tt)
+
+    add(s)
+    add(s.upper())
+    cs = clean_sku(s)
+    if cs:
+        add(cs)
+    try:
+        f = float(s.replace(",", ""))
+        if not np.isfinite(f):
+            return out
+        if f == int(f) and abs(f) < 1e16:
+            add(str(int(f)))
+    except ValueError:
+        pass
+    return out
+
+
+def resolve_myntra_row_keys_to_oms(mapping: Dict[str, str], raw_values: List) -> str:
+    """
+    Map a Myntra line to OMS using the SKU master. Mapping-sheet YRN column and PPMP
+    "Myntra SKU code" share the same keys. Tries each raw field in order
+    (YRN / Myntra SKU code → other SKU columns → style / article / EAN…) with numeric normalization.
+    """
+    ordered_tokens: List[str] = []
+    for raw in raw_values:
+        for t in _tokens_for_myntra_lookup(raw):
+            if t not in ordered_tokens:
+                ordered_tokens.append(t)
+    if not ordered_tokens:
+        return ""
+
+    for k in ordered_tokens:
+        if k in mapping:
+            return mapping[k]
+        alt = canonical_pl_sku_key(k)
+        if alt != k and alt in mapping:
+            return mapping[alt]
+    for k in ordered_tokens:
+        o = map_to_oms_sku(k, mapping)
+        if o != k:
+            return o
+    if ordered_tokens:
+        return map_to_oms_sku(ordered_tokens[0], mapping)
+    return ""
+
+
 def resolve_myntra_row_to_oms(
     mapping: Dict[str, str],
     yrn_raw,
     sku_raw,
     style_raw=None,
 ) -> str:
-    """
-    Map Myntra transaction lines to OMS SKU. YRN (your reference number) is tried first,
-    then seller / Myntra SKU, then Style ID — matching keys in the SKU master sheet.
-    """
-    y = clean_sku(yrn_raw) if yrn_raw is not None and str(yrn_raw).strip() not in ("", "nan", "None") else ""
-    s = clean_sku(sku_raw) if sku_raw is not None and str(sku_raw).strip() not in ("", "nan", "None") else ""
-    st = clean_sku(style_raw) if style_raw is not None and str(style_raw).strip() not in ("", "nan", "None") else ""
+    """Backward-compatible ordering: YRN, seller SKU, Style ID."""
+    return resolve_myntra_row_keys_to_oms(mapping, [yrn_raw, sku_raw, style_raw])
 
-    keys: List[str] = []
-    if y:
-        keys.append(y)
-    if s:
-        keys.append(s)
-    if st:
-        keys.append(st)
-    if not keys:
-        return ""
 
-    for k in keys:
-        if k in mapping:
-            return mapping[k]
-        alt = canonical_pl_sku_key(k)
-        if alt != k and alt in mapping:
-            return mapping[alt]
-    for k in keys:
-        o = map_to_oms_sku(k, mapping)
-        if o != k:
-            return o
-    return map_to_oms_sku(keys[0], mapping)
+def _ordered_myntra_identifier_columns(cols: List[str]) -> List[str]:
+    """PPMP / Seller Orders / Returns: collect column names in mapping priority order (headers lowercased)."""
+    seen: set[str] = set()
+    out: List[str] = []
+
+    def extend(bucket: List[str]) -> None:
+        for c in bucket:
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+
+    extend([c for c in cols if "yrn" in c])
+    # PPMP "Myntra SKU code" equals the mapping sheet YRN column — same priority as YRN.
+    extend([
+        c for c in cols
+        if c not in seen
+        and (
+            c in ("myntra sku code", "myntra_sku_code", "myntra sku", "merchant sku code")
+            or ("myntra" in c and "sku" in c and "oms" not in c)
+        )
+    ])
+
+    _sku_exact = {
+        "sku_id", "skuid", "sku", "sku id", "seller sku", "seller sku code",
+        "myntra sku code", "seller_sku_code", "product sku", "packet sku",
+        "item sku", "variant sku", "merchant sku", "partner sku",
+        "article id", "article_id",
+    }
+    extend([c for c in cols if c in _sku_exact])
+
+    extend([
+        c for c in cols
+        if c not in seen
+        and "sku" in c
+        and "oms" not in c
+        and "style" not in c
+        and "yrn" not in c
+        and "total" not in c
+    ])
+
+    extend([
+        c for c in cols
+        if c not in seen
+        and "reverse" not in c
+        and (
+            ("style" in c and "id" in c)
+            or c in ("style_id", "style code", "stylecode", "master style id", "global style id",
+                     "style id", "oms style id", "child style id")
+        )
+    ])
+
+    extend([
+        c for c in cols
+        if c not in seen
+        and (
+            ("article" in c and ("id" in c or "code" in c or "sku" in c))
+            or "packet_article" in c
+            or "seller_article" in c
+            or "article_type" in c
+            or c in ("article code", "article_code", "base article id")
+        )
+    ])
+
+    extend([c for c in cols if c not in seen and ("ean" in c or "upc" in c or "gtin" in c)])
+
+    # PPMP / report variants: style as "code", vendor/brand/merchant SKUs, catalog ids (low priority).
+    _bad_token = (
+        "oms", "warehouse", "pincode", "amount", "price", "invoice", "discount",
+        "commission", "fee", "tax", "gst", "quantity", "total",
+    )
+
+    def _ok_extra(c: str) -> bool:
+        if c in seen or any(b in c for b in _bad_token):
+            return False
+        if c in ("packet_id", "order_id", "sub_order_id", "suborder id", "order id"):
+            return False
+        return True
+
+    extend([
+        c for c in cols
+        if _ok_extra(c)
+        and (
+            c
+            in (
+                "product_id",
+                "item_id",
+                "listing_id",
+                "catalog_id",
+                "model_no",
+                "model_id",
+                "fsn",
+            )
+            or (
+                c.endswith("_sku")
+                and not c.startswith("total")
+            )
+            or ("style" in c and "code" in c)
+            or (
+                ("vendor" in c or "merchant" in c or "brand" in c)
+                and ("sku" in c or "code" in c or "article" in c)
+            )
+        )
+    ])
+
+    return out
 
 
 def _parse_myntra_csv(
@@ -83,38 +226,12 @@ def _parse_myntra_csv(
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
 
-    yrn_col = next((c for c in df.columns if "yrn" in c), None)
-    style_id_col = next(
-        (c for c in df.columns if "style" in c and "id" in c and "reverse" not in c),
-        None,
-    )
-
-    # PPMP / Seller Orders: map file uses "myntra sku code"; YRN is resolved to OMS via master sheet.
-    _sku_exact = {
-        "sku_id", "skuid", "sku", "sku id", "seller sku", "seller sku code",
-        "myntra sku code", "seller_sku_code", "product sku", "article id", "article_id",
-    }
-    sku_col = next((c for c in df.columns if c in _sku_exact), None)
-    if not sku_col:
-        sku_col = next(
-            (c for c in df.columns
-             if "sku" in c
-             and "oms" not in c
-             and "style" not in c
-             and "yrn" not in c
-             and "total" not in c),
-            None,
-        )
-    if not sku_col and not yrn_col and not style_id_col:
-        return pd.DataFrame(), "No SKU / YRN / Style ID column"
+    id_cols = _ordered_myntra_identifier_columns(list(df.columns))
+    if not id_cols:
+        return pd.DataFrame(), "No SKU / YRN / Style / Article identifier column"
 
     def _row_oms(row: pd.Series) -> str:
-        return resolve_myntra_row_to_oms(
-            mapping,
-            row[yrn_col] if yrn_col else None,
-            row[sku_col] if sku_col else None,
-            row[style_id_col] if style_id_col else None,
-        )
+        return resolve_myntra_row_keys_to_oms(mapping, [row[c] for c in id_cols])
 
     df["_OMS_SKU"] = df.apply(_row_oms, axis=1)
 

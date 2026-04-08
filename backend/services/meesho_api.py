@@ -18,6 +18,7 @@ import pandas as pd
 import requests
 
 from .helpers import map_to_oms_sku
+from .meesho import _norm_meesho_size
 
 log = logging.getLogger("erp.meesho_api")
 
@@ -107,11 +108,34 @@ def _fetch_meesho_orders_page(
     return resp.json()
 
 
+def _meesho_api_line_sku(o: dict) -> str:
+    """Match Order CSV / ZIP: base SKU + size → 1158YKGREEN-XL."""
+    sku_raw = str(o.get("sku") or o.get("product_sku") or o.get("skuId") or "").strip()
+    if not sku_raw:
+        return ""
+    size_raw = str(
+        o.get("size")
+        or o.get("variantSize")
+        or o.get("variant_size")
+        or o.get("product_size")
+        or ""
+    ).strip()
+    if not size_raw:
+        return sku_raw
+    z = _norm_meesho_size(size_raw)
+    if not z:
+        return sku_raw
+    suf = f"-{z}"
+    if sku_raw.upper().endswith(suf.upper()):
+        return sku_raw
+    return f"{sku_raw}{suf}"
+
+
 def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
     """Convert Meesho order list to meesho_df schema."""
     rows = []
     for o in orders:
-        sku_raw   = str(o.get("sku") or o.get("product_sku") or o.get("skuId") or "").strip()
+        sku_raw   = _meesho_api_line_sku(o)
         oms_sku   = map_to_oms_sku(sku_raw, sku_mapping) if sku_mapping else sku_raw
         qty       = float(o.get("quantity", 1) or 1)
         status    = str(o.get("orderStatus") or o.get("order_status") or o.get("status") or "")
@@ -138,6 +162,7 @@ def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
             "Invoice_Amount": rev,
             "State":          state,
             "OrderId":        order_id,
+            "SKU":            sku_raw,
             "OMS_SKU":        oms_sku,
             "_month_override": month_str,
         })

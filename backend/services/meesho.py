@@ -2,12 +2,97 @@
 Meesho loader — extracted 1-for-1 from app.py.
 """
 import io
+import re
 import zipfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+
+def _norm_meesho_size(s: str) -> str:
+    """Normalize size tokens (Meesho Order CSV / API): XXXL → 3XL, etc."""
+    s = str(s).strip().upper()
+    if not s or s in ("NAN", "NONE", "NULL"):
+        return ""
+    m = re.match(r"^(X{3,})L$", s)  # XXXL, XXXXL, …
+    if m:
+        return f"{len(m.group(1))}XL"
+    return s
+
+
+# Trailing size when SKU and size are pasted in one cell: "1158YKGREEN XL" → "1158YKGREEN-XL"
+_TRAILING_SIZE_RE = re.compile(
+    r"\s+(XS|2XL|3XL|4XL|5XL|6XL|[2-6]XL|XXS|XXL|XXXL|XXXXL|XXXXXL|S|M|L|XL|"
+    r"X{3,}L)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _maybe_split_space_sku_size(series: pd.Series) -> pd.Series:
+    def one(x: str) -> str:
+        x = str(x).strip()
+        if not x:
+            return ""
+        m = _TRAILING_SIZE_RE.search(x)
+        if m:
+            left = x[: m.start()].strip()
+            right = _norm_meesho_size(m.group(1))
+            if left and right:
+                return f"{left}-{right}"
+        return x
+
+    return series.apply(one)
+
+
+def _meesho_size_column(df: pd.DataFrame) -> Optional[str]:
+    """Original column name in df for Meesho size (df may be lowercased headers)."""
+    cols_lower = {str(c).lower().strip(): c for c in df.columns}
+    for candidate in (
+        "size",
+        "size_name",
+        "variant_size",
+        "product_size",
+        "product size",
+        "variant size",
+        "item_size",
+        "item size",
+        "sku size",
+        "size (india)",
+        "select size",
+    ):
+        if candidate in cols_lower:
+            return cols_lower[candidate]
+    for k, orig in cols_lower.items():
+        if "resize" in k:
+            continue
+        if k == "size" or k.endswith(" size"):
+            return orig
+    return None
+
+
+def _combine_meesho_sku_size(
+    base: pd.Series, size_ser: Optional[pd.Series]
+) -> pd.Series:
+    """
+    Build variant SKU: base + "-" + size (e.g. 1158YKGREEN + XL → 1158YKGREEN-XL).
+    If a separate size column is missing or empty for a row, try splitting "SKU SIZE" in base.
+    """
+    b = base.fillna("").astype(str).str.strip()
+    if size_ser is None:
+        return _maybe_split_space_sku_size(b)
+    z = size_ser.fillna("").astype(str).str.strip().str.upper()
+    z = z.replace({"NAN": "", "NONE": "", "NULL": ""})
+    z = z.apply(_norm_meesho_size)
+    out = b.copy().astype(str)
+    both = (b != "") & (z != "")
+    out.loc[both] = (b[both] + "-" + z[both]).astype(str).values
+    need_split = (b != "") & (z == "")
+    if need_split.any():
+        out.loc[need_split] = _maybe_split_space_sku_size(b.loc[need_split]).values
+    out.loc[b == ""] = ""
+    return out
 
 
 def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
@@ -60,7 +145,8 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
-            df["_SKU"]     = _get_sku_col(df)
+            _sz = _meesho_size_column(df)
+            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
             df["_TxnType"] = "Shipment"
             if "financial_year" in df.columns and "month_number" in df.columns:
                 df["_Month"] = df.apply(
@@ -82,7 +168,8 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
-            df["_SKU"]     = _get_sku_col(df)
+            _sz = _meesho_size_column(df)
+            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
             df["_TxnType"] = "Refund"
             if "financial_year" in df.columns and "month_number" in df.columns:
                 df["_Month"] = df.apply(
@@ -106,7 +193,8 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
-            df["_SKU"]     = _get_sku_col(df)
+            _sz = _meesho_size_column(df)
+            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
             def _meesho_txn(s):
                 s = str(s).lower()
                 if "return" in s or "rto" in s: return "Refund"
@@ -130,7 +218,8 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
-            df["_SKU"]     = _get_sku_col(df)
+            _sz = _meesho_size_column(df)
+            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
             df["_TxnType"] = "Refund"
             df["_Month"]   = None
             rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
@@ -221,31 +310,13 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "sub_catalog_id", "catalog_id", "supplier_sku", "style_code",
     )), None)
 
-    # Size column — Meesho Order CSV stores size separately (e.g. "3XL", "XXXL", "XL")
-    # Combine with SKU to build the full variant SKU: "1898YKYELLOW" + "XXXL" → "1898YKYELLOW-3XL"
-    size_col = next((c for c in df.columns if c in ("size", "size_name", "variant_size")), None)
-
-    import re as _re
-    def _norm_size(s: str) -> str:
-        """Normalize Meesho size format to OMS format: XXXL→3XL, XXXXL→4XL, etc."""
-        s = s.strip().upper()
-        m = _re.match(r'^(X{3,})L$', s)   # 3+ X's followed by L (XXXL, XXXXL, …)
-        if m:
-            return f"{len(m.group(1))}XL"
-        return s
-
+    # Size column: combine with SKU → 1158YKGREEN + XL → 1158YKGREEN-XL (also split "1158YKGREEN XL" in one cell).
     if sku_col:
         base_sku = df[sku_col].fillna("").astype(str).str.strip()
-        if size_col:
-            size_val = df[size_col].fillna("").astype(str).apply(_norm_size)
-            sku_series = base_sku.where(
-                base_sku == "",
-                base_sku + "-" + size_val
-            ).str.strip("-")
-        else:
-            sku_series = base_sku
+        sz_col = _meesho_size_column(df)
+        sku_series = _combine_meesho_sku_size(base_sku, df[sz_col] if sz_col else None)
     else:
-        sku_series = ""
+        sku_series = pd.Series([""] * len(df), index=df.index, dtype=str)
 
     out = pd.DataFrame({
         "Date":           df["_Date"],

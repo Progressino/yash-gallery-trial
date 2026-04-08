@@ -5,9 +5,11 @@ After editing the xlsx, run: python scripts/regenerate_bundled_sku_map.py
 """
 import io
 import json
+import math
 import os
+import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -70,6 +72,27 @@ def _clean(sku) -> str:
     return str(sku).strip().replace('"""', "").replace("SKU:", "").strip().upper()
 
 
+def _excel_lookup_keys_from_cell(raw) -> List[str]:
+    """Keys stored in sku_mapping for a spreadsheet cell (88022920 vs 88022920.0)."""
+    out: List[str] = []
+    if raw is None:
+        return out
+    if isinstance(raw, float) and math.isnan(raw):
+        return out
+    s = _clean(raw)
+    if s and s.upper() not in ("NAN", "NONE") and s not in ("STYLE ID", "YRN NUMBER", "YRN", "DATE"):
+        out.append(s)
+    try:
+        f = float(str(raw).replace(",", "").strip())
+        if math.isfinite(f) and f == int(f) and abs(f) < 1e16:
+            ik = str(int(f))
+            if ik not in out:
+                out.append(ik)
+    except ValueError:
+        pass
+    return out
+
+
 def _is_oms_column(name: str) -> bool:
     s = str(name).lower().strip()
     if s in ("omssku", "oms sku", "oms sku code", "oms_sku"):
@@ -113,13 +136,29 @@ def _sheet_needs_meesho_style_fallback(sheet_name: str) -> bool:
     ) and "flipkart" not in sl and "amazon" not in sl
 
 
-def _pick_seller_oms_columns(df: pd.DataFrame) -> tuple[Optional[object], Optional[object]]:
+def _pick_seller_oms_columns(
+    df: pd.DataFrame, sheet_name: str = ""
+) -> tuple[Optional[object], Optional[object]]:
     cols = list(df.columns)
     oms_candidates = [c for c in cols if _is_oms_column(str(c))]
     seller_candidates = [c for c in cols if _is_seller_column(str(c))]
 
     oms_col = oms_candidates[-1] if oms_candidates else None
-    seller_col = seller_candidates[0] if seller_candidates else None
+    seller_col: Optional[object] = None
+    # Meesho family sheets use "Meesho SKU" (etc.) as the marketplace key → OMS SKU.
+    if _sheet_needs_meesho_style_fallback(sheet_name):
+        seller_col = next(
+            (
+                c
+                for c in cols
+                if "meesho" in str(c).lower()
+                and "sku" in str(c).lower()
+                and not _is_oms_column(str(c))
+            ),
+            None,
+        )
+    if seller_col is None:
+        seller_col = seller_candidates[0] if seller_candidates else None
 
     data_cols = [c for c in cols if str(c).lower().strip() not in ("date", "dt", "day", "brand")
                         and not (str(c).lower() == "date")]
@@ -159,7 +198,7 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         )
         yrn_col = next((c for c in df.columns if "yrn" in str(c).lower()), None)
 
-        seller_col, oms_col = _pick_seller_oms_columns(df)
+        seller_col, oms_col = _pick_seller_oms_columns(df, _sheet_name)
 
         if (seller_col is None or oms_col is None) and _sheet_needs_meesho_style_fallback(_sheet_name):
             data_cols = [
@@ -173,22 +212,28 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         if seller_col is None or oms_col is None:
             continue
 
+        meesho_sheet = _sheet_needs_meesho_style_fallback(_sheet_name)
+
         for _, row in df.iterrows():
             s = _clean(row.get(seller_col, ""))
             o = _clean(row.get(oms_col, ""))
-            if s in ("", "NAN", "OMS SKU", "SELLER-SKU", "SELLER SKU", "DATE"):
-                continue
             if o in ("", "NAN", "OMS SKU", "SELLER-SKU"):
                 continue
-            if s and o:
-                mapping[s] = o
+            if s and s not in ("NAN", "OMS SKU", "SELLER-SKU", "SELLER SKU", "DATE"):
+                for k in _excel_lookup_keys_from_cell(row.get(seller_col, "")):
+                    mapping[k] = o
+                    # Orders use SKU-SIZE (e.g. 1158YKGREEN-XL); Excel may use a space.
+                    if meesho_sheet and " " in k:
+                        mapping[re.sub(r"\s+", "-", k.strip())] = o
             if style_col:
-                sid = _clean(row.get(style_col, ""))
-                if sid and o and sid not in ("", "STYLE ID", "STYLE"):
-                    mapping.setdefault(sid, o)
+                for sid in _excel_lookup_keys_from_cell(row.get(style_col, "")):
+                    if sid and o:
+                        mapping.setdefault(sid, o)
+            # YRN column = Myntra SKU code in PPMP; keys must resolve to this row's OMS.
+            # Overwrite (not setdefault) so YRN wins if another column reused the same token.
             if yrn_col:
-                yid = _clean(row.get(yrn_col, ""))
-                if yid and o and yid not in ("", "YRN NUMBER", "YRN"):
-                    mapping.setdefault(yid, o)
+                for yid in _excel_lookup_keys_from_cell(row.get(yrn_col, "")):
+                    if yid and o:
+                        mapping[yid] = o
 
     return mapping

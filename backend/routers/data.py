@@ -281,9 +281,16 @@ def sales_export(
     cols = [c for c in base_cols + extra if c in out.columns]
     export_df = out[cols].copy()
     cmap = sess.sku_mapping or {}
-    export_df["OMS_Sku"] = export_df["Sku"].astype(str).apply(
-        lambda s: canonical_sales_sku(map_to_oms_sku(s, cmap))
-    )
+
+    def _export_oms_sku_cell(v) -> str:
+        if pd.isna(v):
+            return ""
+        s = str(v).strip()
+        if s.lower() in ("", "nan", "none"):
+            return ""
+        return canonical_sales_sku(map_to_oms_sku(s, cmap))
+
+    export_df["OMS_Sku"] = export_df["Sku"].apply(_export_oms_sku_cell)
     sku_pos = cols.index("Sku") + 1
     ordered = cols[:sku_pos] + ["OMS_Sku"] + cols[sku_pos:]
     export_df = export_df[ordered]
