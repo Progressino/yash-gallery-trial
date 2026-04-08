@@ -164,6 +164,48 @@ def test_list_sku_mapping_gaps():
     assert "MEESHO_TOTAL" not in gaps
 
 
+def test_meesho_detects_listing_sku_header_and_combines_size():
+    from backend.services.meesho import _combine_meesho_sku_size, _meesho_sku_base_series
+
+    df = pd.DataFrame({"listing sku": ["1158YKGREEN"], "size": ["XL"]})
+    base = _meesho_sku_base_series(df)
+    assert base.iloc[0] == "1158YKGREEN"
+    assert _combine_meesho_sku_size(base, df["size"]).iloc[0] == "1158YKGREEN-XL"
+
+
+def test_meesho_kids_size_band_hyphen():
+    from backend.services.meesho import _combine_meesho_sku_size
+
+    base = pd.Series(["1158YKMUSTARD"])
+    size = pd.Series(["7-8"])
+    assert _combine_meesho_sku_size(base, size).iloc[0] == "1158YKMUSTARD-7-8"
+
+
+def test_meesho_to_sales_maps_and_oms_refresh_on_build():
+    from backend.services.meesho import meesho_to_sales_rows
+
+    mdf = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-12-31"]),
+            "TxnType": ["Refund"],
+            "Quantity": [1.0],
+            "SKU": ["1158YKGREEN-XL"],
+            "OrderId": ["237653394323428672_1"],
+        }
+    )
+    assert meesho_to_sales_rows(mdf, {"1158YKGREEN-XL": "1001OMS-XL"})["Sku"].iloc[0] == "1001OMS-XL"
+    mdf2 = mdf.copy()
+    m = {"1158YKGREEN-XL": "1001OMS-XL"}
+    build_sales_df(
+        mtr_df=pd.DataFrame(),
+        myntra_df=pd.DataFrame(),
+        meesho_df=mdf2,
+        flipkart_df=pd.DataFrame(),
+        sku_mapping=m,
+    )
+    assert mdf2["OMS_SKU"].iloc[0] == "1001OMS-XL"
+
+
 def test_get_platform_summary_amazon_refunds():
     mtr = pd.DataFrame(
         {

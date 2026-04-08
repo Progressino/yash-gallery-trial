@@ -221,6 +221,9 @@ def build_sales_df(
     sales_parts: List[pd.DataFrame] = []
 
     if not meesho_df.empty:
+        from .meesho import refresh_meesho_dataframe_oms_inplace
+
+        refresh_meesho_dataframe_oms_inplace(meesho_df, sku_mapping or None)
         sales_parts.append(_downcast_sales(meesho_to_sales_rows(meesho_df, sku_mapping=sku_mapping or None)))
     if not myntra_df.empty:
         sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df)))

@@ -11,6 +11,32 @@ import numpy as np
 import pandas as pd
 
 
+def _clean_meesho_cell(value) -> str:
+    """Strip Excel float noise (1158.0 → 1158) and null tokens; keep listing case for mapping."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and np.isnan(value):
+        return ""
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, float) and np.isfinite(value) and value == int(value) and abs(value) < 1e15:
+        return str(int(value))
+    t = str(value).strip().replace(",", "")
+    if not t or t.lower() in ("nan", "none", "<na>", "nat"):
+        return ""
+    try:
+        f = float(t)
+        if np.isfinite(f) and f == int(f) and abs(f) < 1e15:
+            return str(int(f))
+    except ValueError:
+        pass
+    return t.strip()
+
+
+def _clean_meesho_str_series(series: pd.Series) -> pd.Series:
+    return series.map(_clean_meesho_cell)
+
+
 def _norm_meesho_size(s: str) -> str:
     """Normalize size tokens (Meesho Order CSV / API): XXXL → 3XL, etc."""
     s = str(s).strip().upper()
@@ -23,9 +49,10 @@ def _norm_meesho_size(s: str) -> str:
 
 
 # Trailing size when SKU and size are pasted in one cell: "1158YKGREEN XL" → "1158YKGREEN-XL"
+# Includes kids' bands e.g. "1158YKGREEN 7-8" → "1158YKGREEN-7-8"
 _TRAILING_SIZE_RE = re.compile(
     r"\s+(XS|2XL|3XL|4XL|5XL|6XL|[2-6]XL|XXS|XXL|XXXL|XXXXL|XXXXXL|S|M|L|XL|"
-    r"X{3,}L)\s*$",
+    r"X{3,}L|\d{1,2}-\d{1,2})\s*$",
     re.IGNORECASE,
 )
 
@@ -61,6 +88,12 @@ def _meesho_size_column(df: pd.DataFrame) -> Optional[str]:
         "sku size",
         "size (india)",
         "select size",
+        "standard size",
+        "standard_size",
+        "indian size",
+        "indian_size",
+        "buyer size",
+        "buyer_size",
     ):
         if candidate in cols_lower:
             return cols_lower[candidate]
@@ -79,10 +112,10 @@ def _combine_meesho_sku_size(
     Build variant SKU: base + "-" + size (e.g. 1158YKGREEN + XL → 1158YKGREEN-XL).
     If a separate size column is missing or empty for a row, try splitting "SKU SIZE" in base.
     """
-    b = base.fillna("").astype(str).str.strip()
+    b = _clean_meesho_str_series(base.fillna(""))
     if size_ser is None:
         return _maybe_split_space_sku_size(b)
-    z = size_ser.fillna("").astype(str).str.strip().str.upper()
+    z = _clean_meesho_str_series(size_ser.fillna("")).str.upper()
     z = z.replace({"NAN": "", "NONE": "", "NULL": ""})
     z = z.apply(_norm_meesho_size)
     out = b.copy().astype(str)
@@ -93,6 +126,106 @@ def _combine_meesho_sku_size(
         out.loc[need_split] = _maybe_split_space_sku_size(b.loc[need_split]).values
     out.loc[b == ""] = ""
     return out
+
+
+_TIER1_MEESHO_SKU_HEADERS = (
+    "sku",
+    "seller_sku",
+    "seller sku",
+    "product_sku",
+    "item_sku",
+    "listing_sku",
+    "listing sku",
+    "meesho_sku",
+    "meesho sku",
+    "supplier_sku",
+    "supplier sku",
+    "merchant_sku",
+    "merchant sku",
+    "partner_sku",
+    "catalog_sku",
+    "brand_sku",
+    "inventory_sku",
+    "inventory sku",
+    "packet_sku",
+    "warehouse_sku",
+)
+
+
+def _meesho_sku_base_series(df: pd.DataFrame) -> pd.Series:
+    """
+    Detect the column that holds the listing / replace-SKU token across TCS, return, and
+    order CSV layouts. Falls back to any column whose name contains 'sku' (excluding order ids).
+    """
+    n = len(df)
+    if n == 0:
+        return pd.Series(dtype=str)
+    cols_lower = {str(c).lower().strip(): c for c in df.columns}
+
+    def _nonempty(ser: pd.Series) -> int:
+        s = _clean_meesho_str_series(ser)
+        return int((s.str.len() > 0).sum())
+
+    for cand in _TIER1_MEESHO_SKU_HEADERS:
+        if cand not in cols_lower:
+            continue
+        ser = _clean_meesho_str_series(df[cols_lower[cand]])
+        if _nonempty(ser) > 0:
+            return ser
+
+    tier2 = (
+        "sub_catalog_name",
+        "catalog_name",
+        "product_name",
+        "item_name",
+        "article_name",
+        "sub_catalog_id",
+        "catalog_id",
+        "product_id",
+        "article_id",
+        "product_code",
+        "item_code",
+        "variant_name",
+        "variant_id",
+        "style_code",
+        "style_id",
+    )
+    best_ser: Optional[pd.Series] = None
+    best_n = 0
+    for cand in tier2:
+        if cand not in cols_lower:
+            continue
+        ser = _clean_meesho_str_series(df[cols_lower[cand]])
+        nn = _nonempty(ser)
+        if nn > best_n:
+            best_n = nn
+            best_ser = ser
+    if best_ser is not None and best_n > 0:
+        return best_ser
+
+    for k, orig in sorted(cols_lower.items()):
+        if "sku" not in k:
+            continue
+        if any(x in k for x in ("order", "sub_order", "commission", "packet_id")):
+            continue
+        ser = _clean_meesho_str_series(df[orig])
+        if _nonempty(ser) > 0:
+            return ser
+
+    return pd.Series([""] * n, index=df.index, dtype=str)
+
+
+def refresh_meesho_dataframe_oms_inplace(df: pd.DataFrame, mapping: Optional[dict]) -> None:
+    """Normalize SKU cells; set OMS_SKU via Replace-SKU / Meesho sheet mapping (mutates df)."""
+    if df.empty or "SKU" not in df.columns:
+        return
+    from .helpers import map_to_oms_sku
+
+    df["SKU"] = _clean_meesho_str_series(df["SKU"])
+    if mapping:
+        df["OMS_SKU"] = df["SKU"].map(lambda s: map_to_oms_sku(s, mapping) if s else "")
+    else:
+        df["OMS_SKU"] = df["SKU"]
 
 
 def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
@@ -111,30 +244,6 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 return cols_lower[candidate]
         return None
 
-    def _get_sku_col(df) -> pd.Series:
-        """Return the best SKU column as a Series, or empty strings if none found.
-        Tries a broad list of Meesho column name variants across TCS, Order, and
-        Dispatch report formats."""
-        cols_lower = {c.lower().strip(): c for c in df.columns}
-        for candidate in [
-            # Standard SKU fields
-            "sku", "product_sku", "seller_sku", "item_sku",
-            # Meesho catalog/product name fields (Order & Dispatch reports)
-            "sub_catalog_name", "catalog_name", "product_name", "item_name",
-            # Meesho ID-based fields that can act as product identifiers
-            "sub_catalog_id", "catalog_id", "product_id", "supplier_sku",
-            # Additional aliases seen in various Meesho export formats
-            "article_name", "article_id", "product_code", "item_code",
-            "variant_name", "variant_id", "style_code", "style_id",
-        ]:
-            if candidate in cols_lower:
-                series = df[cols_lower[candidate]].astype(str).str.strip()
-                # Only use this column if it has non-empty, non-null values
-                non_empty = series[series.str.len() > 0].dropna()
-                if len(non_empty) > 0:
-                    return series
-        return pd.Series([""] * len(df), dtype=str)
-
     if "tcs_sales.xlsx" in files:
         with inner_zf.open(files["tcs_sales.xlsx"]) as fh:
             df = pd.read_excel(fh)
@@ -146,7 +255,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             _sz = _meesho_size_column(df)
-            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
+            df["_SKU"]     = _combine_meesho_sku_size(_meesho_sku_base_series(df), df[_sz] if _sz else None)
             df["_TxnType"] = "Shipment"
             if "financial_year" in df.columns and "month_number" in df.columns:
                 df["_Month"] = df.apply(
@@ -169,7 +278,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state_new", "")
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             _sz = _meesho_size_column(df)
-            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
+            df["_SKU"]     = _combine_meesho_sku_size(_meesho_sku_base_series(df), df[_sz] if _sz else None)
             df["_TxnType"] = "Refund"
             if "financial_year" in df.columns and "month_number" in df.columns:
                 df["_Month"] = df.apply(
@@ -194,7 +303,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             _sz = _meesho_size_column(df)
-            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
+            df["_SKU"]     = _combine_meesho_sku_size(_meesho_sku_base_series(df), df[_sz] if _sz else None)
             def _meesho_txn(s):
                 s = str(s).lower()
                 if "return" in s or "rto" in s: return "Refund"
@@ -219,7 +328,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             _sz = _meesho_size_column(df)
-            df["_SKU"]     = _combine_meesho_sku_size(_get_sku_col(df), df[_sz] if _sz else None)
+            df["_SKU"]     = _combine_meesho_sku_size(_meesho_sku_base_series(df), df[_sz] if _sz else None)
             df["_TxnType"] = "Refund"
             df["_Month"]   = None
             rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
@@ -303,20 +412,10 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     order_col = next((c for c in df.columns if "sub order" in c or "order no" in c
                       or "packet id" in c or "packet" in c), None)
 
-    # SKU: "sku" column is present in Meesho Order Report CSV; fall back to broader list
-    sku_col = next((c for c in df.columns if c in (
-        "sku", "product_sku", "seller_sku", "item_sku",
-        "sub_catalog_name", "catalog_name", "product_name", "item_name",
-        "sub_catalog_id", "catalog_id", "supplier_sku", "style_code",
-    )), None)
-
     # Size column: combine with SKU → 1158YKGREEN + XL → 1158YKGREEN-XL (also split "1158YKGREEN XL" in one cell).
-    if sku_col:
-        base_sku = df[sku_col].fillna("").astype(str).str.strip()
-        sz_col = _meesho_size_column(df)
-        sku_series = _combine_meesho_sku_size(base_sku, df[sz_col] if sz_col else None)
-    else:
-        sku_series = pd.Series([""] * len(df), index=df.index, dtype=str)
+    base_sku = _meesho_sku_base_series(df)
+    sz_col = _meesho_size_column(df)
+    sku_series = _combine_meesho_sku_size(base_sku, df[sz_col] if sz_col else None)
 
     out = pd.DataFrame({
         "Date":           df["_Date"],
@@ -371,7 +470,7 @@ def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]
 def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = None) -> pd.DataFrame:
     """
     Convert meesho_df to the unified sales_df schema.
-    Uses SKU column if present; applies sku_mapping to resolve OMS SKU.
+    Uses SKU column if present; applies sku_mapping to resolve OMS SKU (Replace SKU / Meesho master).
     Falls back to 'MEESHO_TOTAL' only when no SKU data is available.
     """
     if meesho_df.empty:
@@ -381,18 +480,17 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
 
     # Resolve OMS SKU: use the SKU column from the parsed data if available
     if "SKU" in meesho_df.columns:
-        raw_sku = meesho_df["SKU"].astype(str).str.strip()
+        raw_sku = _clean_meesho_str_series(meesho_df["SKU"])
         has_sku = raw_sku.str.len() > 0
-        # Apply sku_mapping if provided; otherwise use the raw SKU directly
+        has_sku &= ~raw_sku.str.lower().isin(["nan", "none"])
         if sku_mapping:
-            resolved = raw_sku.apply(
-                lambda s: map_to_oms_sku(s, sku_mapping) if s and s not in ("", "nan", "None") else ""
-            )
+            mapped = raw_sku.map(lambda s: map_to_oms_sku(s, sku_mapping) if s else "")
         else:
-            resolved = raw_sku
-        # Fall back to MEESHO_TOTAL only for rows where SKU is genuinely missing
-        good = has_sku & (resolved.str.len() > 0) & (~resolved.isin(["nan", "None", ""]))
-        sku_series = resolved.where(good, "MEESHO_TOTAL")
+            mapped = raw_sku
+        mapped = mapped.astype(str).str.strip()
+        empty_mapped = mapped.str.len() == 0
+        sku_series = mapped.where(~(has_sku & empty_mapped), raw_sku)
+        sku_series = sku_series.where(has_sku, "MEESHO_TOTAL")
     else:
         sku_series = "MEESHO_TOTAL"
 
