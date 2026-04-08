@@ -130,6 +130,10 @@ def _combine_meesho_sku_size(
 
 _TIER1_MEESHO_SKU_HEADERS = (
     "sku",
+    "sku id",
+    "sku_id",
+    "sku code",
+    "sku_code",
     "seller_sku",
     "seller sku",
     "product_sku",
@@ -229,8 +233,13 @@ def refresh_meesho_dataframe_oms_inplace(df: pd.DataFrame, mapping: Optional[dic
 
 
 def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
-    files = {f.lower(): f for f in inner_zf.namelist()}
-    rows  = []
+    # Basename index: Supplier archives often use paths like Report_Dec/tcs_sales.xlsx
+    files: dict[str, str] = {}
+    for f in inner_zf.namelist():
+        if f.endswith("/"):
+            continue
+        files[Path(f).name.lower()] = f
+    rows: List[pd.DataFrame] = []
 
     def _best_date_col(df, prefer_return: bool = False) -> str:
         cols_lower = {c.lower(): c for c in df.columns}
@@ -342,7 +351,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     out["Quantity"]       = out["Quantity"].astype("float32")
     out["Invoice_Amount"] = out["Invoice_Amount"].astype("float32")
     out["State"]          = out["State"].astype(str).str.upper().str.strip()
-    out["SKU"]            = out["SKU"].astype(str).str.strip()
+    out["SKU"]            = _clean_meesho_str_series(out["SKU"])
     out["OMS_SKU"]        = out["SKU"]   # alias expected by platform_metrics / PO engine
     out["Month"]          = out["_Month"].where(
         out["_Month"].notna(),
@@ -426,6 +435,7 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "OrderId":        df[order_col].fillna("").astype(str) if order_col else "",
         "SKU":            sku_series,
     })
+    out["SKU"] = _clean_meesho_str_series(out["SKU"])
     out["OMS_SKU"] = out["SKU"]   # alias expected by platform_metrics / PO engine
     out["Month"]   = out["Date"].dt.to_period("M").astype(str)
     return out.dropna(subset=["Date"]), "OK"
@@ -459,12 +469,22 @@ def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]
         except Exception as e:
             skipped.append(f"{base}: {e}")
 
+    # Single-file download: TCS xlsx directly inside outer zip (no nested .zip)
+    if not dfs:
+        try:
+            flat = _parse_meesho_inner_zip(root_zf)
+            if not flat.empty:
+                dfs.append(flat)
+        except Exception as e:
+            skipped.append(f"Flat archive: {e}")
+
     if not dfs:
         return pd.DataFrame(), len(items), skipped
 
     combined = pd.concat(dfs, ignore_index=True)
     combined = combined.drop_duplicates(keep="first")
-    return combined, len(items), skipped
+    zip_count = len(items) if items else (1 if not combined.empty else 0)
+    return combined, zip_count, skipped
 
 
 def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = None) -> pd.DataFrame:

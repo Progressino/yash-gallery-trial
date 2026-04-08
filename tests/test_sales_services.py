@@ -140,6 +140,23 @@ def test_map_glued_myntra_size_hyphens():
     assert sku_recognized_in_master("1061YKBLUE4XLBLUE", m)
 
 
+def test_map_glued_multi_trimmed_variant():
+    m = {"1378YKMULTI-3XL": "OMS-M"}
+    assert map_to_oms_sku("1378YKMULTI3XLMULTI", m) == "OMS-M"
+    assert sku_recognized_in_master("1378YKMULTI3XLMULTI", m)
+
+
+def test_mustrad_maps_to_mustard_master():
+    m = {"165YK-251MUSTARD-3XL": "OMS-T"}
+    assert map_to_oms_sku("165YK-251MUSTRAD-3XL", m) == "OMS-T"
+
+
+def test_bare_digits_match_embedded_yrn_key():
+    m = {"YARYKASS100506552": "OMS-YRN"}
+    assert map_to_oms_sku("100506552", m) == "OMS-YRN"
+    assert sku_recognized_in_master("100506552", m)
+
+
 def test_yrn_decimal_form_matches_integer_map_key():
     """Myntra YRN in Excel is often 100672680.0 in sales while the map key is 100672680."""
     m = {"100672680": "1001YK-XL"}
@@ -179,6 +196,73 @@ def test_meesho_kids_size_band_hyphen():
     base = pd.Series(["1158YKMUSTARD"])
     size = pd.Series(["7-8"])
     assert _combine_meesho_sku_size(base, size).iloc[0] == "1158YKMUSTARD-7-8"
+
+
+def test_meesho_nested_zip_finds_tcs_by_basename():
+    """TCS files in subfolders (SomeFolder/tcs_sales_return.xlsx) must be detected."""
+    import zipfile
+    from io import BytesIO
+
+    from backend.services.meesho import load_meesho_from_zip, meesho_to_sales_rows
+
+    inner_df = pd.DataFrame(
+        {
+            "order_date": [pd.Timestamp("2025-12-31")],
+            "sku": ["1158YKGREEN"],
+            "size": ["XL"],
+            "quantity": [1],
+            "total_invoice_value": [100.0],
+            "end_customer_state_new": ["MH"],
+            "sub_order_num": ["SO1"],
+        }
+    )
+    xb = BytesIO()
+    inner_df.to_excel(xb, index=False)
+    xlsx_bytes = xb.getvalue()
+
+    inner_mem = BytesIO()
+    with zipfile.ZipFile(inner_mem, "w", zipfile.ZIP_DEFLATED) as zin:
+        zin.writestr("Reports/Dec/tcs_sales_return.xlsx", xlsx_bytes)
+
+    outer_mem = BytesIO()
+    with zipfile.ZipFile(outer_mem, "w", zipfile.ZIP_DEFLATED) as zout:
+        zout.writestr("dec.zip", inner_mem.getvalue())
+
+    combined, _n, _skip = load_meesho_from_zip(outer_mem.getvalue())
+    assert not combined.empty
+    assert combined["SKU"].iloc[0] == "1158YKGREEN-XL"
+    sales = meesho_to_sales_rows(combined, None)
+    assert sales["Sku"].iloc[0] != "MEESHO_TOTAL"
+
+
+def test_meesho_flat_outer_zip_without_nested_zip():
+    """Outer archive may contain TCS xlsx directly (no inner .zip)."""
+    import zipfile
+    from io import BytesIO
+
+    from backend.services.meesho import load_meesho_from_zip, meesho_to_sales_rows
+
+    inner_df = pd.DataFrame(
+        {
+            "order_date": [pd.Timestamp("2025-11-15")],
+            "sku": ["999YKRED"],
+            "size": ["M"],
+            "quantity": [2],
+            "total_invoice_value": [50.0],
+            "end_customer_state_new": ["KA"],
+            "sub_order_num": ["SO2"],
+        }
+    )
+    xb = BytesIO()
+    inner_df.to_excel(xb, index=False)
+    outer_mem = BytesIO()
+    with zipfile.ZipFile(outer_mem, "w", zipfile.ZIP_DEFLATED) as zout:
+        zout.writestr("whatever/tcs_sales.xlsx", xb.getvalue())
+
+    combined, _n, _sk = load_meesho_from_zip(outer_mem.getvalue())
+    assert not combined.empty
+    assert combined["SKU"].iloc[0] == "999YKRED-M"
+    assert meesho_to_sales_rows(combined, None)["Sku"].iloc[0] != "MEESHO_TOTAL"
 
 
 def test_meesho_to_sales_maps_and_oms_refresh_on_build():
