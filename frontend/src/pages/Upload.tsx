@@ -54,6 +54,7 @@ export default function Upload() {
     setBuildingMsg('Building combined sales dataset…')
     try {
       const res = await buildSales()
+      setSkuMapGaps(res.unmapped_skus ?? [])
       if (res.ok) { showToast('success', res.message); await refresh() }
       else showToast('error', res.message)
     } catch (e: unknown) {
@@ -62,6 +63,7 @@ export default function Upload() {
   }
 
   const [dailyDetected, setDailyDetected] = useState<string[]>([])
+  const [skuMapGaps, setSkuMapGaps] = useState<string[]>([])
   const [resetClearTier3, setResetClearTier3] = useState(false)
   const [resetClearWarm, setResetClearWarm] = useState(true)
   const [qualityReport, setQualityReport] = useState<Awaited<ReturnType<typeof getDataQuality>> | null>(null)
@@ -185,9 +187,39 @@ export default function Upload() {
           <FileUpload
             label="Upload .xlsx"
             accept={{ 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }}
-            onUpload={handle('sku', (file: File) => uploadSkuMapping(file))}
+            onUpload={async (file: File) => {
+              setL('sku', true)
+              try {
+                const res = await uploadSkuMapping(file)
+                setSkuMapGaps(res.unmapped_skus ?? [])
+                if (res.ok) {
+                  showToast('success', res.message)
+                  await refresh()
+                } else showToast('error', res.message)
+              } catch (e: unknown) {
+                setSkuMapGaps([])
+                showToast('error', e instanceof Error ? e.message : 'Upload failed')
+              } finally {
+                setL('sku', false)
+              }
+            }}
             uploading={loading['sku']}
           />
+          {skuMapGaps.length > 0 && (
+            <div className="mt-3 rounded border border-amber-300/80 bg-amber-50/90 p-3 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100">
+              <div className="font-medium">
+                Sales SKUs not in this mapping (missing as seller key or OMS value)
+              </div>
+              <p className="mt-1 text-xs opacity-90">
+                Add or fix these on the master sheet, re-upload mapping, then rebuild sales if needed.
+              </p>
+              <ul className="mt-2 max-h-40 list-inside list-disc overflow-y-auto font-mono text-xs">
+                {skuMapGaps.map((s) => (
+                  <li key={s}>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </UploadCard>
 
         <UploadCard title="2️⃣ Amazon" subtitle="MTR master ZIP or RAR — upload multiple; data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']}>

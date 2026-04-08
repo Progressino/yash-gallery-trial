@@ -20,6 +20,8 @@ export interface UploadResponse {
   years?: number[]
   sku_count?: number
   detected_platforms?: string[]
+  /** Present after SKU master upload when some sales SKUs are not keys or OMS values in the map */
+  unmapped_skus?: string[]
 }
 
 export interface CoverageResponse {
@@ -101,7 +103,12 @@ export async function uploadDailyAuto(
   return data
 }
 
-export async function buildSales(): Promise<{ ok: boolean; message: string; rows?: number }> {
+export async function buildSales(): Promise<{
+  ok: boolean
+  message: string
+  rows?: number
+  unmapped_skus?: string[]
+}> {
   const { data } = await api.post('/upload/build-sales')
   return data
 }

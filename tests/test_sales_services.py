@@ -3,11 +3,13 @@
 import pandas as pd
 
 from backend.services.mtr import dedup_amazon_mtr_dataframe
+from backend.services.helpers import sku_recognized_in_master
 from backend.services.sales import (
     build_sales_df,
     filter_sales_for_export,
     get_platform_summary,
     get_sales_summary,
+    list_sku_mapping_gaps,
 )
 
 
@@ -111,6 +113,23 @@ def test_filter_sales_for_export_date_and_source():
     )
     assert len(out) == 2
     assert set(out["Source"].unique()) == {"Amazon"}
+
+
+def test_sku_recognized_in_master_keys_and_values():
+    m = {"AMZ1": "OMSVAL", "FK": "OTHER"}
+    assert sku_recognized_in_master("AMZ1", m)
+    assert sku_recognized_in_master("OMSVAL", m)
+    assert not sku_recognized_in_master("STRANGER", m)
+
+
+def test_list_sku_mapping_gaps():
+    sales = pd.DataFrame({"Sku": ["OMSVAL", "STRANGER", "MEESHO_TOTAL", ""]})
+    m = {"AMZ1": "OMSVAL", "FK99": "OTHER"}
+    gaps = list_sku_mapping_gaps(sales, m)
+    assert "STRANGER" in gaps
+    assert "OMSVAL" not in gaps
+    assert "OTHER" not in gaps
+    assert "MEESHO_TOTAL" not in gaps
 
 
 def test_get_platform_summary_amazon_refunds():

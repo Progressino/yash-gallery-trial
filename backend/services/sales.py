@@ -11,7 +11,13 @@ import pandas as pd
 
 log = logging.getLogger("erp.sales")
 
-from .helpers import _downcast_sales, map_to_oms_sku
+from .helpers import (
+    _downcast_sales,
+    canonical_pl_sku_key,
+    clean_sku,
+    map_to_oms_sku,
+    mapping_lookup_sets,
+)
 from .myntra import myntra_to_sales_rows
 from .meesho import meesho_to_sales_rows
 from .flipkart import flipkart_to_sales_rows
@@ -19,6 +25,67 @@ from .snapdeal import snapdeal_to_sales_rows
 
 # Strip "PL" infix in Amazon seller SKUs (mirrors inventory._PL_RE)
 _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
+
+
+def _is_aggregate_sales_sku(token: str) -> bool:
+    """Bucket / ledger rows that must not be pushed through marketplace→OMS mapping."""
+    s = str(token).strip().lower()
+    return (
+        s == "meesho_total"
+        or "_total" in s
+        or (s.startswith("total") and len(s) <= 24)
+        or (s.endswith("total") and len(s) <= 24)
+    )
+
+
+def _apply_unified_oms_skus(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    One canonical pass: map_to_oms_sku (PL + key fallbacks) then canonical_sales_sku (PL strip).
+    Ensures every marketplace uses the same final tokens as the SKU master / inventory.
+    """
+    if df.empty or "Sku" not in df.columns:
+        return df
+    m = mapping or {}
+
+    def _one(raw) -> str:
+        if pd.isna(raw):
+            return ""
+        c = str(raw).strip()
+        if not c or c.upper() in ("NAN", "NONE"):
+            return ""
+        if _is_aggregate_sales_sku(c):
+            return c
+        if m:
+            return canonical_sales_sku(map_to_oms_sku(c, m))
+        return canonical_sales_sku(c)
+
+    out = df.copy()
+    out["Sku"] = out["Sku"].apply(_one)
+    return out
+
+
+def list_sku_mapping_gaps(sales_df: pd.DataFrame, mapping: Dict[str, str], *, limit: int = 80) -> List[str]:
+    """
+    SKUs present in unified sales that do not appear as a mapping key (incl. PL-alias of keys)
+    or as a mapped OMS value — i.e. likely missing / typo'd lines on the master sheet.
+    """
+    if sales_df.empty or not mapping or "Sku" not in sales_df.columns:
+        return []
+    key_set, val_set = mapping_lookup_sets(mapping)
+    bad: List[str] = []
+    seen: set[str] = set()
+    for raw in sales_df["Sku"].dropna().unique():
+        c = clean_sku(raw)
+        if not c or _is_aggregate_sales_sku(c):
+            continue
+        pl = canonical_pl_sku_key(c)
+        if c in key_set or pl in key_set or c in val_set:
+            continue
+        if c not in seen:
+            seen.add(c)
+            bad.append(c)
+    bad.sort()
+    return bad[:limit]
 
 
 def _resolve_mtr_sku(sku, mapping: Dict[str, str]) -> str:
@@ -178,9 +245,8 @@ def build_sales_df(
     del sales_parts
     gc.collect()
 
-    # Unify PL vs YK seller spelling so the same physical SKU is not double-counted
-    # across listings (e.g. 1023PLYKPBLUE-5XL vs 1023YKPBLUE-5XL).
-    combined_sales["Sku"] = combined_sales["Sku"].map(canonical_sales_sku)
+    # Single canonical resolution for all channels (same rules as SKU master).
+    combined_sales = _apply_unified_oms_skus(combined_sales, sku_mapping or {})
 
     # Deduplicate: rows with valid OrderId by (OrderId, Sku, Source, Transaction Type)
     # so multi-item orders keep one row per line SKU (previous logic collapsed lines).

@@ -6,7 +6,7 @@ import re
 import io
 import zipfile
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -42,7 +42,53 @@ def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
     alt = canonical_pl_sku_key(c)
     if alt != c and alt in mapping:
         return mapping[alt]
+    # Excel / CSV: style ids as 1.02E+08 — normalize to integer string for map keys
+    try:
+        f = float(str(seller_sku).strip().replace(",", ""))
+        if np.isfinite(f) and f == int(f) and abs(f) < 1e16:
+            ik = str(int(f))
+            if ik != c and ik in mapping:
+                return mapping[ik]
+            pl = canonical_pl_sku_key(ik)
+            if pl in mapping:
+                return mapping[pl]
+    except (ValueError, OverflowError):
+        pass
     return c
+
+
+def mapping_lookup_sets(mapping: Dict[str, str]) -> Tuple[Set[str], Set[str]]:
+    """
+    Normalized map keys (plus PL-alias of each key) and OMS values.
+    Used to tell whether a sales/export token is covered by the master sheet.
+    """
+    key_set: Set[str] = set()
+    for k in mapping.keys():
+        kk = clean_sku(k)
+        if kk:
+            key_set.add(kk)
+            key_set.add(canonical_pl_sku_key(kk))
+    val_set = {clean_sku(v) for v in mapping.values() if clean_sku(v)}
+    return key_set, val_set
+
+
+def sku_recognized_in_master(
+    token: str,
+    mapping: Dict[str, str],
+    *,
+    key_set: Optional[Set[str]] = None,
+    val_set: Optional[Set[str]] = None,
+) -> bool:
+    """True if token appears as a seller/marketplace key or as an OMS value in the master."""
+    if not mapping:
+        return True
+    c = clean_sku(token)
+    if not c:
+        return True
+    if key_set is None or val_set is None:
+        key_set, val_set = mapping_lookup_sets(mapping)
+    pl = canonical_pl_sku_key(c)
+    return c in key_set or pl in key_set or c in val_set
 
 
 def get_parent_sku(oms_sku) -> str:

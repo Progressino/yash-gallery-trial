@@ -10,6 +10,8 @@ class UploadResponse(BaseModel):
     years: Optional[list[int]] = None
     sku_count: Optional[int] = None
     detected_platforms: Optional[list[str]] = None
+    # After SKU master upload: tokens in sales not present as map key (incl. PL-alias) or OMS value
+    unmapped_skus: Optional[list[str]] = None
 
 
 class CoverageResponse(BaseModel):

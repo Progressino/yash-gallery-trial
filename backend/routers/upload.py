@@ -25,7 +25,7 @@ from ..services.meesho import load_meesho_from_zip
 from ..services.flipkart import load_flipkart_from_zip
 from ..services.snapdeal import load_snapdeal_from_zip
 from ..services.inventory import load_inventory_consolidated, merge_inventory_update
-from ..services.sales import build_sales_df
+from ..services.sales import build_sales_df, list_sku_mapping_gaps
 from ..services.existing_po import parse_existing_po
 from ..services.github_cache import save_cache_to_drive
 from ..services.daily_store import save_daily_file, merge_platform_data as _merge_platform_data
@@ -111,17 +111,49 @@ def _get_session(request: Request):
 # ── SKU Mapping ───────────────────────────────────────────────
 
 @router.post("/sku-mapping", response_model=UploadResponse)
-async def upload_sku_mapping(request: Request, file: UploadFile = File(...)):
+async def upload_sku_mapping(
+    request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)
+):
     sess = _get_session(request)
     try:
         file_bytes = await file.read()
         mapping = parse_sku_mapping(file_bytes)
         sess.sku_mapping = mapping
+
+        had_platform = (
+            not sess.mtr_df.empty
+            or not sess.myntra_df.empty
+            or not sess.meesho_df.empty
+            or not sess.flipkart_df.empty
+            or not sess.snapdeal_df.empty
+        )
+        if had_platform:
+            sess.sales_df = build_sales_df(
+                mtr_df=sess.mtr_df,
+                myntra_df=sess.myntra_df,
+                meesho_df=sess.meesho_df,
+                flipkart_df=sess.flipkart_df,
+                snapdeal_df=sess.snapdeal_df,
+                sku_mapping=mapping,
+            )
+            background_tasks.add_task(_auto_save_cache, sess)
+
+        gaps = list_sku_mapping_gaps(sess.sales_df, mapping)
+        msg = f"SKU mapping loaded: {len(mapping):,} entries"
+        if had_platform:
+            msg += f"; sales rebuilt ({len(sess.sales_df):,} rows)"
+        if gaps:
+            msg += (
+                f". Warning: {len(gaps)} SKU(s) in sales are not in this map "
+                f"(as seller key or OMS value) — add them to the master or fix typos."
+            )
+
         _session_data_changed(sess)
         return UploadResponse(
             ok=True,
-            message=f"SKU mapping loaded: {len(mapping):,} entries",
+            message=msg,
             sku_count=len(mapping),
+            unmapped_skus=gaps or None,
         )
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Failed to parse SKU mapping: {e}")
@@ -1044,11 +1076,18 @@ async def build_sales(request: Request, background_tasks: BackgroundTasks):
     sess._quarterly_cache.clear()  # invalidate quarterly cache on new sales data
     _session_data_changed(sess)
     background_tasks.add_task(_auto_save_cache, sess)
-    return JSONResponse(content={
-        "ok": True,
-        "message": f"Sales built: {len(sales_df):,} rows. Saving to cache in background…",
-        "rows": len(sales_df),
-    })
+    gaps = list_sku_mapping_gaps(sales_df, sess.sku_mapping)
+    msg = f"Sales built: {len(sales_df):,} rows. Saving to cache in background…"
+    if gaps:
+        msg += f" Warning: {len(gaps)} SKU(s) not found as map key or OMS value — see Upload → SKU Mapping list."
+    return JSONResponse(
+        content={
+            "ok": True,
+            "message": msg,
+            "rows": len(sales_df),
+            "unmapped_skus": gaps or None,
+        }
+    )
 
 
 # ── Clear platform data ────────────────────────────────────────

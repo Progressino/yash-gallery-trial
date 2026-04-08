@@ -9,7 +9,12 @@ from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from ..models.schemas import CoverageResponse
-from ..services.helpers import map_to_oms_sku
+from ..services.helpers import (
+    clean_sku,
+    map_to_oms_sku,
+    mapping_lookup_sets,
+    sku_recognized_in_master,
+)
 from ..services.sales import (
     get_sales_summary,
     get_sales_by_source,
@@ -281,6 +286,7 @@ def sales_export(
     cols = [c for c in base_cols + extra if c in out.columns]
     export_df = out[cols].copy()
     cmap = sess.sku_mapping or {}
+    _map_keys, _map_vals = mapping_lookup_sets(cmap) if cmap else (set(), set())
 
     def _export_oms_sku_cell(v) -> str:
         if pd.isna(v):
@@ -288,7 +294,16 @@ def sales_export(
         s = str(v).strip()
         if s.lower() in ("", "nan", "none"):
             return ""
-        return canonical_sales_sku(map_to_oms_sku(s, cmap))
+        resolved = canonical_sales_sku(map_to_oms_sku(s, cmap))
+        # If lookup is a no-op and this token never appears on the master (key or OMS),
+        # leave OMS_Sku blank so exports don't fake a match (common for raw Myntra style IDs).
+        if (
+            cmap
+            and clean_sku(resolved) == clean_sku(s)
+            and not sku_recognized_in_master(s, cmap, key_set=_map_keys, val_set=_map_vals)
+        ):
+            return ""
+        return resolved
 
     export_df["OMS_Sku"] = export_df["Sku"].apply(_export_oms_sku_cell)
     sku_pos = cols.index("Sku") + 1

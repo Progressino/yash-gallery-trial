@@ -13,12 +13,26 @@ from .helpers import canonical_pl_sku_key, clean_sku, map_to_oms_sku
 
 
 def _tokens_for_myntra_lookup(raw) -> List[str]:
-    """Expand a cell value into string tokens (handles 88022920.0 vs 88022920, case)."""
+    """Expand a cell value into lookup tokens (88022920.0 vs 88022920, scientific notation, | splits)."""
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
         return []
-    s = str(raw).strip()
-    if not s or s.lower() in ("nan", "none", ""):
+    s0 = (
+        str(raw)
+        .strip()
+        .replace("\u200b", "")
+        .replace("\ufeff", "")
+        .replace("\xa0", " ")
+    )
+    if not s0 or s0.lower() in ("nan", "none", ""):
         return []
+    # PPMP / Excel: "9609|1589" or pasted glitch — try whole cell and each segment.
+    pieces: List[str] = [s0]
+    if "|" in s0:
+        for p in s0.split("|"):
+            pp = p.strip()
+            if pp and pp not in pieces:
+                pieces.append(pp)
+
     out: List[str] = []
     seen: set[str] = set()
 
@@ -30,19 +44,20 @@ def _tokens_for_myntra_lookup(raw) -> List[str]:
             seen.add(tt)
             out.append(tt)
 
-    add(s)
-    add(s.upper())
-    cs = clean_sku(s)
-    if cs:
-        add(cs)
-    try:
-        f = float(s.replace(",", ""))
-        if not np.isfinite(f):
-            return out
-        if f == int(f) and abs(f) < 1e16:
-            add(str(int(f)))
-    except ValueError:
-        pass
+    for s in pieces:
+        add(s)
+        add(s.upper())
+        cs = clean_sku(s)
+        if cs:
+            add(cs)
+        try:
+            f = float(str(s).replace(",", "").strip())
+            if not np.isfinite(f):
+                continue
+            if f == int(f) and abs(f) < 1e16:
+                add(str(int(f)))
+        except ValueError:
+            pass
     return out
 
 
