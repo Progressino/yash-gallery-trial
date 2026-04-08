@@ -95,11 +95,28 @@ def _excel_lookup_keys_from_cell(raw) -> List[str]:
 
 def _is_oms_column(name: str) -> bool:
     s = str(name).lower().strip()
-    if s in ("omssku", "oms sku", "oms sku code", "oms_sku"):
+    if s in (
+        "omssku",
+        "oms sku",
+        "oms sku code",
+        "oms_sku",
+        "oms",
+        "oms code",
+        "internal oms",
+        "master oms",
+    ):
         return True
     if "oms" in s and ("sku" in s or "code" in s):
         return True
     return False
+
+
+def _ordered_oms_columns(df: pd.DataFrame, primary: Optional[object]) -> List[object]:
+    """Try preferred OMS column first, then every other OMS-like column left-to-right."""
+    all_oms = [c for c in df.columns if _is_oms_column(str(c))]
+    if primary is not None and primary in all_oms:
+        return [primary] + [c for c in all_oms if c != primary]
+    return all_oms or ([primary] if primary is not None else [])
 
 
 def _is_replace_sku_column(name: str) -> bool:
@@ -211,6 +228,10 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
     Supports **Replace SKU** columns/sheets: listing/order SKU (after Meesho SKU+size combine)
     maps to OMS. **Meesho SKU** / **Myntra SKU code** columns on the same row are also
     registered as keys. **YRN** column keys match PPMP Myntra SKU code → OMS.
+
+    OMS columns are forward-filled (Excel merged cells). Per row, every OMS-like
+    column is scanned so YRN still maps when the primary OMS cell is empty but
+    another OMS column on the same row is filled.
     """
     mapping: Dict[str, str] = {}
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
@@ -219,6 +240,12 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=_sheet_name)
         if df.empty or len(df.columns) < 2:
             continue
+
+        # Excel merged cells often leave OMS blank on continuation rows — forward-fill OMS columns only.
+        _oms_like = [c for c in df.columns if _is_oms_column(str(c))]
+        if _oms_like:
+            df = df.copy()
+            df[_oms_like] = df[_oms_like].ffill()
 
         style_col = next(
             (c for c in df.columns if "style" in str(c).lower() and "id" in str(c).lower()),
@@ -239,6 +266,17 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
 
         if seller_col is None or oms_col is None:
             continue
+
+        oms_col_order = _ordered_oms_columns(df, oms_col)
+
+        def _row_oms(row: pd.Series) -> str:
+            for oc in oms_col_order:
+                if oc is None:
+                    continue
+                v = _clean(row.get(oc, ""))
+                if v and v not in ("NAN", "OMS SKU", "SELLER-SKU"):
+                    return v
+            return ""
 
         meesho_sheet = (
             _sheet_needs_meesho_style_fallback(_sheet_name)
@@ -272,7 +310,7 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
 
         for _, row in df.iterrows():
             s = _clean(row.get(seller_col, ""))
-            o = _clean(row.get(oms_col, ""))
+            o = _row_oms(row)
             if o in ("", "NAN", "OMS SKU", "SELLER-SKU"):
                 continue
             if s and s not in ("NAN", "OMS SKU", "SELLER-SKU", "SELLER SKU", "DATE"):

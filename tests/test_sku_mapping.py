@@ -94,6 +94,40 @@ def test_replace_sku_sheet_tab_two_column_fallback(tmp_path):
     assert m["1158YKGREEN-XL"] == "1001YKGREEN-XL"
 
 
+def test_yrn_maps_when_primary_oms_empty_secondary_oms_filled(tmp_path):
+    """Last OMS column may be empty; another OMS-named column has the value."""
+    import pandas as pd
+
+    p = tmp_path / "m.xlsx"
+    df = pd.DataFrame(
+        {
+            "YRN": ["100672680"],
+            "OMS SKU": [""],
+            "OMS SKU CODE": ["1001YK-RED-L"],
+        }
+    )
+    df.to_excel(p, sheet_name="MYNTRA", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m.get("100672680") == "1001YK-RED-L"
+
+
+def test_yrn_filled_when_oms_merged_down_in_excel(tmp_path):
+    """Merged OMS: second row OMS NaN inherits first row OMS for YRN registration."""
+    import pandas as pd
+
+    p = tmp_path / "m.xlsx"
+    df = pd.DataFrame(
+        {
+            "YRN": ["100672680", "100672681"],
+            "OMS SKU": ["1001YK-A", float("nan")],
+        }
+    )
+    df.to_excel(p, sheet_name="MYNTRA", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m.get("100672680") == "1001YK-A"
+    assert m.get("100672681") == "1001YK-A"
+
+
 def test_myntra_row_registers_replace_yrn_and_myntra_sku_code(tmp_path):
     import pandas as pd
 
