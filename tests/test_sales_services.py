@@ -122,6 +122,20 @@ def test_sku_recognized_in_master_keys_and_values():
     assert not sku_recognized_in_master("STRANGER", m)
 
 
+def test_yrn_decimal_form_matches_integer_map_key():
+    """Myntra YRN in Excel is often 100672680.0 in sales while the map key is 100672680."""
+    m = {"100672680": "1001YK-XL"}
+    assert sku_recognized_in_master("100672680.0", m)
+    assert sku_recognized_in_master("100672680", m)
+    gaps = list_sku_mapping_gaps(
+        pd.DataFrame({"Sku": ["100672680.0", "999999999"]}),
+        m,
+        limit=20,
+    )
+    assert "100672680.0" not in gaps and "100672680" not in gaps
+    assert "999999999" in gaps
+
+
 def test_list_sku_mapping_gaps():
     sales = pd.DataFrame({"Sku": ["OMSVAL", "STRANGER", "MEESHO_TOTAL", ""]})
     m = {"AMZ1": "OMSVAL", "FK99": "OTHER"}

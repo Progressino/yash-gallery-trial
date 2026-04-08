@@ -61,6 +61,58 @@ def test_meesho_pushpa_prefers_meesho_sku_column(tmp_path):
     assert m["1158YKGREEN-XL"] == "1001YKGREEN-XL"
 
 
+def test_replace_sku_column_registers_meesho_sku_too(tmp_path):
+    """Replace SKU is primary column; Meesho SKU on same row also maps to OMS."""
+    import pandas as pd
+
+    p = tmp_path / "m.xlsx"
+    df = pd.DataFrame(
+        {
+            "Replace SKU": ["1158YKGREEN-XL"],
+            "MEESHO SKU": ["ALT-MEESHO-KEY"],
+            "OMS SKU": ["1001YKGREEN-XL"],
+        }
+    )
+    df.to_excel(p, sheet_name="MEESHO PUSHPA", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["1158YKGREEN-XL"] == "1001YKGREEN-XL"
+    assert m["ALT-MEESHO-KEY"] == "1001YKGREEN-XL"
+
+
+def test_replace_sku_sheet_tab_two_column_fallback(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "m.xlsx"
+    df = pd.DataFrame(
+        {
+            "Listing Sku": ["1158YKGREEN-XL"],
+            "OMS VALUE": ["1001YKGREEN-XL"],
+        }
+    )
+    df.to_excel(p, sheet_name="Replace SKU", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["1158YKGREEN-XL"] == "1001YKGREEN-XL"
+
+
+def test_myntra_row_registers_replace_yrn_and_myntra_sku_code(tmp_path):
+    import pandas as pd
+
+    p = tmp_path / "m.xlsx"
+    df = pd.DataFrame(
+        {
+            "Replace SKU": ["88022920"],
+            "YRN": ["YRN-9"],
+            "MYNTRA SKU CODE": ["99001122"],
+            "OMS SKU": ["1001YK-RED-L"],
+        }
+    )
+    df.to_excel(p, sheet_name="MYNTRA", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["88022920"] == "1001YK-RED-L"
+    assert m["YRN-9"] == "1001YK-RED-L"
+    assert m["99001122"] == "1001YK-RED-L"
+
+
 def test_meesho_sheet_space_in_sku_maps_hyphen_key(tmp_path):
     """Excel may use space before size; orders use hyphen — register both for Meesho sheets."""
     import pandas as pd

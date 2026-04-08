@@ -31,6 +31,30 @@ def canonical_pl_sku_key(sku: str) -> str:
     return _PL_YK.sub(r"\1\2", c)
 
 
+def integer_token_variants(s: str) -> Set[str]:
+    """
+    Align YRN / style IDs across Excel, pandas, and CSV: 100672680.0 vs 100672680 vs 1.0067268E+8.
+    Non-numeric SKUs return only the cleaned string.
+    """
+    out: Set[str] = set()
+    if not s:
+        return out
+    t = str(s).strip().replace(",", "")
+    if t:
+        out.add(t)
+        ut = t.upper()
+        if ut != t:
+            out.add(ut)
+    try:
+        f = float(t)
+        if np.isfinite(f) and f == int(f) and abs(f) < 1e16:
+            ik = str(int(f))
+            out.add(ik)
+    except (ValueError, OverflowError):
+        pass
+    return out
+
+
 def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
     if pd.isna(seller_sku):
         return seller_sku
@@ -61,14 +85,20 @@ def mapping_lookup_sets(mapping: Dict[str, str]) -> Tuple[Set[str], Set[str]]:
     """
     Normalized map keys (plus PL-alias of each key) and OMS values.
     Used to tell whether a sales/export token is covered by the master sheet.
+    Integer YRNs include 100672680.0-style aliases so they match Excel/pandas floats.
     """
     key_set: Set[str] = set()
     for k in mapping.keys():
         kk = clean_sku(k)
         if kk:
-            key_set.add(kk)
-            key_set.add(canonical_pl_sku_key(kk))
-    val_set = {clean_sku(v) for v in mapping.values() if clean_sku(v)}
+            for tok in integer_token_variants(kk):
+                key_set.add(tok)
+                key_set.add(canonical_pl_sku_key(tok))
+    val_set: Set[str] = set()
+    for v in mapping.values():
+        vv = clean_sku(v)
+        if vv:
+            val_set.update(integer_token_variants(vv))
     return key_set, val_set
 
 
@@ -88,7 +118,15 @@ def sku_recognized_in_master(
     if key_set is None or val_set is None:
         key_set, val_set = mapping_lookup_sets(mapping)
     pl = canonical_pl_sku_key(c)
-    return c in key_set or pl in key_set or c in val_set
+    cand: Set[str] = set()
+    cand.update(integer_token_variants(c))
+    cand.update(integer_token_variants(pl))
+    cand.add(pl)
+    if cand & key_set:
+        return True
+    if cand & val_set:
+        return True
+    return False
 
 
 def get_parent_sku(oms_sku) -> str:

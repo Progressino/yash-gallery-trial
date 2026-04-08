@@ -17,6 +17,7 @@ from .helpers import (
     clean_sku,
     map_to_oms_sku,
     mapping_lookup_sets,
+    sku_recognized_in_master,
 )
 from .myntra import myntra_to_sales_rows
 from .meesho import meesho_to_sales_rows
@@ -78,8 +79,7 @@ def list_sku_mapping_gaps(sales_df: pd.DataFrame, mapping: Dict[str, str], *, li
         c = clean_sku(raw)
         if not c or _is_aggregate_sales_sku(c):
             continue
-        pl = canonical_pl_sku_key(c)
-        if c in key_set or pl in key_set or c in val_set:
+        if sku_recognized_in_master(str(raw), mapping, key_set=key_set, val_set=val_set):
             continue
         if c not in seen:
             seen.add(c)

@@ -102,6 +102,19 @@ def _is_oms_column(name: str) -> bool:
     return False
 
 
+def _is_replace_sku_column(name: str) -> bool:
+    """Workbook column for 'Replace SKU' masters — order/listing SKU to translate → OMS."""
+    s = str(name).lower().strip()
+    if _is_oms_column(name):
+        return False
+    return "replace" in s and "sku" in s
+
+
+def _sheet_named_replace_sku(sheet_name: str) -> bool:
+    sl = str(sheet_name).lower().replace("_", " ")
+    return "replace" in sl and "sku" in sl
+
+
 def _is_seller_column(name: str) -> bool:
     s = str(name).lower().strip()
     if s in ("date", "dt", "day"):
@@ -125,6 +138,8 @@ def _is_seller_column(name: str) -> bool:
         return True
     if "sku id" in s or s.endswith("sku code"):
         return True
+    if _is_replace_sku_column(name):
+        return True
     return False
 
 
@@ -136,6 +151,11 @@ def _sheet_needs_meesho_style_fallback(sheet_name: str) -> bool:
     ) and "flipkart" not in sl and "amazon" not in sl
 
 
+def _sheet_needs_loose_column_fallback(sheet_name: str) -> bool:
+    """Meesho-family tabs or 'Replace SKU' tabs with minimal headers."""
+    return _sheet_needs_meesho_style_fallback(sheet_name) or _sheet_named_replace_sku(sheet_name)
+
+
 def _pick_seller_oms_columns(
     df: pd.DataFrame, sheet_name: str = ""
 ) -> tuple[Optional[object], Optional[object]]:
@@ -145,8 +165,12 @@ def _pick_seller_oms_columns(
 
     oms_col = oms_candidates[-1] if oms_candidates else None
     seller_col: Optional[object] = None
-    # Meesho family sheets use "Meesho SKU" (etc.) as the marketplace key → OMS SKU.
-    if _sheet_needs_meesho_style_fallback(sheet_name):
+    # Replace SKU column = primary listing/order token (Meesho combined SKU, etc.).
+    replace_col = next((c for c in cols if _is_replace_sku_column(str(c))), None)
+    if replace_col is not None:
+        seller_col = replace_col
+    # Meesho family sheets: "Meesho SKU" when no Replace SKU column.
+    elif _sheet_needs_meesho_style_fallback(sheet_name):
         seller_col = next(
             (
                 c
@@ -183,6 +207,10 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
     """
     Parse a multi-sheet Excel SKU mapping file.
     Returns {seller_sku_upper → oms_sku} with extra keys for STYLE ID and YRN (Myntra).
+
+    Supports **Replace SKU** columns/sheets: listing/order SKU (after Meesho SKU+size combine)
+    maps to OMS. **Meesho SKU** / **Myntra SKU code** columns on the same row are also
+    registered as keys. **YRN** column keys match PPMP Myntra SKU code → OMS.
     """
     mapping: Dict[str, str] = {}
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
@@ -200,7 +228,7 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
 
         seller_col, oms_col = _pick_seller_oms_columns(df, _sheet_name)
 
-        if (seller_col is None or oms_col is None) and _sheet_needs_meesho_style_fallback(_sheet_name):
+        if (seller_col is None or oms_col is None) and _sheet_needs_loose_column_fallback(_sheet_name):
             data_cols = [
                 c for c in df.columns
                 if str(c).lower().strip() not in ("date", "brand", "dt")
@@ -212,7 +240,35 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         if seller_col is None or oms_col is None:
             continue
 
-        meesho_sheet = _sheet_needs_meesho_style_fallback(_sheet_name)
+        meesho_sheet = (
+            _sheet_needs_meesho_style_fallback(_sheet_name)
+            or _sheet_named_replace_sku(_sheet_name)
+        )
+
+        skip_extra = {c for c in (seller_col, oms_col, style_col, yrn_col) if c is not None}
+        extra_key_cols: List[object] = []
+        _seen_x = set()
+        for c in df.columns:
+            if c in skip_extra or c in _seen_x:
+                continue
+            cl = str(c).lower()
+            if _is_oms_column(str(c)):
+                continue
+            if ("replace" in cl and "sku" in cl) or (
+                "myntra" in cl and "sku" in cl and "oms" not in cl
+            ) or ("meesho" in cl and "sku" in cl):
+                extra_key_cols.append(c)
+                _seen_x.add(c)
+
+        def _put_row_keys(raw_cell, o_val: str) -> None:
+            if not o_val:
+                return
+            for k in _excel_lookup_keys_from_cell(raw_cell):
+                if not k:
+                    continue
+                mapping[k] = o_val
+                if meesho_sheet and " " in k:
+                    mapping[re.sub(r"\s+", "-", k.strip())] = o_val
 
         for _, row in df.iterrows():
             s = _clean(row.get(seller_col, ""))
@@ -220,17 +276,14 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
             if o in ("", "NAN", "OMS SKU", "SELLER-SKU"):
                 continue
             if s and s not in ("NAN", "OMS SKU", "SELLER-SKU", "SELLER SKU", "DATE"):
-                for k in _excel_lookup_keys_from_cell(row.get(seller_col, "")):
-                    mapping[k] = o
-                    # Orders use SKU-SIZE (e.g. 1158YKGREEN-XL); Excel may use a space.
-                    if meesho_sheet and " " in k:
-                        mapping[re.sub(r"\s+", "-", k.strip())] = o
+                _put_row_keys(row.get(seller_col, ""), o)
+            for ec in extra_key_cols:
+                _put_row_keys(row.get(ec, ""), o)
             if style_col:
                 for sid in _excel_lookup_keys_from_cell(row.get(style_col, "")):
                     if sid and o:
                         mapping.setdefault(sid, o)
-            # YRN column = Myntra SKU code in PPMP; keys must resolve to this row's OMS.
-            # Overwrite (not setdefault) so YRN wins if another column reused the same token.
+            # YRN ↔ Myntra SKU code from PPMP; overwrite so YRN wins on conflicts.
             if yrn_col:
                 for yid in _excel_lookup_keys_from_cell(row.get(yrn_col, "")):
                     if yid and o:
