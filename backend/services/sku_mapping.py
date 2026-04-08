@@ -93,6 +93,26 @@ def _excel_lookup_keys_from_cell(raw) -> List[str]:
     return out
 
 
+def _yrn_embedded_numeric_keys(raw) -> List[str]:
+    """
+    Master YRN cells are often full codes (e.g. YARYKASS100672680); PPMP / sales may expose
+    only the numeric tail (100672680). Register 6+ digit runs so both resolve to the same OMS.
+    """
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+        return []
+    t = _clean(raw)
+    if not t or t in ("STYLE ID", "YRN NUMBER", "YRN", "DATE"):
+        return []
+    seen: set[str] = set()
+    out: List[str] = []
+    for m in re.finditer(r"\d{6,}", t):
+        g = m.group(0)
+        if g not in seen:
+            seen.add(g)
+            out.append(g)
+    return out
+
+
 def _is_oms_column(name: str) -> bool:
     s = str(name).lower().strip()
     if s in (
@@ -323,7 +343,11 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
                         mapping.setdefault(sid, o)
             # YRN ↔ Myntra SKU code from PPMP; overwrite so YRN wins on conflicts.
             if yrn_col:
-                for yid in _excel_lookup_keys_from_cell(row.get(yrn_col, "")):
+                raw_y = row.get(yrn_col, "")
+                for yid in _excel_lookup_keys_from_cell(raw_y):
+                    if yid and o:
+                        mapping[yid] = o
+                for yid in _yrn_embedded_numeric_keys(raw_y):
                     if yid and o:
                         mapping[yid] = o
 

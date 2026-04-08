@@ -2,6 +2,7 @@
 Myntra PPMP loader — extracted 1-for-1 from app.py.
 """
 import io
+import re
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -58,6 +59,10 @@ def _tokens_for_myntra_lookup(raw) -> List[str]:
                 add(str(int(f)))
         except ValueError:
             pass
+    # YARYKASS100672680 → 100672680 when PPMP sends only the numeric tail
+    for t in list(out):
+        for m in re.finditer(r"\d{6,}", t):
+            add(m.group(0))
     return out
 
 

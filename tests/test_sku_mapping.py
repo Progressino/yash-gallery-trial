@@ -21,6 +21,28 @@ def test_canonical_pl_sku_key():
     assert canonical_pl_sku_key("1023PLYKBLUE-L") == "1023YKBLUE-L"
 
 
+def test_yrn_full_string_registers_numeric_suffix_for_ppmp(tmp_path):
+    """YRN NUMBER like YARYKASS100672680 must map sales token 100672680 to OMS."""
+    import pandas as pd
+
+    p = tmp_path / "t.xlsx"
+    df = pd.DataFrame(
+        {
+            "DATE": ["2025-01-01"],
+            "YRN NUMBER": ["YARYKASS100672680"],
+            "MYNTRA SKU CODE": [""],
+            "STYLE ID": ["31228609"],
+            "OMS SKU CODE": ["1001YK-TAIL-L"],
+            "BRAND": ["X"],
+        }
+    )
+    df.to_excel(p, sheet_name="MYNTRA", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["YARYKASS100672680"] == "1001YK-TAIL-L"
+    assert m["100672680"] == "1001YK-TAIL-L"
+    assert m["31228609"] == "1001YK-TAIL-L"
+
+
 def test_parse_myntra_style_and_yrn(tmp_path):
     import pandas as pd
 
