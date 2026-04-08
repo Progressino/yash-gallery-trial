@@ -122,6 +122,18 @@ def test_sku_recognized_in_master_keys_and_values():
     assert not sku_recognized_in_master("STRANGER", m)
 
 
+def test_sku_recognized_oms_value_pl_yk_mirror():
+    """Master OMS cell 1012PLYK* must match sales token 1012YK* in gap detection."""
+    m = {"MKEY": "1012PLYKCPINK-3XL"}
+    assert sku_recognized_in_master("1012YKCPINK-3XL", m)
+
+
+def test_sku_recognized_hyphen_spacing_and_dot_before_size():
+    m = {"1057KDBLUE-7-8": "OMS-A", "1556YKNGREEN-3XL": "OMS-B"}
+    assert sku_recognized_in_master("1057KDBLUE -7-8", m)
+    assert sku_recognized_in_master("1556YKNGREEN.-3XL", m)
+
+
 def test_yrn_decimal_form_matches_integer_map_key():
     """Myntra YRN in Excel is often 100672680.0 in sales while the map key is 100672680."""
     m = {"100672680": "1001YK-XL"}

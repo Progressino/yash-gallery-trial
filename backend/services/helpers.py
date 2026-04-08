@@ -6,7 +6,7 @@ import re
 import io
 import zipfile
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,8 @@ def clean_sku(sku) -> str:
 
 # Match Amazon PL listing spellings (1023PLYK* → 1023YK*) for map lookups.
 _PL_YK = re.compile(r"^(\d+)PL(YK)", re.I)
+_HYPHEN_SPACES = re.compile(r"\s*-\s*")
+_DOT_BEFORE_HYPHEN = re.compile(r"\.(?=-)")
 
 
 def canonical_pl_sku_key(sku: str) -> str:
@@ -29,6 +31,38 @@ def canonical_pl_sku_key(sku: str) -> str:
     if not c:
         return c
     return _PL_YK.sub(r"\1\2", c)
+
+
+def normalized_sku_forms_for_lookup(value) -> List[str]:
+    """
+    Spacing around hyphens and stray dots before size suffix (e.g. GREEN.-3XL → GREEN-3XL),
+    plus PL↔YK variants — common between marketplace exports and the master sheet.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    c = clean_sku(value)
+    if not c:
+        return []
+    bases = [c]
+    hy = _HYPHEN_SPACES.sub("-", c)
+    if hy != c:
+        bases.append(hy)
+    dot = _DOT_BEFORE_HYPHEN.sub("", c)
+    if dot != c:
+        bases.append(dot)
+    dot_hy = _DOT_BEFORE_HYPHEN.sub("", hy)
+    if dot_hy not in bases:
+        bases.append(dot_hy)
+    seen: Set[str] = set()
+    out: List[str] = []
+    for b in bases:
+        if not b:
+            continue
+        for x in (b, canonical_pl_sku_key(b)):
+            if x and x not in seen:
+                seen.add(x)
+                out.append(x)
+    return out
 
 
 def integer_token_variants(s: str) -> Set[str]:
@@ -61,44 +95,48 @@ def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
     c = clean_sku(seller_sku)
     if not c:
         return c
-    if c in mapping:
-        return mapping[c]
-    alt = canonical_pl_sku_key(c)
-    if alt != c and alt in mapping:
-        return mapping[alt]
+    for form in normalized_sku_forms_for_lookup(seller_sku):
+        for tok in integer_token_variants(form):
+            if tok in mapping:
+                return mapping[tok]
+            pl = canonical_pl_sku_key(tok)
+            if pl in mapping:
+                return mapping[pl]
     # Excel / CSV: style ids as 1.02E+08 — normalize to integer string for map keys
     try:
         f = float(str(seller_sku).strip().replace(",", ""))
         if np.isfinite(f) and f == int(f) and abs(f) < 1e16:
             ik = str(int(f))
-            if ik != c and ik in mapping:
-                return mapping[ik]
-            pl = canonical_pl_sku_key(ik)
-            if pl in mapping:
-                return mapping[pl]
+            for cand in (ik, canonical_pl_sku_key(ik)):
+                if cand in mapping:
+                    return mapping[cand]
     except (ValueError, OverflowError):
         pass
     return c
 
 
+def _tokens_one_master_cell(value) -> Set[str]:
+    """All lookup tokens derived from one key or OMS cell (spacing, PL, ints)."""
+    out: Set[str] = set()
+    for form in normalized_sku_forms_for_lookup(value):
+        for tok in integer_token_variants(form):
+            out.add(tok)
+            out.add(canonical_pl_sku_key(tok))
+    return out
+
+
 def mapping_lookup_sets(mapping: Dict[str, str]) -> Tuple[Set[str], Set[str]]:
     """
-    Normalized map keys (plus PL-alias of each key) and OMS values.
+    Normalized map keys and OMS values (incl. PL↔YK for both — sales often canonicalise OMS to YK).
     Used to tell whether a sales/export token is covered by the master sheet.
     Integer YRNs include 100672680.0-style aliases so they match Excel/pandas floats.
     """
     key_set: Set[str] = set()
     for k in mapping.keys():
-        kk = clean_sku(k)
-        if kk:
-            for tok in integer_token_variants(kk):
-                key_set.add(tok)
-                key_set.add(canonical_pl_sku_key(tok))
+        key_set.update(_tokens_one_master_cell(k))
     val_set: Set[str] = set()
     for v in mapping.values():
-        vv = clean_sku(v)
-        if vv:
-            val_set.update(integer_token_variants(vv))
+        val_set.update(_tokens_one_master_cell(v))
     return key_set, val_set
 
 
@@ -117,11 +155,11 @@ def sku_recognized_in_master(
         return True
     if key_set is None or val_set is None:
         key_set, val_set = mapping_lookup_sets(mapping)
-    pl = canonical_pl_sku_key(c)
     cand: Set[str] = set()
-    cand.update(integer_token_variants(c))
-    cand.update(integer_token_variants(pl))
-    cand.add(pl)
+    for form in normalized_sku_forms_for_lookup(token):
+        for tok in integer_token_variants(form):
+            cand.add(tok)
+            cand.add(canonical_pl_sku_key(tok))
     if cand & key_set:
         return True
     if cand & val_set:
