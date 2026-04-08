@@ -33,18 +33,23 @@ def canonical_pl_sku_key(sku: str) -> str:
     return _PL_YK.sub(r"\1\2", c)
 
 
-def _glued_myntra_size_hyphen_variant(s: str) -> str:
+def _glued_myntra_size_hyphen_variants(s: str) -> List[str]:
     """
     PPMP sometimes omits hyphens around size: 1061YKBLUE4XLBLUE → 1061YKBLUE-4XL-BLUE.
-    Only when the token has no '-' yet (other normalizers handle spaced hyphens).
+    1378YKMULTI3XLMULTI → 1378YKMULTI-3XL-MULTI and shortened 1378YKMULTI-3XL when color repeats.
     """
     c = clean_sku(s)
     if not c or "-" in c:
-        return ""
+        return []
     m = re.match(r"^(\d+YK[A-Z]+)((?:XXXL|XXL|[2345]XL))([A-Z]+)$", c)
     if not m:
-        return ""
-    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        return []
+    full = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    out = [full]
+    base, sz, tail = m.group(1), m.group(2), m.group(3)
+    if base.endswith(tail):
+        out.append(f"{base}-{sz}")
+    return out
 
 
 def normalized_sku_forms_for_lookup(value) -> List[str]:
@@ -58,9 +63,13 @@ def normalized_sku_forms_for_lookup(value) -> List[str]:
     if not c:
         return []
     bases = [c]
-    gl = _glued_myntra_size_hyphen_variant(c)
-    if gl and gl not in bases:
-        bases.append(gl)
+    if "MUSTRAD" in c:
+        alt = c.replace("MUSTRAD", "MUSTARD")
+        if alt != c:
+            bases.append(alt)
+    for gl in _glued_myntra_size_hyphen_variants(c):
+        if gl not in bases:
+            bases.append(gl)
     hy = _HYPHEN_SPACES.sub("-", c)
     if hy != c:
         bases.append(hy)
@@ -129,6 +138,10 @@ def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
                     return mapping[cand]
     except (ValueError, OverflowError):
         pass
+    if c.isdigit() and len(c) >= 6:
+        ne = _cached_numeric_embed_index(mapping)
+        if c in ne:
+            return ne[c]
     return c
 
 
@@ -142,9 +155,42 @@ def _tokens_one_master_cell(value) -> Set[str]:
     return out
 
 
-def mapping_lookup_sets(mapping: Dict[str, str]) -> Tuple[Set[str], Set[str]]:
+_NUMERIC_EMBED_CACHE: Dict[int, Dict[str, str]] = {}
+
+
+def _build_numeric_embed_index(mapping: Dict[str, str]) -> Dict[str, str]:
+    """
+    Bare catalog ids (e.g. 100506552) often match a 6+ digit run inside YARY…100506552 or OMS text.
+    Last mapping row wins on rare collisions.
+    """
+    out: Dict[str, str] = {}
+    for k, v in mapping.items():
+        oms = clean_sku(v)
+        if not oms:
+            continue
+        for tok in _tokens_one_master_cell(str(k)):
+            for m in re.finditer(r"\d{6,}", tok):
+                out[m.group(0)] = oms
+        vv = clean_sku(str(v))
+        if vv:
+            for m in re.finditer(r"\d{6,}", vv):
+                out[m.group(0)] = vv
+    return out
+
+
+def _cached_numeric_embed_index(mapping: Dict[str, str]) -> Dict[str, str]:
+    i = id(mapping)
+    if i not in _NUMERIC_EMBED_CACHE:
+        _NUMERIC_EMBED_CACHE[i] = _build_numeric_embed_index(mapping)
+        if len(_NUMERIC_EMBED_CACHE) > 64:
+            _NUMERIC_EMBED_CACHE.clear()
+    return _NUMERIC_EMBED_CACHE[i]
+
+
+def mapping_lookup_sets(mapping: Dict[str, str]) -> Tuple[Set[str], Set[str], Dict[str, str]]:
     """
     Normalized map keys and OMS values (incl. PL↔YK for both — sales often canonicalise OMS to YK).
+    Third return: numeric id → OMS for digits embedded in keys/values (Myntra YRN tails, style ids).
     Used to tell whether a sales/export token is covered by the master sheet.
     Integer YRNs include 100672680.0-style aliases so they match Excel/pandas floats.
     """
@@ -154,7 +200,8 @@ def mapping_lookup_sets(mapping: Dict[str, str]) -> Tuple[Set[str], Set[str]]:
     val_set: Set[str] = set()
     for v in mapping.values():
         val_set.update(_tokens_one_master_cell(v))
-    return key_set, val_set
+    num_embed = _cached_numeric_embed_index(mapping)
+    return key_set, val_set, num_embed
 
 
 def sku_recognized_in_master(
@@ -163,6 +210,7 @@ def sku_recognized_in_master(
     *,
     key_set: Optional[Set[str]] = None,
     val_set: Optional[Set[str]] = None,
+    numeric_embed: Optional[Dict[str, str]] = None,
 ) -> bool:
     """True if token appears as a seller/marketplace key or as an OMS value in the master."""
     if not mapping:
@@ -171,7 +219,9 @@ def sku_recognized_in_master(
     if not c:
         return True
     if key_set is None or val_set is None:
-        key_set, val_set = mapping_lookup_sets(mapping)
+        key_set, val_set, numeric_embed = mapping_lookup_sets(mapping)
+    elif numeric_embed is None:
+        numeric_embed = _cached_numeric_embed_index(mapping)
     cand: Set[str] = set()
     for form in normalized_sku_forms_for_lookup(token):
         for tok in integer_token_variants(form):
@@ -181,6 +231,9 @@ def sku_recognized_in_master(
         return True
     if cand & val_set:
         return True
+    for tok in cand:
+        if tok.isdigit() and len(tok) >= 6 and tok in numeric_embed:
+            return True
     return False
 
 

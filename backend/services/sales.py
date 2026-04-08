@@ -72,14 +72,16 @@ def list_sku_mapping_gaps(sales_df: pd.DataFrame, mapping: Dict[str, str], *, li
     """
     if sales_df.empty or not mapping or "Sku" not in sales_df.columns:
         return []
-    key_set, val_set = mapping_lookup_sets(mapping)
+    key_set, val_set, num_embed = mapping_lookup_sets(mapping)
     bad: List[str] = []
     seen: set[str] = set()
     for raw in sales_df["Sku"].dropna().unique():
         c = clean_sku(raw)
         if not c or _is_aggregate_sales_sku(c):
             continue
-        if sku_recognized_in_master(str(raw), mapping, key_set=key_set, val_set=val_set):
+        if sku_recognized_in_master(
+            str(raw), mapping, key_set=key_set, val_set=val_set, numeric_embed=num_embed
+        ):
             continue
         if c not in seen:
             seen.add(c)

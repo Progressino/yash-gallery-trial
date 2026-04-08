@@ -286,7 +286,7 @@ def sales_export(
     cols = [c for c in base_cols + extra if c in out.columns]
     export_df = out[cols].copy()
     cmap = sess.sku_mapping or {}
-    _map_keys, _map_vals = mapping_lookup_sets(cmap) if cmap else (set(), set())
+    _map_keys, _map_vals, _map_num = mapping_lookup_sets(cmap) if cmap else (set(), set(), {})
 
     def _export_oms_sku_cell(v) -> str:
         if pd.isna(v):
@@ -300,7 +300,9 @@ def sales_export(
         if (
             cmap
             and clean_sku(resolved) == clean_sku(s)
-            and not sku_recognized_in_master(s, cmap, key_set=_map_keys, val_set=_map_vals)
+            and not sku_recognized_in_master(
+                s, cmap, key_set=_map_keys, val_set=_map_vals, numeric_embed=_map_num
+            )
         ):
             return ""
         return resolved
