@@ -361,6 +361,95 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     return out.dropna(subset=["Date"])
 
 
+def _norm_export_header(c) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(c).strip().lower())
+
+
+def looks_like_meesho_order_export(df: pd.DataFrame) -> bool:
+    """Unified sales export: TxnDate + Transaction Type + Sku + Quantity (app / ERP export)."""
+    if df.empty or len(df.columns) < 4:
+        return False
+    keys = {_norm_export_header(c) for c in df.columns}
+    return {"txndate", "transactiontype", "sku", "quantity"}.issubset(keys)
+
+
+def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str]:
+    """
+    Re-import an ERP unified sales Excel export (Meesho rows with TxnDate, Sku, …).
+    When Sku is MEESHO_TOTAL, uses listing column Sku.1 / sku1 (pandas duplicate rename).
+    """
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    except Exception as e:
+        return pd.DataFrame(), f"Excel read error: {e}"
+    if df.empty:
+        return pd.DataFrame(), "Empty workbook"
+    if not looks_like_meesho_order_export(df):
+        return pd.DataFrame(), "Not a unified sales export (need TxnDate, Transaction Type, Sku, Quantity)"
+
+    col_map: dict[str, object] = {}
+    for c in df.columns:
+        col_map.setdefault(_norm_export_header(c), c)
+
+    date_c = col_map.get("txndate")
+    txn_c = col_map.get("transactiontype")
+    sku_c = col_map.get("sku")
+    qty_c = col_map.get("quantity")
+    order_c = col_map.get("orderid")
+    state_c = col_map.get("state") or col_map.get("customerstate")
+    rev_c = col_map.get("invoiceamount") or col_map.get("invoice_amount")
+    source_c = col_map.get("source")
+    sku_alt_c = col_map.get("sku1") or col_map.get("sku2")
+
+    if not all([date_c, txn_c, sku_c, qty_c]):
+        return pd.DataFrame(), "Missing required columns in export"
+
+    if source_c is not None:
+        m = df[source_c].astype(str).str.strip().str.lower() == "meesho"
+        df = df.loc[m].copy()
+        if df.empty:
+            return pd.DataFrame(), "No rows with Source=Meesho"
+
+    sku_series = df[sku_c].astype(str).str.strip()
+    if sku_alt_c is not None:
+        alt = df[sku_alt_c].astype(str).str.strip()
+        bad = sku_series.str.upper().eq("MEESHO_TOTAL") | sku_series.isin(["", "NAN", "NONE"])
+        sku_series = sku_series.where(~bad, alt)
+
+    def _txn(s) -> str:
+        u = str(s).strip().upper()
+        if "REFUND" in u or "RETURN" in u or "RTO" in u:
+            return "Refund"
+        if "CANCEL" in u:
+            return "Cancel"
+        return "Shipment"
+
+    rev = (
+        pd.to_numeric(df[rev_c], errors="coerce").fillna(0).astype("float32")
+        if rev_c is not None
+        else pd.Series(0.0, index=df.index, dtype="float32")
+    )
+    out = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(df[date_c], errors="coerce"),
+            "TxnType": df[txn_c].map(_txn),
+            "Quantity": pd.to_numeric(df[qty_c], errors="coerce").fillna(1).astype("float32").abs(),
+            "Invoice_Amount": rev,
+            "State": (
+                df[state_c].fillna("").astype(str).str.upper().str.strip()
+                if state_c is not None
+                else ""
+            ),
+            "OrderId": df[order_c].fillna("").astype(str) if order_c is not None else "",
+            "SKU": _clean_meesho_str_series(sku_series),
+        }
+    )
+    out["OMS_SKU"] = out["SKU"]
+    out["Month"] = out["Date"].dt.to_period("M").astype(str)
+    out = out.dropna(subset=["Date"])
+    return out, "OK"
+
+
 def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     """
     Parse a Meesho daily orders CSV report (non-ZIP format).

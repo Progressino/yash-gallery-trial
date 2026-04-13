@@ -21,7 +21,11 @@ from ..models.schemas import UploadResponse
 from ..services.sku_mapping import parse_sku_mapping
 from ..services.mtr import load_mtr_from_zip, load_mtr_from_extracted_files, parse_mtr_csv
 from ..services.myntra import load_myntra_from_zip
-from ..services.meesho import load_meesho_from_zip
+from ..services.meesho import (
+    load_meesho_from_zip,
+    looks_like_meesho_order_export,
+    parse_meesho_order_export_xlsx,
+)
 from ..services.flipkart import load_flipkart_from_zip
 from ..services.snapdeal import load_snapdeal_from_zip
 from ..services.inventory import load_inventory_consolidated, merge_inventory_update
@@ -240,6 +244,40 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
     try:
         raw_bytes = await file.read()
         fname = (file.filename or "").lower()
+
+        # Unified sales Excel export (TxnDate, Sku, Sku.1 listing fallback) — must run before PK/ZIP logic
+        if fname.endswith((".xlsx", ".xls")):
+            df, msg = parse_meesho_order_export_xlsx(raw_bytes)
+            if not df.empty:
+                save_daily_file("meesho", file.filename or "meesho-order.xlsx", df)
+                sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+                sess.sales_df = build_sales_df(
+                    mtr_df=sess.mtr_df,
+                    myntra_df=sess.myntra_df,
+                    meesho_df=sess.meesho_df,
+                    flipkart_df=sess.flipkart_df,
+                    snapdeal_df=sess.snapdeal_df,
+                    sku_mapping=sess.sku_mapping,
+                )
+                total = len(sess.meesho_df)
+                years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+                skus = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum())
+                background_tasks.add_task(_auto_save_cache, sess)
+                _session_data_changed(sess)
+                return UploadResponse(
+                    ok=True,
+                    message=f"Meesho order export (Excel): added {len(df):,} rows ({skus:,} with SKU). Total: {total:,} rows.",
+                    rows=total,
+                    years=years,
+                )
+            return UploadResponse(
+                ok=False,
+                message=(
+                    f"Excel is not a recognised Meesho sales export ({msg}). "
+                    "Expected columns TxnDate, Transaction Type, Sku, Quantity (and optional Sku.1 listing). "
+                    "Or upload supplier Order CSV / monthly ZIP."
+                ),
+            )
 
         # Auto-detect: CSV order report vs ZIP (TCS / monthly archive)
         is_csv = fname.endswith(".csv") or (not fname.endswith(".zip") and raw_bytes[:3] != b"PK\x03")
@@ -694,7 +732,7 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
     """
     Guess platform from path/filename + file contents.
     Returns: 'amazon_b2c', 'amazon_b2b', 'amazon_mtr_zip', 'myntra', 'meesho',
-    'meesho_csv', 'flipkart', 'snapdeal', 'unknown'
+    'meesho_csv', 'meesho_order_xlsx', 'flipkart', 'snapdeal', 'unknown'
     """
     fn = (filename or "").lower().replace("\\", "/")
 
@@ -705,6 +743,14 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
         return _detect_platform_zip(file_bytes, fn)
 
     if fn.endswith((".xlsx", ".xls")):
+        try:
+            peek = pd.read_excel(io.BytesIO(file_bytes), nrows=40)
+            if looks_like_meesho_order_export(peek):
+                src = next((c for c in peek.columns if str(c).strip().lower() == "source"), None)
+                if src is None or peek[src].astype(str).str.strip().str.lower().eq("meesho").any():
+                    return "meesho_order_xlsx"
+        except Exception:
+            pass
         return "flipkart"
 
     header_bytes = file_bytes[:3000]
@@ -845,6 +891,18 @@ async def upload_daily_auto(
                     sess.meesho_df = _load_platform("meesho")
                     sess.daily_restored = False
                     detected.append(f"Meesho ({fname})")
+                    if msg != "OK":
+                        warnings.append(f"{fname}: {msg}")
+                else:
+                    warnings.append(f"{fname}: {msg}")
+
+            elif platform == "meesho_order_xlsx":
+                df, msg = parse_meesho_order_export_xlsx(raw)
+                if not df.empty:
+                    save_daily_file("meesho", fname, df)
+                    sess.meesho_df = _load_platform("meesho")
+                    sess.daily_restored = False
+                    detected.append(f"Meesho order export ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
                 else:

@@ -198,6 +198,34 @@ def test_meesho_kids_size_band_hyphen():
     assert _combine_meesho_sku_size(base, size).iloc[0] == "1158YKMUSTARD-7-8"
 
 
+def test_meesho_order_export_xlsx_coalesces_sku1():
+    from io import BytesIO
+
+    import pandas as pd
+
+    from backend.services.meesho import parse_meesho_order_export_xlsx
+
+    df = pd.DataFrame(
+        {
+            "TxnDate": [pd.Timestamp("2024-12-16")],
+            "Sku": ["MEESHO_TOTAL"],
+            "OMS_Sku": [None],
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Units_Effective": [1],
+            "Source": ["Meesho"],
+            "OrderId": ["100056595506869312_1"],
+            "Sku.1": ["1592YKBLUE-5XL"],
+        }
+    )
+    buf = BytesIO()
+    df.to_excel(buf, index=False)
+    out, msg = parse_meesho_order_export_xlsx(buf.getvalue())
+    assert msg == "OK"
+    assert len(out) == 1
+    assert out["SKU"].iloc[0] == "1592YKBLUE-5XL"
+
+
 def test_meesho_nested_zip_finds_tcs_by_basename():
     """TCS files in subfolders (SomeFolder/tcs_sales_return.xlsx) must be detected."""
     import zipfile
