@@ -11,10 +11,12 @@ from fastapi.responses import StreamingResponse
 from ..models.schemas import CoverageResponse
 from ..services.helpers import (
     clean_sku,
+    is_likely_non_sku_notes_value,
     map_to_oms_sku,
     mapping_lookup_sets,
     sku_recognized_in_master,
 )
+from ..services.meesho import apply_meesho_listing_sku_recovery_for_export
 from ..services.sales import (
     get_sales_summary,
     get_sales_by_source,
@@ -285,6 +287,7 @@ def sales_export(
     extra = [c for c in ("OrderId",) if c in out.columns]
     cols = [c for c in base_cols + extra if c in out.columns]
     export_df = out[cols].copy()
+    export_df = apply_meesho_listing_sku_recovery_for_export(export_df, sess.meesho_df)
     cmap = sess.sku_mapping or {}
     _map_keys, _map_vals, _map_num = mapping_lookup_sets(cmap) if cmap else (set(), set(), {})
 
@@ -294,7 +297,11 @@ def sales_export(
         s = str(v).strip()
         if s.lower() in ("", "nan", "none"):
             return ""
+        if is_likely_non_sku_notes_value(s):
+            return ""
         resolved = canonical_sales_sku(map_to_oms_sku(s, cmap))
+        if is_likely_non_sku_notes_value(resolved):
+            return ""
         # If lookup is a no-op and this token never appears on the master (key or OMS),
         # leave OMS_Sku blank so exports don't fake a match (common for raw Myntra style IDs).
         if (

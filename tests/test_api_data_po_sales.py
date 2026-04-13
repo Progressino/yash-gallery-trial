@@ -140,3 +140,69 @@ def test_sales_export_csv(client, session_for_client):
     body = r.text
     assert "TxnDate" in body and "Amazon" in body and "Shipment" in body
     assert "OMS_Sku" in body
+
+
+def test_sales_export_recover_meesho_sku_from_meesho_df(client, session_for_client):
+    import io
+
+    import pandas as pd
+
+    _, sess = session_for_client
+    from backend.session import wipe_app_session
+
+    wipe_app_session(sess)
+    sess.pause_auto_data_restore = True
+    oid = "171474035005_1"
+    day = "2025-12-24"
+    sess.meesho_df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime([day]),
+            "TxnType": ["Shipment"],
+            "Quantity": [1.0],
+            "SKU": ["1592YKBLUE-5XL"],
+            "OrderId": [oid],
+        }
+    )
+    sess.sales_df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime([f"{day} 00:00:00"]),
+            "Sku": ["MEESHO_TOTAL"],
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Units_Effective": [1],
+            "Source": ["Meesho"],
+            "OrderId": [oid],
+        }
+    )
+    r = client.get("/api/data/sales-export?months=0")
+    assert r.status_code == 200
+    out = pd.read_csv(io.StringIO(r.text))
+    assert out["Sku"].iloc[0] == "1592YKBLUE-5XL"
+
+
+def test_sales_export_blanks_oms_for_note_like_sku(client, session_for_client):
+    import io
+
+    import pandas as pd
+
+    _, sess = session_for_client
+    from backend.session import wipe_app_session
+
+    wipe_app_session(sess)
+    sess.pause_auto_data_restore = True
+    sess.meesho_df = pd.DataFrame()
+    sess.sales_df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2025-06-01"]),
+            "Sku": ["SIZE CHANGE"],
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Units_Effective": [1],
+            "Source": ["Meesho"],
+            "OrderId": ["x1"],
+        }
+    )
+    r = client.get("/api/data/sales-export?months=0")
+    assert r.status_code == 200
+    out = pd.read_csv(io.StringIO(r.text))
+    assert str(out["OMS_Sku"].iloc[0]) in ("", "nan") or pd.isna(out["OMS_Sku"].iloc[0])

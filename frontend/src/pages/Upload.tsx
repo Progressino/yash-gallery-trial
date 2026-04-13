@@ -249,10 +249,17 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🛒 Meesho" subtitle="Upload ZIPs (TCS/ledger) or Order Report CSVs — select multiple" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']}>
+        <UploadCard title="🛒 Meesho" subtitle="ZIP (TCS/ledger), Order CSV, or unified sales Excel (.xlsx/.xls) — select multiple" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']}>
           <FileUpload
-            label="Upload .zip or .csv (select multiple)"
-            accept={{ 'application/zip': ['.zip'], 'text/csv': ['.csv'] }}
+            label="Upload .zip, .csv, .xlsx, or .xls (select multiple)"
+            accept={{
+              'application/zip': ['.zip'],
+              'text/csv': ['.csv'],
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+              'application/vnd.ms-excel': ['.xls'],
+              // Some browsers report Excel as generic binary when picking files
+              'application/octet-stream': ['.xlsx', '.xls'],
+            }}
             onUpload={handle('meesho', (file: File) => uploadMeesho(file))}
             uploading={loading['meesho']}
             multiple
@@ -361,7 +368,7 @@ export default function Upload() {
             <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily order upload</h3>
             <p className="text-xs text-gray-400">
               For <strong>ongoing</strong> refreshes after Tier 1 history is loaded. Drop <strong>any mix</strong> of recent files —
-              platform is auto-detected per file. Accepted: Amazon MTR/FBA CSV, Myntra PPMP CSV, Meesho CSV or ZIP, Flipkart XLSX,
+              platform is auto-detected per file. Accepted: Amazon MTR/FBA CSV, Myntra PPMP CSV, Meesho CSV / ZIP / unified XLSX, Flipkart XLSX,
               Snapdeal paths containing <code className="text-gray-600">snapdeal</code>, RAR bundles. Sales dataset rebuilds automatically.
             </p>
           </div>
@@ -623,9 +630,11 @@ function DailyDropzone({ uploading, onUpload }: {
     accept: {
       'text/csv': ['.csv'],
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
       'application/zip': ['.zip'],
       'application/x-rar-compressed': ['.rar'],
       'application/vnd.rar': ['.rar'],
+      'application/octet-stream': ['.xlsx', '.xls'],
     },
     multiple: true,
     disabled: uploading,
@@ -656,7 +665,7 @@ function DailyDropzone({ uploading, onUpload }: {
                 Drag & drop daily report files here, or{' '}
                 <span className="text-blue-600 underline">browse</span>
                 <br />
-                <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .zip / .rar — platform auto-detected</span>
+                <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .xls / .zip / .rar — platform auto-detected</span>
               </p>
         }
       </div>

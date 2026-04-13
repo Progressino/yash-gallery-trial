@@ -198,6 +198,31 @@ def test_meesho_kids_size_band_hyphen():
     assert _combine_meesho_sku_size(base, size).iloc[0] == "1158YKMUSTARD-7-8"
 
 
+def test_meesho_order_export_xlsx_coalesces_listing_sku_column():
+    from io import BytesIO
+
+    import pandas as pd
+
+    from backend.services.meesho import parse_meesho_order_export_xlsx
+
+    df = pd.DataFrame(
+        {
+            "TxnDate": [pd.Timestamp("2024-12-16")],
+            "Sku": ["MEESHO_TOTAL"],
+            "Listing Sku": ["1592YKBLUE-5XL"],
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Source": ["Meesho"],
+            "OrderId": ["100056595506869312_1"],
+        }
+    )
+    buf = BytesIO()
+    df.to_excel(buf, index=False)
+    out, msg = parse_meesho_order_export_xlsx(buf.getvalue())
+    assert msg == "OK"
+    assert out["SKU"].iloc[0] == "1592YKBLUE-5XL"
+
+
 def test_meesho_order_export_xlsx_coalesces_sku1():
     from io import BytesIO
 
@@ -224,6 +249,18 @@ def test_meesho_order_export_xlsx_coalesces_sku1():
     assert msg == "OK"
     assert len(out) == 1
     assert out["SKU"].iloc[0] == "1592YKBLUE-5XL"
+
+
+def test_meesho_csv_skips_aggregate_sku_column_for_listing_sku():
+    from backend.services.meesho import parse_meesho_csv
+
+    csv = (
+        "order date,sku,listing sku,quantity,customer state,sub order no\n"
+        "2024-01-01,MEESHO_TOTAL,1158YKGREEN-XL,1,MH,SO1\n"
+    )
+    out, msg = parse_meesho_csv(csv.encode("utf-8"))
+    assert msg == "OK"
+    assert out["SKU"].iloc[0] == "1158YKGREEN-XL"
 
 
 def test_meesho_nested_zip_finds_tcs_by_basename():

@@ -4,6 +4,7 @@ Extracted 1-for-1 from app.py.
 """
 import re
 import io
+import unicodedata
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -18,6 +19,51 @@ def clean_sku(sku) -> str:
     if pd.isna(sku):
         return ""
     return str(sku).strip().replace('"""', "").replace("SKU:", "").strip().upper()
+
+
+# Phrases from return / credit / adjustment columns that are often mis-read as SKUs.
+_NON_SKU_NOTE_PHRASE = re.compile(
+    r"SIZE\s*CHANGE|BAAKI|SE\s+ADJUST|\bADJUST\b|\bEXCHANGE\b|REASON\s+FOR|"
+    r"\bRTO\b|CREDIT\s+ENTRY|REPLACEMENT\s|DAMAG|COMPLAINT|RETURN\s+REASON",
+    re.I,
+)
+
+
+def looks_like_seller_listing_sku(value) -> bool:
+    """Heuristic: Meesho / supplier listing codes (digits+YK, compact alnum), not prose notes."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    t = str(value).strip()
+    if not t or t.lower() in ("nan", "none", "<na>", "nat"):
+        return False
+    if _NON_SKU_NOTE_PHRASE.search(t):
+        return False
+    if len(t) > 72:
+        return False
+    if re.search(r"\d{3,}\s*YK", t, re.I):
+        return True
+    cu = clean_sku(t)
+    if re.match(r"^\d{4,}[A-Z]", cu):
+        return True
+    if re.match(r"^[A-Z0-9]{4,}(?:-[A-Z0-9]+)+$", cu):
+        return True
+    if 4 <= len(cu) <= 36 and re.search(r"\d", cu) and "  " not in t and t.count(" ") <= 3:
+        return True
+    return False
+
+
+def is_likely_non_sku_notes_value(value) -> bool:
+    """True for return/adjustment prose — should not appear as Sku / OMS in exports."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    t = unicodedata.normalize("NFKC", str(value).strip())
+    if not t:
+        return False
+    if _NON_SKU_NOTE_PHRASE.search(t):
+        return True
+    if len(t) > 55 and t.count(" ") >= 3:
+        return True
+    return False
 
 
 # Match Amazon PL listing spellings (1023PLYK* → 1023YK*) for map lookups.

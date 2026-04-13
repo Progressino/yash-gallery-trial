@@ -5,10 +5,12 @@ import io
 import re
 import zipfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+from .helpers import is_likely_non_sku_notes_value, looks_like_seller_listing_sku
 
 
 def _clean_meesho_cell(value) -> str:
@@ -156,6 +158,27 @@ _TIER1_MEESHO_SKU_HEADERS = (
 )
 
 
+def _tier1_series_overwhelmingly_aggregate(ser: pd.Series) -> bool:
+    """Skip tier-1 columns that are mostly MEESHO_TOTAL / *_TOTAL bucket rows."""
+    s = _clean_meesho_str_series(ser.fillna(""))
+    nonempty = s.str.len() > 0
+    if not nonempty.any():
+        return True
+    u = s.str.upper()
+    bad = u.eq("MEESHO_TOTAL") | ((u.str.endswith("_TOTAL")) & (u.str.len() <= 28))
+    return bool(bad.sum() / int(nonempty.sum()) >= 0.85)
+
+
+def _listing_sku_fraction(ser: pd.Series) -> Tuple[float, int]:
+    s = _clean_meesho_str_series(ser.fillna(""))
+    nonempty = s.str.len() > 0
+    n = int(nonempty.sum())
+    if n == 0:
+        return 0.0, 0
+    good = int(s.loc[nonempty].map(looks_like_seller_listing_sku).sum())
+    return good / n, n
+
+
 def _meesho_sku_base_series(df: pd.DataFrame) -> pd.Series:
     """
     Detect the column that holds the listing / replace-SKU token across TCS, return, and
@@ -174,7 +197,7 @@ def _meesho_sku_base_series(df: pd.DataFrame) -> pd.Series:
         if cand not in cols_lower:
             continue
         ser = _clean_meesho_str_series(df[cols_lower[cand]])
-        if _nonempty(ser) > 0:
+        if _nonempty(ser) > 0 and not _tier1_series_overwhelmingly_aggregate(ser):
             return ser
 
     tier2 = (
@@ -195,25 +218,42 @@ def _meesho_sku_base_series(df: pd.DataFrame) -> pd.Series:
         "style_id",
     )
     best_ser: Optional[pd.Series] = None
-    best_n = 0
+    best_key: Tuple[float, int] = (0.0, 0)
     for cand in tier2:
         if cand not in cols_lower:
             continue
         ser = _clean_meesho_str_series(df[cols_lower[cand]])
-        nn = _nonempty(ser)
-        if nn > best_n:
-            best_n = nn
+        frac, nn = _listing_sku_fraction(ser)
+        if nn == 0 or frac < 0.22:
+            continue
+        key = (frac, nn)
+        if key > best_key:
+            best_key = key
             best_ser = ser
-    if best_ser is not None and best_n > 0:
+    if best_ser is not None and best_key[1] > 0:
         return best_ser
 
     for k, orig in sorted(cols_lower.items()):
         if "sku" not in k:
             continue
-        if any(x in k for x in ("order", "sub_order", "commission", "packet_id")):
+        if any(
+            x in k
+            for x in (
+                "order",
+                "sub_order",
+                "commission",
+                "packet_id",
+                "reason",
+                "credit",
+                "return",
+                "adjust",
+                "resize",
+            )
+        ):
             continue
         ser = _clean_meesho_str_series(df[orig])
-        if _nonempty(ser) > 0:
+        frac, nn = _listing_sku_fraction(ser)
+        if nn > 0 and frac >= 0.2:
             return ser
 
     return pd.Series([""] * n, index=df.index, dtype=str)
@@ -373,6 +413,48 @@ def looks_like_meesho_order_export(df: pd.DataFrame) -> bool:
     return {"txndate", "transactiontype", "sku", "quantity"}.issubset(keys)
 
 
+_ALT_ORDER_EXPORT_SKU_NORMS = frozenset(
+    {
+        "sku1",
+        "sku2",
+        "sku3",
+        "listingsku",
+        "sellersku",
+        "merchantsku",
+        "suppliersku",
+        "productsku",
+        "catalogsku",
+        "replacementsku",
+        "variantsku",
+        "skuid",
+        "meeshosku",
+        "marketplacesku",
+        "channelsku",
+    }
+)
+
+
+def _order_export_alt_sku_columns(col_map: dict[str, object], primary: object) -> List[object]:
+    """Extra listing / seller SKU columns in unified sales Excel (beyond pandas' Sku.1)."""
+    raw: List[object] = []
+    for norm, orig in sorted(col_map.items(), key=lambda x: x[0]):
+        if orig == primary:
+            continue
+        if norm in _ALT_ORDER_EXPORT_SKU_NORMS:
+            raw.append(orig)
+        elif norm.startswith("sku") and norm != "sku" and len(norm) > 3 and norm[3:].isdigit():
+            raw.append(orig)
+    seen: set[int] = set()
+    out: List[object] = []
+    for o in raw:
+        i = id(o)
+        if i in seen:
+            continue
+        seen.add(i)
+        out.append(o)
+    return out
+
+
 def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     """
     Re-import an ERP unified sales Excel export (Meesho rows with TxnDate, Sku, …).
@@ -411,10 +493,35 @@ def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str
             return pd.DataFrame(), "No rows with Source=Meesho"
 
     sku_series = df[sku_c].astype(str).str.strip()
+
+    def _row_needs_listing_coalesce(s: pd.Series) -> pd.Series:
+        return (
+            s.str.upper().eq("MEESHO_TOTAL")
+            | s.isin(["", "NAN", "NONE"])
+            | s.map(lambda x: is_likely_non_sku_notes_value(x))
+        )
+
+    bad = _row_needs_listing_coalesce(sku_series)
+    alt_cols: List[object] = []
     if sku_alt_c is not None:
-        alt = df[sku_alt_c].astype(str).str.strip()
-        bad = sku_series.str.upper().eq("MEESHO_TOTAL") | sku_series.isin(["", "NAN", "NONE"])
-        sku_series = sku_series.where(~bad, alt)
+        alt_cols.append(sku_alt_c)
+    for c in _order_export_alt_sku_columns(col_map, sku_c):
+        if c not in alt_cols:
+            alt_cols.append(c)
+    for col in alt_cols:
+        alt = df[col].astype(str).str.strip()
+        meesho_agg = sku_series.str.upper().eq("MEESHO_TOTAL")
+        ok_alt = alt.map(looks_like_seller_listing_sku) | (
+            meesho_agg
+            & (alt.str.len() >= 4)
+            & (alt.str.len() <= 48)
+            & ~alt.map(is_likely_non_sku_notes_value)
+            & alt.str.contains(r"\d", regex=True, na=False)
+        )
+        sku_series = sku_series.where(~(bad & ok_alt), alt)
+        bad = _row_needs_listing_coalesce(sku_series)
+        if not bad.any():
+            break
 
     def _txn(s) -> str:
         u = str(s).strip().upper()
@@ -574,6 +681,105 @@ def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]
     combined = combined.drop_duplicates(keep="first")
     zip_count = len(items) if items else (1 if not combined.empty else 0)
     return combined, zip_count, skipped
+
+
+def meesho_export_sku_recovery_maps(
+    meesho_df: pd.DataFrame,
+) -> Tuple[Dict[Tuple[str, str], str], Dict[str, str]]:
+    """
+    Build lookups from raw Meesho rows: (OrderId, YYYY-MM-DD) -> listing SKU, and OrderId -> SKU
+    when there is exactly one plausible listing SKU for that key (multi-item orders are skipped).
+    """
+    if meesho_df.empty or "OrderId" not in meesho_df.columns or "SKU" not in meesho_df.columns:
+        return {}, {}
+    m = meesho_df.copy()
+    m["_oid"] = m["OrderId"].astype(str).str.strip()
+    m["_sku"] = _clean_meesho_str_series(m["SKU"])
+    dt = pd.to_datetime(m["Date"], errors="coerce")
+    m["_day"] = dt.dt.strftime("%Y-%m-%d")
+    m.loc[dt.isna(), "_day"] = ""
+
+    good = m["_oid"].ne("") & ~m["_oid"].str.lower().isin(["nan", "none"])
+    good &= m["_sku"].str.len() > 0
+    good &= ~m["_sku"].str.upper().eq("MEESHO_TOTAL")
+    good &= ~m["_sku"].map(is_likely_non_sku_notes_value)
+    good &= m["_sku"].map(looks_like_seller_listing_sku)
+    m = m.loc[good]
+    if m.empty:
+        return {}, {}
+
+    day_map: Dict[Tuple[str, str], str] = {}
+    for (oid, day), grp in m.groupby(["_oid", "_day"]):
+        day_s = str(day).strip() if day is not None and str(day) not in ("NaT", "nan") else ""
+        if not day_s:
+            continue
+        skus = list(dict.fromkeys(grp["_sku"].tolist()))
+        if len(skus) == 1:
+            day_map[(str(oid), day_s)] = skus[0]
+
+    oid_map: Dict[str, str] = {}
+    for oid, grp in m.groupby("_oid"):
+        skus = list(dict.fromkeys(grp["_sku"].tolist()))
+        if len(skus) == 1:
+            oid_map[str(oid).strip()] = skus[0]
+
+    return day_map, oid_map
+
+
+def _export_row_needs_meesho_sku_recovery(sku: object) -> bool:
+    if sku is None or (isinstance(sku, float) and pd.isna(sku)):
+        return True
+    s = str(sku).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return True
+    sl = s.lower()
+    if (
+        sl == "meesho_total"
+        or "_total" in sl
+        or (sl.startswith("total") and len(sl) <= 24)
+        or (sl.endswith("total") and len(sl) <= 24)
+    ):
+        return True
+    if is_likely_non_sku_notes_value(s):
+        return True
+    return False
+
+
+def apply_meesho_listing_sku_recovery_for_export(
+    export_df: pd.DataFrame, meesho_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Replace MEESHO_TOTAL / note-like Sku values on Meesho export rows when meesho_df has a single
+    unambiguous listing SKU for the same OrderId (and calendar day when dates align).
+    """
+    if export_df.empty or meesho_df.empty:
+        return export_df
+    need_cols = {"Source", "Sku", "OrderId", "TxnDate"}
+    if not need_cols.issubset(export_df.columns):
+        return export_df
+    day_map, oid_map = meesho_export_sku_recovery_maps(meesho_df)
+    if not day_map and not oid_map:
+        return export_df
+    out = export_df.copy()
+    is_m = out["Source"].astype(str).str.strip().str.lower() == "meesho"
+    needs = is_m & out["Sku"].map(_export_row_needs_meesho_sku_recovery)
+    if not needs.any():
+        return out
+    sub = out.loc[needs]
+    oidv = sub["OrderId"].astype(str).str.strip()
+    dtv = pd.to_datetime(sub["TxnDate"], errors="coerce")
+    bad_day = dtv.isna()
+    dk = np.where(bad_day, "", dtv.dt.strftime("%Y-%m-%d"))
+    mk = oidv + "|" + pd.Series(dk, index=sub.index).astype(str)
+    flat_day = {f"{a}|{b}": v for (a, b), v in day_map.items()}
+    rday = mk.map(flat_day).fillna("")
+    roid = oidv.map(oid_map).fillna("")
+    rec = rday.where(rday.astype(str).str.len() > 0, roid)
+    rec = rec.astype(str).str.strip()
+    good = rec.map(looks_like_seller_listing_sku) & rec.str.len().gt(0)
+    if good.any():
+        out.loc[good.index[good], "Sku"] = rec.loc[good]
+    return out
 
 
 def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = None) -> pd.DataFrame:
