@@ -21,6 +21,31 @@ def clean_sku(sku) -> str:
     return str(sku).strip().replace('"""', "").replace("SKU:", "").strip().upper()
 
 
+def normalize_id_token_for_mapping(value) -> str:
+    """
+    Normalise marketplace / Excel tokens before map lookup (YRN, Flipkart SKU ID).
+    Handles '47061570.0' and scientific notation strings without changing alphabetic SKUs.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    t = str(value).strip()
+    if not t or t.lower() in ("nan", "none"):
+        return t
+    try:
+        if re.fullmatch(r"\d+\.0+", t):
+            return str(int(float(t)))
+    except ValueError:
+        pass
+    try:
+        if re.match(r"^\d+(\.\d+)?[eE][+\-]?\d+$", t):
+            f = float(t)
+            if np.isfinite(f) and f == int(f) and abs(f) < 1e16:
+                return str(int(f))
+    except ValueError:
+        pass
+    return t
+
+
 # Phrases from return / credit / adjustment columns that are often mis-read as SKUs.
 _NON_SKU_NOTE_PHRASE = re.compile(
     r"SIZE\s*CHANGE|BAAKI|SE\s+ADJUST|\bADJUST\b|\bEXCHANGE\b|REASON\s+FOR|"
@@ -79,6 +104,43 @@ def canonical_pl_sku_key(sku: str) -> str:
     return _PL_YK.sub(r"\1\2", c)
 
 
+def _listing_hyphen_and_pla_variants(cleaned_upper: str) -> List[str]:
+    """
+    Extra shapes seen across marketplaces for the same listing:
+    - Hyphen between numeric style id and YK block: 165-YK251MUSTRAD ↔ 165YK251MUSTRAD
+    - Stray hyphen after Y: 165Y-K251… → 165YK251…
+    - Amazon-style PLA… where YK was split: 165PLAK251… → 165PLYK251… → (PL strip) 165YK251…
+    """
+    out: List[str] = []
+    if not cleaned_upper:
+        return out
+    cu = cleaned_upper
+    m = re.match(r"^(\d+)-(YK[A-Z0-9\-]+)$", cu, re.I)
+    if m:
+        g2 = m.group(2).upper()
+        glued = f"{m.group(1)}{g2}"
+        if glued != cu:
+            out.append(glued)
+    m = re.match(r"^(\d+)(YK[A-Z0-9\-]+)$", cu, re.I)
+    if m:
+        g2 = m.group(2).upper()
+        split = f"{m.group(1)}-{g2}"
+        if split != cu:
+            out.append(split)
+    if re.match(r"^\d+Y-K[0-9A-Z]", cu, re.I):
+        alt = re.sub(r"^(\d+)Y-K", r"\1YK", cu, count=1, flags=re.I).upper()
+        if alt != cu:
+            out.append(alt)
+    m = re.match(r"^(\d+)PLA(YK[A-Z0-9\-]+)$", cu, re.I)
+    if m:
+        out.append(f"{m.group(1)}PL{m.group(2).upper()}")
+    #165PLAK251… → 165PLYK251… (listing typo / panel quirk)
+    m = re.match(r"^(\d+)PLAK(\d+[A-Z0-9\-]*)$", cu, re.I)
+    if m:
+        out.append(f"{m.group(1)}PLYK{m.group(2).upper()}")
+    return out
+
+
 def _glued_myntra_size_hyphen_variants(s: str) -> List[str]:
     """
     PPMP sometimes omits hyphens around size: 1061YKBLUE4XLBLUE → 1061YKBLUE-4XL-BLUE.
@@ -125,6 +187,12 @@ def normalized_sku_forms_for_lookup(value) -> List[str]:
     dot_hy = _DOT_BEFORE_HYPHEN.sub("", hy)
     if dot_hy not in bases:
         bases.append(dot_hy)
+    i = 0
+    while i < len(bases):
+        for v in _listing_hyphen_and_pla_variants(bases[i]):
+            if v not in bases:
+                bases.append(v)
+        i += 1
     seen: Set[str] = set()
     out: List[str] = []
     for b in bases:
@@ -164,10 +232,12 @@ def integer_token_variants(s: str) -> Set[str]:
 def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
     if pd.isna(seller_sku):
         return seller_sku
-    c = clean_sku(seller_sku)
+    raw = str(seller_sku).strip()
+    root = normalize_id_token_for_mapping(raw) or raw
+    c = clean_sku(root)
     if not c:
         return c
-    for form in normalized_sku_forms_for_lookup(seller_sku):
+    for form in normalized_sku_forms_for_lookup(root):
         for tok in integer_token_variants(form):
             if tok in mapping:
                 return mapping[tok]
@@ -176,7 +246,7 @@ def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
                 return mapping[pl]
     # Excel / CSV: style ids as 1.02E+08 — normalize to integer string for map keys
     try:
-        f = float(str(seller_sku).strip().replace(",", ""))
+        f = float(str(root).replace(",", ""))
         if np.isfinite(f) and f == int(f) and abs(f) < 1e16:
             ik = str(int(f))
             for cand in (ik, canonical_pl_sku_key(ik)):

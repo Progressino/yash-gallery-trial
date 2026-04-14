@@ -5,12 +5,75 @@ import io
 import re
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .helpers import map_to_oms_sku, clean_sku
+
+_FK_SKU_PLACEHOLDER_RE = re.compile(r"^[\s\-\u2014\u2013\.]*$", re.U)
+
+
+def _fk_is_sku_placeholder(val) -> bool:
+    """Flipkart reports often use '-' / blank in SKU when the real id lives in SKU ID / FSN."""
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return True
+    s = str(val).strip().upper()
+    if not s or s in ("NAN", "NONE", "N/A", "NA", "#N/A", "NULL", "UNDEFINED", "SKU"):
+        return True
+    return bool(_FK_SKU_PLACEHOLDER_RE.fullmatch(s))
+
+
+def _fk_col_ci(df: pd.DataFrame, *candidates: str) -> Optional[str]:
+    low = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in low:
+            return low[cand.lower()]
+    return None
+
+
+def _fk_series_optional_col(df: pd.DataFrame, *header_names: str) -> pd.Series:
+    """Column as string series, or empty strings when the report omits that field."""
+    c = _fk_col_ci(df, *header_names)
+    if c:
+        return df[c].fillna("").astype(str)
+    return pd.Series("", index=df.index, dtype=str)
+
+
+def _fk_coalesced_listing_sku_series(xl: pd.DataFrame) -> pd.Series:
+    """First non-placeholder token per row across common Flipkart Sales Report columns."""
+    groups = (
+        ("SKU", "Sku"),
+        ("Seller SKU", "Seller Sku"),
+        ("SKU ID", "SKU Id", "Sku Id", "sku id"),
+        ("FSN", "fsn"),
+        ("Listing ID", "Listing Id", "listing id"),
+    )
+    cols: List[str] = []
+    for names in groups:
+        c = None
+        for nm in names:
+            c = _fk_col_ci(xl, nm)
+            if c:
+                break
+        if c and c not in cols:
+            cols.append(c)
+    n = len(xl)
+    if not cols:
+        return pd.Series([""] * n, index=xl.index, dtype=str)
+    out = xl[cols[0]].astype(str).str.strip()
+    for c in cols[1:]:
+        alt = xl[c].astype(str).str.strip()
+        bad = out.map(_fk_is_sku_placeholder)
+        out = out.where(~bad, alt)
+    return out
+
+
+def _fk_map_listing_to_oms(raw, mapping: Dict[str, str]) -> str:
+    if _fk_is_sku_placeholder(raw):
+        return ""
+    return map_to_oms_sku(clean_sku(str(raw)), mapping)
 
 
 def _fk_month_from_filename(fname: str):
@@ -58,13 +121,18 @@ def _parse_flipkart_xlsx(
             xl["TxnType"]        = xl["Event Sub Type"].apply(_fk_txn)
             xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
             xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
-            xl["OMS_SKU"]        = xl["SKU"].apply(clean_sku).apply(lambda x: map_to_oms_sku(x, mapping))
+            _eff_sku = _fk_coalesced_listing_sku_series(xl)
+            xl["OMS_SKU"]        = _eff_sku.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
             state_col = next((c for c in xl.columns if "Delivery State" in c), None)
-            xl["State"] = xl[state_col].fillna("").astype(str).str.upper().str.strip() if state_col else ""
+            xl["State"] = (
+                xl[state_col].fillna("").astype(str).str.upper().str.strip()
+                if state_col
+                else pd.Series("", index=xl.index, dtype=str)
+            )
 
-            xl["OrderId"]        = xl.get("Order ID",         xl.get("Order Id",         "")).astype(str)
-            xl["BuyerInvoiceId"] = xl.get("Buyer Invoice ID", xl.get("Buyer Invoice Id", "")).astype(str)
+            xl["OrderId"] = _fk_series_optional_col(xl, "Order ID", "Order Id")
+            xl["BuyerInvoiceId"] = _fk_series_optional_col(xl, "Buyer Invoice ID", "Buyer Invoice Id")
 
             out = xl[["Date", "Month", "TxnType", "Quantity", "Invoice_Amount",
                       "OMS_SKU", "State", "OrderId", "BuyerInvoiceId"]].copy()
@@ -98,9 +166,15 @@ def _parse_flipkart_xlsx(
                     "Final Sale Amount", "Return Amount"]:
             xl[col] = pd.to_numeric(xl.get(col, 0), errors="coerce").fillna(0)
 
-        xl["OMS_SKU"] = xl["SKU ID"].apply(
-            lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
-        )
+        sku_id_col = "SKU ID"
+        _sid = xl[sku_id_col].astype(str).str.strip()
+        for nm in ("Seller SKU", "Seller Sku", "SKU", "FSN", "fsn"):
+            c = _fk_col_ci(xl, nm)
+            if c:
+                alt = xl[c].astype(str).str.strip()
+                bad = _sid.map(_fk_is_sku_placeholder)
+                _sid = _sid.where(~bad, alt)
+        xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
         # Synthetic OrderId: ProductId + SKU + date string (no real order ID available)
         product_id_col = "Product Id" if "Product Id" in xl.columns else ""
@@ -223,11 +297,18 @@ def _parse_flipkart_orders_sheet(
         if df.empty:
             return pd.DataFrame()
 
-        # SKU
+        # SKU — Seller SKU first; fall back to SKU ID / FSN when cell is '-' or blank
         sku_col = next((c for c in df.columns if "seller sku" in c.lower()), None)
         if not sku_col:
             return pd.DataFrame()
-        df["_OMS_SKU"] = df[sku_col].apply(lambda x: map_to_oms_sku(clean_sku(str(x)), mapping))
+        eff = df[sku_col].astype(str).str.strip()
+        for nm in ("SKU ID", "SKU Id", "Sku Id", "FSN", "fsn"):
+            alt_c = _fk_col_ci(df, nm)
+            if alt_c:
+                alt = df[alt_c].astype(str).str.strip()
+                bad = eff.map(_fk_is_sku_placeholder)
+                eff = eff.where(~bad, alt)
+        df["_OMS_SKU"] = eff.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
         # Quantity
         qty_col = next((c for c in df.columns if c.strip().lower() == "quantity"), None)
@@ -304,10 +385,15 @@ def _parse_flipkart_earn_more(
                     "Final Sale Amount", "Return Amount"]:
             xl[col] = pd.to_numeric(xl.get(col, 0), errors="coerce").fillna(0)
 
-        # SKU mapping
-        xl["OMS_SKU"] = xl["SKU ID"].apply(
-            lambda x: map_to_oms_sku(clean_sku(str(x)), mapping)
-        )
+        # SKU mapping (coalesce when SKU ID is a placeholder)
+        _sid = xl["SKU ID"].astype(str).str.strip()
+        for nm in ("Seller SKU", "Seller Sku", "SKU", "FSN", "fsn"):
+            c = _fk_col_ci(xl, nm)
+            if c:
+                alt = xl[c].astype(str).str.strip()
+                bad = _sid.map(_fk_is_sku_placeholder)
+                _sid = _sid.where(~bad, alt)
+        xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
         rows: List[pd.DataFrame] = []
 

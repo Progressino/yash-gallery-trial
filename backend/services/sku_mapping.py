@@ -269,7 +269,6 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=_sheet_name)
         if df.empty or len(df.columns) < 2:
             continue
-        embed_myntra_numerics = _sheet_is_myntra_tab(_sheet_name)
 
         # Excel merged cells often leave OMS blank on continuation rows — forward-fill OMS columns only.
         _oms_like = [c for c in df.columns if _is_oms_column(str(c))]
@@ -282,6 +281,9 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
             None,
         )
         yrn_col = next((c for c in df.columns if "yrn" in str(c).lower()), None)
+
+        # Numeric tails from seller / extra columns (PPMP YRN-style ids) — Myntra tab or any sheet with YRN column
+        embed_myntra_numerics = _sheet_is_myntra_tab(_sheet_name) or (yrn_col is not None)
 
         seller_col, oms_col = _pick_seller_oms_columns(df, _sheet_name)
 

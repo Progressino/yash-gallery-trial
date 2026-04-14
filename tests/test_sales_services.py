@@ -151,6 +151,23 @@ def test_mustrad_maps_to_mustard_master():
     assert map_to_oms_sku("165YK-251MUSTRAD-3XL", m) == "OMS-T"
 
 
+def test_map_hyphen_between_style_id_and_yk_block():
+    """Unified / channel exports sometimes insert 165-YK251… vs 165YK251…"""
+    m = {"165YK251MUSTRAD": "OMS-165"}
+    assert map_to_oms_sku("165-YK251MUSTRAD", m) == "OMS-165"
+    assert map_to_oms_sku("165YK251MUSTRAD", m) == "OMS-165"
+
+
+def test_map_y_hyphen_k_digit_listing_typo():
+    m = {"165YK251MUSTRAD": "OMS-165"}
+    assert map_to_oms_sku("165Y-K251MUSTRAD", m) == "OMS-165"
+
+
+def test_map_plak_to_plyk_then_pl_strip():
+    m = {"165YK251MUSTRAD": "OMS-165"}
+    assert map_to_oms_sku("165PLAK251MUSTRAD", m) == "OMS-165"
+
+
 def test_bare_digits_match_embedded_yrn_key():
     m = {"YARYKASS100506552": "OMS-YRN"}
     assert map_to_oms_sku("100506552", m) == "OMS-YRN"
@@ -370,3 +387,34 @@ def test_get_platform_summary_amazon_refunds():
     assert amz["total_units"] == 100
     assert amz["total_returns"] == 5
     assert amz["return_rate"] == 5.0
+
+
+def test_map_to_oms_normalizes_yrn_float_string():
+    m = {"47061570": "OMS-YRN"}
+    assert map_to_oms_sku("47061570.0", m) == "OMS-YRN"
+    assert map_to_oms_sku("4.706157e+07", m) == "OMS-YRN"
+
+
+def test_flipkart_sales_report_maps_sku_id_when_sku_column_is_dash():
+    from io import BytesIO
+
+    from backend.services.flipkart import _parse_flipkart_xlsx
+
+    m = {"FKLISTING99": "OMS-FK"}
+    df = pd.DataFrame(
+        {
+            "Buyer Invoice Date": [pd.Timestamp("2025-01-15")],
+            "Event Sub Type": ["Sale"],
+            "Item Quantity": [1],
+            "Buyer Invoice Amount": [100.0],
+            "SKU": ["-"],
+            "SKU ID": ["FKLISTING99"],
+            "Order ID": ["OD334028117901509100"],
+        }
+    )
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name="Sales Report", index=False)
+    out = _parse_flipkart_xlsx(buf.getvalue(), "fk-Jan-2025.xlsx", m)
+    assert not out.empty
+    assert out["OMS_SKU"].iloc[0] == "OMS-FK"

@@ -14,6 +14,7 @@ from ..services.helpers import (
     is_likely_non_sku_notes_value,
     map_to_oms_sku,
     mapping_lookup_sets,
+    normalize_id_token_for_mapping,
     sku_recognized_in_master,
 )
 from ..services.meesho import apply_meesho_listing_sku_recovery_for_export
@@ -294,7 +295,7 @@ def sales_export(
     def _export_oms_sku_cell(v) -> str:
         if pd.isna(v):
             return ""
-        s = str(v).strip()
+        s = normalize_id_token_for_mapping(str(v).strip())
         if s.lower() in ("", "nan", "none"):
             return ""
         if is_likely_non_sku_notes_value(s):
