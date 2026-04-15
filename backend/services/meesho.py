@@ -433,6 +433,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     out["LineKey"] = lk
     oid0 = clean_line_id_series(out["OrderId"])
     out["OrderId"] = oid0.where(oid0.ne(""), lk)
+    out["MeeshoSubOrder"] = clean_line_id_series(out["OrderId"])
     return out.dropna(subset=["Date"])
 
 
@@ -596,6 +597,7 @@ def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str
             "LineKey": lk,
             "RawStatus": df[txn_c].fillna("").astype(str).str.strip(),
             "SKU": _clean_meesho_str_series(sku_series),
+            "MeeshoSubOrder": oid_raw.mask(oid_raw.eq(""), clean_line_id_series(lk)),
         }
     )
     out["OMS_SKU"] = out["SKU"]
@@ -642,11 +644,10 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
                        or c == "status"), None)
     def _txn(s):
         s = str(s).lower().strip()
-        # Only customer returns / RTO count as Refund. READY_TO_SHIP, HOLD, CANCELLED, etc. still
-        # carry order-date quantity — seller DSR for a calendar day matches Meesho "orders on date"
-        # exports (gross line qty), not only SHIPPED rows.
         if "return" in s or "rto" in s:
             return "Refund"
+        if "cancel" in s:
+            return "Cancel"
         return "Shipment"
     df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"
 
@@ -679,6 +680,12 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     )
     oid_out = line_keys.where(line_keys.ne(""), oid_fb)
     _raw_st = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
+    _sub_ord = (
+        clean_line_id_series(df[order_col])
+        if order_col
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    _sub_ord = _sub_ord.where(_sub_ord.ne(""), clean_line_id_series(oid_out))
 
     out = pd.DataFrame({
         "Date":           df["_Date"],
@@ -690,6 +697,7 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
         "LineKey":        line_keys,
         "RawStatus":      _raw_st,
         "SKU":            sku_series,
+        "MeeshoSubOrder": _sub_ord,
     })
     out["SKU"] = _clean_meesho_str_series(out["SKU"])
     out["OMS_SKU"] = out["SKU"]   # alias expected by platform_metrics / PO engine

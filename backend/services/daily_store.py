@@ -270,6 +270,64 @@ def _dedup_meesho_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
 
 
+def _dedup_meesho_suborder_cross_source(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    Supplier TCS uses ``sub_order_num`` as the id; daily CSV often uses ``packet id`` as
+    ``LineKey`` while ``MeeshoSubOrder`` holds the sub-order. Same
+    (day, SKU, txn, qty, sub-order) must collapse to one row: drop synthetic LineKey
+    twins, then exact duplicates from re-uploads.
+    """
+    if d.empty or not all(
+        c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey", "OrderId")
+    ):
+        return d
+    work = d.copy()
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_q"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+    work["_skuN"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    if "MeeshoSubOrder" in work.columns:
+        work["_sub"] = clean_line_id_series(work["MeeshoSubOrder"])
+    else:
+        work["_sub"] = clean_line_id_series(work["OrderId"])
+    lk = work["LineKey"].fillna("").astype(str).str.strip()
+    syn_m = lk.str.match(_MEE_SYN_LINEKEY, na=False)
+
+    drop_idx: List[Any] = []
+    sub_ok = work["_sub"].ne("") & ~work["_sub"].str.lower().isin(["nan", "none"])
+    if sub_ok.any():
+        for _, g in work.loc[sub_ok].groupby(["_day", "_skuN", "TxnType", "_q", "_sub"], sort=False):
+            idx = g.index.tolist()
+            if len(idx) <= 1:
+                continue
+            sm = syn_m.reindex(idx)
+            if sm.any() and (~sm).any():
+                drop_idx.extend([i for i in idx if bool(sm.loc[i])])
+
+    out = d.drop(index=drop_idx, errors="ignore").reset_index(drop=True) if drop_idx else d
+    if out.empty:
+        return out
+
+    w2 = out.copy()
+    w2["_day"] = pd.to_datetime(w2["Date"], errors="coerce").dt.normalize()
+    w2["_q"] = pd.to_numeric(w2["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+    w2["_skuN"] = w2["OMS_SKU"].astype(str).str.strip().str.upper()
+    if "MeeshoSubOrder" in w2.columns:
+        w2["_sub"] = clean_line_id_series(w2["MeeshoSubOrder"])
+    else:
+        w2["_sub"] = clean_line_id_series(w2["OrderId"])
+    ok = w2["_sub"].ne("") & ~w2["_sub"].str.lower().isin(["nan", "none"])
+    if not ok.any():
+        return out
+    cols_tmp = ["_day", "_q", "_skuN", "_sub"]
+    part = (
+        w2.loc[ok]
+        .drop_duplicates(subset=["_day", "_skuN", "TxnType", "_q", "_sub"], keep="last")
+        .drop(columns=cols_tmp, errors="ignore")
+    )
+    rest = w2.loc[~ok].drop(columns=cols_tmp, errors="ignore")
+    return pd.concat([rest, part], ignore_index=True)
+
+
 def _flipkart_synthetic_line_mask(lk: pd.Series) -> pd.Series:
     s = lk.fillna("").astype(str).str.strip()
     m_exp = s.str.match(_FK_ORDER_EXPORT_LINEKEY, na=False)
@@ -280,8 +338,9 @@ def _flipkart_synthetic_line_mask(lk: pd.Series) -> pd.Series:
 def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     """
     Flipkart Sales Report rows carry real Order IDs; Order Export and earn_more_report use
-    synthetic LineKeys. Same (day, SKU, txn, qty, status, amount) can appear in multiple
-    files — drop a lone synthetic twin when a real row exists; see Meesho overlay notes.
+    synthetic LineKeys.     Same (day, SKU, txn, qty, status, amount) can appear in multiple
+    files — drop **all** synthetic LineKeys when any real marketplace row exists in that
+    bucket (refined by status + amount to limit cross-order collisions).
     """
     if d.empty or not all(
         c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey")
@@ -313,8 +372,7 @@ def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
         sm = syn_m.loc[idx]
         rm = real_m.loc[idx]
         if rm.any() and sm.any():
-            if int(sm.sum()) == 1:
-                drop_idx.extend([i for i in idx if bool(sm.loc[i])])
+            drop_idx.extend([i for i in idx if bool(sm.loc[i])])
             continue
         if sm.all():
             pri_series = pd.Series(2, index=idx, dtype="int32")
@@ -463,6 +521,7 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                 out = _dedup_myntra_parent_order_shadow(out)
             if platform == "meesho":
                 out = _dedup_meesho_cross_source_overlay(out)
+                out = _dedup_meesho_suborder_cross_source(out)
             elif platform == "flipkart":
                 out = _dedup_flipkart_cross_source_overlay(out)
             return out

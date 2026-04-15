@@ -327,8 +327,8 @@ def test_meesho_order_export_xlsx_coalesces_sku1():
     assert out["SKU"].iloc[0] == "1592YKBLUE-5XL"
 
 
-def test_meesho_csv_counts_ready_to_ship_and_cancelled_as_shipment_for_dsr():
-    """Order-date DSR matches Meesho exports: only returns/RTO are Refund."""
+def test_meesho_csv_txn_types_ship_refund_cancel():
+    """Returns/RTO are Refund; cancelled lines are Cancel (excluded from shipped KPI)."""
     from backend.services.meesho import parse_meesho_csv
 
     csv = (
@@ -342,8 +342,10 @@ def test_meesho_csv_counts_ready_to_ship_and_cancelled_as_shipment_for_dsr():
     assert msg == "OK"
     ship = out[out["TxnType"] == "Shipment"]["Quantity"].sum()
     ref = out[out["TxnType"] == "Refund"]["Quantity"].sum()
-    assert float(ship) == 3.0
+    can = out[out["TxnType"] == "Cancel"]["Quantity"].sum()
+    assert float(ship) == 2.0
     assert float(ref) == 1.0
+    assert float(can) == 1.0
 
 
 def test_myntra_csv_maps_status_f_to_shipment():
@@ -423,6 +425,7 @@ def test_meesho_overlay_drops_synthetic_when_suborder_twin_same_fingerprint():
             "Quantity": [2.0, 2.0],
             "LineKey": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
             "OrderId": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
+            "MeeshoSubOrder": ["SUBORDER99", "SUBORDER99"],
         }
     )
     out = _dedup_meesho_cross_source_overlay(d)
@@ -500,10 +503,34 @@ def test_merge_platform_data_runs_dedup_on_first_upload():
             "Quantity": [2.0, 2.0],
             "LineKey": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
             "OrderId": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
+            "MeeshoSubOrder": ["SUBORDER99", "SUBORDER99"],
         }
     )
     out = merge_platform_data(pd.DataFrame(), d, "meesho")
     assert len(out) == 1
+
+
+def test_meesho_suborder_collapses_tcs_style_and_packet_linekey():
+    """Same sub-order: TCS synthetic LineKey vs packet LineKey → one row."""
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10", "2026-04-10"]),
+            "OMS_SKU": ["S1", "S1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "LineKey": ["MEETCS|20260410|S1|Shipment|1|99", "PKT888"],
+            "OrderId": ["MEETCS|20260410|S1|Shipment|1|99", "PKT888"],
+            "MeeshoSubOrder": ["SUB777", "SUB777"],
+            "RawStatus": ["Shipment", "DELIVERED"],
+            "Invoice_Amount": [99.0, 99.0],
+        }
+    )
+    out = merge_platform_data(pd.DataFrame(), d, "meesho")
+    assert len(out) == 1
+    assert out["LineKey"].iloc[0] == "PKT888"
 
 
 def test_myntra_parent_order_shadow_drops_store_id_duplicate():

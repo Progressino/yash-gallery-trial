@@ -17,7 +17,7 @@ from datetime import date, timedelta
 import pandas as pd
 import requests
 
-from .helpers import map_to_oms_sku
+from .helpers import clean_line_id_series, map_to_oms_sku
 from .meesho import _norm_meesho_size
 
 log = logging.getLogger("erp.meesho_api")
@@ -149,6 +149,7 @@ def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
         rev      = float(o.get("totalInvoiceValue") or o.get("meeshoPrice") or o.get("supplierDiscountedPrice") or 0)
         state    = str(o.get("endCustomerState") or o.get("end_customer_state") or o.get("state") or "").upper()
         order_id = str(o.get("subOrderNumber") or o.get("sub_order_num") or o.get("orderId") or "")
+        sub_key  = str(clean_line_id_series(pd.Series([order_id])).iloc[0])
         fy       = o.get("financialYear")
         mon_num  = o.get("monthNumber")
         if fy and mon_num:
@@ -164,6 +165,7 @@ def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
             "OrderId":        order_id,
             "SKU":            sku_raw,
             "OMS_SKU":        oms_sku,
+            "MeeshoSubOrder": sub_key,
             "_month_override": month_str,
         })
     if not rows:
