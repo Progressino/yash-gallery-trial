@@ -210,6 +210,11 @@ def _dedup_meesho_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     The same Meesho shipment often appears twice: supplier TCS (MEETCS|…) vs ERP export
     (MEEEXP|…) vs daily CSV (MEECSV|…) with different LineKeys but the same day / SKU /
     txn / qty. Prefer real sub-order LineKeys; among synthetics prefer TCS > export > CSV.
+
+    Fingerprint includes RawStatus + rounded invoice amount so unrelated orders sharing
+    SKU/qty/day are not merged. When mixing real + synthetic, only drop a **single**
+    synthetic twin (classic duplicate row); if multiple synthetics remain, do not drop —
+    avoids under-counting distinct orders that shared a coarse bucket.
     """
     if d.empty or not all(
         c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey")
@@ -219,19 +224,30 @@ def _dedup_meesho_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work["_q"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
     work["_skuN"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    if "RawStatus" in work.columns:
+        work["_rs"] = work["RawStatus"].astype(str).str.strip()
+    else:
+        work["_rs"] = ""
+    if "Invoice_Amount" in work.columns:
+        work["_amt"] = (
+            pd.to_numeric(work["Invoice_Amount"], errors="coerce").fillna(0).round().astype("int64")
+        )
+    else:
+        work["_amt"] = 0
     lk = work["LineKey"].fillna("").astype(str).str.strip()
     syn_m = _meesho_synthetic_line_mask(lk)
     real_m = (~syn_m) & lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
 
     drop_idx: List[Any] = []
-    for _, g in work.groupby(["_day", "_skuN", "TxnType", "_q"], sort=False):
+    for _, g in work.groupby(["_day", "_skuN", "TxnType", "_q", "_rs", "_amt"], sort=False):
         idx = g.index.tolist()
         if len(idx) <= 1:
             continue
         sm = syn_m.loc[idx]
         rm = real_m.loc[idx]
         if rm.any() and sm.any():
-            drop_idx.extend([i for i in idx if bool(sm.loc[i])])
+            if int(sm.sum()) == 1:
+                drop_idx.extend([i for i in idx if bool(sm.loc[i])])
             continue
         if sm.all():
             lu = lk.loc[idx].str.upper()
@@ -264,8 +280,8 @@ def _flipkart_synthetic_line_mask(lk: pd.Series) -> pd.Series:
 def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     """
     Flipkart Sales Report rows carry real Order IDs; Order Export and earn_more_report use
-    synthetic LineKeys. Same (day, SKU, txn, qty) can appear in multiple files — drop
-    synthetics when a real order LineKey exists; among synthetics prefer Order Export over FKEM.
+    synthetic LineKeys. Same (day, SKU, txn, qty, status, amount) can appear in multiple
+    files — drop a lone synthetic twin when a real row exists; see Meesho overlay notes.
     """
     if d.empty or not all(
         c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey")
@@ -275,19 +291,30 @@ def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work["_q"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
     work["_skuN"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    if "RawStatus" in work.columns:
+        work["_rs"] = work["RawStatus"].astype(str).str.strip()
+    else:
+        work["_rs"] = ""
+    if "Invoice_Amount" in work.columns:
+        work["_amt"] = (
+            pd.to_numeric(work["Invoice_Amount"], errors="coerce").fillna(0).round().astype("int64")
+        )
+    else:
+        work["_amt"] = 0
     lk = work["LineKey"].fillna("").astype(str).str.strip()
     syn_m = _flipkart_synthetic_line_mask(lk)
     real_m = (~syn_m) & lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
 
     drop_idx: List[Any] = []
-    for _, g in work.groupby(["_day", "_skuN", "TxnType", "_q"], sort=False):
+    for _, g in work.groupby(["_day", "_skuN", "TxnType", "_q", "_rs", "_amt"], sort=False):
         idx = g.index.tolist()
         if len(idx) <= 1:
             continue
         sm = syn_m.loc[idx]
         rm = real_m.loc[idx]
         if rm.any() and sm.any():
-            drop_idx.extend([i for i in idx if bool(sm.loc[i])])
+            if int(sm.sum()) == 1:
+                drop_idx.extend([i for i in idx if bool(sm.loc[i])])
             continue
         if sm.all():
             pri_series = pd.Series(2, index=idx, dtype="int32")
@@ -313,7 +340,9 @@ def _dedup_myntra_parent_order_shadow(d: pd.DataFrame) -> pd.DataFrame:
     """
     PPMP / seller CSVs sometimes repeat the same line once with ``order line id`` and
     again with only ``store order id`` as the LineKey. Same calendar fingerprint
-    (day, SKU, txn, qty) — drop the parent-only duplicate when a line-level row exists.
+    (day, SKU, txn, qty) — drop the parent-only row **only** when a line-level row in
+    the same group shares that ``ParentOrderId`` (same marketplace order). Otherwise
+    unrelated orders that happen to share SKU/qty/day would incorrectly lose rows.
     """
     if d.empty or "ParentOrderId" not in d.columns:
         return d
@@ -339,11 +368,14 @@ def _dedup_myntra_parent_order_shadow(d: pd.DataFrame) -> pd.DataFrame:
             continue
         line_rows = [
             i for i in idx
-            if lk.loc[i] and (not par.loc[i] or lk.loc[i] != par.loc[i])
+            if lk.loc[i] and par.loc[i] and lk.loc[i] != par.loc[i]
         ]
         if not line_rows:
             continue
-        drop_idx.extend(parent_rows)
+        parents_with_line_child = {par.loc[j] for j in line_rows if par.loc[j]}
+        for i in parent_rows:
+            if lk.loc[i] in parents_with_line_child:
+                drop_idx.append(i)
 
     if not drop_idx:
         return d

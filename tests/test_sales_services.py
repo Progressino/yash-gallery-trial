@@ -527,6 +527,27 @@ def test_myntra_parent_order_shadow_drops_store_id_duplicate():
     assert out["LineKey"].iloc[0] == "LINE99"
 
 
+def test_myntra_parent_shadow_keeps_unrelated_orders_same_fingerprint():
+    """Two different store orders, same SKU/qty/day — must not drop the parent-only row."""
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-03-31", "2026-03-31"]),
+            "OMS_SKU": ["S1", "S1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "LineKey": ["LINE_A", "PARENT_B"],
+            "OrderId": ["LINE_A", "PARENT_B"],
+            "ParentOrderId": ["PARENT_A", "PARENT_B"],
+            "RawStatus": ["WP", "WP"],
+        }
+    )
+    out = merge_platform_data(pd.DataFrame(), d, "myntra")
+    assert len(out) == 2
+
+
 def test_flipkart_strong_dedup_keeps_two_skus_same_order_id():
     from backend.services.daily_store import merge_platform_data
     import pandas as pd
