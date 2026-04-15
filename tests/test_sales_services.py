@@ -406,6 +406,40 @@ def test_get_platform_summary_amazon_refunds():
     assert amz["return_rate"] == 5.0
 
 
+def test_platform_summary_with_sales_df_matches_export_window():
+    """Dashboard cards must use unified sales (same as CSV export), not raw platform frames."""
+    mtr = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-04-10", "2025-04-11"]),
+            "SKU": ["A", "B"],
+            "Transaction_Type": ["Shipment", "Shipment"],
+            "Quantity": [3.0, 7.0],
+            "Order_Id": ["O1", "O2"],
+            "Invoice_Number": ["", ""],
+        }
+    )
+    sales = build_sales_df(
+        mtr_df=mtr,
+        myntra_df=pd.DataFrame(),
+        meesho_df=pd.DataFrame(),
+        flipkart_df=pd.DataFrame(),
+        sku_mapping={},
+    )
+    plat = get_platform_summary(
+        mtr, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None,
+        start_date="2025-04-01",
+        end_date="2025-04-30",
+        sales_df=sales,
+    )
+    amz = next(p for p in plat if p["platform"] == "Amazon")
+    exp = filter_sales_for_export(
+        sales, start_date="2025-04-01", end_date="2025-04-30", sources=["Amazon"]
+    )
+    exp_ship = exp[exp["Transaction Type"] == "Shipment"]["Quantity"].sum()
+    assert amz["total_units"] == int(exp_ship)
+    assert amz["total_units"] == 10
+
+
 def test_map_to_oms_normalizes_yrn_float_string():
     m = {"47061570": "OMS-YRN"}
     assert map_to_oms_sku("47061570.0", m) == "OMS-YRN"

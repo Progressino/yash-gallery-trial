@@ -1106,6 +1106,7 @@ def platform_summary(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,
         start_date=start_date, end_date=end_date,
+        sales_df=sess.sales_df,
     )
 
 

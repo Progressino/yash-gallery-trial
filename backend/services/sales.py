@@ -525,6 +525,137 @@ def _compute_platform_metrics(
         return stub
 
 
+def _platform_summary_from_unified_sales(
+    sales_df: pd.DataFrame,
+    platform_name: str,
+    raw_df: pd.DataFrame,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> dict:
+    """
+    Platform card KPIs from unified ``sales_df`` (deduped, mapped) so totals match
+    CSV export and top-of-dashboard KPIs. ``raw_df`` only gates ``loaded``.
+    """
+    stub: dict = {
+        "platform": platform_name,
+        "loaded": False,
+        "total_units": 0,
+        "total_returns": 0,
+        "return_rate": 0.0,
+        "top_sku": "",
+        "trend_direction": "flat",
+        "monthly": [],
+        "by_state": [],
+    }
+    loaded = not raw_df.empty
+    if sales_df.empty or "Source" not in sales_df.columns:
+        stub["loaded"] = loaded
+        return stub
+
+    s = sales_df[sales_df["Source"].astype(str).str.strip() == platform_name].copy()
+    s["TxnDate"] = pd.to_datetime(s["TxnDate"], errors="coerce")
+    s = s.dropna(subset=["TxnDate"])
+    if hasattr(s["TxnDate"].dt, "tz") and s["TxnDate"].dt.tz is not None:
+        s["TxnDate"] = s["TxnDate"].dt.tz_convert(None)
+
+    if start_date:
+        s = s[s["TxnDate"] >= pd.Timestamp(start_date)]
+    if end_date:
+        s = s[s["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+
+    if s.empty:
+        stub["loaded"] = loaded
+        return stub
+
+    txn = s["Transaction Type"].astype(str).str.strip()
+    qty = pd.to_numeric(s["Quantity"], errors="coerce").fillna(0)
+    shipped_mask = txn == "Shipment"
+    refund_mask = txn == "Refund"
+
+    total_units = int(qty[shipped_mask].sum())
+    total_returns = int(qty[refund_mask].sum())
+    return_rate = round(total_returns / total_units * 100, 1) if total_units > 0 else 0.0
+
+    top_sku = ""
+    if shipped_mask.any() and "Sku" in s.columns:
+        _tg = s.loc[shipped_mask].copy()
+        _tg["_qty"] = qty[shipped_mask]
+        if not _tg.empty:
+            top_sku = str(_tg.groupby("Sku")["_qty"].sum().idxmax())
+
+    s["_Month"] = s["TxnDate"].dt.to_period("M").astype(str)
+    monthly_grp = (
+        s.assign(_q=qty)
+        .groupby(["_Month", "Transaction Type"])["_q"]
+        .sum()
+        .reset_index()
+        .pivot_table(index="_Month", columns="Transaction Type", values="_q", fill_value=0)
+        .reset_index()
+    )
+    monthly_grp.columns.name = None
+    monthly_grp = monthly_grp.rename(columns={"Shipment": "shipments", "Refund": "refunds"})
+    if "shipments" not in monthly_grp.columns:
+        monthly_grp["shipments"] = 0
+    if "refunds" not in monthly_grp.columns:
+        monthly_grp["refunds"] = 0
+    monthly_grp = monthly_grp.sort_values("_Month").tail(6)
+    monthly_grp = monthly_grp.rename(columns={"_Month": "month"})
+    keep_cols = [c for c in ["month", "shipments", "refunds"] if c in monthly_grp.columns]
+    monthly = monthly_grp[keep_cols].to_dict("records")
+
+    trend_direction = "flat"
+    ships = monthly_grp["shipments"].tolist() if "shipments" in monthly_grp.columns else []
+    if len(ships) >= 3:
+        last, three_ago = ships[-1], ships[-3]
+        if three_ago > 0:
+            change = (last - three_ago) / three_ago
+            if change > 0.10:
+                trend_direction = "up"
+            elif change < -0.10:
+                trend_direction = "down"
+
+    by_state: List[dict] = []
+    if "State" in s.columns:
+        st = (
+            s.loc[shipped_mask]
+            .assign(_qty=qty[shipped_mask])
+            .groupby("State")["_qty"]
+            .sum()
+            .reset_index()
+            .rename(columns={"State": "state", "_qty": "units"})
+            .sort_values("units", ascending=False)
+        )
+        st["units"] = st["units"].astype(int)
+        by_state = st.to_dict("records")
+    elif loaded and not raw_df.empty:
+        # Unified rows usually omit State; keep heatmap from raw upload (same date window).
+        kwargs = dict(start_date=start_date, end_date=end_date)
+        if platform_name == "Amazon":
+            mtr = raw_df.copy()
+            if not mtr.empty and "Date" in mtr.columns:
+                mtr["_Date"] = mtr["Date"]
+            raw_stub = _compute_platform_metrics(
+                mtr, platform_name, "SKU", "Transaction_Type", **kwargs
+            )
+        else:
+            raw_stub = _compute_platform_metrics(
+                raw_df, platform_name, "OMS_SKU", "TxnType", **kwargs
+            )
+        by_state = raw_stub.get("by_state") or []
+
+    return {
+        "platform": platform_name,
+        "loaded": loaded,
+        "total_units": total_units,
+        "total_returns": total_returns,
+        "return_rate": return_rate,
+        "top_sku": top_sku,
+        "trend_direction": trend_direction,
+        "monthly": monthly,
+        "by_state": by_state,
+    }
+
+
 def get_platform_summary(
     mtr_df: pd.DataFrame,
     myntra_df: pd.DataFrame,
@@ -533,24 +664,33 @@ def get_platform_summary(
     snapdeal_df: Optional[pd.DataFrame] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    sales_df: Optional[pd.DataFrame] = None,
 ) -> List[dict]:
     """Returns 5 platform summary dicts (always 5, even for unloaded platforms)."""
-    # MTR has Date col already; add it as _Date alias
+    _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
+
+    if sales_df is not None and not sales_df.empty:
+        return [
+            _platform_summary_from_unified_sales(sales_df, "Amazon", mtr_df, start_date, end_date),
+            _platform_summary_from_unified_sales(sales_df, "Myntra", myntra_df, start_date, end_date),
+            _platform_summary_from_unified_sales(sales_df, "Meesho", meesho_df, start_date, end_date),
+            _platform_summary_from_unified_sales(sales_df, "Flipkart", flipkart_df, start_date, end_date),
+            _platform_summary_from_unified_sales(sales_df, "Snapdeal", _snapdeal, start_date, end_date),
+        ]
+
+    # Legacy: raw platform frames only (differs from unified export when dedup/mapping changes rows)
     mtr = mtr_df.copy() if not mtr_df.empty else mtr_df
     if not mtr.empty and "Date" in mtr.columns:
         mtr["_Date"] = mtr["Date"]
 
-    _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
-
     kwargs = dict(start_date=start_date, end_date=end_date)
-    results = [
+    return [
         _compute_platform_metrics(mtr,        "Amazon",   "SKU",     "Transaction_Type", **kwargs),
         _compute_platform_metrics(myntra_df,   "Myntra",   "OMS_SKU", "TxnType",          **kwargs),
         _compute_platform_metrics(meesho_df,   "Meesho",   "OMS_SKU", "TxnType",          **kwargs),
         _compute_platform_metrics(flipkart_df, "Flipkart", "OMS_SKU", "TxnType",          **kwargs),
         _compute_platform_metrics(_snapdeal,   "Snapdeal", "OMS_SKU", "TxnType",          **kwargs),
     ]
-    return results
 
 
 def get_anomalies(
