@@ -411,6 +411,12 @@ def _parse_myntra_csv(
     )
     oid_out = line_keys.where(line_keys.ne(""), oid_fb)
 
+    parent_order = (
+        clean_line_id_series(df["store order id"])
+        if "store order id" in df.columns
+        else pd.Series("", index=df.index, dtype=str)
+    )
+
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "OMS_SKU":        df["_OMS_SKU"],
@@ -423,6 +429,7 @@ def _parse_myntra_csv(
         "Warehouse_Id":   df[wh_col].fillna("") if wh_col else "",
         "OrderId":        oid_out,
         "LineKey":        line_keys,
+        "ParentOrderId":  parent_order,
     })
     out["Month"]       = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
@@ -478,6 +485,11 @@ def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
         lk = myntra_df["LineKey"].astype(str).str.strip()
         use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
         oid = oid.where(~use, lk)
+    lk_out = (
+        clean_line_id_series(myntra_df["LineKey"])
+        if "LineKey" in myntra_df.columns
+        else pd.Series("", index=myntra_df.index, dtype=str)
+    )
     out = pd.DataFrame({
         "Sku":              myntra_df["OMS_SKU"],
         "TxnDate":          myntra_df["Date"],
@@ -487,5 +499,6 @@ def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
                             np.where(myntra_df["TxnType"] == "Cancel",  0, myntra_df["Quantity"])),
         "Source":           "Myntra",
         "OrderId":          oid,
+        "LineKey":          lk_out,
     })
     return out

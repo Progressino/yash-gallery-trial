@@ -506,6 +506,71 @@ def test_merge_platform_data_runs_dedup_on_first_upload():
     assert len(out) == 1
 
 
+def test_myntra_parent_order_shadow_drops_store_id_duplicate():
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10", "2026-04-10"]),
+            "OMS_SKU": ["S1", "S1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "LineKey": ["LINE99", "PARENT1"],
+            "OrderId": ["LINE99", "PARENT1"],
+            "ParentOrderId": ["PARENT1", "PARENT1"],
+            "RawStatus": ["WP", "WP"],
+        }
+    )
+    out = merge_platform_data(pd.DataFrame(), d, "myntra")
+    assert len(out) == 1
+    assert out["LineKey"].iloc[0] == "LINE99"
+
+
+def test_flipkart_strong_dedup_keeps_two_skus_same_order_id():
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10", "2026-04-10"]),
+            "OMS_SKU": ["SKU-A", "SKU-B"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 2.0],
+            "LineKey": ["ODSHARED", "ODSHARED"],
+            "OrderId": ["ODSHARED", "ODSHARED"],
+            "RawStatus": ["Sale", "Sale"],
+        }
+    )
+    out = merge_platform_data(pd.DataFrame(), d, "flipkart")
+    assert len(out) == 2
+
+
+def test_build_sales_dedupes_duplicate_linekey_after_mapping():
+    from backend.services.sales import build_sales_df
+    import pandas as pd
+
+    myn = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10", "2026-04-10"]),
+            "OMS_SKU": ["LIST1", "LIST1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "LineKey": ["LINE1", "LINE1"],
+            "OrderId": ["LINE1", "LINE1"],
+        }
+    )
+    sales = build_sales_df(
+        pd.DataFrame(),
+        myn,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        {"LIST1": "OMS1"},
+    )
+    m = (sales["Source"] == "Myntra") & (sales["Transaction Type"] == "Shipment")
+    assert int(pd.to_numeric(sales.loc[m, "Quantity"], errors="coerce").sum()) == 1
+
+
 def test_flipkart_earn_more_assigns_distinct_order_ids_for_dedup():
     """Same SKU/date/qty lines must not collapse in build_sales_df."""
     from io import BytesIO

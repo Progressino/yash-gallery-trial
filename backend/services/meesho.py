@@ -895,6 +895,11 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
         lk = meesho_df["LineKey"].astype(str).str.strip()
         use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
         oid = oid.where(~use, lk)
+    lk_sales = (
+        clean_line_id_series(meesho_df["LineKey"])
+        if "LineKey" in meesho_df.columns
+        else pd.Series("", index=meesho_df.index, dtype=str)
+    )
     out = pd.DataFrame({
         "Sku":              sku_series,
         "TxnDate":          meesho_df["Date"],
@@ -904,5 +909,6 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
                             np.where(meesho_df["TxnType"] == "Cancel",  0, meesho_df["Quantity"])),
         "Source":           "Meesho",
         "OrderId":          oid,
+        "LineKey":          lk_sales,
     })
     return out

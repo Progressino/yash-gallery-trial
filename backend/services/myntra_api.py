@@ -150,6 +150,7 @@ def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
             "Warehouse_Id":   "",
             "OrderId":        order_id,
             "LineKey":        order_id,
+            "ParentOrderId":  str(o.get("customerOrderId") or o.get("storeOrderId") or ""),
         })
     if not rows:
         return pd.DataFrame()

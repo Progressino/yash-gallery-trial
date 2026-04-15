@@ -611,6 +611,11 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
         lk = fk_df["LineKey"].astype(str).str.strip()
         use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
         oid = oid.where(~use, lk)
+    lk_sales = (
+        clean_line_id_series(fk_df["LineKey"])
+        if "LineKey" in fk_df.columns
+        else pd.Series("", index=fk_df.index, dtype=str)
+    )
     out = pd.DataFrame({
         "Sku":              fk_df["OMS_SKU"],
         "TxnDate":          fk_df["Date"],
@@ -623,5 +628,6 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
         "Source":           "Flipkart",
         "OrderId":          oid,
         "DSR_Segment":      _brand,
+        "LineKey":          lk_sales,
     })
     return out

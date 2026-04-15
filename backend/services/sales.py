@@ -54,6 +54,7 @@ def _filter_by_reporting_days(
 from .helpers import (
     _downcast_sales,
     canonical_pl_sku_key,
+    clean_line_id_series,
     clean_sku,
     map_to_oms_sku,
     mapping_lookup_sets,
@@ -205,7 +206,10 @@ def _mtr_to_sales_df(
         m["Transaction Type"] == "Refund",  -m["Quantity"],
         np.where(m["Transaction Type"] == "Cancel", 0, m["Quantity"])
     )
-    return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId"]]
+    m["LineKey"] = ""
+    return m[
+        ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId", "LineKey"]
+    ]
 
 
 def _drop_amazon_unkeyed_shadows(df: pd.DataFrame) -> pd.DataFrame:
@@ -255,6 +259,29 @@ def _drop_amazon_unkeyed_shadows(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([rest, amz_out], ignore_index=True)
 
 
+def _dedup_sales_linekey_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    After OMS mapping, collapse duplicate marketplace lines that share the same LineKey,
+    SKU, txn type, and reporting calendar day (upload + cache paths sometimes keep twins).
+    """
+    if df.empty or "LineKey" not in df.columns:
+        return df
+    lk = clean_line_id_series(df["LineKey"])
+    use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+    if not use.any():
+        return df
+    sub = df.loc[use].copy()
+    rest = df.loc[~use]
+    sub["LineKey"] = lk.loc[sub.index]
+    sub["_day"] = txn_reporting_naive_ist(sub["TxnDate"]).dt.normalize()
+    sub = sub.drop_duplicates(
+        subset=["Source", "LineKey", "Sku", "Transaction Type", "_day"],
+        keep="last",
+    )
+    sub = sub.drop(columns=["_day"], errors="ignore")
+    return pd.concat([rest, sub], ignore_index=True)
+
+
 def build_sales_df(
     mtr_df: pd.DataFrame,
     myntra_df: pd.DataFrame,
@@ -299,6 +326,7 @@ def build_sales_df(
 
     # Single canonical resolution for all channels (same rules as SKU master).
     combined_sales = _apply_unified_oms_skus(combined_sales, sku_mapping or {})
+    combined_sales = _dedup_sales_linekey_rows(combined_sales)
 
     # Deduplicate: rows with valid OrderId by (OrderId, Sku, Source, Transaction Type)
     # so multi-item orders keep one row per line SKU (previous logic collapsed lines).

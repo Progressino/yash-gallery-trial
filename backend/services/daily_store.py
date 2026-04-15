@@ -17,6 +17,8 @@ from typing import Dict, List, Tuple, Any
 
 import pandas as pd
 
+from .helpers import clean_line_id_series
+
 # Meesho LineKeys from TCS / ERP export / CSV fallbacks (not marketplace sub-order ids).
 _MEE_SYN_LINEKEY = re.compile(r"^(MEETCS\||MEEEXP\||MEECSV\|)", re.I)
 # Flipkart Order Export synthetic ids: product_Sku_YYYYMMDD (no pipes). earn_more uses FKEM|…
@@ -307,6 +309,47 @@ def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
 
 
+def _dedup_myntra_parent_order_shadow(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    PPMP / seller CSVs sometimes repeat the same line once with ``order line id`` and
+    again with only ``store order id`` as the LineKey. Same calendar fingerprint
+    (day, SKU, txn, qty) — drop the parent-only duplicate when a line-level row exists.
+    """
+    if d.empty or "ParentOrderId" not in d.columns:
+        return d
+    if not all(c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey")):
+        return d
+    work = d.copy()
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_q"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+    work["_skuN"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    lk = clean_line_id_series(work["LineKey"])
+    par = clean_line_id_series(work["ParentOrderId"])
+
+    drop_idx: List[Any] = []
+    for _, g in work.groupby(["_day", "_skuN", "TxnType", "_q"], sort=False):
+        idx = g.index.tolist()
+        if len(idx) <= 1:
+            continue
+        parent_rows = [
+            i for i in idx
+            if lk.loc[i] and par.loc[i] and lk.loc[i] == par.loc[i]
+        ]
+        if not parent_rows:
+            continue
+        line_rows = [
+            i for i in idx
+            if lk.loc[i] and (not par.loc[i] or lk.loc[i] != par.loc[i])
+        ]
+        if not line_rows:
+            continue
+        drop_idx.extend(parent_rows)
+
+    if not drop_idx:
+        return d
+    return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
+
+
 def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
     """
     Deduplicate a concatenated platform DataFrame to remove inflated rows
@@ -318,8 +361,9 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
       (same store order id, different SKUs) while preventing re-upload duplicates.
       Rows WITHOUT an OrderId (aggregated/summary data) are kept as-is.
     - Myntra / Meesho / Flipkart: prefer ``LineKey`` when present; see
-      ``_dedup_linekey_legacy_shadow``. Strong LineKeys dedupe without OMS_SKU in the key so
-      mapping changes do not duplicate rows.
+      ``_dedup_linekey_legacy_shadow``. Strong LineKeys dedupe without OMS_SKU for Myntra /
+      Meesho (line-level ids). Flipkart includes ``OMS_SKU`` in the strong key because
+      marketplace Order IDs are often shared across multiple line SKUs.
     """
     if df.empty:
         return df
@@ -368,6 +412,10 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                     key_s = ["_ded_id"]
                     if txn_col and txn_col in ws.columns:
                         key_s.append(txn_col)
+                    # Flipkart LineKey is often marketplace Order ID shared by multiple line SKUs —
+                    # include SKU so we do not collapse multi-item orders to one row.
+                    if platform == "flipkart" and sku_col and sku_col in ws.columns:
+                        key_s.append(sku_col)
                     parts.append(ws.drop_duplicates(subset=key_s, keep="last"))
                 if not ww.empty:
                     key_w = [c for c in key if c in ww.columns]
@@ -379,6 +427,8 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
             out = out.drop(columns=["_ded_date", "_qtyk", "_ded_id"], errors="ignore")
             if platform in ("myntra", "meesho", "flipkart"):
                 out = _dedup_linekey_legacy_shadow(out)
+            if platform == "myntra":
+                out = _dedup_myntra_parent_order_shadow(out)
             if platform == "meesho":
                 out = _dedup_meesho_cross_source_overlay(out)
             elif platform == "flipkart":

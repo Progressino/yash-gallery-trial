@@ -548,6 +548,7 @@ def snapdeal_to_sales_rows(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
         ),
         "Source":           "Snapdeal",
         "OrderId":          snapdeal_df["OrderId"],
+        "LineKey":          "",
     })
     if "Company" in snapdeal_df.columns:
         co = snapdeal_df["Company"].fillna("").astype(str).str.strip()
