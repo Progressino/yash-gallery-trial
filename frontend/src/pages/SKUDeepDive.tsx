@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, Cell,
@@ -71,6 +71,70 @@ const PRESET_RANGES = [
   { label: 'All',  days: 0   },
 ]
 
+/** Remember last deep-dive filters when sidebar opens /sku-deepdive without ?sku= */
+const DEEPDIVE_PIN_KEY = 'erp.skuDeepDive.pin'
+
+interface PinnedDeepDive {
+  sku: string
+  start: string
+  end: string
+  allSizes: boolean
+  channel: string
+  activePreset: number | null
+}
+
+function readDeepDivePin(): PinnedDeepDive | null {
+  try {
+    const raw = sessionStorage.getItem(DEEPDIVE_PIN_KEY)
+    if (!raw) return null
+    const p = JSON.parse(raw) as PinnedDeepDive
+    if (!p?.sku || typeof p.sku !== 'string') return null
+    return {
+      sku: p.sku,
+      start: typeof p.start === 'string' ? p.start : '',
+      end: typeof p.end === 'string' ? p.end : '',
+      allSizes: !!p.allSizes,
+      channel: typeof p.channel === 'string' ? p.channel : '',
+      activePreset:
+        p.activePreset === null || typeof p.activePreset === 'number' ? p.activePreset : 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeDeepDivePin(p: PinnedDeepDive) {
+  sessionStorage.setItem(DEEPDIVE_PIN_KEY, JSON.stringify(p))
+}
+
+function clearDeepDivePin() {
+  sessionStorage.removeItem(DEEPDIVE_PIN_KEY)
+}
+
+/** Last SKU committed in Deep Dive — keeps the search field in sync after sidebar navigation or tab return */
+const DEEPDIVE_LAST_SKU_KEY = 'erp.skuDeepDive.lastSku'
+
+function readLastDeepDiveSku(): string | null {
+  try {
+    const s = sessionStorage.getItem(DEEPDIVE_LAST_SKU_KEY)?.trim()
+    return s || null
+  } catch {
+    return null
+  }
+}
+
+function writeLastDeepDiveSku(sku: string) {
+  try {
+    sessionStorage.setItem(DEEPDIVE_LAST_SKU_KEY, sku.trim())
+  } catch { /* ignore quota */ }
+}
+
+function clearLastDeepDiveSku() {
+  try {
+    sessionStorage.removeItem(DEEPDIVE_LAST_SKU_KEY)
+  } catch { /* ignore */ }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmt(n: number) { return n.toLocaleString('en-IN') }
@@ -129,6 +193,15 @@ function SKUSearch({ value, onChange }: { value: string; onChange: (s: string, t
   )
 
   useEffect(() => { setQ(value) }, [value])
+
+  // Browsers / bfcache can desync the draft field when switching away and back; realign with loaded SKU
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible') setQ(value)
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [value])
 
   return (
     <div className="relative w-full max-w-sm">
@@ -202,13 +275,49 @@ export default function SKUDeepDive() {
   const [channel,    setChannel]    = useState(sourceParam)
   /** 0 = full loaded range (no date filter); matches total-sales exports */
   const [activePreset, setPreset]   = useState<number | null>(0)
+  const [pinSavedFlash, setPinSavedFlash] = useState(false)
+  const [storedPinExists, setStoredPinExists] = useState(
+    () => typeof sessionStorage !== 'undefined' && !!readDeepDivePin()?.sku,
+  )
+  const pinRestoredRef = useRef(false)
 
-  // Sync URL → state on initial load
+  // Restore pinned view once when URL has no ?sku= (e.g. sidebar link to /sku-deepdive)
+  useEffect(() => {
+    if (pinRestoredRef.current) return
+    if (skuParam) {
+      pinRestoredRef.current = true
+      return
+    }
+    const pin = readDeepDivePin()
+    if (pin?.sku) {
+      const p: Record<string, string> = { sku: pin.sku }
+      if (pin.start) p.start = pin.start
+      if (pin.end) p.end = pin.end
+      if (pin.allSizes) p.all_sizes = '1'
+      if (pin.channel) p.source = pin.channel
+      setSearchParams(p, { replace: true })
+      // Preset is not in the URL; restore from pin so chips match after navigation
+      setPreset(pin.activePreset ?? 0)
+    } else {
+      const last = readLastDeepDiveSku()
+      if (last) setSearchParams({ sku: last }, { replace: true })
+    }
+    pinRestoredRef.current = true
+  }, [skuParam, setSearchParams])
+
+  // Sync URL → state whenever the address bar query changes
   useEffect(() => {
     if (skuParam) setActiveSku(skuParam)
+    setStart(startParam)
+    setEnd(endParam)
     setAllSizes(allSizesParam)
     setChannel(sourceParam)
-  }, [skuParam, allSizesParam, sourceParam])
+  }, [skuParam, startParam, endParam, allSizesParam, sourceParam])
+
+  useEffect(() => {
+    if (activeSku.trim()) writeLastDeepDiveSku(activeSku)
+    else clearLastDeepDiveSku()
+  }, [activeSku])
 
   const apply = useCallback((sku: string, s: string, e: string, allSz: boolean, ch: string) => {
     const p: Record<string, string> = {}
@@ -232,9 +341,9 @@ export default function SKUDeepDive() {
     apply(activeSku, s, e, allSizes, channel)
   }
 
-  const { data, isLoading, isFetching } = useQuery<DeepDiveData>({
+  const { data, isLoading } = useQuery<DeepDiveData>({
     queryKey: ['sku-deepdive', activeSku, start, end, allSizes, channel],
-        queryFn: async () => {
+    queryFn: async () => {
       const params = new URLSearchParams({ sku: activeSku })
       if (start.trim()) params.set('start_date', start)
       if (end.trim())   params.set('end_date', end)
@@ -244,9 +353,35 @@ export default function SKUDeepDive() {
       return data
     },
     enabled: !!activeSku,
+    staleTime: 60_000,
+    gcTime: 1000 * 60 * 60,
+    placeholderData: keepPreviousData,
+    refetchOnWindowFocus: false,
   })
 
-  const loading = isLoading || isFetching
+  const pinCurrentView = useCallback(() => {
+    if (!activeSku.trim()) return
+    writeDeepDivePin({
+      sku: activeSku,
+      start,
+      end,
+      allSizes,
+      channel,
+      activePreset,
+    })
+    setStoredPinExists(true)
+    setPinSavedFlash(true)
+    window.setTimeout(() => setPinSavedFlash(false), 3500)
+  }, [activeSku, start, end, allSizes, channel, activePreset])
+
+  const unpinView = useCallback(() => {
+    clearDeepDivePin()
+    setStoredPinExists(false)
+    setPinSavedFlash(false)
+  }, [])
+
+  // Only block the UI on first load — not on background refetch (e.g. tab focus), so the view “sticks”
+  const loading = isLoading
   const s = data?.summary
 
   return (
@@ -259,12 +394,40 @@ export default function SKUDeepDive() {
             Full sales breakdown for any product SKU · Default period is <strong>all loaded history</strong> (use presets to narrow)
           </p>
         </div>
-        <button
-          onClick={() => navigate(-1)}
-          className="text-sm text-gray-400 hover:text-gray-600 transition"
-        >
-          ← Back
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {activeSku && (
+            <>
+              <button
+                type="button"
+                onClick={pinCurrentView}
+                className="text-sm font-medium px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition shadow-sm"
+                title="Save this SKU and filters on this device. Reopening SKU Deepdive from the menu will restore them."
+              >
+                Keep this view
+              </button>
+              {storedPinExists && (
+                <button
+                  type="button"
+                  onClick={unpinView}
+                  className="text-sm text-gray-500 hover:text-gray-700 px-2 py-1.5"
+                  title="Stop restoring saved filters when opening this page"
+                >
+                  Clear saved view
+                </button>
+              )}
+            </>
+          )}
+          {pinSavedFlash && (
+            <span className="text-xs text-green-600 font-medium">Saved for next visit</span>
+          )}
+          <button
+            type="button"
+            onClick={() => navigate(-1)}
+            className="text-sm text-gray-400 hover:text-gray-600 transition"
+          >
+            ← Back
+          </button>
+        </div>
       </div>
 
       {/* ── Controls ── */}

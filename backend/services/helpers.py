@@ -254,10 +254,14 @@ def map_to_oms_sku(seller_sku, mapping: Dict[str, str]) -> str:
                     return mapping[cand]
     except (ValueError, OverflowError):
         pass
-    if c.isdigit() and len(c) >= 6:
-        ne = _cached_numeric_embed_index(mapping)
-        if c in ne:
-            return ne[c]
+    ne = _cached_numeric_embed_index(mapping)
+    if c.isdigit() and len(c) >= 6 and c in ne:
+        return ne[c]
+    # Myntra / catalog vendor SKUs: DSBYDRSS131185528, YARYKASS100672680 — match6+ digit style/YRN tail
+    for m in re.finditer(r"\d{6,}", c):
+        g = m.group(0)
+        if g in ne:
+            return ne[g]
     return c
 
 
@@ -349,6 +353,9 @@ def sku_recognized_in_master(
         return True
     for tok in cand:
         if tok.isdigit() and len(tok) >= 6 and tok in numeric_embed:
+            return True
+    for m in re.finditer(r"\d{6,}", c):
+        if m.group(0) in numeric_embed:
             return True
     return False
 

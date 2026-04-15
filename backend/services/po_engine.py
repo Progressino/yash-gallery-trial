@@ -567,17 +567,31 @@ def calculate_po_base(
     po_df["Parent_SKU"] = po_df["OMS_SKU"].apply(get_parent_sku)
 
     # Cutting ratio for the Cutting Planner:
-    # Prefer each size's share of net PO qty (actionable demand),
-    # and fall back to ADS share when the parent has no PO demand.
+    # - Net PO share when any variant has PO_Qty > 0 (unchanged).
+    # - When no net PO, spread by ADS (or gross share) only if **two or more** sizes have
+    #   Gross_PO_Qty > 0 — otherwise a single-size need stays on that size (team can
+    #   adjust within one size; no phantom split across siblings).
     parent_po_sum = po_df.groupby("Parent_SKU")["PO_Qty"].transform("sum")
     parent_ads_sum = po_df.groupby("Parent_SKU")["ADS"].transform("sum")
+    gross_num = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0)
+    has_gross_req = gross_num > 0
+    _par = po_df["Parent_SKU"]
+    n_gross_sizes = has_gross_req.astype(int).groupby(_par).transform("sum")
+    parent_gross_sum = gross_num.groupby(_par).transform("sum")
+    ratio_from_po = np.where(parent_po_sum > 0, po_df["PO_Qty"] / parent_po_sum, 0.0)
+    ratio_from_ads = np.where(
+        parent_ads_sum > 0,
+        po_df["ADS"] / parent_ads_sum,
+        np.where(parent_gross_sum > 0, gross_num / parent_gross_sum, 0.0),
+    )
+    ratio_single_gross = np.where(has_gross_req & (n_gross_sizes == 1), 1.0, 0.0)
     po_df["Cutting_Ratio"] = np.where(
         parent_po_sum > 0,
-        (po_df["PO_Qty"] / parent_po_sum),
+        ratio_from_po,
         np.where(
-            parent_ads_sum > 0,
-            (po_df["ADS"] / parent_ads_sum),
-            0.0,
+            n_gross_sizes >= 2,
+            ratio_from_ads,
+            np.where(n_gross_sizes == 1, ratio_single_gross, 0.0),
         ),
     ).round(4)
 

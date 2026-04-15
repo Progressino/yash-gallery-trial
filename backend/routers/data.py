@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from ..models.schemas import CoverageResponse
 from ..services.helpers import (
     clean_sku,
+    get_parent_sku,
     is_likely_non_sku_notes_value,
     map_to_oms_sku,
     mapping_lookup_sets,
@@ -25,6 +26,7 @@ from ..services.sales import (
     get_platform_summary,
     get_anomalies,
     canonical_sales_sku,
+    canonical_sales_sku_series,
     filter_sales_for_export,
 )
 from ..services.daily_store import list_uploads, get_summary, delete_upload
@@ -359,7 +361,7 @@ def sku_list(request: Request, q: Optional[str] = None, limit: int = 100, includ
     """Return unique SKUs in sales_df, optionally filtered by search query.
     When include_parents=True also returns deduplicated parent/base SKUs marked with a flag."""
     import pandas as pd
-    from ..services.helpers import get_parent_sku
+
     sess = _sess(request)
     df   = sess.sales_df
     if df.empty or "Sku" not in df.columns:
@@ -405,9 +407,9 @@ def sku_deepdive(
     size variants (e.g. 1898YKYELLOW-3XL, 1898YKYELLOW-2XL …) are aggregated together.
     """
     import pandas as pd
-    from ..services.helpers import get_parent_sku
+
     sess = _sess(request)
-    df   = sess.sales_df
+    df0 = sess.sales_df
 
     # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format)
     meesho_note: str | None = None
@@ -431,22 +433,24 @@ def sku_deepdive(
                 f"(Supplier Panel → Reports → Order Reports)."
             )
 
-    if df.empty:
+    if df0.empty:
         return {"loaded": False, "message": "No sales data loaded"}
 
-    # Normalise dates
-    df = df.copy()
-    df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
-    if df["TxnDate"].dt.tz is not None:
-        df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
-    df = df.dropna(subset=["TxnDate"])
+    # Parse dates once; avoid copying the full sales table (was the main latency on large sessions).
+    txn_dates = pd.to_datetime(df0["TxnDate"], errors="coerce")
+    if txn_dates.dt.tz is not None:
+        txn_dates = txn_dates.dt.tz_convert(None)
 
+    valid_dt = txn_dates.notna()
     source_filter: Optional[str] = None
     if source and str(source).strip():
         source_filter = str(source).strip()
-        df = df[df["Source"].astype(str).str.strip() == source_filter]
+        src_mask = df0["Source"].astype(str).str.strip() == source_filter
+    else:
+        src_mask = pd.Series(True, index=df0.index)
 
-    if df.empty:
+    base_mask = valid_dt & src_mask
+    if not base_mask.any():
         return {
             "loaded":        bool(source_filter),
             "sku":           sku,
@@ -471,33 +475,35 @@ def sku_deepdive(
     # Default: full loaded history (matches Excel "total sales" exports). Use explicit
     # start_date / end_date query params for a shorter window (e.g. last 90 days).
     if not start_date and not end_date:
-        start_ts = df["TxnDate"].min()
-        end_ts   = df["TxnDate"].max()
+        start_ts = txn_dates.loc[base_mask].min()
+        end_ts = txn_dates.loc[base_mask].max()
     else:
-        start_ts = pd.Timestamp(start_date) if start_date else df["TxnDate"].min()
-        end_ts   = pd.Timestamp(end_date)   if end_date   else df["TxnDate"].max()
+        start_ts = pd.Timestamp(start_date) if start_date else txn_dates.loc[base_mask].min()
+        end_ts = pd.Timestamp(end_date) if end_date else txn_dates.loc[base_mask].max()
 
-    # Resolve matching SKUs — exact or all-sizes (prefix) mode
+    end_inclusive = end_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    date_mask = (txn_dates >= start_ts) & (txn_dates <= end_inclusive)
+    pre_mask = base_mask & date_mask
+
     sku_variants = _sku_deepdive_aliases(sku)
     if all_sizes:
-        df["_parent"] = df["Sku"].astype(str).apply(
-            lambda x: canonical_sales_sku(str(get_parent_sku(x)).strip())
-        )
         parent_targets = {
             canonical_sales_sku(str(get_parent_sku(s)).strip()) for s in sku_variants
         }
-        sku_mask = df["_parent"].isin(parent_targets)
+        sub_skus = df0.loc[pre_mask, "Sku"].astype(str)
+        uniq = sub_skus.unique()
+        parent_map = {u: canonical_sales_sku(str(get_parent_sku(u)).strip()) for u in uniq}
+        sub_parents = sub_skus.map(parent_map)
+        sku_match_sub = sub_parents.isin(parent_targets)
+        sku_mask = pd.Series(False, index=df0.index)
+        sku_mask.loc[pre_mask] = sku_match_sub.values
     else:
-        sku_mask = df["Sku"].astype(str).map(canonical_sales_sku).isin(
-            {canonical_sales_sku(s) for s in sku_variants}
-        )
+        targets = {canonical_sales_sku(s) for s in sku_variants}
+        sku_mask = canonical_sales_sku_series(df0["Sku"]).isin(targets)
 
-    # Filter to SKU + date window
-    sku_df = df[
-        sku_mask &
-        (df["TxnDate"] >= start_ts) &
-        (df["TxnDate"] <= end_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-    ].copy()
+    final_mask = pre_mask & sku_mask
+    sku_df = df0.loc[final_mask].copy()
+    sku_df["TxnDate"] = txn_dates.loc[final_mask]
 
     if sku_df.empty:
         return {
@@ -579,13 +585,13 @@ def sku_deepdive(
     by_platform = plat_grp[["platform", "shipped", "returns", "return_rate"]].sort_values("shipped", ascending=False).to_dict("records")
 
     # Daily trend (shipments only)
+    _ship_m = txn == "Shipment"
+    _ship_df = sku_df.loc[_ship_m]
     daily_grp = (
-        sku_df[txn == "Shipment"]
-        .assign(_qty=qty[txn == "Shipment"])
-        .groupby(sku_df["TxnDate"].dt.strftime("%Y-%m-%d"))
+        _ship_df.assign(_qty=qty.loc[_ship_m], _day=_ship_df["TxnDate"].dt.strftime("%Y-%m-%d"))
+        .groupby("_day", as_index=False)
         .agg(units=("_qty", "sum"))
-        .reset_index()
-        .rename(columns={"TxnDate": "date"})
+        .rename(columns={"_day": "date"})
         .sort_values("date")
     )
     daily = daily_grp.to_dict("records")

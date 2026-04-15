@@ -6,11 +6,21 @@ from backend.services.mtr import dedup_amazon_mtr_dataframe
 from backend.services.helpers import map_to_oms_sku, sku_recognized_in_master
 from backend.services.sales import (
     build_sales_df,
+    canonical_sales_sku,
+    canonical_sales_sku_series,
     filter_sales_for_export,
     get_platform_summary,
     get_sales_summary,
     list_sku_mapping_gaps,
 )
+
+
+def test_canonical_sales_sku_series_matches_scalar():
+    s = pd.Series(["1023PLYKBLUE-3XL", "", None, "NAN"])
+    out = canonical_sales_sku_series(s)
+    assert out.iloc[0] == canonical_sales_sku("1023PLYKBLUE-3XL")
+    assert out.iloc[1] == ""
+    assert out.iloc[3] == ""
 
 
 def test_get_sales_summary_shipments_and_refunds():
@@ -172,6 +182,13 @@ def test_bare_digits_match_embedded_yrn_key():
     m = {"YARYKASS100506552": "OMS-YRN"}
     assert map_to_oms_sku("100506552", m) == "OMS-YRN"
     assert sku_recognized_in_master("100506552", m)
+
+
+def test_myntra_prefixed_vendor_code_maps_via_embedded_style_id():
+    """PPMP / exports often use DSBY… / vendor-prefixed SKUs; OMS master keys carry the numeric tail."""
+    m = {"STYLE131185528": "5009YKNGREY-8XL"}
+    assert map_to_oms_sku("DSBYDRSS131185528", m) == "5009YKNGREY-8XL"
+    assert sku_recognized_in_master("DSBYDRSS131185528", m)
 
 
 def test_yrn_decimal_form_matches_integer_map_key():

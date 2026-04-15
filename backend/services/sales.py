@@ -109,6 +109,13 @@ def canonical_sales_sku(sku) -> str:
     return _PL_RE.sub(r"\1\2", t)
 
 
+def canonical_sales_sku_series(skus: pd.Series) -> pd.Series:
+    """Vectorised PL strip for deep-dive / bulk filters (matches ``canonical_sales_sku``)."""
+    s = skus.fillna("").astype(str).str.strip().str.upper()
+    s = s.mask(s.isin(["", "NAN", "NONE"]), "")
+    return s.str.replace(_PL_RE, r"\1\2", regex=True)
+
+
 def _mtr_to_sales_df(
     mtr_df: pd.DataFrame,
     sku_mapping: Optional[Dict[str, str]] = None,

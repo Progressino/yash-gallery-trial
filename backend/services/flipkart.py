@@ -5,7 +5,7 @@ import io
 import re
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -41,11 +41,60 @@ def _fk_series_optional_col(df: pd.DataFrame, *header_names: str) -> pd.Series:
     return pd.Series("", index=df.index, dtype=str)
 
 
+def _fk_skuish_column_noise(cl: str) -> bool:
+    """True if header looks like totals/qty/amount — not a listing identifier column."""
+    return any(
+        x in cl
+        for x in (
+            "total",
+            "quantity",
+            "qty",
+            "count",
+            "rate",
+            "amount",
+            "value",
+            "gmv",
+            "price",
+            "commission",
+            "fee",
+            "tax",
+        )
+    )
+
+
+def _fk_fill_placeholders_from_skuish_columns(
+    xl: pd.DataFrame, out: pd.Series, used: Set[str]
+) -> pd.Series:
+    """
+    Flipkart sheets often put “-” in the primary SKU cell while the real seller code
+    lives under a variant header (Merchant SKU, typo “Skuu”, etc.). Scan remaining
+    columns whose names contain “sku” (case-insensitive).
+    """
+    bad = out.map(_fk_is_sku_placeholder)
+    if not bad.any():
+        return out
+    for col in xl.columns:
+        if col in used:
+            continue
+        cl = str(col).strip().lower()
+        if "sku" not in cl and "fsn" not in cl:
+            continue
+        if _fk_skuish_column_noise(cl):
+            continue
+        alt = xl[col].astype(str).str.strip()
+        out = out.where(~bad, alt)
+        bad = out.map(_fk_is_sku_placeholder)
+        if not bad.any():
+            break
+    return out
+
+
 def _fk_coalesced_listing_sku_series(xl: pd.DataFrame) -> pd.Series:
     """First non-placeholder token per row across common Flipkart Sales Report columns."""
     groups = (
         ("SKU", "Sku"),
-        ("Seller SKU", "Seller Sku"),
+        ("Seller SKU", "Seller Sku", "seller sku"),
+        ("Merchant SKU", "Merchant Sku", "Partner SKU", "Vendor SKU", "Your SKU"),
         ("SKU ID", "SKU Id", "Sku Id", "sku id"),
         ("FSN", "fsn"),
         ("Listing ID", "Listing Id", "listing id"),
@@ -61,13 +110,14 @@ def _fk_coalesced_listing_sku_series(xl: pd.DataFrame) -> pd.Series:
             cols.append(c)
     n = len(xl)
     if not cols:
-        return pd.Series([""] * n, index=xl.index, dtype=str)
+        out = pd.Series([""] * n, index=xl.index, dtype=str)
+        return _fk_fill_placeholders_from_skuish_columns(xl, out, set())
     out = xl[cols[0]].astype(str).str.strip()
     for c in cols[1:]:
         alt = xl[c].astype(str).str.strip()
         bad = out.map(_fk_is_sku_placeholder)
         out = out.where(~bad, alt)
-    return out
+    return _fk_fill_placeholders_from_skuish_columns(xl, out, set(cols))
 
 
 def _fk_map_listing_to_oms(raw, mapping: Dict[str, str]) -> str:
@@ -168,12 +218,24 @@ def _parse_flipkart_xlsx(
 
         sku_id_col = "SKU ID"
         _sid = xl[sku_id_col].astype(str).str.strip()
-        for nm in ("Seller SKU", "Seller Sku", "SKU", "FSN", "fsn"):
+        _used: Set[str] = {sku_id_col}
+        for nm in (
+            "Seller SKU",
+            "Seller Sku",
+            "SKU",
+            "Merchant SKU",
+            "Merchant Sku",
+            "Partner SKU",
+            "FSN",
+            "fsn",
+        ):
             c = _fk_col_ci(xl, nm)
             if c:
+                _used.add(c)
                 alt = xl[c].astype(str).str.strip()
                 bad = _sid.map(_fk_is_sku_placeholder)
                 _sid = _sid.where(~bad, alt)
+        _sid = _fk_fill_placeholders_from_skuish_columns(xl, _sid, _used)
         xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
         # Synthetic OrderId: ProductId + SKU + date string (no real order ID available)
@@ -302,12 +364,15 @@ def _parse_flipkart_orders_sheet(
         if not sku_col:
             return pd.DataFrame()
         eff = df[sku_col].astype(str).str.strip()
-        for nm in ("SKU ID", "SKU Id", "Sku Id", "FSN", "fsn"):
+        _used_o: Set[str] = {sku_col}
+        for nm in ("SKU ID", "SKU Id", "Sku Id", "Merchant SKU", "Partner SKU", "FSN", "fsn"):
             alt_c = _fk_col_ci(df, nm)
             if alt_c:
+                _used_o.add(alt_c)
                 alt = df[alt_c].astype(str).str.strip()
                 bad = eff.map(_fk_is_sku_placeholder)
                 eff = eff.where(~bad, alt)
+        eff = _fk_fill_placeholders_from_skuish_columns(df, eff, _used_o)
         df["_OMS_SKU"] = eff.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
         # Quantity
@@ -387,12 +452,23 @@ def _parse_flipkart_earn_more(
 
         # SKU mapping (coalesce when SKU ID is a placeholder)
         _sid = xl["SKU ID"].astype(str).str.strip()
-        for nm in ("Seller SKU", "Seller Sku", "SKU", "FSN", "fsn"):
+        _used_e: Set[str] = {"SKU ID"}
+        for nm in (
+            "Seller SKU",
+            "Seller Sku",
+            "SKU",
+            "Merchant SKU",
+            "Partner SKU",
+            "FSN",
+            "fsn",
+        ):
             c = _fk_col_ci(xl, nm)
             if c:
+                _used_e.add(c)
                 alt = xl[c].astype(str).str.strip()
                 bad = _sid.map(_fk_is_sku_placeholder)
                 _sid = _sid.where(~bad, alt)
+        _sid = _fk_fill_placeholders_from_skuish_columns(xl, _sid, _used_e)
         xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
         rows: List[pd.DataFrame] = []
