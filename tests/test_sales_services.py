@@ -392,7 +392,7 @@ def test_myntra_merge_platform_data_idempotent_on_reupload():
 
 
 def test_myntra_legacy_shadow_drops_parent_id_when_linekey_twin_exists():
-    from backend.services.daily_store import _dedup_myntra_legacy_shadow
+    from backend.services.daily_store import _dedup_linekey_legacy_shadow
     import pandas as pd
 
     d = pd.DataFrame(
@@ -406,9 +406,104 @@ def test_myntra_legacy_shadow_drops_parent_id_when_linekey_twin_exists():
             "OrderId": ["PARENT", "L99"],
         }
     )
-    out = _dedup_myntra_legacy_shadow(d)
+    out = _dedup_linekey_legacy_shadow(d)
     assert len(out) == 1
     assert out["OrderId"].iloc[0] == "L99"
+
+
+def test_meesho_overlay_drops_synthetic_when_suborder_twin_same_fingerprint():
+    from backend.services.daily_store import _dedup_meesho_cross_source_overlay
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-04-10", "2024-04-10"]),
+            "OMS_SKU": ["SKU1", "SKU1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [2.0, 2.0],
+            "LineKey": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
+            "OrderId": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
+        }
+    )
+    out = _dedup_meesho_cross_source_overlay(d)
+    assert len(out) == 1
+    assert out["LineKey"].iloc[0] == "SUBORDER99"
+
+
+def test_meesho_overlay_prefers_tcs_over_export_when_all_synthetic():
+    from backend.services.daily_store import _dedup_meesho_cross_source_overlay
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-04-10", "2024-04-10"]),
+            "OMS_SKU": ["SKU1", "SKU1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "LineKey": ["MEEEXP|20240410|SKU1|Shipment|1", "MEETCS|20240410|SKU1|Shipment|1|199"],
+            "OrderId": ["MEEEXP|20240410|SKU1|Shipment|1", "MEETCS|20240410|SKU1|Shipment|1|199"],
+        }
+    )
+    out = _dedup_meesho_cross_source_overlay(d)
+    assert len(out) == 1
+    assert str(out["LineKey"].iloc[0]).startswith("MEETCS|")
+
+
+def test_flipkart_overlay_drops_fkem_when_real_order_same_fingerprint():
+    from backend.services.daily_store import _dedup_flipkart_cross_source_overlay
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-04-10", "2024-04-10"]),
+            "OMS_SKU": ["OMS1", "OMS1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [3.0, 3.0],
+            "LineKey": ["FKEM||LIST1|20240410|SHIP|3", "OD123456789"],
+            "OrderId": ["FKEM||LIST1|20240410|SHIP|3", "OD123456789"],
+        }
+    )
+    out = _dedup_flipkart_cross_source_overlay(d)
+    assert len(out) == 1
+    assert out["LineKey"].iloc[0] == "OD123456789"
+
+
+def test_flipkart_overlay_prefers_order_export_over_earn_more_when_all_synthetic():
+    from backend.services.daily_store import _dedup_flipkart_cross_source_overlay
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-04-10", "2024-04-10"]),
+            "OMS_SKU": ["OMS1", "OMS1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [2.0, 2.0],
+            "LineKey": ["FKEM||LIST1|20240410|SHIP|2", "PID1_LIST1_20240410"],
+            "OrderId": ["FKEM||LIST1|20240410|SHIP|2", "PID1_LIST1_20240410"],
+        }
+    )
+    out = _dedup_flipkart_cross_source_overlay(d)
+    assert len(out) == 1
+    assert "FKEM" not in str(out["LineKey"].iloc[0])
+
+
+def test_merge_platform_data_runs_dedup_on_first_upload():
+    """First merge used to skip _dedup_platform_df — overlays must run on single batch too."""
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-04-10", "2024-04-10"]),
+            "OMS_SKU": ["SKU1", "SKU1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [2.0, 2.0],
+            "LineKey": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
+            "OrderId": ["MEEEXP|20240410|SKU1|Shipment|2", "SUBORDER99"],
+        }
+    )
+    out = merge_platform_data(pd.DataFrame(), d, "meesho")
+    assert len(out) == 1
 
 
 def test_flipkart_earn_more_assigns_distinct_order_ids_for_dedup():
@@ -436,7 +531,7 @@ def test_flipkart_earn_more_assigns_distinct_order_ids_for_dedup():
     ]
     ws.append(hdr)
     ws.append(["2026-04-10", "LIST1", 5, 3, 0, 0, 300, 0, "B1"])
-    ws.append(["2026-04-10", "LIST1", 5, 3, 0, 0, 300, 0, "B1"])
+    ws.append(["2026-04-10", "LIST1", 6, 4, 0, 0, 400, 0, "B1"])
     buf = BytesIO()
     wb.save(buf)
     fk = _parse_flipkart_earn_more(buf.getvalue(), "em.xlsx", {"LIST1": "OMS-1"})
@@ -448,7 +543,7 @@ def test_flipkart_earn_more_assigns_distinct_order_ids_for_dedup():
         {},
     )
     m = (sales["Source"] == "Flipkart") & (sales["Transaction Type"] == "Shipment")
-    assert int(pd.to_numeric(sales.loc[m, "Quantity"], errors="coerce").sum()) == 6
+    assert int(pd.to_numeric(sales.loc[m, "Quantity"], errors="coerce").sum()) == 7
 
 
 def test_meesho_csv_skips_aggregate_sku_column_for_listing_sku():

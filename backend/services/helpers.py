@@ -46,6 +46,19 @@ def normalize_id_token_for_mapping(value) -> str:
     return t
 
 
+def clean_line_id_series(series: pd.Series) -> pd.Series:
+    """
+    Normalize marketplace id columns for row-level dedup (strip noise, Excel float tails).
+    Used for LineKey / OrderId alignment across re-uploads and cache merges.
+    """
+    s = series.fillna("").astype(str).str.strip()
+    s = s.replace({"nan": "", "none": "", "<na>": "", "NaT": ""})
+    num = pd.to_numeric(s, errors="coerce")
+    is_whole = num.notna() & np.isfinite(num) & (num == np.floor(num))
+    s = s.mask(is_whole, num[is_whole].astype(np.int64).astype(str))
+    return s
+
+
 # Phrases from return / credit / adjustment columns that are often mis-read as SKUs.
 _NON_SKU_NOTE_PHRASE = re.compile(
     r"SIZE\s*CHANGE|BAAKI|SE\s+ADJUST|\bADJUST\b|\bEXCHANGE\b|REASON\s+FOR|"

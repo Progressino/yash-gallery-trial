@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
-from .helpers import map_to_oms_sku, clean_sku
+from .helpers import clean_line_id_series, clean_sku, map_to_oms_sku
 
 _FK_SKU_PLACEHOLDER_RE = re.compile(r"^[\s\-\u2014\u2013\.]*$", re.U)
 
@@ -169,6 +169,25 @@ def _fk_month_from_filename(fname: str):
     return None
 
 
+def _fk_finalize_out_with_line_keys(out: pd.DataFrame, raw_status: Optional[pd.Series] = None) -> pd.DataFrame:
+    """Add RawStatus + LineKey so Tier-3 merges dedupe even when OMS mapping changes."""
+    if out.empty:
+        return out
+    df = out.copy()
+    if raw_status is not None:
+        df["RawStatus"] = raw_status.fillna("").astype(str).str.strip()
+    else:
+        df["RawStatus"] = df["TxnType"].astype(str)
+    oid = clean_line_id_series(df["OrderId"])
+    if "LineKey" not in df.columns:
+        df["LineKey"] = oid
+    else:
+        lk = clean_line_id_series(df["LineKey"])
+        df["LineKey"] = lk.where(lk.ne(""), oid)
+    df["OrderId"] = oid.where(oid.ne(""), df["LineKey"])
+    return df
+
+
 def _parse_flipkart_xlsx(
     file_bytes: bytes, fname: str, mapping: Dict[str, str]
 ) -> pd.DataFrame:
@@ -213,6 +232,9 @@ def _parse_flipkart_xlsx(
 
             out = xl[["Date", "Month", "TxnType", "Quantity", "Invoice_Amount",
                       "OMS_SKU", "State", "OrderId", "BuyerInvoiceId", "Brand"]].copy()
+            out = _fk_finalize_out_with_line_keys(
+                out, raw_status=xl["Event Sub Type"].fillna("").astype(str).str.strip()
+            )
             return out.dropna(subset=["Date"])
     except Exception:
         pass
@@ -315,7 +337,8 @@ def _parse_flipkart_xlsx(
 
         if not rows:
             return pd.DataFrame()
-        return pd.concat(rows, ignore_index=True)
+        out = pd.concat(rows, ignore_index=True)
+        return _fk_finalize_out_with_line_keys(out, raw_status=None)
 
     except Exception:
         return pd.DataFrame()
@@ -354,7 +377,9 @@ def load_flipkart_from_zip(
         return pd.DataFrame(), len(xlsx_items), skipped
 
     combined = pd.concat(dfs, ignore_index=True)
-    combined = combined.drop_duplicates(keep="first")
+    from .daily_store import _dedup_platform_df
+
+    combined = _dedup_platform_df(combined, "flipkart")
     return combined, len(xlsx_items), skipped
 
 
@@ -444,6 +469,7 @@ def _parse_flipkart_orders_sheet(
             "BuyerInvoiceId": "",
             "Brand":          df["_Brand"],
         })
+        out = _fk_finalize_out_with_line_keys(out, raw_status=None)
         return out.dropna(subset=["Date"])
 
     except Exception:
@@ -506,6 +532,13 @@ def _parse_flipkart_earn_more(
         xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
         xl["Brand"] = _fk_series_optional_col(xl, "Brand")
 
+        pid_col = "Product Id" if "Product Id" in xl.columns else None
+
+        def _pid_series(sdf: pd.DataFrame) -> pd.Series:
+            if pid_col and pid_col in sdf.columns:
+                return sdf[pid_col].fillna("").astype(str).str.strip()
+            return pd.Series("", index=sdf.index, dtype=str)
+
         rows: List[pd.DataFrame] = []
 
         # Shipment rows — prefer Final Sale Units (net of cancellations), same as Order Export
@@ -515,6 +548,11 @@ def _parse_flipkart_earn_more(
         ).fillna(0)
         ship = xl[xl["_ship_qty"] > 0].copy()
         if not ship.empty:
+            pid = _pid_series(ship)
+            sk = ship["SKU ID"].astype(str).str.strip()
+            dts = ship["Date"].dt.strftime("%Y%m%d")
+            sq = pd.to_numeric(ship["_ship_qty"], errors="coerce").fillna(0).astype(np.int64).astype(str)
+            ship_lk = "FKEM|" + pid + "|" + sk + "|" + dts + "|SHIP|" + sq
             rows.append(pd.DataFrame({
                 "Date":           ship["Date"],
                 "Month":          ship["Date"].apply(_get_month),
@@ -523,7 +561,8 @@ def _parse_flipkart_earn_more(
                 "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
                 "OMS_SKU":        ship["OMS_SKU"],
                 "State":          "",
-                "OrderId":        "",
+                "OrderId":        ship_lk,
+                "LineKey":        ship_lk,
                 "BuyerInvoiceId": "",
                 "Brand":          ship["Brand"],
             }))
@@ -531,6 +570,11 @@ def _parse_flipkart_earn_more(
         # Refund rows
         ret = xl[xl["Return Units"] > 0].copy()
         if not ret.empty:
+            pid = _pid_series(ret)
+            sk = ret["SKU ID"].astype(str).str.strip()
+            dts = ret["Date"].dt.strftime("%Y%m%d")
+            rq = pd.to_numeric(ret["Return Units"], errors="coerce").fillna(0).astype(np.int64).astype(str)
+            ret_lk = "FKEM|" + pid + "|" + sk + "|" + dts + "|RET|" + rq
             rows.append(pd.DataFrame({
                 "Date":           ret["Date"],
                 "Month":          ret["Date"].apply(_get_month),
@@ -539,7 +583,8 @@ def _parse_flipkart_earn_more(
                 "Invoice_Amount": ret["Return Amount"].astype("float32"),
                 "OMS_SKU":        ret["OMS_SKU"],
                 "State":          "",
-                "OrderId":        "",
+                "OrderId":        ret_lk,
+                "LineKey":        ret_lk,
                 "BuyerInvoiceId": "",
                 "Brand":          ret["Brand"],
             }))
@@ -547,10 +592,7 @@ def _parse_flipkart_earn_more(
         if not rows:
             return pd.DataFrame()
         out = pd.concat(rows, ignore_index=True)
-        # Empty OrderId made build_sales_df collapse rows with the same Sku/Date/Qty; assign
-        # stable line keys so each earn_more line survives dedup.
-        dkey = pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y%m%d").fillna("")
-        out["OrderId"] = "FKEM:" + out.index.astype(str) + ":" + dkey.astype(str)
+        out["RawStatus"] = out["TxnType"].astype(str)
         return out
 
     except Exception:
@@ -564,6 +606,11 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
         _brand = fk_df["Brand"].fillna("").astype(str).str.strip()
     else:
         _brand = pd.Series("", index=fk_df.index, dtype=str)
+    oid = fk_df["OrderId"].astype(str).str.strip()
+    if "LineKey" in fk_df.columns:
+        lk = fk_df["LineKey"].astype(str).str.strip()
+        use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+        oid = oid.where(~use, lk)
     out = pd.DataFrame({
         "Sku":              fk_df["OMS_SKU"],
         "TxnDate":          fk_df["Date"],
@@ -574,7 +621,7 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
                             np.where(fk_df["TxnType"] == "ReturnCancel",   fk_df["Quantity"],
                                      fk_df["Quantity"]))),
         "Source":           "Flipkart",
-        "OrderId":          fk_df["OrderId"],
+        "OrderId":          oid,
         "DSR_Segment":      _brand,
     })
     return out

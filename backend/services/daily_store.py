@@ -17,6 +17,11 @@ from typing import Dict, List, Tuple, Any
 
 import pandas as pd
 
+# Meesho LineKeys from TCS / ERP export / CSV fallbacks (not marketplace sub-order ids).
+_MEE_SYN_LINEKEY = re.compile(r"^(MEETCS\||MEEEXP\||MEECSV\|)", re.I)
+# Flipkart Order Export synthetic ids: product_Sku_YYYYMMDD (no pipes). earn_more uses FKEM|…
+_FK_ORDER_EXPORT_LINEKEY = re.compile(r"^[^|]+_[^|]+_\d{8}$")
+
 
 def _resolve_db_path() -> Path:
     env = (os.environ.get("DAILY_SALES_DB") or "").strip()
@@ -156,12 +161,12 @@ def _df_to_parquet(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-def _dedup_myntra_legacy_shadow(d: pd.DataFrame) -> pd.DataFrame:
+def _dedup_linekey_legacy_shadow(d: pd.DataFrame) -> pd.DataFrame:
     """
-    After a warm-cache + Tier-3 merge, the same Myntra line can appear twice: once from an
-    older snapshot keyed only by parent ``store order id`` (no LineKey) and again with a proper
-    line / packet id. Drop the legacy shadow rows when a LineKey-backed twin exists for the
-    same (day, SKU, txn, qty, raw status).
+    After a warm-cache + Tier-3 merge, the same marketplace line can appear twice: once from an
+    older snapshot with a weak/parent id (empty LineKey) and again with a stable LineKey.
+    Drop the legacy shadow rows when a LineKey-backed twin exists for the same
+    (day, SKU, txn, qty, raw status). Used for Myntra, Meesho, and Flipkart.
     """
     if d.empty or "LineKey" not in d.columns:
         return d
@@ -193,6 +198,115 @@ def _dedup_myntra_legacy_shadow(d: pd.DataFrame) -> pd.DataFrame:
     return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
 
 
+def _meesho_synthetic_line_mask(lk: pd.Series) -> pd.Series:
+    s = lk.fillna("").astype(str).str.strip()
+    return s.str.match(_MEE_SYN_LINEKEY, na=False)
+
+
+def _dedup_meesho_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    The same Meesho shipment often appears twice: supplier TCS (MEETCS|…) vs ERP export
+    (MEEEXP|…) vs daily CSV (MEECSV|…) with different LineKeys but the same day / SKU /
+    txn / qty. Prefer real sub-order LineKeys; among synthetics prefer TCS > export > CSV.
+    """
+    if d.empty or not all(
+        c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey")
+    ):
+        return d
+    work = d.copy()
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_q"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+    work["_skuN"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    lk = work["LineKey"].fillna("").astype(str).str.strip()
+    syn_m = _meesho_synthetic_line_mask(lk)
+    real_m = (~syn_m) & lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+
+    drop_idx: List[Any] = []
+    for _, g in work.groupby(["_day", "_skuN", "TxnType", "_q"], sort=False):
+        idx = g.index.tolist()
+        if len(idx) <= 1:
+            continue
+        sm = syn_m.loc[idx]
+        rm = real_m.loc[idx]
+        if rm.any() and sm.any():
+            drop_idx.extend([i for i in idx if bool(sm.loc[i])])
+            continue
+        if sm.all():
+            lu = lk.loc[idx].str.upper()
+            pri_series = pd.Series(0, index=idx, dtype="int32")
+            for i in idx:
+                u = lu.loc[i]
+                if u.startswith("MEETCS|"):
+                    pri_series.loc[i] = 0
+                elif u.startswith("MEEEXP|"):
+                    pri_series.loc[i] = 1
+                else:
+                    pri_series.loc[i] = 2
+            best = int(pri_series.min())
+            if (pri_series == best).all():
+                continue
+            drop_idx.extend([i for i in idx if int(pri_series.loc[i]) > best])
+
+    if not drop_idx:
+        return d
+    return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
+
+
+def _flipkart_synthetic_line_mask(lk: pd.Series) -> pd.Series:
+    s = lk.fillna("").astype(str).str.strip()
+    m_exp = s.str.match(_FK_ORDER_EXPORT_LINEKEY, na=False)
+    m_em = s.str.startswith("FKEM|")
+    return m_exp | m_em
+
+
+def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    Flipkart Sales Report rows carry real Order IDs; Order Export and earn_more_report use
+    synthetic LineKeys. Same (day, SKU, txn, qty) can appear in multiple files — drop
+    synthetics when a real order LineKey exists; among synthetics prefer Order Export over FKEM.
+    """
+    if d.empty or not all(
+        c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey")
+    ):
+        return d
+    work = d.copy()
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_q"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+    work["_skuN"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    lk = work["LineKey"].fillna("").astype(str).str.strip()
+    syn_m = _flipkart_synthetic_line_mask(lk)
+    real_m = (~syn_m) & lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+
+    drop_idx: List[Any] = []
+    for _, g in work.groupby(["_day", "_skuN", "TxnType", "_q"], sort=False):
+        idx = g.index.tolist()
+        if len(idx) <= 1:
+            continue
+        sm = syn_m.loc[idx]
+        rm = real_m.loc[idx]
+        if rm.any() and sm.any():
+            drop_idx.extend([i for i in idx if bool(sm.loc[i])])
+            continue
+        if sm.all():
+            pri_series = pd.Series(2, index=idx, dtype="int32")
+            for i in idx:
+                u = lk.loc[i]
+                if u.startswith("FKEM|"):
+                    pri_series.loc[i] = 1
+                elif bool(re.match(_FK_ORDER_EXPORT_LINEKEY, u)):
+                    pri_series.loc[i] = 0
+                else:
+                    pri_series.loc[i] = 2
+            best = int(pri_series.min())
+            if (pri_series == best).all():
+                continue
+            drop_idx.extend([i for i in idx if int(pri_series.loc[i]) > best])
+
+    if not drop_idx:
+        return d
+    return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
+
+
 def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
     """
     Deduplicate a concatenated platform DataFrame to remove inflated rows
@@ -203,8 +317,9 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
       (OrderId, SKU, TxnType, Date) — composite key preserves multi-SKU orders
       (same store order id, different SKUs) while preventing re-upload duplicates.
       Rows WITHOUT an OrderId (aggregated/summary data) are kept as-is.
-    - Myntra: prefer ``LineKey`` (line / packet id) when present so re-merges and
-      warm-cache + SQLite double loads collapse cleanly; see ``_dedup_myntra_legacy_shadow``.
+    - Myntra / Meesho / Flipkart: prefer ``LineKey`` when present; see
+      ``_dedup_linekey_legacy_shadow``. Strong LineKeys dedupe without OMS_SKU in the key so
+      mapping changes do not duplicate rows.
     """
     if df.empty:
         return df
@@ -238,12 +353,36 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                 key.append("_ded_date")
             if "Quantity" in d.columns:
                 key.append("_qtyk")
-            with_id = d[has_id].drop_duplicates(subset=key, keep="last")
+
+            with_id = d[has_id]
+            parts: List[pd.DataFrame] = []
+            if not with_id.empty:
+                if "LineKey" in d.columns:
+                    lk = with_id["LineKey"].fillna("").astype(str).str.strip()
+                    sk_mask = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+                else:
+                    sk_mask = pd.Series(False, index=with_id.index)
+                ws = with_id.loc[sk_mask]
+                ww = with_id.loc[~sk_mask]
+                if not ws.empty:
+                    key_s = ["_ded_id"]
+                    if txn_col and txn_col in ws.columns:
+                        key_s.append(txn_col)
+                    parts.append(ws.drop_duplicates(subset=key_s, keep="last"))
+                if not ww.empty:
+                    key_w = [c for c in key if c in ww.columns]
+                    parts.append(ww.drop_duplicates(subset=key_w, keep="last"))
+            with_id_out = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
             no_id = d[~has_id]
-            out = pd.concat([with_id, no_id], ignore_index=True)
+            out = pd.concat([with_id_out, no_id], ignore_index=True)
             out = out.drop(columns=["_ded_date", "_qtyk", "_ded_id"], errors="ignore")
-            if platform == "myntra":
-                out = _dedup_myntra_legacy_shadow(out)
+            if platform in ("myntra", "meesho", "flipkart"):
+                out = _dedup_linekey_legacy_shadow(out)
+            if platform == "meesho":
+                out = _dedup_meesho_cross_source_overlay(out)
+            elif platform == "flipkart":
+                out = _dedup_flipkart_cross_source_overlay(out)
             return out
     except Exception:
         pass
@@ -356,14 +495,15 @@ def load_all_platforms() -> Dict[str, pd.DataFrame]:
 def merge_platform_data(existing: pd.DataFrame, new_df: pd.DataFrame, platform: str) -> pd.DataFrame:
     """
     Merge two platform DataFrames with proper deduplication.
-    Safe to call from any module. Uses _dedup_platform_df internally.
+    Safe to call from any module. Uses _dedup_platform_df internally (including when
+    ``existing`` is empty so the first upload still gets Meesho/Flipkart overlays).
     - Amazon: invoice/order/qty keys + PL SKU normalisation so overlapping Tier-1 ZIPs
       do not double-count the same shipment.
     - Other platforms: OrderId + SKU + txn + calendar day (and qty when present);
       newer upload wins (keep last after concat [existing, new]).
     """
     if existing.empty:
-        return new_df.copy() if not new_df.empty else new_df
+        return _dedup_platform_df(new_df.copy() if not new_df.empty else new_df, platform)
     if new_df.empty:
         return existing
     combined = pd.concat([existing, new_df], ignore_index=True)

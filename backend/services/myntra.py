@@ -10,7 +10,13 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from .helpers import canonical_pl_sku_key, clean_sku, map_to_oms_sku, normalized_sku_forms_for_lookup
+from .helpers import (
+    canonical_pl_sku_key,
+    clean_line_id_series,
+    clean_sku,
+    map_to_oms_sku,
+    normalized_sku_forms_for_lookup,
+)
 
 
 def _tokens_for_myntra_lookup(raw) -> List[str]:
@@ -215,16 +221,6 @@ def _ordered_myntra_identifier_columns(cols: List[str]) -> List[str]:
     return out
 
 
-def _myntra_clean_id_tokens(series: pd.Series) -> pd.Series:
-    """Normalize id cells (strip Excel float noise: 11094087301.0 → 11094087301)."""
-    s = series.fillna("").astype(str).str.strip()
-    s = s.replace({"nan": "", "none": "", "<na>": "", "NaT": ""})
-    num = pd.to_numeric(s, errors="coerce")
-    is_whole = num.notna() & np.isfinite(num) & (num == np.floor(num))
-    s = s.mask(is_whole, num[is_whole].astype(np.int64).astype(str))
-    return s
-
-
 def _myntra_line_dedup_series(df: pd.DataFrame) -> pd.Series:
     """
     Stable per-line id for Tier-3 dedup and unified sales (order line > packet > seller ids).
@@ -242,11 +238,11 @@ def _myntra_line_dedup_series(df: pd.DataFrame) -> pd.Series:
     ):
         if col not in df.columns:
             continue
-        cand = _myntra_clean_id_tokens(df[col])
+        cand = clean_line_id_series(df[col])
         need = keys.eq("") & cand.ne("")
         keys = keys.mask(need, cand)
     if keys.eq("").any() and "store order id" in df.columns:
-        cand = _myntra_clean_id_tokens(df["store order id"])
+        cand = clean_line_id_series(df["store order id"])
         need = keys.eq("") & cand.ne("")
         keys = keys.mask(need, cand)
     return keys
@@ -409,7 +405,7 @@ def _parse_myntra_csv(
 
     line_keys = _myntra_line_dedup_series(df)
     oid_fb = (
-        _myntra_clean_id_tokens(df[order_col])
+        clean_line_id_series(df[order_col])
         if order_col
         else pd.Series("", index=df.index, dtype=str)
     )

@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .helpers import is_likely_non_sku_notes_value, looks_like_seller_listing_sku
+from .helpers import clean_line_id_series, is_likely_non_sku_notes_value, looks_like_seller_listing_sku
 
 
 def _clean_meesho_cell(value) -> str:
@@ -259,6 +259,28 @@ def _meesho_sku_base_series(df: pd.DataFrame) -> pd.Series:
     return pd.Series([""] * n, index=df.index, dtype=str)
 
 
+def _meesho_line_dedup_series(df: pd.DataFrame) -> pd.Series:
+    """Prefer packet id over sub-order columns so the same line keeps one key across re-uploads."""
+    if df.empty:
+        return pd.Series(dtype=str)
+    keys = pd.Series("", index=df.index, dtype=str)
+    for col in (
+        "packet id",
+        "packet_id",
+        "sub order no",
+        "sub order",
+        "suborder id",
+        "suborder no",
+        "catalog id",
+    ):
+        if col not in df.columns:
+            continue
+        cand = clean_line_id_series(df[col])
+        need = keys.eq("") & cand.ne("")
+        keys = keys.mask(need, cand)
+    return keys
+
+
 def refresh_meesho_dataframe_oms_inplace(df: pd.DataFrame, mapping: Optional[dict]) -> None:
     """Normalize SKU cells; set OMS_SKU via Replace-SKU / Meesho sheet mapping (mutates df)."""
     if df.empty or "SKU" not in df.columns:
@@ -398,6 +420,19 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
         out["Date"].dt.to_period("M").astype(str)
     )
     out = out.drop(columns=["_Month"])
+    out["RawStatus"] = out["TxnType"].astype(str)
+    lk = clean_line_id_series(out["OrderId"])
+    miss = lk.eq("")
+    if miss.any():
+        dt = out["Date"].dt.strftime("%Y%m%d")
+        sku = out["SKU"].astype(str).str.strip()
+        txn = out["TxnType"].astype(str)
+        q = pd.to_numeric(out["Quantity"], errors="coerce").fillna(0).astype(str)
+        rev = pd.to_numeric(out["Invoice_Amount"], errors="coerce").fillna(0).astype(str)
+        lk = lk.mask(miss, "MEETCS|" + dt + "|" + sku + "|" + txn + "|" + q + "|" + rev)
+    out["LineKey"] = lk
+    oid0 = clean_line_id_series(out["OrderId"])
+    out["OrderId"] = oid0.where(oid0.ne(""), lk)
     return out.dropna(subset=["Date"])
 
 
@@ -536,10 +571,20 @@ def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str
         if rev_c is not None
         else pd.Series(0.0, index=df.index, dtype="float32")
     )
+    oid_raw = df[order_c].fillna("").astype(str) if order_c is not None else pd.Series("", index=df.index)
+    oid_raw = clean_line_id_series(oid_raw)
+    txn_ser = df[txn_c].map(_txn)
+    dt_key = pd.to_datetime(df[date_c], errors="coerce").dt.strftime("%Y%m%d")
+    sku_key = _clean_meesho_str_series(sku_series).astype(str)
+    q_key = pd.to_numeric(df[qty_c], errors="coerce").fillna(1).astype(str)
+    lk = oid_raw.where(
+        oid_raw.ne(""),
+        "MEEEXP|" + dt_key.fillna("") + "|" + sku_key + "|" + txn_ser.astype(str) + "|" + q_key,
+    )
     out = pd.DataFrame(
         {
             "Date": pd.to_datetime(df[date_c], errors="coerce"),
-            "TxnType": df[txn_c].map(_txn),
+            "TxnType": txn_ser,
             "Quantity": pd.to_numeric(df[qty_c], errors="coerce").fillna(1).astype("float32").abs(),
             "Invoice_Amount": rev,
             "State": (
@@ -547,7 +592,9 @@ def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str
                 if state_c is not None
                 else ""
             ),
-            "OrderId": df[order_c].fillna("").astype(str) if order_c is not None else "",
+            "OrderId": oid_raw.where(oid_raw.ne(""), lk),
+            "LineKey": lk,
+            "RawStatus": df[txn_c].fillna("").astype(str).str.strip(),
             "SKU": _clean_meesho_str_series(sku_series),
         }
     )
@@ -615,7 +662,7 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     # State
     state_col = next((c for c in df.columns if "customer state" in c or c == "state"), None)
 
-    # Order ID: prefer "sub order no" / "packet id"
+    # Order ID fallback column (LineKey prefers packet id first — see _meesho_line_dedup_series).
     order_col = next((c for c in df.columns if "sub order" in c or "order no" in c
                       or "packet id" in c or "packet" in c), None)
 
@@ -624,18 +671,48 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     sz_col = _meesho_size_column(df)
     sku_series = _combine_meesho_sku_size(base_sku, df[sz_col] if sz_col else None)
 
+    line_keys = _meesho_line_dedup_series(df)
+    oid_fb = (
+        clean_line_id_series(df[order_col])
+        if order_col
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    oid_out = line_keys.where(line_keys.ne(""), oid_fb)
+    _raw_st = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
+
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "TxnType":        df["_TxnType"],
         "Quantity":       df["_Qty"].astype("float32"),
         "Invoice_Amount": df["_Rev"].astype("float32"),
         "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
-        "OrderId":        df[order_col].fillna("").astype(str) if order_col else "",
+        "OrderId":        oid_out,
+        "LineKey":        line_keys,
+        "RawStatus":      _raw_st,
         "SKU":            sku_series,
     })
     out["SKU"] = _clean_meesho_str_series(out["SKU"])
     out["OMS_SKU"] = out["SKU"]   # alias expected by platform_metrics / PO engine
     out["Month"]   = out["Date"].dt.to_period("M").astype(str)
+    oi = clean_line_id_series(out["OrderId"])
+    el = clean_line_id_series(out["LineKey"])
+    miss = oi.eq("") & el.eq("")
+    if miss.any():
+        dt = out["Date"].dt.strftime("%Y%m%d")
+        syn = (
+            "MEECSV|"
+            + dt
+            + "|"
+            + out["SKU"].astype(str).str.strip()
+            + "|"
+            + out["TxnType"].astype(str)
+            + "|"
+            + pd.to_numeric(out["Quantity"], errors="coerce").fillna(0).astype(str)
+            + "|"
+            + out["RawStatus"].astype(str).str.strip()
+        )
+        out.loc[miss, "LineKey"] = syn.loc[miss]
+        out.loc[miss, "OrderId"] = syn.loc[miss]
     return out.dropna(subset=["Date"]), "OK"
 
 
@@ -680,7 +757,9 @@ def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]
         return pd.DataFrame(), len(items), skipped
 
     combined = pd.concat(dfs, ignore_index=True)
-    combined = combined.drop_duplicates(keep="first")
+    from .daily_store import _dedup_platform_df
+
+    combined = _dedup_platform_df(combined, "meesho")
     zip_count = len(items) if items else (1 if not combined.empty else 0)
     return combined, zip_count, skipped
 
@@ -811,6 +890,11 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
     else:
         sku_series = "MEESHO_TOTAL"
 
+    oid = meesho_df["OrderId"].astype(str).str.strip()
+    if "LineKey" in meesho_df.columns:
+        lk = meesho_df["LineKey"].astype(str).str.strip()
+        use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+        oid = oid.where(~use, lk)
     out = pd.DataFrame({
         "Sku":              sku_series,
         "TxnDate":          meesho_df["Date"],
@@ -819,6 +903,6 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
         "Units_Effective":  np.where(meesho_df["TxnType"] == "Refund", -meesho_df["Quantity"],
                             np.where(meesho_df["TxnType"] == "Cancel",  0, meesho_df["Quantity"])),
         "Source":           "Meesho",
-        "OrderId":          meesho_df["OrderId"],
+        "OrderId":          oid,
     })
     return out
