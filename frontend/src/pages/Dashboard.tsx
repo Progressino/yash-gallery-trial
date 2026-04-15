@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, Fragment } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -9,6 +9,19 @@ import api, { downloadIntelligenceSalesCsv, getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 
 interface DailyBreakdownRow { date: string; platform: string; units: number; returns: number }
+
+interface DsrSection {
+  platform: string
+  rows: { segment: string; sales: number; returns: number }[]
+  section_sales: number
+  section_returns: number
+}
+interface DsrResponse {
+  date: string
+  display_date: string
+  sections: DsrSection[]
+  subtotal: { sales: number; returns: number }
+}
 
 // ── Types ───────────────────────────────────────────────────────
 interface PlatformSummaryItem {
@@ -134,6 +147,8 @@ export default function Dashboard() {
   const [skuSearch, setSkuSearch] = useState('')
   const [topSkuLimit, setTopSkuLimit] = useState(10)
   const [exportingSales, setExportingSales] = useState(false)
+  const [showDsr, setShowDsr] = useState(false)
+  const [dsrDate, setDsrDate] = useState(TODAY)
 
   function applyPreset(label: string, startFn: () => string) {
     const s = startFn()
@@ -210,6 +225,16 @@ export default function Dashboard() {
     queryKey: ['daily-breakdown', dailyParams],
     queryFn: async () => { const { data } = await api.get(`/data/daily-breakdown?${dailyParams}`); return data },
     enabled: deepViewMode === 'daily',
+    staleTime: 60 * 1000,
+  })
+
+  const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
+    queryKey: ['daily-dsr', dsrDate],
+    queryFn: async () => {
+      const { data } = await api.get(`/data/daily-dsr?date=${encodeURIComponent(dsrDate)}`)
+      return data
+    },
+    enabled: showDsr && !!dsrDate,
     staleTime: 60 * 1000,
   })
 
@@ -401,7 +426,103 @@ export default function Dashboard() {
             )}
           </div>
         )}
+        {/* Daily DSR toggle */}
+        <div className="flex flex-wrap items-center gap-3 pt-1 border-t border-gray-100">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showDsr}
+              onChange={e => { setShowDsr(e.target.checked); if (e.target.checked && dateEnd) setDsrDate(dateEnd) }}
+              className="rounded border-gray-300 text-[#002B5B] focus:ring-blue-400"
+            />
+            <span className="text-xs font-semibold text-gray-600">Daily DSR report</span>
+          </label>
+          {showDsr && (
+            <>
+              <input
+                type="date"
+                value={dsrDate}
+                max={TODAY}
+                onChange={e => setDsrDate(e.target.value)}
+                className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
+              />
+              {dateEnd && dsrDate !== dateEnd && (
+                <button
+                  type="button"
+                  onClick={() => setDsrDate(dateEnd)}
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Use filter end date
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
+
+      {/* ── Daily DSR table ── */}
+      {showDsr && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-[#002B5B]">Daily DSR Report</h3>
+            {dsrData?.display_date && (
+              <span className="text-xs text-gray-500 font-medium">{dsrData.display_date}</span>
+            )}
+          </div>
+          {!salesLoaded ? (
+            <p className="text-sm text-gray-400 px-4 py-8 text-center">Load sales data to view DSR.</p>
+          ) : loadingDsr ? (
+            <p className="text-sm text-gray-400 px-4 py-8 text-center animate-pulse">Loading…</p>
+          ) : !dsrData?.sections?.length ? (
+            <p className="text-sm text-gray-400 px-4 py-8 text-center">
+              No shipments or returns for this day — pick another date or widen uploads.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-xs">
+                <thead>
+                  <tr className="bg-gray-50 text-gray-600 text-left">
+                    <th className="px-4 py-2 font-semibold w-2/5">Marketplace / segment</th>
+                    <th className="px-4 py-2 font-semibold text-right">Sales</th>
+                    <th className="px-4 py-2 font-semibold text-right">Return</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dsrData.sections.map(sec => (
+                    <Fragment key={sec.platform}>
+                      <tr className="bg-slate-50 border-t border-gray-200">
+                        <td colSpan={3} className="px-4 py-1.5 font-bold text-gray-800">
+                          {sec.platform}
+                        </td>
+                      </tr>
+                      {sec.rows.map(row => (
+                        <tr key={`${sec.platform}-${row.segment}`} className="border-t border-gray-100 hover:bg-gray-50/80">
+                          <td className="px-4 py-1.5 pl-6 text-gray-700">{row.segment}</td>
+                          <td className="px-4 py-1.5 text-right tabular-nums text-gray-800">{row.sales.toLocaleString()}</td>
+                          <td className="px-4 py-1.5 text-right tabular-nums text-gray-800">{row.returns.toLocaleString()}</td>
+                        </tr>
+                      ))}
+                      <tr className="border-t border-gray-200 bg-gray-50/50 font-semibold">
+                        <td className="px-4 py-1.5 pl-6 text-gray-600"> </td>
+                        <td className="px-4 py-1.5 text-right tabular-nums">{sec.section_sales.toLocaleString()}</td>
+                        <td className="px-4 py-1.5 text-right tabular-nums">{sec.section_returns.toLocaleString()}</td>
+                      </tr>
+                    </Fragment>
+                  ))}
+                  <tr className="border-t-2 border-gray-300 bg-[#002B5B]/5 font-bold">
+                    <td className="px-4 py-2 text-gray-900">Subtotal</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{dsrData.subtotal.sales.toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{dsrData.subtotal.returns.toLocaleString()}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="text-[10px] text-gray-400 px-4 py-2 border-t border-gray-100">
+            Segments use Flipkart Brand and Snapdeal Company when present; other channels show as &quot;All&quot; unless you add a DSR_Segment column in unified sales. Minor channels appear under Others.
+          </p>
+        </div>
+      )}
 
       {/* ── KPI Strip ── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">

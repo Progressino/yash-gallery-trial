@@ -49,28 +49,120 @@ _RAR_MAGIC = b"Rar!\x1a\x07"
 
 def _extract_rar_files(rar_bytes: bytes) -> list[tuple[str, bytes]]:
     """
-    Extract all files from a RAR archive using bsdtar subprocess.
-    Returns list of (filename, bytes) tuples.
+    Extract all files from a RAR archive (incl. RAR5). Returns [(relative path, bytes), ...].
+
+    Tries, in order: **bsdtar** (libarchive), **unar**, **7zz** / **7z**. Many Linux images
+    have no ``bsdtar``, or libarchive without RAR — then Meesho CSVs inside a RAR never
+    reach the dashboard. ``unar`` / p7zip are common Homebrew / apt packages.
     """
-    bsdtar = shutil.which("bsdtar")
-    if not bsdtar:
-        raise ValueError("bsdtar not found — cannot extract RAR files")
     tmpdir = tempfile.mkdtemp(prefix="rar_daily_")
-    try:
-        rar_path = os.path.join(tmpdir, "upload.rar")
-        with open(rar_path, "wb") as f:
-            f.write(rar_bytes)
-        subprocess.run([bsdtar, "xf", rar_path, "-C", tmpdir], check=True, capture_output=True)
-        result = []
-        for root, _dirs, files in os.walk(tmpdir):
+    rar_path = os.path.join(tmpdir, "upload.rar")
+    extract_root = os.path.join(tmpdir, "_out")
+
+    def _collect(out_root: str) -> list[tuple[str, bytes]]:
+        result: list[tuple[str, bytes]] = []
+        if not os.path.isdir(out_root):
+            return result
+        for walk_root, _dirs, files in os.walk(out_root):
             for fname in files:
-                full = os.path.join(root, fname)
-                rel = os.path.relpath(full, tmpdir).replace("\\", "/")
-                if rel == "upload.rar" or fname == "upload.rar":
+                if fname == "upload.rar":
+                    continue
+                full = os.path.join(walk_root, fname)
+                try:
+                    rel = os.path.relpath(full, out_root).replace("\\", "/")
+                except ValueError:
                     continue
                 with open(full, "rb") as fh:
                     result.append((rel, fh.read()))
         return result
+
+    def _reset_out() -> None:
+        shutil.rmtree(extract_root, ignore_errors=True)
+        os.makedirs(extract_root, exist_ok=True)
+
+    try:
+        with open(rar_path, "wb") as f:
+            f.write(rar_bytes)
+
+        os.makedirs(extract_root, exist_ok=True)
+        errors: list[str] = []
+
+        bsdtar = shutil.which("bsdtar")
+        if bsdtar:
+            try:
+                r = subprocess.run(
+                    [bsdtar, "xf", rar_path, "-C", extract_root],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                got = _collect(extract_root)
+                if r.returncode == 0 and got:
+                    _log.info("RAR extract: bsdtar OK (%d files)", len(got))
+                    return got
+                err = (r.stderr or r.stdout or "").strip()
+                if r.returncode != 0:
+                    errors.append(f"bsdtar exit {r.returncode}: {err[:320]}")
+                else:
+                    errors.append("bsdtar: 0 files extracted")
+            except subprocess.TimeoutExpired:
+                errors.append("bsdtar: timeout")
+            except Exception as e:
+                errors.append(f"bsdtar: {e}")
+            _reset_out()
+
+        unar = shutil.which("unar")
+        if unar:
+            try:
+                r = subprocess.run(
+                    [unar, "-o", extract_root, "-f", rar_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                got = _collect(extract_root)
+                if got:
+                    _log.info("RAR extract: unar OK (%d files)", len(got))
+                    return got
+                err = (r.stderr or r.stdout or "").strip()
+                errors.append(f"unar exit {r.returncode}: {err[:320]}")
+            except subprocess.TimeoutExpired:
+                errors.append("unar: timeout")
+            except Exception as e:
+                errors.append(f"unar: {e}")
+            _reset_out()
+
+        for bin_name in ("7zz", "7z"):
+            seven = shutil.which(bin_name)
+            if not seven:
+                continue
+            try:
+                r = subprocess.run(
+                    [seven, "x", "-y", f"-o{extract_root}", rar_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                got = _collect(extract_root)
+                if got:
+                    _log.info("RAR extract: %s OK (%d files)", bin_name, len(got))
+                    return got
+                err = (r.stderr or r.stdout or "").strip()
+                errors.append(f"{bin_name} exit {r.returncode}: {err[:320]}")
+            except subprocess.TimeoutExpired:
+                errors.append(f"{bin_name}: timeout")
+            except Exception as e:
+                errors.append(f"{bin_name}: {e}")
+            _reset_out()
+
+        hint = (
+            "Install one of: bsdtar (libarchive with RAR), unar (`brew install unar`), "
+            "or p7zip (`apt install p7zip-full` / `brew install p7zip`). "
+            "Or extract the RAR locally and upload the Meesho `Orders_*.csv` files as a ZIP."
+        )
+        raise ValueError(
+            "Cannot extract RAR — " + (" | ".join(errors) if errors else "no files produced") + ". " + hint
+        )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -681,10 +773,9 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
             message=f"Existing PO loaded: {len(df):,} SKUs with pipeline quantities.",
             rows=len(df),
         )
-    except ValueError as e:
-        return UploadResponse(ok=False, message=str(e))
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse Existing PO: {e}")
+        _log.warning("existing-po parse failed: %s", e, exc_info=True)
+        return UploadResponse(ok=False, message=f"Failed to parse Existing PO: {e}")
 
 
 @router.post("/cogs", response_model=UploadResponse)
@@ -763,6 +854,18 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
         return "amazon_b2c"
     if "meesho" in fn:
         return "meesho_csv"
+    # Meesho supplier panel CSV: Orders_YYYY-MM-DD_... (strict — avoid *orders_report* false positives)
+    if fn.endswith(".csv") and "seller_orders" not in fn and re.search(
+        r"(?:^|/)orders_\d{4}-\d{2}-\d{2}", fn
+    ):
+        try:
+            head = file_bytes[:4000].decode("utf-8", errors="ignore").lower()
+            if "reason for credit entry" in head or (
+                "sub order no" in head and "customer state" in head
+            ):
+                return "meesho_csv"
+        except Exception:
+            pass
     # "Amz ..." or "amz ..." filenames → Amazon FBA
     if fn.startswith("amz ") or fn.startswith("amz_"):
         return "amazon_b2c"

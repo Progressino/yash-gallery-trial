@@ -183,9 +183,10 @@ def _parse_flipkart_xlsx(
 
             xl["OrderId"] = _fk_series_optional_col(xl, "Order ID", "Order Id")
             xl["BuyerInvoiceId"] = _fk_series_optional_col(xl, "Buyer Invoice ID", "Buyer Invoice Id")
+            xl["Brand"] = _fk_series_optional_col(xl, "Brand")
 
             out = xl[["Date", "Month", "TxnType", "Quantity", "Invoice_Amount",
-                      "OMS_SKU", "State", "OrderId", "BuyerInvoiceId"]].copy()
+                      "OMS_SKU", "State", "OrderId", "BuyerInvoiceId", "Brand"]].copy()
             return out.dropna(subset=["Date"])
     except Exception:
         pass
@@ -237,6 +238,7 @@ def _parse_flipkart_xlsx(
                 _sid = _sid.where(~bad, alt)
         _sid = _fk_fill_placeholders_from_skuish_columns(xl, _sid, _used)
         xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
+        xl["Brand"] = _fk_series_optional_col(xl, "Brand")
 
         # Synthetic OrderId: ProductId + SKU + date string (no real order ID available)
         product_id_col = "Product Id" if "Product Id" in xl.columns else ""
@@ -266,6 +268,7 @@ def _parse_flipkart_xlsx(
                 "State":          "",
                 "OrderId":        ship["_OrderId"],
                 "BuyerInvoiceId": "",
+                "Brand":          ship["Brand"],
             }))
 
         # Refund rows
@@ -281,6 +284,7 @@ def _parse_flipkart_xlsx(
                 "State":          "",
                 "OrderId":        ret["_OrderId"],
                 "BuyerInvoiceId": "",
+                "Brand":          ret["Brand"],
             }))
 
         if not rows:
@@ -396,6 +400,9 @@ def _parse_flipkart_orders_sheet(
         order_col = next((c for c in df.columns if c.strip().lower() == "order id"), None)
         df["_OrderId"] = df[order_col].fillna("").astype(str) if order_col else ""
 
+        brand_col = next((c for c in df.columns if c.strip().lower() == "brand"), None)
+        df["_Brand"] = df[brand_col].fillna("").astype(str).str.strip() if brand_col else ""
+
         # State (not available in this format)
         file_month = _fk_month_from_filename(fname)
 
@@ -409,6 +416,7 @@ def _parse_flipkart_orders_sheet(
             "State":          "",
             "OrderId":        df["_OrderId"],
             "BuyerInvoiceId": "",
+            "Brand":          df["_Brand"],
         })
         return out.dropna(subset=["Date"])
 
@@ -425,7 +433,7 @@ def _parse_flipkart_earn_more(
              Fulfillment Type, Location Id, Gross Units, GMV,
              Cancellation Units, Cancellation Amount,
              Return Units, Return Amount, Final Sale Units, Final Sale Amount.
-    Expands aggregated rows into Shipment/Refund/Cancel rows.
+    Expands aggregated rows into Shipment/Refund rows (ship qty = Final Sale Units when present).
     """
     try:
         xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name="earn_more_report", dtype=str)
@@ -470,22 +478,28 @@ def _parse_flipkart_earn_more(
                 _sid = _sid.where(~bad, alt)
         _sid = _fk_fill_placeholders_from_skuish_columns(xl, _sid, _used_e)
         xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
+        xl["Brand"] = _fk_series_optional_col(xl, "Brand")
 
         rows: List[pd.DataFrame] = []
 
-        # Shipment rows — use Gross Units (all orders placed, including cancelled)
-        ship = xl[xl["Gross Units"] > 0].copy()
+        # Shipment rows — prefer Final Sale Units (net of cancellations), same as Order Export
+        # in ``_parse_flipkart_xlsx``. Gross Units includes cancelled demand and overstates KPIs.
+        xl["_ship_qty"] = pd.to_numeric(
+            xl.get("Final Sale Units", xl.get("Gross Units", 0)), errors="coerce"
+        ).fillna(0)
+        ship = xl[xl["_ship_qty"] > 0].copy()
         if not ship.empty:
             rows.append(pd.DataFrame({
                 "Date":           ship["Date"],
                 "Month":          ship["Date"].apply(_get_month),
                 "TxnType":        "Shipment",
-                "Quantity":       ship["Gross Units"].astype("float32"),
+                "Quantity":       ship["_ship_qty"].astype("float32"),
                 "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
                 "OMS_SKU":        ship["OMS_SKU"],
                 "State":          "",
                 "OrderId":        "",
                 "BuyerInvoiceId": "",
+                "Brand":          ship["Brand"],
             }))
 
         # Refund rows
@@ -501,6 +515,7 @@ def _parse_flipkart_earn_more(
                 "State":          "",
                 "OrderId":        "",
                 "BuyerInvoiceId": "",
+                "Brand":          ret["Brand"],
             }))
 
         if not rows:
@@ -514,6 +529,10 @@ def _parse_flipkart_earn_more(
 def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
     if fk_df.empty:
         return pd.DataFrame()
+    if "Brand" in fk_df.columns:
+        _brand = fk_df["Brand"].fillna("").astype(str).str.strip()
+    else:
+        _brand = pd.Series("", index=fk_df.index, dtype=str)
     out = pd.DataFrame({
         "Sku":              fk_df["OMS_SKU"],
         "TxnDate":          fk_df["Date"],
@@ -525,5 +544,6 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
                                      fk_df["Quantity"]))),
         "Source":           "Flipkart",
         "OrderId":          fk_df["OrderId"],
+        "DSR_Segment":      _brand,
     })
     return out

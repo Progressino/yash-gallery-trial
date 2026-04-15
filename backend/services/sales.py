@@ -5,11 +5,51 @@ import gc
 import logging
 import re
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 log = logging.getLogger("erp.sales")
+
+# Dashboard / DSR filters use India reporting calendar (seller exports are IST or UTC+05:30).
+_REPORTING_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def txn_reporting_naive_ist(series: pd.Series) -> pd.Series:
+    """
+    Normalize marketplace timestamps to **naive wall clock in Asia/Kolkata**.
+
+    - tz-aware values (UTC, +05:30, etc.) → convert to IST then drop tz info.
+    - tz-naive values → left as-is (already local wall time in typical exports).
+
+    Avoid ``tz_convert(None)`` on mixed series — that folds to **UTC** and shifts calendar days,
+    which makes single-day dashboard filters wrong for Myntra/Flipkart while Amazon (often
+    date-only) still looks fine.
+    """
+    t = pd.to_datetime(series, errors="coerce")
+    if getattr(t.dt, "tz", None) is not None:
+        return t.dt.tz_convert(_REPORTING_TZ).dt.tz_localize(None)
+    return t
+
+
+def _filter_by_reporting_days(
+    df: pd.DataFrame,
+    date_col: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> pd.DataFrame:
+    """Inclusive calendar-day window on IST-normalized dates."""
+    if df.empty or date_col not in df.columns:
+        return df
+    t = txn_reporting_naive_ist(df[date_col])
+    day = t.dt.normalize()
+    mask = pd.Series(True, index=df.index)
+    if start_date:
+        mask &= day >= pd.Timestamp(start_date).normalize()
+    if end_date:
+        mask &= day <= pd.Timestamp(end_date).normalize()
+    return df.loc[mask]
 
 from .helpers import (
     _downcast_sales,
@@ -309,16 +349,12 @@ def get_sales_summary(
         return {"total_units": 0, "total_returns": 0, "net_units": 0, "return_rate": 0.0}
 
     df = sales_df.copy()
-    df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+    df["TxnDate"] = txn_reporting_naive_ist(df["TxnDate"])
     df = df.dropna(subset=["TxnDate"])
-    if df["TxnDate"].dt.tz is not None:
-        df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
 
-    if start_date:
-        df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
-    if end_date:
-        df = df[df["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
-    elif not start_date and months > 0:
+    if start_date or end_date:
+        df = _filter_by_reporting_days(df, "TxnDate", start_date, end_date)
+    elif months > 0:
         cutoff = df["TxnDate"].max() - pd.DateOffset(months=months)
         df = df[df["TxnDate"] >= cutoff]
 
@@ -346,16 +382,12 @@ def filter_sales_for_export(
     if sales_df.empty:
         return sales_df
     df = sales_df.copy()
-    df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+    df["TxnDate"] = txn_reporting_naive_ist(df["TxnDate"])
     df = df.dropna(subset=["TxnDate"])
-    if df["TxnDate"].dt.tz is not None:
-        df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
 
-    if start_date:
-        df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
-    if end_date:
-        df = df[df["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
-    elif not start_date and months > 0:
+    if start_date or end_date:
+        df = _filter_by_reporting_days(df, "TxnDate", start_date, end_date)
+    elif months > 0:
         cutoff = df["TxnDate"].max() - pd.DateOffset(months=months)
         df = df[df["TxnDate"] >= cutoff]
 
@@ -379,6 +411,107 @@ def get_sales_by_source(sales_df: pd.DataFrame) -> List[dict]:
     return grp.sort_values("units", ascending=False).to_dict("records")
 
 
+DSR_PLATFORM_ORDER = ("Amazon", "Meesho", "Myntra", "Flipkart", "Snapdeal", "Others")
+DSR_MAIN_SOURCES = frozenset({"Amazon", "Meesho", "Myntra", "Flipkart", "Snapdeal"})
+
+
+def _fmt_dsr_display_date(iso_date: str) -> str:
+    """e.g. 2026-04-09 → 9-Apr-26"""
+    try:
+        ts = pd.Timestamp(iso_date)
+        return f"{ts.day}-{ts.strftime('%b')}-{str(ts.year)[-2:]}"
+    except Exception:
+        return iso_date
+
+
+def get_daily_dsr_report(sales_df: pd.DataFrame, report_date: str) -> dict:
+    """
+    Single-day DSR-style breakdown: primary marketplaces plus an Others bucket.
+    Rows under each platform use ``DSR_Segment`` when present (e.g. Flipkart Brand,
+    Snapdeal Company); otherwise one combined ``All`` row. Others uses each distinct
+    ``Source`` as the segment label.
+    """
+    empty = {
+        "date":            report_date or "",
+        "display_date":    _fmt_dsr_display_date(report_date) if report_date else "",
+        "sections":        [],
+        "subtotal":        {"sales": 0, "returns": 0},
+    }
+    if sales_df.empty or not (report_date and str(report_date).strip()):
+        return empty
+
+    try:
+        day = pd.Timestamp(report_date).normalize()
+    except Exception:
+        return empty
+
+    d = sales_df.copy()
+    d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
+    d = d.dropna(subset=["TxnDate"])
+    d = d[d["TxnDate"].dt.normalize() == day]
+    if d.empty:
+        return {
+            **empty,
+            "date":         str(day.date()),
+            "display_date": _fmt_dsr_display_date(str(day.date())),
+        }
+
+    d["_qty"] = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0)
+    txn = d["Transaction Type"].astype(str).str.strip()
+    d["_ship"] = txn == "Shipment"
+    d["_ref"] = txn == "Refund"
+
+    src = d["Source"].astype(str).str.strip()
+    d["_bucket"] = src.where(src.isin(DSR_MAIN_SOURCES), "Others")
+
+    seg = pd.Series("All", index=d.index, dtype=str)
+    if "DSR_Segment" in d.columns:
+        seg = d["DSR_Segment"].fillna("").astype(str).str.strip()
+        seg = seg.mask(seg.str.len() == 0, "All")
+    elif "Company" in d.columns:
+        seg = d["Company"].fillna("").astype(str).str.strip()
+        seg = seg.mask(seg.str.len() == 0, "All")
+    d["_seg"] = seg
+    others_m = d["_bucket"] == "Others"
+    if others_m.any():
+        d.loc[others_m, "_seg"] = src.loc[others_m]
+
+    sections: List[dict] = []
+    sub_sales = 0
+    sub_ret = 0
+
+    for plat in DSR_PLATFORM_ORDER:
+        sub = d[d["_bucket"] == plat]
+        if sub.empty:
+            continue
+        row_list: List[dict] = []
+        for seg_name in sorted(
+            sub["_seg"].unique(),
+            key=lambda x: (str(x).lower() == "all", str(x).lower()),
+        ):
+            g = sub[sub["_seg"] == seg_name]
+            sales_n = int(g.loc[g["_ship"], "_qty"].sum())
+            ret_n = int(g.loc[g["_ref"], "_qty"].sum())
+            row_list.append({"segment": str(seg_name), "sales": sales_n, "returns": ret_n})
+        sec_sales = sum(r["sales"] for r in row_list)
+        sec_ret = sum(r["returns"] for r in row_list)
+        sub_sales += sec_sales
+        sub_ret += sec_ret
+        sections.append({
+            "platform":        plat,
+            "rows":            row_list,
+            "section_sales":   sec_sales,
+            "section_returns": sec_ret,
+        })
+
+    return {
+        "date":         str(day.date()),
+        "display_date": _fmt_dsr_display_date(str(day.date())),
+        "sections":     sections,
+        "subtotal":     {"sales": sub_sales, "returns": sub_ret},
+    }
+
+
 def get_top_skus(
     sales_df: pd.DataFrame,
     limit: int = 20,
@@ -390,13 +523,9 @@ def get_top_skus(
         return []
     df = sales_df[sales_df["Transaction Type"] == "Shipment"].copy()
     if start_date or end_date:
-        df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
-        if df["TxnDate"].dt.tz is not None:
-            df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
-        if start_date:
-            df = df[df["TxnDate"] >= pd.Timestamp(start_date)]
-        if end_date:
-            df = df[df["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+        df["TxnDate"] = txn_reporting_naive_ist(df["TxnDate"])
+        df = df.dropna(subset=["TxnDate"])
+        df = _filter_by_reporting_days(df, "TxnDate", start_date, end_date)
     # Filter out aggregate/total rows (e.g. MEESHO_TOTAL, TOTAL, etc.)
     _sku_lower = df["Sku"].astype(str).str.lower()
     df = df[~(_sku_lower.str.contains("_total") | _sku_lower.str.endswith("total") | _sku_lower.str.startswith("total"))]
@@ -429,20 +558,15 @@ def _compute_platform_metrics(
 
     try:
         d = df.copy()
-        d["_Date"] = pd.to_datetime(d.get("Date", d.get("_Date")), errors="coerce")
+        d["_Date"] = txn_reporting_naive_ist(
+            pd.to_datetime(d.get("Date", d.get("_Date")), errors="coerce")
+        )
         d = d.dropna(subset=["_Date"])
         if d.empty:
             return stub
 
-        # Strip timezone so tz-naive comparisons don't raise TypeError
-        if hasattr(d["_Date"], "dt") and d["_Date"].dt.tz is not None:
-            d["_Date"] = d["_Date"].dt.tz_localize(None)
-
-        # Apply date filter if provided
-        if start_date:
-            d = d[d["_Date"] >= pd.Timestamp(start_date)]
-        if end_date:
-            d = d[d["_Date"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+        if start_date or end_date:
+            d = _filter_by_reporting_days(d, "_Date", start_date, end_date)
         if d.empty:
             # Platform IS loaded but has no data in this date window — show as loaded with 0
             stub["loaded"] = True
@@ -553,15 +677,10 @@ def _platform_summary_from_unified_sales(
         return stub
 
     s = sales_df[sales_df["Source"].astype(str).str.strip() == platform_name].copy()
-    s["TxnDate"] = pd.to_datetime(s["TxnDate"], errors="coerce")
+    s["TxnDate"] = txn_reporting_naive_ist(s["TxnDate"])
     s = s.dropna(subset=["TxnDate"])
-    if hasattr(s["TxnDate"].dt, "tz") and s["TxnDate"].dt.tz is not None:
-        s["TxnDate"] = s["TxnDate"].dt.tz_convert(None)
-
-    if start_date:
-        s = s[s["TxnDate"] >= pd.Timestamp(start_date)]
-    if end_date:
-        s = s[s["TxnDate"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+    if start_date or end_date:
+        s = _filter_by_reporting_days(s, "TxnDate", start_date, end_date)
 
     if s.empty:
         stub["loaded"] = loaded

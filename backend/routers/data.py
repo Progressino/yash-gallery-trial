@@ -1,6 +1,6 @@
 """
 Data query router — analytics endpoints.
-GET /api/data/coverage, sales-summary, sales-export, sales-by-source, top-skus,
+GET /api/data/coverage, sales-summary, sales-export, sales-by-source, daily-dsr, top-skus,
 mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 """
 import io
@@ -20,14 +20,17 @@ from ..services.helpers import (
 )
 from ..services.meesho import apply_meesho_listing_sku_recovery_for_export
 from ..services.sales import (
-    get_sales_summary,
-    get_sales_by_source,
-    get_top_skus,
-    get_platform_summary,
-    get_anomalies,
+    _filter_by_reporting_days,
     canonical_sales_sku,
     canonical_sales_sku_series,
     filter_sales_for_export,
+    get_anomalies,
+    get_daily_dsr_report,
+    get_platform_summary,
+    get_sales_by_source,
+    get_sales_summary,
+    get_top_skus,
+    txn_reporting_naive_ist,
 )
 from ..services.daily_store import list_uploads, get_summary, delete_upload
 from ..session import AppSession
@@ -437,9 +440,7 @@ def sku_deepdive(
         return {"loaded": False, "message": "No sales data loaded"}
 
     # Parse dates once; avoid copying the full sales table (was the main latency on large sessions).
-    txn_dates = pd.to_datetime(df0["TxnDate"], errors="coerce")
-    if txn_dates.dt.tz is not None:
-        txn_dates = txn_dates.dt.tz_convert(None)
+    txn_dates = txn_reporting_naive_ist(df0["TxnDate"])
 
     valid_dt = txn_dates.notna()
     source_filter: Optional[str] = None
@@ -662,13 +663,10 @@ def daily_breakdown(
 
     try:
         d = df.copy()
-        d["TxnDate"] = pd.to_datetime(d["TxnDate"], errors="coerce")
+        d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
         d = d.dropna(subset=["TxnDate"])
-
-        if start_date:
-            d = d[d["TxnDate"] >= pd.Timestamp(start_date)]
-        if end_date:
-            d = d[d["TxnDate"] <= pd.Timestamp(end_date)]
+        if start_date or end_date:
+            d = _filter_by_reporting_days(d, "TxnDate", start_date, end_date)
         if platform:
             plats = [p.strip() for p in platform.split(",")]
             d = d[d["Source"].isin(plats)]
@@ -695,6 +693,34 @@ def daily_breakdown(
         return grp.to_dict("records")
     except Exception:
         return []
+
+
+@router.get("/daily-dsr")
+def daily_dsr(request: Request, date: Optional[str] = None):
+    """
+    Daily DSR-style report for one calendar day: marketplace sections with optional
+    segment rows (Flipkart Brand, Snapdeal Company, etc.) and an Others bucket.
+    Query: ``date`` = ISO ``YYYY-MM-DD`` (defaults to latest day with sales if omitted).
+    """
+    import pandas as pd
+
+    sess = _sess(request)
+    df = sess.sales_df
+    if df.empty:
+        return get_daily_dsr_report(df, date or "")
+
+    if not date or not str(date).strip():
+        d = df.copy()
+        d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
+        d = d.dropna(subset=["TxnDate"])
+        if d.empty:
+            return get_daily_dsr_report(df, "")
+        latest = d["TxnDate"].max()
+        if pd.isna(latest):
+            return get_daily_dsr_report(df, "")
+        date = str(latest.normalize().date())
+
+    return get_daily_dsr_report(df, date)
 
 
 # ── MTR Analytics ─────────────────────────────────────────────

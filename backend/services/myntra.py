@@ -245,6 +245,8 @@ def _parse_myntra_csv(
         df.loc[null_mask, "_Date"] = pd.to_datetime(
             df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
         )
+    # Daily sales / DSR alignment: use the report's primary order date ("created on" /
+    # order_created_date). Fulfilment dates shift rows across calendar days vs seller DSR.
     df = df.dropna(subset=["_Date"])
     if df.empty:
         return pd.DataFrame(), "All dates invalid"

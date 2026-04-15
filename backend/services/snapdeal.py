@@ -550,5 +550,9 @@ def snapdeal_to_sales_rows(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
         "OrderId":          snapdeal_df["OrderId"],
     })
     if "Company" in snapdeal_df.columns:
-        out["Company"] = snapdeal_df["Company"].values
+        co = snapdeal_df["Company"].fillna("").astype(str).str.strip()
+        out["Company"] = co.values
+        out["DSR_Segment"] = co.values
+    else:
+        out["DSR_Segment"] = ""
     return out

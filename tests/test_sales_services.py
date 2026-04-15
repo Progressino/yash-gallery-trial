@@ -9,6 +9,7 @@ from backend.services.sales import (
     canonical_sales_sku,
     canonical_sales_sku_series,
     filter_sales_for_export,
+    get_daily_dsr_report,
     get_platform_summary,
     get_sales_summary,
     list_sku_mapping_gaps,
@@ -21,6 +22,47 @@ def test_canonical_sales_sku_series_matches_scalar():
     assert out.iloc[0] == canonical_sales_sku("1023PLYKBLUE-3XL")
     assert out.iloc[1] == ""
     assert out.iloc[3] == ""
+
+
+def test_get_daily_dsr_report_segments_and_others():
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2025-04-09"] * 4),
+            "Transaction Type": ["Shipment", "Shipment", "Refund", "Shipment"],
+            "Quantity": [10, 5, 2, 3],
+            "Source": ["Amazon", "Amazon", "Amazon", "Shopify"],
+            "DSR_Segment": ["YG", "Akiko", "YG", "All"],
+            "OrderId": ["a", "b", "c", "d"],
+            "Sku": ["x", "y", "x", "z"],
+            "Units_Effective": [10, 5, -2, 3],
+        }
+    )
+    r = get_daily_dsr_report(df, "2025-04-09")
+    assert r["subtotal"]["sales"] == 18
+    assert r["subtotal"]["returns"] == 2
+    amazon = next(s for s in r["sections"] if s["platform"] == "Amazon")
+    assert amazon["section_sales"] == 15
+    assert amazon["section_returns"] == 2
+    others = next(s for s in r["sections"] if s["platform"] == "Others")
+    assert others["rows"][0]["sales"] == 3
+    assert others["rows"][0]["segment"] == "Shopify"
+
+
+def test_get_sales_summary_includes_ist_same_calendar_day():
+    """tz-aware +05:30 timestamps must not fall out of an IST single-day window."""
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-04-08 00:30:00+05:30"]),
+            "Transaction Type": ["Shipment"],
+            "Quantity": [5],
+            "Units_Effective": [5],
+            "Sku": ["X"],
+            "Source": ["Myntra"],
+            "OrderId": ["1"],
+        }
+    )
+    s = get_sales_summary(df, months=0, start_date="2026-04-08", end_date="2026-04-08")
+    assert s["total_units"] == 5
 
 
 def test_get_sales_summary_shipments_and_refunds():
@@ -469,3 +511,36 @@ def test_flipkart_sales_report_maps_sku_id_when_sku_column_is_dash():
     out = _parse_flipkart_xlsx(buf.getvalue(), "fk-Jan-2025.xlsx", m)
     assert not out.empty
     assert out["OMS_SKU"].iloc[0] == "OMS-FK"
+
+
+def test_flipkart_earn_more_prefers_final_sale_units_over_gross():
+    """earn_more_report must not count cancelled demand in shipments (Final Sale vs Gross)."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from backend.services.flipkart import _parse_flipkart_earn_more
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "earn_more_report"
+    ws.append(
+        [
+            "Order Date",
+            "SKU ID",
+            "Gross Units",
+            "Final Sale Units",
+            "Return Units",
+            "Cancellation Units",
+            "Final Sale Amount",
+            "Return Amount",
+            "Brand",
+        ]
+    )
+    ws.append(["2026-04-01", "LIST1", 10, 7, 0, 3, 700, 0, "B1"])
+    buf = BytesIO()
+    wb.save(buf)
+    out = _parse_flipkart_earn_more(buf.getvalue(), "earn-Apr-2026.xlsx", {"LIST1": "OMS-1"})
+    ship = out[out["TxnType"] == "Shipment"]
+    assert len(ship) == 1
+    assert float(ship["Quantity"].iloc[0]) == 7.0
