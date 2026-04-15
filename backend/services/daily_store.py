@@ -13,7 +13,7 @@ import re
 import sqlite3
 import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import pandas as pd
 
@@ -156,6 +156,43 @@ def _df_to_parquet(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def _dedup_myntra_legacy_shadow(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    After a warm-cache + Tier-3 merge, the same Myntra line can appear twice: once from an
+    older snapshot keyed only by parent ``store order id`` (no LineKey) and again with a proper
+    line / packet id. Drop the legacy shadow rows when a LineKey-backed twin exists for the
+    same (day, SKU, txn, qty, raw status).
+    """
+    if d.empty or "LineKey" not in d.columns:
+        return d
+    if not all(c in d.columns for c in ("OMS_SKU", "Date", "TxnType", "Quantity")):
+        return d
+    work = d.copy()
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_q"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+    if "RawStatus" in work.columns:
+        work["_rs"] = work["RawStatus"].astype(str).str.strip()
+    else:
+        work["_rs"] = ""
+    lk = work["LineKey"].fillna("").astype(str).str.strip()
+    has_lk = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+    work["_prio"] = has_lk.astype(int)
+
+    drop_idx: List[Any] = []
+    for _, g in work.groupby(["_day", "OMS_SKU", "TxnType", "_q", "_rs"], sort=False):
+        if len(g) <= 1:
+            continue
+        pr = g["_prio"]
+        if (pr == 1).any() and (pr == 0).any():
+            drop_idx.extend(g.index[pr == 0].tolist())
+        elif (pr == 0).all() and len(g) > 1:
+            drop_idx.extend(g.index[1:].tolist())
+
+    if not drop_idx:
+        return d
+    return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
+
+
 def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
     """
     Deduplicate a concatenated platform DataFrame to remove inflated rows
@@ -166,6 +203,8 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
       (OrderId, SKU, TxnType, Date) — composite key preserves multi-SKU orders
       (same store order id, different SKUs) while preventing re-upload duplicates.
       Rows WITHOUT an OrderId (aggregated/summary data) are kept as-is.
+    - Myntra: prefer ``LineKey`` (line / packet id) when present so re-merges and
+      warm-cache + SQLite double loads collapse cleanly; see ``_dedup_myntra_legacy_shadow``.
     """
     if df.empty:
         return df
@@ -175,7 +214,14 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
             return dedup_amazon_mtr_dataframe(df)
         elif "OrderId" in df.columns:
             d = df.copy()
-            has_id = d["OrderId"].astype(str).str.strip() != ""
+            oid_raw = d["OrderId"].astype(str).str.strip()
+            if "LineKey" in d.columns:
+                lk = d["LineKey"].fillna("").astype(str).str.strip()
+                use_lk = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+                d["_ded_id"] = oid_raw.where(~use_lk, lk)
+            else:
+                d["_ded_id"] = oid_raw
+            has_id = d["_ded_id"].ne("") & ~d["_ded_id"].str.lower().isin(["nan", "none"])
             sku_col = "OMS_SKU" if "OMS_SKU" in d.columns else ("SKU" if "SKU" in d.columns else None)
             date_col = "Date" if "Date" in d.columns else None
             txn_col  = "TxnType" if "TxnType" in d.columns else None
@@ -183,7 +229,7 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                 d["_ded_date"] = pd.to_datetime(d[date_col], errors="coerce").dt.normalize()
             if "Quantity" in d.columns:
                 d["_qtyk"] = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0).round().astype("int64")
-            key = ["OrderId"]
+            key = ["_ded_id"]
             if sku_col:
                 key.append(sku_col)
             if txn_col:
@@ -195,7 +241,9 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
             with_id = d[has_id].drop_duplicates(subset=key, keep="last")
             no_id = d[~has_id]
             out = pd.concat([with_id, no_id], ignore_index=True)
-            out = out.drop(columns=["_ded_date", "_qtyk"], errors="ignore")
+            out = out.drop(columns=["_ded_date", "_qtyk", "_ded_id"], errors="ignore")
+            if platform == "myntra":
+                out = _dedup_myntra_legacy_shadow(out)
             return out
     except Exception:
         pass

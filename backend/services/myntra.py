@@ -215,6 +215,43 @@ def _ordered_myntra_identifier_columns(cols: List[str]) -> List[str]:
     return out
 
 
+def _myntra_clean_id_tokens(series: pd.Series) -> pd.Series:
+    """Normalize id cells (strip Excel float noise: 11094087301.0 → 11094087301)."""
+    s = series.fillna("").astype(str).str.strip()
+    s = s.replace({"nan": "", "none": "", "<na>": "", "NaT": ""})
+    num = pd.to_numeric(s, errors="coerce")
+    is_whole = num.notna() & np.isfinite(num) & (num == np.floor(num))
+    s = s.mask(is_whole, num[is_whole].astype(np.int64).astype(str))
+    return s
+
+
+def _myntra_line_dedup_series(df: pd.DataFrame) -> pd.Series:
+    """
+    Stable per-line id for Tier-3 dedup and unified sales (order line > packet > seller ids).
+    Must stay consistent across re-uploads so merge_platform_data / SQLite + warm-cache merges
+    do not double-count the same row.
+    """
+    if df.empty:
+        return pd.Series(dtype=str)
+    keys = pd.Series("", index=df.index, dtype=str)
+    for col in (
+        "order line id",
+        "packet id",
+        "seller order id",
+        "order id fk",
+    ):
+        if col not in df.columns:
+            continue
+        cand = _myntra_clean_id_tokens(df[col])
+        need = keys.eq("") & cand.ne("")
+        keys = keys.mask(need, cand)
+    if keys.eq("").any() and "store order id" in df.columns:
+        cand = _myntra_clean_id_tokens(df["store order id"])
+        need = keys.eq("") & cand.ne("")
+        keys = keys.mask(need, cand)
+    return keys
+
+
 def _parse_myntra_csv(
     csv_bytes: bytes, filename: str, mapping: Dict[str, str]
 ) -> Tuple[pd.DataFrame, str]:
@@ -370,6 +407,14 @@ def _parse_myntra_csv(
     order_col = next((c for c in _order_id_priority if c in df.columns), None)
     _raw_status = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
 
+    line_keys = _myntra_line_dedup_series(df)
+    oid_fb = (
+        _myntra_clean_id_tokens(df[order_col])
+        if order_col
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    oid_out = line_keys.where(line_keys.ne(""), oid_fb)
+
     out = pd.DataFrame({
         "Date":           df["_Date"],
         "OMS_SKU":        df["_OMS_SKU"],
@@ -380,7 +425,8 @@ def _parse_myntra_csv(
         "State":          df[state_col].fillna("").str.upper().str.strip() if state_col else "",
         "Payment_Method": df[pm_col].fillna("") if pm_col else "",
         "Warehouse_Id":   df[wh_col].fillna("") if wh_col else "",
-        "OrderId":        df[order_col].fillna("") if order_col else "",
+        "OrderId":        oid_out,
+        "LineKey":        line_keys,
     })
     out["Month"]       = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
@@ -422,15 +468,20 @@ def load_myntra_from_zip(
         return pd.DataFrame(), len(csv_items), skipped
 
     combined = pd.concat(dfs, ignore_index=True)
-    combined = combined.drop_duplicates(
-        subset=["OrderId", "OMS_SKU", "TxnType", "Date"], keep="first"
-    )
+    from .daily_store import _dedup_platform_df
+
+    combined = _dedup_platform_df(combined, "myntra")
     return combined, len(csv_items), skipped
 
 
 def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
     if myntra_df.empty:
         return pd.DataFrame()
+    oid = myntra_df["OrderId"].astype(str).str.strip()
+    if "LineKey" in myntra_df.columns:
+        lk = myntra_df["LineKey"].astype(str).str.strip()
+        use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+        oid = oid.where(~use, lk)
     out = pd.DataFrame({
         "Sku":              myntra_df["OMS_SKU"],
         "TxnDate":          myntra_df["Date"],
@@ -439,6 +490,6 @@ def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
         "Units_Effective":  np.where(myntra_df["TxnType"] == "Refund", -myntra_df["Quantity"],
                             np.where(myntra_df["TxnType"] == "Cancel",  0, myntra_df["Quantity"])),
         "Source":           "Myntra",
-        "OrderId":          myntra_df["OrderId"],
+        "OrderId":          oid,
     })
     return out

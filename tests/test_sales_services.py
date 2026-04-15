@@ -371,6 +371,44 @@ def test_myntra_csv_prefers_order_line_id_over_store_order_id():
     df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
     assert "OK" in msg
     assert df["OrderId"].tolist() == ["LINEAA", "LINEBB"]
+    assert df["LineKey"].tolist() == ["LINEAA", "LINEBB"]
+
+
+def test_myntra_merge_platform_data_idempotent_on_reupload():
+    """Re-merging the same parsed frame must not double row counts (Tier-3 / cache paths)."""
+    from backend.services.daily_store import merge_platform_data
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,store order id,order line id,seller sku code,myntra sku code\n"
+        "2026-04-10 10:00:00,WP,PARENT1,L1,SK1,Y1\n"
+        "2026-04-10 10:00:00,WP,PARENT1,L2,SK2,Y2\n"
+    )
+    df, _ = _parse_myntra_csv(csv.encode("utf-8"), "a.csv", {})
+    m1 = merge_platform_data(pd.DataFrame(), df, "myntra")
+    m2 = merge_platform_data(m1, df, "myntra")
+    assert len(m1) == 2
+    assert len(m2) == 2
+
+
+def test_myntra_legacy_shadow_drops_parent_id_when_linekey_twin_exists():
+    from backend.services.daily_store import _dedup_myntra_legacy_shadow
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10", "2026-04-10"]),
+            "OMS_SKU": ["S1", "S1"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "RawStatus": ["WP", "WP"],
+            "LineKey": ["", "L99"],
+            "OrderId": ["PARENT", "L99"],
+        }
+    )
+    out = _dedup_myntra_legacy_shadow(d)
+    assert len(out) == 1
+    assert out["OrderId"].iloc[0] == "L99"
 
 
 def test_flipkart_earn_more_assigns_distinct_order_ids_for_dedup():

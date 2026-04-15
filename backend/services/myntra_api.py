@@ -6,7 +6,7 @@ Data:  GET  /v4/orders  (date-filtered, paginated)
 
 Output matches the schema produced by myntra.py parser:
   Date, OMS_SKU, TxnType, RawStatus, Quantity, Invoice_Amount,
-  State, Payment_Method, Warehouse_Id, OrderId, Month, Month_Label
+  State, Payment_Method, Warehouse_Id, OrderId, LineKey, Month, Month_Label
 """
 
 import base64
@@ -149,6 +149,7 @@ def _orders_to_df(orders: list, sku_mapping: dict) -> pd.DataFrame:
             "Payment_Method": pay_method,
             "Warehouse_Id":   "",
             "OrderId":        order_id,
+            "LineKey":        order_id,
         })
     if not rows:
         return pd.DataFrame()
