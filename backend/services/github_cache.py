@@ -240,6 +240,15 @@ def load_cache_from_drive(
     except Exception as e:
         return False, f"Could not read manifest: {e}", {}
 
+    # Platform keys → canonical platform name for dedup
+    _PLATFORM_DEDUP_MAP = {
+        "mtr_df":      "amazon",
+        "meesho_df":   "meesho",
+        "myntra_df":   "myntra",
+        "flipkart_df": "flipkart",
+        "snapdeal_df": "snapdeal",
+    }
+
     items      = list(_CACHE_FILES.items())
     loaded     = {}
     for step, (ss_key, filename) in enumerate(items):
@@ -250,7 +259,15 @@ def load_cache_from_drive(
         try:
             raw = _gh_download_asset(assets[filename][1])
             if filename.endswith(".parquet"):
-                loaded[ss_key] = pd.read_parquet(io.BytesIO(raw), engine="pyarrow")
+                df = pd.read_parquet(io.BytesIO(raw), engine="pyarrow")
+                # Strict dedup: enforce no-duplicate policy on platform DataFrames at load time
+                if ss_key in _PLATFORM_DEDUP_MAP and not df.empty:
+                    try:
+                        from .daily_store import _dedup_platform_df
+                        df = _dedup_platform_df(df, _PLATFORM_DEDUP_MAP[ss_key])
+                    except Exception:
+                        pass  # dedup is best-effort; never fail a cache load
+                loaded[ss_key] = df
             elif filename.endswith(".json"):
                 loaded[ss_key] = json.loads(raw.decode("utf-8"))
         except Exception as e:
