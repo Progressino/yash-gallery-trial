@@ -310,7 +310,10 @@ def _parse_myntra_csv(
                 or s.startswith("RTD") or s.startswith("RVP")
                 or s in ("R", "RS", "RD", "RTOD", "RVP", "RTN", "RSHIP")):
             return "Refund"
-        if "CANCEL" in s or s in ("F", "IC", "FAILED"):
+        # "F" (failed / platform-cancelled) still appears on the order's created date in seller
+        # reports — count as Shipment so daily totals match line counts for that date (see Seller
+        # Orders CSV). Hard cancels use IC / FAILED / CANCEL in text.
+        if "CANCEL" in s or s in ("IC", "FAILED"):
             return "Cancel"
         if s in ("C", "SH", "PK", "D", "S", "SHIPPED", "CONFIRMED", "DELIVERED",
                  "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
@@ -349,11 +352,22 @@ def _parse_myntra_csv(
     ]), None)
     pm_col     = next((c for c in df.columns if "payment_method" in c or "payment method" in c), None)
     wh_col     = next((c for c in df.columns if "warehouse_id" in c or "warehouse id" in c), None)
-    # PPMP: "order_id" / "packet_id"; Seller Orders Report: "order id" / "seller order id"
-    order_col  = next((c for c in df.columns if c in [
-        "order_id", "packet_id", "order id", "sub order id", "suborder id",
-        "seller order id", "order id fk", "store order id",
-    ]), None)
+    # Line-level id for dedup: must not use ``store order id`` first (parent order shared by many
+    # lines — was chosen because it appears before ``order line id`` in CSV column order).
+    _order_id_priority = (
+        "order line id",
+        "seller order id",
+        "order_id",
+        "packet_id",
+        "packet id",
+        "sub order id",
+        "suborder id",
+        "order id",
+        "order id fk",
+        "order release id",
+        "store order id",
+    )
+    order_col = next((c for c in _order_id_priority if c in df.columns), None)
     _raw_status = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
 
     out = pd.DataFrame({

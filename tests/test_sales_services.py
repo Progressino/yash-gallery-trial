@@ -327,6 +327,92 @@ def test_meesho_order_export_xlsx_coalesces_sku1():
     assert out["SKU"].iloc[0] == "1592YKBLUE-5XL"
 
 
+def test_meesho_csv_counts_ready_to_ship_and_cancelled_as_shipment_for_dsr():
+    """Order-date DSR matches Meesho exports: only returns/RTO are Refund."""
+    from backend.services.meesho import parse_meesho_csv
+
+    csv = (
+        "order date,reason for credit entry,sku,quantity,sub order no\n"
+        "2026-04-14,SHIPPED,A1,1,S1\n"
+        "2026-04-14,READY_TO_SHIP,A2,1,S2\n"
+        "2026-04-14,CANCELLED,A3,1,S3\n"
+        "2026-04-14,RETURNED,A4,1,S4\n"
+    )
+    out, msg = parse_meesho_csv(csv.encode("utf-8"))
+    assert msg == "OK"
+    ship = out[out["TxnType"] == "Shipment"]["Quantity"].sum()
+    ref = out[out["TxnType"] == "Refund"]["Quantity"].sum()
+    assert float(ship) == 3.0
+    assert float(ref) == 1.0
+
+
+def test_myntra_csv_maps_status_f_to_shipment():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,seller sku code,myntra sku code\n"
+        "2026-04-14 10:00:00,F,SK1,Y1\n"
+        "2026-04-14 11:00:00,IC,SK2,Y2\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
+    assert "OK" in msg
+    assert df["TxnType"].tolist() == ["Shipment", "Cancel"]
+
+
+def test_myntra_csv_prefers_order_line_id_over_store_order_id():
+    """Seller report column order puts store order id before line id; line id must win for dedup."""
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,store order id,order line id,seller sku code,myntra sku code\n"
+        "2026-04-10 10:00:00,WP,PARENT1,LINEAA,SK1,Y1\n"
+        "2026-04-10 10:00:00,WP,PARENT1,LINEBB,SK1,Y2\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
+    assert "OK" in msg
+    assert df["OrderId"].tolist() == ["LINEAA", "LINEBB"]
+
+
+def test_flipkart_earn_more_assigns_distinct_order_ids_for_dedup():
+    """Same SKU/date/qty lines must not collapse in build_sales_df."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from backend.services.flipkart import _parse_flipkart_earn_more
+    from backend.services.sales import build_sales_df
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "earn_more_report"
+    hdr = [
+        "Order Date",
+        "SKU ID",
+        "Gross Units",
+        "Final Sale Units",
+        "Return Units",
+        "Cancellation Units",
+        "Final Sale Amount",
+        "Return Amount",
+        "Brand",
+    ]
+    ws.append(hdr)
+    ws.append(["2026-04-10", "LIST1", 5, 3, 0, 0, 300, 0, "B1"])
+    ws.append(["2026-04-10", "LIST1", 5, 3, 0, 0, 300, 0, "B1"])
+    buf = BytesIO()
+    wb.save(buf)
+    fk = _parse_flipkart_earn_more(buf.getvalue(), "em.xlsx", {"LIST1": "OMS-1"})
+    sales = build_sales_df(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        fk,
+        {},
+    )
+    m = (sales["Source"] == "Flipkart") & (sales["Transaction Type"] == "Shipment")
+    assert int(pd.to_numeric(sales.loc[m, "Quantity"], errors="coerce").sum()) == 6
+
+
 def test_meesho_csv_skips_aggregate_sku_column_for_listing_sku():
     from backend.services.meesho import parse_meesho_csv
 
@@ -513,6 +599,16 @@ def test_flipkart_sales_report_maps_sku_id_when_sku_column_is_dash():
     assert out["OMS_SKU"].iloc[0] == "OMS-FK"
 
 
+def test_flipkart_parse_excel_order_dates_serial_and_iso():
+    from datetime import date
+
+    from backend.services.flipkart import _fk_parse_excel_order_dates
+
+    s = pd.Series(["46126", "2026-04-01", 46113.0])
+    out = _fk_parse_excel_order_dates(s)
+    assert list(out.dt.date) == [date(2026, 4, 14), date(2026, 4, 1), date(2026, 4, 1)]
+
+
 def test_flipkart_earn_more_prefers_final_sale_units_over_gross():
     """earn_more_report must not count cancelled demand in shipments (Final Sale vs Gross)."""
     from io import BytesIO
@@ -544,3 +640,36 @@ def test_flipkart_earn_more_prefers_final_sale_units_over_gross():
     ship = out[out["TxnType"] == "Shipment"]
     assert len(ship) == 1
     assert float(ship["Quantity"].iloc[0]) == 7.0
+
+
+def test_flipkart_earn_more_parses_numeric_excel_serial_order_date():
+    """Order Date stored as Excel serial (common when re-saving XLSX) must not become NaT."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from backend.services.flipkart import _parse_flipkart_earn_more
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "earn_more_report"
+    ws.append(
+        [
+            "Order Date",
+            "SKU ID",
+            "Gross Units",
+            "Final Sale Units",
+            "Return Units",
+            "Cancellation Units",
+            "Final Sale Amount",
+            "Return Amount",
+            "Brand",
+        ]
+    )
+    ws.append([46126, "LIST1", 10, 5, 0, 5, 500, 0, "B1"])
+    buf = BytesIO()
+    wb.save(buf)
+    out = _parse_flipkart_earn_more(buf.getvalue(), "earn-Apr-2026.xlsx", {"LIST1": "OMS-1"})
+    ship = out[out["TxnType"] == "Shipment"]
+    assert len(ship) == 1
+    assert ship["Date"].iloc[0].date().isoformat() == "2026-04-14"

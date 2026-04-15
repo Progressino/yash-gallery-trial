@@ -126,6 +126,32 @@ def _fk_map_listing_to_oms(raw, mapping: Dict[str, str]) -> str:
     return map_to_oms_sku(clean_sku(str(raw)), mapping)
 
 
+def _fk_parse_excel_order_dates(series: pd.Series) -> pd.Series:
+    """
+    Flipkart exports often store dates as Excel serials (float) or as strings like "46126"
+    after CSV round-trips. Plain ``pd.to_datetime`` treats floats as nanoseconds (wrong) and
+    leaves serial strings as NaT — both drop real rows. Use Excel day origin for numeric values.
+    """
+    s = series.copy()
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return pd.to_datetime(s, errors="coerce")
+    if pd.api.types.is_numeric_dtype(s):
+        return pd.to_datetime(s, unit="D", origin="1899-12-30", errors="coerce")
+
+    # object / string / mixed: Excel serial first (avoids mixed-type to_datetime warnings), then calendar
+    num = pd.to_numeric(s, errors="coerce")
+    serial_mask = num.notna() & (num >= 20000) & (num <= 65000)
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    if serial_mask.any():
+        out.loc[serial_mask] = pd.to_datetime(
+            num.loc[serial_mask], unit="D", origin="1899-12-30", errors="coerce"
+        )
+    rest = ~serial_mask & s.notna()
+    if rest.any():
+        out.loc[rest] = pd.to_datetime(s.loc[rest], errors="coerce")
+    return out
+
+
 def _fk_month_from_filename(fname: str):
     base = Path(fname).stem.upper()
     _MON = {
@@ -152,7 +178,7 @@ def _parse_flipkart_xlsx(
         xl.columns = xl.columns.str.strip()
         if not xl.empty and "Event Sub Type" in xl.columns:
             date_col = "Buyer Invoice Date" if "Buyer Invoice Date" in xl.columns else "Order Date"
-            xl["Date"] = pd.to_datetime(xl[date_col], errors="coerce")
+            xl["Date"] = _fk_parse_excel_order_dates(xl[date_col])
 
             file_month = _fk_month_from_filename(fname)
             if file_month:
@@ -193,7 +219,7 @@ def _parse_flipkart_xlsx(
 
     # ── Try new "Order Export" format (first sheet, columns: SKU ID / Gross Units / Order Date) ──
     try:
-        xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, dtype=str)
+        xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
         if xl.empty:
             return pd.DataFrame()
 
@@ -203,7 +229,7 @@ def _parse_flipkart_xlsx(
         if not ("SKU ID" in xl.columns and "Gross Units" in xl.columns and "Order Date" in xl.columns):
             return pd.DataFrame()
 
-        xl["Date"] = pd.to_datetime(xl["Order Date"], errors="coerce")
+        xl["Date"] = _fk_parse_excel_order_dates(xl["Order Date"])
         xl = xl.dropna(subset=["Date"])
         if xl.empty:
             return pd.DataFrame()
@@ -358,7 +384,7 @@ def _parse_flipkart_orders_sheet(
         date_col = next((c for c in df.columns if "order date" in c.lower()), None)
         if not date_col:
             return pd.DataFrame()
-        df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+        df["_Date"] = _fk_parse_excel_order_dates(df[date_col])
         df = df.dropna(subset=["_Date"])
         if df.empty:
             return pd.DataFrame()
@@ -436,14 +462,14 @@ def _parse_flipkart_earn_more(
     Expands aggregated rows into Shipment/Refund rows (ship qty = Final Sale Units when present).
     """
     try:
-        xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name="earn_more_report", dtype=str)
+        xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name="earn_more_report")
         if xl.empty:
             return pd.DataFrame()
 
         xl.columns = xl.columns.str.strip()
 
-        # Normalize date
-        xl["Date"] = pd.to_datetime(xl["Order Date"], errors="coerce")
+        # Normalize date (Excel serials / strings must not use naive to_datetime — see _fk_parse_excel_order_dates)
+        xl["Date"] = _fk_parse_excel_order_dates(xl["Order Date"])
         xl = xl.dropna(subset=["Date"])
         if xl.empty:
             return pd.DataFrame()
@@ -520,7 +546,12 @@ def _parse_flipkart_earn_more(
 
         if not rows:
             return pd.DataFrame()
-        return pd.concat(rows, ignore_index=True)
+        out = pd.concat(rows, ignore_index=True)
+        # Empty OrderId made build_sales_df collapse rows with the same Sku/Date/Qty; assign
+        # stable line keys so each earn_more line survives dedup.
+        dkey = pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y%m%d").fillna("")
+        out["OrderId"] = "FKEM:" + out.index.astype(str) + ":" + dkey.astype(str)
+        return out
 
     except Exception:
         return pd.DataFrame()

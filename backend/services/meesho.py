@@ -595,10 +595,12 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
                        or c == "status"), None)
     def _txn(s):
         s = str(s).lower().strip()
-        if "return" in s or "rto" in s:                          return "Refund"
-        if "cancel" in s:                                         return "Cancel"
-        if s in ("ready_to_ship", "hold", "pending", "new"):     return "Cancel"  # pre-shipment, exclude
-        return "Shipment"  # DELIVERED, SHIPPED, DOOR_STEP_EXCHANGED, etc.
+        # Only customer returns / RTO count as Refund. READY_TO_SHIP, HOLD, CANCELLED, etc. still
+        # carry order-date quantity — seller DSR for a calendar day matches Meesho "orders on date"
+        # exports (gross line qty), not only SHIPPED rows.
+        if "return" in s or "rto" in s:
+            return "Refund"
+        return "Shipment"
     df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"
 
     # Quantity
