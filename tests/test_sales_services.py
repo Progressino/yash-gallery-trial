@@ -85,11 +85,25 @@ def test_get_sales_summary_shipments_and_refunds():
     assert abs(s["return_rate"] - (2 / 15 * 100)) < 0.15
 
 
-def test_amazon_unkeyed_shadow_dropped_when_any_keyed_matches_fingerprint():
-    """Two keyed shipments same sku/day/qty still suppress matching unkeyed FBA shadow."""
+def test_amazon_unkeyed_shadow_dropped_only_for_single_keyed_fingerprint():
+    """One keyed + one unkeyed duplicate shadow → drop shadow; two keyed same fp → keep all."""
     from backend.services.sales import _drop_amazon_unkeyed_shadows
 
-    df = pd.DataFrame(
+    dup = pd.DataFrame(
+        {
+            "Source": ["Amazon", "Amazon"],
+            "Sku": ["S1", "S1"],
+            "TxnDate": pd.to_datetime(["2025-06-01", "2025-06-01"]),
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Quantity": [2, 2],
+            "Units_Effective": [2, 2],
+            "OrderId": ["O1", None],
+            "LineKey": ["", ""],
+        }
+    )
+    assert len(_drop_amazon_unkeyed_shadows(dup)) == 1
+
+    two_orders = pd.DataFrame(
         {
             "Source": ["Amazon", "Amazon", "Amazon"],
             "Sku": ["S1", "S1", "S1"],
@@ -101,8 +115,7 @@ def test_amazon_unkeyed_shadow_dropped_when_any_keyed_matches_fingerprint():
             "LineKey": ["", "", ""],
         }
     )
-    out = _drop_amazon_unkeyed_shadows(df)
-    assert len(out) == 2
+    assert len(_drop_amazon_unkeyed_shadows(two_orders)) == 3
 
 
 def test_get_anomalies_return_spike_uses_unified_sales_and_date_window():
@@ -402,6 +415,19 @@ def test_meesho_csv_txn_types_ship_refund_cancel():
     assert float(ship) == 2.0
     assert float(ref) == 1.0
     assert float(can) == 1.0
+
+
+def test_meesho_csv_linekey_prefers_sub_order_over_packet_id():
+    from backend.services.meesho import parse_meesho_csv
+
+    csv = (
+        "order date,reason for credit entry,sku,quantity,sub order no,packet id\n"
+        "2026-04-05,DELIVERED,SK1,1,SUB999,PKT888\n"
+    )
+    out, msg = parse_meesho_csv(csv.encode("utf-8"))
+    assert msg == "OK"
+    assert out["LineKey"].iloc[0] == "SUB999"
+    assert out["MeeshoSubOrder"].iloc[0] == "SUB999"
 
 
 def test_myntra_csv_maps_status_f_to_shipment():

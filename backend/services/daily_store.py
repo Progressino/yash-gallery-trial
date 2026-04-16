@@ -272,8 +272,8 @@ def _dedup_meesho_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
 
 def _dedup_meesho_suborder_cross_source(d: pd.DataFrame) -> pd.DataFrame:
     """
-    Supplier TCS uses ``sub_order_num`` as the id; daily CSV often uses ``packet id`` as
-    ``LineKey`` while ``MeeshoSubOrder`` holds the sub-order. Same
+    Supplier TCS uses ``sub_order_num`` as the id; daily CSV should prefer Sub Order as
+    ``LineKey`` (packet id is fallback). Same
     (day, SKU, txn, qty, sub-order) must collapse to one row: drop synthetic LineKey
     twins, then exact duplicates from re-uploads.
     """

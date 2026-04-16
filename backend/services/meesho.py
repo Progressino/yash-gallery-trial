@@ -260,17 +260,19 @@ def _meesho_sku_base_series(df: pd.DataFrame) -> pd.Series:
 
 
 def _meesho_line_dedup_series(df: pd.DataFrame) -> pd.Series:
-    """Prefer packet id over sub-order columns so the same line keeps one key across re-uploads."""
+    """Prefer Sub Order ID over packet id — DSR and supplier exports are sub-order grain."""
     if df.empty:
         return pd.Series(dtype=str)
     keys = pd.Series("", index=df.index, dtype=str)
     for col in (
-        "packet id",
-        "packet_id",
         "sub order no",
         "sub order",
         "suborder id",
         "suborder no",
+        "sub_order_no",
+        "sub_order_id",
+        "packet id",
+        "packet_id",
         "catalog id",
     ):
         if col not in df.columns:
@@ -663,9 +665,24 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     # State
     state_col = next((c for c in df.columns if "customer state" in c or c == "state"), None)
 
-    # Order ID fallback column (LineKey prefers packet id first — see _meesho_line_dedup_series).
-    order_col = next((c for c in df.columns if "sub order" in c or "order no" in c
-                      or "packet id" in c or "packet" in c), None)
+    # Order / LineKey: Sub Order ID must win over packet id (see _meesho_line_dedup_series).
+    order_col = None
+    for c in df.columns:
+        cl = str(c).lower()
+        if "sub order" in cl or "suborder" in cl:
+            order_col = c
+            break
+    if order_col is None:
+        for c in df.columns:
+            cl = str(c).lower()
+            if "order no" in cl or cl in ("order id", "order_id"):
+                order_col = c
+                break
+    if order_col is None:
+        for c in df.columns:
+            if "packet" in str(c).lower():
+                order_col = c
+                break
 
     # Size column: combine with SKU → 1158YKGREEN + XL → 1158YKGREEN-XL (also split "1158YKGREEN XL" in one cell).
     base_sku = _meesho_sku_base_series(df)
