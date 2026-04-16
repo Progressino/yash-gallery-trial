@@ -219,8 +219,8 @@ def _drop_amazon_unkeyed_shadows(df: pd.DataFrame) -> pd.DataFrame:
     dedup buckets in build_sales_df and were both kept — inflating units.
 
     For each (Sku, calendar day, Transaction Type, quantity) fingerprint that has
-    exactly one keyed Amazon row, drop unkeyed Amazon rows matching that fingerprint
-    (conservative: if multiple keyed rows share the fingerprint, we do not drop).
+    at least one keyed Amazon row, drop unkeyed Amazon rows matching that fingerprint
+    (FBA / shipment extracts often repeat the same qty as the order-keyed MTR line).
     """
     if df.empty or "Source" not in df.columns or "OrderId" not in df.columns:
         return df
@@ -245,13 +245,12 @@ def _drop_amazon_unkeyed_shadows(df: pd.DataFrame) -> pd.DataFrame:
         return pd.concat([rest, amz], ignore_index=True)
 
     key_cols = ["Sku", "_day", "Transaction Type", "_qtyk"]
-    kc = keyed.groupby(key_cols).size()
-    single = kc[kc == 1].reset_index()[key_cols]
-    if single.empty:
+    keyed_fps = keyed.drop_duplicates(subset=key_cols, keep="first")[key_cols]
+    if keyed_fps.empty:
         amz = amz.drop(columns=["_day", "_qtyk"], errors="ignore")
         return pd.concat([rest, amz], ignore_index=True)
 
-    unkeyed_merge = unkeyed.merge(single, on=key_cols, how="left", indicator=True)
+    unkeyed_merge = unkeyed.merge(keyed_fps, on=key_cols, how="left", indicator=True)
     kept_unkeyed = unkeyed_merge.loc[unkeyed_merge["_merge"] == "left_only"].drop(columns=["_merge"])
 
     amz_out = pd.concat([keyed, kept_unkeyed], ignore_index=True)

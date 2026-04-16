@@ -338,9 +338,10 @@ def _flipkart_synthetic_line_mask(lk: pd.Series) -> pd.Series:
 def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
     """
     Flipkart Sales Report rows carry real Order IDs; Order Export and earn_more_report use
-    synthetic LineKeys.     Same (day, SKU, txn, qty, status, amount) can appear in multiple
-    files — drop **all** synthetic LineKeys when any real marketplace row exists in that
-    bucket (refined by status + amount to limit cross-order collisions).
+    synthetic LineKeys. Same (day, SKU, txn, qty, status, amount) can appear in multiple
+    files. When a real row and synthetics share a bucket, drop only a **single** synthetic
+    twin (Meesho-style); dropping every synthetic under-counted vs overlapping exports.
+    Among all-synthetic buckets, prefer earn_more over order-export LineKeys.
     """
     if d.empty or not all(
         c in d.columns for c in ("Date", "OMS_SKU", "TxnType", "Quantity", "LineKey")
@@ -372,7 +373,11 @@ def _dedup_flipkart_cross_source_overlay(d: pd.DataFrame) -> pd.DataFrame:
         sm = syn_m.loc[idx]
         rm = real_m.loc[idx]
         if rm.any() and sm.any():
-            drop_idx.extend([i for i in idx if bool(sm.loc[i])])
+            # Same idea as Meesho overlay: drop only a single obvious synthetic twin.
+            # Multiple synthetics in one coarse bucket may be distinct orders — dropping
+            # all of them under-counted vs seller Excel when exports overlap.
+            if int(sm.sum()) == 1:
+                drop_idx.extend([i for i in idx if bool(sm.loc[i])])
             continue
         if sm.all():
             pri_series = pd.Series(2, index=idx, dtype="int32")

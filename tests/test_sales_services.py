@@ -85,6 +85,26 @@ def test_get_sales_summary_shipments_and_refunds():
     assert abs(s["return_rate"] - (2 / 15 * 100)) < 0.15
 
 
+def test_amazon_unkeyed_shadow_dropped_when_any_keyed_matches_fingerprint():
+    """Two keyed shipments same sku/day/qty still suppress matching unkeyed FBA shadow."""
+    from backend.services.sales import _drop_amazon_unkeyed_shadows
+
+    df = pd.DataFrame(
+        {
+            "Source": ["Amazon", "Amazon", "Amazon"],
+            "Sku": ["S1", "S1", "S1"],
+            "TxnDate": pd.to_datetime(["2025-06-01", "2025-06-01", "2025-06-01"]),
+            "Transaction Type": ["Shipment", "Shipment", "Shipment"],
+            "Quantity": [2, 2, 2],
+            "Units_Effective": [2, 2, 2],
+            "OrderId": ["O-A", "O-B", None],
+            "LineKey": ["", "", ""],
+        }
+    )
+    out = _drop_amazon_unkeyed_shadows(df)
+    assert len(out) == 2
+
+
 def test_get_anomalies_return_spike_uses_unified_sales_and_date_window():
     """Raw platform frames can imply a huge return rate; unified + date filter must match cards."""
     raw_fk = pd.DataFrame(
@@ -517,6 +537,33 @@ def test_flipkart_overlay_drops_fkem_when_real_order_same_fingerprint():
     out = _dedup_flipkart_cross_source_overlay(d)
     assert len(out) == 1
     assert out["LineKey"].iloc[0] == "OD123456789"
+
+
+def test_flipkart_overlay_keeps_multiple_synthetics_when_real_share_bucket():
+    """Two earn_more lines + one real order: do not drop both synthetics (under-count risk)."""
+    from backend.services.daily_store import _dedup_flipkart_cross_source_overlay
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-04-10", "2024-04-10", "2024-04-10"]),
+            "OMS_SKU": ["OMS1", "OMS1", "OMS1"],
+            "TxnType": ["Shipment", "Shipment", "Shipment"],
+            "Quantity": [2.0, 2.0, 2.0],
+            "LineKey": [
+                "FKEM||L1|20240410|SHIP|2",
+                "FKEM||L2|20240410|SHIP|2",
+                "OD999",
+            ],
+            "OrderId": [
+                "FKEM||L1|20240410|SHIP|2",
+                "FKEM||L2|20240410|SHIP|2",
+                "OD999",
+            ],
+        }
+    )
+    out = _dedup_flipkart_cross_source_overlay(d)
+    assert len(out) == 3
 
 
 def test_flipkart_overlay_prefers_order_export_over_earn_more_when_all_synthetic():
