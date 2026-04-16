@@ -1,8 +1,10 @@
 """
 Data query router — analytics endpoints.
-GET /api/data/coverage, sales-summary, sales-export, sales-by-source, daily-dsr, top-skus,
+GET /api/data/coverage, sales-summary, sales-export, sales-by-source, daily-dsr, daily-dsr-export,
+dsr-brand-monthly, dsr-brand-monthly-export, top-skus,
 mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 """
+import csv
 import io
 import re
 from typing import List, Optional, Set
@@ -23,9 +25,12 @@ from ..services.sales import (
     _filter_by_reporting_days,
     canonical_sales_sku,
     canonical_sales_sku_series,
+    daily_dsr_report_to_csv_rows,
     filter_sales_for_export,
     get_anomalies,
     get_daily_dsr_report,
+    dsr_brand_monthly_to_csv_rows,
+    get_dsr_brand_monthly_comparison,
     get_platform_summary,
     get_sales_by_source,
     get_sales_summary,
@@ -695,6 +700,28 @@ def daily_breakdown(
         return []
 
 
+def _resolve_daily_dsr_date(sess: AppSession, date: Optional[str]) -> tuple:
+    """Return (sales_df, iso_date_str) for DSR helpers."""
+    import pandas as pd
+
+    df = sess.sales_df
+    if df.empty:
+        return df, (date or "").strip()
+
+    if not date or not str(date).strip():
+        d = df.copy()
+        d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
+        d = d.dropna(subset=["TxnDate"])
+        if d.empty:
+            return df, ""
+        latest = d["TxnDate"].max()
+        if pd.isna(latest):
+            return df, ""
+        date = str(latest.normalize().date())
+
+    return df, str(date).strip()
+
+
 @router.get("/daily-dsr")
 def daily_dsr(request: Request, date: Optional[str] = None):
     """
@@ -702,25 +729,66 @@ def daily_dsr(request: Request, date: Optional[str] = None):
     segment rows (Flipkart Brand, Snapdeal Company, etc.) and an Others bucket.
     Query: ``date`` = ISO ``YYYY-MM-DD`` (defaults to latest day with sales if omitted).
     """
-    import pandas as pd
-
     sess = _sess(request)
-    df = sess.sales_df
-    if df.empty:
-        return get_daily_dsr_report(df, date or "")
+    _restore_daily_if_needed(sess)
+    df, iso = _resolve_daily_dsr_date(sess, date)
+    return get_daily_dsr_report(df, iso)
 
-    if not date or not str(date).strip():
-        d = df.copy()
-        d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
-        d = d.dropna(subset=["TxnDate"])
-        if d.empty:
-            return get_daily_dsr_report(df, "")
-        latest = d["TxnDate"].max()
-        if pd.isna(latest):
-            return get_daily_dsr_report(df, "")
-        date = str(latest.normalize().date())
 
-    return get_daily_dsr_report(df, date)
+@router.get("/daily-dsr-export")
+def daily_dsr_export(request: Request, date: Optional[str] = None):
+    """CSV download matching the on-screen Daily DSR table."""
+    sess = _sess(request)
+    _restore_daily_if_needed(sess)
+    df, iso = _resolve_daily_dsr_date(sess, date)
+    report = get_daily_dsr_report(df, iso)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    for row in daily_dsr_report_to_csv_rows(report):
+        w.writerow(row)
+    body = buf.getvalue().encode("utf-8")
+    fname = f"daily-dsr_{report.get('date') or 'nodate'}.csv"
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.get("/dsr-brand-monthly")
+def dsr_brand_monthly(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """YG vs Akiko shipment units by calendar month (DSR segment / brand labels)."""
+    sess = _sess(request)
+    _restore_daily_if_needed(sess)
+    return get_dsr_brand_monthly_comparison(sess.sales_df, start_date, end_date)
+
+
+@router.get("/dsr-brand-monthly-export")
+def dsr_brand_monthly_export(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """CSV of YG vs Akiko monthly comparison (same logic as ``/dsr-brand-monthly``)."""
+    sess = _sess(request)
+    _restore_daily_if_needed(sess)
+    result = get_dsr_brand_monthly_comparison(sess.sales_df, start_date, end_date)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    for row in dsr_brand_monthly_to_csv_rows(result):
+        w.writerow(row)
+    body = buf.getvalue().encode("utf-8")
+    part = f"{start_date or 'all'}_{end_date or 'all'}".replace("/", "-")
+    fname = f"dsr-yg-akiko-monthly_{part}.csv"
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ── MTR Analytics ─────────────────────────────────────────────

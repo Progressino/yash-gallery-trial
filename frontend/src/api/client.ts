@@ -125,6 +125,63 @@ export async function getCoverage(): Promise<CoverageResponse> {
   return data
 }
 
+/** YG vs Akiko monthly comparison CSV (uses same date params as dashboard summary). */
+export async function downloadDsrBrandMonthlyCsv(params: string): Promise<void> {
+  const q = params.trim() ? `?${params}` : ''
+  const res = await fetch(`/api/data/dsr-brand-monthly-export${q}`, { credentials: 'include' })
+  if (!res.ok) {
+    let msg = `Export failed (${res.status})`
+    try {
+      const j = (await res.json()) as { detail?: string }
+      if (typeof j.detail === 'string') msg = j.detail
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('Content-Disposition')
+  const m = cd?.match(/filename="([^"]+)"/i)
+  const filename = m?.[1] ?? 'dsr-yg-akiko-monthly.csv'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/** Daily DSR table as CSV (same rows as the dashboard DSR block). */
+export async function downloadDailyDsrCsv(isoDate: string): Promise<void> {
+  const p = new URLSearchParams()
+  if (isoDate) p.set('date', isoDate)
+  const res = await fetch(`/api/data/daily-dsr-export?${p}`, { credentials: 'include' })
+  if (!res.ok) {
+    let msg = `Export failed (${res.status})`
+    try {
+      const j = (await res.json()) as { detail?: string }
+      if (typeof j.detail === 'string') msg = j.detail
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('Content-Disposition')
+  const m = cd?.match(/filename="([^"]+)"/i)
+  const filename = m?.[1] ?? 'daily-dsr.csv'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 /** Line-level unified sales CSV for Intelligence dashboard (date range + optional platforms). */
 export async function downloadIntelligenceSalesCsv(opts: {
   startDate?: string

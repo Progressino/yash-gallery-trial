@@ -8,9 +8,12 @@ from backend.services.sales import (
     build_sales_df,
     canonical_sales_sku,
     canonical_sales_sku_series,
+    daily_dsr_report_to_csv_rows,
+    dsr_brand_monthly_to_csv_rows,
     filter_sales_for_export,
     get_anomalies,
     get_daily_dsr_report,
+    get_dsr_brand_monthly_comparison,
     get_platform_summary,
     get_sales_summary,
     list_sku_mapping_gaps,
@@ -47,6 +50,47 @@ def test_get_daily_dsr_report_segments_and_others():
     others = next(s for s in r["sections"] if s["platform"] == "Others")
     assert others["rows"][0]["sales"] == 3
     assert others["rows"][0]["segment"] == "Shopify"
+
+
+def test_daily_dsr_report_to_csv_rows_includes_subtotal():
+    r = get_daily_dsr_report(pd.DataFrame(), "")
+    rows = daily_dsr_report_to_csv_rows(r)
+    assert rows[0][0] == "Report type"
+    assert any(row[0] == "Subtotal (all platforms)" for row in rows)
+
+
+def test_get_dsr_brand_monthly_comparison_yg_vs_akiko():
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(
+                ["2025-03-10", "2025-03-15", "2025-04-01", "2025-04-02", "2025-04-03"]
+            ),
+            "Transaction Type": ["Shipment"] * 5,
+            "Quantity": [100, 50, 30, 40, 200],
+            "Source": ["Flipkart"] * 5,
+            "DSR_Segment": ["YG", "Akiko", "YG", "Akiko", "OtherBrand"],
+            "Sku": ["a"] * 5,
+        }
+    )
+    out = get_dsr_brand_monthly_comparison(df, "2025-03-01", "2025-04-30")
+    assert out["note"] == ""
+    mar = next(x for x in out["rows"] if x["month"] == "2025-03")
+    assert mar["YG"] == 100
+    assert mar["Akiko"] == 50
+    assert mar["leader"] == "YG"
+    apr = next(x for x in out["rows"] if x["month"] == "2025-04")
+    assert apr["YG"] == 30
+    assert apr["Akiko"] == 40
+    assert apr["leader"] == "Akiko"
+    assert out["totals"]["YG"] == 130
+    assert out["totals"]["Akiko"] == 90
+
+
+def test_dsr_brand_monthly_to_csv_rows():
+    out = get_dsr_brand_monthly_comparison(pd.DataFrame(), None, None)
+    rows = dsr_brand_monthly_to_csv_rows(out)
+    assert rows[0][0] == "Report"
+    assert any(r and r[0] == "Range total" for r in rows)
 
 
 def test_get_sales_summary_includes_ist_same_calendar_day():

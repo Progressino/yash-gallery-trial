@@ -541,6 +541,182 @@ def get_daily_dsr_report(sales_df: pd.DataFrame, report_date: str) -> dict:
     }
 
 
+def daily_dsr_report_to_csv_rows(report: dict) -> List[List[object]]:
+    """Flatten a ``get_daily_dsr_report`` dict into CSV rows (header + body)."""
+    rows: List[List[object]] = [
+        ["Report type", "Daily DSR"],
+        ["Date (ISO)", report.get("date", "")],
+        ["Display date", report.get("display_date", "")],
+        ["", "", "", ""],
+        ["Marketplace", "Segment", "Sales (units)", "Returns (units)"],
+    ]
+    for sec in report.get("sections") or []:
+        plat = sec.get("platform", "")
+        for r in sec.get("rows") or []:
+            rows.append(
+                [plat, r.get("segment", ""), r.get("sales", 0), r.get("returns", 0)]
+            )
+        rows.append(
+            [
+                plat,
+                f"— {plat} total —",
+                sec.get("section_sales", 0),
+                sec.get("section_returns", 0),
+            ]
+        )
+    st = report.get("subtotal") or {}
+    rows.append(["Subtotal (all platforms)", "", st.get("sales", 0), st.get("returns", 0)])
+    return rows
+
+
+def _series_canonical_dsr_brand(seg: pd.Series) -> pd.Series:
+    """
+    Map DSR segment / company labels to ``YG`` or ``Akiko`` for head-to-head reporting.
+    Rows that are not clearly one of these brands become NA (excluded from comparison).
+    """
+    s = seg.fillna("").astype(str).str.strip().str.lower()
+    out = pd.Series(pd.NA, index=seg.index, dtype=object)
+    m_akiko = s.str.contains("akiko", na=False)
+    m_yg = (
+        (s == "yg")
+        | s.str.contains("yash gallery", na=False)
+        | s.str.contains(r"\byg\b", regex=True, na=False)
+    )
+    conflict = m_yg & m_akiko
+    m_yg = m_yg & ~conflict
+    m_akiko = m_akiko & ~conflict
+    out = out.mask(m_yg, "YG")
+    out = out.mask(m_akiko, "Akiko")
+    return out
+
+
+def get_dsr_brand_monthly_comparison(
+    sales_df: pd.DataFrame,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """
+    Month-over-month shipment units for **YG** vs **Akiko** based on ``DSR_Segment``
+    (or ``Company`` fallback), same labeling rules as the daily DSR table.
+    """
+    empty: dict = {
+        "rows":   [],
+        "totals": {"YG": 0, "Akiko": 0},
+        "note":   "",
+    }
+    if sales_df.empty or "TxnDate" not in sales_df.columns:
+        return empty
+
+    d = sales_df.copy()
+    d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
+    d = d.dropna(subset=["TxnDate"])
+    if start_date or end_date:
+        d = _filter_by_reporting_days(d, "TxnDate", start_date, end_date)
+
+    d = d[d["Transaction Type"].astype(str).str.strip() == "Shipment"]
+    if d.empty:
+        return {**empty, "note": "No shipment rows in the selected range."}
+
+    seg = pd.Series("All", index=d.index, dtype=str)
+    if "DSR_Segment" in d.columns:
+        seg = d["DSR_Segment"].fillna("").astype(str).str.strip()
+        seg = seg.mask(seg.str.len() == 0, "All")
+    elif "Company" in d.columns:
+        seg = d["Company"].fillna("").astype(str).str.strip()
+        seg = seg.mask(seg.str.len() == 0, "All")
+    d["_brand"] = _series_canonical_dsr_brand(seg)
+    d = d[d["_brand"].notna()]
+    if d.empty:
+        return {
+            **empty,
+            "note": (
+                "No rows tagged as YG or Akiko. Segments come from Flipkart Brand, "
+                "Snapdeal Company, or a DSR_Segment column on unified sales."
+            ),
+        }
+
+    d["_month"] = d["TxnDate"].dt.to_period("M").astype(str)
+    qty = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0)
+    pivot = (
+        d.assign(_q=qty)
+        .groupby(["_month", "_brand"], observed=True)["_q"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+    for col in ("YG", "Akiko"):
+        if col not in pivot.columns:
+            pivot[col] = 0
+    pivot = pivot.reindex(columns=["YG", "Akiko"], fill_value=0)
+
+    out_rows: List[dict] = []
+    for month in sorted(pivot.index.astype(str)):
+        yg = int(pivot.loc[month, "YG"])
+        ak = int(pivot.loc[month, "Akiko"])
+        if yg > ak:
+            leader, delta = "YG", yg - ak
+        elif ak > yg:
+            leader, delta = "Akiko", ak - yg
+        else:
+            leader, delta = "Tie", 0
+        try:
+            ts = pd.Timestamp(month + "-01")
+            month_display = ts.strftime("%b %Y")
+        except Exception:
+            month_display = month
+        out_rows.append({
+            "month":         month,
+            "month_display": month_display,
+            "YG":            yg,
+            "Akiko":         ak,
+            "leader":        leader,
+            "delta":         delta,
+        })
+
+    totals = {
+        "YG":    int(pivot["YG"].sum()),
+        "Akiko": int(pivot["Akiko"].sum()),
+    }
+    return {"rows": out_rows, "totals": totals, "note": ""}
+
+
+def dsr_brand_monthly_to_csv_rows(result: dict) -> List[List[object]]:
+    """Flatten ``get_dsr_brand_monthly_comparison`` output for CSV download."""
+    rows: List[List[object]] = [
+        ["Report", "YG vs Akiko — monthly shipment units"],
+        ["Filter note", "Respects Intelligence dashboard start/end dates when provided."],
+    ]
+    if result.get("note"):
+        rows.append(["Status", result["note"]])
+    rows.extend([[], ["Month (label)", "Month (ISO)", "YG", "Akiko", "Leader", "Margin (units)"]])
+    for r in result.get("rows") or []:
+        margin = "" if r.get("leader") == "Tie" else r.get("delta", 0)
+        rows.append([
+            r.get("month_display", ""),
+            r.get("month", ""),
+            r.get("YG", 0),
+            r.get("Akiko", 0),
+            r.get("leader", ""),
+            margin,
+        ])
+    t = result.get("totals") or {}
+    rows.append([])
+    rows.append([
+        "Range total",
+        "",
+        t.get("YG", 0),
+        t.get("Akiko", 0),
+        (
+            "YG ahead"
+            if t.get("YG", 0) > t.get("Akiko", 0)
+            else "Akiko ahead"
+            if t.get("Akiko", 0) > t.get("YG", 0)
+            else "Tie"
+        ),
+        abs(int(t.get("YG", 0)) - int(t.get("Akiko", 0))),
+    ])
+    return rows
+
+
 def get_top_skus(
     sales_df: pd.DataFrame,
     limit: int = 20,

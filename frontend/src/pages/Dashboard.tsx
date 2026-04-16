@@ -5,7 +5,12 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell,
 } from 'recharts'
-import api, { downloadIntelligenceSalesCsv, getCoverage } from '../api/client'
+import api, {
+  downloadDailyDsrCsv,
+  downloadDsrBrandMonthlyCsv,
+  downloadIntelligenceSalesCsv,
+  getCoverage,
+} from '../api/client'
 import { useSession } from '../store/session'
 
 interface DailyBreakdownRow { date: string; platform: string; units: number; returns: number }
@@ -21,6 +26,20 @@ interface DsrResponse {
   display_date: string
   sections: DsrSection[]
   subtotal: { sales: number; returns: number }
+}
+
+interface DsrBrandMonthlyRow {
+  month: string
+  month_display: string
+  YG: number
+  Akiko: number
+  leader: string
+  delta: number
+}
+interface DsrBrandMonthlyResponse {
+  rows: DsrBrandMonthlyRow[]
+  totals: { YG: number; Akiko: number }
+  note: string
 }
 
 // ── Types ───────────────────────────────────────────────────────
@@ -147,6 +166,8 @@ export default function Dashboard() {
   const [skuSearch, setSkuSearch] = useState('')
   const [topSkuLimit, setTopSkuLimit] = useState(10)
   const [exportingSales, setExportingSales] = useState(false)
+  const [exportingDsr, setExportingDsr] = useState(false)
+  const [exportingDsrMonthly, setExportingDsrMonthly] = useState(false)
   const [showDsr, setShowDsr] = useState(false)
   const [dsrDate, setDsrDate] = useState(TODAY)
 
@@ -180,6 +201,13 @@ export default function Dashboard() {
     const p = new URLSearchParams({ months: '0' })
     if (dateStart) p.set('start_date', dateStart)
     if (dateEnd)   p.set('end_date',   dateEnd)
+    return p.toString()
+  }, [dateStart, dateEnd])
+
+  const dsrBrandMonthlyParams = useMemo(() => {
+    const p = new URLSearchParams()
+    if (dateStart) p.set('start_date', dateStart)
+    if (dateEnd)   p.set('end_date', dateEnd)
     return p.toString()
   }, [dateStart, dateEnd])
 
@@ -238,6 +266,16 @@ export default function Dashboard() {
     staleTime: 60 * 1000,
   })
 
+  const { data: dsrBrandMonthly, isLoading: loadingDsrBrands } = useQuery<DsrBrandMonthlyResponse>({
+    queryKey: ['dsr-brand-monthly', dateStart, dateEnd],
+    queryFn: async () => {
+      const { data } = await api.get(`/data/dsr-brand-monthly?${dsrBrandMonthlyParams}`)
+      return data
+    },
+    enabled: salesLoaded,
+    staleTime: 60 * 1000,
+  })
+
   const platforms = platformSummary ?? []
   const loadedPlatforms = platforms.filter(p => p.loaded)
   const activePlatformCount = loadedPlatforms.length
@@ -269,6 +307,28 @@ export default function Dashboard() {
 
   const allPlatformsHidden =
     loadedPlatforms.length > 0 && loadedPlatforms.every(p => hiddenPlatforms.has(p.platform))
+
+  async function handleDownloadDailyDsrCsv() {
+    try {
+      setExportingDsr(true)
+      await downloadDailyDsrCsv(dsrDate)
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Could not export Daily DSR.')
+    } finally {
+      setExportingDsr(false)
+    }
+  }
+
+  async function handleDownloadDsrBrandMonthlyCsv() {
+    try {
+      setExportingDsrMonthly(true)
+      await downloadDsrBrandMonthlyCsv(dsrBrandMonthlyParams)
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Could not export YG vs Akiko monthly.')
+    } finally {
+      setExportingDsrMonthly(false)
+    }
+  }
 
   async function handleDownloadSalesCsv() {
     try {
@@ -465,9 +525,19 @@ export default function Dashboard() {
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-sm font-semibold text-[#002B5B]">Daily DSR Report</h3>
-            {dsrData?.display_date && (
-              <span className="text-xs text-gray-500 font-medium">{dsrData.display_date}</span>
-            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              {dsrData?.display_date && (
+                <span className="text-xs text-gray-500 font-medium">{dsrData.display_date}</span>
+              )}
+              <button
+                type="button"
+                disabled={!salesLoaded || exportingDsr || loadingDsr}
+                onClick={handleDownloadDailyDsrCsv}
+                className="text-xs font-medium px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] hover:bg-[#002B5B]/5 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {exportingDsr ? 'Exporting…' : 'Export CSV'}
+              </button>
+            </div>
           </div>
           {!salesLoaded ? (
             <p className="text-sm text-gray-400 px-4 py-8 text-center">Load sales data to view DSR.</p>
@@ -521,6 +591,100 @@ export default function Dashboard() {
           <p className="text-[10px] text-gray-400 px-4 py-2 border-t border-gray-100">
             Segments use Flipkart Brand and Snapdeal Company when present; other channels show as &quot;All&quot; unless you add a DSR_Segment column in unified sales. Minor channels appear under Others.
           </p>
+        </div>
+      )}
+
+      {/* ── YG vs Akiko (monthly) — uses Intelligence date range ── */}
+      {salesLoaded && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-[#002B5B]">YG vs Akiko — monthly shipments</h3>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] text-gray-500">
+                {dateStart || dateEnd
+                  ? `${dateStart || '…'} → ${dateEnd || '…'}`
+                  : 'All loaded sales (set filters above to limit)'}
+              </span>
+              <button
+                type="button"
+                disabled={exportingDsrMonthly || loadingDsrBrands}
+                onClick={handleDownloadDsrBrandMonthlyCsv}
+                className="text-xs font-medium px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] hover:bg-[#002B5B]/5 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {exportingDsrMonthly ? 'Exporting…' : 'Export CSV'}
+              </button>
+            </div>
+          </div>
+          <div className="px-4 py-4 bg-slate-50/50">
+            {loadingDsrBrands ? (
+              <p className="text-xs text-gray-400 animate-pulse">Loading comparison…</p>
+            ) : dsrBrandMonthly?.note ? (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">{dsrBrandMonthly.note}</p>
+            ) : !dsrBrandMonthly?.rows?.length ? (
+              <p className="text-xs text-gray-400">No months in range with YG or Akiko-tagged segments.</p>
+            ) : (
+              <>
+                <div className="h-56 w-full mb-4">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={dsrBrandMonthly.rows.map(r => ({
+                        name: r.month_display,
+                        YG: r.YG,
+                        Akiko: r.Akiko,
+                      }))}
+                      margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis dataKey="name" tick={{ fontSize: 10 }} />
+                      <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                      <Tooltip formatter={(v: number) => v.toLocaleString()} />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      <Bar dataKey="YG" name="YG" fill="#002B5B" radius={[2, 2, 0, 0]} />
+                      <Bar dataKey="Akiko" name="Akiko" fill="#E91E63" radius={[2, 2, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                  <table className="min-w-full text-xs">
+                    <thead>
+                      <tr className="bg-gray-50 text-gray-600 text-left">
+                        <th className="px-3 py-2 font-semibold">Month</th>
+                        <th className="px-3 py-2 font-semibold text-right">YG</th>
+                        <th className="px-3 py-2 font-semibold text-right">Akiko</th>
+                        <th className="px-3 py-2 font-semibold">Higher</th>
+                        <th className="px-3 py-2 font-semibold text-right">By</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dsrBrandMonthly.rows.map(r => (
+                        <tr key={r.month} className="border-t border-gray-100">
+                          <td className="px-3 py-1.5 text-gray-800">{r.month_display}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{r.YG.toLocaleString()}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{r.Akiko.toLocaleString()}</td>
+                          <td className="px-3 py-1.5 font-medium text-gray-800">{r.leader}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-gray-600">
+                            {r.leader === 'Tie' ? '—' : r.delta.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                      <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
+                        <td className="px-3 py-2">Range total</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.YG.toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.Akiko.toLocaleString()}</td>
+                        <td className="px-3 py-2" colSpan={2}>
+                          {dsrBrandMonthly.totals.YG > dsrBrandMonthly.totals.Akiko
+                            ? 'YG ahead'
+                            : dsrBrandMonthly.totals.Akiko > dsrBrandMonthly.totals.YG
+                              ? 'Akiko ahead'
+                              : 'Tie'}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
 
