@@ -202,7 +202,8 @@ export async function cacheLoad() {
 
 /** Clear warm + session, re-download GitHub cache, merge Tier-3 SQLite, rebuild sales, re-save GitHub (background). */
 export async function cacheReloadFresh(): Promise<{ ok: boolean; message: string; sales_rows?: number }> {
-  const { data } = await api.post('/cache/reload-fresh')
+  // Large datasets: many parquet downloads + sales rebuild can exceed default proxy limits.
+  const { data } = await api.post('/cache/reload-fresh', undefined, { timeout: 900_000 })
   return data
 }
 

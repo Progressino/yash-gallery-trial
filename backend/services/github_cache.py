@@ -4,12 +4,16 @@ Reads GITHUB_REPO and GITHUB_TOKEN from environment variables.
 """
 import io
 import json
+import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Callable, Dict, Optional, Tuple
 
 import pandas as pd
 import requests
+
+_log = logging.getLogger(__name__)
 
 from .helpers import _coerce_df_for_parquet
 
@@ -249,24 +253,51 @@ def load_cache_from_drive(
         "snapdeal_df": "snapdeal",
     }
 
-    items      = list(_CACHE_FILES.items())
-    loaded     = {}
-    for step, (ss_key, filename) in enumerate(items):
-        if progress_callback:
-            progress_callback(step, len(items), f"Downloading {filename}…")
-        if filename not in assets:
-            continue
+    items = list(_CACHE_FILES.items())
+    to_fetch = [(ss_key, filename, assets[filename][1]) for ss_key, filename in items if filename in assets]
+
+    # Parallel downloads: sequential GitHub pulls often exceed nginx / Cloudflare proxy
+    # limits (e.g. 60–300s) when many large parquet assets exist.
+    blobs: Dict[str, Tuple[str, bytes]] = {}
+    if to_fetch:
+        n_workers = min(6, len(to_fetch))
         try:
-            raw = _gh_download_asset(assets[filename][1])
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                future_map = {
+                    pool.submit(_gh_download_asset, url): (ss_key, filename)
+                    for ss_key, filename, url in to_fetch
+                }
+                for n_done, fut in enumerate(as_completed(future_map), start=1):
+                    ss_key, filename = future_map[fut]
+                    if progress_callback:
+                        progress_callback(n_done - 1, len(to_fetch), f"Downloaded {filename}…")
+                    try:
+                        raw = fut.result()
+                        blobs[filename] = (ss_key, raw)
+                    except Exception as e:
+                        return False, f"Failed loading {filename}: {e}", {}
+        except Exception as e:
+            _log.exception("parallel cache download")
+            return False, f"Cache download failed: {e}", {}
+
+    loaded: Dict[str, object] = {}
+    for step, (ss_key, filename) in enumerate(items):
+        if filename not in blobs:
+            continue
+        if progress_callback:
+            progress_callback(step, len(items), f"Parsing {filename}…")
+        try:
+            _sk, raw = blobs[filename]
+            assert _sk == ss_key
             if filename.endswith(".parquet"):
                 df = pd.read_parquet(io.BytesIO(raw), engine="pyarrow")
-                # Strict dedup: enforce no-duplicate policy on platform DataFrames at load time
                 if ss_key in _PLATFORM_DEDUP_MAP and not df.empty:
                     try:
                         from .daily_store import _dedup_platform_df
+
                         df = _dedup_platform_df(df, _PLATFORM_DEDUP_MAP[ss_key])
                     except Exception:
-                        pass  # dedup is best-effort; never fail a cache load
+                        pass
                 loaded[ss_key] = df
             elif filename.endswith(".json"):
                 loaded[ss_key] = json.loads(raw.decode("utf-8"))

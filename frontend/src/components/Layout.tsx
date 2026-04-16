@@ -128,8 +128,12 @@ export default function Layout() {
       } else {
         flash('err', res.message)
       }
-    } catch {
-      flash('err', 'Fresh reload failed')
+    } catch (e: unknown) {
+      const msg =
+        e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string'
+          ? (e as { message: string }).message
+          : 'Fresh reload failed (timeout or network — try again; if it persists, check server logs).'
+      flash('err', msg)
     } finally {
       setCacheLoading(null)
     }
