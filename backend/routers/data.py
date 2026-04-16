@@ -1137,12 +1137,18 @@ def platform_summary(
 
 
 @router.get("/anomalies")
-def anomalies_endpoint(request: Request):
+def anomalies_endpoint(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     sess = _sess(request)
     return get_anomalies(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,
         sess.inventory_df_variant, sess.sales_df,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 

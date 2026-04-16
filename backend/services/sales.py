@@ -848,6 +848,8 @@ def get_anomalies(
     snapdeal_df: Optional[pd.DataFrame] = None,
     inventory_df: pd.DataFrame = None,
     sales_df: pd.DataFrame = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[dict]:
     """Runs 5 anomaly rules. Returns list sorted critical → warning → info."""
     if inventory_df is None:
@@ -867,27 +869,68 @@ def get_anomalies(
         ("Snapdeal", _snapdeal,      "TxnType",          "Shipment", "Refund", "Date"),
     ]
 
+    use_unified_return_spike = (
+        not sales_df.empty
+        and all(
+            c in sales_df.columns
+            for c in ("Source", "TxnDate", "Transaction Type", "Quantity")
+        )
+    )
+
+    if use_unified_return_spike:
+        try:
+            s = sales_df.copy()
+            s["TxnDate"] = txn_reporting_naive_ist(s["TxnDate"])
+            s = s.dropna(subset=["TxnDate"])
+            if start_date or end_date:
+                s = _filter_by_reporting_days(s, "TxnDate", start_date, end_date)
+            for name in ("Amazon", "Myntra", "Meesho", "Flipkart", "Snapdeal"):
+                sub = s[s["Source"].astype(str).str.strip() == name]
+                if sub.empty:
+                    continue
+                txn = sub["Transaction Type"].astype(str).str.strip()
+                qty = pd.to_numeric(sub["Quantity"], errors="coerce").fillna(0)
+                shipped = float(qty[txn == "Shipment"].sum())
+                returned = float(qty[txn == "Refund"].sum())
+                rate = returned / shipped * 100 if shipped > 0 else 0.0
+                if rate > 30:
+                    alerts.append({
+                        "type": "return_spike", "severity": "warning",
+                        "platform": name,
+                        "message": (
+                            f"{name} return rate is {rate:.1f}% (threshold: 30%) — "
+                            "investigate product quality or sizing"
+                        ),
+                        "sku": None,
+                    })
+        except Exception:
+            log.exception("anomaly return_spike (unified sales)")
+
     for name, df, txn_col, ship_val, refund_val, date_col in platform_dfs:
         if df.empty:
             continue
 
-        try:
-            d = df.copy()
-            qty = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0)
-            shipped  = qty[d[txn_col].astype(str).str.strip() == ship_val].sum()
-            returned = qty[d[txn_col].astype(str).str.strip() == refund_val].sum()
+        if not use_unified_return_spike:
+            try:
+                d = df.copy()
+                qty = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0)
+                shipped = qty[d[txn_col].astype(str).str.strip() == ship_val].sum()
+                returned = qty[d[txn_col].astype(str).str.strip() == refund_val].sum()
 
-            # Rule 1: Return spike
-            rate = returned / shipped * 100 if shipped > 0 else 0
-            if rate > 30:
-                alerts.append({
-                    "type": "return_spike", "severity": "warning",
-                    "platform": name,
-                    "message": f"{name} return rate is {rate:.1f}% (threshold: 30%) — investigate product quality or sizing",
-                    "sku": None,
-                })
-        except Exception:
-            pass
+                # Rule 1: Return spike (raw platform frames — only when no unified sales yet)
+                rate = returned / shipped * 100 if shipped > 0 else 0
+                if rate > 30:
+                    alerts.append({
+                        "type": "return_spike", "severity": "warning",
+                        "platform": name,
+                        "message": (
+                            f"{name} return rate is {rate:.1f}% (threshold: 30%) — "
+                            "investigate product quality or sizing"
+                        ),
+                        "sku": None,
+                    })
+            except Exception:
+                pass
 
         try:
             # Rule 2: Zero sales in last 30 days

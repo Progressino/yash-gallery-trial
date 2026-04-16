@@ -248,6 +248,39 @@ def _myntra_line_dedup_series(df: pd.DataFrame) -> pd.Series:
     return keys
 
 
+def _coalesce_myntra_dispatch_over_order_date(df: pd.DataFrame, order_dates: pd.Series) -> pd.Series:
+    """
+    Prefer actual dispatch / shipment / packed timestamps when present so daily totals
+    align with seller DSR spreadsheets that bucket by fulfilment date, not order_created.
+    """
+    out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    candidates = (
+        "dispatch_date",
+        "dispatched_date",
+        "actual_dispatch_date",
+        "shipment_date",
+        "shipped_date",
+        "ship_date",
+        "shipping_date",
+        "packed_date",
+        "packed_on",
+        "handover_date",
+        "courier_handover_date",
+        "manifest_date",
+        "logistics_dispatch_date",
+        "out_for_delivery_date",
+    )
+    for col in candidates:
+        if col not in df.columns:
+            continue
+        d2 = pd.to_datetime(df[col], errors="coerce")
+        if d2.isna().all():
+            continue
+        need = out.isna() & d2.notna()
+        out = out.mask(need, d2)
+    return out.fillna(order_dates)
+
+
 def _parse_myntra_csv(
     csv_bytes: bytes, filename: str, mapping: Dict[str, str]
 ) -> Tuple[pd.DataFrame, str]:
@@ -278,8 +311,9 @@ def _parse_myntra_csv(
         df.loc[null_mask, "_Date"] = pd.to_datetime(
             df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
         )
-    # Daily sales / DSR alignment: use the report's primary order date ("created on" /
-    # order_created_date). Fulfilment dates shift rows across calendar days vs seller DSR.
+    # DSR alignment: prefer dispatch/shipment/packed date when the export includes it,
+    # else order_created / purchase date (same row set as before when those cols absent).
+    df["_Date"] = _coalesce_myntra_dispatch_over_order_date(df, df["_Date"])
     df = df.dropna(subset=["_Date"])
     if df.empty:
         return pd.DataFrame(), "All dates invalid"

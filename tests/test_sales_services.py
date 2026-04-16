@@ -9,6 +9,7 @@ from backend.services.sales import (
     canonical_sales_sku,
     canonical_sales_sku_series,
     filter_sales_for_export,
+    get_anomalies,
     get_daily_dsr_report,
     get_platform_summary,
     get_sales_summary,
@@ -82,6 +83,41 @@ def test_get_sales_summary_shipments_and_refunds():
     assert s["total_returns"] == 2
     assert s["net_units"] == 13
     assert abs(s["return_rate"] - (2 / 15 * 100)) < 0.15
+
+
+def test_get_anomalies_return_spike_uses_unified_sales_and_date_window():
+    """Raw platform frames can imply a huge return rate; unified + date filter must match cards."""
+    raw_fk = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2020-01-01", "2020-01-02"]),
+            "TxnType": ["Shipment", "Refund"],
+            "Quantity": [10.0, 50.0],
+        }
+    )
+    sales = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-04-10", "2026-04-10"]),
+            "Transaction Type": ["Shipment", "Refund"],
+            "Quantity": [100, 3],
+            "Source": ["Flipkart", "Flipkart"],
+            "Sku": ["A", "A"],
+            "Units_Effective": [100, -3],
+            "OrderId": ["x", "y"],
+        }
+    )
+    alerts = get_anomalies(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        raw_fk,
+        snapdeal_df=pd.DataFrame(),
+        inventory_df=pd.DataFrame(),
+        sales_df=sales,
+        start_date="2026-04-10",
+        end_date="2026-04-10",
+    )
+    spike = [a for a in alerts if a.get("type") == "return_spike"]
+    assert spike == []
 
 
 def test_dedup_keeps_refund_sharing_order_with_invoice_shipment():
@@ -359,6 +395,18 @@ def test_myntra_csv_maps_status_f_to_shipment():
     df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
     assert "OK" in msg
     assert df["TxnType"].tolist() == ["Shipment", "Cancel"]
+
+
+def test_myntra_csv_prefers_dispatch_date_when_present():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,dispatch_date,order status,order line id,seller sku code,myntra sku code\n"
+        "2026-03-29,2026-03-31,SHIPPED,L1,SK1,Y1\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
+    assert "OK" in msg
+    assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-31").normalize()
 
 
 def test_myntra_csv_prefers_order_line_id_over_store_order_id():

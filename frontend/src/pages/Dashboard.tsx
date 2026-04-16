@@ -216,8 +216,8 @@ export default function Dashboard() {
   })
 
   const { data: anomalies, isLoading: loadingAnomalies } = useQuery<AnomalyItem[]>({
-    queryKey: ['anomalies'],
-    queryFn: async () => { const { data } = await api.get('/data/anomalies'); return data },
+    queryKey: ['anomalies', dateStart, dateEnd],
+    queryFn: async () => { const { data } = await api.get(`/data/anomalies?${summaryParams}`); return data },
     staleTime: 2 * 60 * 1000,
   })
 
