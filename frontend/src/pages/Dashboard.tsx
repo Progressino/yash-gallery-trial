@@ -687,7 +687,7 @@ export default function Dashboard() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                       <XAxis dataKey="name" tick={{ fontSize: 10 }} />
                       <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
-                      <Tooltip formatter={(v: number) => v.toLocaleString()} />
+                      <Tooltip formatter={(v: number | undefined) => (v ?? 0).toLocaleString()} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       <Bar dataKey="YG" name="YG" fill="#002B5B" radius={[2, 2, 0, 0]} />
                       <Bar dataKey="Akiko" name="Akiko" fill="#E91E63" radius={[2, 2, 0, 0]} />
