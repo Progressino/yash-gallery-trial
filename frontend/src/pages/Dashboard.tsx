@@ -150,13 +150,16 @@ function daysAgo(n: number) { const d = new Date(); d.setDate(d.getDate() - n); 
 function monthsAgo(n: number) { const d = new Date(); d.setMonth(d.getMonth() - n); return toIso(d) }
 const TODAY = toIso(new Date())
 
-const PRESETS = [
+type DatePreset = { label: string; start: () => string; end?: () => string }
+
+const PRESETS: DatePreset[] = [
+  { label: 'Today', start: () => toIso(new Date()), end: () => toIso(new Date()) },
   { label: '30D',  start: () => daysAgo(30) },
   { label: '90D',  start: () => daysAgo(90) },
   { label: '6M',   start: () => monthsAgo(6) },
   { label: '1Y',   start: () => monthsAgo(12) },
   { label: 'All',  start: () => '' },
-] as const
+]
 
 // ── Main Dashboard ──────────────────────────────────────────────
 export default function Dashboard() {
@@ -181,10 +184,11 @@ export default function Dashboard() {
   const [salesViewNet, setSalesViewNet] = useState(false)
   const [dsrDate, setDsrDate] = useState(TODAY)
 
-  function applyPreset(label: string, startFn: () => string) {
+  function applyPreset(label: string, startFn: () => string, endFn?: () => string) {
     const s = startFn()
+    const e = endFn ? endFn() : toIso(new Date())
     setDateStart(s)
-    setDateEnd(TODAY)
+    setDateEnd(e)
     setActivePreset(label)
   }
 
@@ -433,10 +437,10 @@ export default function Dashboard() {
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Date</span>
           <div className="flex gap-1">
-            {PRESETS.map(({ label, start }) => (
+            {PRESETS.map(({ label, start, end }) => (
               <button
                 key={label}
-                onClick={() => applyPreset(label, start)}
+                onClick={() => applyPreset(label, start, end)}
                 className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                   activePreset === label
                     ? 'bg-[#002B5B] text-white'
@@ -476,6 +480,15 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
+        <p className="text-xs text-gray-600 leading-relaxed">
+          Active range:{' '}
+          <span className="font-semibold text-gray-800 tabular-nums">{dateStart || '—'}</span>
+          {' → '}
+          <span className="font-semibold text-gray-800 tabular-nums">{dateEnd || '—'}</span>
+          {dateStart && dateEnd && dateStart === dateEnd ? ' (single day).' : ' (inclusive).'}
+          {' '}
+          Platform overview and KPIs follow this range. For one calendar day, set both fields to that date or use Today.
+        </p>
         {/* Gross vs net (shipments vs after-returns) */}
         <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-gray-100">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sales view</span>
