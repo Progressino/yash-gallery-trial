@@ -1055,6 +1055,73 @@ def test_flipkart_cancel_reduces_net_units_like_maco_final_sale():
     assert float(sales["Units_Effective"].sum()) == 0.0
 
 
+def test_amazon_mtr_cancel_reduces_net_units():
+    from backend.services.sales import _mtr_to_sales_df
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-04-10"), pd.Timestamp("2026-04-10")],
+            "SKU": ["AMZ1", "AMZ1"],
+            "Transaction_Type": ["Shipment", "Cancel"],
+            "Quantity": [1.0, 1.0],
+            "Order_Id": ["O1", "O1"],
+            "Invoice_Number": ["", ""],
+        }
+    )
+    out = _mtr_to_sales_df(mtr_df, {})
+    assert float(out["Units_Effective"].sum()) == 0.0
+
+
+def test_myntra_cancel_reduces_net_units():
+    from backend.services.myntra import myntra_to_sales_rows
+
+    myn = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-04-10"), pd.Timestamp("2026-04-10")],
+            "TxnType": ["Shipment", "Cancel"],
+            "Quantity": [1.0, 1.0],
+            "OMS_SKU": ["SK1", "SK1"],
+            "OrderId": ["L1", "L1"],
+            "LineKey": ["L1", "L1"],
+        }
+    )
+    sales = myntra_to_sales_rows(myn)
+    assert float(sales["Units_Effective"].sum()) == 0.0
+
+
+def test_meesho_cancel_reduces_net_units():
+    from backend.services.meesho import meesho_to_sales_rows
+
+    mee = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-04-10"), pd.Timestamp("2026-04-10")],
+            "TxnType": ["Shipment", "Cancel"],
+            "Quantity": [1.0, 1.0],
+            "SKU": ["SK1", "SK1"],
+            "OrderId": ["SO1", "SO1"],
+            "LineKey": ["SO1", "SO1"],
+        }
+    )
+    sales = meesho_to_sales_rows(mee, None)
+    assert float(sales["Units_Effective"].sum()) == 0.0
+
+
+def test_snapdeal_cancel_reduces_net_units():
+    from backend.services.snapdeal import snapdeal_to_sales_rows
+
+    sd = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-04-10"), pd.Timestamp("2026-04-10")],
+            "TxnType": ["Shipment", "Cancel"],
+            "Quantity": [1.0, 1.0],
+            "OMS_SKU": ["SK1", "SK1"],
+            "OrderId": ["SD1", "SD1"],
+        }
+    )
+    sales = snapdeal_to_sales_rows(sd)
+    assert float(sales["Units_Effective"].sum()) == 0.0
+
+
 def test_flipkart_parse_excel_order_dates_serial_and_iso():
     from datetime import date
 

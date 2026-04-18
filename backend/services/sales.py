@@ -202,9 +202,10 @@ def _mtr_to_sales_df(
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
 
+    # Cancel rows pair with Shipment/Refund events — net must reflect seller/MACO final units.
     m["Units_Effective"] = np.where(
         m["Transaction Type"] == "Refund",  -m["Quantity"],
-        np.where(m["Transaction Type"] == "Cancel", 0, m["Quantity"])
+        np.where(m["Transaction Type"] == "Cancel", -m["Quantity"], m["Quantity"])
     )
     m["LineKey"] = ""
     return m[

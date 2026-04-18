@@ -60,7 +60,7 @@ def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
         m["Sku"] = m["Sku"].apply(get_parent_sku)
     m["Units_Effective"] = np.where(
         m["Transaction Type"] == "Refund", -m["Quantity"],
-        np.where(m["Transaction Type"] == "Cancel", 0, m["Quantity"])
+        np.where(m["Transaction Type"] == "Cancel", -m["Quantity"], m["Quantity"])
     )
     return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective"]]
 

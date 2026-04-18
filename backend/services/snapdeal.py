@@ -544,7 +544,8 @@ def snapdeal_to_sales_rows(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
         "Quantity":         snapdeal_df["Quantity"],
         "Units_Effective":  np.where(
             snapdeal_df["TxnType"] == "Refund",  -snapdeal_df["Quantity"],
-            np.where(snapdeal_df["TxnType"] == "Cancel", 0, snapdeal_df["Quantity"])
+            np.where(snapdeal_df["TxnType"] == "Cancel", -snapdeal_df["Quantity"],
+                     snapdeal_df["Quantity"])
         ),
         "Source":           "Snapdeal",
         "OrderId":          snapdeal_df["OrderId"],
