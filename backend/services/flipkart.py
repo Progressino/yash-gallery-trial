@@ -176,6 +176,34 @@ def _fk_parse_excel_order_dates(series: pd.Series) -> pd.Series:
     return out
 
 
+def _fk_sales_report_date_column(xl: pd.DataFrame) -> Optional[str]:
+    """
+    Choose which Sales Report column drives ``Date`` for filtering and dashboards.
+
+    Flipkart Seller Hub “units for day X” usually follows **dispatch / order** timing.
+    **Buyer Invoice Date** often lags by a day or more, so preferring it alone caused
+    rows to fall outside the user’s chosen calendar day (under-count vs gross in FK UI).
+    """
+    low = {str(c).strip().lower(): c for c in xl.columns}
+    for cand in (
+        "dispatch date",
+        "dispatch date (seller)",
+        "shipment date",
+        "shipped on",
+        "shipped date",
+        "packed on",
+        "packed date",
+        "handover date",
+        "order date",
+        "order created date",
+        "sale date",
+        "buyer invoice date",
+    ):
+        if cand in low:
+            return low[cand]
+    return None
+
+
 def _fk_month_from_filename(fname: str):
     base = Path(fname).stem.upper()
     _MON = {
@@ -203,11 +231,29 @@ def _fk_finalize_out_with_line_keys(out: pd.DataFrame, raw_status: Optional[pd.S
     else:
         df["RawStatus"] = df["TxnType"].astype(str)
     oid = clean_line_id_series(df["OrderId"])
+    inv = (
+        clean_line_id_series(df["BuyerInvoiceId"])
+        if "BuyerInvoiceId" in df.columns
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    oitem = (
+        clean_line_id_series(df["OrderItemId"])
+        if "OrderItemId" in df.columns
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    # One marketplace order id can span multiple invoice / item lines — without this,
+    # unified sales dedupe collapses rows and understates units vs Flipkart totals.
+    base_lk = oid
+    base_lk = base_lk + np.where(inv.ne(""), "|" + inv, "")
+    base_lk = base_lk + np.where(oitem.ne(""), "|" + oitem, "")
+    # Rare exports omit invoice / item ids — disambiguate duplicate keys within the file.
+    _dup_idx = base_lk.groupby(base_lk).cumcount().astype(str)
+    base_lk = base_lk + np.where(_dup_idx != "0", "|L" + _dup_idx, "")
     if "LineKey" not in df.columns:
-        df["LineKey"] = oid
+        df["LineKey"] = base_lk
     else:
         lk = clean_line_id_series(df["LineKey"])
-        df["LineKey"] = lk.where(lk.ne(""), oid)
+        df["LineKey"] = lk.where(lk.ne(""), base_lk)
     df["OrderId"] = oid.where(oid.ne(""), df["LineKey"])
     return df
 
@@ -220,46 +266,55 @@ def _parse_flipkart_xlsx(
         xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Sales Report")
         xl.columns = xl.columns.str.strip()
         if not xl.empty and "Event Sub Type" in xl.columns:
-            date_col = "Buyer Invoice Date" if "Buyer Invoice Date" in xl.columns else "Order Date"
-            xl["Date"] = _fk_parse_excel_order_dates(xl[date_col])
+            date_col = _fk_sales_report_date_column(xl)
+            if date_col:
+                xl["Date"] = _fk_parse_excel_order_dates(xl[date_col])
 
-            file_month = _fk_month_from_filename(fname)
-            if file_month:
-                xl["Month"] = file_month
-            else:
-                xl["Month"] = xl["Date"].dt.to_period("M").astype(str)
+                file_month = _fk_month_from_filename(fname)
+                if file_month:
+                    xl["Month"] = file_month
+                else:
+                    xl["Month"] = xl["Date"].dt.to_period("M").astype(str)
 
-            def _fk_txn(event):
-                e = str(event).strip()
-                if e == "Sale":                 return "Shipment"
-                if e == "Return":               return "Refund"
-                if e == "Cancellation":         return "Cancel"
-                if e == "Return Cancellation":  return "ReturnCancel"
-                return "Shipment"
+                def _fk_txn(event):
+                    e = str(event).strip()
+                    if e == "Sale":                 return "Shipment"
+                    if e == "Return":               return "Refund"
+                    if e == "Cancellation":         return "Cancel"
+                    if e == "Return Cancellation":  return "ReturnCancel"
+                    return "Shipment"
 
-            xl["TxnType"]        = xl["Event Sub Type"].apply(_fk_txn)
-            xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
-            xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
-            _eff_sku = _fk_coalesced_listing_sku_series(xl)
-            xl["OMS_SKU"]        = _eff_sku.map(lambda x: _fk_map_listing_to_oms(x, mapping))
+                xl["TxnType"]        = xl["Event Sub Type"].apply(_fk_txn)
+                xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
+                xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
+                _eff_sku = _fk_coalesced_listing_sku_series(xl)
+                xl["OMS_SKU"]        = _eff_sku.map(lambda x: _fk_map_listing_to_oms(x, mapping))
 
-            state_col = next((c for c in xl.columns if "Delivery State" in c), None)
-            xl["State"] = (
-                xl[state_col].fillna("").astype(str).str.upper().str.strip()
-                if state_col
-                else pd.Series("", index=xl.index, dtype=str)
-            )
+                state_col = next((c for c in xl.columns if "Delivery State" in c), None)
+                xl["State"] = (
+                    xl[state_col].fillna("").astype(str).str.upper().str.strip()
+                    if state_col
+                    else pd.Series("", index=xl.index, dtype=str)
+                )
 
-            xl["OrderId"] = _fk_series_optional_col(xl, "Order ID", "Order Id")
-            xl["BuyerInvoiceId"] = _fk_series_optional_col(xl, "Buyer Invoice ID", "Buyer Invoice Id")
-            xl["Brand"] = _fk_series_optional_col(xl, "Brand")
+                xl["OrderId"] = _fk_series_optional_col(xl, "Order ID", "Order Id")
+                xl["BuyerInvoiceId"] = _fk_series_optional_col(xl, "Buyer Invoice ID", "Buyer Invoice Id")
+                xl["OrderItemId"] = _fk_series_optional_col(
+                    xl,
+                    "Order Item ID",
+                    "Order Item Id",
+                    "Sales Order Item ID",
+                    "Sales Order Item Id",
+                    "Order Item ID (Sale)",
+                )
+                xl["Brand"] = _fk_series_optional_col(xl, "Brand")
 
-            out = xl[["Date", "Month", "TxnType", "Quantity", "Invoice_Amount",
-                      "OMS_SKU", "State", "OrderId", "BuyerInvoiceId", "Brand"]].copy()
-            out = _fk_finalize_out_with_line_keys(
-                out, raw_status=xl["Event Sub Type"].fillna("").astype(str).str.strip()
-            )
-            return out.dropna(subset=["Date"])
+                out = xl[["Date", "Month", "TxnType", "Quantity", "Invoice_Amount",
+                          "OMS_SKU", "State", "OrderId", "BuyerInvoiceId", "OrderItemId", "Brand"]].copy()
+                out = _fk_finalize_out_with_line_keys(
+                    out, raw_status=xl["Event Sub Type"].fillna("").astype(str).str.strip()
+                )
+                return out.dropna(subset=["Date"])
     except Exception:
         pass
 
@@ -476,10 +531,14 @@ def load_flipkart_from_zip(
         return pd.DataFrame(), 0, [f"Cannot open Flipkart ZIP: {e}"]
 
     xlsx_items = [n for n in root_zf.namelist() if n.lower().endswith(".xlsx")]
+    xls_legacy = [
+        n for n in root_zf.namelist()
+        if n.lower().endswith(".xls") and not n.lower().endswith(".xlsx")
+    ]
     xlsb_items = [n for n in root_zf.namelist() if n.lower().endswith(".xlsb")]
-    all_items  = xlsx_items + xlsb_items
+    all_items = xlsx_items + xls_legacy + xlsb_items
 
-    for item_name in xlsx_items:
+    for item_name in xlsx_items + xls_legacy:
         base = Path(item_name).name
         try:
             file_bytes = root_zf.read(item_name)

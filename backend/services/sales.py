@@ -330,23 +330,36 @@ def build_sales_df(
     combined_sales = _apply_unified_oms_skus(combined_sales, sku_mapping or {})
     combined_sales = _dedup_sales_linekey_rows(combined_sales)
 
-    # Deduplicate: rows with valid OrderId by (OrderId, Sku, Source, Transaction Type)
-    # so multi-item orders keep one row per line SKU (previous logic collapsed lines).
-    _oid_str   = combined_sales["OrderId"].astype(str).str.strip()
-    _oid_valid = combined_sales["OrderId"].notna() & ~_oid_str.str.lower().isin(["", "nan", "none"])
-    del _oid_str
+    if "LineKey" not in combined_sales.columns:
+        combined_sales["LineKey"] = ""
 
-    _with_oid    = combined_sales[_oid_valid].drop_duplicates(
-        subset=["OrderId", "Sku", "Source", "Transaction Type"], keep="last"
+    lk_series = clean_line_id_series(combined_sales["LineKey"])
+    has_lk = lk_series.ne("") & ~lk_series.str.lower().isin(["nan", "none"])
+
+    # Rows with a marketplace line id: dedupe on LineKey (Flipkart often repeats Order ID
+    # across invoice lines — OrderId-only dedupe was dropping real units).
+    _with_lk = combined_sales.loc[has_lk].drop_duplicates(
+        subset=["Source", "LineKey", "Sku", "Transaction Type"],
+        keep="last",
     )
-    _without_oid = combined_sales[~_oid_valid].drop_duplicates(
-        subset=["Sku", "TxnDate", "Source", "Transaction Type", "Quantity"], keep="last"
+
+    _oid_str = combined_sales["OrderId"].astype(str).str.strip()
+    _oid_valid = combined_sales["OrderId"].notna() & ~_oid_str.str.lower().isin(["", "nan", "none"])
+
+    rest = combined_sales.loc[~has_lk]
+    _with_oid = rest.loc[_oid_valid].drop_duplicates(
+        subset=["OrderId", "Sku", "Source", "Transaction Type"],
+        keep="last",
     )
-    del combined_sales, _oid_valid
+    _without_oid = rest.loc[~_oid_valid].drop_duplicates(
+        subset=["Sku", "TxnDate", "Source", "Transaction Type", "Quantity"],
+        keep="last",
+    )
+    del combined_sales, _oid_valid, _oid_str, has_lk, lk_series, rest
     gc.collect()
 
-    result = pd.concat([_with_oid, _without_oid], ignore_index=True)
-    del _with_oid, _without_oid
+    result = pd.concat([_with_lk, _with_oid, _without_oid], ignore_index=True)
+    del _with_lk, _with_oid, _without_oid
     gc.collect()
 
     result = _drop_amazon_unkeyed_shadows(result)
@@ -897,20 +910,10 @@ def _compute_platform_metrics(
         return stub
 
 
-def _platform_summary_from_unified_sales(
-    sales_df: pd.DataFrame,
-    platform_name: str,
-    raw_df: pd.DataFrame,
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> dict:
-    """
-    Platform card KPIs from unified ``sales_df`` (deduped, mapped) so totals match
-    CSV export and top-of-dashboard KPIs. ``raw_df`` only gates ``loaded``.
-    """
-    stub: dict = {
+def _unified_platform_stub(platform_name: str, loaded: bool) -> dict:
+    return {
         "platform": platform_name,
-        "loaded": False,
+        "loaded": loaded,
         "total_units": 0,
         "total_returns": 0,
         "net_units": 0,
@@ -921,20 +924,23 @@ def _platform_summary_from_unified_sales(
         "monthly": [],
         "by_state": [],
     }
+
+
+def _unified_platform_summary_one(
+    s: pd.DataFrame,
+    platform_name: str,
+    raw_df: pd.DataFrame,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> dict:
+    """
+    One platform card from rows already filtered to that ``Source`` and reporting dates.
+    ``raw_df`` gates ``loaded`` and supplies by_state when unified rows omit State.
+    """
     loaded = not raw_df.empty
-    if sales_df.empty or "Source" not in sales_df.columns:
-        stub["loaded"] = loaded
-        return stub
-
-    s = sales_df[sales_df["Source"].astype(str).str.strip() == platform_name].copy()
-    s["TxnDate"] = txn_reporting_naive_ist(s["TxnDate"])
-    s = s.dropna(subset=["TxnDate"])
-    if start_date or end_date:
-        s = _filter_by_reporting_days(s, "TxnDate", start_date, end_date)
-
     if s.empty:
-        stub["loaded"] = loaded
-        return stub
+        out = _unified_platform_stub(platform_name, loaded)
+        return out
 
     txn = s["Transaction Type"].astype(str).str.strip()
     qty = pd.to_numeric(s["Quantity"], errors="coerce").fillna(0)
@@ -1056,6 +1062,57 @@ def _platform_summary_from_unified_sales(
     }
 
 
+def _platform_summaries_from_unified_bulk(
+    sales_df: pd.DataFrame,
+    mtr_df: pd.DataFrame,
+    myntra_df: pd.DataFrame,
+    meesho_df: pd.DataFrame,
+    flipkart_df: pd.DataFrame,
+    snapdeal_df: pd.DataFrame,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> List[dict]:
+    """
+    Build all five platform cards with one ``TxnDate`` normalisation and one groupby
+    on ``Source`` (avoids five full scans of ``sales_df`` on the Intelligence dashboard).
+    """
+    order = [
+        ("Amazon", mtr_df),
+        ("Myntra", myntra_df),
+        ("Meesho", meesho_df),
+        ("Flipkart", flipkart_df),
+        ("Snapdeal", snapdeal_df),
+    ]
+    if sales_df.empty or "Source" not in sales_df.columns:
+        return [_unified_platform_stub(name, not raw.empty) for name, raw in order]
+
+    prep = sales_df.copy()
+    prep["TxnDate"] = txn_reporting_naive_ist(prep["TxnDate"])
+    prep = prep.dropna(subset=["TxnDate"])
+    if start_date or end_date:
+        prep = _filter_by_reporting_days(prep, "TxnDate", start_date, end_date)
+    if prep.empty:
+        return [_unified_platform_stub(name, not raw.empty) for name, raw in order]
+
+    src_key = prep["Source"].astype(str).str.strip()
+    parts: dict[str, pd.DataFrame] = {}
+    for k, sub in prep.groupby(src_key, sort=False):
+        label = str(k).strip()
+        if label and label.lower() != "nan":
+            parts[label] = sub
+
+    return [
+        _unified_platform_summary_one(
+            parts.get(name, pd.DataFrame()),
+            name,
+            raw,
+            start_date,
+            end_date,
+        )
+        for name, raw in order
+    ]
+
+
 def get_platform_summary(
     mtr_df: pd.DataFrame,
     myntra_df: pd.DataFrame,
@@ -1070,13 +1127,16 @@ def get_platform_summary(
     _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
 
     if sales_df is not None and not sales_df.empty:
-        return [
-            _platform_summary_from_unified_sales(sales_df, "Amazon", mtr_df, start_date, end_date),
-            _platform_summary_from_unified_sales(sales_df, "Myntra", myntra_df, start_date, end_date),
-            _platform_summary_from_unified_sales(sales_df, "Meesho", meesho_df, start_date, end_date),
-            _platform_summary_from_unified_sales(sales_df, "Flipkart", flipkart_df, start_date, end_date),
-            _platform_summary_from_unified_sales(sales_df, "Snapdeal", _snapdeal, start_date, end_date),
-        ]
+        return _platform_summaries_from_unified_bulk(
+            sales_df,
+            mtr_df,
+            myntra_df,
+            meesho_df,
+            flipkart_df,
+            _snapdeal,
+            start_date,
+            end_date,
+        )
 
     # Legacy: raw platform frames only (differs from unified export when dedup/mapping changes rows)
     mtr = mtr_df.copy() if not mtr_df.empty else mtr_df

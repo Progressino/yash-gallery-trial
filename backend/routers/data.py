@@ -71,77 +71,82 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         return
     if sess.daily_restored:
         return
-    sess.daily_restored = True  # Only attempt once per session
 
-    import pandas as pd
-    from ..services.daily_store import load_platform_data
-    from ..services.sales import build_sales_df
+    with sess._daily_restore_lock:
+        if sess.daily_restored:
+            return
 
-    # Auto-restore SKU mapping from GitHub cache if missing (lightweight — JSON only)
-    if not sess.sku_mapping:
-        try:
-            from ..services.github_cache import load_sku_mapping_from_drive
-            mapping = load_sku_mapping_from_drive()
-            if mapping:
-                sess.sku_mapping = mapping
-        except Exception:
-            pass  # GitHub not configured or network error — skip silently
+        import pandas as pd
+        from ..services.daily_store import load_platform_data
+        from ..services.sales import build_sales_df
 
-    changed = False
-    for platform, attr in [
-        ("amazon",   "mtr_df"),
-        ("myntra",   "myntra_df"),
-        ("meesho",   "meesho_df"),
-        ("flipkart", "flipkart_df"),
-        ("snapdeal", "snapdeal_df"),
-    ]:
-        if getattr(sess, attr).empty:
-            df = load_platform_data(platform)
-            if not df.empty:
-                setattr(sess, attr, df)
-                changed = True
+        # Auto-restore SKU mapping from GitHub cache if missing (lightweight — JSON only)
+        if not sess.sku_mapping:
+            try:
+                from ..services.github_cache import load_sku_mapping_from_drive
+                mapping = load_sku_mapping_from_drive()
+                if mapping:
+                    sess.sku_mapping = mapping
+            except Exception:
+                pass  # GitHub not configured or network error — skip silently
 
-    if changed:
-        try:
-            sess.sales_df = build_sales_df(
-                mtr_df=sess.mtr_df,
-                myntra_df=sess.myntra_df,
-                meesho_df=sess.meesho_df,
-                flipkart_df=sess.flipkart_df,
-                snapdeal_df=sess.snapdeal_df,
-                sku_mapping=sess.sku_mapping,
-            )
-            sess._quarterly_cache.clear()
-        except Exception:
-            pass
+        changed = False
+        for platform, attr in [
+            ("amazon",   "mtr_df"),
+            ("myntra",   "myntra_df"),
+            ("meesho",   "meesho_df"),
+            ("flipkart", "flipkart_df"),
+            ("snapdeal", "snapdeal_df"),
+        ]:
+            if getattr(sess, attr).empty:
+                df = load_platform_data(platform)
+                if not df.empty:
+                    setattr(sess, attr, df)
+                    changed = True
 
-    # Restore inventory from warm cache (fast — already in memory) or GitHub as fallback.
-    # Inventory has no SQLite backing so it's always lost on server restart.
-    need_inventory = sess.inventory_df_variant.empty
-    if need_inventory:
-        try:
-            import backend.main as _main
-            if _main._warm_cache:
-                # Fast path: copy from in-memory warm cache — no network call
-                for key in ["inventory_df_variant", "inventory_df_parent"]:
-                    val = _main._warm_cache.get(key)
-                    if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                        setattr(sess, key, val)
-                if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
-                    sess.sku_mapping = _main._warm_cache["sku_mapping"]
-            else:
-                # Warm cache not ready yet — fall back to GitHub download
-                from ..services.github_cache import load_cache_from_drive
-                ok, _, loaded = load_cache_from_drive()
-                if ok and loaded:
+        if changed:
+            try:
+                sess.sales_df = build_sales_df(
+                    mtr_df=sess.mtr_df,
+                    myntra_df=sess.myntra_df,
+                    meesho_df=sess.meesho_df,
+                    flipkart_df=sess.flipkart_df,
+                    snapdeal_df=sess.snapdeal_df,
+                    sku_mapping=sess.sku_mapping,
+                )
+                sess._quarterly_cache.clear()
+            except Exception:
+                pass
+
+        # Restore inventory from warm cache (fast — already in memory) or GitHub as fallback.
+        # Inventory has no SQLite backing so it's always lost on server restart.
+        need_inventory = sess.inventory_df_variant.empty
+        if need_inventory:
+            try:
+                import backend.main as _main
+                if _main._warm_cache:
+                    # Fast path: copy from in-memory warm cache — no network call
                     for key in ["inventory_df_variant", "inventory_df_parent"]:
-                        val = loaded.get(key)
+                        val = _main._warm_cache.get(key)
                         if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
                             setattr(sess, key, val)
-                    if not sess.sku_mapping and loaded.get("sku_mapping"):
-                        sess.sku_mapping = loaded["sku_mapping"]
-        except Exception:
-            pass
+                    if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
+                        sess.sku_mapping = _main._warm_cache["sku_mapping"]
+                else:
+                    # Warm cache not ready yet — fall back to GitHub download
+                    from ..services.github_cache import load_cache_from_drive
+                    ok, _, loaded = load_cache_from_drive()
+                    if ok and loaded:
+                        for key in ["inventory_df_variant", "inventory_df_parent"]:
+                            val = loaded.get(key)
+                            if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                                setattr(sess, key, val)
+                        if not sess.sku_mapping and loaded.get("sku_mapping"):
+                            sess.sku_mapping = loaded["sku_mapping"]
+            except Exception:
+                pass
+
+        sess.daily_restored = True
 
 
 # ── Coverage ──────────────────────────────────────────────────
@@ -348,6 +353,7 @@ def sales_export(
 @router.get("/sales-by-source")
 def sales_by_source(request: Request):
     sess = _sess(request)
+    _restore_daily_if_needed(sess)
     return get_sales_by_source(sess.sales_df)
 
 
@@ -361,6 +367,7 @@ def top_skus(
 ):
     """``basis=gross`` (default): rank by shipment quantity. ``basis=net``: by ``Units_Effective`` sum."""
     sess = _sess(request)
+    _restore_daily_if_needed(sess)
     return get_top_skus(
         sess.sales_df,
         limit=limit,
@@ -670,6 +677,7 @@ def daily_breakdown(
     """
     import pandas as pd
     sess = _sess(request)
+    _restore_daily_if_needed(sess)
     df = sess.sales_df
     if df.empty:
         return []
@@ -1242,6 +1250,7 @@ def anomalies_endpoint(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
+    _restore_daily_if_needed(sess)
     return get_anomalies(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,

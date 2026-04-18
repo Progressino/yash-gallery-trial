@@ -2,6 +2,7 @@
 Server-side session store — mirrors st.session_state exactly.
 Each browser gets a UUID cookie; the UUID maps to an AppSession.
 """
+import threading
 import uuid
 import time
 from dataclasses import dataclass, field
@@ -52,6 +53,12 @@ class AppSession:
     # ── PO Engine cache ───────────────────────────────────────
     # Keyed by (group_by_parent, n_quarters) — cleared when sales data changes
     _quarterly_cache: dict = field(default_factory=dict)
+
+    # Serialize Tier-3 SQLite restore + build_sales_df so parallel /data/* requests
+    # do not race (previously daily_restored was set before work finished).
+    _daily_restore_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False,
+    )
 
 
 def wipe_app_session(sess: AppSession) -> None:

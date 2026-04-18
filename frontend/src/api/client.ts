@@ -224,6 +224,9 @@ export interface DailyUpload {
   id: number
   platform: string
   file_date: string
+  /** Actual min/max row dates inside the file (when stored). */
+  date_from?: string | null
+  date_to?: string | null
   filename: string
   uploaded_at: string
   rows: number

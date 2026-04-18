@@ -764,7 +764,9 @@ function DailyHistory() {
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
             <h4 className="text-sm font-semibold text-[#002B5B]">Saved Daily Uploads</h4>
-            <span className="text-xs text-gray-400">{uploads!.length} file{uploads!.length !== 1 ? 's' : ''} · last 30 per platform</span>
+            <span className="text-xs text-gray-400">
+              {uploads!.length} file{uploads!.length !== 1 ? 's' : ''} · last 30 per platform · row counts are parsed lines (not Excel grid rows); data range shows min–max dates in the file
+            </span>
           </div>
           <div className="divide-y divide-gray-50 max-h-64 overflow-y-auto">
             {uploads!.map(u => {
@@ -772,7 +774,11 @@ function DailyHistory() {
               return (
                 <div key={u.id} className="flex items-center gap-3 px-5 py-2.5 hover:bg-gray-50 transition-colors">
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${meta.color}`}>{meta.label}</span>
-                  <span className="text-xs font-mono text-gray-500 shrink-0 w-24">{u.file_date}</span>
+                  <span className="text-xs font-mono text-gray-500 shrink-0 w-28" title="Sort key date from filename (or first row date)">
+                    {u.date_from && u.date_to
+                      ? (u.date_from === u.date_to ? u.date_from : `${u.date_from}→${u.date_to}`)
+                      : u.file_date}
+                  </span>
                   <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{u.filename}</span>
                   <span className="text-xs text-gray-400 shrink-0">{u.rows.toLocaleString()} rows</span>
                   <button

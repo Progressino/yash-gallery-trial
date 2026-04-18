@@ -177,7 +177,8 @@ export default function Dashboard() {
   const [exportingDsrMonthly, setExportingDsrMonthly] = useState(false)
   const [showDsr, setShowDsr] = useState(false)
   /** false = gross (shipments); true = net (Units_Effective / after returns). */
-  const [salesViewNet, setSalesViewNet] = useState(true)
+  /** Default gross so marketplace “units sold” checks (e.g. Flipkart) match without toggling. */
+  const [salesViewNet, setSalesViewNet] = useState(false)
   const [dsrDate, setDsrDate] = useState(TODAY)
 
   function applyPreset(label: string, startFn: () => string) {
@@ -232,7 +233,8 @@ export default function Dashboard() {
   useQuery({
     queryKey: ['coverage'],
     queryFn: async () => { const c = await getCoverage(); setCoverage(c); return c },
-    refetchInterval: 30_000,
+    staleTime: 60_000,
+    refetchInterval: 120_000,
   })
 
   const { data: salesSummary, isLoading: loadingSales } = useQuery<SalesSummary>({
@@ -502,7 +504,8 @@ export default function Dashboard() {
             </span>
           </div>
           <p className="text-[10px] text-gray-400 max-w-xl leading-snug">
-            Gross counts shipment rows; net uses effective units (shipments minus returns), matching CSV / summary totals when data is consistent.
+            <strong className="font-medium text-gray-500">Gross</strong> sums <strong>Shipment</strong> quantities only (compare to Flipkart gross / units sold).
+            <strong className="font-medium text-gray-500"> Net</strong> uses effective units (shipments minus returns and Flipkart cancellations). If seller shows 220 gross and the card showed ~200, you were likely viewing <strong>Net</strong>.
           </p>
         </div>
         {/* Platform toggle row */}

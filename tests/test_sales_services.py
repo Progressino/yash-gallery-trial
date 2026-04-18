@@ -1032,6 +1032,37 @@ def test_flipkart_sales_report_maps_sku_id_when_sku_column_is_dash():
     assert out["OMS_SKU"].iloc[0] == "OMS-FK"
 
 
+def test_flipkart_sales_report_prefers_order_date_when_invoice_lags():
+    """Seller gross-by-day often follows order/dispatch; invoice can be next calendar day."""
+    from io import BytesIO
+
+    from backend.services.flipkart import _parse_flipkart_xlsx
+    from backend.services.sales import _filter_by_reporting_days, build_sales_df
+
+    m = {"FKLISTING1": "OMS-A"}
+    df = pd.DataFrame(
+        {
+            "Order Date": [pd.Timestamp("2026-04-10"), pd.Timestamp("2026-04-10")],
+            "Buyer Invoice Date": [pd.Timestamp("2026-04-11"), pd.Timestamp("2026-04-10")],
+            "Event Sub Type": ["Sale", "Sale"],
+            "Item Quantity": [5, 6],
+            "Buyer Invoice Amount": [1.0, 1.0],
+            "SKU": ["FKLISTING1", "FKLISTING1"],
+            "Order ID": ["OD-A", "OD-B"],
+            "Buyer Invoice ID": ["INV-A", "INV-B"],
+        }
+    )
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name="Sales Report", index=False)
+    fk = _parse_flipkart_xlsx(buf.getvalue(), "fk-Apr-2026.xlsx", m)
+    assert len(fk) == 2
+    built = build_sales_df(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), fk, m)
+    d10 = _filter_by_reporting_days(built, "TxnDate", "2026-04-10", "2026-04-10")
+    ship = d10[d10["Transaction Type"] == "Shipment"]
+    assert int(pd.to_numeric(ship["Quantity"], errors="coerce").sum()) == 11
+
+
 def test_flipkart_cancel_reduces_net_units_like_maco_final_sale():
     """Sales Report Sale + Cancellation pairs must net to zero effective units (MACO Final Sale semantics)."""
     from backend.services.flipkart import flipkart_to_sales_rows

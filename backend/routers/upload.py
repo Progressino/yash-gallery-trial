@@ -9,7 +9,7 @@ import zipfile
 import shutil
 import subprocess
 import tempfile
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import logging
 import pandas as pd
@@ -796,20 +796,44 @@ async def upload_cogs(request: Request, file: UploadFile = File(...)):
 
 # ── Daily Orders — Auto-detect (drop all files, we figure it out) ─
 
+def _zip_member_paths(file_bytes: bytes) -> tuple[list[str], str]:
+    """Non-directory ZIP members (no __MACOSX); returns (paths, space-joined lowercase)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            names = [
+                n for n in zf.namelist()
+                if "__MACOSX" not in n and not n.endswith("/")
+            ]
+        return names, " ".join(n.lower() for n in names)
+    except Exception:
+        return [], ""
+
+
+def _zip_is_meesho_monthly(file_bytes: bytes, outer_fn: str) -> bool:
+    if "meesho" in outer_fn.lower():
+        return True
+    _names, joined = _zip_member_paths(file_bytes)
+    return "tcs_sales" in joined or "forwardreports" in joined
+
+
+def _zip_is_amazon_mtr_master(file_bytes: bytes) -> bool:
+    try:
+        probe, n_csv, _sk = load_mtr_from_zip(file_bytes)
+        return not probe.empty and n_csv > 0
+    except Exception:
+        return False
+
+
 def _detect_platform_zip(file_bytes: bytes, fn: str) -> str:
     """
     Distinguish Meesho monthly ZIP vs Amazon MTR master ZIP (nested CSV/ZIPs).
+    Used only when the **entire** archive is passed to ``_handle_one`` (see daily-auto ZIP routing).
     """
     if "meesho" in fn:
         return "meesho"
-    try:
-        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-            names = [n for n in zf.namelist() if "__MACOSX" not in n]
-            joined = " ".join(n.lower() for n in names)
-        if "tcs_sales" in joined or "forwardreports" in joined:
-            return "meesho"
-    except Exception:
-        pass
+    _names, joined = _zip_member_paths(file_bytes)
+    if "tcs_sales" in joined or "forwardreports" in joined:
+        return "meesho"
     try:
         probe, n_csv, _sk = load_mtr_from_zip(file_bytes)
         if not probe.empty and n_csv > 0:
@@ -817,6 +841,18 @@ def _detect_platform_zip(file_bytes: bytes, fn: str) -> str:
     except Exception:
         pass
     return "meesho"
+
+
+def _zip_is_flipkart_spreadsheet_bundle(file_bytes: bytes, outer_fn: str) -> bool:
+    """ZIP of XLSX/XLSB only (typical Flipkart seller export) — no CSV members."""
+    if "flipkart" in outer_fn.lower():
+        return True
+    names, _joined = _zip_member_paths(file_bytes)
+    if not names:
+        return False
+    has_sheet = any(n.lower().endswith((".xlsx", ".xls", ".xlsb")) for n in names)
+    has_csv = any(n.lower().endswith(".csv") for n in names)
+    return has_sheet and not has_csv
 
 
 def _detect_platform(filename: str, file_bytes: bytes) -> str:
@@ -923,17 +959,50 @@ async def upload_daily_auto(
     detected: list[str] = []
     warnings: list[str] = []
 
-    def _handle_one(fname: str, raw: bytes) -> None:
+    from ..services.daily_store import load_platform_data as _load_platform_data
+
+    def _flush_deferred_platforms(defer: Set[str]) -> None:
+        if not defer:
+            return
+        if "amazon" in defer:
+            sess.mtr_df = _load_platform_data("amazon")
+        if "myntra" in defer:
+            sess.myntra_df = _load_platform_data("myntra")
+        if "meesho" in defer:
+            sess.meesho_df = _load_platform_data("meesho")
+        if "flipkart" in defer:
+            sess.flipkart_df = _load_platform_data("flipkart")
+        sess.daily_restored = False
+
+    def _handle_one(
+        fname: str,
+        raw: bytes,
+        defer_reload: Optional[Set[str]] = None,
+    ) -> None:
         """Process a single (non-RAR) file and mutate detected/warnings."""
         from ..services.daily_store import load_platform_data as _load_platform
+
+        def _touch_platform(p: str) -> None:
+            if defer_reload is not None:
+                defer_reload.add(p)
+            else:
+                if p == "amazon":
+                    sess.mtr_df = _load_platform("amazon")
+                elif p == "myntra":
+                    sess.myntra_df = _load_platform("myntra")
+                elif p == "meesho":
+                    sess.meesho_df = _load_platform("meesho")
+                elif p == "flipkart":
+                    sess.flipkart_df = _load_platform("flipkart")
+                sess.daily_restored = False
+
         platform = _detect_platform(fname, raw)
         try:
             if platform == "amazon_mtr_zip":
                 df_mtr, _n, sk_mtr = load_mtr_from_zip(raw)
                 if not df_mtr.empty:
                     save_daily_file("amazon", fname, df_mtr)
-                    sess.mtr_df = _load_platform("amazon")
-                    sess.daily_restored = False
+                    _touch_platform("amazon")
                     detected.append(f"Amazon MTR ({fname})")
                     if sk_mtr:
                         warnings.append(f"{fname}: {'; '.join(sk_mtr[:2])}")
@@ -944,8 +1013,7 @@ async def upload_daily_auto(
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
                     save_daily_file("amazon", fname, df)
-                    sess.mtr_df = _load_platform("amazon")  # reload clean from DB
-                    sess.daily_restored = False  # force cache re-merge on next data request
+                    _touch_platform("amazon")
                     detected.append(f"Amazon ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -956,8 +1024,7 @@ async def upload_daily_auto(
                 df, msg = parse_mtr_csv(raw, fname)
                 if not df.empty:
                     save_daily_file("amazon", fname, df)
-                    sess.mtr_df = _load_platform("amazon")
-                    sess.daily_restored = False
+                    _touch_platform("amazon")
                     detected.append(f"Amazon B2B ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -969,8 +1036,7 @@ async def upload_daily_auto(
                 df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
                 if not df.empty:
                     save_daily_file("myntra", fname, df)
-                    sess.myntra_df = _load_platform("myntra")
-                    sess.daily_restored = False
+                    _touch_platform("myntra")
                     detected.append(f"Myntra ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -981,8 +1047,7 @@ async def upload_daily_auto(
                 df, _count, _skipped = load_meesho_from_zip(raw)
                 if not df.empty:
                     save_daily_file("meesho", fname, df)
-                    sess.meesho_df = _load_platform("meesho")
-                    sess.daily_restored = False
+                    _touch_platform("meesho")
                     detected.append(f"Meesho ({fname})")
                     if _skipped:
                         warnings.append(f"{fname}: {'; '.join(_skipped[:2])}")
@@ -994,8 +1059,7 @@ async def upload_daily_auto(
                 df, msg = parse_meesho_csv(raw)
                 if not df.empty:
                     save_daily_file("meesho", fname, df)
-                    sess.meesho_df = _load_platform("meesho")
-                    sess.daily_restored = False
+                    _touch_platform("meesho")
                     detected.append(f"Meesho ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -1006,8 +1070,7 @@ async def upload_daily_auto(
                 df, msg = parse_meesho_order_export_xlsx(raw)
                 if not df.empty:
                     save_daily_file("meesho", fname, df)
-                    sess.meesho_df = _load_platform("meesho")
-                    sess.daily_restored = False
+                    _touch_platform("meesho")
                     detected.append(f"Meesho order export ({fname})")
                     if msg != "OK":
                         warnings.append(f"{fname}: {msg}")
@@ -1059,8 +1122,7 @@ async def upload_daily_auto(
                             return
                 if not df.empty:
                     save_daily_file("flipkart", fname, df)
-                    sess.flipkart_df = _load_platform("flipkart")
-                    sess.daily_restored = False
+                    _touch_platform("flipkart")
                     detected.append(f"Flipkart ({fname})")
                 else:
                     warnings.append(f"{fname}: No data extracted from Flipkart file")
@@ -1075,14 +1137,86 @@ async def upload_daily_auto(
         fname = fobj.filename or "upload"
         raw = await fobj.read()
         try:
+            fl = fname.lower()
             # RAR archive — extract and process each file inside
-            if raw[:6] == _RAR_MAGIC or fname.lower().endswith(".rar"):
+            if raw[:6] == _RAR_MAGIC or fl.endswith(".rar"):
                 try:
                     inner_files = _extract_rar_files(raw)
+                    defer_rar: Set[str] = set()
                     for inner_name, inner_bytes in inner_files:
-                        _handle_one(inner_name, inner_bytes)
+                        _handle_one(inner_name, inner_bytes, defer_rar)
+                    _flush_deferred_platforms(defer_rar)
                 except Exception as e:
                     warnings.append(f"{fname} (RAR extract): {e}")
+            elif fl.endswith(".zip"):
+                if "snapdeal" in fl:
+                    _handle_one(fname, raw)
+                elif _zip_is_meesho_monthly(raw, fname):
+                    _handle_one(fname, raw)
+                elif _zip_is_amazon_mtr_master(raw):
+                    _handle_one(fname, raw)
+                elif _zip_is_flipkart_spreadsheet_bundle(raw, fname):
+                    try:
+                        df_fk, n_fc, skipped_fk = load_flipkart_from_zip(
+                            raw, sess.sku_mapping or {},
+                        )
+                        if not df_fk.empty:
+                            save_daily_file("flipkart", fname, df_fk)
+                            sess.flipkart_df = _load_platform_data("flipkart")
+                            sess.daily_restored = False
+                            detected.append(
+                                f"Flipkart ZIP ({fname}, {n_fc} file(s))",
+                            )
+                            if skipped_fk:
+                                warnings.append(
+                                    f"{fname}: {'; '.join(skipped_fk[:2])}",
+                                )
+                        else:
+                            defer_z: Set[str] = set()
+                            try:
+                                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                                    for info in zf.infolist():
+                                        if info.is_dir():
+                                            continue
+                                        n = info.filename
+                                        if "__MACOSX" in n:
+                                            continue
+                                        base = n.rsplit("/", 1)[-1]
+                                        if base.startswith("."):
+                                            continue
+                                        _handle_one(n, zf.read(n), defer_z)
+                                _flush_deferred_platforms(defer_z)
+                            except Exception as e:
+                                warnings.append(f"{fname} (ZIP expand): {e}")
+                            fk_hits = [d for d in detected if "Flipkart" in d]
+                            if not fk_hits:
+                                hint = (
+                                    "; ".join(skipped_fk[:3])
+                                    if skipped_fk
+                                    else "no parsable sheets"
+                                )
+                                warnings.append(
+                                    f"{fname}: Flipkart ZIP — no rows ({hint})",
+                                )
+                    except Exception as e:
+                        warnings.append(f"{fname} (Flipkart ZIP): {e}")
+                else:
+                    defer_z: Set[str] = set()
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                            for info in zf.infolist():
+                                if info.is_dir():
+                                    continue
+                                n = info.filename
+                                if "__MACOSX" in n:
+                                    continue
+                                base = n.rsplit("/", 1)[-1]
+                                if base.startswith("."):
+                                    continue
+                                _handle_one(n, zf.read(n), defer_z)
+                        _flush_deferred_platforms(defer_z)
+                    except Exception as e:
+                        warnings.append(f"{fname} (ZIP): {e}")
             else:
                 _handle_one(fname, raw)
         finally:

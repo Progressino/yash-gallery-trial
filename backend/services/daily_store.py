@@ -117,6 +117,27 @@ def _extract_file_date(filename: str, df: pd.DataFrame) -> str:
         except ValueError:
             pass
 
+    # "1 APR to 14" / "01-Apr to 14-Apr" (year missing in path) — use calendar from row dates.
+    mrng = re.search(
+        r"(?i)(\d{1,2})\D{0,3}(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\D+to\D+(\d{1,2})",
+        filename.replace("_", " "),
+    )
+    if mrng:
+        try:
+            mon = _MON.get(mrng.group(2).lower())
+            if mon and not df.empty:
+                for col in ("Date", "TxnDate", "_Date"):
+                    if col in df.columns:
+                        dates = pd.to_datetime(df[col], errors="coerce").dropna()
+                        if not dates.empty:
+                            y = int(dates.min().year)
+                            d0 = datetime.date(y, mon, int(mrng.group(1)))
+                            if 2020 <= d0.year <= 2030:
+                                return str(d0)
+                        break
+        except (ValueError, IndexError):
+            pass
+
     # Fall back to earliest date in the DataFrame
     for col in ("Date", "TxnDate", "_Date", "Customer Shipment Date", "Order Date"):
         if col in df.columns:
@@ -660,9 +681,11 @@ def list_uploads() -> List[dict]:
     """Return metadata for all uploads (newest first), no blob."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT id, platform, file_date, filename, uploaded_at, rows, date_from, date_to "
-        "FROM daily_uploads "
-        "ORDER BY file_date DESC, uploaded_at DESC"
+        """
+        SELECT id, platform, file_date, filename, uploaded_at, rows, date_from, date_to
+        FROM daily_uploads
+        ORDER BY datetime(uploaded_at) DESC
+        """
     ).fetchall()
     conn.close()
     return [
@@ -676,11 +699,21 @@ def list_uploads() -> List[dict]:
 
 
 def get_summary() -> dict:
-    """Per-platform: min_date, max_date, total_rows, file_count."""
+    """Per-platform: min_date, max_date, total_rows, file_count.
+
+    min/max prefer **actual** row date ranges (``date_from`` / ``date_to`` per upload)
+    so Flipkart "1–14 Apr" files do not all look like a single ``file_date`` day.
+    """
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT platform, MIN(file_date), MAX(file_date), SUM(rows), COUNT(*) "
-        "FROM daily_uploads GROUP BY platform"
+        """
+        SELECT platform,
+               MIN(COALESCE(NULLIF(TRIM(COALESCE(date_from, '')), ''), file_date)),
+               MAX(COALESCE(NULLIF(TRIM(COALESCE(date_to, '')), ''), file_date)),
+               SUM(rows), COUNT(*)
+        FROM daily_uploads
+        GROUP BY platform
+        """
     ).fetchall()
     conn.close()
     return {
