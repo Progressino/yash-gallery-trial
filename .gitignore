@@ -28,6 +28,9 @@ Thumbs.db
 # Data cache (large files)
 data_cache/
 
+# Local smoke-test extracts (e.g. APR sales RAR)
+tmp-sales-apr-extract/
+
 # Local SQLite / dev databases (never commit)
 *.db
 
