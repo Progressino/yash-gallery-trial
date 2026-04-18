@@ -154,7 +154,11 @@ def _do_load_warm_cache() -> bool:
                       | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
                 ].reset_index(drop=True)
 
-        # Merge daily SQLite store on top of GitHub cache, then rebuild sales_df
+        # Merge daily SQLite store on top of GitHub cache, then rebuild sales_df.
+        # Date-superseding: for any date covered by the daily store, remove that date
+        # from the GitHub cache before merging. This prevents double-counting when
+        # the LineKey format changes (e.g. after a parser fix) — the daily store
+        # version always wins for dates it has data for.
         try:
             daily = load_all_platforms()
             merged_any = False
@@ -166,7 +170,18 @@ def _do_load_warm_cache() -> bool:
                 ("snapdeal", "snapdeal_df"),
             ]:
                 if daily.get(plat) is not None and not daily[plat].empty:
-                    loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
+                    daily_df  = daily[plat]
+                    github_df = loaded.get(key, pd.DataFrame())
+                    # Strip GitHub rows whose dates are covered by the daily store
+                    if not github_df.empty and "Date" in github_df.columns and "Date" in daily_df.columns:
+                        try:
+                            daily_dates  = set(pd.to_datetime(daily_df["Date"],  errors="coerce").dt.normalize())
+                            github_dates =     pd.to_datetime(github_df["Date"], errors="coerce").dt.normalize()
+                            github_df = github_df[~github_dates.isin(daily_dates)].copy()
+                            loaded[key] = github_df
+                        except Exception:
+                            pass  # If date stripping fails, fall through to normal merge
+                    loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily_df, plat)
                     merged_any = True
             if merged_any:
                 from .services.sales import build_sales_df
