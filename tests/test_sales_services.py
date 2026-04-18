@@ -1032,6 +1032,29 @@ def test_flipkart_sales_report_maps_sku_id_when_sku_column_is_dash():
     assert out["OMS_SKU"].iloc[0] == "OMS-FK"
 
 
+def test_flipkart_cancel_reduces_net_units_like_maco_final_sale():
+    """Sales Report Sale + Cancellation pairs must net to zero effective units (MACO Final Sale semantics)."""
+    from backend.services.flipkart import flipkart_to_sales_rows
+
+    fk = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-04-10"), pd.Timestamp("2026-04-10")],
+            "Month": ["2026-04", "2026-04"],
+            "TxnType": ["Shipment", "Cancel"],
+            "Quantity": [1.0, 1.0],
+            "OMS_SKU": ["SK1", "SK1"],
+            "State": ["", ""],
+            "OrderId": ["OD1", "OD1"],
+            "BuyerInvoiceId": ["", ""],
+            "Brand": ["B", "B"],
+            "LineKey": ["OD1", "OD1"],
+            "RawStatus": ["Sale", "Cancellation"],
+        }
+    )
+    sales = flipkart_to_sales_rows(fk)
+    assert float(sales["Units_Effective"].sum()) == 0.0
+
+
 def test_flipkart_parse_excel_order_dates_serial_and_iso():
     from datetime import date
 

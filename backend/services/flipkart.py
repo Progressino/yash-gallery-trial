@@ -721,13 +721,16 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
         if "LineKey" in fk_df.columns
         else pd.Series("", index=fk_df.index, dtype=str)
     )
+    # Units_Effective must mirror MACO / Order Export "Final Sale Units":
+    # Sales Report emits paired Sale + Cancellation rows — cancellations must subtract
+    # (previously Cancel used 0, so net units overstated vs seller hub aggregates).
     out = pd.DataFrame({
         "Sku":              fk_df["OMS_SKU"],
         "TxnDate":          fk_df["Date"],
         "Transaction Type": fk_df["TxnType"],
         "Quantity":         fk_df["Quantity"],
         "Units_Effective":  np.where(fk_df["TxnType"] == "Refund",       -fk_df["Quantity"],
-                            np.where(fk_df["TxnType"] == "Cancel",         0,
+                            np.where(fk_df["TxnType"] == "Cancel",       -fk_df["Quantity"],
                             np.where(fk_df["TxnType"] == "ReturnCancel",   fk_df["Quantity"],
                                      fk_df["Quantity"]))),
         "Source":           "Flipkart",
