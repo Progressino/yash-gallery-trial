@@ -368,9 +368,11 @@ def _parse_flipkart_xlsb(
     try:
         rows_data: List[List] = []
         with pyxlsb.open_workbook(io.BytesIO(file_bytes)) as wb:
-            sheet_name = wb.sheets[0] if wb.sheets else None
-            if not sheet_name:
+            if not wb.sheets:
                 return pd.DataFrame()
+            names = [str(s) for s in wb.sheets]
+            lower = {n.lower().strip(): n for n in names}
+            sheet_name = lower.get("flipkart sale") or names[0]
             with wb.get_sheet(sheet_name) as ws:
                 for row in ws.rows():
                     rows_data.append([c.v for c in row])
