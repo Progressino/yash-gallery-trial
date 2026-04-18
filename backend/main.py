@@ -8,6 +8,7 @@ load_dotenv()   # loads .env from cwd (run from repo root or backend/)
 
 import asyncio
 import logging
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
@@ -55,6 +56,9 @@ log = logging.getLogger("erp.cache_warmer")
 # New/empty sessions copy from here so users never wait for a GitHub download.
 _warm_cache: dict = {}
 _warm_cache_loaded_at: datetime | None = None
+# Set (signalled) once _do_load_warm_cache finishes (success or failure).
+# Session middleware waits on this so the first page load auto-applies the cache.
+_warm_cache_ready = threading.Event()
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -77,6 +81,7 @@ def clear_warm_cache() -> None:
     global _warm_cache, _warm_cache_loaded_at
     _warm_cache = {}
     _warm_cache_loaded_at = None
+    _warm_cache_ready.clear()  # Reset so next load is awaited correctly
 
 
 def publish_warm_cache_from_session(sess) -> None:
@@ -205,6 +210,10 @@ def _do_load_warm_cache() -> bool:
     except Exception as e:
         log.exception("Warm cache load error: %s", e)
         return False
+
+    finally:
+        # Always signal ready so waiting sessions aren't blocked forever
+        _warm_cache_ready.set()
 
 
 def _copy_warm_cache_to_session(sess) -> bool:
@@ -362,12 +371,16 @@ async def session_middleware(request: Request, call_next):
     # not just on brand-new sessions. This handles the race condition where
     # the cache was still loading when the session was first created, and also
     # re-fills sessions whose in-memory data was lost after a deploy.
+    # If the cache is still being downloaded from GitHub, wait up to 90 s so
+    # the very first page-load after a deploy auto-applies data (no manual click).
     copied_warm = False
     if (
         session.mtr_df.empty
         and session.sales_df.empty
         and not getattr(session, "pause_auto_data_restore", False)
     ):
+        if not _warm_cache:
+            _warm_cache_ready.wait(timeout=90)
         copied_warm = _copy_warm_cache_to_session(session)
 
     try:
