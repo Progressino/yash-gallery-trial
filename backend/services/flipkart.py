@@ -1,11 +1,14 @@
 """
 Flipkart loader — extracted 1-for-1 from app.py.
 """
+import gc
 import io
+import os
 import re
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -515,57 +518,109 @@ def _parse_flipkart_xlsb(
         return pd.DataFrame()
 
 
+@contextmanager
+def _open_flipkart_zip(zip_input: Union[bytes, bytearray, str, Path]):
+    """ZIP from RAM or filesystem path (path avoids duplicating huge Tier-1 uploads in memory)."""
+    if isinstance(zip_input, (bytes, bytearray)):
+        bio = io.BytesIO(zip_input)
+        with zipfile.ZipFile(bio) as zf:
+            yield zf
+    else:
+        with zipfile.ZipFile(os.fspath(zip_input)) as zf:
+            yield zf
+
+
 def load_flipkart_from_zip(
-    zip_bytes: bytes, mapping: Dict[str, str]
+    zip_input: Union[bytes, bytearray, str, Path],
+    mapping: Optional[Dict[str, str]] = None,
+    *,
+    parse_batch_concat: int = 4,
 ) -> Tuple[pd.DataFrame, int, List[str]]:
     """
     Parse Flipkart master ZIP containing monthly Sales Report XLSXs (and optional XLSB).
+    ``zip_input`` may be **bytes** or a **path** to a ZIP on disk (recommended for
+    multi-year Tier-1 uploads — reduces peak RAM and OOM 502s).
+
+    Parsed sheets are concatenated in small batches to cap memory vs holding every
+    monthly DataFrame at once.
+
     Returns (combined_df, file_count, skipped_list).
     """
-    dfs: List[pd.DataFrame] = []
+    m = mapping or {}
     skipped: List[str] = []
+    batches: List[pd.DataFrame] = []
+    buf: List[pd.DataFrame] = []
+    all_items: List[str] = []
+
+    def _flush_buf() -> None:
+        nonlocal buf
+        if not buf:
+            return
+        batches.append(pd.concat(buf, ignore_index=True))
+        buf = []
+        gc.collect()
+
+    def _push_df(df: pd.DataFrame) -> None:
+        nonlocal buf
+        if df.empty:
+            return
+        buf.append(df)
+        if len(buf) >= max(1, int(parse_batch_concat)):
+            _flush_buf()
 
     try:
-        root_zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        with _open_flipkart_zip(zip_input) as root_zf:
+            names = root_zf.namelist()
+            xlsx_items = [n for n in names if n.lower().endswith(".xlsx")]
+            xls_legacy = [
+                n for n in names
+                if n.lower().endswith(".xls") and not n.lower().endswith(".xlsx")
+            ]
+            xlsb_items = [n for n in names if n.lower().endswith(".xlsb")]
+            all_items = xlsx_items + xls_legacy + xlsb_items
+
+            for item_name in xlsx_items + xls_legacy:
+                base = Path(item_name).name
+                if "__MACOSX" in item_name or base.startswith("."):
+                    continue
+                try:
+                    file_bytes = root_zf.read(item_name)
+                    df = _parse_flipkart_xlsx(file_bytes, base, m)
+                    del file_bytes
+                    if df.empty:
+                        skipped.append(f"{base}: no data / unrecognised format")
+                    else:
+                        _push_df(df)
+                    del df
+                except Exception as e:
+                    skipped.append(f"{base}: {e}")
+
+            for item_name in xlsb_items:
+                base = Path(item_name).name
+                if "__MACOSX" in item_name or base.startswith("."):
+                    continue
+                try:
+                    file_bytes = root_zf.read(item_name)
+                    df = _parse_flipkart_xlsb(file_bytes, base, m)
+                    del file_bytes
+                    if df.empty:
+                        skipped.append(f"{base}: no data / unrecognised XLSB format")
+                    else:
+                        _push_df(df)
+                    del df
+                except Exception as e:
+                    skipped.append(f"{base}: {e}")
+
+            _flush_buf()
     except Exception as e:
         return pd.DataFrame(), 0, [f"Cannot open Flipkart ZIP: {e}"]
 
-    xlsx_items = [n for n in root_zf.namelist() if n.lower().endswith(".xlsx")]
-    xls_legacy = [
-        n for n in root_zf.namelist()
-        if n.lower().endswith(".xls") and not n.lower().endswith(".xlsx")
-    ]
-    xlsb_items = [n for n in root_zf.namelist() if n.lower().endswith(".xlsb")]
-    all_items = xlsx_items + xls_legacy + xlsb_items
-
-    for item_name in xlsx_items + xls_legacy:
-        base = Path(item_name).name
-        try:
-            file_bytes = root_zf.read(item_name)
-            df = _parse_flipkart_xlsx(file_bytes, base, mapping)
-            if df.empty:
-                skipped.append(f"{base}: no data / unrecognised format")
-            else:
-                dfs.append(df)
-        except Exception as e:
-            skipped.append(f"{base}: {e}")
-
-    for item_name in xlsb_items:
-        base = Path(item_name).name
-        try:
-            file_bytes = root_zf.read(item_name)
-            df = _parse_flipkart_xlsb(file_bytes, base, mapping)
-            if df.empty:
-                skipped.append(f"{base}: no data / unrecognised XLSB format")
-            else:
-                dfs.append(df)
-        except Exception as e:
-            skipped.append(f"{base}: {e}")
-
-    if not dfs:
+    if not batches:
         return pd.DataFrame(), len(all_items), skipped
 
-    combined = pd.concat(dfs, ignore_index=True)
+    combined = pd.concat(batches, ignore_index=True) if len(batches) > 1 else batches[0]
+    del batches
+    gc.collect()
     from .daily_store import _dedup_platform_df
 
     combined = _dedup_platform_df(combined, "flipkart")

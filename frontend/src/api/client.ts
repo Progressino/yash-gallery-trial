@@ -47,12 +47,16 @@ export interface CoverageResponse {
 
 // ── Upload helpers ────────────────────────────────────────────
 
+/** Tier-1 multi-year ZIPs can take several minutes to parse; align with nginx proxy_read_timeout (e.g. 900s). */
+const UPLOAD_TIMEOUT_MS = 900_000
+
 async function uploadFile(endpoint: string, file: File, extraFields?: Record<string, string>): Promise<UploadResponse> {
   const fd = new FormData()
   fd.append('file', file)
   if (extraFields) Object.entries(extraFields).forEach(([k, v]) => fd.append(k, v))
   const { data } = await api.post<UploadResponse>(endpoint, fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: UPLOAD_TIMEOUT_MS,
   })
   return data
 }
@@ -74,6 +78,7 @@ export async function uploadInventoryAuto(
   files.forEach(f => fd.append('files', f))
   const { data } = await api.post('/upload/inventory-auto', fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: UPLOAD_TIMEOUT_MS,
   })
   return data
 }
@@ -88,6 +93,7 @@ export async function uploadInventory(files: {
   if (files.amz)    fd.append('amz_file',    files.amz)
   const { data } = await api.post('/upload/inventory', fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: UPLOAD_TIMEOUT_MS,
   })
   return data
 }
@@ -99,6 +105,7 @@ export async function uploadDailyAuto(
   files.forEach(f => fd.append('files', f))
   const { data } = await api.post('/upload/daily-auto', fd, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: UPLOAD_TIMEOUT_MS,
   })
   return data
 }

@@ -436,10 +436,19 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
     sess = _get_session(request)
     if not sess.sku_mapping:
         return UploadResponse(ok=False, message="Upload SKU Mapping first.")
+    tmp_path: Optional[str] = None
     try:
-        zip_bytes = await file.read()
-        df, xlsx_count, skipped = load_flipkart_from_zip(zip_bytes, sess.sku_mapping)
-        del zip_bytes
+        # Stream to disk so multi-year Tier-1 ZIPs are not held wholly in RAM (reduces OOM → 502).
+        _fd, tmp_path = tempfile.mkstemp(suffix=".zip")
+        os.close(_fd)
+        chunk_size = 8 * 1024 * 1024
+        with open(tmp_path, "wb") as out:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                out.write(chunk)
+        df, xlsx_count, skipped = load_flipkart_from_zip(tmp_path, sess.sku_mapping)
         gc.collect()
 
         if df.empty:
@@ -462,6 +471,12 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
         )
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Failed to parse Flipkart ZIP: {e}")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 # ── Snapdeal ──────────────────────────────────────────────────
