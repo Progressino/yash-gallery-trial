@@ -833,6 +833,9 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
     if fn.endswith(".zip"):
         return _detect_platform_zip(file_bytes, fn)
 
+    if fn.endswith(".xlsb"):
+        return "flipkart"
+
     if fn.endswith((".xlsx", ".xls")):
         try:
             peek = pd.read_excel(io.BytesIO(file_bytes), nrows=40)
@@ -1029,22 +1032,31 @@ async def upload_daily_auto(
                     detected.append(f"Snapdeal ({fname})")
 
             elif platform == "flipkart":
-                from ..services.flipkart import _parse_flipkart_xlsx, _parse_flipkart_orders_sheet, _parse_flipkart_earn_more
-                try:
-                    xl_sheets = pd.ExcelFile(io.BytesIO(raw)).sheet_names
-                except Exception:
-                    xl_sheets = []
-                if "Sales Report" in xl_sheets:
-                    df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
-                elif "Orders" in xl_sheets:
-                    df = _parse_flipkart_orders_sheet(raw, fname, sess.sku_mapping)
-                elif "earn_more_report" in xl_sheets:
-                    df = _parse_flipkart_earn_more(raw, fname, sess.sku_mapping)
-                else:
-                    df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
+                from ..services.flipkart import (
+                    _parse_flipkart_xlsx, _parse_flipkart_orders_sheet,
+                    _parse_flipkart_earn_more, _parse_flipkart_xlsb,
+                )
+                if fname.lower().endswith(".xlsb"):
+                    df = _parse_flipkart_xlsb(raw, fname, sess.sku_mapping)
                     if df.empty:
-                        warnings.append(f"{fname}: Skipped — no Sales Report, Orders, or earn_more_report sheet (sheets: {', '.join(xl_sheets[:4])})")
+                        warnings.append(f"{fname}: No data extracted from Flipkart XLSB file")
                         return
+                else:
+                    try:
+                        xl_sheets = pd.ExcelFile(io.BytesIO(raw)).sheet_names
+                    except Exception:
+                        xl_sheets = []
+                    if "Sales Report" in xl_sheets:
+                        df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
+                    elif "Orders" in xl_sheets:
+                        df = _parse_flipkart_orders_sheet(raw, fname, sess.sku_mapping)
+                    elif "earn_more_report" in xl_sheets:
+                        df = _parse_flipkart_earn_more(raw, fname, sess.sku_mapping)
+                    else:
+                        df = _parse_flipkart_xlsx(raw, fname, sess.sku_mapping)
+                        if df.empty:
+                            warnings.append(f"{fname}: Skipped — no Sales Report, Orders, or earn_more_report sheet (sheets: {', '.join(xl_sheets[:4])})")
+                            return
                 if not df.empty:
                     save_daily_file("flipkart", fname, df)
                     sess.flipkart_df = _load_platform("flipkart")

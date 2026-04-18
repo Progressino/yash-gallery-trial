@@ -128,25 +128,49 @@ def _fk_map_listing_to_oms(raw, mapping: Dict[str, str]) -> str:
 
 def _fk_parse_excel_order_dates(series: pd.Series) -> pd.Series:
     """
-    Flipkart exports often store dates as Excel serials (float) or as strings like "46126"
-    after CSV round-trips. Plain ``pd.to_datetime`` treats floats as nanoseconds (wrong) and
-    leaves serial strings as NaT — both drop real rows. Use Excel day origin for numeric values.
+    Flipkart exports store dates as:
+    - Excel day serials (float/int, e.g. 46126) in XLSX/CSV exports
+    - YYYYMMDD integers (e.g. 20260410) in XLSB / MACO aggregate exports
+    - Datetime strings (e.g. "2026-04-10") in some API exports
+    Plain ``pd.to_datetime`` treats floats as nanoseconds (wrong) and
+    leaves serial strings as NaT — both drop real rows.
     """
     s = series.copy()
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s, errors="coerce")
+
     if pd.api.types.is_numeric_dtype(s):
+        # YYYYMMDD integers (20000101–20991231) vs Excel day serials (~20000–65000)
+        yyyymmdd_mask = (s >= 20_000_101) & (s <= 20_991_231)
+        if yyyymmdd_mask.all():
+            return pd.to_datetime(
+                s.astype("int64").astype(str), format="%Y%m%d", errors="coerce"
+            )
+        elif yyyymmdd_mask.any():
+            out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+            out.loc[yyyymmdd_mask] = pd.to_datetime(
+                s.loc[yyyymmdd_mask].astype("int64").astype(str), format="%Y%m%d", errors="coerce"
+            )
+            out.loc[~yyyymmdd_mask] = pd.to_datetime(
+                s.loc[~yyyymmdd_mask], unit="D", origin="1899-12-30", errors="coerce"
+            )
+            return out
         return pd.to_datetime(s, unit="D", origin="1899-12-30", errors="coerce")
 
-    # object / string / mixed: Excel serial first (avoids mixed-type to_datetime warnings), then calendar
+    # object / string / mixed
     num = pd.to_numeric(s, errors="coerce")
-    serial_mask = num.notna() & (num >= 20000) & (num <= 65000)
+    yyyymmdd_mask = num.notna() & (num >= 20_000_101) & (num <= 20_991_231)
+    serial_mask   = num.notna() & (num >= 20_000) & (num <= 65_000) & ~yyyymmdd_mask
     out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    if yyyymmdd_mask.any():
+        out.loc[yyyymmdd_mask] = pd.to_datetime(
+            num.loc[yyyymmdd_mask].astype("int64").astype(str), format="%Y%m%d", errors="coerce"
+        )
     if serial_mask.any():
         out.loc[serial_mask] = pd.to_datetime(
             num.loc[serial_mask], unit="D", origin="1899-12-30", errors="coerce"
         )
-    rest = ~serial_mask & s.notna()
+    rest = ~yyyymmdd_mask & ~serial_mask & s.notna()
     if rest.any():
         out.loc[rest] = pd.to_datetime(s.loc[rest], errors="coerce")
     return out
@@ -299,45 +323,135 @@ def _parse_flipkart_xlsx(
         else:
             xl["_OrderId"] = xl["SKU ID"].astype(str) + "_" + xl["Date"].dt.strftime("%Y%m%d")
 
-        rows: List[pd.DataFrame] = []
-
-        # Shipment rows — use Final Sale Units (excludes cancellations)
-        # Gross Units includes cancelled orders and would massively overcount.
+        # Final Sale Units = Gross − Cancellation − Return (already net of both).
+        # Using Final Sale for Shipment qty and ALSO creating separate Refund rows
+        # would double-deduct returns. We use Final Sale directly — no Refund rows.
         xl["_ship_qty"] = pd.to_numeric(xl.get("Final Sale Units", xl.get("Gross Units", 0)), errors="coerce").fillna(0)
         ship = xl[xl["_ship_qty"] > 0].copy()
-        if not ship.empty:
-            rows.append(pd.DataFrame({
-                "Date":           ship["Date"],
-                "Month":          ship["Date"].apply(_get_month),
-                "TxnType":        "Shipment",
-                "Quantity":       ship["_ship_qty"].astype("float32"),
-                "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
-                "OMS_SKU":        ship["OMS_SKU"],
-                "State":          "",
-                "OrderId":        ship["_OrderId"],
-                "BuyerInvoiceId": "",
-                "Brand":          ship["Brand"],
-            }))
-
-        # Refund rows
-        ret = xl[xl["Return Units"] > 0].copy()
-        if not ret.empty:
-            rows.append(pd.DataFrame({
-                "Date":           ret["Date"],
-                "Month":          ret["Date"].apply(_get_month),
-                "TxnType":        "Refund",
-                "Quantity":       ret["Return Units"].astype("float32"),
-                "Invoice_Amount": ret["Return Amount"].astype("float32"),
-                "OMS_SKU":        ret["OMS_SKU"],
-                "State":          "",
-                "OrderId":        ret["_OrderId"],
-                "BuyerInvoiceId": "",
-                "Brand":          ret["Brand"],
-            }))
-
-        if not rows:
+        if ship.empty:
             return pd.DataFrame()
-        out = pd.concat(rows, ignore_index=True)
+
+        out = pd.DataFrame({
+            "Date":           ship["Date"],
+            "Month":          ship["Date"].apply(_get_month),
+            "TxnType":        "Shipment",
+            "Quantity":       ship["_ship_qty"].astype("float32"),
+            "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
+            "OMS_SKU":        ship["OMS_SKU"],
+            "State":          "",
+            "OrderId":        ship["_OrderId"],
+            "BuyerInvoiceId": "",
+            "Brand":          ship["Brand"],
+        })
+        return _fk_finalize_out_with_line_keys(out, raw_status=None)
+
+    except Exception:
+        return pd.DataFrame()
+
+
+def _parse_flipkart_xlsb(
+    file_bytes: bytes, fname: str, mapping: Dict[str, str]
+) -> pd.DataFrame:
+    """
+    Parse Flipkart MACO / aggregate .xlsb (Binary Excel) report.
+    Columns match the Order Export format: Product Id, SKU ID, Brand, Order Date
+    (YYYYMMDD int), Gross Units, Cancellation Units, Return Units, Final Sale Units,
+    Final Sale Amount, etc.
+    Final Sale Units = Gross − Cancellation − Return — no separate Refund rows generated.
+    Requires the pyxlsb package (add to requirements.txt).
+    """
+    try:
+        import pyxlsb
+    except ImportError:
+        return pd.DataFrame()
+
+    try:
+        rows_data: List[List] = []
+        with pyxlsb.open_workbook(io.BytesIO(file_bytes)) as wb:
+            sheet_name = wb.sheets[0] if wb.sheets else None
+            if not sheet_name:
+                return pd.DataFrame()
+            with wb.get_sheet(sheet_name) as ws:
+                for row in ws.rows():
+                    rows_data.append([c.v for c in row])
+
+        if len(rows_data) < 2:
+            return pd.DataFrame()
+
+        headers = [
+            str(h).strip() if h is not None else f"_col{i}"
+            for i, h in enumerate(rows_data[0])
+        ]
+        xl = pd.DataFrame(rows_data[1:], columns=headers)
+        xl = xl.dropna(how="all")
+        if xl.empty:
+            return pd.DataFrame()
+
+        xl.columns = xl.columns.str.strip()
+
+        if "SKU ID" not in xl.columns or "Order Date" not in xl.columns:
+            return pd.DataFrame()
+
+        xl["Date"] = _fk_parse_excel_order_dates(xl["Order Date"])
+        xl = xl.dropna(subset=["Date"])
+        if xl.empty:
+            return pd.DataFrame()
+
+        file_month = _fk_month_from_filename(fname)
+
+        def _get_month(d):
+            return file_month if file_month else d.to_period("M").strftime("%Y-%m")
+
+        for col in ["Gross Units", "Final Sale Units", "Return Units", "Cancellation Units",
+                    "Final Sale Amount", "Return Amount"]:
+            xl[col] = pd.to_numeric(xl.get(col, 0), errors="coerce").fillna(0)
+
+        sku_id_col = "SKU ID"
+        _sid = xl[sku_id_col].astype(str).str.strip()
+        _used: Set[str] = {sku_id_col}
+        for nm in ("Seller SKU", "Seller Sku", "SKU", "Merchant SKU",
+                   "Merchant Sku", "Partner SKU", "FSN", "fsn"):
+            c = _fk_col_ci(xl, nm)
+            if c:
+                _used.add(c)
+                alt = xl[c].astype(str).str.strip()
+                bad = _sid.map(_fk_is_sku_placeholder)
+                _sid = _sid.where(~bad, alt)
+        _sid = _fk_fill_placeholders_from_skuish_columns(xl, _sid, _used)
+        xl["OMS_SKU"] = _sid.map(lambda x: _fk_map_listing_to_oms(x, mapping))
+        xl["Brand"] = _fk_series_optional_col(xl, "Brand")
+
+        product_id_col = "Product Id" if "Product Id" in xl.columns else ""
+        if product_id_col:
+            xl["_OrderId"] = (
+                xl[product_id_col].astype(str) + "_" +
+                xl["SKU ID"].astype(str) + "_" +
+                xl["Date"].dt.strftime("%Y%m%d")
+            )
+        else:
+            xl["_OrderId"] = xl["SKU ID"].astype(str) + "_" + xl["Date"].dt.strftime("%Y%m%d")
+
+        # Final Sale Units = Gross − Cancellation − Return (already net).
+        # Do NOT create separate Refund rows.
+        xl["_ship_qty"] = pd.to_numeric(
+            xl.get("Final Sale Units", xl.get("Gross Units", 0)), errors="coerce"
+        ).fillna(0)
+        ship = xl[xl["_ship_qty"] > 0].copy()
+        if ship.empty:
+            return pd.DataFrame()
+
+        out = pd.DataFrame({
+            "Date":           ship["Date"],
+            "Month":          ship["Date"].apply(_get_month),
+            "TxnType":        "Shipment",
+            "Quantity":       ship["_ship_qty"].astype("float32"),
+            "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
+            "OMS_SKU":        ship["OMS_SKU"],
+            "State":          "",
+            "OrderId":        ship["_OrderId"],
+            "BuyerInvoiceId": "",
+            "Brand":          ship["Brand"],
+        })
         return _fk_finalize_out_with_line_keys(out, raw_status=None)
 
     except Exception:
@@ -348,8 +462,8 @@ def load_flipkart_from_zip(
     zip_bytes: bytes, mapping: Dict[str, str]
 ) -> Tuple[pd.DataFrame, int, List[str]]:
     """
-    Parse Flipkart master ZIP containing monthly Sales Report XLSXs.
-    Returns (combined_df, xlsx_count, skipped_list).
+    Parse Flipkart master ZIP containing monthly Sales Report XLSXs (and optional XLSB).
+    Returns (combined_df, file_count, skipped_list).
     """
     dfs: List[pd.DataFrame] = []
     skipped: List[str] = []
@@ -360,6 +474,8 @@ def load_flipkart_from_zip(
         return pd.DataFrame(), 0, [f"Cannot open Flipkart ZIP: {e}"]
 
     xlsx_items = [n for n in root_zf.namelist() if n.lower().endswith(".xlsx")]
+    xlsb_items = [n for n in root_zf.namelist() if n.lower().endswith(".xlsb")]
+    all_items  = xlsx_items + xlsb_items
 
     for item_name in xlsx_items:
         base = Path(item_name).name
@@ -373,14 +489,26 @@ def load_flipkart_from_zip(
         except Exception as e:
             skipped.append(f"{base}: {e}")
 
+    for item_name in xlsb_items:
+        base = Path(item_name).name
+        try:
+            file_bytes = root_zf.read(item_name)
+            df = _parse_flipkart_xlsb(file_bytes, base, mapping)
+            if df.empty:
+                skipped.append(f"{base}: no data / unrecognised XLSB format")
+            else:
+                dfs.append(df)
+        except Exception as e:
+            skipped.append(f"{base}: {e}")
+
     if not dfs:
-        return pd.DataFrame(), len(xlsx_items), skipped
+        return pd.DataFrame(), len(all_items), skipped
 
     combined = pd.concat(dfs, ignore_index=True)
     from .daily_store import _dedup_platform_df
 
     combined = _dedup_platform_df(combined, "flipkart")
-    return combined, len(xlsx_items), skipped
+    return combined, len(all_items), skipped
 
 
 def _parse_flipkart_orders_sheet(
@@ -539,60 +667,35 @@ def _parse_flipkart_earn_more(
                 return sdf[pid_col].fillna("").astype(str).str.strip()
             return pd.Series("", index=sdf.index, dtype=str)
 
-        rows: List[pd.DataFrame] = []
-
-        # Shipment rows — prefer Final Sale Units (net of cancellations), same as Order Export
-        # in ``_parse_flipkart_xlsx``. Gross Units includes cancelled demand and overstates KPIs.
+        # Final Sale Units = Gross − Cancellation − Return (already net of both).
+        # Using Final Sale for Shipment qty and ALSO creating separate Refund rows
+        # would double-deduct returns. We use Final Sale directly — no Refund rows.
         xl["_ship_qty"] = pd.to_numeric(
             xl.get("Final Sale Units", xl.get("Gross Units", 0)), errors="coerce"
         ).fillna(0)
         ship = xl[xl["_ship_qty"] > 0].copy()
-        if not ship.empty:
-            pid = _pid_series(ship)
-            sk = ship["SKU ID"].astype(str).str.strip()
-            dts = ship["Date"].dt.strftime("%Y%m%d")
-            sq = pd.to_numeric(ship["_ship_qty"], errors="coerce").fillna(0).astype(np.int64).astype(str)
-            ship_lk = "FKEM|" + pid + "|" + sk + "|" + dts + "|SHIP|" + sq
-            rows.append(pd.DataFrame({
-                "Date":           ship["Date"],
-                "Month":          ship["Date"].apply(_get_month),
-                "TxnType":        "Shipment",
-                "Quantity":       ship["_ship_qty"].astype("float32"),
-                "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
-                "OMS_SKU":        ship["OMS_SKU"],
-                "State":          "",
-                "OrderId":        ship_lk,
-                "LineKey":        ship_lk,
-                "BuyerInvoiceId": "",
-                "Brand":          ship["Brand"],
-            }))
-
-        # Refund rows
-        ret = xl[xl["Return Units"] > 0].copy()
-        if not ret.empty:
-            pid = _pid_series(ret)
-            sk = ret["SKU ID"].astype(str).str.strip()
-            dts = ret["Date"].dt.strftime("%Y%m%d")
-            rq = pd.to_numeric(ret["Return Units"], errors="coerce").fillna(0).astype(np.int64).astype(str)
-            ret_lk = "FKEM|" + pid + "|" + sk + "|" + dts + "|RET|" + rq
-            rows.append(pd.DataFrame({
-                "Date":           ret["Date"],
-                "Month":          ret["Date"].apply(_get_month),
-                "TxnType":        "Refund",
-                "Quantity":       ret["Return Units"].astype("float32"),
-                "Invoice_Amount": ret["Return Amount"].astype("float32"),
-                "OMS_SKU":        ret["OMS_SKU"],
-                "State":          "",
-                "OrderId":        ret_lk,
-                "LineKey":        ret_lk,
-                "BuyerInvoiceId": "",
-                "Brand":          ret["Brand"],
-            }))
-
-        if not rows:
+        if ship.empty:
             return pd.DataFrame()
-        out = pd.concat(rows, ignore_index=True)
-        out["RawStatus"] = out["TxnType"].astype(str)
+
+        pid = _pid_series(ship)
+        sk = ship["SKU ID"].astype(str).str.strip()
+        dts = ship["Date"].dt.strftime("%Y%m%d")
+        sq = pd.to_numeric(ship["_ship_qty"], errors="coerce").fillna(0).astype(np.int64).astype(str)
+        ship_lk = "FKEM|" + pid + "|" + sk + "|" + dts + "|SHIP|" + sq
+        out = pd.DataFrame({
+            "Date":           ship["Date"],
+            "Month":          ship["Date"].apply(_get_month),
+            "TxnType":        "Shipment",
+            "Quantity":       ship["_ship_qty"].astype("float32"),
+            "Invoice_Amount": ship["Final Sale Amount"].astype("float32"),
+            "OMS_SKU":        ship["OMS_SKU"],
+            "State":          "",
+            "OrderId":        ship_lk,
+            "LineKey":        ship_lk,
+            "BuyerInvoiceId": "",
+            "Brand":          ship["Brand"],
+        })
+        out["RawStatus"] = "Shipment"
         return out
 
     except Exception:
