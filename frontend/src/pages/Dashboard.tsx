@@ -48,11 +48,13 @@ interface PlatformSummaryItem {
   loaded: boolean
   total_units: number
   total_returns: number
+  net_units?: number
   return_rate: number
   top_sku: string
   trend_direction: 'up' | 'down' | 'flat'
-  monthly: { month: string; shipments: number; refunds: number }[]
-  by_state: { state: string; units: number }[]
+  trend_direction_net?: 'up' | 'down' | 'flat'
+  monthly: { month: string; shipments: number; refunds: number; net?: number }[]
+  by_state: { state: string; units: number; net_units?: number }[]
 }
 interface AnomalyItem {
   type: string
@@ -114,13 +116,18 @@ function fmtMonth(m: string) {
   } catch { return m }
 }
 
-function mergePlatformMonthly(platforms: PlatformSummaryItem[]) {
+function monthlyRowNet(row: PlatformSummaryItem['monthly'][0]) {
+  if (typeof row.net === 'number') return row.net
+  return row.shipments - row.refunds
+}
+
+function mergePlatformMonthly(platforms: PlatformSummaryItem[], useNet: boolean) {
   const monthMap: Record<string, Record<string, number>> = {}
   for (const p of platforms) {
     if (!p.loaded) continue
     for (const row of p.monthly) {
       if (!monthMap[row.month]) monthMap[row.month] = {}
-      monthMap[row.month][p.platform] = row.shipments
+      monthMap[row.month][p.platform] = useNet ? monthlyRowNet(row) : row.shipments
     }
   }
   return Object.entries(monthMap)
@@ -169,6 +176,8 @@ export default function Dashboard() {
   const [exportingDsr, setExportingDsr] = useState(false)
   const [exportingDsrMonthly, setExportingDsrMonthly] = useState(false)
   const [showDsr, setShowDsr] = useState(false)
+  /** false = gross (shipments); true = net (Units_Effective / after returns). */
+  const [salesViewNet, setSalesViewNet] = useState(false)
   const [dsrDate, setDsrDate] = useState(TODAY)
 
   function applyPreset(label: string, startFn: () => string) {
@@ -194,8 +203,9 @@ export default function Dashboard() {
     const p = new URLSearchParams({ limit: String(topSkuLimit) })
     if (dateStart) p.set('start_date', dateStart)
     if (dateEnd)   p.set('end_date',   dateEnd)
+    if (salesViewNet) p.set('basis', 'net')
     return p.toString()
-  }, [dateStart, dateEnd, topSkuLimit])
+  }, [dateStart, dateEnd, topSkuLimit, salesViewNet])
 
   const summaryParams = useMemo(() => {
     const p = new URLSearchParams({ months: '0' })
@@ -232,7 +242,7 @@ export default function Dashboard() {
   })
 
   const { data: topSkusRaw, isLoading: loadingSkus } = useQuery<TopSku[]>({
-    queryKey: ['top-skus', dateStart, dateEnd],
+    queryKey: ['top-skus', dateStart, dateEnd, topSkuLimit, salesViewNet],
     queryFn: async () => { const { data } = await api.get(`/data/top-skus?${dateParams}`); return data },
     staleTime: 2 * 60 * 1000,
   })
@@ -297,7 +307,10 @@ export default function Dashboard() {
     }))
   }, [platforms, dateStart, dateEnd])
 
-  const chartData = useMemo(() => mergePlatformMonthly(filteredPlatforms), [filteredPlatforms])
+  const chartData = useMemo(
+    () => mergePlatformMonthly(filteredPlatforms, salesViewNet),
+    [filteredPlatforms, salesViewNet],
+  )
 
   const exportPlatforms = useMemo(() => {
     if (hiddenPlatforms.size === 0) return undefined
@@ -356,8 +369,11 @@ export default function Dashboard() {
   // Heatmap data
   const heatmapData = platforms.find(p => p.platform === heatmapPlatform)?.by_state ?? []
   const stateMap: Record<string, number> = {}
-  for (const s of heatmapData) stateMap[s.state] = s.units
-  const maxUnits = Math.max(...heatmapData.map(s => s.units), 0)
+  for (const s of heatmapData) {
+    const v = salesViewNet ? (s.net_units ?? s.units) : s.units
+    stateMap[s.state] = Math.max(0, v)
+  }
+  const maxUnits = Math.max(...Object.values(stateMap), 0)
 
   // Deep dive — use filtered monthly
   const deepPlatform = filteredPlatforms.find(p => p.platform === deepDiveTab)
@@ -365,6 +381,7 @@ export default function Dashboard() {
     month: fmtMonth(r.month),
     shipments: r.shipments,
     refunds: r.refunds,
+    net: monthlyRowNet(r),
   }))
 
   // Daily breakdown chart data
@@ -375,7 +392,9 @@ export default function Dashboard() {
       byDate[row.date].units   += row.units
       byDate[row.date].returns += row.returns
     }
-    return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date))
+    return Object.values(byDate)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map(d => ({ ...d, net: d.units - d.returns }))
   }, [dailyBreakdown])
 
   return (
@@ -454,6 +473,37 @@ export default function Dashboard() {
               {exportingSales ? 'Preparing…' : 'Download CSV'}
             </button>
           </div>
+        </div>
+        {/* Gross vs net (shipments vs after-returns) */}
+        <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-gray-100">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sales view</span>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-medium tabular-nums ${!salesViewNet ? 'text-[#002B5B]' : 'text-gray-400'}`}>
+              Gross
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={salesViewNet}
+              aria-label="Toggle between gross shipments and net units after returns"
+              onClick={() => setSalesViewNet(v => !v)}
+              className={`relative w-11 h-6 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#002B5B]/40 ${
+                salesViewNet ? 'bg-[#002B5B]' : 'bg-gray-300'
+              }`}
+            >
+              <span
+                className={`absolute top-1 left-1 h-4 w-4 rounded-full bg-white shadow transition-transform duration-200 ease-out ${
+                  salesViewNet ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+            <span className={`text-xs font-medium tabular-nums ${salesViewNet ? 'text-[#002B5B]' : 'text-gray-400'}`}>
+              Net
+            </span>
+          </div>
+          <p className="text-[10px] text-gray-400 max-w-xl leading-snug">
+            Gross counts shipment rows; net uses effective units (shipments minus returns), matching CSV / summary totals when data is consistent.
+          </p>
         </div>
         {/* Platform toggle row */}
         {loadedPlatforms.length > 0 && (
@@ -690,10 +740,18 @@ export default function Dashboard() {
 
       {/* ── KPI Strip ── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-        <KpiCard label="Total Units Sold" value={loadingSales ? '…' : totalUnits.toLocaleString()} accent="#002B5B" />
+        <KpiCard
+          label={salesViewNet ? 'Net units (after returns)' : 'Gross units (shipments)'}
+          value={loadingSales ? '…' : (salesViewNet ? netUnits : totalUnits).toLocaleString()}
+          accent="#002B5B"
+        />
         <KpiCard label="Total Returns"    value={loadingSales ? '…' : totalReturns.toLocaleString()} accent="#EF4444" />
         <KpiCard label="Return Rate"      value={loadingSales ? '…' : `${returnRate.toFixed(1)}%`} accent={returnRate > 30 ? '#EF4444' : returnRate > 15 ? '#F59E0B' : '#10B981'} />
-        <KpiCard label="Net Units"        value={loadingSales ? '…' : netUnits.toLocaleString()} accent="#10B981" />
+        <KpiCard
+          label={salesViewNet ? 'Gross shipments' : 'Net units'}
+          value={loadingSales ? '…' : (salesViewNet ? totalUnits : netUnits).toLocaleString()}
+          accent="#10B981"
+        />
         <KpiCard label="Active Platforms" value={loadingPlatforms ? '…' : `${activePlatformCount} / ${platforms.length || 5}`} accent="#6366F1" />
       </div>
 
@@ -718,8 +776,11 @@ export default function Dashboard() {
             const loaded = p?.loaded ?? false
             const rr = p?.return_rate ?? 0
             const rrColor = rr > 30 ? 'text-red-600' : rr > 15 ? 'text-amber-500' : 'text-green-600'
-            const trendIcon = p?.trend_direction === 'up' ? '↑' : p?.trend_direction === 'down' ? '↓' : '→'
-            const trendColor = p?.trend_direction === 'up' ? 'text-green-600' : p?.trend_direction === 'down' ? 'text-red-500' : 'text-gray-400'
+            const cardNet = p?.net_units ?? ((p?.total_units ?? 0) - (p?.total_returns ?? 0))
+            const displayUnits = salesViewNet ? cardNet : (p?.total_units ?? 0)
+            const tDir = salesViewNet ? (p?.trend_direction_net ?? p?.trend_direction ?? 'flat') : (p?.trend_direction ?? 'flat')
+            const trendIcon = tDir === 'up' ? '↑' : tDir === 'down' ? '↓' : '→'
+            const trendColor = tDir === 'up' ? 'text-green-600' : tDir === 'down' ? 'text-red-500' : 'text-gray-400'
             return (
               <div key={name} className={`bg-white rounded-xl border overflow-hidden shadow-sm relative ${loaded ? 'border-gray-200' : 'border-gray-100'}`}>
                 <div className="h-1.5 w-full" style={{ backgroundColor: color }} />
@@ -733,8 +794,8 @@ export default function Dashboard() {
                     <span className="text-xs font-semibold text-gray-500">{name}</span>
                     <span className={`text-lg font-bold ${trendColor}`}>{trendIcon}</span>
                   </div>
-                  <p className="text-2xl font-bold text-gray-800">{(p?.total_units ?? 0).toLocaleString()}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">units shipped</p>
+                  <p className="text-2xl font-bold text-gray-800">{displayUnits.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">{salesViewNet ? 'net units' : 'units shipped'}</p>
                   <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
                     <span className={`text-sm font-semibold ${rrColor}`}>{rr.toFixed(1)}% return</span>
                     {p?.top_sku && (
@@ -755,7 +816,10 @@ export default function Dashboard() {
         {/* Sales Trend Panel */}
         <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-gray-700">Sales Trend by Platform</h3>
+            <h3 className="text-sm font-semibold text-gray-700">
+              Sales Trend by Platform
+              <span className="font-normal text-gray-400"> ({salesViewNet ? 'net' : 'gross'})</span>
+            </h3>
             <span className="text-xs text-gray-400">
               {dateStart || 'All time'}{dateEnd ? ` → ${dateEnd}` : ''}
             </span>
@@ -774,7 +838,7 @@ export default function Dashboard() {
                 <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), '']}
+                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'net' : 'gross']}
                 />
                 <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
                 {platforms.filter(p => p.loaded && !hiddenPlatforms.has(p.platform)).map(p => (
@@ -843,7 +907,10 @@ export default function Dashboard() {
         {/* Top SKUs */}
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-gray-700">🏆 Top SKUs</h3>
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700">🏆 Top SKUs</h3>
+              <p className="text-[10px] text-gray-400 mt-0.5">By {salesViewNet ? 'net' : 'gross'} units in range</p>
+            </div>
             <select
               value={topSkuLimit}
               onChange={e => setTopSkuLimit(Number(e.target.value))}
@@ -892,7 +959,7 @@ export default function Dashboard() {
                 />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), 'Units']}
+                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'Net units' : 'Units']}
                   cursor={{ fill: 'rgba(0,43,91,0.06)' }}
                 />
                 <Bar
@@ -916,7 +983,10 @@ export default function Dashboard() {
         {/* State Heatmap */}
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-gray-700">🗺️ Geographic Distribution</h3>
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700">🗺️ Geographic Distribution</h3>
+              <p className="text-[10px] text-gray-400 mt-0.5">Intensity: {salesViewNet ? 'net' : 'gross'} by state</p>
+            </div>
             <select
               value={heatmapPlatform}
               onChange={e => setHeatmapPlatform(e.target.value)}
@@ -965,7 +1035,10 @@ export default function Dashboard() {
       {/* ── Platform Deep Dive ── */}
       <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
         <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-          <h3 className="text-sm font-semibold text-gray-700">🔍 Platform Deep Dive</h3>
+          <h3 className="text-sm font-semibold text-gray-700">
+            🔍 Platform Deep Dive
+            <span className="font-normal text-gray-400"> ({salesViewNet ? 'net' : 'gross'})</span>
+          </h3>
           <div className="flex items-center gap-3 flex-wrap">
             {/* Monthly / Daily toggle */}
             <div className="flex rounded-lg overflow-hidden border border-gray-200">
@@ -1022,11 +1095,17 @@ export default function Dashboard() {
                 <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), '']}
+                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'net' : '']}
                 />
                 <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="units"   name="Units"   fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
-                <Bar dataKey="returns" name="Returns" fill="#F87171" radius={[3, 3, 0, 0]} />
+                {salesViewNet ? (
+                  <Bar dataKey="net" name="Net units" fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
+                ) : (
+                  <>
+                    <Bar dataKey="units"   name="Shipments" fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="returns" name="Returns"   fill="#F87171" radius={[3, 3, 0, 0]} />
+                  </>
+                )}
               </BarChart>
             </ResponsiveContainer>
           )
@@ -1040,11 +1119,17 @@ export default function Dashboard() {
               <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
               <Tooltip
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), '']}
+                formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'net' : '']}
               />
               <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="shipments" name="Shipments" fill={PLATFORM_COLORS[deepDiveTab]} radius={[3, 3, 0, 0]} />
-              <Bar dataKey="refunds"   name="Refunds"   fill="#F87171" radius={[3, 3, 0, 0]} />
+              {salesViewNet ? (
+                <Bar dataKey="net" name="Net units" fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
+              ) : (
+                <>
+                  <Bar dataKey="shipments" name="Shipments" fill={PLATFORM_COLORS[deepDiveTab]} radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="refunds"   name="Refunds"   fill="#F87171" radius={[3, 3, 0, 0]} />
+                </>
+              )}
             </BarChart>
           </ResponsiveContainer>
         )}

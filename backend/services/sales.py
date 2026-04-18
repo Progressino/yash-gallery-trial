@@ -722,18 +722,34 @@ def get_top_skus(
     limit: int = 20,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    basis: str = "gross",
 ) -> List[dict]:
-    """Returns top SKUs by net units sold, optionally filtered by date range."""
+    """Top SKUs by gross shipment units (``basis=gross``) or ``Units_Effective`` sum (``basis=net``)."""
     if sales_df.empty or "Sku" not in sales_df.columns:
         return []
-    df = sales_df[sales_df["Transaction Type"] == "Shipment"].copy()
+    b = (basis or "gross").strip().lower()
+    if b not in ("gross", "net"):
+        b = "gross"
+
+    df = sales_df.copy()
     if start_date or end_date:
         df["TxnDate"] = txn_reporting_naive_ist(df["TxnDate"])
         df = df.dropna(subset=["TxnDate"])
         df = _filter_by_reporting_days(df, "TxnDate", start_date, end_date)
-    # Filter out aggregate/total rows (e.g. MEESHO_TOTAL, TOTAL, etc.)
+
     _sku_lower = df["Sku"].astype(str).str.lower()
     df = df[~(_sku_lower.str.contains("_total") | _sku_lower.str.endswith("total") | _sku_lower.str.startswith("total"))]
+
+    if b == "net" and "Units_Effective" in df.columns:
+        eff = pd.to_numeric(df["Units_Effective"], errors="coerce").fillna(0)
+        grp = df.assign(_e=eff).groupby("Sku")["_e"].sum().reset_index()
+        grp.columns = ["sku", "units"]
+        grp["units"] = grp["units"].astype(int)
+        return grp.sort_values("units", ascending=False).head(limit).to_dict("records")
+
+    df = df[df["Transaction Type"] == "Shipment"].copy()
+    if df.empty:
+        return []
     grp = df.groupby("Sku")["Quantity"].sum().reset_index()
     grp.columns = ["sku", "units"]
     return grp.sort_values("units", ascending=False).head(limit).to_dict("records")
@@ -754,8 +770,9 @@ def _compute_platform_metrics(
     """Shared computation for a single platform DataFrame."""
     stub = {
         "platform": platform_name, "loaded": False,
-        "total_units": 0, "total_returns": 0, "return_rate": 0.0,
-        "top_sku": "", "trend_direction": "flat",
+        "total_units": 0, "total_returns": 0, "net_units": 0,
+        "return_rate": 0.0,
+        "top_sku": "", "trend_direction": "flat", "trend_direction_net": "flat",
         "monthly": [], "by_state": [],
     }
     if df.empty:
@@ -813,7 +830,10 @@ def _compute_platform_metrics(
             monthly_grp["refunds"] = 0
         monthly_grp = monthly_grp.sort_values("_Month").tail(6)
         monthly_grp = monthly_grp.rename(columns={"_Month": "month"})
-        keep_cols = [c for c in ["month", "shipments", "refunds"] if c in monthly_grp.columns]
+        monthly_grp["net"] = (
+            monthly_grp["shipments"].astype(int) - monthly_grp["refunds"].astype(int)
+        )
+        keep_cols = [c for c in ["month", "shipments", "refunds", "net"] if c in monthly_grp.columns]
         monthly = monthly_grp[keep_cols].to_dict("records")
 
         # Trend direction (last month vs 3 months ago)
@@ -828,25 +848,47 @@ def _compute_platform_metrics(
                 elif change < -0.10:
                     trend_direction = "down"
 
+        trend_direction_net = "flat"
+        nets = monthly_grp["net"].tolist() if "net" in monthly_grp.columns else []
+        if len(nets) >= 3:
+            last_n, three_ago_n = nets[-1], nets[-3]
+            if three_ago_n != 0:
+                change_n = (last_n - three_ago_n) / abs(three_ago_n)
+            else:
+                change_n = 0.0 if last_n == 0 else (1.0 if last_n > 0 else -1.0)
+            if change_n > 0.10:
+                trend_direction_net = "up"
+            elif change_n < -0.10:
+                trend_direction_net = "down"
+
+        net_units = total_units - total_returns
+
         # By state
         by_state = []
         if "State" in d.columns:
-            st = (
+            ship_st = (
                 d[shipped_mask].copy()
                 .assign(_qty=qty[shipped_mask].values)
                 .groupby("State")["_qty"].sum()
-                .reset_index()
-                .rename(columns={"State": "state", "_qty": "units"})
-                .sort_values("units", ascending=False)
             )
-            st["units"] = st["units"].astype(int)
-            by_state = st.to_dict("records")
+            ret_st = (
+                d[refund_mask].copy()
+                .assign(_qty=qty[refund_mask].values)
+                .groupby("State")["_qty"].sum()
+            )
+            for stname in ship_st.index.union(ret_st.index):
+                u = int(ship_st.get(stname, 0) or 0)
+                r = int(ret_st.get(stname, 0) or 0)
+                by_state.append({"state": stname, "units": u, "net_units": u - r})
+            by_state.sort(key=lambda x: x["units"], reverse=True)
 
         return {
             "platform": platform_name, "loaded": True,
             "total_units": total_units, "total_returns": total_returns,
+            "net_units": net_units,
             "return_rate": return_rate, "top_sku": str(top_sku),
             "trend_direction": trend_direction,
+            "trend_direction_net": trend_direction_net,
             "monthly": monthly, "by_state": by_state,
         }
     except Exception as _exc:
@@ -870,9 +912,11 @@ def _platform_summary_from_unified_sales(
         "loaded": False,
         "total_units": 0,
         "total_returns": 0,
+        "net_units": 0,
         "return_rate": 0.0,
         "top_sku": "",
         "trend_direction": "flat",
+        "trend_direction_net": "flat",
         "monthly": [],
         "by_state": [],
     }
@@ -900,6 +944,9 @@ def _platform_summary_from_unified_sales(
     total_returns = int(qty[refund_mask].sum())
     return_rate = round(total_returns / total_units * 100, 1) if total_units > 0 else 0.0
 
+    eff = pd.to_numeric(s["Units_Effective"], errors="coerce").fillna(0) if "Units_Effective" in s.columns else None
+    net_units = int(eff.sum()) if eff is not None else total_units - total_returns
+
     top_sku = ""
     if shipped_mask.any() and "Sku" in s.columns:
         _tg = s.loc[shipped_mask].copy()
@@ -924,7 +971,10 @@ def _platform_summary_from_unified_sales(
         monthly_grp["refunds"] = 0
     monthly_grp = monthly_grp.sort_values("_Month").tail(6)
     monthly_grp = monthly_grp.rename(columns={"_Month": "month"})
-    keep_cols = [c for c in ["month", "shipments", "refunds"] if c in monthly_grp.columns]
+    monthly_grp["net"] = (
+        monthly_grp["shipments"].astype(int) - monthly_grp["refunds"].astype(int)
+    )
+    keep_cols = [c for c in ["month", "shipments", "refunds", "net"] if c in monthly_grp.columns]
     monthly = monthly_grp[keep_cols].to_dict("records")
 
     trend_direction = "flat"
@@ -938,19 +988,42 @@ def _platform_summary_from_unified_sales(
             elif change < -0.10:
                 trend_direction = "down"
 
+    trend_direction_net = "flat"
+    nets = monthly_grp["net"].tolist() if "net" in monthly_grp.columns else []
+    if len(nets) >= 3:
+        last_n, three_ago_n = nets[-1], nets[-3]
+        if three_ago_n != 0:
+            change_n = (last_n - three_ago_n) / abs(three_ago_n)
+        else:
+            change_n = 0.0 if last_n == 0 else (1.0 if last_n > 0 else -1.0)
+        if change_n > 0.10:
+            trend_direction_net = "up"
+        elif change_n < -0.10:
+            trend_direction_net = "down"
+
     by_state: List[dict] = []
     if "State" in s.columns:
-        st = (
+        gross_by = (
             s.loc[shipped_mask]
             .assign(_qty=qty[shipped_mask])
             .groupby("State")["_qty"]
             .sum()
-            .reset_index()
-            .rename(columns={"State": "state", "_qty": "units"})
-            .sort_values("units", ascending=False)
         )
-        st["units"] = st["units"].astype(int)
-        by_state = st.to_dict("records")
+        if eff is not None:
+            net_by = s.assign(_eff=eff).groupby("State")["_eff"].sum()
+        else:
+            ret_by = (
+                s.loc[refund_mask]
+                .assign(_qty=qty[refund_mask])
+                .groupby("State")["_qty"]
+                .sum()
+            )
+            net_by = gross_by.subtract(ret_by, fill_value=0)
+        for stname in gross_by.index.union(net_by.index):
+            g = int(gross_by.get(stname, 0) or 0)
+            n = int(net_by.get(stname, 0) or 0)
+            by_state.append({"state": stname, "units": g, "net_units": n})
+        by_state.sort(key=lambda x: x["units"], reverse=True)
     elif loaded and not raw_df.empty:
         # Unified rows usually omit State; keep heatmap from raw upload (same date window).
         kwargs = dict(start_date=start_date, end_date=end_date)
@@ -972,9 +1045,11 @@ def _platform_summary_from_unified_sales(
         "loaded": loaded,
         "total_units": total_units,
         "total_returns": total_returns,
+        "net_units": net_units,
         "return_rate": return_rate,
         "top_sku": top_sku,
         "trend_direction": trend_direction,
+        "trend_direction_net": trend_direction_net,
         "monthly": monthly,
         "by_state": by_state,
     }

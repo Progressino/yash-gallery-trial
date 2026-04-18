@@ -16,6 +16,7 @@ from backend.services.sales import (
     get_dsr_brand_monthly_comparison,
     get_platform_summary,
     get_sales_summary,
+    get_top_skus,
     list_sku_mapping_gaps,
 )
 
@@ -943,6 +944,27 @@ def test_get_platform_summary_amazon_refunds():
     assert amz["total_units"] == 100
     assert amz["total_returns"] == 5
     assert amz["return_rate"] == 5.0
+    assert amz["net_units"] == 95
+
+
+def test_get_top_skus_gross_vs_net_basis():
+    df = pd.DataFrame(
+        {
+            "Sku": ["A", "A", "B"],
+            "Transaction Type": ["Shipment", "Refund", "Shipment"],
+            "Quantity": [10, 3, 5],
+            "Units_Effective": [10, -3, 5],
+            "TxnDate": pd.to_datetime(["2025-01-01", "2025-01-02", "2025-01-03"]),
+        }
+    )
+    gross = get_top_skus(df, limit=5, basis="gross")
+    net = get_top_skus(df, limit=5, basis="net")
+    by_sku_g = {r["sku"]: r["units"] for r in gross}
+    by_sku_n = {r["sku"]: r["units"] for r in net}
+    assert by_sku_g["A"] == 10
+    assert by_sku_n["A"] == 7
+    assert by_sku_g["B"] == 5
+    assert by_sku_n["B"] == 5
 
 
 def test_platform_summary_with_sales_df_matches_export_window():

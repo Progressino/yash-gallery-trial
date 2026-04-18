@@ -357,9 +357,17 @@ def top_skus(
     limit: int = 20,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    basis: Optional[str] = None,
 ):
+    """``basis=gross`` (default): rank by shipment quantity. ``basis=net``: by ``Units_Effective`` sum."""
     sess = _sess(request)
-    return get_top_skus(sess.sales_df, limit=limit, start_date=start_date, end_date=end_date)
+    return get_top_skus(
+        sess.sales_df,
+        limit=limit,
+        start_date=start_date,
+        end_date=end_date,
+        basis=basis or "gross",
+    )
 
 
 # ── SKU List (for search autocomplete) ───────────────────────
