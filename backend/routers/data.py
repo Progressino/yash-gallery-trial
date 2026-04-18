@@ -841,6 +841,12 @@ def mtr_analytics(request: Request):
     # Summary
     shipped  = float(df[df["Transaction_Type"] == "Shipment"]["Quantity"].sum())
     returned = float(df[df["Transaction_Type"] == "Refund"]["Quantity"].sum())
+    net_units = int(shipped - returned)
+
+    if "shipments" in monthly.columns and "refunds" in monthly.columns:
+        monthly["net"] = monthly["shipments"] - monthly["refunds"]
+    elif "shipments" in monthly.columns:
+        monthly["net"] = monthly["shipments"]
 
     return {
         "loaded":       True,
@@ -848,6 +854,7 @@ def mtr_analytics(request: Request):
         "date_range":   [str(df["Date"].min().date()), str(df["Date"].max().date())],
         "shipped":      int(shipped),
         "returned":     int(returned),
+        "net_units":    net_units,
         "return_rate":  round(returned / shipped * 100, 1) if shipped > 0 else 0,
         "monthly":      monthly.to_dict("records"),
         "top_skus":     top.to_dict("records"),
@@ -893,12 +900,16 @@ def myntra_analytics(request: Request):
     )
     by_state.columns = ["state", "units"]
 
+    if "shipments" in monthly.columns:
+        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+
     return {
         "loaded":      True,
         "rows":        len(df),
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
         "shipped":     int(shipped),
         "returned":    int(returned),
+        "net_units":   int(shipped - returned),
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
         "monthly":     monthly.to_dict("records"),
         "top_skus":    top_skus.to_dict("records"),
@@ -939,12 +950,16 @@ def meesho_analytics(request: Request):
     )
     by_state.columns = ["state", "units"]
 
+    if "shipments" in monthly.columns:
+        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+
     return {
         "loaded":      True,
         "rows":        len(df),
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
         "shipped":     int(shipped),
         "returned":    int(returned),
+        "net_units":   int(shipped - returned),
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
         "monthly":     monthly.to_dict("records"),
         "by_state":    by_state.to_dict("records"),
@@ -990,12 +1005,16 @@ def flipkart_analytics(request: Request):
     )
     by_state.columns = ["state", "units"]
 
+    if "shipments" in monthly.columns:
+        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+
     return {
         "loaded":      True,
         "rows":        len(df),
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
         "shipped":     int(shipped),
         "returned":    int(returned),
+        "net_units":   int(shipped - returned),
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
         "monthly":     monthly.to_dict("records"),
         "top_skus":    top_skus.to_dict("records"),
@@ -1086,6 +1105,9 @@ def snapdeal_analytics(request: Request, company: Optional[str] = None):
     by_state.columns = ["state", "units"]
     by_state = by_state[by_state["state"].str.strip() != ""]
 
+    if "shipments" in monthly.columns:
+        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+
     return {
         "loaded":      True,
         "rows":        len(df),
@@ -1093,6 +1115,7 @@ def snapdeal_analytics(request: Request, company: Optional[str] = None):
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
         "shipped":     int(shipped),
         "returned":    int(returned),
+        "net_units":   int(shipped - returned),
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
         "monthly":     monthly.to_dict("records"),
         "top_skus":    top_skus.to_dict("records"),

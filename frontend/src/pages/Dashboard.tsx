@@ -177,7 +177,7 @@ export default function Dashboard() {
   const [exportingDsrMonthly, setExportingDsrMonthly] = useState(false)
   const [showDsr, setShowDsr] = useState(false)
   /** false = gross (shipments); true = net (Units_Effective / after returns). */
-  const [salesViewNet, setSalesViewNet] = useState(false)
+  const [salesViewNet, setSalesViewNet] = useState(true)
   const [dsrDate, setDsrDate] = useState(TODAY)
 
   function applyPreset(label: string, startFn: () => string) {

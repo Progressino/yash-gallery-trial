@@ -137,7 +137,11 @@ export default function Snapdeal() {
       )}
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <KpiCard
+          label="Net Units (Final Sale)"
+          value={(data.net_units ?? (data.shipped ?? 0) - (data.returned ?? 0)).toLocaleString()}
+        />
         <KpiCard
           label="Shipped Units"
           value={(data.shipped ?? 0).toLocaleString()}

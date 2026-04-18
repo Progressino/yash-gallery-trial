@@ -51,7 +51,8 @@ export default function Myntra() {
         </p>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <KpiCard label="Net Units (Final Sale)" value={(data.net_units ?? (data.shipped ?? 0) - (data.returned ?? 0)).toLocaleString()} />
         <KpiCard label="Shipped"     value={(data.shipped ?? 0).toLocaleString()} />
         <KpiCard label="Returns"     value={(data.returned ?? 0).toLocaleString()} accent="border-l-red-500" />
         <KpiCard label="Return Rate" value={`${data.return_rate ?? 0}%`} accent={rateAccent(data.return_rate)} />

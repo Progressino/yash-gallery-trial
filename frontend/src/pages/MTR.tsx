@@ -62,7 +62,8 @@ export default function MTR() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <KpiCard label="Net Units (Final Sale)" value={((data.net_units ?? (data.shipped ?? 0) - (data.returned ?? 0))).toLocaleString()} sub="shipped − returns" />
         <KpiCard label="Shipped Units"  value={(data.shipped ?? 0).toLocaleString()} />
         <KpiCard label="Returned Units" value={(data.returned ?? 0).toLocaleString()} />
         <KpiCard label="Return Rate"    value={`${data.return_rate ?? 0}%`} />
