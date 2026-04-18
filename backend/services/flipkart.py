@@ -797,7 +797,13 @@ def _parse_flipkart_earn_more(
         sk = ship["SKU ID"].astype(str).str.strip()
         dts = ship["Date"].dt.strftime("%Y%m%d")
         sq = pd.to_numeric(ship["_ship_qty"], errors="coerce").fillna(0).astype(np.int64).astype(str)
-        ship_lk = "FKEM|" + pid + "|" + sk + "|" + dts + "|SHIP|" + sq
+        # Include Location Id so per-warehouse rows for the same SKU+date aren't collapsed
+        loc = (
+            ship["Location Id"].fillna("").astype(str).str.strip()
+            if "Location Id" in ship.columns
+            else pd.Series("", index=ship.index, dtype=str)
+        )
+        ship_lk = "FKEM|" + pid + "|" + loc + "|" + sk + "|" + dts + "|SHIP|" + sq
         out = pd.DataFrame({
             "Date":           ship["Date"],
             "Month":          ship["Date"].apply(_get_month),
