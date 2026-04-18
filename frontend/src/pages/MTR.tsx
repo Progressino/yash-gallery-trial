@@ -11,6 +11,7 @@ interface MTRData {
   date_range?: [string, string]
   shipped?: number
   returned?: number
+  net_units?: number
   return_rate?: number
   monthly?: Array<{ Month: string; shipments?: number; refunds?: number }>
   top_skus?: Array<{ sku: string; units: number }>

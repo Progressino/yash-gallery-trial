@@ -11,6 +11,7 @@ interface MeeshoData {
   date_range?: [string, string]
   shipped?: number
   returned?: number
+  net_units?: number
   return_rate?: number
   monthly?: Array<{ Month: string; shipments?: number; refunds?: number }>
   by_state?: Array<{ state: string; units: number }>
