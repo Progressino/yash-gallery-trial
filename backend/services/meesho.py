@@ -724,6 +724,8 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     miss = oi.eq("") & el.eq("")
     if miss.any():
         dt = out["Date"].dt.strftime("%Y%m%d")
+        # Do not embed RawStatus: SHIPPED vs DELIVERED for the same sub-order would get
+        # different synthetic keys and double-count in Tier-3 dedup (same as physical line).
         syn = (
             "MEECSV|"
             + dt
@@ -733,8 +735,6 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
             + out["TxnType"].astype(str)
             + "|"
             + pd.to_numeric(out["Quantity"], errors="coerce").fillna(0).astype(str)
-            + "|"
-            + out["RawStatus"].astype(str).str.strip()
         )
         out.loc[miss, "LineKey"] = syn.loc[miss]
         out.loc[miss, "OrderId"] = syn.loc[miss]

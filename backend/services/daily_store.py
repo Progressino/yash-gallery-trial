@@ -466,15 +466,15 @@ def _dedup_myntra_parent_order_shadow(d: pd.DataFrame) -> pd.DataFrame:
     return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
 
 
-def _dedup_myntra_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFrame:
+def _dedup_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFrame:
     """
     Tier-3 merges (concat existing + new upload) keep Shipment and Refund as distinct keys,
-    so a line that moved to **RTO** in PPMP can leave a stale **Shipment** row from an older
-    snapshot alongside the current **Refund** row — same seller line id, same SKU/qty, same
-    reporting day. PPMP ground truth is one RTO row; drop the shadow Shipment so returns and
-    gross ship counts match seller exports.
+    so a line that moved to **RTO / return** can leave a stale **Shipment** row from an older
+    snapshot alongside the current **Refund** row — same marketplace line id, same SKU/qty,
+    same reporting day. Drop the shadow Shipment so gross/return counts match seller exports.
 
-    Different calendar days (ship in January, return in February) are left intact.
+    Used for **Myntra** and **Meesho**. Different calendar days (ship in January, return in
+    February) are left intact.
     """
     if d.empty or "TxnType" not in d.columns:
         return d
@@ -586,10 +586,11 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                 out = _dedup_linekey_legacy_shadow(out)
             if platform == "myntra":
                 out = _dedup_myntra_parent_order_shadow(out)
-                out = _dedup_myntra_shipment_superseded_by_same_day_refund(out)
+                out = _dedup_shipment_superseded_by_same_day_refund(out)
             if platform == "meesho":
                 out = _dedup_meesho_cross_source_overlay(out)
                 out = _dedup_meesho_suborder_cross_source(out)
+                out = _dedup_shipment_superseded_by_same_day_refund(out)
             elif platform == "flipkart":
                 out = _dedup_flipkart_cross_source_overlay(out)
             return out

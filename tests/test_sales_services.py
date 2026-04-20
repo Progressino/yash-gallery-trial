@@ -707,6 +707,65 @@ def test_merge_platform_data_runs_dedup_on_first_upload():
     assert len(out) == 1
 
 
+def test_meesho_csv_shipment_status_progression_dedupes_synthetic_linekey():
+    """SHIPPED then DELIVERED for the same SKU/day/qty must not double-count (MEECSV key)."""
+    from backend.services.daily_store import merge_platform_data
+    from backend.services.meesho import parse_meesho_csv
+
+    csv = (
+        "order date,reason for credit entry,sku,quantity\n"
+        "2026-04-10,SHIPPED,SK1,1\n"
+        "2026-04-10,DELIVERED,SK1,1\n"
+    )
+    out, msg = parse_meesho_csv(csv.encode("utf-8"))
+    assert msg == "OK"
+    assert len(out) == 2
+    assert out["LineKey"].iloc[0] == out["LineKey"].iloc[1]
+    merged = merge_platform_data(pd.DataFrame(), out, "meesho")
+    assert len(merged) == 1
+
+
+def test_meesho_same_day_refund_drops_stale_shipment_after_merge():
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    stale_ship = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10"]),
+            "OMS_SKU": ["S1"],
+            "TxnType": ["Shipment"],
+            "Quantity": [1.0],
+            "LineKey": ["SUB999"],
+            "OrderId": ["SUB999"],
+            "MeeshoSubOrder": ["SUB999"],
+            "RawStatus": ["DELIVERED"],
+            "SKU": ["S1"],
+            "Invoice_Amount": [0.0],
+            "State": [""],
+            "Month": ["2026-04"],
+        }
+    )
+    ret = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10"]),
+            "OMS_SKU": ["S1"],
+            "TxnType": ["Refund"],
+            "Quantity": [1.0],
+            "LineKey": ["SUB999"],
+            "OrderId": ["SUB999"],
+            "MeeshoSubOrder": ["SUB999"],
+            "RawStatus": ["RETURNED"],
+            "SKU": ["S1"],
+            "Invoice_Amount": [0.0],
+            "State": [""],
+            "Month": ["2026-04"],
+        }
+    )
+    out = merge_platform_data(stale_ship, ret, "meesho")
+    assert len(out) == 1
+    assert out["TxnType"].iloc[0] == "Refund"
+
+
 def test_meesho_suborder_collapses_tcs_style_and_packet_linekey():
     """Same sub-order: TCS synthetic LineKey vs packet LineKey → one row."""
     from backend.services.daily_store import merge_platform_data
