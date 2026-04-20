@@ -1157,8 +1157,16 @@ async def upload_daily_auto(
             if raw[:6] == _RAR_MAGIC or fl.endswith(".rar"):
                 try:
                     inner_files = _extract_rar_files(raw)
+                    if not inner_files:
+                        warnings.append(f"{fname}: RAR archive extracted to zero files — check archive is not corrupt.")
                     defer_rar: Set[str] = set()
                     for inner_name, inner_bytes in inner_files:
+                        if not inner_bytes:
+                            continue
+                        norm = inner_name.replace("\\", "/").strip()
+                        base = norm.rsplit("/", 1)[-1] if norm else ""
+                        if not base or base.endswith("/"):
+                            continue
                         _handle_one(inner_name, inner_bytes, defer_rar)
                     _flush_deferred_platforms(defer_rar)
                 except Exception as e:

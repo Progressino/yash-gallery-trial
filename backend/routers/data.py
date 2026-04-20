@@ -156,6 +156,9 @@ def get_coverage(request: Request):
     sess = _sess(request)
     _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
     paused = getattr(sess, "pause_auto_data_restore", False)
+    from ..services.daily_store import get_summary
+
+    tier3_any = bool(get_summary())
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=not sess.mtr_df.empty,
@@ -165,7 +168,7 @@ def get_coverage(request: Request):
         flipkart=not sess.flipkart_df.empty,
         snapdeal=not sess.snapdeal_df.empty,
         inventory=not sess.inventory_df_variant.empty,
-        daily_orders=len(sess.daily_sales_sources) > 0,
+        daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
         existing_po=not sess.existing_po_df.empty,
         mtr_rows=len(sess.mtr_df),
         sales_rows=len(sess.sales_df),

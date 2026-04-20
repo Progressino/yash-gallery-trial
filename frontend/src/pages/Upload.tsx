@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { useDropzone } from 'react-dropzone'
+import { useDropzone, type FileRejection } from 'react-dropzone'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
@@ -374,6 +374,7 @@ export default function Upload() {
           </div>
           <DailyDropzone
             uploading={loading['daily']}
+            onReject={(msg) => showToast('error', msg)}
             onUpload={async (files) => { await handleDailyAuto(files); qc.invalidateQueries({ queryKey: ['daily-summary'] }); qc.invalidateQueries({ queryKey: ['daily-uploads'] }) }}
           />
           {dailyDetected.length > 0 && (
@@ -612,9 +613,10 @@ function Warn({ children }: { children: React.ReactNode }) {
   return <p className="text-xs text-amber-600 bg-amber-50 rounded p-2">{children}</p>
 }
 
-function DailyDropzone({ uploading, onUpload }: {
+function DailyDropzone({ uploading, onUpload, onReject }: {
   uploading: boolean
   onUpload: (files: File[]) => Promise<void>
+  onReject?: (message: string) => void
 }) {
   const [queued, setQueued] = useState<File[]>([])
 
@@ -625,16 +627,32 @@ function DailyDropzone({ uploading, onUpload }: {
     })
   }, [])
 
+  const onDropRejected = useCallback((rej: FileRejection[]) => {
+    if (!rej.length || !onReject) return
+    const bit = rej
+      .map((r) => `${r.file.name} (${r.errors.map((e) => e.message).join(', ')})`)
+      .join('; ')
+    onReject(
+      `Some files were not accepted (browser MIME type). ` +
+        `Try again or use “browse” — ${bit}. ` +
+        `RAR/ZIP often report as application/octet-stream; the dropzone now allows that.`,
+    )
+  }, [onReject])
+
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
+    onDropRejected,
     accept: {
       'text/csv': ['.csv'],
+      'text/plain': ['.csv'],
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-      'application/vnd.ms-excel': ['.xls'],
+      'application/vnd.ms-excel': ['.xls', '.xlsx'],
       'application/zip': ['.zip'],
+      'application/x-zip-compressed': ['.zip'],
       'application/x-rar-compressed': ['.rar'],
       'application/vnd.rar': ['.rar'],
-      'application/octet-stream': ['.xlsx', '.xls'],
+      // Browsers / OS often use generic type for RAR, XLSB, and some CSV/ZIP exports
+      'application/octet-stream': ['.rar', '.zip', '.csv', '.xlsx', '.xls', '.xlsb'],
     },
     multiple: true,
     disabled: uploading,
