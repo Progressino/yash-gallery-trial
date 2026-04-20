@@ -262,6 +262,57 @@ def _collect_csv_entries(main_zip_file, depth: int = 0):
     return entries, skipped
 
 
+def _amazon_fba_aggregate_order_lines(df: pd.DataFrame, *, has_order_id: bool) -> pd.DataFrame:
+    """
+    FBA / order-keyed rows without a tax invoice: Amazon often emits the same
+    Customer Shipment event as multiple CSV lines (exact clones or split qty rows
+    with the same timestamp). Drop exact duplicates, then sum quantity and amounts
+    per (Order, SKU, txn, shipment second) so each fulfilment line is counted once
+    with the correct unit total.
+    """
+    if df.empty:
+        return df
+    work = df.copy()
+    work = work.drop(columns=["SKU", "_day", "_qty"], errors="ignore")
+    work["_ts"] = pd.to_datetime(work["Date"], errors="coerce").dt.floor("s")
+
+    dup_subset = ["_sk", "Transaction_Type", "_ts", "Quantity"]
+    if "Invoice_Amount" in work.columns:
+        dup_subset.append("Invoice_Amount")
+    if has_order_id:
+        dup_subset = ["Order_Id"] + dup_subset
+    work = work.drop_duplicates(subset=dup_subset, keep="first")
+
+    sum_cols = [
+        c for c in (
+            "Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
+        ) if c in work.columns
+    ]
+    first_cols = [
+        c for c in (
+            "Report_Type", "Ship_To_State", "Warehouse_Id", "Fulfillment",
+            "Payment_Method", "Invoice_Number", "Buyer_Name", "IRN_Status",
+        ) if c in work.columns and c not in sum_cols
+    ]
+    agg: dict = {"Date": "max"}
+    for c in sum_cols:
+        agg[c] = "sum"
+    for c in first_cols:
+        agg[c] = "first"
+
+    # One logical line per Amazon order + SKU + txn: sum qty across shipment instants
+    # (seconds apart) after exact duplicate removal — matches seller "unique line" exports.
+    gcols = (["Order_Id", "_sk", "Transaction_Type"] if has_order_id
+             else ["_sk", "Transaction_Type"])
+    out = work.groupby(gcols, as_index=False, sort=False).agg(agg)
+    out = out.rename(columns={"_sk": "SKU"})
+    out["Month"] = out["Date"].dt.to_period("M").astype(str)
+    out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
+    if not has_order_id:
+        out["Order_Id"] = ""
+    return out
+
+
 def dedup_amazon_mtr_dataframe(combined: pd.DataFrame) -> pd.DataFrame:
     """
     Collapse duplicate lines when multiple Tier-1 ZIPs / reports overlap (same
@@ -271,8 +322,11 @@ def dedup_amazon_mtr_dataframe(combined: pd.DataFrame) -> pd.DataFrame:
     - Invoice rows: Invoice_Number + canonical SKU + transaction type + qty
       (date omitted — avoids duplicate from report-vs-shipment date noise).
     - Invoice rows suppress duplicate FBA-style lines for the same Amazon order.
-    - Order-keyed rows: Order_Id + canonical SKU + txn + qty (no calendar date).
-    - Rows with neither id: fallback on SKU + calendar day + txn + qty.
+    - Order-keyed rows **without** invoice: exact duplicate rows removed, then
+      quantities and tax amounts **summed** per Order_Id + SKU + txn +
+      shipment timestamp (second) so split/clone FBA Customer Shipment lines
+      are one logical line.
+    - Rows with neither id: same aggregation on SKU + txn + shipment second.
     """
     if combined.empty:
         return combined
@@ -306,12 +360,8 @@ def dedup_amazon_mtr_dataframe(combined: pd.DataFrame) -> pd.DataFrame:
 
     oid_ok = rest["Order_Id"].astype(str).str.strip()
     oid_ok = oid_ok.ne("") & ~oid_ok.str.lower().isin(["nan", "none"])
-    by_oid = rest[oid_ok].drop_duplicates(
-        subset=["Order_Id", "_sk", "Transaction_Type", "_qty"], keep="last"
-    )
-    no_oid = rest[~oid_ok].drop_duplicates(
-        subset=["_sk", "Transaction_Type", "_day", "_qty"], keep="last"
-    )
+    by_oid = _amazon_fba_aggregate_order_lines(rest.loc[oid_ok], has_order_id=True)
+    no_oid = _amazon_fba_aggregate_order_lines(rest.loc[~oid_ok], has_order_id=False)
 
     out = pd.concat([inv_rows, by_oid, no_oid], ignore_index=True)
     out = out.drop(columns=["_sk", "_day", "_qty"], errors="ignore")

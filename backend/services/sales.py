@@ -347,10 +347,23 @@ def build_sales_df(
     _oid_valid = combined_sales["OrderId"].notna() & ~_oid_str.str.lower().isin(["", "nan", "none"])
 
     rest = combined_sales.loc[~has_lk]
-    _with_oid = rest.loc[_oid_valid].drop_duplicates(
+    # Amazon: same OrderId + SKU can legitimately have multiple shipment instants; do not
+    # collapse them. Other channels keep OrderId-only dedup (LineKey is usually empty only here).
+    _oid_rest = rest.loc[_oid_valid]
+    _amz_oid = _oid_rest["Source"].astype(str).eq("Amazon")
+    _amz_part = _oid_rest.loc[_amz_oid].copy()
+    _other_oid = _oid_rest.loc[~_amz_oid]
+    if not _amz_part.empty:
+        _amz_part["_ded_ts"] = txn_reporting_naive_ist(_amz_part["TxnDate"]).dt.floor("s")
+        _amz_part = _amz_part.drop_duplicates(
+            subset=["OrderId", "Sku", "Source", "Transaction Type", "_ded_ts"],
+            keep="last",
+        ).drop(columns=["_ded_ts"], errors="ignore")
+    _other_dedup = _other_oid.drop_duplicates(
         subset=["OrderId", "Sku", "Source", "Transaction Type"],
         keep="last",
     )
+    _with_oid = pd.concat([_amz_part, _other_dedup], ignore_index=True)
     _without_oid = rest.loc[~_oid_valid].drop_duplicates(
         subset=["Sku", "TxnDate", "Source", "Transaction Type", "Quantity"],
         keep="last",

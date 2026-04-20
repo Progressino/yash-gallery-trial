@@ -214,6 +214,37 @@ def test_dedup_keeps_refund_sharing_order_with_invoice_shipment():
     assert int(out[out["Transaction_Type"] == "Refund"]["Quantity"].sum()) == 1
 
 
+def test_dedup_amazon_fba_collapses_clone_rows_and_sums_split_qty():
+    """FBA Customer Shipment: exact clones removed, then qty summed per order line."""
+    d = pd.DataFrame(
+        {
+            "Invoice_Number": ["", "", ""],
+            "Order_Id": ["O-FBA", "O-FBA", "O-FBA"],
+            "SKU": ["S1", "S1", "S1"],
+            "Transaction_Type": ["Shipment"] * 3,
+            "Quantity": [1.0, 1.0, 2.0],
+            "Date": pd.to_datetime(
+                ["2025-06-01 10:00:00", "2025-06-01 10:00:00", "2025-06-01 11:00:00"]
+            ),
+            "Invoice_Amount": [10.0, 10.0, 20.0],
+            "Total_Tax": [0.0, 0.0, 0.0],
+            "CGST": [0.0, 0.0, 0.0],
+            "SGST": [0.0, 0.0, 0.0],
+            "IGST": [0.0, 0.0, 0.0],
+            "Report_Type": ["B2C"] * 3,
+            "Ship_To_State": ["MH"] * 3,
+            "Warehouse_Id": [""] * 3,
+            "Fulfillment": [""] * 3,
+            "Payment_Method": [""] * 3,
+            "Buyer_Name": [""] * 3,
+            "IRN_Status": [""] * 3,
+        }
+    )
+    out = dedup_amazon_mtr_dataframe(d)
+    assert len(out) == 1
+    assert float(out["Quantity"].iloc[0]) == 3.0
+
+
 def test_build_sales_df_amazon_with_mapping():
     mtr = pd.DataFrame(
         {
