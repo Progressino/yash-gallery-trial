@@ -741,6 +741,68 @@ def test_myntra_parent_shadow_keeps_unrelated_orders_same_fingerprint():
     assert len(out) == 2
 
 
+def test_myntra_same_day_refund_drops_stale_shipment_after_merge():
+    """PPMP RTO is one row; Tier-3 merge must not keep a stale Shipment + Refund for the same line."""
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    stale_ship = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10"]),
+            "OMS_SKU": ["S1"],
+            "TxnType": ["Shipment"],
+            "Quantity": [1.0],
+            "LineKey": ["11069041104"],
+            "OrderId": ["11069041104"],
+            "RawStatus": ["SH"],
+        }
+    )
+    rto_refund = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10"]),
+            "OMS_SKU": ["S1"],
+            "TxnType": ["Refund"],
+            "Quantity": [1.0],
+            "LineKey": ["11069041104"],
+            "OrderId": ["11069041104"],
+            "RawStatus": ["RTO"],
+        }
+    )
+    out = merge_platform_data(stale_ship, rto_refund, "myntra")
+    assert len(out) == 1
+    assert out["TxnType"].iloc[0] == "Refund"
+
+
+def test_myntra_shipment_and_refund_different_days_keeps_both():
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    ship = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-01"]),
+            "OMS_SKU": ["S1"],
+            "TxnType": ["Shipment"],
+            "Quantity": [1.0],
+            "LineKey": ["L1"],
+            "OrderId": ["L1"],
+            "RawStatus": ["SH"],
+        }
+    )
+    ret = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-15"]),
+            "OMS_SKU": ["S1"],
+            "TxnType": ["Refund"],
+            "Quantity": [1.0],
+            "LineKey": ["L1"],
+            "OrderId": ["L1"],
+            "RawStatus": ["RETURN"],
+        }
+    )
+    out = merge_platform_data(ship, ret, "myntra")
+    assert len(out) == 2
+
+
 def test_flipkart_strong_dedup_keeps_two_skus_same_order_id():
     from backend.services.daily_store import merge_platform_data
     import pandas as pd

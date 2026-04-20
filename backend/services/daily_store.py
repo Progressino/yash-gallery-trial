@@ -466,6 +466,47 @@ def _dedup_myntra_parent_order_shadow(d: pd.DataFrame) -> pd.DataFrame:
     return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
 
 
+def _dedup_myntra_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tier-3 merges (concat existing + new upload) keep Shipment and Refund as distinct keys,
+    so a line that moved to **RTO** in PPMP can leave a stale **Shipment** row from an older
+    snapshot alongside the current **Refund** row — same seller line id, same SKU/qty, same
+    reporting day. PPMP ground truth is one RTO row; drop the shadow Shipment so returns and
+    gross ship counts match seller exports.
+
+    Different calendar days (ship in January, return in February) are left intact.
+    """
+    if d.empty or "TxnType" not in d.columns:
+        return d
+    required = ("OrderId", "Date", "OMS_SKU", "Quantity", "TxnType")
+    if not all(c in d.columns for c in required):
+        return d
+    work = d.copy()
+    oid = work["OrderId"].astype(str).str.strip()
+    if "LineKey" in work.columns:
+        lk = work["LineKey"].fillna("").astype(str).str.strip()
+        use_lk = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+        oid = oid.where(~use_lk, lk)
+    work["_ded_id"] = oid
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_sku"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    work["_qty"] = pd.to_numeric(work["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+    work["_txn"] = work["TxnType"].astype(str).str.strip()
+
+    drop_idx: List[Any] = []
+    for key, g in work.groupby(["_ded_id", "_day", "_sku", "_qty"], sort=False):
+        ded_id = key[0]
+        if not ded_id or str(ded_id).lower() in ("nan", "none", ""):
+            continue
+        txns = set(g["_txn"])
+        if "Shipment" in txns and "Refund" in txns:
+            drop_idx.extend(g.index[g["_txn"] == "Shipment"].tolist())
+
+    if not drop_idx:
+        return d
+    return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
+
+
 def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
     """
     Deduplicate a concatenated platform DataFrame to remove inflated rows
@@ -545,6 +586,7 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                 out = _dedup_linekey_legacy_shadow(out)
             if platform == "myntra":
                 out = _dedup_myntra_parent_order_shadow(out)
+                out = _dedup_myntra_shipment_superseded_by_same_day_refund(out)
             if platform == "meesho":
                 out = _dedup_meesho_cross_source_overlay(out)
                 out = _dedup_meesho_suborder_cross_source(out)
