@@ -10,7 +10,22 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .helpers import clean_line_id_series, is_likely_non_sku_notes_value, looks_like_seller_listing_sku
+from .helpers import (
+    clean_line_id_series,
+    is_likely_non_sku_notes_value,
+    is_non_rto_forward_milestone_status,
+    looks_like_seller_listing_sku,
+)
+
+
+def _meesho_status_implies_refund(status) -> bool:
+    """True when Meesho panel / export status should classify as Refund (reverse leg)."""
+    if is_non_rto_forward_milestone_status(status):
+        return False
+    s = str(status).strip().upper()
+    if not s or s in ("NAN", "NONE"):
+        return False
+    return any(x in s for x in ("RETURN", "RTO", "REVERSE", "REFUND"))
 
 
 def _clean_meesho_cell(value) -> str:
@@ -378,9 +393,11 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             _sz = _meesho_size_column(df)
             df["_SKU"]     = _combine_meesho_sku_size(_meesho_sku_base_series(df), df[_sz] if _sz else None)
             def _meesho_txn(s):
-                s = str(s).lower()
-                if "return" in s or "rto" in s: return "Refund"
-                if "cancel" in s:               return "Cancel"
+                if _meesho_status_implies_refund(s):
+                    return "Refund"
+                s2 = str(s).lower()
+                if "cancel" in s2:
+                    return "Cancel"
                 return "Shipment"
             df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
             df["_Month"]   = None
@@ -562,9 +579,9 @@ def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str
             break
 
     def _txn(s) -> str:
-        u = str(s).strip().upper()
-        if "REFUND" in u or "RETURN" in u or "RTO" in u:
+        if _meesho_status_implies_refund(s):
             return "Refund"
+        u = str(s).strip().upper()
         if "CANCEL" in u:
             return "Cancel"
         return "Shipment"
@@ -645,10 +662,10 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     status_col = next((c for c in df.columns if "reason" in c or "order status" in c
                        or c == "status"), None)
     def _txn(s):
-        s = str(s).lower().strip()
-        if "return" in s or "rto" in s:
+        if _meesho_status_implies_refund(s):
             return "Refund"
-        if "cancel" in s:
+        s2 = str(s).lower().strip()
+        if "cancel" in s2:
             return "Cancel"
         return "Shipment"
     df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"

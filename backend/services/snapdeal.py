@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .helpers import map_to_oms_sku, clean_sku
+from .helpers import clean_sku, is_non_rto_forward_milestone_status, map_to_oms_sku
 
 
 # ── Keywords that indicate we're looking at a real header row ─────────────────
@@ -102,7 +102,9 @@ def _find_date_col_by_value(df: pd.DataFrame) -> Optional[str]:
 def _snapdeal_txn(status: str) -> str:
     """Map Snapdeal order status → Shipment / Refund / Cancel."""
     s = str(status).strip().lower()
-    if any(x in s for x in ["return", "rto", "refund", "returned", "reverse"]):
+    if not is_non_rto_forward_milestone_status(status) and any(
+        x in s for x in ["return", "rto", "refund", "returned", "reverse"]
+    ):
         return "Refund"
     if any(x in s for x in ["cancel", "cancelled", "cancellation"]):
         return "Cancel"

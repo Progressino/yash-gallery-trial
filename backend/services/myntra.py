@@ -14,6 +14,7 @@ from .helpers import (
     canonical_pl_sku_key,
     clean_line_id_series,
     clean_sku,
+    is_non_rto_forward_milestone_status,
     map_to_oms_sku,
     normalized_sku_forms_for_lookup,
 )
@@ -373,7 +374,8 @@ def _parse_myntra_csv(
             return "Shipment"
         if s in ("REVERSE", "REV", "RVP"):                    # RVP = Reverse Pickup
             return "Refund"
-        if ("RETURN" in s or "REVERSE" in s or s.startswith("RTO")
+        if not is_non_rto_forward_milestone_status(s) and (
+                "RETURN" in s or "REVERSE" in s or s.startswith("RTO")
                 or s.startswith("RTD") or s.startswith("RVP")
                 or s in ("R", "RS", "RD", "RTOD", "RVP", "RTN", "RSHIP")):
             return "Refund"

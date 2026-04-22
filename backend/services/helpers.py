@@ -59,6 +59,21 @@ def clean_line_id_series(series: pd.Series) -> pd.Series:
     return s
 
 
+# "NON RTO DELIVERED" / "NON-RETURN" are forward milestones; naive ``"rto" in s`` / ``"return" in s`` false-positive.
+_NON_RTO_FORWARD = re.compile(r"(?i)NON[-\s]?RTO|NON[-\s]?RETURN")
+
+
+def is_non_rto_forward_milestone_status(status) -> bool:
+    """
+    True when a marketplace status negates RTO/return (successful forward delivery).
+    Without this guard, substring checks mark the row as Refund; tier-3 dedup then
+    drops the Shipment twin and gross delivered units disappear from dashboards.
+    """
+    if status is None or (isinstance(status, float) and pd.isna(status)):
+        return False
+    return bool(_NON_RTO_FORWARD.search(str(status)))
+
+
 # Phrases from return / credit / adjustment columns that are often mis-read as SKUs.
 _NON_SKU_NOTE_PHRASE = re.compile(
     r"SIZE\s*CHANGE|BAAKI|SE\s+ADJUST|\bADJUST\b|\bEXCHANGE\b|REASON\s+FOR|"

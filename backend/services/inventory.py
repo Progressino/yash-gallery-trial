@@ -1,13 +1,15 @@
 """
 Inventory loader — consolidated from all sources.
 """
+import hashlib
 import io
 import os
 import re
 import shutil
 import subprocess
 import tempfile
-from typing import Dict, List, Optional
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -221,6 +223,129 @@ def _parse_fba_tsv(tsv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
         .reset_index()
         .rename(columns={"Shipped": "FBA_InTransit"})
     )
+
+
+def _parse_fba_shipment_id(tsv_bytes: bytes) -> Optional[str]:
+    """First-line 'Shipment ID' from Amazon FBA inbound TSV, if present."""
+    first = tsv_bytes.decode("utf-8", errors="ignore").partition("\n")[0].split("\t")
+    if len(first) >= 2 and first[0].strip().lower() == "shipment id":
+        sid = first[1].strip().upper()
+        return sid or None
+    return None
+
+
+def _parse_fba_tsv_detail(tsv_bytes: bytes) -> pd.DataFrame:
+    """
+    Line-level rows: Merchant SKU, FNSKU, Shipped (before OMS mapping).
+    Used to merge multiple exports for the same shipment without double-counting.
+    """
+    text = tsv_bytes.decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    header_idx = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("Merchant SKU\t")), None
+    )
+    if header_idx is None:
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), sep="\t", dtype=str)
+    except Exception:
+        return pd.DataFrame()
+    if "Merchant SKU" not in df.columns or "Shipped" not in df.columns:
+        return pd.DataFrame()
+    if "FNSKU" not in df.columns:
+        df = df.copy()
+        df["FNSKU"] = ""
+    df = df[df["Merchant SKU"].notna()].copy()
+    df["Shipped"] = pd.to_numeric(df["Shipped"], errors="coerce").fillna(0)
+    return df[["Merchant SKU", "FNSKU", "Shipped"]]
+
+
+def _parse_fba_tsv_shipment_group(tsv_chunks: List[bytes], mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    One or more TSV exports for the same FBA shipment. Identical files should be
+    merged to a single manifest; overlapping line keys take max(Shipped) so
+    duplicate rows do not inflate totals.
+    """
+    if len(tsv_chunks) == 1:
+        return _parse_fba_tsv(tsv_chunks[0], mapping)
+    detail_parts = [_parse_fba_tsv_detail(t) for t in tsv_chunks]
+    detail_parts = [d for d in detail_parts if not d.empty]
+    if not detail_parts:
+        return pd.DataFrame()
+    df = pd.concat(detail_parts, ignore_index=True)
+    df = (
+        df.groupby(["Merchant SKU", "FNSKU"], sort=False)["Shipped"]
+        .max()
+        .reset_index()
+    )
+
+    def _resolve(msku: str) -> str:
+        raw = str(msku).strip().upper()
+        stripped = _PL_RE.sub(r"\1\2", raw)
+        return map_to_oms_sku(stripped, mapping)
+
+    df["OMS_SKU"] = df["Merchant SKU"].apply(_resolve)
+    return (
+        df.groupby("OMS_SKU")["Shipped"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Shipped": "FBA_InTransit"})
+    )
+
+
+def _dedupe_fba_tsv_payloads(tsv_list: List[bytes]) -> Tuple[List[bytes], int]:
+    """Drop byte-identical TSVs (e.g. duplicate downloads named (1)/(2))."""
+    seen: set[bytes] = set()
+    out: List[bytes] = []
+    for t in tsv_list:
+        h = hashlib.sha256(t).digest()
+        if h in seen:
+            continue
+        seen.add(h)
+        out.append(t)
+    return out, len(tsv_list) - len(out)
+
+
+def _aggregate_fba_intransit_tsvs(tsv_list: List[bytes], mapping: Dict[str, str]) -> Tuple[pd.DataFrame, dict]:
+    """
+    Parse all FBA in-transit TSVs: hash-dedupe, then merge per Shipment ID, then sum across shipments.
+    Returns (dataframe OMS_SKU, FBA_InTransit), debug dict.
+    """
+    dbg: dict = {}
+    if not tsv_list:
+        return pd.DataFrame(), dbg
+    dbg["fba_tsv_count_raw"] = len(tsv_list)
+    deduped, dropped = _dedupe_fba_tsv_payloads(tsv_list)
+    dbg["fba_tsv_identical_dropped"] = dropped
+    dbg["fba_tsv_count_deduped"] = len(deduped)
+
+    by_ship: Dict[str, List[bytes]] = defaultdict(list)
+    no_sid: List[bytes] = []
+    for t in deduped:
+        sid = _parse_fba_shipment_id(t)
+        if sid:
+            by_ship[sid].append(t)
+        else:
+            no_sid.append(t)
+
+    dbg["fba_shipment_ids"] = {k: len(v) for k, v in by_ship.items()}
+    dbg["fba_tsv_no_shipment_id"] = len(no_sid)
+
+    parts: List[pd.DataFrame] = []
+    for _sid, chunks in by_ship.items():
+        p = _parse_fba_tsv_shipment_group(chunks, mapping)
+        if not p.empty:
+            parts.append(p)
+    for t in no_sid:
+        p = _parse_fba_tsv(t, mapping)
+        if not p.empty:
+            parts.append(p)
+
+    if not parts:
+        return pd.DataFrame(), dbg
+    combined = pd.concat(parts, ignore_index=True)
+    out = combined.groupby("OMS_SKU")["FBA_InTransit"].sum().reset_index()
+    return out, dbg
 
 
 # Flipkart stock columns — only physically available/sellable units (matches OMS Flipkart count).
@@ -516,11 +641,9 @@ def load_inventory_consolidated(
                     inv_dfs.append(part)
                 debug["amz"] = f"{len(part)} SKUs"
 
-            fba_parts = [_parse_fba_tsv(t, mapping) for t in extracted["fba_tsvs"]]
-            fba_parts = [d for d in fba_parts if not d.empty]
-            if fba_parts:
-                combined = pd.concat(fba_parts, ignore_index=True)
-                part = combined.groupby("OMS_SKU")["FBA_InTransit"].sum().reset_index()
+            part, fba_dbg = _aggregate_fba_intransit_tsvs(extracted["fba_tsvs"], mapping)
+            debug.update(fba_dbg)
+            if not part.empty:
                 inv_dfs.append(part)
                 debug["fba"] = f"{len(part)} SKUs"
 
