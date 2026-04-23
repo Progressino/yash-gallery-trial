@@ -56,8 +56,12 @@ log = logging.getLogger("erp.cache_warmer")
 # New/empty sessions copy from here so users never wait for a GitHub download.
 _warm_cache: dict = {}
 _warm_cache_loaded_at: datetime | None = None
-# Set (signalled) once _do_load_warm_cache finishes (success or failure).
-# Session middleware waits on this so the first page load auto-applies the cache.
+# Monotonically increasing counter: increments on every successful warm-cache
+# update (Phase 1 = 1, Phase 2 = 2, next day refresh = 3, …).  Sessions track
+# which generation they last received so the middleware can re-copy Phase-2 data
+# to sessions that only got Phase-1 data without requiring a full page reload.
+_warm_cache_generation: int = 0
+# Set (signalled) once Phase 1 (SQLite) finishes. Cleared by clear_warm_cache().
 _warm_cache_ready = threading.Event()
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -78,9 +82,10 @@ _WARM_CACHE_KEYS = (
 
 def clear_warm_cache() -> None:
     """Drop app-level warm cache so the next load re-downloads from GitHub / rebuilds from SQLite."""
-    global _warm_cache, _warm_cache_loaded_at
+    global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
     _warm_cache = {}
     _warm_cache_loaded_at = None
+    _warm_cache_generation = 0
     _warm_cache_ready.clear()  # Reset so next load is awaited correctly
 
 
@@ -105,106 +110,149 @@ def publish_warm_cache_from_session(sess) -> None:
 
 
 def _do_load_warm_cache() -> bool:
-    """Download from GitHub and store in module-level _warm_cache. Thread-safe (GIL)."""
-    global _warm_cache, _warm_cache_loaded_at
+    """
+    Two-phase warm-cache load. Thread-safe (GIL).
+
+    Phase 1 (~2 s): Load platform DataFrames from the local SQLite daily store,
+    publish to _warm_cache, and immediately signal _warm_cache_ready so the first
+    page-load after a deploy returns data within a couple of seconds.
+
+    Phase 2 (~60–90 s): Download GitHub historical cache in the same thread (no
+    extra thread needed — lifespan already runs this in an executor). Strip any
+    GitHub rows whose dates are already covered by the SQLite store (daily store
+    always wins), merge, rebuild sales_df, and update _warm_cache.  Existing
+    sessions that received Phase-1 data get the fuller historical view on their
+    next fresh request (new session or page reload).
+    """
+    global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
     try:
         from .services.github_cache import load_cache_from_drive
-        from .services.daily_store import load_all_platforms, merge_platform_data as _merge, save_daily_file
+        from .services.daily_store import load_all_platforms, merge_platform_data as _merge
+        from .services.sales import build_sales_df
         import pandas as pd
 
+        def _sanitise_snapdeal(df: pd.DataFrame) -> pd.DataFrame:
+            if df.empty or "OMS_SKU" not in df.columns:
+                return df
+            bad = df["OMS_SKU"].astype(str).str.upper()
+            return df[
+                ~(bad.isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])
+                  | df["OMS_SKU"].astype(str).str.match(r'^\d+$'))
+            ].reset_index(drop=True)
+
+        # ── Phase 1: SQLite daily store (local, fast) ─────────────────────────
+        # Users see correct data within ~2 s of a backend restart.
+        phase1_ok = False
+        phase1_daily: dict = {}
+        try:
+            phase1_daily = load_all_platforms()
+            if phase1_daily:
+                p1: dict = {
+                    "mtr_df":               phase1_daily.get("amazon",   pd.DataFrame()),
+                    "myntra_df":            phase1_daily.get("myntra",   pd.DataFrame()),
+                    "meesho_df":            phase1_daily.get("meesho",   pd.DataFrame()),
+                    "flipkart_df":          phase1_daily.get("flipkart", pd.DataFrame()),
+                    "snapdeal_df":          _sanitise_snapdeal(phase1_daily.get("snapdeal", pd.DataFrame())),
+                    "sales_df":             pd.DataFrame(),
+                    "sku_mapping":          {},
+                    "inventory_df_variant": pd.DataFrame(),
+                    "inventory_df_parent":  pd.DataFrame(),
+                }
+                has_sales = any(
+                    not v.empty
+                    for v in [p1["mtr_df"], p1["myntra_df"], p1["meesho_df"],
+                               p1["flipkart_df"], p1["snapdeal_df"]]
+                )
+                if has_sales:
+                    p1["sales_df"] = build_sales_df(
+                        mtr_df=p1["mtr_df"],       myntra_df=p1["myntra_df"],
+                        meesho_df=p1["meesho_df"], flipkart_df=p1["flipkart_df"],
+                        sku_mapping={},            snapdeal_df=p1["snapdeal_df"],
+                    )
+                _warm_cache = p1
+                _warm_cache_loaded_at = datetime.now(IST)
+                _warm_cache_generation += 1   # generation 1 = Phase-1 SQLite data
+                _warm_cache_ready.set()       # ← unblocks first page-load immediately
+                phase1_ok = True
+                log.info(
+                    "Warm-cache Phase 1 ready: %d sales rows from SQLite. "
+                    "Downloading GitHub historical cache in background…",
+                    len(p1.get("sales_df", pd.DataFrame())),
+                )
+        except Exception as e:
+            log.warning("Warm-cache Phase 1 (SQLite) failed: %s — continuing to GitHub", e)
+
+        # ── Phase 2: GitHub historical cache (network, slow) ──────────────────
+        # Provides data for dates not yet in the SQLite daily store.
         ok, msg, loaded = load_cache_from_drive()
         if not ok or not loaded:
-            log.warning("Warm-cache load failed: %s — falling back to SQLite only", msg)
-            # GitHub failed — build cache entirely from SQLite daily store
-            try:
-                daily = load_all_platforms()
-                if daily:
-                    loaded = {
-                        "mtr_df":      daily.get("amazon",   pd.DataFrame()),
-                        "myntra_df":   daily.get("myntra",   pd.DataFrame()),
-                        "meesho_df":   daily.get("meesho",   pd.DataFrame()),
-                        "flipkart_df": daily.get("flipkart", pd.DataFrame()),
-                        "snapdeal_df": daily.get("snapdeal", pd.DataFrame()),
-                        "sales_df":    pd.DataFrame(),
-                        "sku_mapping": {},
-                        "inventory_df_variant": pd.DataFrame(),
-                        "inventory_df_parent":  pd.DataFrame(),
-                    }
-                    # Rebuild sales_df from what SQLite has
-                    if any(not v.empty for v in [loaded["mtr_df"], loaded["myntra_df"],
-                                                  loaded["meesho_df"], loaded["flipkart_df"],
-                                                  loaded["snapdeal_df"]]):
-                        from .services.sales import build_sales_df
-                        loaded["sales_df"] = build_sales_df(
-                            mtr_df=loaded["mtr_df"], myntra_df=loaded["myntra_df"],
-                            meesho_df=loaded["meesho_df"], flipkart_df=loaded["flipkart_df"],
-                            sku_mapping=loaded.get("sku_mapping") or {},
-                            snapdeal_df=loaded["snapdeal_df"],
-                        )
-                    log.info("Warm cache rebuilt from SQLite: %d sales rows",
-                             len(loaded.get("sales_df", pd.DataFrame())))
-                else:
-                    return False
-            except Exception as e2:
-                log.warning("SQLite fallback also failed: %s", e2)
+            log.warning("Warm-cache Phase 2 (GitHub) failed: %s", msg)
+            if not phase1_ok:
+                # Nothing at all — try a pure SQLite fallback so we return something
+                if phase1_daily:
+                    log.info("Using Phase 1 SQLite data only (GitHub unavailable).")
+                    return True
                 return False
+            return True   # Phase 1 data is still good
 
-        # Sanitise Snapdeal — strip invalid SKUs
-        if "snapdeal_df" in loaded and isinstance(loaded["snapdeal_df"], pd.DataFrame):
-            snap = loaded["snapdeal_df"]
-            if not snap.empty and "OMS_SKU" in snap.columns:
-                bad = snap["OMS_SKU"].astype(str).str.upper()
-                loaded["snapdeal_df"] = snap[
-                    ~(bad.isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])
-                      | snap["OMS_SKU"].astype(str).str.match(r'^\d+$'))
-                ].reset_index(drop=True)
+        # Sanitise Snapdeal from GitHub
+        loaded["snapdeal_df"] = _sanitise_snapdeal(loaded.get("snapdeal_df", pd.DataFrame()))
 
-        # Merge daily SQLite store on top of GitHub cache, then rebuild sales_df.
-        # Date-superseding: for any date covered by the daily store, remove that date
-        # from the GitHub cache before merging. This prevents double-counting when
-        # the LineKey format changes (e.g. after a parser fix) — the daily store
-        # version always wins for dates it has data for.
+        # Date-superseding merge: for every date covered by the SQLite daily store,
+        # strip that date from the GitHub cache before merging so the freshly-parsed
+        # SQLite rows always win (prevents double-counting after parser fixes).
         try:
+            # Re-read SQLite so we pick up any upload that arrived during Phase 2.
             daily = load_all_platforms()
             merged_any = False
             for plat, key in [
-                ("amazon", "mtr_df"),
-                ("myntra", "myntra_df"),
-                ("meesho", "meesho_df"),
+                ("amazon",   "mtr_df"),
+                ("myntra",   "myntra_df"),
+                ("meesho",   "meesho_df"),
                 ("flipkart", "flipkart_df"),
                 ("snapdeal", "snapdeal_df"),
             ]:
                 if daily.get(plat) is not None and not daily[plat].empty:
                     daily_df  = daily[plat]
                     github_df = loaded.get(key, pd.DataFrame())
-                    # Strip GitHub rows whose dates are covered by the daily store
-                    if not github_df.empty and "Date" in github_df.columns and "Date" in daily_df.columns:
+                    if (not github_df.empty
+                            and "Date" in github_df.columns
+                            and "Date" in daily_df.columns):
                         try:
                             daily_dates  = set(pd.to_datetime(daily_df["Date"],  errors="coerce").dt.normalize())
                             github_dates =     pd.to_datetime(github_df["Date"], errors="coerce").dt.normalize()
                             github_df = github_df[~github_dates.isin(daily_dates)].copy()
                             loaded[key] = github_df
                         except Exception:
-                            pass  # If date stripping fails, fall through to normal merge
+                            pass
                     loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily_df, plat)
                     merged_any = True
             if merged_any:
-                from .services.sales import build_sales_df
-                loaded["sales_df"] = build_sales_df(
-                    mtr_df=loaded.get("mtr_df", pd.DataFrame()),
-                    myntra_df=loaded.get("myntra_df", pd.DataFrame()),
-                    meesho_df=loaded.get("meesho_df", pd.DataFrame()),
-                    flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
-                    sku_mapping=loaded.get("sku_mapping") or {},
-                    snapdeal_df=loaded.get("snapdeal_df"),
-                )
-                log.info("sales_df rebuilt after SQLite merge: %d rows", len(loaded["sales_df"]))
+                log.info("Phase 2: SQLite merged on top of GitHub for %d platform(s).", merged_any)
         except Exception as e:
-            log.warning("Daily-store merge warning: %s", e)
+            log.warning("Phase 2 daily-store merge warning: %s", e)
+
+        # Rebuild unified sales_df from the fully-merged platform data
+        try:
+            loaded["sales_df"] = build_sales_df(
+                mtr_df=loaded.get("mtr_df", pd.DataFrame()),
+                myntra_df=loaded.get("myntra_df", pd.DataFrame()),
+                meesho_df=loaded.get("meesho_df", pd.DataFrame()),
+                flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
+                sku_mapping=loaded.get("sku_mapping") or {},
+                snapdeal_df=loaded.get("snapdeal_df"),
+            )
+            log.info("Phase 2 sales_df: %d rows", len(loaded["sales_df"]))
+        except Exception as e:
+            log.warning("Phase 2 sales_df rebuild failed: %s", e)
+            if phase1_ok:
+                loaded.setdefault("sales_df", _warm_cache.get("sales_df", pd.DataFrame()))
 
         _warm_cache = loaded
         _warm_cache_loaded_at = datetime.now(IST)
-        log.info("Warm cache loaded at %s — %s", _warm_cache_loaded_at.strftime("%H:%M IST"), msg)
+        _warm_cache_generation += 1   # generation 2+ = Phase-2 GitHub+SQLite data
+        log.info("Warm cache fully loaded (Phase 2, gen=%d) at %s — %s",
+                 _warm_cache_generation, _warm_cache_loaded_at.strftime("%H:%M IST"), msg)
         return True
 
     except Exception as e:
@@ -212,7 +260,8 @@ def _do_load_warm_cache() -> bool:
         return False
 
     finally:
-        # Always signal ready so waiting sessions aren't blocked forever
+        # Always signal so waiting code is never blocked forever
+        # (no-op if Phase 1 already called set())
         _warm_cache_ready.set()
 
 
@@ -370,20 +419,30 @@ async def session_middleware(request: Request, call_next):
     request.state.session = session
     setattr(session, "_persist_sid", sid)
 
-    # Pre-populate session from warm cache whenever the session has no data —
-    # not just on brand-new sessions. This handles the race condition where
-    # the cache was still loading when the session was first created, and also
-    # re-fills sessions whose in-memory data was lost after a deploy.
-    # Do not block request handling on warm-cache hydration. A previous synchronous
-    # wait here could stall the event loop and make the UI stick on "Loading...".
-    # Cache fill continues in background and data routes can restore from SQLite.
+    # Pre-populate session from warm cache whenever the session has no data, OR
+    # when the warm cache has moved to a newer generation (Phase 2 after Phase 1)
+    # and the session still has only auto-copied data (no user uploads).
+    # _warm_cache_only=True means the session data came exclusively from an auto-copy
+    # of the warm cache — no explicit upload or load has run since.  Upload routes
+    # call resume_auto_data_restore() which sets _warm_cache_only=False.
     copied_warm = False
-    if (
-        session.mtr_df.empty
-        and session.sales_df.empty
-        and not getattr(session, "pause_auto_data_restore", False)
-    ):
-        copied_warm = _copy_warm_cache_to_session(session)
+    _session_gen   = getattr(session, "_warm_cache_gen", 0)
+    _wc_only       = getattr(session, "_warm_cache_only", False)
+    _phase2_ready  = _warm_cache_generation >= 2 and _session_gen < _warm_cache_generation
+    if not getattr(session, "pause_auto_data_restore", False):
+        if session.mtr_df.empty and session.sales_df.empty:
+            # Session has no data — copy from warm cache (available ~2 s after restart)
+            copied_warm = _copy_warm_cache_to_session(session)
+            if copied_warm:
+                session._warm_cache_gen  = _warm_cache_generation
+                session._warm_cache_only = True
+        elif _wc_only and _phase2_ready:
+            # Session has Phase-1 SQLite data only; Phase 2 (GitHub historical) is ready.
+            # Seamlessly upgrade — no user-uploaded data to protect.
+            copied_warm = _copy_warm_cache_to_session(session)
+            if copied_warm:
+                session._warm_cache_gen  = _warm_cache_generation
+                session._warm_cache_only = True
 
     try:
         from .services.sku_mapping import ensure_default_sku_mapping_from_bundle
@@ -443,4 +502,6 @@ def health():
         "sessions": store.count,
         "warm_cache": bool(_warm_cache),
         "warm_cache_loaded_at": _warm_cache_loaded_at.isoformat() if _warm_cache_loaded_at else None,
+        # generation: 0=loading, 1=Phase1 SQLite ready, 2=Phase2 GitHub+SQLite ready
+        "warm_cache_generation": _warm_cache_generation,
     }

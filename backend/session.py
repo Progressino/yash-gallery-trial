@@ -92,6 +92,9 @@ def resume_auto_data_restore(sess: AppSession) -> None:
     """Re-enable automatic restores / merges after an explicit load or new upload."""
     sess.pause_auto_data_restore = False
     sess.daily_restored = False
+    # Mark that the session now has user/explicit data — prevents Phase-2 warm-cache
+    # auto-re-copy from overwriting data the user just uploaded.
+    sess._warm_cache_only = False
 
 
 class SessionStore:
