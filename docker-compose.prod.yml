@@ -54,8 +54,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    mem_limit: 4g
-    memswap_limit: 6g   # allows up to 2g of swap before OOM
+    mem_limit: 7g
+    memswap_limit: 8g   # keep headroom to avoid OOM during first large session restore
     restart: unless-stopped
 
   # ── React frontend + nginx reverse proxy ────────────────────
