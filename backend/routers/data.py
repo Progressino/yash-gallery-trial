@@ -108,7 +108,10 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             ("snapdeal", "snapdeal_df"),
         ]:
             if getattr(sess, attr).empty:
-                df = load_platform_data(platform, months=_auto_months)
+                # Fast path for session auto-restore: skip deep dedup here to avoid
+                # long blocking sync on first dashboard load. Upload-time merges and
+                # sales build dedup still normalize rows for analytics.
+                df = load_platform_data(platform, months=_auto_months, dedup=False)
                 if not df.empty:
                     setattr(sess, attr, df)
                     changed = True

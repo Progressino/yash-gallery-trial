@@ -705,7 +705,7 @@ def save_daily_file(
     return file_date, len(df)
 
 
-def load_platform_data(platform: str, months: int | None = None) -> pd.DataFrame:
+def load_platform_data(platform: str, months: int | None = None, *, dedup: bool = True) -> pd.DataFrame:
     """Load and concatenate stored daily data for one platform, with deduplication.
 
     ``months=None`` (default): load **all** blobs for the platform. Tier-1 bulk uploads
@@ -771,6 +771,8 @@ def load_platform_data(platform: str, months: int | None = None) -> pd.DataFrame
         return pd.DataFrame()
 
     combined = pd.concat(dfs, ignore_index=True)
+    if not dedup:
+        return combined.reset_index(drop=True)
     return _dedup_platform_df(combined, platform)
 
 
