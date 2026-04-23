@@ -23,7 +23,7 @@ GET/POST/DELETE /api/finance/sales-uploads
 """
 import os
 from typing import Optional, List
-from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel
 
 from ..db.finance_db import (
@@ -39,7 +39,12 @@ from ..db.finance_db import (
     get_chart_of_accounts, get_trial_balance,
     list_tally_pl, upsert_tally_pl, delete_tally_pl,
 )
-from ..services.finance import get_pl_statement, get_gst_summary, get_platform_revenue
+from ..services.finance import (
+    get_pl_statement,
+    get_gst_summary,
+    get_platform_revenue,
+    get_platform_revenue_from_finance_uploads,
+)
 
 _FINANCE_PIN = os.environ.get("FINANCE_PIN", "").strip()
 
@@ -239,6 +244,11 @@ def pl_statement(
     request:    Request,
     start_date: Optional[str] = None,
     end_date:   Optional[str] = None,
+    revenue_source: str = Query(
+        "finance_lock",
+        description="finance_lock = Sales Uploads tab (finance.db) only; session = Upload page / Dashboard basis",
+        pattern="^(session|finance_lock)$",
+    ),
 ):
     sess = _sess(request)
     return get_pl_statement(
@@ -250,6 +260,7 @@ def pl_statement(
         cogs_df     = sess.cogs_df,
         start_date  = start_date,
         end_date    = end_date,
+        revenue_source=revenue_source,
     )
 
 
@@ -268,8 +279,14 @@ def platform_revenue(
     request:    Request,
     start_date: Optional[str] = None,
     end_date:   Optional[str] = None,
+    revenue_source: str = Query(
+        "finance_lock",
+        pattern="^(session|finance_lock)$",
+    ),
 ):
     sess = _sess(request)
+    if revenue_source == "finance_lock":
+        return get_platform_revenue_from_finance_uploads(start_date, end_date)
     return get_platform_revenue(
         mtr_df      = sess.mtr_df,
         myntra_df   = sess.myntra_df,
@@ -700,6 +717,9 @@ async def upload_sales_file(
     Parse a platform sales file (MTR zip, Myntra zip, Meesho zip, Flipkart zip,
     Snapdeal zip, or plain CSV/Excel) and save a locked record in finance_sales_uploads.
     Returns parsed summary stats + the new record id.
+
+    Does **not** write to the ERP session, Tier-3 daily_sales.db, or affect Dashboard / PO —
+    only finance.db (see ``revenue_source=finance_lock`` on /pl and /platform-revenue).
     """
     import pandas as pd
     from ..services.mtr      import load_mtr_from_zip

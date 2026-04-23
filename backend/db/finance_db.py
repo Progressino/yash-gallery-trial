@@ -999,6 +999,8 @@ def delete_expense_voucher(voucher_id: int) -> bool:
 def list_finance_sales_uploads(
     platform: Optional[str] = None,
     period: Optional[str] = None,
+    period_from: Optional[str] = None,
+    period_to: Optional[str] = None,
 ) -> list[dict]:
     conn = _connect()
     query = "SELECT * FROM finance_sales_uploads WHERE 1=1"
@@ -1009,6 +1011,13 @@ def list_finance_sales_uploads(
     if period:
         query += " AND period = ?"
         params.append(period)
+    # period is stored as YYYY-MM — lexicographic range works
+    if period_from:
+        query += " AND period >= ?"
+        params.append(period_from[:7])
+    if period_to:
+        query += " AND period <= ?"
+        params.append(period_to[:7])
     query += " ORDER BY period DESC, id DESC"
     rows = conn.execute(query, params).fetchall()
     conn.close()

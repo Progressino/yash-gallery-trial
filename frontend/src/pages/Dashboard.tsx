@@ -34,12 +34,13 @@ interface DsrBrandMonthlyRow {
   YG: number
   Akiko: number
   Other: number
+  Untagged: number
   leader: string
   delta: number
 }
 interface DsrBrandMonthlyResponse {
   rows: DsrBrandMonthlyRow[]
-  totals: { YG: number; Akiko: number; Other: number }
+  totals: { YG: number; Akiko: number; Other: number; Untagged: number }
   note: string
 }
 
@@ -661,15 +662,15 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── YG vs Akiko vs Other (monthly) — uses Intelligence date range ── */}
+      {/* ── YG vs Akiko vs Other vs Untagged (monthly) — uses Intelligence date range ── */}
       {salesLoaded && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
             <div>
-              <h3 className="text-sm font-semibold text-[#002B5B]">YG vs Akiko vs Other — monthly shipments</h3>
+              <h3 className="text-sm font-semibold text-[#002B5B]">YG vs Akiko vs Other vs Untagged — monthly shipments</h3>
               <p className="text-[10px] text-gray-500 mt-0.5 max-w-xl">
-                Other rolls up seller labels from uploads (e.g. <code className="text-[10px] bg-gray-100 px-1 rounded">…_Other Myntra …</code>,{' '}
-                <code className="text-[10px] bg-gray-100 px-1 rounded">…_Akiko Meesho …</code>) plus Flipkart Brand / Snapdeal Company. Matches platform KPIs when files are named with account tags.
+                Other rolls up named sellers (e.g. Ikrass, Ashirwad) from uploads and Flipkart Brand / Snapdeal Company.
+                Untagged is shipment rows with no seller label — the four columns sum to gross shipments for the same date range as the KPIs.
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
@@ -691,12 +692,17 @@ export default function Dashboard() {
           <div className="px-4 py-4 bg-slate-50/50">
             {loadingDsrBrands ? (
               <p className="text-xs text-gray-400 animate-pulse">Loading comparison…</p>
-            ) : dsrBrandMonthly?.note ? (
-              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">{dsrBrandMonthly.note}</p>
             ) : !dsrBrandMonthly?.rows?.length ? (
-              <p className="text-xs text-gray-400">No months in range with seller-tagged segments.</p>
+              <p className="text-xs text-gray-400">
+                {dsrBrandMonthly?.note || 'No shipment rows in the selected range.'}
+              </p>
             ) : (
               <>
+                {dsrBrandMonthly.note ? (
+                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
+                    {dsrBrandMonthly.note}
+                  </p>
+                ) : null}
                 <div className="h-56 w-full mb-4">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart
@@ -705,6 +711,7 @@ export default function Dashboard() {
                         YG: r.YG,
                         Akiko: r.Akiko,
                         Other: r.Other,
+                        Untagged: r.Untagged ?? 0,
                       }))}
                       margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
                     >
@@ -716,6 +723,7 @@ export default function Dashboard() {
                       <Bar dataKey="YG" name="YG" fill="#002B5B" radius={[2, 2, 0, 0]} />
                       <Bar dataKey="Akiko" name="Akiko" fill="#E91E63" radius={[2, 2, 0, 0]} />
                       <Bar dataKey="Other" name="Other" fill="#94A3B8" radius={[2, 2, 0, 0]} />
+                      <Bar dataKey="Untagged" name="Untagged" fill="#F97316" radius={[2, 2, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -727,6 +735,7 @@ export default function Dashboard() {
                         <th className="px-3 py-2 font-semibold text-right">YG</th>
                         <th className="px-3 py-2 font-semibold text-right">Akiko</th>
                         <th className="px-3 py-2 font-semibold text-right">Other</th>
+                        <th className="px-3 py-2 font-semibold text-right">Untagged</th>
                         <th className="px-3 py-2 font-semibold">Leader</th>
                         <th className="px-3 py-2 font-semibold text-right">By</th>
                       </tr>
@@ -738,6 +747,7 @@ export default function Dashboard() {
                           <td className="px-3 py-1.5 text-right tabular-nums">{r.YG.toLocaleString()}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{r.Akiko.toLocaleString()}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{r.Other.toLocaleString()}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{(r.Untagged ?? 0).toLocaleString()}</td>
                           <td className="px-3 py-1.5 font-medium text-gray-800">{r.leader}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums text-gray-600">
                             {r.leader === 'Tie' ? '—' : r.delta.toLocaleString()}
@@ -749,6 +759,7 @@ export default function Dashboard() {
                         <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.YG.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.Akiko.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{(dsrBrandMonthly.totals.Other ?? 0).toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{(dsrBrandMonthly.totals.Untagged ?? 0).toLocaleString()}</td>
                         <td className="px-3 py-2" colSpan={2}>
                           {(() => {
                             const t = dsrBrandMonthly.totals
@@ -756,6 +767,7 @@ export default function Dashboard() {
                               ['YG', t.YG],
                               ['Akiko', t.Akiko],
                               ['Other', t.Other ?? 0],
+                              ['Untagged', t.Untagged ?? 0],
                             ]
                             const sorted = [...pairs].sort((a, b) => b[1] - a[1])
                             if (sorted[0][1] === sorted[1][1]) return 'Tie (top)'

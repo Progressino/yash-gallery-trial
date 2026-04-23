@@ -79,16 +79,41 @@ def test_get_dsr_brand_monthly_comparison_yg_vs_akiko():
     assert mar["YG"] == 100
     assert mar["Akiko"] == 50
     assert mar["Other"] == 0
+    assert mar["Untagged"] == 0
     assert mar["leader"] == "YG"
     apr = next(x for x in out["rows"] if x["month"] == "2025-04")
     assert apr["YG"] == 30
     assert apr["Akiko"] == 40
     assert apr["Other"] == 200
+    assert apr["Untagged"] == 0
     assert apr["leader"] == "Other"
     assert apr["delta"] == 160
     assert out["totals"]["YG"] == 130
     assert out["totals"]["Akiko"] == 90
     assert out["totals"]["Other"] == 200
+    assert out["totals"]["Untagged"] == 0
+
+
+def test_get_dsr_brand_monthly_untagged_when_segment_blank_matches_shipment_total():
+    """Rows with empty / All segment must count as Untagged so brand totals match gross."""
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2025-04-01", "2025-04-01", "2025-04-01"]),
+            "Transaction Type": ["Shipment", "Shipment", "Shipment"],
+            "Quantity": [100, 50, 75],
+            "Source": ["Myntra"] * 3,
+            "DSR_Segment": ["YG", "", "All"],
+            "Sku": ["a", "b", "c"],
+        }
+    )
+    out = get_dsr_brand_monthly_comparison(df, "2025-04-01", "2025-04-30")
+    row = out["rows"][0]
+    assert row["YG"] == 100
+    assert row["Untagged"] == 125
+    assert row["Akiko"] == 0
+    assert row["Other"] == 0
+    assert out["totals"]["YG"] + out["totals"]["Untagged"] == 225
+    assert "no seller label" in out["note"].lower()
 
 
 def test_infer_dsr_label_from_upload_filename_myntra_meesho_flipkart():

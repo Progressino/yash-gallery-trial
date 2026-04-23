@@ -396,6 +396,9 @@ def build_sales_df(
         result = result.drop_duplicates(subset=_cols, keep="last")
     gc.collect()
 
+    if not result.empty and "DSR_Segment" not in result.columns:
+        result["DSR_Segment"] = ""
+
     return _downcast_sales(result)
 
 
@@ -608,7 +611,8 @@ def daily_dsr_report_to_csv_rows(report: dict) -> List[List[object]]:
 def _series_canonical_dsr_brand(seg: pd.Series) -> pd.Series:
     """
     Map segment / company labels to ``YG``, ``Akiko``, or ``Other`` (upload filename labels,
-    Flipkart Brand, Snapdeal Company, etc.). Rows with no segment / placeholder only → NA.
+    Flipkart Brand, Snapdeal Company, etc.). Blank / ``All`` / placeholders → NA (caller maps NA
+    to ``Untagged`` in monthly comparison).
     """
     raw = seg.fillna("").astype(str).str.strip()
     s = raw.str.lower()
@@ -636,12 +640,13 @@ def get_dsr_brand_monthly_comparison(
     end_date: Optional[str] = None,
 ) -> dict:
     """
-    Month-over-month shipment units for **YG**, **Akiko**, and **Other** sellers based on
-    ``DSR_Segment`` / ``Company`` / upload filename labels (e.g. ``…_YG Myntra …``).
+    Month-over-month shipment units for **YG**, **Akiko**, **Other**, and **Untagged**
+    (rows with no usable seller label). The four buckets sum to gross shipments for the
+    same date window as the KPI strip — ``Untagged`` highlights missing filename tags.
     """
     empty: dict = {
         "rows":   [],
-        "totals": {"YG": 0, "Akiko": 0, "Other": 0},
+        "totals": {"YG": 0, "Akiko": 0, "Other": 0, "Untagged": 0},
         "note":   "",
     }
     if sales_df.empty or "TxnDate" not in sales_df.columns:
@@ -664,17 +669,7 @@ def get_dsr_brand_monthly_comparison(
     elif "Company" in d.columns:
         seg = d["Company"].fillna("").astype(str).str.strip()
         seg = seg.mask(seg.str.len() == 0, "All")
-    d["_brand"] = _series_canonical_dsr_brand(seg)
-    d = d[d["_brand"].notna()]
-    if d.empty:
-        return {
-            **empty,
-            "note": (
-                "No rows with a seller segment. Name uploads like "
-                "“…_YG Myntra …” / “…_Other Myntra …” / “…_Akiko Meesho …”, "
-                "or use Flipkart Brand / Snapdeal Company / DSR_Segment on sales rows."
-            ),
-        }
+    d["_brand"] = _series_canonical_dsr_brand(seg).fillna("Untagged")
 
     d["_month"] = d["TxnDate"].dt.to_period("M").astype(str)
     qty = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0)
@@ -684,17 +679,18 @@ def get_dsr_brand_monthly_comparison(
         .sum()
         .unstack(fill_value=0)
     )
-    for col in ("YG", "Akiko", "Other"):
+    for col in ("YG", "Akiko", "Other", "Untagged"):
         if col not in pivot.columns:
             pivot[col] = 0
-    pivot = pivot.reindex(columns=["YG", "Akiko", "Other"], fill_value=0)
+    pivot = pivot.reindex(columns=["YG", "Akiko", "Other", "Untagged"], fill_value=0)
 
     out_rows: List[dict] = []
     for month in sorted(pivot.index.astype(str)):
         yg = int(pivot.loc[month, "YG"])
         ak = int(pivot.loc[month, "Akiko"])
         ot = int(pivot.loc[month, "Other"])
-        counts = {"YG": yg, "Akiko": ak, "Other": ot}
+        ut = int(pivot.loc[month, "Untagged"])
+        counts = {"YG": yg, "Akiko": ak, "Other": ot, "Untagged": ut}
         mx = max(counts.values())
         tops = [k for k, v in counts.items() if v == mx]
         if len(tops) > 1:
@@ -714,27 +710,35 @@ def get_dsr_brand_monthly_comparison(
             "YG":            yg,
             "Akiko":         ak,
             "Other":         ot,
+            "Untagged":      ut,
             "leader":        leader,
             "delta":         delta,
         })
 
     totals = {
-        "YG":    int(pivot["YG"].sum()),
-        "Akiko": int(pivot["Akiko"].sum()),
-        "Other": int(pivot["Other"].sum()),
+        "YG":       int(pivot["YG"].sum()),
+        "Akiko":    int(pivot["Akiko"].sum()),
+        "Other":    int(pivot["Other"].sum()),
+        "Untagged": int(pivot["Untagged"].sum()),
     }
-    return {"rows": out_rows, "totals": totals, "note": ""}
+    note = ""
+    if totals["Untagged"] > 0:
+        note = (
+            f"{totals['Untagged']:,} shipment units have no seller label — name files "
+            "“…_<Seller> <Amazon|Myntra|Meesho|Flipkart|Snapdeal> …” or rebuild after deploy."
+        )
+    return {"rows": out_rows, "totals": totals, "note": note}
 
 
 def dsr_brand_monthly_to_csv_rows(result: dict) -> List[List[object]]:
     """Flatten ``get_dsr_brand_monthly_comparison`` output for CSV download."""
     rows: List[List[object]] = [
-        ["Report", "YG vs Akiko vs Other — monthly shipment units"],
+        ["Report", "YG vs Akiko vs Other vs Untagged — monthly shipment units"],
         ["Filter note", "Respects Intelligence dashboard start/end dates when provided."],
     ]
     if result.get("note"):
         rows.append(["Status", result["note"]])
-    rows.extend([[], ["Month (label)", "Month (ISO)", "YG", "Akiko", "Other", "Leader", "Margin (units)"]])
+    rows.extend([[], ["Month (label)", "Month (ISO)", "YG", "Akiko", "Other", "Untagged", "Leader", "Margin (units)"]])
     for r in result.get("rows") or []:
         margin = "" if r.get("leader") == "Tie" else r.get("delta", 0)
         rows.append([
@@ -743,12 +747,16 @@ def dsr_brand_monthly_to_csv_rows(result: dict) -> List[List[object]]:
             r.get("YG", 0),
             r.get("Akiko", 0),
             r.get("Other", 0),
+            r.get("Untagged", 0),
             r.get("leader", ""),
             margin,
         ])
     t = result.get("totals") or {}
-    yg, ak, ot = int(t.get("YG", 0)), int(t.get("Akiko", 0)), int(t.get("Other", 0))
-    counts = {"YG": yg, "Akiko": ak, "Other": ot}
+    yg = int(t.get("YG", 0))
+    ak = int(t.get("Akiko", 0))
+    ot = int(t.get("Other", 0))
+    ut = int(t.get("Untagged", 0))
+    counts = {"YG": yg, "Akiko": ak, "Other": ot, "Untagged": ut}
     mx = max(counts.values())
     tops = [k for k, v in counts.items() if v == mx]
     if len(tops) > 1:
@@ -764,6 +772,7 @@ def dsr_brand_monthly_to_csv_rows(result: dict) -> List[List[object]]:
         yg,
         ak,
         ot,
+        ut,
         lead_txt,
         lead_margin if lead_txt != "Tie" else "",
     ])

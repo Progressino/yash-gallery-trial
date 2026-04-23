@@ -26,6 +26,8 @@ interface PLStatement {
   total_expenses:   number
   net_profit:       number
   platform_breakdown: PlatformRev[]
+  revenue_source?:   'session' | 'finance_lock'
+  cogs_basis_note?:  string
 }
 interface PlatformRev {
   platform:        string
@@ -245,6 +247,8 @@ export default function Finance() {
   const [dateStart,    setDateStart]    = useState(() => daysAgo(90))
   const [dateEnd,      setDateEnd]      = useState(TODAY)
   const [activePreset, setActivePreset] = useState<string>('90D')
+  /** Finance Sales Uploads (locked) vs operational session (Upload page — Dashboard / PO) */
+  const [revenueSource, setRevenueSource] = useState<'finance_lock' | 'session'>('finance_lock')
 
   // Expense form state
   const [expDate,  setExpDate]  = useState(TODAY)
@@ -271,10 +275,16 @@ export default function Finance() {
     return p.toString()
   }, [dateStart, dateEnd])
 
+  const plAndRevQ = useMemo(() => {
+    const p = new URLSearchParams(dateQ)
+    p.set('revenue_source', revenueSource)
+    return p.toString()
+  }, [dateQ, revenueSource])
+
   // ── Queries ──────────────────────────────────────────────────
   const { data: pl, isLoading: loadPL } = useQuery<PLStatement>({
-    queryKey: ['finance-pl', dateStart, dateEnd],
-    queryFn:  async () => { const { data } = await api.get(`/finance/pl?${dateQ}`); return data },
+    queryKey: ['finance-pl', dateStart, dateEnd, revenueSource],
+    queryFn:  async () => { const { data } = await api.get(`/finance/pl?${plAndRevQ}`); return data },
     staleTime: 2 * 60 * 1000,
   })
 
@@ -292,8 +302,8 @@ export default function Finance() {
   })
 
   const { data: platformRev, isLoading: loadRev } = useQuery<PlatformRev[]>({
-    queryKey: ['finance-platform-rev', dateStart, dateEnd],
-    queryFn:  async () => { const { data } = await api.get(`/finance/platform-revenue?${dateQ}`); return data },
+    queryKey: ['finance-platform-rev', dateStart, dateEnd, revenueSource],
+    queryFn:  async () => { const { data } = await api.get(`/finance/platform-revenue?${plAndRevQ}`); return data },
     staleTime: 2 * 60 * 1000,
     enabled:   activeTab === 'revenue',
   })
@@ -444,6 +454,19 @@ export default function Finance() {
             <input type="date" value={dateEnd} min={dateStart} max={TODAY} onChange={e => handleEndChange(e.target.value)}
               className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300" />
           </div>
+          {(activeTab === 'pl' || activeTab === 'revenue') && (
+            <div className="flex items-center gap-2 border-l border-gray-200 pl-3 ml-1">
+              <label className="text-xs text-gray-500 whitespace-nowrap">Revenue basis</label>
+              <select
+                value={revenueSource}
+                onChange={e => setRevenueSource(e.target.value as 'finance_lock' | 'session')}
+                className="text-xs border border-gray-200 rounded px-2 py-1.5 text-gray-700 max-w-[280px] focus:outline-none focus:ring-1 focus:ring-blue-300"
+              >
+                <option value="finance_lock">Finance Sales Uploads (locked DB — separate from Dashboard)</option>
+                <option value="session">Operational (Upload page — same as Dashboard / PO)</option>
+              </select>
+            </div>
+          )}
         </div>
       )}
 
@@ -472,6 +495,20 @@ export default function Finance() {
       {/* ── Tab: P&L ── */}
       {activeTab === 'pl' && (
         <div className="space-y-4">
+          {pl?.revenue_source === 'finance_lock' && pl?.cogs_basis_note && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700 flex gap-2 items-start">
+              <span className="mt-0.5">📌</span>
+              <div>
+                <p className="font-semibold text-slate-800">Revenue from Finance Sales Uploads</p>
+                <p className="mt-0.5 text-slate-600">{pl.cogs_basis_note}</p>
+              </div>
+            </div>
+          )}
+          {pl?.revenue_source === 'session' && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700">
+              <strong>Operational basis:</strong> P&amp;L revenue matches the Upload page session (Dashboard / PO). Finance Sales Uploads are not included here — switch <em>Revenue basis</em> above to use locked finance totals.
+            </div>
+          )}
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-4">
             <div className="flex-1">
               <p className="text-sm font-semibold text-amber-800">Cost of Goods Sold (COGS)</p>
@@ -702,6 +739,23 @@ export default function Finance() {
       {/* ── Tab: Platform Revenue ── */}
       {activeTab === 'revenue' && (
         <div className="space-y-4">
+          {revenueSource === 'finance_lock' && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700">
+              Totals below are summed from <strong>Sales Uploads</strong> (finance.db) for months overlapping the date range — not from the operational Upload page. Use <em>Operational</em> in Revenue basis to match Dashboard.
+            </div>
+          )}
+          {revenueSource === 'session' && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700">
+              <strong>Operational:</strong> same marketplace files as Dashboard / PO. Finance Sales Uploads are ignored here.
+            </div>
+          )}
+          {!loadRev && (platformRev ?? []).length === 0 && (
+            <div className="bg-white rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500">
+              {revenueSource === 'finance_lock'
+                ? 'No finance-locked sales rows for this period. Upload under Sales Uploads, or choose Operational to see Dashboard data.'
+                : 'No operational revenue for this period — load marketplace files on the Upload page.'}
+            </div>
+          )}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {loadRev ? (
               [1,2,3,4].map(i => <div key={i} className="bg-white rounded-xl border border-gray-200 h-28 animate-pulse" />)
@@ -737,7 +791,11 @@ export default function Finance() {
             {loadRev ? (
               <div className="h-48 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
             ) : revChartData.length === 0 ? (
-              <div className="h-48 flex items-center justify-center text-gray-400 text-sm">No platform data loaded</div>
+              <div className="h-48 flex flex-col items-center justify-center text-gray-400 text-sm px-4 text-center gap-2">
+                <span>{revenueSource === 'finance_lock'
+                  ? 'No Finance Sales Uploads in this range. Add files under Sales Uploads, or switch Revenue basis to Operational.'
+                  : 'No platform data loaded on the Upload page for this range.'}</span>
+              </div>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={revChartData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
@@ -2789,7 +2847,7 @@ function SalesUploadsTab() {
         <span className="text-amber-500 mt-0.5">🔒</span>
         <div>
           <p className="text-xs font-semibold text-amber-800">Finance-locked uploads</p>
-          <p className="text-xs text-amber-700 mt-0.5">Records saved here are immutable. Only Finance team members can delete them. Totals are parsed automatically from the file.</p>
+          <p className="text-xs text-amber-700 mt-0.5">Records saved here stay in the finance database only — they do not merge into the Upload page, Dashboard, or PO engine. Use P&amp;L / Platform Revenue with <strong>Revenue basis → Finance Sales Uploads</strong> to view these totals.</p>
         </div>
       </div>
 

@@ -6,7 +6,7 @@ from typing import Optional
 
 import pandas as pd
 
-from ..db.finance_db import list_expenses
+from ..db.finance_db import list_expenses, list_finance_sales_uploads
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -33,6 +33,44 @@ def _platform_rev(df: pd.DataFrame, txn_col: str, ship_val: str = "Shipment", re
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def get_platform_revenue_from_finance_uploads(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> list[dict]:
+    """
+    Revenue/returns from Finance → Sales Uploads only (finance.db).
+    Does not read operational session / Tier-3 daily store — avoids double-counting
+    when accounts upload the same months that ops loaded on the Upload page.
+    """
+    p_from = (start_date or "1970-01")[:7]
+    p_to = (end_date or "2099-12")[:7]
+    rows = list_finance_sales_uploads(period_from=p_from, period_to=p_to)
+    if not rows:
+        return []
+
+    agg: dict[str, dict] = {}
+    for r in rows:
+        name = str(r.get("platform") or "").strip() or "Unknown"
+        bucket = agg.setdefault(name, {"gross": 0.0, "ret": 0.0})
+        bucket["gross"] += float(r.get("total_revenue") or 0)
+        bucket["ret"] += float(r.get("total_returns") or 0)
+
+    result: list[dict] = []
+    for name in sorted(agg.keys()):
+        gross, ret = agg[name]["gross"], agg[name]["ret"]
+        net = gross - ret
+        rr = round(ret / gross * 100, 1) if gross > 0 else 0.0
+        result.append({
+            "platform":        name,
+            "loaded":          True,
+            "gross_revenue":   round(gross, 2),
+            "returns_value":   round(ret, 2),
+            "net_revenue":     round(net, 2),
+            "return_rate_pct": rr,
+        })
+    return result
+
 
 def get_platform_revenue(
     mtr_df:     pd.DataFrame,
@@ -123,9 +161,20 @@ def get_pl_statement(
     cogs_df:    pd.DataFrame,
     start_date: Optional[str] = None,
     end_date:   Optional[str] = None,
+    revenue_source: str = "session",
 ) -> dict:
-    """Full P&L statement."""
-    platform_data = get_platform_revenue(mtr_df, myntra_df, meesho_df, flipkart_df, start_date, end_date)
+    """Full P&L statement.
+
+    revenue_source:
+      - ``session`` — marketplace DFs from Upload page / Tier-3 (same basis as Dashboard / PO).
+      - ``finance_lock`` — totals from Finance → Sales Uploads (finance.db) only.
+    """
+    if revenue_source == "finance_lock":
+        platform_data = get_platform_revenue_from_finance_uploads(start_date, end_date)
+    else:
+        platform_data = get_platform_revenue(
+            mtr_df, myntra_df, meesho_df, flipkart_df, start_date, end_date
+        )
 
     gross_revenue  = sum(p["gross_revenue"] for p in platform_data)
     returns_value  = sum(p["returns_value"]  for p in platform_data)
@@ -165,6 +214,12 @@ def get_pl_statement(
         "total_expenses":   round(total_expenses, 2),
         "net_profit":       round(net_profit, 2),
         "platform_breakdown": platform_data,
+        "revenue_source":   revenue_source,
+        "cogs_basis_note": (
+            "COGS uses unit sales from the Upload page session (operational), not Finance Sales Uploads."
+            if revenue_source == "finance_lock"
+            else ""
+        ),
     }
 
 
