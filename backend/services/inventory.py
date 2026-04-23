@@ -28,20 +28,79 @@ _RAR_MAGIC = b"Rar!\x1a\x07"
 _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
 
 
+def _dedupe_identical_byte_payloads(payloads: List[bytes]) -> Tuple[List[bytes], int]:
+    """Drop byte-identical blobs (duplicate exports / (1)(2) copies)."""
+    seen: set[bytes] = set()
+    out: List[bytes] = []
+    for p in payloads:
+        h = hashlib.sha256(p).digest()
+        if h in seen:
+            continue
+        seen.add(h)
+        out.append(p)
+    return out, len(payloads) - len(out)
+
+
+def _rar_sniff_csv_kind(base_lower: str, data: bytes) -> Optional[str]:
+    """
+    Classify a CSV inside an inventory RAR. Returns:
+      flipkart | myntra | amazon | combo | oms | None
+    """
+    if "flipkart" in base_lower or base_lower.startswith("fk"):
+        return "flipkart"
+    if "myntra" in base_lower:
+        return "myntra"
+    if "amz" in base_lower or "amazon" in base_lower:
+        return "amazon"
+    if "combo" in base_lower:
+        return "combo"
+    if "oms" in base_lower:
+        return "oms"
+    text = data[:4000].decode("utf-8", errors="ignore").lower()
+    if "msku" in text and "ending warehouse balance" in text:
+        return "amazon"
+    if "seller sku code" in text or ("style id" in text and "inventory count" in text):
+        return "myntra"
+    if "combo sku code" in text and "combo" in text:
+        return "combo"
+    if "item skucode" in text or "buffer stock" in text:
+        return "oms"
+    if "live on website" in text:
+        return "flipkart"
+    return None
+
+
+def _append_rar_csv(result: dict, kind: str, data: bytes) -> None:
+    if kind == "flipkart":
+        result["flipkart_csvs"].append(data)
+    elif kind == "myntra":
+        result["myntra_csvs"].append(data)
+    elif kind == "amazon":
+        result["amz_csvs"].append(data)
+    elif kind == "combo":
+        result["combo_csvs"].append(data)
+    elif kind == "oms":
+        result["oms_csvs"].append(data)
+
+
 # ── RAR extraction ────────────────────────────────────────────
 
 def _extract_all_from_rar(rar_bytes: bytes) -> dict:
     """
     Extract all relevant inventory files from a RAR archive.
     Tries bsdtar subprocess first (always available), then falls back to rarfile.
-    Returns dict with keys: amz_csv, myntra_csv, oms_csv, combo_csv, fba_tsvs (list).
+    Returns dict with keys:
+      amz_csvs, myntra_csvs, oms_csvs, combo_csvs, flipkart_csvs (lists of bytes),
+      fba_tsvs (list).
+    Every matching CSV is collected — os.walk order no longer drops files.
     """
     result: dict = {
-        "amz_csv":    None,
-        "myntra_csv": None,
-        "oms_csv":    None,
-        "combo_csv":  None,
-        "fba_tsvs":   [],
+        "amz_csvs":      [],
+        "myntra_csvs":   [],
+        "oms_csvs":      [],
+        "combo_csvs":    [],
+        "flipkart_csvs": [],
+        "fba_tsvs":      [],
     }
 
     # ── Try bsdtar subprocess (libarchive-tools — supports RAR4 & RAR5) ──
@@ -69,26 +128,9 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
                         continue
                     if not base.endswith(".csv"):
                         continue
-                    # Filename-based detection first
-                    if "amz" in base:
-                        result["amz_csv"] = data
-                    elif "myntra" in base:
-                        result["myntra_csv"] = data
-                    elif "combo" in base:
-                        result["combo_csv"] = data
-                    elif "oms" in base:
-                        result["oms_csv"] = data
-                    else:
-                        # Filename gives no hint — detect by content
-                        text = data[:2000].decode("utf-8", errors="ignore").lower()
-                        if "msku" in text and "ending warehouse balance" in text:
-                            result["amz_csv"] = data
-                        elif "seller sku code" in text or ("style id" in text and "inventory count" in text):
-                            result["myntra_csv"] = data
-                        elif "combo sku code" in text and "combo" in text:
-                            result["combo_csv"] = data
-                        elif "item skucode" in text or "buffer stock" in text:
-                            result["oms_csv"] = data
+                    kind = _rar_sniff_csv_kind(base, data)
+                    if kind:
+                        _append_rar_csv(result, kind, data)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
         return result
@@ -110,24 +152,9 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
             if not base.endswith(".csv"):
                 continue
             data = rf.read(name)
-            if "amz" in base:
-                result["amz_csv"] = data
-            elif "myntra" in base:
-                result["myntra_csv"] = data
-            elif "combo" in base:
-                result["combo_csv"] = data
-            elif "oms" in base:
-                result["oms_csv"] = data
-            else:
-                text = data[:2000].decode("utf-8", errors="ignore").lower()
-                if "msku" in text and "ending warehouse balance" in text:
-                    result["amz_csv"] = data
-                elif "seller sku code" in text or ("style id" in text and "inventory count" in text):
-                    result["myntra_csv"] = data
-                elif "combo sku code" in text and "combo" in text:
-                    result["combo_csv"] = data
-                elif "item skucode" in text or "buffer stock" in text:
-                    result["oms_csv"] = data
+            kind = _rar_sniff_csv_kind(base, data)
+            if kind:
+                _append_rar_csv(result, kind, data)
     return result
 
 
@@ -549,7 +576,7 @@ def _parse_oms_or_combo(csv_bytes: bytes) -> pd.DataFrame:
 def load_inventory_consolidated(
     oms_bytes: Optional[bytes | List[bytes]],
     fk_bytes: Optional[bytes | List[bytes]],
-    myntra_bytes: Optional[bytes],
+    myntra_bytes: Optional[bytes | List[bytes]],
     amz_bytes: Optional[bytes],
     mapping: Dict[str, str],
     group_by_parent: bool = False,
@@ -566,6 +593,9 @@ def load_inventory_consolidated(
     """
     inv_dfs: List[pd.DataFrame] = []
     oms_parts: List[pd.DataFrame] = []   # accumulate OMS data before merging
+    fk_parts: List[pd.DataFrame] = []    # Flipkart — standalone + inside RAR, one merge later
+    myntra_other_parts: List[pd.DataFrame] = []  # Myntra PPMP — standalone + RAR (one layer)
+    amz_rar_parts: List[pd.DataFrame] = []
     debug: dict = {}
 
     # ── Separately uploaded OMS / Combo files ────────────────
@@ -577,34 +607,26 @@ def load_inventory_consolidated(
                 if not part.empty:
                     oms_parts.append(part)
 
-    # ── Flipkart ─────────────────────────────────────────────
+    # ── Flipkart (standalone uploads — RAR FK files appended into fk_parts below) ──
     if fk_bytes:
         fk_list = fk_bytes if isinstance(fk_bytes, list) else [fk_bytes]
-        fk_parts = []
         for fb in fk_list:
             if fb:
                 p = _parse_fk_inventory_csv(fb, mapping)
                 if not p.empty:
                     fk_parts.append(p)
-        if fk_parts:
-            combined_fk = pd.concat(fk_parts, ignore_index=True)
-            part = combined_fk.groupby("OMS_SKU")["Flipkart_Inventory"].sum().reset_index()
-            inv_dfs.append(part)
-            debug["flipkart"] = f"{len(part)} SKUs ({len(fk_list)} files)"
-        else:
-            debug["flipkart"] = f"0 SKUs (no valid FK data)"
 
-    # ── Separately uploaded Myntra file ──────────────────────
+    # ── Separately uploaded Myntra (multi-file + byte-dedupe) ──────────────────────
     if myntra_bytes:
-        part = _parse_myntra_other(myntra_bytes, mapping)
+        m_list = myntra_bytes if isinstance(myntra_bytes, list) else [myntra_bytes]
+        m_list = [b for b in m_list if b]
+        m_dedup, m_drop = _dedupe_identical_byte_payloads(m_list)
+        debug["myntra_upload_deduped"] = m_drop
+        for blob in m_dedup:
+            p = _parse_myntra_other(blob, mapping)
+            if not p.empty:
+                myntra_other_parts.append(p)
         debug["myntra_upload_cols"] = "via _parse_myntra_other"
-        if not part.empty:
-            # rename column to Myntra_Inventory for separately-uploaded file
-            part = part.rename(columns={"Myntra_Other_Inventory": "Myntra_Inventory"})
-            inv_dfs.append(part)
-            debug["myntra"] = f"{len(part)} SKUs"
-        else:
-            debug["myntra"] = "0 SKUs"
 
     # ── Amazon / RAR ─────────────────────────────────────────
     if amz_bytes:
@@ -612,22 +634,27 @@ def load_inventory_consolidated(
         if raw[:6] == _RAR_MAGIC:
             extracted = _extract_all_from_rar(raw)
             debug["rar_files"] = {
-                "amz_csv": bool(extracted["amz_csv"]),
-                "myntra_csv": bool(extracted["myntra_csv"]),
-                "oms_csv": bool(extracted["oms_csv"]),
-                "combo_csv": bool(extracted["combo_csv"]),
-                "fba_tsvs": len(extracted["fba_tsvs"]),
+                "amz_csvs":      len(extracted["amz_csvs"]),
+                "myntra_csvs":   len(extracted["myntra_csvs"]),
+                "oms_csvs":      len(extracted["oms_csvs"]),
+                "combo_csvs":    len(extracted["combo_csvs"]),
+                "flipkart_csvs": len(extracted["flipkart_csvs"]),
+                "fba_tsvs":      len(extracted["fba_tsvs"]),
             }
 
-            if extracted["amz_csv"]:
-                # Log all columns so we can identify the right filter for Other Warehouse
-                _amz_peek = read_csv_safe(extracted["amz_csv"])
+            for fc in extracted["flipkart_csvs"]:
+                p = _parse_fk_inventory_csv(fc, mapping)
+                if not p.empty:
+                    fk_parts.append(p)
+
+            amz_blobs, _ = _dedupe_identical_byte_payloads(extracted["amz_csvs"])
+            if amz_blobs:
+                _amz_peek = read_csv_safe(amz_blobs[0])
                 debug["amz_csv_cols"] = list(_amz_peek.columns) if not _amz_peek.empty else []
                 debug["amz_csv_sample_dispositions"] = (
                     _amz_peek["Disposition"].dropna().unique().tolist()
                     if "Disposition" in _amz_peek.columns else "no Disposition col"
                 )
-                # Expose Location → inventory sum breakdown to identify which locations OMS counts
                 if not _amz_peek.empty and "Location" in _amz_peek.columns and "Ending Warehouse Balance" in _amz_peek.columns:
                     _amz_peek["_bal"] = pd.to_numeric(_amz_peek["Ending Warehouse Balance"], errors="coerce").fillna(0)
                     _amz_sellable = _amz_peek[_amz_peek.get("Disposition", pd.Series(dtype=str)).astype(str).str.strip().str.upper() == "SELLABLE"] if "Disposition" in _amz_peek.columns else _amz_peek
@@ -636,10 +663,17 @@ def load_inventory_consolidated(
                         .sort_values(ascending=False).head(30).to_dict()
                     )
                     debug["amz_sellable_total"] = int(_amz_sellable["_bal"].sum())
-                part = _parse_amz_csv(extracted["amz_csv"], mapping)
-                if not part.empty:
-                    inv_dfs.append(part)
-                debug["amz"] = f"{len(part)} SKUs"
+            for ab in amz_blobs:
+                p = _parse_amz_csv(ab, mapping)
+                if not p.empty:
+                    amz_rar_parts.append(p)
+            if amz_rar_parts:
+                amz_cat = pd.concat(amz_rar_parts, ignore_index=True)
+                part = amz_cat.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
+                inv_dfs.append(part)
+                debug["amz"] = f"{len(part)} SKUs ({len(amz_blobs)} ledger file(s))"
+            elif amz_blobs:
+                debug["amz"] = "0 SKUs (ledger parse empty)"
 
             part, fba_dbg = _aggregate_fba_intransit_tsvs(extracted["fba_tsvs"], mapping)
             debug.update(fba_dbg)
@@ -647,41 +681,67 @@ def load_inventory_consolidated(
                 inv_dfs.append(part)
                 debug["fba"] = f"{len(part)} SKUs"
 
-            if extracted["myntra_csv"]:
-                part = _parse_myntra_other(extracted["myntra_csv"], mapping)
-                debug["myntra_rar"] = f"{len(part)} SKUs"
-                if not part.empty:
-                    inv_dfs.append(part)
-            else:
-                debug["myntra_rar"] = "no myntra csv found in RAR"
+            myn_blobs, myn_drop = _dedupe_identical_byte_payloads(extracted["myntra_csvs"])
+            debug["myntra_rar_deduped"] = myn_drop
+            for mb in myn_blobs:
+                p = _parse_myntra_other(mb, mapping)
+                if not p.empty:
+                    myntra_other_parts.append(p)
+            debug["myntra_rar"] = (
+                f"{len(myn_blobs)} file(s) from RAR → merged with standalone Myntra"
+                if myn_blobs
+                else "no myntra csv found in RAR"
+            )
 
-            if extracted["oms_csv"]:
-                if oms_bytes:
-                    # Separate OMS file was also uploaded — skip RAR's OMS to avoid double-counting
-                    debug["oms_rar"] = "skipped (separate OMS file takes precedence)"
-                else:
-                    _oms_peek = read_csv_safe(extracted["oms_csv"])
+            if not oms_bytes:
+                oms_blobs, oms_dedup_n = _dedupe_identical_byte_payloads(extracted["oms_csvs"])
+                debug["oms_rar_deduped_identical"] = oms_dedup_n
+                for ob in oms_blobs:
+                    _oms_peek = read_csv_safe(ob)
                     debug["oms_csv_all_cols"] = list(_oms_peek.columns)
-                    part = _parse_oms_csv(extracted["oms_csv"])
-                    if not part.empty:
-                        oms_parts.append(part)
-                    debug["oms_rar"] = f"{len(part)} SKUs"
+                    p = _parse_oms_csv(ob)
+                    if not p.empty:
+                        oms_parts.append(p)
+                if oms_blobs:
+                    debug["oms_rar"] = f"{len(oms_blobs)} OMS file(s) merged"
+            else:
+                debug["oms_rar"] = "skipped (separate OMS file takes precedence)"
 
-            if extracted["combo_csv"]:
-                if oms_bytes:
-                    # Same: skip RAR's Combo CSV if separate OMS was uploaded
-                    debug["combo_rar"] = "skipped (separate OMS file takes precedence)"
-                else:
-                    part = _parse_combo_csv(extracted["combo_csv"])
-                    if not part.empty:
-                        oms_parts.append(part)
-                    debug["combo_rar"] = f"{len(part)} SKUs"
+            if not oms_bytes:
+                combo_blobs, combo_dedup = _dedupe_identical_byte_payloads(extracted["combo_csvs"])
+                debug["combo_rar_deduped_identical"] = combo_dedup
+                for cb in combo_blobs:
+                    p = _parse_combo_csv(cb)
+                    if not p.empty:
+                        oms_parts.append(p)
+                if combo_blobs:
+                    debug["combo_rar"] = f"{len(combo_blobs)} combo file(s) merged"
+            else:
+                debug["combo_rar"] = "skipped (separate OMS file takes precedence)"
 
         else:
             part = _parse_amz_csv(raw, mapping)
             if not part.empty:
                 inv_dfs.append(part)
             debug["amz_csv"] = f"{len(part)} SKUs"
+
+    # ── Single Myntra Other layer (standalone + RAR) ───────────────────────────
+    if myntra_other_parts:
+        m_all = pd.concat(myntra_other_parts, ignore_index=True)
+        part = m_all.groupby("OMS_SKU")["Myntra_Other_Inventory"].sum().reset_index()
+        inv_dfs.append(part)
+        debug["myntra"] = f"{len(part)} SKUs ({len(myntra_other_parts)} file payload(s) merged)"
+    else:
+        debug["myntra"] = debug.get("myntra_rar") or "0 SKUs (no Myntra PPMP)"
+
+    # ── Single merged Flipkart layer (avoids duplicate Flipkart_Inventory_x / _y columns) ──
+    if fk_parts:
+        combined_fk = pd.concat(fk_parts, ignore_index=True)
+        part = combined_fk.groupby("OMS_SKU")["Flipkart_Inventory"].sum().reset_index()
+        inv_dfs.append(part)
+        debug["flipkart"] = f"{len(part)} SKUs ({len(fk_parts)} file payloads)"
+    elif "flipkart" not in debug:
+        debug["flipkart"] = "0 SKUs (no valid FK data)"
 
     # ── Combine all OMS parts → single OMS_Inventory + Buffer_Stock (+ marketplace cols) ──
     if oms_parts:

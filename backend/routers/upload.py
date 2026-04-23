@@ -592,7 +592,7 @@ async def upload_inventory_auto(
 
     oms_bytes_list: list[bytes] = []
     fk_bytes_list: list[bytes] = []
-    myntra_bytes = None
+    myntra_bytes_list: list[bytes] = []
     amz_bytes = None
     detected: list[str] = []
 
@@ -608,7 +608,7 @@ async def upload_inventory_auto(
             fk_bytes_list.append(raw)
             detected.append(f"Flipkart ({fname})")
         elif inv_type == "myntra":
-            myntra_bytes = raw
+            myntra_bytes_list.append(raw)
             detected.append(f"Myntra ({fname})")
         elif inv_type == "amazon":
             amz_bytes = raw
@@ -618,6 +618,7 @@ async def upload_inventory_auto(
             detected.append(f"OMS ({fname})")
 
     fk_bytes = fk_bytes_list or None
+    myntra_bytes = myntra_bytes_list if myntra_bytes_list else None
 
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
         return JSONResponse(content={"ok": False, "message": "No files provided."})
@@ -670,7 +671,7 @@ async def upload_inventory_auto(
         "rows":    len(df_variant),
         "debug":   debug,
         "detected": detected,
-        "v":       "inv-v7",   # bump to confirm new code is running
+        "v":       "inv-v8",   # RAR: all Myntra/FK/OMS/Amazon CSVs + byte dedupe; multi-Myntra auto-upload
     })
 
 
