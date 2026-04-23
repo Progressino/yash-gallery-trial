@@ -731,6 +731,12 @@ def load_platform_data(platform: str, months: int | None = None) -> pd.DataFrame
 
     dfs = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
+    cutoff_ts = None
+    if months is not None:
+        try:
+            cutoff_ts = pd.Timestamp(datetime.date.today() - datetime.timedelta(days=months * 30))
+        except Exception:
+            cutoff_ts = None
     for (filename, blob) in rows:
         try:
             d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
@@ -746,7 +752,19 @@ def load_platform_data(platform: str, months: int | None = None) -> pd.DataFrame
                         miss = seg.str.len().eq(0) | seg.str.casefold().isin({"all", "nan", "none"})
                         if miss.any():
                             d.loc[miss, "DSR_Segment"] = label
-            dfs.append(d)
+            # Row-level recency filter: file_date can be recent while rows inside are older.
+            # Keep restore bounded by actual transaction dates when months is requested.
+            if cutoff_ts is not None and not d.empty:
+                dt_col = None
+                for c in ("TxnDate", "Date", "Order Date", "order_date"):
+                    if c in d.columns:
+                        dt_col = c
+                        break
+                if dt_col is not None:
+                    _dt = pd.to_datetime(d[dt_col], errors="coerce")
+                    d = d[_dt >= cutoff_ts]
+            if not d.empty:
+                dfs.append(d)
         except Exception:
             pass
     if not dfs:
