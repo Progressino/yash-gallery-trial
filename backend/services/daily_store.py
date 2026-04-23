@@ -17,7 +17,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from .helpers import apply_dsr_segment_to_df_inplace, clean_line_id_series
+from .helpers import (
+    apply_dsr_segment_to_df_inplace,
+    clean_line_id_series,
+    infer_dsr_label_from_upload_filename,
+)
 
 # Filename tail for ``infer_dsr_label_from_upload_filename`` — applied on every ``save_daily_file``.
 _DSR_TAIL_FOR_PLATFORM = {
@@ -712,23 +716,37 @@ def load_platform_data(platform: str, months: int | None = None) -> pd.DataFrame
     conn = _get_conn()
     if months is None:
         rows = conn.execute(
-            "SELECT data_parquet FROM daily_uploads "
+            "SELECT filename, data_parquet FROM daily_uploads "
             "WHERE platform=? ORDER BY file_date ASC",
             (platform,),
         ).fetchall()
     else:
         cutoff = (datetime.date.today() - datetime.timedelta(days=months * 30)).isoformat()
         rows = conn.execute(
-            "SELECT data_parquet FROM daily_uploads "
+            "SELECT filename, data_parquet FROM daily_uploads "
             "WHERE platform=? AND file_date >= ? ORDER BY file_date ASC",
             (platform, cutoff),
         ).fetchall()
     conn.close()
 
     dfs = []
-    for (blob,) in rows:
+    tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
+    for (filename, blob) in rows:
         try:
-            dfs.append(pd.read_parquet(io.BytesIO(blob), engine="pyarrow"))
+            d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+            # Legacy repair: old blobs (saved before DSR stamping) can still have blank
+            # segments. Fill only missing values from the upload filename label.
+            if tail and not d.empty:
+                label = infer_dsr_label_from_upload_filename(filename, tail)
+                if label:
+                    if "DSR_Segment" not in d.columns:
+                        d["DSR_Segment"] = label
+                    else:
+                        seg = d["DSR_Segment"].fillna("").astype(str).str.strip()
+                        miss = seg.str.len().eq(0) | seg.str.casefold().isin({"all", "nan", "none"})
+                        if miss.any():
+                            d.loc[miss, "DSR_Segment"] = label
+            dfs.append(d)
         except Exception:
             pass
     if not dfs:
