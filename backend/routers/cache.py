@@ -14,6 +14,7 @@ import pandas as pd
 from ..services.sales import build_sales_df
 from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest, delete_github_cache_assets
 from ..services.daily_store import (
+    backfill_dsr_segments_in_store,
     load_all_platforms,
     merge_platform_data as _merge_platform_data,
     clear_all_daily_uploads,
@@ -46,6 +47,16 @@ class ResetAllResponse(BaseModel):
     ok: bool
     message: str
     tier3_deleted: int = 0
+
+
+class DsrBackfillResponse(BaseModel):
+    ok: bool
+    message: str
+    dry_run: bool
+    scanned_files: int = 0
+    changed_files: int = 0
+    changed_rows: int = 0
+    skipped_files: int = 0
 
 
 def _sanitize_snapdeal_in_loaded(loaded: dict) -> None:
@@ -282,6 +293,42 @@ def cache_reset_all(request: Request, body: ResetAllBody = ResetAllBody()):
         bits.append(gh_msg.strip())
     _persist_pg_session(request, sess)
     return ResetAllResponse(ok=True, message=" ".join(bits), tier3_deleted=tier3_n)
+
+
+@router.post("/backfill-dsr-segments", response_model=DsrBackfillResponse)
+def cache_backfill_dsr_segments(request: Request, dry_run: bool = True):
+    """
+    One-time maintenance endpoint:
+    Backfill missing DSR_Segment values in SQLite daily uploads from stored filenames.
+    """
+    sess = request.state.session
+    if sess is None:
+        return DsrBackfillResponse(ok=False, message="No session", dry_run=dry_run)
+    try:
+        stats = backfill_dsr_segments_in_store(dry_run=dry_run)
+        if not dry_run:
+            # Force next data query to re-load repaired blobs from SQLite.
+            sess.daily_restored = False
+            n = _rebuild_sales_in_session(sess)
+            sess._quarterly_cache.clear()
+            _persist_pg_session(request, sess)
+            msg = (
+                f"Backfill applied: {stats['changed_files']} file(s), "
+                f"{stats['changed_rows']} row(s). Sales rebuilt: {n:,} rows."
+            )
+        else:
+            msg = (
+                f"Dry-run: {stats['changed_files']} file(s) / "
+                f"{stats['changed_rows']} row(s) would be repaired."
+            )
+        return DsrBackfillResponse(ok=True, message=msg, **stats)
+    except Exception as e:
+        _log.exception("backfill dsr segments failed: %s", e)
+        return DsrBackfillResponse(
+            ok=False,
+            message=f"Backfill failed: {e}",
+            dry_run=dry_run,
+        )
 
 
 @router.post("/reload-fresh", response_model=CacheReloadResponse)

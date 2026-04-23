@@ -766,6 +766,71 @@ def load_all_platforms() -> Dict[str, pd.DataFrame]:
     return result
 
 
+def backfill_dsr_segments_in_store(*, dry_run: bool = True) -> dict:
+    """
+    One-time repair for legacy daily blobs saved before DSR filename stamping.
+    Fills missing ``DSR_Segment`` values from the upload filename label per platform.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, platform, filename, data_parquet FROM daily_uploads ORDER BY id ASC"
+    ).fetchall()
+
+    scanned = len(rows)
+    changed_files = 0
+    changed_rows = 0
+    skipped = 0
+
+    for row_id, platform, filename, blob in rows:
+        tail = _DSR_TAIL_FOR_PLATFORM.get(str(platform).strip().lower())
+        if not tail:
+            skipped += 1
+            continue
+        label = infer_dsr_label_from_upload_filename(filename, tail)
+        if not label:
+            skipped += 1
+            continue
+        try:
+            d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+        except Exception:
+            skipped += 1
+            continue
+        if d.empty:
+            skipped += 1
+            continue
+
+        changed_here = 0
+        if "DSR_Segment" not in d.columns:
+            changed_here = len(d)
+            d["DSR_Segment"] = label
+        else:
+            seg = d["DSR_Segment"].fillna("").astype(str).str.strip()
+            miss = seg.str.len().eq(0) | seg.str.casefold().isin({"all", "nan", "none"})
+            changed_here = int(miss.sum())
+            if changed_here > 0:
+                d.loc[miss, "DSR_Segment"] = label
+
+        if changed_here > 0:
+            changed_files += 1
+            changed_rows += changed_here
+            if not dry_run:
+                conn.execute(
+                    "UPDATE daily_uploads SET data_parquet=?, rows=? WHERE id=?",
+                    (_df_to_parquet(d), len(d), row_id),
+                )
+
+    if not dry_run:
+        conn.commit()
+    conn.close()
+    return {
+        "dry_run": dry_run,
+        "scanned_files": scanned,
+        "changed_files": changed_files,
+        "changed_rows": changed_rows,
+        "skipped_files": skipped,
+    }
+
+
 def merge_platform_data(
     existing: pd.DataFrame,
     new_df: pd.DataFrame,
