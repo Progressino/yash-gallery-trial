@@ -13,11 +13,20 @@ import re
 import sqlite3
 import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from .helpers import clean_line_id_series
+from .helpers import apply_dsr_segment_to_df_inplace, clean_line_id_series
+
+# Filename tail for ``infer_dsr_label_from_upload_filename`` — applied on every ``save_daily_file``.
+_DSR_TAIL_FOR_PLATFORM = {
+    "amazon": "Amazon",
+    "myntra": "Myntra",
+    "meesho": "Meesho",
+    "flipkart": "Flipkart",
+    "snapdeal": "Snapdeal",
+}
 
 # Meesho LineKeys from TCS / ERP export / CSV fallbacks (not marketplace sub-order ids).
 _MEE_SYN_LINEKEY = re.compile(r"^(MEETCS\||MEEEXP\||MEECSV\|)", re.I)
@@ -639,6 +648,8 @@ def save_daily_file(
 ) -> Tuple[str, int]:
     """
     Persist a daily upload.
+    - Stamps ``DSR_Segment`` from ``filename`` when it matches
+      ``…_<Label> <Amazon|Myntra|…>…`` so SQLite + brand rollups never miss seller tags.
     - Replaces any existing entries for the same platform whose date range
       overlaps with the new file's actual data date range (prevents duplication
       when re-uploading or uploading wider date-range reports).
@@ -647,6 +658,10 @@ def save_daily_file(
     """
     if df.empty:
         return str(datetime.date.today()), 0
+
+    tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
+    if tail:
+        apply_dsr_segment_to_df_inplace(df, filename, tail)
 
     file_date = _extract_file_date(filename, df)
     date_from, date_to = _extract_date_range(df)
@@ -733,7 +748,13 @@ def load_all_platforms() -> Dict[str, pd.DataFrame]:
     return result
 
 
-def merge_platform_data(existing: pd.DataFrame, new_df: pd.DataFrame, platform: str) -> pd.DataFrame:
+def merge_platform_data(
+    existing: pd.DataFrame,
+    new_df: pd.DataFrame,
+    platform: str,
+    *,
+    source_filename: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Merge two platform DataFrames with proper deduplication.
     Safe to call from any module. Uses _dedup_platform_df internally (including when
@@ -742,7 +763,14 @@ def merge_platform_data(existing: pd.DataFrame, new_df: pd.DataFrame, platform: 
       do not double-count the same shipment.
     - Other platforms: OrderId + SKU + txn + calendar day (and qty when present);
       newer upload wins (keep last after concat [existing, new]).
+    - ``source_filename``: when set, stamps ``DSR_Segment`` from the filename (defense when
+      merge runs without a prior ``save_daily_file`` on the same frame).
     """
+    if not new_df.empty and source_filename:
+        tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
+        if tail:
+            apply_dsr_segment_to_df_inplace(new_df, source_filename, tail)
+
     if existing.empty:
         return _dedup_platform_df(new_df.copy() if not new_df.empty else new_df, platform)
     if new_df.empty:

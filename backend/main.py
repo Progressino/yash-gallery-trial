@@ -264,14 +264,17 @@ def _do_marketplace_sync_all() -> None:
             log.info("Scheduled %s: no new data — %s", platform, msg)
             continue
 
+        api_sync_fname = f"api-{platform}-{_date.today()}.csv"
         try:
-            save_daily_file(db_platform, f"api-{platform}-{_date.today()}.csv", df)
+            save_daily_file(db_platform, api_sync_fname, df)
         except Exception as e:
             log.warning("Scheduled %s: daily store save failed: %s", platform, e)
 
         try:
             existing = _warm_cache.get(cache_key, pd.DataFrame())
-            _warm_cache[cache_key] = merge_platform_data(existing, df, db_platform)
+            _warm_cache[cache_key] = merge_platform_data(
+                existing, df, db_platform, source_filename=api_sync_fname,
+            )
             log.info("Scheduled %s: warm cache updated with %d rows", platform, len(df))
         except Exception as e:
             log.warning("Scheduled %s: warm cache merge failed: %s", platform, e)

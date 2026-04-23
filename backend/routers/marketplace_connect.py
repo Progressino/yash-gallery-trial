@@ -120,7 +120,9 @@ def _run_sync(platform: str, creds: dict, days_back: int, session=None) -> None:
     if session is not None:
         try:
             existing = getattr(session, session_attr, pd.DataFrame())
-            merged   = merge_platform_data(existing, df, db_platform)
+            merged   = merge_platform_data(
+                existing, df, db_platform, source_filename=filename,
+            )
             setattr(session, session_attr, merged)
             # Rebuild unified sales_df
             from ..services.sales import build_sales_df
@@ -141,7 +143,9 @@ def _run_sync(platform: str, creds: dict, days_back: int, session=None) -> None:
         import backend.main as _main
         cache_key = "mtr_df" if platform == "amazon" else f"{platform}_df"
         existing  = _main._warm_cache.get(cache_key, pd.DataFrame())
-        _main._warm_cache[cache_key] = merge_platform_data(existing, df, db_platform)
+        _main._warm_cache[cache_key] = merge_platform_data(
+            existing, df, db_platform, source_filename=filename,
+        )
     except Exception as e:
         log.warning("%s: warm cache update failed: %s", platform, e)
 

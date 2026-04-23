@@ -279,7 +279,9 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
             )
 
         save_daily_file("amazon", file.filename or "mtr-upload.zip", df)
-        sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
+        sess.mtr_df = _merge_platform_data(
+            sess.mtr_df, df, "amazon", source_filename=file.filename or None,
+        )
         total = len(sess.mtr_df)
         years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
@@ -316,7 +318,9 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
             )
 
         save_daily_file("myntra", file.filename or "myntra-upload.zip", df)
-        sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
+        sess.myntra_df = _merge_platform_data(
+            sess.myntra_df, df, "myntra", source_filename=file.filename or None,
+        )
         total = len(sess.myntra_df)
         years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
@@ -348,7 +352,9 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                     df, file.filename or None, "Meesho",
                 )
                 save_daily_file("meesho", file.filename or "meesho-order.xlsx", df)
-                sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+                sess.meesho_df = _merge_platform_data(
+                    sess.meesho_df, df, "meesho", source_filename=file.filename or None,
+                )
                 sess.sales_df = build_sales_df(
                     mtr_df=sess.mtr_df,
                     myntra_df=sess.myntra_df,
@@ -389,7 +395,9 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
             df = apply_dsr_segment_from_upload_filename(df, file.filename or None, "Meesho")
             save_daily_file("meesho", file.filename or "meesho-orders.csv", df)
-            sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+            sess.meesho_df = _merge_platform_data(
+                sess.meesho_df, df, "meesho", source_filename=file.filename or None,
+            )
             sess.sales_df  = build_sales_df(
                 mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
                 flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
@@ -418,7 +426,9 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                     message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
             save_daily_file("meesho", file.filename or "meesho-upload.zip", df)
-            sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+            sess.meesho_df = _merge_platform_data(
+                sess.meesho_df, df, "meesho", source_filename=file.filename or None,
+            )
             sess.sales_df  = build_sales_df(
                 mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
                 flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
@@ -469,7 +479,9 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
             )
 
         save_daily_file("flipkart", file.filename or "flipkart-upload.zip", df)
-        sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
+        sess.flipkart_df = _merge_platform_data(
+            sess.flipkart_df, df, "flipkart", source_filename=file.filename or None,
+        )
         total = len(sess.flipkart_df)
         years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
@@ -749,7 +761,9 @@ async def upload_amazon_b2c(request: Request, file: UploadFile = File(...)):
         if df.empty:
             return UploadResponse(ok=False, message=f"B2C parse failed: {msg}")
 
-        sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
+        sess.mtr_df = _merge_platform_data(
+            sess.mtr_df, df, "amazon", source_filename=file.filename or None,
+        )
         _session_data_changed(sess)
         return UploadResponse(
             ok=True,
@@ -774,7 +788,9 @@ async def upload_amazon_b2b(request: Request, file: UploadFile = File(...)):
         if df.empty:
             return UploadResponse(ok=False, message=f"B2B parse failed: {msg}")
 
-        sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
+        sess.mtr_df = _merge_platform_data(
+            sess.mtr_df, df, "amazon", source_filename=file.filename or None,
+        )
         _session_data_changed(sess)
         return UploadResponse(
             ok=True,
@@ -1325,7 +1341,9 @@ async def upload_daily(
                 df, msg = parse_mtr_csv(raw, fobj.filename or f"{label}.csv")
                 del raw
                 if not df.empty:
-                    sess.mtr_df = _merge_platform_data(sess.mtr_df, df, "amazon")
+                    sess.mtr_df = _merge_platform_data(
+                        sess.mtr_df, df, "amazon", source_filename=fobj.filename or None,
+                    )
                     detected.append(label)
                     if msg != "OK":
                         warnings.append(f"{label}: {msg}")
@@ -1345,7 +1363,9 @@ async def upload_daily(
                 df = apply_dsr_segment_from_upload_filename(
                     df, myntra.filename or None, "Myntra",
                 )
-                sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
+                sess.myntra_df = _merge_platform_data(
+                    sess.myntra_df, df, "myntra", source_filename=myntra.filename or None,
+                )
                 detected.append("Myntra")
                 if msg != "OK":
                     warnings.append(f"Myntra: {msg}")
@@ -1364,7 +1384,9 @@ async def upload_daily(
             )
             del raw
             if not df.empty:
-                sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
+                sess.meesho_df = _merge_platform_data(
+                    sess.meesho_df, df, "meesho", source_filename=meesho.filename or None,
+                )
                 detected.append("Meesho")
                 if _skipped:
                     warnings.append(f"Meesho: {'; '.join(_skipped[:3])}")
@@ -1384,7 +1406,9 @@ async def upload_daily(
                 df = apply_dsr_segment_from_upload_filename(
                     df, flipkart.filename or None, "Flipkart",
                 )
-                sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
+                sess.flipkart_df = _merge_platform_data(
+                    sess.flipkart_df, df, "flipkart", source_filename=flipkart.filename or None,
+                )
                 detected.append("Flipkart")
             else:
                 warnings.append("Flipkart: No data extracted")

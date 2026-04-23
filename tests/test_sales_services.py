@@ -770,6 +770,31 @@ def test_build_sales_df_applies_platform_dedup_before_myntra_to_sales():
     assert int(out["Quantity"].sum()) == 1
 
 
+def test_merge_platform_data_stamps_dsr_from_source_filename():
+    """Merges without a prior save still tag rows when ``source_filename`` is passed."""
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    new = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-21"]),
+            "OMS_SKU": ["S1"],
+            "TxnType": ["Shipment"],
+            "Quantity": [1.0],
+            "OrderId": ["O1"],
+            "LineKey": ["L1"],
+        }
+    )
+    out = merge_platform_data(
+        pd.DataFrame(),
+        new,
+        "myntra",
+        source_filename="batch_YG Myntra 21-22-4-26.csv",
+    )
+    assert len(out) == 1
+    assert out["DSR_Segment"].iloc[0] == "YG"
+
+
 def test_merge_platform_data_runs_dedup_on_first_upload():
     """First merge used to skip _dedup_platform_df — overlays must run on single batch too."""
     from backend.services.daily_store import merge_platform_data

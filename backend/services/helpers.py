@@ -499,3 +499,20 @@ def apply_dsr_segment_from_upload_filename(
     out = df.copy()
     out["DSR_Segment"] = label
     return out
+
+
+def apply_dsr_segment_to_df_inplace(
+    df: pd.DataFrame,
+    filename: Optional[str],
+    platform_word: str,
+) -> None:
+    """
+    Like ``apply_dsr_segment_from_upload_filename`` but mutates ``df`` so callers
+    that pass the same object to SQLite + session merge always see ``DSR_Segment``.
+    """
+    if df.empty or not filename or not platform_word:
+        return
+    label = infer_dsr_label_from_upload_filename(filename, platform_word)
+    if not label:
+        return
+    df["DSR_Segment"] = label
