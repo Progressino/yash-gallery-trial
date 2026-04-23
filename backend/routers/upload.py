@@ -28,7 +28,7 @@ from ..services.meesho import (
 )
 from ..services.flipkart import load_flipkart_from_zip
 from ..services.snapdeal import load_snapdeal_from_zip
-from ..services.inventory import load_inventory_consolidated, merge_inventory_update
+from ..services.inventory import load_inventory_consolidated
 from ..services.sales import build_sales_df, list_sku_mapping_gaps
 from ..services.existing_po import parse_existing_po
 from ..services.github_cache import save_cache_to_drive
@@ -580,6 +580,22 @@ def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
 
     # Content-based detection
     try:
+        # XLSX files are ZIP containers and won't decode to useful text.
+        # Probe headers via pandas to classify Flipkart/Myntra/OMS uploads.
+        if filename.lower().endswith((".xlsx", ".xls")) or content_bytes[:4] == b"PK\x03\x04":
+            try:
+                xdf = pd.read_excel(io.BytesIO(content_bytes), nrows=5)
+                cols = [str(c).strip().lower() for c in xdf.columns]
+                joined = " | ".join(cols)
+                if "seller sku code" in joined or ("style id" in joined and "inventory count" in joined):
+                    return "myntra"
+                if "live on website" in joined or ("sku" in joined and "available to promise" in joined):
+                    return "flipkart"
+                if "item skucode" in joined or "buffer stock" in joined:
+                    return "oms"
+            except Exception:
+                pass
+
         text = content_bytes[:2000].decode("utf-8", errors="ignore").lower()
         if "item skucode" in text or "buffer stock" in text:
             return "oms"
@@ -654,12 +670,9 @@ async def upload_inventory_auto(
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
 
-    # RAR upload contains all sources (OMS + Amazon + Myntra + FBA) — always REPLACE
-    # the full inventory so stale cached values never bleed through.
-    # Only MERGE when uploading a single-source file (Flipkart-only, etc.) on top of existing data.
-    has_rar = amz_bytes is not None and amz_bytes[:6] == b"Rar!\x1a\x07"
-    if not has_rar and not sess.inventory_df_variant.empty:
-        df_variant = merge_inventory_update(sess.inventory_df_variant, df_variant)
+    # Always replace inventory snapshot for this upload batch.
+    # This prevents stale values after accidental duplicate file uploads.
+    # Users can upload the full current set again to refresh all sources cleanly.
 
     # Rebuild parent view from merged variant DF (group by parent SKU)
     try:

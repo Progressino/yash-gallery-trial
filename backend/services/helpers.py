@@ -434,7 +434,15 @@ def read_csv_safe(file_bytes: bytes) -> pd.DataFrame:
     try:
         return pd.read_csv(io.BytesIO(file_bytes))
     except Exception:
-        return pd.DataFrame()
+        # Inventory uploads are often XLSX despite CSV-like naming.
+        # Fallback to Excel so callers (inventory parsers) don't silently drop files.
+        try:
+            xls = pd.read_excel(io.BytesIO(file_bytes))
+            if isinstance(xls, pd.DataFrame):
+                return xls
+            return pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
 
 
 def read_zip_csv(zip_bytes: bytes) -> pd.DataFrame:
