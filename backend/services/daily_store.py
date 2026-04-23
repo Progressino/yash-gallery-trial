@@ -705,7 +705,13 @@ def save_daily_file(
     return file_date, len(df)
 
 
-def load_platform_data(platform: str, months: int | None = None, *, dedup: bool = True) -> pd.DataFrame:
+def load_platform_data(
+    platform: str,
+    months: int | None = None,
+    *,
+    dedup: bool = True,
+    max_files: int | None = None,
+) -> pd.DataFrame:
     """Load and concatenate stored daily data for one platform, with deduplication.
 
     ``months=None`` (default): load **all** blobs for the platform. Tier-1 bulk uploads
@@ -714,6 +720,13 @@ def load_platform_data(platform: str, months: int | None = None, *, dedup: bool 
     Pass a positive ``months`` only if you need an intentional memory-bound window.
     """
     conn = _get_conn()
+    _limit = None
+    if max_files is not None:
+        try:
+            _limit = max(1, int(max_files))
+        except Exception:
+            _limit = None
+
     if months is None:
         rows = conn.execute(
             "SELECT filename, data_parquet FROM daily_uploads "
@@ -727,6 +740,8 @@ def load_platform_data(platform: str, months: int | None = None, *, dedup: bool 
             "WHERE platform=? AND file_date >= ? ORDER BY file_date ASC",
             (platform, cutoff),
         ).fetchall()
+    if _limit is not None and len(rows) > _limit:
+        rows = rows[-_limit:]
     conn.close()
 
     dfs = []

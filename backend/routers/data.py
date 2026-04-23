@@ -98,6 +98,11 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         except Exception:
             _auto_months = 6
         _auto_months = None if _auto_months <= 0 else _auto_months
+        try:
+            _auto_max_files = int((os.environ.get("AUTO_RESTORE_MAX_FILES") or "20").strip())
+        except Exception:
+            _auto_max_files = 20
+        _auto_max_files = None if _auto_max_files <= 0 else _auto_max_files
 
         changed = False
         for platform, attr in [
@@ -111,7 +116,12 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
                 # Fast path for session auto-restore: skip deep dedup here to avoid
                 # long blocking sync on first dashboard load. Upload-time merges and
                 # sales build dedup still normalize rows for analytics.
-                df = load_platform_data(platform, months=_auto_months, dedup=False)
+                df = load_platform_data(
+                    platform,
+                    months=_auto_months,
+                    dedup=False,
+                    max_files=_auto_max_files,
+                )
                 if not df.empty:
                     setattr(sess, attr, df)
                     changed = True
