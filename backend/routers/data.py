@@ -6,6 +6,7 @@ mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 """
 import csv
 import io
+import os
 import re
 from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
@@ -90,6 +91,14 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             except Exception:
                 pass  # GitHub not configured or network error — skip silently
 
+        # Keep auto-restore bounded for large stores to avoid minute-long "syncing" stalls.
+        # 0 or negative disables the cap (loads all history).
+        try:
+            _auto_months = int((os.environ.get("AUTO_RESTORE_MONTHS") or "6").strip())
+        except Exception:
+            _auto_months = 6
+        _auto_months = None if _auto_months <= 0 else _auto_months
+
         changed = False
         for platform, attr in [
             ("amazon",   "mtr_df"),
@@ -99,7 +108,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             ("snapdeal", "snapdeal_df"),
         ]:
             if getattr(sess, attr).empty:
-                df = load_platform_data(platform)
+                df = load_platform_data(platform, months=_auto_months)
                 if not df.empty:
                     setattr(sess, attr, df)
                     changed = True
