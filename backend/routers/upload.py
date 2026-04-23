@@ -33,6 +33,7 @@ from ..services.sales import build_sales_df, list_sku_mapping_gaps
 from ..services.existing_po import parse_existing_po
 from ..services.github_cache import save_cache_to_drive
 from ..services.daily_store import save_daily_file, merge_platform_data as _merge_platform_data
+from ..services.helpers import apply_dsr_segment_from_upload_filename
 
 
 router = APIRouter()
@@ -302,7 +303,9 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
         return UploadResponse(ok=False, message="Upload SKU Mapping first.")
     try:
         zip_bytes = await file.read()
-        df, csv_count, skipped = load_myntra_from_zip(zip_bytes, sess.sku_mapping)
+        df, csv_count, skipped = load_myntra_from_zip(
+            zip_bytes, sess.sku_mapping, file.filename or None,
+        )
         del zip_bytes
         gc.collect()
 
@@ -341,6 +344,9 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
         if fname.endswith((".xlsx", ".xls")):
             df, msg = parse_meesho_order_export_xlsx(raw_bytes)
             if not df.empty:
+                df = apply_dsr_segment_from_upload_filename(
+                    df, file.filename or None, "Meesho",
+                )
                 save_daily_file("meesho", file.filename or "meesho-order.xlsx", df)
                 sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
                 sess.sales_df = build_sales_df(
@@ -381,6 +387,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             gc.collect()
             if df.empty:
                 return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
+            df = apply_dsr_segment_from_upload_filename(df, file.filename or None, "Meesho")
             save_daily_file("meesho", file.filename or "meesho-orders.csv", df)
             sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
             sess.sales_df  = build_sales_df(
@@ -400,7 +407,9 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 years=years,
             )
         else:
-            df, zip_count, skipped = load_meesho_from_zip(raw_bytes)
+            df, zip_count, skipped = load_meesho_from_zip(
+                raw_bytes, source_filename=file.filename or None,
+            )
             del raw_bytes
             gc.collect()
             if df.empty:
@@ -448,7 +457,9 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
                 if not chunk:
                     break
                 out.write(chunk)
-        df, xlsx_count, skipped = load_flipkart_from_zip(tmp_path, sess.sku_mapping)
+        df, xlsx_count, skipped = load_flipkart_from_zip(
+            tmp_path, sess.sku_mapping, source_filename=file.filename or None,
+        )
         gc.collect()
 
         if df.empty:
@@ -1051,6 +1062,7 @@ async def upload_daily_auto(
                 from ..services.myntra import _parse_myntra_csv
                 df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
                 if not df.empty:
+                    df = apply_dsr_segment_from_upload_filename(df, fname, "Myntra")
                     save_daily_file("myntra", fname, df)
                     _touch_platform("myntra")
                     detected.append(f"Myntra ({fname})")
@@ -1060,7 +1072,7 @@ async def upload_daily_auto(
                     warnings.append(f"{fname}: {msg}")
 
             elif platform == "meesho":
-                df, _count, _skipped = load_meesho_from_zip(raw)
+                df, _count, _skipped = load_meesho_from_zip(raw, source_filename=fname)
                 if not df.empty:
                     save_daily_file("meesho", fname, df)
                     _touch_platform("meesho")
@@ -1074,6 +1086,7 @@ async def upload_daily_auto(
                 from ..services.meesho import parse_meesho_csv
                 df, msg = parse_meesho_csv(raw)
                 if not df.empty:
+                    df = apply_dsr_segment_from_upload_filename(df, fname, "Meesho")
                     save_daily_file("meesho", fname, df)
                     _touch_platform("meesho")
                     detected.append(f"Meesho ({fname})")
@@ -1085,6 +1098,7 @@ async def upload_daily_auto(
             elif platform == "meesho_order_xlsx":
                 df, msg = parse_meesho_order_export_xlsx(raw)
                 if not df.empty:
+                    df = apply_dsr_segment_from_upload_filename(df, fname, "Meesho")
                     save_daily_file("meesho", fname, df)
                     _touch_platform("meesho")
                     detected.append(f"Meesho order export ({fname})")
@@ -1137,6 +1151,7 @@ async def upload_daily_auto(
                             warnings.append(f"{fname}: Skipped — no Sales Report, Orders, or earn_more_report sheet (sheets: {', '.join(xl_sheets[:4])})")
                             return
                 if not df.empty:
+                    df = apply_dsr_segment_from_upload_filename(df, fname, "Flipkart")
                     save_daily_file("flipkart", fname, df)
                     _touch_platform("flipkart")
                     detected.append(f"Flipkart ({fname})")
@@ -1182,7 +1197,9 @@ async def upload_daily_auto(
                 elif _zip_is_flipkart_spreadsheet_bundle(raw, fname):
                     try:
                         df_fk, n_fc, skipped_fk = load_flipkart_from_zip(
-                            raw, sess.sku_mapping or {},
+                            raw,
+                            sess.sku_mapping or {},
+                            source_filename=fname,
                         )
                         if not df_fk.empty:
                             save_daily_file("flipkart", fname, df_fk)
@@ -1325,6 +1342,9 @@ async def upload_daily(
             df, msg = _parse_myntra_csv(raw, myntra.filename or "myntra.csv", sess.sku_mapping)
             del raw
             if not df.empty:
+                df = apply_dsr_segment_from_upload_filename(
+                    df, myntra.filename or None, "Myntra",
+                )
                 sess.myntra_df = _merge_platform_data(sess.myntra_df, df, "myntra")
                 detected.append("Myntra")
                 if msg != "OK":
@@ -1339,7 +1359,9 @@ async def upload_daily(
         try:
             from ..services.meesho import load_meesho_from_zip
             raw = await meesho.read()
-            df, _count, _skipped = load_meesho_from_zip(raw)
+            df, _count, _skipped = load_meesho_from_zip(
+                raw, source_filename=meesho.filename or None,
+            )
             del raw
             if not df.empty:
                 sess.meesho_df = _merge_platform_data(sess.meesho_df, df, "meesho")
@@ -1359,6 +1381,9 @@ async def upload_daily(
             df = _parse_flipkart_xlsx(raw, flipkart.filename or "flipkart.xlsx", sess.sku_mapping)
             del raw
             if not df.empty:
+                df = apply_dsr_segment_from_upload_filename(
+                    df, flipkart.filename or None, "Flipkart",
+                )
                 sess.flipkart_df = _merge_platform_data(sess.flipkart_df, df, "flipkart")
                 detected.append("Flipkart")
             else:

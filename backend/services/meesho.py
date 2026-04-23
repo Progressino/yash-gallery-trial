@@ -758,7 +758,10 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     return out.dropna(subset=["Date"]), "OK"
 
 
-def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]]:
+def load_meesho_from_zip(
+    zip_bytes: bytes,
+    source_filename: str | None = None,
+) -> Tuple[pd.DataFrame, int, List[str]]:
     """
     Parse Meesho master ZIP (ZIP of ZIPs).
     Returns (combined_df, inner_zip_count, skipped_list).
@@ -800,8 +803,10 @@ def load_meesho_from_zip(zip_bytes: bytes) -> Tuple[pd.DataFrame, int, List[str]
 
     combined = pd.concat(dfs, ignore_index=True)
     from .daily_store import _dedup_platform_df
+    from .helpers import apply_dsr_segment_from_upload_filename
 
     combined = _dedup_platform_df(combined, "meesho")
+    combined = apply_dsr_segment_from_upload_filename(combined, source_filename, "Meesho")
     zip_count = len(items) if items else (1 if not combined.empty else 0)
     return combined, zip_count, skipped
 
@@ -954,4 +959,6 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
         "OrderId":          oid,
         "LineKey":          lk_sales,
     })
+    if "DSR_Segment" in meesho_df.columns:
+        out["DSR_Segment"] = meesho_df["DSR_Segment"].astype(str).fillna("").values
     return out

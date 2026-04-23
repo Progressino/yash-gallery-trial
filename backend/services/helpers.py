@@ -456,3 +456,46 @@ def _coerce_df_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
     for col in out.select_dtypes(include="category").columns:
         out[col] = out[col].astype(str)
     return out
+
+
+def infer_dsr_label_from_upload_filename(filename: Optional[str], platform_word: str) -> str:
+    """
+    Pull seller/account token from upload names such as
+    ``..._YG Myntra 21-22-4-26.csv``, ``..._Akiko Meesho ....csv``,
+    ``..._Ikrass Flipkart ....xlsx`` (pattern: ``<label> <Platform>``).
+    """
+    if not filename or not platform_word:
+        return ""
+    name = Path(str(filename)).name.strip()
+    if not name:
+        return ""
+    for _ in range(3):
+        m = re.match(r"(.+)(\.(?:[a-z0-9]{1,12}))$", name, re.I)
+        if not m:
+            break
+        name = m.group(1)
+    pat = re.compile(rf"\s+{re.escape(platform_word)}\b", re.I)
+    mm = pat.search(name)
+    if not mm:
+        return ""
+    before = name[: mm.start()].strip()
+    if not before:
+        return ""
+    token = before.split("_")[-1].strip()
+    return (token if token else before).strip()
+
+
+def apply_dsr_segment_from_upload_filename(
+    df: pd.DataFrame,
+    filename: Optional[str],
+    platform_word: str,
+) -> pd.DataFrame:
+    """Set ``DSR_Segment`` on every row from the upload filename when a label is detected."""
+    if df.empty:
+        return df
+    label = infer_dsr_label_from_upload_filename(filename, platform_word)
+    if not label:
+        return df
+    out = df.copy()
+    out["DSR_Segment"] = label
+    return out

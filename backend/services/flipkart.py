@@ -535,6 +535,7 @@ def load_flipkart_from_zip(
     mapping: Optional[Dict[str, str]] = None,
     *,
     parse_batch_concat: int = 4,
+    source_filename: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, int, List[str]]:
     """
     Parse Flipkart master ZIP containing monthly Sales Report XLSXs (and optional XLSB).
@@ -624,6 +625,12 @@ def load_flipkart_from_zip(
     from .daily_store import _dedup_platform_df
 
     combined = _dedup_platform_df(combined, "flipkart")
+    if source_filename:
+        from .helpers import apply_dsr_segment_from_upload_filename
+
+        combined = apply_dsr_segment_from_upload_filename(
+            combined, source_filename, "Flipkart",
+        )
     return combined, len(all_items), skipped
 
 
@@ -831,6 +838,9 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
         _brand = fk_df["Brand"].fillna("").astype(str).str.strip()
     else:
         _brand = pd.Series("", index=fk_df.index, dtype=str)
+    if "DSR_Segment" in fk_df.columns:
+        _file_seg = fk_df["DSR_Segment"].fillna("").astype(str).str.strip()
+        _brand = _file_seg.where(_file_seg.str.len() > 0, _brand)
     oid = fk_df["OrderId"].astype(str).str.strip()
     if "LineKey" in fk_df.columns:
         lk = fk_df["LineKey"].astype(str).str.strip()

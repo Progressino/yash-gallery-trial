@@ -33,12 +33,13 @@ interface DsrBrandMonthlyRow {
   month_display: string
   YG: number
   Akiko: number
+  Other: number
   leader: string
   delta: number
 }
 interface DsrBrandMonthlyResponse {
   rows: DsrBrandMonthlyRow[]
-  totals: { YG: number; Akiko: number }
+  totals: { YG: number; Akiko: number; Other: number }
   note: string
 }
 
@@ -660,11 +661,17 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── YG vs Akiko (monthly) — uses Intelligence date range ── */}
+      {/* ── YG vs Akiko vs Other (monthly) — uses Intelligence date range ── */}
       {salesLoaded && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-[#002B5B]">YG vs Akiko — monthly shipments</h3>
+            <div>
+              <h3 className="text-sm font-semibold text-[#002B5B]">YG vs Akiko vs Other — monthly shipments</h3>
+              <p className="text-[10px] text-gray-500 mt-0.5 max-w-xl">
+                Other rolls up seller labels from uploads (e.g. <code className="text-[10px] bg-gray-100 px-1 rounded">…_Other Myntra …</code>,{' '}
+                <code className="text-[10px] bg-gray-100 px-1 rounded">…_Akiko Meesho …</code>) plus Flipkart Brand / Snapdeal Company. Matches platform KPIs when files are named with account tags.
+              </p>
+            </div>
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[10px] text-gray-500">
                 {dateStart || dateEnd
@@ -687,7 +694,7 @@ export default function Dashboard() {
             ) : dsrBrandMonthly?.note ? (
               <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">{dsrBrandMonthly.note}</p>
             ) : !dsrBrandMonthly?.rows?.length ? (
-              <p className="text-xs text-gray-400">No months in range with YG or Akiko-tagged segments.</p>
+              <p className="text-xs text-gray-400">No months in range with seller-tagged segments.</p>
             ) : (
               <>
                 <div className="h-56 w-full mb-4">
@@ -697,6 +704,7 @@ export default function Dashboard() {
                         name: r.month_display,
                         YG: r.YG,
                         Akiko: r.Akiko,
+                        Other: r.Other,
                       }))}
                       margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
                     >
@@ -707,6 +715,7 @@ export default function Dashboard() {
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       <Bar dataKey="YG" name="YG" fill="#002B5B" radius={[2, 2, 0, 0]} />
                       <Bar dataKey="Akiko" name="Akiko" fill="#E91E63" radius={[2, 2, 0, 0]} />
+                      <Bar dataKey="Other" name="Other" fill="#94A3B8" radius={[2, 2, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -717,7 +726,8 @@ export default function Dashboard() {
                         <th className="px-3 py-2 font-semibold">Month</th>
                         <th className="px-3 py-2 font-semibold text-right">YG</th>
                         <th className="px-3 py-2 font-semibold text-right">Akiko</th>
-                        <th className="px-3 py-2 font-semibold">Higher</th>
+                        <th className="px-3 py-2 font-semibold text-right">Other</th>
+                        <th className="px-3 py-2 font-semibold">Leader</th>
                         <th className="px-3 py-2 font-semibold text-right">By</th>
                       </tr>
                     </thead>
@@ -727,6 +737,7 @@ export default function Dashboard() {
                           <td className="px-3 py-1.5 text-gray-800">{r.month_display}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{r.YG.toLocaleString()}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{r.Akiko.toLocaleString()}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{r.Other.toLocaleString()}</td>
                           <td className="px-3 py-1.5 font-medium text-gray-800">{r.leader}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums text-gray-600">
                             {r.leader === 'Tie' ? '—' : r.delta.toLocaleString()}
@@ -737,12 +748,19 @@ export default function Dashboard() {
                         <td className="px-3 py-2">Range total</td>
                         <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.YG.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.Akiko.toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{(dsrBrandMonthly.totals.Other ?? 0).toLocaleString()}</td>
                         <td className="px-3 py-2" colSpan={2}>
-                          {dsrBrandMonthly.totals.YG > dsrBrandMonthly.totals.Akiko
-                            ? 'YG ahead'
-                            : dsrBrandMonthly.totals.Akiko > dsrBrandMonthly.totals.YG
-                              ? 'Akiko ahead'
-                              : 'Tie'}
+                          {(() => {
+                            const t = dsrBrandMonthly.totals
+                            const pairs: [string, number][] = [
+                              ['YG', t.YG],
+                              ['Akiko', t.Akiko],
+                              ['Other', t.Other ?? 0],
+                            ]
+                            const sorted = [...pairs].sort((a, b) => b[1] - a[1])
+                            if (sorted[0][1] === sorted[1][1]) return 'Tie (top)'
+                            return `${sorted[0][0]} ahead`
+                          })()}
                         </td>
                       </tr>
                     </tbody>

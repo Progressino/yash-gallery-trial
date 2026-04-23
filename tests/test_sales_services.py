@@ -78,13 +78,38 @@ def test_get_dsr_brand_monthly_comparison_yg_vs_akiko():
     mar = next(x for x in out["rows"] if x["month"] == "2025-03")
     assert mar["YG"] == 100
     assert mar["Akiko"] == 50
+    assert mar["Other"] == 0
     assert mar["leader"] == "YG"
     apr = next(x for x in out["rows"] if x["month"] == "2025-04")
     assert apr["YG"] == 30
     assert apr["Akiko"] == 40
-    assert apr["leader"] == "Akiko"
+    assert apr["Other"] == 200
+    assert apr["leader"] == "Other"
+    assert apr["delta"] == 160
     assert out["totals"]["YG"] == 130
     assert out["totals"]["Akiko"] == 90
+    assert out["totals"]["Other"] == 200
+
+
+def test_infer_dsr_label_from_upload_filename_myntra_meesho_flipkart():
+    from backend.services.helpers import infer_dsr_label_from_upload_filename
+
+    assert infer_dsr_label_from_upload_filename(
+        "dJJ8Viij_2026-04-23_Seller_Orders_2026-04-21_2026-04-22_YG Myntra 21-22-4-26.csv",
+        "Myntra",
+    ) == "YG"
+    assert infer_dsr_label_from_upload_filename(
+        "aQXZRJz7_2026-04-23_Seller_Orders_19498_2026-04-21_2026-04-22_Other Myntra 21-22-4-26.csv",
+        "Myntra",
+    ) == "Other"
+    assert infer_dsr_label_from_upload_filename(
+        "Orders_2026-04-21_2026-04-22_Akiko Meesho 21-22-4-26.csv",
+        "Meesho",
+    ) == "Akiko"
+    assert infer_dsr_label_from_upload_filename(
+        "earn_more_report (22) 2_Ikrass Flipkart 21-22-4-26.xlsx",
+        "Flipkart",
+    ) == "Ikrass"
 
 
 def test_dsr_brand_monthly_to_csv_rows():

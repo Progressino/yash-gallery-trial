@@ -473,7 +473,9 @@ def _parse_myntra_csv(
 
 
 def load_myntra_from_zip(
-    zip_bytes: bytes, mapping: Dict[str, str]
+    zip_bytes: bytes,
+    mapping: Dict[str, str],
+    source_filename: str | None = None,
 ) -> Tuple[pd.DataFrame, int, List[str]]:
     """
     Parse Myntra PPMP master ZIP containing monthly CSVs.
@@ -508,8 +510,10 @@ def load_myntra_from_zip(
 
     combined = pd.concat(dfs, ignore_index=True)
     from .daily_store import _dedup_platform_df
+    from .helpers import apply_dsr_segment_from_upload_filename
 
     combined = _dedup_platform_df(combined, "myntra")
+    combined = apply_dsr_segment_from_upload_filename(combined, source_filename, "Myntra")
     return combined, len(csv_items), skipped
 
 
@@ -538,4 +542,6 @@ def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
         "OrderId":          oid,
         "LineKey":          lk_out,
     })
+    if "DSR_Segment" in myntra_df.columns:
+        out["DSR_Segment"] = myntra_df["DSR_Segment"].astype(str).fillna("").values
     return out
