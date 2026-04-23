@@ -374,16 +374,15 @@ async def session_middleware(request: Request, call_next):
     # not just on brand-new sessions. This handles the race condition where
     # the cache was still loading when the session was first created, and also
     # re-fills sessions whose in-memory data was lost after a deploy.
-    # If the cache is still being downloaded from GitHub, wait up to 90 s so
-    # the very first page-load after a deploy auto-applies data (no manual click).
+    # Do not block request handling on warm-cache hydration. A previous synchronous
+    # wait here could stall the event loop and make the UI stick on "Loading...".
+    # Cache fill continues in background and data routes can restore from SQLite.
     copied_warm = False
     if (
         session.mtr_df.empty
         and session.sales_df.empty
         and not getattr(session, "pause_auto_data_restore", False)
     ):
-        if not _warm_cache:
-            _warm_cache_ready.wait(timeout=90)
         copied_warm = _copy_warm_cache_to_session(session)
 
     try:
