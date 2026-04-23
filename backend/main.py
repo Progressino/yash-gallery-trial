@@ -140,19 +140,26 @@ def _do_load_warm_cache() -> bool:
                   | df["OMS_SKU"].astype(str).str.match(r'^\d+$'))
             ].reset_index(drop=True)
 
-        # ── Phase 1: SQLite daily store (local, fast) ─────────────────────────
-        # Users see correct data within ~2 s of a backend restart.
+        # ── Phase 1: recent SQLite data (local, fast ~5-15s) ─────────────────
+        # Load only the last 4 months of uploads so this completes quickly.
+        # Phase 2 provides the full history from GitHub for older date ranges.
+        from .services.daily_store import load_platform_data as _load_plat
+        _P1_MONTHS = 4   # covers last ~120 days — typical dashboard range
+
         phase1_ok = False
-        phase1_daily: dict = {}
         try:
-            phase1_daily = load_all_platforms()
-            if phase1_daily:
+            p1_raw: dict = {}
+            for _plat in ("amazon", "myntra", "meesho", "flipkart", "snapdeal"):
+                _df = _load_plat(_plat, months=_P1_MONTHS)
+                if not _df.empty:
+                    p1_raw[_plat] = _df
+            if p1_raw:
                 p1: dict = {
-                    "mtr_df":               phase1_daily.get("amazon",   pd.DataFrame()),
-                    "myntra_df":            phase1_daily.get("myntra",   pd.DataFrame()),
-                    "meesho_df":            phase1_daily.get("meesho",   pd.DataFrame()),
-                    "flipkart_df":          phase1_daily.get("flipkart", pd.DataFrame()),
-                    "snapdeal_df":          _sanitise_snapdeal(phase1_daily.get("snapdeal", pd.DataFrame())),
+                    "mtr_df":               p1_raw.get("amazon",   pd.DataFrame()),
+                    "myntra_df":            p1_raw.get("myntra",   pd.DataFrame()),
+                    "meesho_df":            p1_raw.get("meesho",   pd.DataFrame()),
+                    "flipkart_df":          p1_raw.get("flipkart", pd.DataFrame()),
+                    "snapdeal_df":          _sanitise_snapdeal(p1_raw.get("snapdeal", pd.DataFrame())),
                     "sales_df":             pd.DataFrame(),
                     "sku_mapping":          {},
                     "inventory_df_variant": pd.DataFrame(),
@@ -175,9 +182,9 @@ def _do_load_warm_cache() -> bool:
                 _warm_cache_ready.set()       # ← unblocks first page-load immediately
                 phase1_ok = True
                 log.info(
-                    "Warm-cache Phase 1 ready: %d sales rows from SQLite. "
-                    "Downloading GitHub historical cache in background…",
-                    len(p1.get("sales_df", pd.DataFrame())),
+                    "Warm-cache Phase 1 ready: %d sales rows (last %d months from SQLite). "
+                    "Fetching GitHub historical cache…",
+                    len(p1.get("sales_df", pd.DataFrame())), _P1_MONTHS,
                 )
         except Exception as e:
             log.warning("Warm-cache Phase 1 (SQLite) failed: %s — continuing to GitHub", e)
