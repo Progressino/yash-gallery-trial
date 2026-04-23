@@ -687,6 +687,62 @@ def test_flipkart_overlay_prefers_order_export_over_earn_more_when_all_synthetic
     assert "FKEM" not in str(out["LineKey"].iloc[0])
 
 
+def test_myntra_cross_export_same_substance_different_linekey_collapses():
+    """PPMP vs seller id columns can differ for the same line — must not double gross units."""
+    from backend.services.daily_store import _dedup_platform_df
+    import pandas as pd
+
+    d = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-21", "2026-04-21"]),
+            "OMS_SKU": ["YKY123", "YKY123"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "Invoice_Amount": [299.0, 299.0],
+            "RawStatus": ["DELIVERED", "DELIVERED"],
+            "State": ["KA", "KA"],
+            "Payment_Method": ["PREPAID", "PREPAID"],
+            "Warehouse_Id": ["W1", "W1"],
+            "LineKey": ["PACKET-A", "LINE-B"],
+            "OrderId": ["OID1", "OID1"],
+            "ParentOrderId": ["PARENT1", "PARENT1"],
+        }
+    )
+    out = _dedup_platform_df(d, "myntra")
+    assert len(out) == 1
+
+
+def test_build_sales_df_applies_platform_dedup_before_myntra_to_sales():
+    """Callers may pass concatenated Tier-3 frames without merge_platform_data."""
+    import pandas as pd
+
+    myntra = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-21", "2026-04-21"]),
+            "OMS_SKU": ["YKY123", "YKY123"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+            "Invoice_Amount": [299.0, 299.0],
+            "RawStatus": ["DELIVERED", "DELIVERED"],
+            "State": ["KA", "KA"],
+            "Payment_Method": ["PREPAID", "PREPAID"],
+            "Warehouse_Id": ["W1", "W1"],
+            "LineKey": ["PACKET-A", "LINE-B"],
+            "OrderId": ["OID1", "OID1"],
+            "ParentOrderId": ["PARENT1", "PARENT1"],
+        }
+    )
+    out = build_sales_df(
+        pd.DataFrame(),
+        myntra,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        {},
+    )
+    assert len(out) == 1
+    assert int(out["Quantity"].sum()) == 1
+
+
 def test_merge_platform_data_runs_dedup_on_first_upload():
     """First merge used to skip _dedup_platform_df — overlays must run on single batch too."""
     from backend.services.daily_store import merge_platform_data

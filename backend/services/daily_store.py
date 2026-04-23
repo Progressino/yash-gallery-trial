@@ -466,6 +466,32 @@ def _dedup_myntra_parent_order_shadow(d: pd.DataFrame) -> pd.DataFrame:
     return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
 
 
+# Columns that differ when the *same* fulfilment line is re-exported under another id
+# (packet id vs order line id, synthetic LineKey vs marketplace id, overlapping ZIPs).
+_CROSS_EXPORT_ID_COLS = frozenset({
+    "LineKey",
+    "OrderId",
+    "Month",
+    "Month_Label",
+})
+
+
+def _dedup_cross_export_id_twins(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    After LineKey / OrderId dedup, still remove rows whose **substantive** fields are
+    identical — duplicate monthly + daily uploads, PPMP vs seller report, or two id
+    columns populated differently for the same line (different LineKey only).
+
+    Excludes identity-ish columns from the fingerprint so true twin rows collapse.
+    """
+    if d.empty or len(d) < 2:
+        return d
+    subset = [c for c in d.columns if c not in _CROSS_EXPORT_ID_COLS]
+    if len(subset) < 4:
+        return d
+    return d.drop_duplicates(subset=subset, keep="last").reset_index(drop=True)
+
+
 def _dedup_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFrame:
     """
     Tier-3 merges (concat existing + new upload) keep Shipment and Refund as distinct keys,
@@ -521,6 +547,9 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
       ``_dedup_linekey_legacy_shadow``. Strong LineKeys dedupe without OMS_SKU for Myntra /
       Meesho (line-level ids). Flipkart includes ``OMS_SKU`` in the strong key because
       marketplace Order IDs are often shared across multiple line SKUs.
+    - Final pass ``_dedup_cross_export_id_twins`` for those channels: rows whose substantive
+      columns match but ``LineKey`` / ``OrderId`` differ (duplicate ZIPs, packet vs line id)
+      collapse to one row — avoids ~2× counts when exports disagree on ids only.
     """
     if df.empty:
         return df
@@ -593,6 +622,8 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                 out = _dedup_shipment_superseded_by_same_day_refund(out)
             elif platform == "flipkart":
                 out = _dedup_flipkart_cross_source_overlay(out)
+            if platform in ("myntra", "meesho", "flipkart"):
+                out = _dedup_cross_export_id_twins(out)
             return out
     except Exception:
         pass

@@ -296,16 +296,21 @@ def build_sales_df(
     Concatenate all platform DataFrames into a unified sales_df and deduplicate.
     Mirrors the 'Load All Data' block in app.py.
     """
+    from .daily_store import _dedup_platform_df
+
     sales_parts: List[pd.DataFrame] = []
 
     if not meesho_df.empty:
         from .meesho import refresh_meesho_dataframe_oms_inplace
 
         refresh_meesho_dataframe_oms_inplace(meesho_df, sku_mapping or None)
+        meesho_df = _dedup_platform_df(meesho_df, "meesho")
         sales_parts.append(_downcast_sales(meesho_to_sales_rows(meesho_df, sku_mapping=sku_mapping or None)))
     if not myntra_df.empty:
+        myntra_df = _dedup_platform_df(myntra_df, "myntra")
         sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df)))
     if not flipkart_df.empty:
+        flipkart_df = _dedup_platform_df(flipkart_df, "flipkart")
         sales_parts.append(_downcast_sales(flipkart_to_sales_rows(flipkart_df)))
     if snapdeal_df is not None and not snapdeal_df.empty:
         sales_parts.append(_downcast_sales(snapdeal_to_sales_rows(snapdeal_df)))
