@@ -236,6 +236,10 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     if ghost_rows:
         msgs.append(f"Dropped {ghost_rows} rows with out-of-range years.")
 
+    from .helpers import apply_dsr_segment_from_upload_filename
+
+    out = apply_dsr_segment_from_upload_filename(out, source_file, "Amazon")
+
     return out, ("OK" if not msgs else " | ".join(msgs))
 
 
@@ -304,7 +308,13 @@ def _amazon_fba_aggregate_order_lines(df: pd.DataFrame, *, has_order_id: bool) -
     # (seconds apart) after exact duplicate removal — matches seller "unique line" exports.
     gcols = (["Order_Id", "_sk", "Transaction_Type"] if has_order_id
              else ["_sk", "Transaction_Type"])
-    out = work.groupby(gcols, as_index=False, sort=False).agg(agg)
+    work = work.reset_index(drop=True)
+    # pandas 3.x: ``as_index=False`` + dict agg can corrupt grouper alignment; use reset_index().
+    gb = work.groupby(gcols, sort=False, observed=True)
+    out = gb.agg(agg).reset_index()
+    if "DSR_Segment" in work.columns:
+        dsr_one = work.groupby(gcols, sort=False, observed=True)["DSR_Segment"].first().reset_index()
+        out = out.merge(dsr_one, on=gcols, how="left")
     out = out.rename(columns={"_sk": "SKU"})
     out["Month"] = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")

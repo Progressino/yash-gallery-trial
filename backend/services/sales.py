@@ -208,9 +208,13 @@ def _mtr_to_sales_df(
         np.where(m["Transaction Type"] == "Cancel", -m["Quantity"], m["Quantity"])
     )
     m["LineKey"] = ""
-    return m[
-        ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId", "LineKey"]
-    ]
+    cols = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId", "LineKey"]
+    if "DSR_Segment" in mtr_df.columns:
+        m["DSR_Segment"] = (
+            mtr_df.loc[m.index, "DSR_Segment"].fillna("").astype(str).str.strip().values
+        )
+        cols.append("DSR_Segment")
+    return m[cols]
 
 
 def _drop_amazon_unkeyed_shadows(df: pd.DataFrame) -> pd.DataFrame:

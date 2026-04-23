@@ -279,6 +279,7 @@ def test_build_sales_df_amazon_with_mapping():
             "Quantity": [4.0],
             "Order_Id": ["OID-1"],
             "Invoice_Number": [""],
+            "DSR_Segment": ["YG UAE"],
         }
     )
     mapping = {"1001YK-RED-L": "1001YK-RED-L"}
@@ -292,6 +293,7 @@ def test_build_sales_df_amazon_with_mapping():
     assert not merged.empty
     assert (merged["Source"] == "Amazon").all()
     assert merged["Quantity"].sum() == 4
+    assert merged["DSR_Segment"].iloc[0] == "YG UAE"
 
 
 def test_build_sales_df_amazon_with_empty_mapping_includes_rows():
