@@ -3,8 +3,9 @@ Sales aggregation — build + dedup logic extracted from app.py.
 """
 import gc
 import logging
+import os
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -50,6 +51,60 @@ def _filter_by_reporting_days(
     if end_date:
         mask &= day <= pd.Timestamp(end_date).normalize()
     return df.loc[mask]
+
+
+# Unified ``Source`` values → Tier-3 ``daily_uploads.platform`` keys (see daily_store.save_daily_file).
+_UPLOAD_GATE_SOURCE_TO_PLATFORM: Dict[str, str] = {
+    "Amazon": "amazon",
+    "Myntra": "myntra",
+    "Meesho": "meesho",
+    "Flipkart": "flipkart",
+    "Snapdeal": "snapdeal",
+}
+
+
+def upload_report_day_gate_enabled() -> bool:
+    """When True, Intelligence views only count rows whose calendar day matches a persisted upload ``file_date`` for that channel."""
+    v = (os.environ.get("DASHBOARD_UPLOAD_DAY_GATE") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def apply_upload_report_day_gate(sales_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop unified-sales rows for the five main marketplaces unless ``TxnDate`` (IST wall)
+    falls on a calendar day that exists as ``file_date`` for that platform in Tier-3
+    SQLite (``daily_uploads``). Other ``Source`` values are left unchanged.
+
+    Set ``DASHBOARD_UPLOAD_DAY_GATE=0`` to restore legacy behaviour (all transaction dates).
+    """
+    if sales_df.empty or not upload_report_day_gate_enabled():
+        return sales_df
+    need = {"TxnDate", "Source"}
+    if not need.issubset(sales_df.columns):
+        return sales_df
+
+    from .daily_store import get_upload_report_day_coverage
+
+    cov: Dict[str, Set[str]] = get_upload_report_day_coverage()
+    df = sales_df.copy()
+    t = txn_reporting_naive_ist(df["TxnDate"])
+    day_str = t.dt.normalize().dt.strftime("%Y-%m-%d")
+    src = df["Source"].astype(str).str.strip()
+    plat = src.map(_UPLOAD_GATE_SOURCE_TO_PLATFORM)
+
+    keep = pd.Series(True, index=df.index)
+    for p_name, db_key in _UPLOAD_GATE_SOURCE_TO_PLATFORM.items():
+        m_src = src == p_name
+        if not m_src.any():
+            continue
+        allowed = cov.get(db_key) or set()
+        if not allowed:
+            keep &= ~m_src
+        else:
+            keep &= (~m_src) | day_str.isin(allowed)
+
+    out = df.loc[keep].reset_index(drop=True)
+    return out
 
 from .helpers import (
     _downcast_sales,
@@ -419,6 +474,10 @@ def get_sales_summary(
     df = sales_df.copy()
     df["TxnDate"] = txn_reporting_naive_ist(df["TxnDate"])
     df = df.dropna(subset=["TxnDate"])
+    df = apply_upload_report_day_gate(df)
+
+    if df.empty:
+        return {"total_units": 0, "total_returns": 0, "net_units": 0, "return_rate": 0.0}
 
     if start_date or end_date:
         df = _filter_by_reporting_days(df, "TxnDate", start_date, end_date)
@@ -431,12 +490,23 @@ def get_sales_summary(
     net      = df["Units_Effective"].sum()
     rate     = float(returned / shipped * 100) if shipped > 0 else 0.0
 
-    return {
+    out = {
         "total_units":  int(shipped),
         "total_returns": int(returned),
         "net_units":    int(net),
         "return_rate":  round(rate, 1),
     }
+    if (start_date and str(start_date).strip()) or (end_date and str(end_date).strip()):
+        if upload_report_day_gate_enabled():
+            out["date_basis_note"] = (
+                "Marketplace totals only include calendar days that have a saved Tier-3 upload for that "
+                "channel with a matching report date (file_date). Days you did not upload for stay at zero."
+            )
+        else:
+            out["date_basis_note"] = (
+                "Upload-day gating is off (DASHBOARD_UPLOAD_DAY_GATE). Counts use transaction dates in loaded data."
+            )
+    return out
 
 
 def filter_sales_for_export(
@@ -464,14 +534,17 @@ def filter_sales_for_export(
         if want and "Source" in df.columns:
             df = df[df["Source"].astype(str).str.strip().isin(want)]
 
-    return df
+    return apply_upload_report_day_gate(df)
 
 
 def get_sales_by_source(sales_df: pd.DataFrame) -> List[dict]:
     """Returns pie chart data: [{source, units}]."""
     if sales_df.empty:
         return []
-    df = sales_df[sales_df["Transaction Type"] == "Shipment"].copy()
+    df = apply_upload_report_day_gate(sales_df.copy())
+    if df.empty:
+        return []
+    df = df[df["Transaction Type"] == "Shipment"].copy()
     if "Source" in df.columns:
         df["Source"] = df["Source"].astype(str)
     grp = df.groupby("Source")["Quantity"].sum().reset_index()
@@ -513,7 +586,7 @@ def get_daily_dsr_report(sales_df: pd.DataFrame, report_date: str) -> dict:
     except Exception:
         return empty
 
-    d = sales_df.copy()
+    d = apply_upload_report_day_gate(sales_df.copy())
     d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
     d = d.dropna(subset=["TxnDate"])
     d = d[d["TxnDate"].dt.normalize() == day]
@@ -652,7 +725,7 @@ def get_dsr_brand_monthly_comparison(
     if sales_df.empty or "TxnDate" not in sales_df.columns:
         return empty
 
-    d = sales_df.copy()
+    d = apply_upload_report_day_gate(sales_df.copy())
     d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
     d = d.dropna(subset=["TxnDate"])
     if start_date or end_date:
@@ -794,6 +867,7 @@ def get_top_skus(
         b = "gross"
 
     df = sales_df.copy()
+    df = apply_upload_report_day_gate(df)
     if start_date or end_date:
         df["TxnDate"] = txn_reporting_naive_ist(df["TxnDate"])
         df = df.dropna(subset=["TxnDate"])
@@ -1175,6 +1249,7 @@ def get_platform_summary(
     _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
 
     if sales_df is not None and not sales_df.empty:
+        sales_df = apply_upload_report_day_gate(sales_df)
         return _platform_summaries_from_unified_bulk(
             sales_df,
             mtr_df,

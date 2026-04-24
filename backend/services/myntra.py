@@ -255,21 +255,35 @@ def _coalesce_myntra_dispatch_over_order_date(df: pd.DataFrame, order_dates: pd.
     align with seller DSR spreadsheets that bucket by fulfilment date, not order_created.
     """
     out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    # Headers are lowercased in _parse_myntra_csv; seller reports often use spaces ("shipped on").
     candidates = (
         "dispatch_date",
         "dispatched_date",
         "actual_dispatch_date",
+        "dispatch date",
+        "dispatch on",
         "shipment_date",
+        "shipment date",
         "shipped_date",
+        "shipped on",
         "ship_date",
+        "ship date",
         "shipping_date",
+        "shipping date",
         "packed_date",
-        "packed_on",
+        "packed on",
         "handover_date",
+        "handover date",
         "courier_handover_date",
         "manifest_date",
         "logistics_dispatch_date",
         "out_for_delivery_date",
+        "out for delivery date",
+        "inscanned on",
+        "inscanned_date",
+        "delivered on",
+        "delivered_date",
+        "delivery_date",
     )
     for col in candidates:
         if col not in df.columns:

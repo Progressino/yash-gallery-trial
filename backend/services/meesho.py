@@ -18,6 +18,50 @@ from .helpers import (
 )
 
 
+def _meesho_col_lookup_lower(df: pd.DataFrame) -> dict[str, str]:
+    """Map normalized header → original column name (Meesho zips keep mixed-case Excel headers)."""
+    return {str(c).strip().lower(): c for c in df.columns}
+
+
+def _coalesce_meesho_fulfilment_over_order_date(df: pd.DataFrame, order_dates: pd.Series) -> pd.Series:
+    """
+    When TCS / forward exports include handover or ship timestamps, prefer them for TxnDate
+    so daily Intelligence totals align with fulfilment-day DSRs (same idea as Myntra).
+    """
+    out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    norm = _meesho_col_lookup_lower(df)
+    candidates = (
+        "dispatch_date",
+        "dispatched_date",
+        "shipment_date",
+        "shipped_date",
+        "shipped on",
+        "ship date",
+        "dispatch date",
+        "handover_date",
+        "handover date",
+        "courier_handover_date",
+        "packed_date",
+        "packed on",
+        "delivery_date",
+        "delivered_date",
+        "delivered on",
+        "out_for_delivery_date",
+        "rto_delivered_date",
+    )
+    for key in candidates:
+        if key not in norm:
+            continue
+        col = norm[key]
+        d2 = pd.to_datetime(df[col], errors="coerce")
+        if d2.isna().all():
+            continue
+        need = out.isna() & d2.notna()
+        out = out.mask(need, d2)
+    od = pd.to_datetime(order_dates, errors="coerce")
+    return out.fillna(od)
+
+
 def _meesho_status_implies_refund(status) -> bool:
     """True when Meesho panel / export status should classify as Refund (reverse leg)."""
     if is_non_rto_forward_milestone_status(status):
@@ -332,12 +376,19 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 return cols_lower[candidate]
         return None
 
+    def _assign_row_dates(df_inner: pd.DataFrame, dc: Optional[str]) -> None:
+        if dc:
+            base = pd.to_datetime(df_inner[dc], errors="coerce")
+            df_inner["_Date"] = _coalesce_meesho_fulfilment_over_order_date(df_inner, base)
+        else:
+            df_inner["_Date"] = pd.NaT
+
     if "tcs_sales.xlsx" in files:
         with inner_zf.open(files["tcs_sales.xlsx"]) as fh:
             df = pd.read_excel(fh)
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=False)
-            df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
+            _assign_row_dates(df, date_col)
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
             df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state_new", "")
@@ -360,7 +411,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df = pd.read_excel(fh)
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=True)
-            df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
+            _assign_row_dates(df, date_col)
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
             df["_Rev"]     = pd.to_numeric(df.get("total_invoice_value", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state_new", "")
@@ -385,7 +436,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df = pd.read_excel(fh)
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=False)
-            df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
+            _assign_row_dates(df, date_col)
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
             df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
@@ -412,7 +463,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df = pd.read_excel(fh)
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=True)
-            df["_Date"]    = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
+            _assign_row_dates(df, date_col)
             df["_Qty"]     = pd.to_numeric(df.get("quantity", 1), errors="coerce").fillna(1)
             df["_Rev"]     = pd.to_numeric(df.get("meesho_price", 0), errors="coerce").fillna(0)
             df["_State"]   = df.get("end_customer_state", df.get("state", ""))
@@ -653,7 +704,9 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     date_col = next((c for c in df.columns if "order date" in c or c == "date"), None)
     if not date_col:
         return pd.DataFrame(), "No date column found"
-    df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df["_Date"] = _coalesce_meesho_fulfilment_over_order_date(
+        df, pd.to_datetime(df[date_col], errors="coerce")
+    )
     df = df.dropna(subset=["_Date"])
     if df.empty:
         return pd.DataFrame(), "All dates invalid"

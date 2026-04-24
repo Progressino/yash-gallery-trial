@@ -13,7 +13,7 @@ import re
 import sqlite3
 import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -916,6 +916,32 @@ def list_uploads() -> List[dict]:
         }
         for r in rows
     ]
+
+
+def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
+    """
+    For each Tier-3 platform, the set of ISO calendar days (``YYYY-MM-DD``) that appear
+    as ``file_date`` on at least one persisted upload row.
+
+    Intelligence / dashboard gating uses this so a calendar day only counts after a
+    report was saved for that **report day** (filename-derived when possible), not
+    merely because transaction rows inside some other upload happen to fall on that day.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT platform, file_date FROM daily_uploads WHERE file_date IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    out: Dict[str, Set[str]] = {}
+    for plat, fd in rows:
+        if plat is None or fd is None:
+            continue
+        p = str(plat).strip().lower()
+        d = str(fd).strip()[:10]
+        if len(d) < 10:
+            continue
+        out.setdefault(p, set()).add(d)
+    return out
 
 
 def get_summary() -> dict:

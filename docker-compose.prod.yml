@@ -36,6 +36,8 @@ services:
     env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
+      # Intelligence dashboard: only count marketplace rows on days with a Tier-3 upload file_date for that channel
+      - DASHBOARD_UPLOAD_DAY_GATE=1
       - FORECAST_SESSION_DATABASE_URL=postgresql://forecast:${FORECAST_PG_PASSWORD:-forecast}@postgres:5432/forecast
       - FINANCE_DB_PATH=/data/finance.db
       - ITEM_DB_PATH=/data/items.db

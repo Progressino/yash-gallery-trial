@@ -159,6 +159,8 @@ def test_get_sales_summary_includes_ist_same_calendar_day():
     )
     s = get_sales_summary(df, months=0, start_date="2026-04-08", end_date="2026-04-08")
     assert s["total_units"] == 5
+    assert "date_basis_note" in s
+    assert "gating" in s["date_basis_note"].lower() or "marketplace" in s["date_basis_note"].lower()
 
 
 def test_get_sales_summary_shipments_and_refunds():
@@ -178,6 +180,7 @@ def test_get_sales_summary_shipments_and_refunds():
     assert s["total_returns"] == 2
     assert s["net_units"] == 13
     assert abs(s["return_rate"] - (2 / 15 * 100)) < 0.15
+    assert "date_basis_note" not in s
 
 
 def test_amazon_unkeyed_shadow_dropped_only_for_single_keyed_fingerprint():
@@ -1512,3 +1515,31 @@ def test_flipkart_earn_more_parses_numeric_excel_serial_order_date():
     ship = out[out["TxnType"] == "Shipment"]
     assert len(ship) == 1
     assert ship["Date"].iloc[0].date().isoformat() == "2026-04-14"
+
+
+def test_apply_upload_report_day_gate_keeps_only_covered_file_dates(monkeypatch):
+    from backend.services import daily_store
+    from backend.services.sales import apply_upload_report_day_gate
+
+    monkeypatch.setenv("DASHBOARD_UPLOAD_DAY_GATE", "1")
+    monkeypatch.setattr(
+        daily_store,
+        "get_upload_report_day_coverage",
+        lambda: {"myntra": {"2026-04-09"}, "amazon": {"2026-04-09"}},
+    )
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-04-08", "2026-04-09", "2026-04-09"]),
+            "Transaction Type": ["Shipment", "Shipment", "Shipment"],
+            "Quantity": [1, 2, 3],
+            "Units_Effective": [1, 2, 3],
+            "Sku": ["A", "B", "C"],
+            "Source": ["Myntra", "Myntra", "Amazon"],
+            "OrderId": ["1", "2", "3"],
+        }
+    )
+    out = apply_upload_report_day_gate(df)
+    assert len(out) == 2
+    assert set(out["Source"].tolist()) == {"Myntra", "Amazon"}
+    assert int(out.loc[out["Source"] == "Myntra", "Quantity"].sum()) == 2
+    assert int(out.loc[out["Source"] == "Amazon", "Quantity"].sum()) == 3

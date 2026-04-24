@@ -24,6 +24,7 @@ from ..services.helpers import (
 from ..services.meesho import apply_meesho_listing_sku_recovery_for_export
 from ..services.sales import (
     _filter_by_reporting_days,
+    apply_upload_report_day_gate,
     canonical_sales_sku,
     canonical_sales_sku_series,
     daily_dsr_report_to_csv_rows,
@@ -457,7 +458,7 @@ def sku_deepdive(
     import pandas as pd
 
     sess = _sess(request)
-    df0 = sess.sales_df
+    df0 = apply_upload_report_day_gate(sess.sales_df.copy())
 
     # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format)
     meesho_note: str | None = None
@@ -703,7 +704,7 @@ def daily_breakdown(
     import pandas as pd
     sess = _sess(request)
     _restore_daily_if_needed(sess)
-    df = sess.sales_df
+    df = apply_upload_report_day_gate(sess.sales_df.copy())
     if df.empty:
         return []
 
@@ -745,7 +746,7 @@ def _resolve_daily_dsr_date(sess: AppSession, date: Optional[str]) -> tuple:
     """Return (sales_df, iso_date_str) for DSR helpers."""
     import pandas as pd
 
-    df = sess.sales_df
+    df = apply_upload_report_day_gate(sess.sales_df.copy())
     if df.empty:
         return df, (date or "").strip()
 
@@ -1279,7 +1280,8 @@ def anomalies_endpoint(
     return get_anomalies(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,
-        sess.inventory_df_variant, sess.sales_df,
+        sess.inventory_df_variant,
+        apply_upload_report_day_gate(sess.sales_df.copy()),
         start_date=start_date,
         end_date=end_date,
     )

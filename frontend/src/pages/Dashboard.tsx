@@ -70,7 +70,9 @@ interface SalesSummary {
   total_returns: number
   net_units: number
   return_rate: number
-  active_months: number
+  active_months?: number
+  /** Present when start/end date filters are applied: explains TxnDate vs upload day. */
+  date_basis_note?: string
 }
 interface TopSku {
   sku: string
@@ -491,6 +493,11 @@ export default function Dashboard() {
           {' '}
           Platform overview and KPIs follow this range. For one calendar day, set both fields to that date or use Today.
         </p>
+        {salesSummary?.date_basis_note ? (
+          <p className="text-[11px] text-amber-900/90 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 leading-snug mt-2">
+            {salesSummary.date_basis_note}
+          </p>
+        ) : null}
         {/* Gross vs net (shipments vs after-returns) */}
         <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-gray-100">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sales view</span>
