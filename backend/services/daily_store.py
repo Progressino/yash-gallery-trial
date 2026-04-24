@@ -962,8 +962,10 @@ def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
         if plat is None or fd is None:
             continue
         p = str(plat).strip().lower()
-        d = str(fd).strip()[:10]
-        if len(d) < 10:
+        raw = str(fd).strip()
+        # SQLite DATE / Python date / ISO datetime → YYYY-MM-DD
+        d = raw[:10] if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-" else ""
+        if len(d) != 10:
             continue
         out.setdefault(p, set()).add(d)
     return out

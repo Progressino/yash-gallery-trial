@@ -65,8 +65,8 @@ _UPLOAD_GATE_SOURCE_TO_PLATFORM: Dict[str, str] = {
 
 def upload_report_day_gate_enabled() -> bool:
     """When True, Intelligence views only count rows whose calendar day matches a persisted upload ``file_date`` for that channel."""
-    v = (os.environ.get("DASHBOARD_UPLOAD_DAY_GATE") or "").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    v = (os.environ.get("DASHBOARD_UPLOAD_DAY_GATE") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
 
 
 def apply_upload_report_day_gate(sales_df: pd.DataFrame) -> pd.DataFrame:

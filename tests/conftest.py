@@ -4,6 +4,12 @@ import pytest
 from starlette.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _disable_dashboard_upload_day_gate_by_default(monkeypatch):
+    """Intelligence upload-day gating defaults ON in app code; tests expect legacy ungated totals."""
+    monkeypatch.setenv("DASHBOARD_UPLOAD_DAY_GATE", "0")
+
+
 @pytest.fixture
 def auth_token(monkeypatch):
     monkeypatch.setattr("backend.main.verify_token", lambda t: "tester" if t else None)
