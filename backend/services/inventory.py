@@ -320,6 +320,14 @@ def _parse_fba_tsv_shipment_group(tsv_chunks: List[bytes], mapping: Dict[str, st
     )
 
 
+def _fba_chunk_total_shipped(tsv_bytes: bytes) -> float:
+    """Total shipped quantity for one FBA TSV payload (best-effort)."""
+    d = _parse_fba_tsv_detail(tsv_bytes)
+    if d.empty:
+        return 0.0
+    return float(pd.to_numeric(d["Shipped"], errors="coerce").fillna(0).sum())
+
+
 def _dedupe_fba_tsv_payloads(tsv_list: List[bytes]) -> Tuple[List[bytes], int]:
     """Drop byte-identical TSVs (e.g. duplicate downloads named (1)/(2))."""
     seen: set[bytes] = set()
@@ -357,10 +365,23 @@ def _aggregate_fba_intransit_tsvs(tsv_list: List[bytes], mapping: Dict[str, str]
 
     dbg["fba_shipment_ids"] = {k: len(v) for k, v in by_ship.items()}
     dbg["fba_tsv_no_shipment_id"] = len(no_sid)
+    dup_ship_ids = sorted([sid for sid, chunks in by_ship.items() if len(chunks) > 1])
+    if dup_ship_ids:
+        dbg["fba_duplicate_shipment_ids"] = dup_ship_ids
+        dbg["fba_duplicate_notice"] = (
+            f"Duplicate FBA files detected for shipment IDs: {', '.join(dup_ship_ids)}. "
+            "Only one file per shipment is included."
+        )
 
     parts: List[pd.DataFrame] = []
     for _sid, chunks in by_ship.items():
-        p = _parse_fba_tsv_shipment_group(chunks, mapping)
+        # If duplicate files for a shipment are present, include only one payload
+        # (highest shipped total) and exclude the rest as duplicates.
+        chosen = chunks
+        if len(chunks) > 1:
+            best = max(chunks, key=_fba_chunk_total_shipped)
+            chosen = [best]
+        p = _parse_fba_tsv_shipment_group(chosen, mapping)
         if not p.empty:
             parts.append(p)
     for t in no_sid:
