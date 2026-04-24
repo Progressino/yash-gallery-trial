@@ -792,6 +792,43 @@ def save_daily_file(
 
     file_date = _extract_file_date(filename, df)
     date_from, date_to = _extract_date_range(df)
+
+    # ── Safety gate: reject entries whose data is entirely AFTER the file date ──
+    # date_from > file_date means ALL rows are timestamped in the future relative
+    # to the upload date — physically impossible for order data and a sure sign of
+    # a dispatch-date parsing artifact (e.g. Myntra archive rows whose dispatch
+    # timestamp falls months after the order date).
+    # We also register the bad date in platform_blocked_dates so the GitHub cache
+    # is likewise protected even if this entry somehow slips through.
+    if date_from and file_date:
+        try:
+            import logging as _sl
+            _sl = _sl.getLogger("erp.daily_store")
+            _d_from = datetime.date.fromisoformat(date_from)
+            _f_date = datetime.date.fromisoformat(file_date)
+            if _d_from > _f_date:
+                _sl.warning(
+                    "save_daily_file BLOCKED %s '%s': date_from=%s is after file_date=%s "
+                    "(dispatch-date artifact). Entry NOT saved to SQLite.",
+                    platform, filename[:80], date_from, file_date,
+                )
+                # Persist to blocked_dates so Phase-2 GitHub cache also strips it
+                _bc = _get_conn()
+                _bc.execute(
+                    "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) VALUES (?, ?)",
+                    (platform, date_from),
+                )
+                if date_to and date_to != date_from:
+                    _bc.execute(
+                        "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) VALUES (?, ?)",
+                        (platform, date_to),
+                    )
+                _bc.commit()
+                _bc.close()
+                return file_date, 0
+        except Exception:
+            pass  # Never block a save due to a validation bug
+
     parquet_bytes = _df_to_parquet(df)
 
     conn = _get_conn()
