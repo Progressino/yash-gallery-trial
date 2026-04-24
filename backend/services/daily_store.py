@@ -86,13 +86,25 @@ def _get_conn() -> sqlite3.Connection:
     except Exception:
         pass
 
+    # Table: dates that were cleaned out by migrations so Phase-2 GitHub cache
+    # merge can also exclude them (GitHub cache may still carry the stale rows).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS platform_blocked_dates (
+            platform TEXT NOT NULL,
+            date     TEXT NOT NULL,
+            PRIMARY KEY (platform, date)
+        )
+    """)
+
     # Migration: remove Myntra entries where ALL data dates are AFTER the file_date.
     # This happens when _coalesce_myntra_dispatch_over_order_date() picks actual dispatch
     # timestamps from the far future (e.g. Jan-Mar 2026 archive rows dispatched on Apr 24).
     # Such entries corrupt the dashboard by showing historical orders under a future date.
+    # The deleted dates are also written to platform_blocked_dates so that Phase-2
+    # GitHub-cache merging strips the same dates (GitHub cache may still carry them).
     try:
         cur = conn.execute(
-            "SELECT id, filename, file_date, date_from FROM daily_uploads "
+            "SELECT id, filename, file_date, date_from, date_to FROM daily_uploads "
             "WHERE platform='myntra' AND date_from IS NOT NULL AND date_from > file_date"
         )
         bad = cur.fetchall()
@@ -107,11 +119,42 @@ def _get_conn() -> sqlite3.Connection:
             conn.execute(
                 f"DELETE FROM daily_uploads WHERE id IN ({','.join('?' * len(ids))})", ids
             )
+            # Persist blocked dates so Phase-2 GitHub cache also excludes them
+            for row in bad:
+                date_from, date_to = row[3], row[4]
+                if date_from:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) "
+                        "VALUES ('myntra', ?)", (date_from,)
+                    )
+                if date_to and date_to != date_from:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) "
+                        "VALUES ('myntra', ?)", (date_to,)
+                    )
     except Exception:
         pass
 
     conn.commit()
     return conn
+
+
+def get_blocked_dates(platform: str) -> set:
+    """
+    Return the set of ISO date strings (YYYY-MM-DD) that have been permanently
+    removed from the SQLite daily store for *platform* via cleanup migrations.
+    Phase-2 GitHub-cache merging uses this to also strip those dates from the
+    GitHub cache (which may still carry the stale rows).
+    """
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT date FROM platform_blocked_dates WHERE platform=?", (platform,)
+        ).fetchall()
+        conn.close()
+        return {row[0] for row in rows}
+    except Exception:
+        return set()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

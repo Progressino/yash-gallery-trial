@@ -208,7 +208,10 @@ def _do_load_warm_cache() -> bool:
         # Date-superseding merge: for every date covered by the SQLite daily store,
         # strip that date from the GitHub cache before merging so the freshly-parsed
         # SQLite rows always win (prevents double-counting after parser fixes).
+        # Also strip dates that were *deleted* from SQLite by cleanup migrations —
+        # the GitHub cache may still carry those stale rows.
         try:
+            from .services.daily_store import get_blocked_dates as _get_blocked_dates
             # Re-read SQLite so we pick up any upload that arrived during Phase 2.
             daily = load_all_platforms()
             merged_any = False
@@ -219,20 +222,33 @@ def _do_load_warm_cache() -> bool:
                 ("flipkart", "flipkart_df"),
                 ("snapdeal", "snapdeal_df"),
             ]:
-                if daily.get(plat) is not None and not daily[plat].empty:
-                    daily_df  = daily[plat]
-                    github_df = loaded.get(key, pd.DataFrame())
-                    if (not github_df.empty
-                            and "Date" in github_df.columns
-                            and "Date" in daily_df.columns):
-                        try:
-                            daily_dates  = set(pd.to_datetime(daily_df["Date"],  errors="coerce").dt.normalize())
-                            github_dates =     pd.to_datetime(github_df["Date"], errors="coerce").dt.normalize()
+                github_df = loaded.get(key, pd.DataFrame())
+                if not github_df.empty and "Date" in github_df.columns:
+                    try:
+                        daily_df = daily.get(plat, pd.DataFrame())
+                        # Dates present in SQLite — those rows always win
+                        daily_dates: set = set()
+                        if not daily_df.empty and "Date" in daily_df.columns:
+                            daily_dates = set(
+                                pd.to_datetime(daily_df["Date"], errors="coerce").dt.normalize()
+                            )
+                        # Dates removed by cleanup migrations — must also be blocked
+                        # from the GitHub cache so stale rows don't sneak back in.
+                        for bd_str in _get_blocked_dates(plat):
+                            try:
+                                daily_dates.add(pd.Timestamp(bd_str).normalize())
+                            except Exception:
+                                pass
+                        if daily_dates:
+                            github_dates = pd.to_datetime(
+                                github_df["Date"], errors="coerce"
+                            ).dt.normalize()
                             github_df = github_df[~github_dates.isin(daily_dates)].copy()
                             loaded[key] = github_df
-                        except Exception:
-                            pass
-                    loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily_df, plat)
+                    except Exception:
+                        pass
+                if daily.get(plat) is not None and not daily[plat].empty:
+                    loaded[key] = _merge(loaded.get(key, pd.DataFrame()), daily[plat], plat)
                     merged_any = True
             if merged_any:
                 log.info("Phase 2: SQLite merged on top of GitHub for %d platform(s).", merged_any)
