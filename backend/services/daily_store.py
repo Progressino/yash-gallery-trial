@@ -86,8 +86,8 @@ def _get_conn() -> sqlite3.Connection:
     except Exception:
         pass
 
-    # Table: dates that were cleaned out by migrations so Phase-2 GitHub cache
-    # merge can also exclude them (GitHub cache may still carry the stale rows).
+    # Table: dates permanently removed by migrations; Phase-2 GitHub-cache merge
+    # also strips these so stale rows don't sneak back from the GitHub cache.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS platform_blocked_dates (
             platform TEXT NOT NULL,
@@ -96,44 +96,99 @@ def _get_conn() -> sqlite3.Connection:
         )
     """)
 
-    # Migration: remove Myntra entries where ALL data dates are AFTER the file_date.
-    # This happens when _coalesce_myntra_dispatch_over_order_date() picks actual dispatch
-    # timestamps from the far future (e.g. Jan-Mar 2026 archive rows dispatched on Apr 24).
-    # Such entries corrupt the dashboard by showing historical orders under a future date.
-    # The deleted dates are also written to platform_blocked_dates so that Phase-2
-    # GitHub-cache merging strips the same dates (GitHub cache may still carry them).
-    try:
-        cur = conn.execute(
-            "SELECT id, filename, file_date, date_from, date_to FROM daily_uploads "
-            "WHERE platform='myntra' AND date_from IS NOT NULL AND date_from > file_date"
+    # Migrations log — tracks which one-time cleanups have already run.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS db_migrations (
+            name       TEXT PRIMARY KEY,
+            applied_at TEXT DEFAULT (datetime('now'))
         )
-        bad = cur.fetchall()
-        if bad:
-            import logging
-            _log = logging.getLogger("erp.daily_store")
-            ids = [row[0] for row in bad]
-            _log.warning(
-                "daily_store migration: removing %d Myntra entries with date_from > file_date "
-                "(dispatch-date artifact). ids=%s", len(ids), ids
+    """)
+
+    # ── One-time migration: purge Myntra dispatch-date artifacts ─────────────
+    # Entries whose data dates all fall AFTER the file_date are impossible
+    # (you cannot have future order data) and are caused by the coalesce
+    # function picking a batch-level dispatch timestamp as the "order date"
+    # for the entire Jan-Mar 2026 archive (dispatched on 2026-04-24).
+    # We handle BOTH cases:
+    #   (a) date_from IS NOT NULL — straightforward SQL check
+    #   (b) date_from IS NULL     — columns added after upload; must read parquet
+    _MIG = "myntra_dispatch_date_fix_v1"
+    if not conn.execute(
+        "SELECT 1 FROM db_migrations WHERE name=?", (_MIG,)
+    ).fetchone():
+        try:
+            import logging as _logging
+            _mlog = _logging.getLogger("erp.daily_store")
+            bad_ids: list  = []
+            bad_dates: set = set()
+
+            # (a) entries that already have date_from populated
+            cur_a = conn.execute(
+                "SELECT id, date_from, date_to FROM daily_uploads "
+                "WHERE platform='myntra' AND date_from IS NOT NULL AND date_from > file_date"
             )
+            for row in cur_a.fetchall():
+                bad_ids.append(row[0])
+                if row[1]:
+                    bad_dates.add(row[1])
+                if row[2] and row[2] != row[1]:
+                    bad_dates.add(row[2])
+
+            # (b) entries with NULL date_from — read parquet to get actual range
+            cur_b = conn.execute(
+                "SELECT id, file_date, data_parquet FROM daily_uploads "
+                "WHERE platform='myntra' AND date_from IS NULL AND data_parquet IS NOT NULL"
+            )
+            for entry_id, file_date_str, parquet_blob in cur_b.fetchall():
+                try:
+                    df_tmp = pd.read_parquet(io.BytesIO(parquet_blob), columns=["Date"])
+                    dates_tmp = pd.to_datetime(
+                        df_tmp["Date"], errors="coerce"
+                    ).dropna()
+                    if dates_tmp.empty:
+                        continue
+                    d_from = str(dates_tmp.min().date())
+                    d_to   = str(dates_tmp.max().date())
+                    # Update the columns so future migrations don't re-read the blob
+                    conn.execute(
+                        "UPDATE daily_uploads SET date_from=?, date_to=? WHERE id=?",
+                        (d_from, d_to, entry_id),
+                    )
+                    if d_from > file_date_str:
+                        bad_ids.append(entry_id)
+                        bad_dates.add(d_from)
+                        if d_to != d_from:
+                            bad_dates.add(d_to)
+                except Exception:
+                    continue
+
+            if bad_ids:
+                _mlog.warning(
+                    "daily_store migration %s: removing %d Myntra entries "
+                    "with data dated after file_date (dispatch-date artifact). "
+                    "ids=%s  blocked_dates=%s",
+                    _MIG, len(bad_ids), bad_ids, sorted(bad_dates),
+                )
+                conn.execute(
+                    f"DELETE FROM daily_uploads "
+                    f"WHERE id IN ({','.join('?' * len(bad_ids))})",
+                    bad_ids,
+                )
+                for bd in bad_dates:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) "
+                        "VALUES ('myntra', ?)",
+                        (bd,),
+                    )
+
             conn.execute(
-                f"DELETE FROM daily_uploads WHERE id IN ({','.join('?' * len(ids))})", ids
+                "INSERT OR IGNORE INTO db_migrations (name) VALUES (?)", (_MIG,)
             )
-            # Persist blocked dates so Phase-2 GitHub cache also excludes them
-            for row in bad:
-                date_from, date_to = row[3], row[4]
-                if date_from:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) "
-                        "VALUES ('myntra', ?)", (date_from,)
-                    )
-                if date_to and date_to != date_from:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) "
-                        "VALUES ('myntra', ?)", (date_to,)
-                    )
-    except Exception:
-        pass
+        except Exception as _me:
+            import logging as _logging2
+            _logging2.getLogger("erp.daily_store").warning(
+                "daily_store migration %s failed: %s", _MIG, _me
+            )
 
     conn.commit()
     return conn
