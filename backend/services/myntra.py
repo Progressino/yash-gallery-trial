@@ -293,6 +293,16 @@ def _coalesce_myntra_dispatch_over_order_date(df: pd.DataFrame, order_dates: pd.
             continue
         need = out.isna() & d2.notna()
         out = out.mask(need, d2)
+
+    # Safety cap: if dispatch date is more than 60 days after the order date, it is
+    # almost certainly a data artifact (e.g. Jan-Mar archive rows where the *actual*
+    # dispatch date falls in April).  Fall back to order_date for those rows so they
+    # stay bucketed in the correct reporting month instead of polluting a future date.
+    _MAX_DISPATCH_LAG = pd.Timedelta(days=60)
+    _order = pd.to_datetime(order_dates, errors="coerce")
+    _lag_exceeded = out.notna() & _order.notna() & ((out - _order) > _MAX_DISPATCH_LAG)
+    out = out.mask(_lag_exceeded, _order)
+
     return out.fillna(order_dates)
 
 

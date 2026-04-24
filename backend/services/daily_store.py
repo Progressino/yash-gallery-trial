@@ -85,6 +85,31 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute("ALTER TABLE daily_uploads ADD COLUMN date_to DATE")
     except Exception:
         pass
+
+    # Migration: remove Myntra entries where ALL data dates are AFTER the file_date.
+    # This happens when _coalesce_myntra_dispatch_over_order_date() picks actual dispatch
+    # timestamps from the far future (e.g. Jan-Mar 2026 archive rows dispatched on Apr 24).
+    # Such entries corrupt the dashboard by showing historical orders under a future date.
+    try:
+        cur = conn.execute(
+            "SELECT id, filename, file_date, date_from FROM daily_uploads "
+            "WHERE platform='myntra' AND date_from IS NOT NULL AND date_from > file_date"
+        )
+        bad = cur.fetchall()
+        if bad:
+            import logging
+            _log = logging.getLogger("erp.daily_store")
+            ids = [row[0] for row in bad]
+            _log.warning(
+                "daily_store migration: removing %d Myntra entries with date_from > file_date "
+                "(dispatch-date artifact). ids=%s", len(ids), ids
+            )
+            conn.execute(
+                f"DELETE FROM daily_uploads WHERE id IN ({','.join('?' * len(ids))})", ids
+            )
+    except Exception:
+        pass
+
     conn.commit()
     return conn
 
