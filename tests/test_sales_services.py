@@ -561,7 +561,7 @@ def test_meesho_csv_linekey_prefers_sub_order_over_packet_id():
     assert out["MeeshoSubOrder"].iloc[0] == "SUB999"
 
 
-def test_myntra_csv_maps_status_f_to_shipment():
+def test_myntra_csv_maps_status_f_and_ic_to_shipment():
     from backend.services.myntra import _parse_myntra_csv
 
     csv = (
@@ -571,7 +571,7 @@ def test_myntra_csv_maps_status_f_to_shipment():
     )
     df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
     assert "OK" in msg
-    assert df["TxnType"].tolist() == ["Shipment", "Cancel"]
+    assert df["TxnType"].tolist() == ["Shipment", "Shipment"]
 
 
 def test_myntra_csv_prefers_dispatch_date_when_present(monkeypatch):

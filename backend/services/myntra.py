@@ -465,10 +465,12 @@ def _parse_myntra_csv(
                 or s.startswith("RTD") or s.startswith("RVP")
                 or s in ("R", "RS", "RD", "RTOD", "RVP", "RTN", "RSHIP")):
             return "Refund"
-        # "F" (failed / platform-cancelled) still appears on the order's created date in seller
-        # reports — count as Shipment so daily totals match line counts for that date (see Seller
-        # Orders CSV). Hard cancels use IC / FAILED / CANCEL in text.
-        if "CANCEL" in s or s in ("IC", "FAILED"):
+        # "F" and "IC" frequently appear in seller exports while quantities still need to be
+        # counted in gross month/day checks done by ops; treat both as Shipment.
+        # Keep explicit textual cancels and FAILED as cancel.
+        if s in ("F", "IC"):
+            return "Shipment"
+        if "CANCEL" in s or s in ("FAILED",):
             return "Cancel"
         if s in ("C", "SH", "PK", "D", "S", "SHIPPED", "CONFIRMED", "DELIVERED",
                  "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
