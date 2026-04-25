@@ -69,6 +69,15 @@ def upload_report_day_gate_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def myntra_overview_use_raw_enabled() -> bool:
+    """
+    Stabilization toggle: build Myntra overview card from raw parsed myntra_df.
+    This avoids unified-path drift when dedup/mapping rules suppress rows.
+    """
+    v = (os.environ.get("MYNTRA_OVERVIEW_USE_RAW") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def apply_upload_report_day_gate(sales_df: pd.DataFrame) -> pd.DataFrame:
     """
     Drop unified-sales rows for the five main marketplaces unless ``TxnDate`` (IST wall)
@@ -1225,7 +1234,7 @@ def _platform_summaries_from_unified_bulk(
         if label and label.lower() != "nan":
             parts[label] = sub
 
-    return [
+    out = [
         _unified_platform_summary_one(
             parts.get(name, pd.DataFrame()),
             name,
@@ -1235,6 +1244,14 @@ def _platform_summaries_from_unified_bulk(
         )
         for name, raw in order
     ]
+    if myntra_overview_use_raw_enabled() and not myntra_df.empty:
+        kwargs = dict(start_date=start_date, end_date=end_date)
+        myntra_raw = _compute_platform_metrics(myntra_df, "Myntra", "OMS_SKU", "TxnType", **kwargs)
+        for i, row in enumerate(out):
+            if row.get("platform") == "Myntra":
+                out[i] = myntra_raw
+                break
+    return out
 
 
 def get_platform_summary(
