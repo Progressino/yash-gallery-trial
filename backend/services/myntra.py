@@ -2,6 +2,7 @@
 Myntra PPMP loader — extracted 1-for-1 from app.py.
 """
 import io
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -306,6 +307,16 @@ def _coalesce_myntra_dispatch_over_order_date(df: pd.DataFrame, order_dates: pd.
     return out.fillna(order_dates)
 
 
+def _myntra_use_dispatch_date() -> bool:
+    """
+    When enabled, prefer dispatch/shipment dates over order-created date.
+    Default OFF to keep monthly totals aligned with seller reports that pivot on
+    created/order date.
+    """
+    v = (os.environ.get("MYNTRA_USE_DISPATCH_DATE") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _parse_myntra_csv(
     csv_bytes: bytes, filename: str, mapping: Dict[str, str]
 ) -> Tuple[pd.DataFrame, str]:
@@ -336,9 +347,10 @@ def _parse_myntra_csv(
         df.loc[null_mask, "_Date"] = pd.to_datetime(
             df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
         )
-    # DSR alignment: prefer dispatch/shipment/packed date when the export includes it,
-    # else order_created / purchase date (same row set as before when those cols absent).
-    df["_Date"] = _coalesce_myntra_dispatch_over_order_date(df, df["_Date"])
+    # Default to order-created date for stable month totals. Dispatch-date bucketing is
+    # available via MYNTRA_USE_DISPATCH_DATE=1 when explicitly needed.
+    if _myntra_use_dispatch_date():
+        df["_Date"] = _coalesce_myntra_dispatch_over_order_date(df, df["_Date"])
     df = df.dropna(subset=["_Date"])
     if df.empty:
         return pd.DataFrame(), "All dates invalid"

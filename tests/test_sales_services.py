@@ -574,9 +574,10 @@ def test_myntra_csv_maps_status_f_to_shipment():
     assert df["TxnType"].tolist() == ["Shipment", "Cancel"]
 
 
-def test_myntra_csv_prefers_dispatch_date_when_present():
+def test_myntra_csv_prefers_dispatch_date_when_present(monkeypatch):
     from backend.services.myntra import _parse_myntra_csv
 
+    monkeypatch.setenv("MYNTRA_USE_DISPATCH_DATE", "1")
     csv = (
         "created on,dispatch_date,order status,order line id,seller sku code,myntra sku code\n"
         "2026-03-29,2026-03-31,SHIPPED,L1,SK1,Y1\n"
@@ -584,6 +585,18 @@ def test_myntra_csv_prefers_dispatch_date_when_present():
     df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
     assert "OK" in msg
     assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-31").normalize()
+
+
+def test_myntra_csv_defaults_to_order_date_when_dispatch_present():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,dispatch_date,order status,order line id,seller sku code,myntra sku code\n"
+        "2026-03-29,2026-04-05,SHIPPED,L1,SK1,Y1\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
+    assert "OK" in msg
+    assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-29").normalize()
 
 
 def test_myntra_csv_prefers_order_line_id_over_store_order_id():
