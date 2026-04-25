@@ -335,6 +335,29 @@ def _myntra_use_dispatch_date() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _myntra_reverse_status_is_refund(val: str) -> bool:
+    """
+    True only for reverse statuses that clearly indicate a return/reverse leg.
+    Avoid treating arbitrary non-empty placeholders as refunds.
+    """
+    s = str(val).strip().upper()
+    if not s or s in {"NAN", "NONE", "NULL", "-", "N/A", "NA", "NO"}:
+        return False
+    if "CANCEL" in s:
+        return False
+    if is_non_rto_forward_milestone_status(s):
+        return False
+    return (
+        "RETURN" in s
+        or "REVERSE" in s
+        or "REFUND" in s
+        or s.startswith("RTO")
+        or s.startswith("RTD")
+        or s.startswith("RVP")
+        or s in {"R", "RS", "RD", "RTOD", "RVP", "RTN", "RSHIP", "REVERSE", "REV"}
+    )
+
+
 def _parse_myntra_csv(
     csv_bytes: bytes, filename: str, mapping: Dict[str, str]
 ) -> Tuple[pd.DataFrame, str]:
@@ -454,8 +477,8 @@ def _parse_myntra_csv(
     if filename.upper().startswith("RT "):
         df["_TxnType"] = "Refund"
 
-    # Step 2: if reverse_order_status column exists, override rows where it is
-    # populated with a non-trivial value → those are returns
+    # Step 2: if reverse_order_status exists, override rows that explicitly signal
+    # reverse/return states. Do not treat arbitrary non-empty values as returns.
     if reverse_col is not None:
         _rev_vals = (
             df[reverse_col]
@@ -464,11 +487,8 @@ def _parse_myntra_csv(
             .str.strip()
             .str.upper()
         )
-        _empty_markers = {"", "NAN", "NONE", "NULL", "-", "N/A", "NA", "NO"}
-        _is_return = ~_rev_vals.isin(_empty_markers)
-        # Also exclude reverse statuses that indicate the return was cancelled
-        _cancelled_reverse = _rev_vals.str.contains("CANCEL", na=False)
-        df.loc[_is_return & ~_cancelled_reverse, "_TxnType"] = "Refund"
+        _is_return = _rev_vals.map(_myntra_reverse_status_is_refund)
+        df.loc[_is_return, "_TxnType"] = "Refund"
 
     state_col  = next((c for c in df.columns if c in [
         "state", "customer_delivery_state_code", "buyer state", "ship state",

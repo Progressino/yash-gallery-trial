@@ -627,6 +627,30 @@ def test_myntra_csv_prefers_order_line_id_over_store_order_id():
     assert df["LineKey"].tolist() == ["LINEAA", "LINEBB"]
 
 
+def test_myntra_reverse_status_placeholder_does_not_force_refund():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,reverse_order_status,order line id,seller sku code,myntra sku code,quantity\n"
+        "2026-03-10,DELIVERED,NOT_APPLICABLE,L1,SK1,Y1,5\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
+    assert "OK" in msg
+    assert df["TxnType"].tolist() == ["Shipment"]
+
+
+def test_myntra_reverse_status_returned_forces_refund():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,reverse_order_status,order line id,seller sku code,myntra sku code,quantity\n"
+        "2026-03-10,DELIVERED,RETURNED,L1,SK1,Y1,5\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
+    assert "OK" in msg
+    assert df["TxnType"].tolist() == ["Refund"]
+
+
 def test_myntra_merge_platform_data_idempotent_on_reupload():
     """Re-merging the same parsed frame must not double row counts (Tier-3 / cache paths)."""
     from backend.services.daily_store import merge_platform_data
