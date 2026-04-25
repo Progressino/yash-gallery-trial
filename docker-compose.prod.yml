@@ -49,6 +49,10 @@ services:
       - USERS_DB_PATH=/data/users.db
       - MARKETPLACE_DB_PATH=/data/marketplace.db
       - MARKETPLACE_ENCRYPTION_KEY=${MARKETPLACE_ENCRYPTION_KEY}
+      # Myntra date bucketing: use dispatch/shipment date so monthly totals align with
+      # seller DSR (Myntra Seller Hub reports are dispatch-date filtered).
+      # The 60-day lag cap in the parser prevents future dispatch-date artifacts.
+      - MYNTRA_USE_DISPATCH_DATE=1
     volumes:
       - /root/app-data/finance:/data
     expose:
