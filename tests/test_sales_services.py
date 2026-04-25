@@ -1543,3 +1543,29 @@ def test_apply_upload_report_day_gate_keeps_only_covered_file_dates(monkeypatch)
     assert set(out["Source"].tolist()) == {"Myntra", "Amazon"}
     assert int(out.loc[out["Source"] == "Myntra", "Quantity"].sum()) == 2
     assert int(out.loc[out["Source"] == "Amazon", "Quantity"].sum()) == 3
+
+
+def test_apply_upload_report_day_gate_fails_open_when_channel_has_no_coverage(monkeypatch):
+    from backend.services import daily_store
+    from backend.services.sales import apply_upload_report_day_gate
+
+    monkeypatch.setenv("DASHBOARD_UPLOAD_DAY_GATE", "1")
+    monkeypatch.setattr(
+        daily_store,
+        "get_upload_report_day_coverage",
+        lambda: {"amazon": {"2026-04-09"}},  # myntra missing coverage metadata
+    )
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-03-01", "2026-03-15", "2026-04-09"]),
+            "Transaction Type": ["Shipment", "Shipment", "Shipment"],
+            "Quantity": [48, 1023, 3],
+            "Units_Effective": [48, 1023, 3],
+            "Sku": ["M1", "M2", "A1"],
+            "Source": ["Myntra", "Myntra", "Amazon"],
+            "OrderId": ["1", "2", "3"],
+        }
+    )
+    out = apply_upload_report_day_gate(df)
+    # Myntra rows are retained (fail-open) when coverage metadata is unavailable.
+    assert int(out.loc[out["Source"] == "Myntra", "Quantity"].sum()) == 1071

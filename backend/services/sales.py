@@ -98,7 +98,10 @@ def apply_upload_report_day_gate(sales_df: pd.DataFrame) -> pd.DataFrame:
             continue
         allowed = cov.get(db_key) or set()
         if not allowed:
-            keep &= ~m_src
+            # Fail-open for this channel when Tier-3 coverage metadata is missing.
+            # Prevents "Upload has data but Intelligence is blank" during transient
+            # SQLite persistence / restore mismatches.
+            continue
         else:
             keep &= (~m_src) | day_str.isin(allowed)
 
