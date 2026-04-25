@@ -418,22 +418,31 @@ def _parse_myntra_csv(
     df["_Rev"] = pd.to_numeric(df[rev_col], errors="coerce").fillna(0) if rev_col else 0.0
 
     # Status column detection (priority order)
-    # Handles both PPMP (underscore_separated) and Seller Orders Report (space separated)
-    _status_candidates = (
-        [c for c in df.columns if "order_status" in c or "order status" in c]
-        + [c for c in df.columns if c in (
-            "status", "packet_status", "shipment_status",
-            "sub_order_status", "current_status", "item_status",
-            "article_status", "delivery_status",
-            "order status", "item status", "shipment status",
-        )]
-        + [c for c in df.columns if "forward" in c or "reverse" in c]
-        + [c for c in df.columns if "status" in c]
-        + [c for c in df.columns if c in (
-            "transaction_type", "txn_type", "return_type", "order_type", "type",
-        )]
+    # Handles both PPMP (underscore_separated) and Seller Orders Report (space separated).
+    # Important: never use reverse-status columns as the primary classifier.
+    _preferred = (
+        "forward_order_status",
+        "order_status",
+        "order status",
+        "status",
+        "shipment_status",
+        "shipment status",
+        "sub_order_status",
+        "current_status",
+        "item_status",
+        "article_status",
+        "delivery_status",
+        "transaction_type",
+        "txn_type",
     )
-    status_col = next(iter(dict.fromkeys(_status_candidates)), None)
+    status_col = next((c for c in _preferred if c in df.columns), None)
+    if status_col is None:
+        _fallback = [
+            c for c in df.columns
+            if ("status" in c and "reverse" not in c)
+        ]
+        if _fallback:
+            status_col = _fallback[0]
 
     # ── Dedicated reverse_order_status column (Myntra PPMP key return signal) ──
     # PPMP files have BOTH forward_order_status AND reverse_order_status.

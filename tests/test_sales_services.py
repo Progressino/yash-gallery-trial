@@ -651,6 +651,19 @@ def test_myntra_reverse_status_returned_forces_refund():
     assert df["TxnType"].tolist() == ["Refund"]
 
 
+def test_myntra_status_prefers_order_status_over_reverse_columns():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,reverse_status,order line id,seller sku code,myntra sku code,quantity\n"
+        "2026-03-10,DELIVERED,REVERSE,L1,SK1,Y1,5\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
+    assert "OK" in msg
+    # reverse_status (non-order) must not become primary classifier
+    assert df["TxnType"].tolist() == ["Shipment"]
+
+
 def test_myntra_merge_platform_data_idempotent_on_reupload():
     """Re-merging the same parsed frame must not double row counts (Tier-3 / cache paths)."""
     from backend.services.daily_store import merge_platform_data
