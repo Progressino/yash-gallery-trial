@@ -1080,29 +1080,57 @@ def list_uploads() -> List[dict]:
 
 def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
     """
-    For each Tier-3 platform, the set of ISO calendar days (``YYYY-MM-DD``) that appear
-    as ``file_date`` on at least one persisted upload row.
+    For each Tier-3 platform, return all calendar days covered by persisted uploads.
 
-    Intelligence / dashboard gating uses this so a calendar day only counts after a
-    report was saved for that **report day** (filename-derived when possible), not
-    merely because transaction rows inside some other upload happen to fall on that day.
+    Coverage prefers the upload's actual row-date window (``date_from`` → ``date_to``),
+    and falls back to ``file_date`` for legacy rows. This keeps Intelligence in sync
+    with Upload coverage while still allowing day-level gating.
     """
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT DISTINCT platform, file_date FROM daily_uploads WHERE file_date IS NOT NULL"
+        """
+        SELECT platform, file_date, date_from, date_to
+        FROM daily_uploads
+        WHERE platform IS NOT NULL
+        """
     ).fetchall()
     conn.close()
     out: Dict[str, Set[str]] = {}
-    for plat, fd in rows:
-        if plat is None or fd is None:
+    for plat, file_date, date_from, date_to in rows:
+        if plat is None:
             continue
         p = str(plat).strip().lower()
-        raw = str(fd).strip()
-        # SQLite DATE / Python date / ISO datetime → YYYY-MM-DD
-        d = raw[:10] if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-" else ""
-        if len(d) != 10:
+        if not p:
             continue
-        out.setdefault(p, set()).add(d)
+
+        def _iso_day(v) -> Optional[datetime.date]:
+            if v is None:
+                return None
+            raw = str(v).strip()
+            if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-":
+                try:
+                    return datetime.date.fromisoformat(raw[:10])
+                except ValueError:
+                    return None
+            return None
+
+        d0 = _iso_day(date_from) or _iso_day(file_date)
+        d1 = _iso_day(date_to) or d0
+        if d0 is None:
+            continue
+        if d1 is None or d1 < d0:
+            d1 = d0
+
+        # Defensive cap: malformed ranges should not explode memory.
+        span_days = (d1 - d0).days
+        if span_days > 3700:
+            d1 = d0 + datetime.timedelta(days=3700)
+
+        bucket = out.setdefault(p, set())
+        cur = d0
+        while cur <= d1:
+            bucket.add(cur.isoformat())
+            cur += datetime.timedelta(days=1)
     return out
 
 

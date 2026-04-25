@@ -90,7 +90,6 @@ def apply_upload_report_day_gate(sales_df: pd.DataFrame) -> pd.DataFrame:
     t = txn_reporting_naive_ist(df["TxnDate"])
     day_str = t.dt.normalize().dt.strftime("%Y-%m-%d")
     src = df["Source"].astype(str).str.strip()
-    plat = src.map(_UPLOAD_GATE_SOURCE_TO_PLATFORM)
 
     keep = pd.Series(True, index=df.index)
     for p_name, db_key in _UPLOAD_GATE_SOURCE_TO_PLATFORM.items():
@@ -499,8 +498,8 @@ def get_sales_summary(
     if (start_date and str(start_date).strip()) or (end_date and str(end_date).strip()):
         if upload_report_day_gate_enabled():
             out["date_basis_note"] = (
-                "Marketplace totals only include calendar days that have a saved Tier-3 upload for that "
-                "channel with a matching report date (file_date). Days you did not upload for stay at zero."
+                "Marketplace totals only include calendar days covered by saved Tier-3 uploads for that "
+                "channel (date_from/date_to, fallback file_date)."
             )
         else:
             out["date_basis_note"] = (
