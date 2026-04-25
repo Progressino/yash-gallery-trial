@@ -21,6 +21,24 @@ from .helpers import (
 )
 
 
+_DMY_SLASH_DASH_RE = re.compile(r"^\s*\d{1,2}[-/]\d{1,2}[-/]\d{2,4}(?:\s|$)")
+
+
+def _parse_myntra_datetime_series(series: pd.Series) -> pd.Series:
+    """
+    Parse Myntra report date/time cells with a day-first fallback for D/M/Y strings.
+    Prevents month swaps like ``05-03-2026`` being read as May 3rd.
+    """
+    raw = series.astype(str)
+    out = pd.to_datetime(raw, errors="coerce")
+    dmy_mask = raw.str.match(_DMY_SLASH_DASH_RE, na=False)
+    if dmy_mask.any():
+        dmy = pd.to_datetime(raw.where(dmy_mask), errors="coerce", dayfirst=True)
+        use = dmy.notna()
+        out = out.mask(use, dmy)
+    return out
+
+
 def _tokens_for_myntra_lookup(raw) -> List[str]:
     """Expand a cell value into lookup tokens (88022920.0 vs 88022920, scientific notation, | splits)."""
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
@@ -289,7 +307,7 @@ def _coalesce_myntra_dispatch_over_order_date(df: pd.DataFrame, order_dates: pd.
     for col in candidates:
         if col not in df.columns:
             continue
-        d2 = pd.to_datetime(df[col], errors="coerce")
+        d2 = _parse_myntra_datetime_series(df[col])
         if d2.isna().all():
             continue
         need = out.isna() & d2.notna()
@@ -341,7 +359,7 @@ def _parse_myntra_csv(
     if not date_col:
         return pd.DataFrame(), "No date column found"
 
-    df["_Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df["_Date"] = _parse_myntra_datetime_series(df[date_col])
     null_mask = df["_Date"].isna()
     if null_mask.any():
         df.loc[null_mask, "_Date"] = pd.to_datetime(

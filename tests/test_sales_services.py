@@ -599,6 +599,19 @@ def test_myntra_csv_defaults_to_order_date_when_dispatch_present():
     assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-29").normalize()
 
 
+def test_myntra_csv_parses_day_first_dates_for_monthly_buckets():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,order line id,seller sku code,myntra sku code\n"
+        "05-03-2026 10:00:00,SHIPPED,L1,SK1,Y1\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
+    assert "OK" in msg
+    d = pd.Timestamp(df["Date"].iloc[0]).normalize()
+    assert d == pd.Timestamp("2026-03-05")
+
+
 def test_myntra_csv_prefers_order_line_id_over_store_order_id():
     """Seller report column order puts store order id before line id; line id must win for dedup."""
     from backend.services.myntra import _parse_myntra_csv
