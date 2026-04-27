@@ -45,6 +45,24 @@ def _session_data_changed(sess) -> None:
     """Undo pause_auto_data_restore after uploads / builds so Tier-3 merge and warm cache work again."""
     resume_auto_data_restore(sess)
 
+
+def _upload_quality_from_merge(
+    *,
+    parsed_rows: int,
+    pre_total: int,
+    post_total: int,
+    saved_rows: Optional[int] = None,
+) -> tuple[int, int, list[str]]:
+    parsed = max(0, int(parsed_rows))
+    kept = max(0, int(post_total) - int(pre_total))
+    dropped = max(0, parsed - kept)
+    reasons: list[str] = []
+    if saved_rows is not None and int(saved_rows) < parsed:
+        reasons.append(f"{parsed - int(saved_rows)} rows blocked during daily-store save")
+    if dropped > 0:
+        reasons.append(f"{dropped} rows dropped as duplicate/overlap during merge")
+    return kept, dropped, reasons
+
 _RAR_MAGIC = b"Rar!\x1a\x07"
 
 
@@ -278,18 +296,33 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
                 message=f"No valid CSV files found. Issues: {'; '.join(skipped[:5])}",
             )
 
-        save_daily_file("amazon", file.filename or "mtr-upload.zip", df)
+        pre_total = len(sess.mtr_df)
+        _fd, saved_rows = save_daily_file("amazon", file.filename or "mtr-upload.zip", df)
         sess.mtr_df = _merge_platform_data(
             sess.mtr_df, df, "amazon", source_filename=file.filename or None,
         )
         total = len(sess.mtr_df)
+        kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+            parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+        )
         years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
         _session_data_changed(sess)
         return UploadResponse(
             ok=True,
-            message=f"Amazon MTR: added {len(df):,} rows ({csv_count} files). Total: {total:,} rows.",
+            message=(
+                f"Amazon MTR: added {kept_rows:,} rows ({csv_count} files). "
+                f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                + (
+                    f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
+                    if dropped_rows > 0 else ""
+                )
+            ),
             rows=total,
+            parsed_rows=len(df),
+            kept_rows=kept_rows,
+            dropped_rows=dropped_rows,
+            dropped_reasons=dropped_reasons or None,
             years=years,
         )
     except Exception as e:
@@ -317,7 +350,8 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        save_daily_file("myntra", file.filename or "myntra-upload.zip", df)
+        pre_total = len(sess.myntra_df)
+        _fd, saved_rows = save_daily_file("myntra", file.filename or "myntra-upload.zip", df)
         sess.myntra_df = _merge_platform_data(
             sess.myntra_df, df, "myntra", source_filename=file.filename or None,
         )
@@ -344,6 +378,17 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
             if ";" in quality_line:
                 tail = quality_line.split(";", 1)[1].strip()
                 dropped_reasons = [x.strip() for x in tail.split(";") if x.strip()]
+        merge_kept, merge_dropped, merge_reasons = _upload_quality_from_merge(
+            parsed_rows=(parsed_rows if parsed_rows is not None else len(df)),
+            pre_total=pre_total,
+            post_total=total,
+            saved_rows=saved_rows,
+        )
+        kept_rows = min(int(kept_rows), int(merge_kept))
+        dropped_rows = max(int(dropped_rows or 0), int(merge_dropped))
+        for rr in merge_reasons:
+            if rr not in dropped_reasons:
+                dropped_reasons.append(rr)
 
         extra_warn = ""
         if dropped_rows and dropped_rows > 0:
@@ -356,7 +401,7 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
         return UploadResponse(
             ok=True,
             message=(
-                f"Myntra: added {len(df):,} rows ({csv_count} CSVs). "
+                f"Myntra: added {kept_rows:,} rows ({csv_count} CSVs). "
                 f"Parsed: {(parsed_rows if parsed_rows is not None else len(df)):,}, "
                 f"Kept: {kept_rows:,}. Total: {total:,} rows."
                 f"{extra_warn}"
@@ -388,7 +433,8 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 df = apply_dsr_segment_from_upload_filename(
                     df, file.filename or None, "Meesho",
                 )
-                save_daily_file("meesho", file.filename or "meesho-order.xlsx", df)
+                pre_total = len(sess.meesho_df)
+                _fd, saved_rows = save_daily_file("meesho", file.filename or "meesho-order.xlsx", df)
                 sess.meesho_df = _merge_platform_data(
                     sess.meesho_df, df, "meesho", source_filename=file.filename or None,
                 )
@@ -403,12 +449,26 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 total = len(sess.meesho_df)
                 years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
                 skus = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum())
+                kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                    parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+                )
                 background_tasks.add_task(_auto_save_cache, sess)
                 _session_data_changed(sess)
                 return UploadResponse(
                     ok=True,
-                    message=f"Meesho order export (Excel): added {len(df):,} rows ({skus:,} with SKU). Total: {total:,} rows.",
+                    message=(
+                        f"Meesho order export (Excel): added {kept_rows:,} rows ({skus:,} with SKU). "
+                        f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                        + (
+                            f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
+                            if dropped_rows > 0 else ""
+                        )
+                    ),
                     rows=total,
+                    parsed_rows=len(df),
+                    kept_rows=kept_rows,
+                    dropped_rows=dropped_rows,
+                    dropped_reasons=dropped_reasons or None,
                     years=years,
                 )
             return UploadResponse(
@@ -431,7 +491,8 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             if df.empty:
                 return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
             df = apply_dsr_segment_from_upload_filename(df, file.filename or None, "Meesho")
-            save_daily_file("meesho", file.filename or "meesho-orders.csv", df)
+            pre_total = len(sess.meesho_df)
+            _fd, saved_rows = save_daily_file("meesho", file.filename or "meesho-orders.csv", df)
             sess.meesho_df = _merge_platform_data(
                 sess.meesho_df, df, "meesho", source_filename=file.filename or None,
             )
@@ -443,12 +504,26 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
             skus  = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum()) if "SKU" in sess.meesho_df.columns else 0
+            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+            )
             background_tasks.add_task(_auto_save_cache, sess)
             _session_data_changed(sess)
             return UploadResponse(
                 ok=True,
-                message=f"Meesho Order CSV: added {len(df):,} rows ({skus:,} with SKU). Total: {total:,} rows.",
+                message=(
+                    f"Meesho Order CSV: added {kept_rows:,} rows ({skus:,} with SKU). "
+                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                    + (
+                        f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
+                        if dropped_rows > 0 else ""
+                    )
+                ),
                 rows=total,
+                parsed_rows=len(df),
+                kept_rows=kept_rows,
+                dropped_rows=dropped_rows,
+                dropped_reasons=dropped_reasons or None,
                 years=years,
             )
         else:
@@ -462,7 +537,8 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                     ok=False,
                     message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
-            save_daily_file("meesho", file.filename or "meesho-upload.zip", df)
+            pre_total = len(sess.meesho_df)
+            _fd, saved_rows = save_daily_file("meesho", file.filename or "meesho-upload.zip", df)
             sess.meesho_df = _merge_platform_data(
                 sess.meesho_df, df, "meesho", source_filename=file.filename or None,
             )
@@ -473,12 +549,26 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             )
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+            )
             background_tasks.add_task(_auto_save_cache, sess)
             _session_data_changed(sess)
             return UploadResponse(
                 ok=True,
-                message=f"Meesho: added {len(df):,} rows ({zip_count} monthly ZIPs). Total: {total:,} rows.",
+                message=(
+                    f"Meesho: added {kept_rows:,} rows ({zip_count} monthly ZIPs). "
+                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                    + (
+                        f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
+                        if dropped_rows > 0 else ""
+                    )
+                ),
                 rows=total,
+                parsed_rows=len(df),
+                kept_rows=kept_rows,
+                dropped_rows=dropped_rows,
+                dropped_reasons=dropped_reasons or None,
                 years=years,
             )
     except Exception as e:
@@ -515,18 +605,33 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        save_daily_file("flipkart", file.filename or "flipkart-upload.zip", df)
+        pre_total = len(sess.flipkart_df)
+        _fd, saved_rows = save_daily_file("flipkart", file.filename or "flipkart-upload.zip", df)
         sess.flipkart_df = _merge_platform_data(
             sess.flipkart_df, df, "flipkart", source_filename=file.filename or None,
         )
         total = len(sess.flipkart_df)
+        kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+            parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+        )
         years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
         _session_data_changed(sess)
         return UploadResponse(
             ok=True,
-            message=f"Flipkart: added {len(df):,} rows ({xlsx_count} files). Total: {total:,} rows.",
+            message=(
+                f"Flipkart: added {kept_rows:,} rows ({xlsx_count} files). "
+                f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                + (
+                    f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
+                    if dropped_rows > 0 else ""
+                )
+            ),
             rows=total,
+            parsed_rows=len(df),
+            kept_rows=kept_rows,
+            dropped_rows=dropped_rows,
+            dropped_reasons=dropped_reasons or None,
             years=years,
         )
     except Exception as e:
@@ -559,13 +664,18 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
                 message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
             )
 
-        save_daily_file("snapdeal", file.filename or "snapdeal-upload.zip", df)
+        pre_total = len(sess.snapdeal_df)
+        _fd, saved_rows = save_daily_file("snapdeal", file.filename or "snapdeal-upload.zip", df)
 
         # Snapdeal may not have OrderId — dedup on all columns
         if sess.snapdeal_df.empty:
             sess.snapdeal_df = df
         else:
             sess.snapdeal_df = pd.concat([sess.snapdeal_df, df], ignore_index=True).drop_duplicates()
+        post_total = len(sess.snapdeal_df)
+        kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+            parsed_rows=len(df), pre_total=pre_total, post_total=post_total, saved_rows=saved_rows,
+        )
 
         # Rebuild sales_df if SKU mapping is loaded
         if sess.sku_mapping:
@@ -585,9 +695,20 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
         _session_data_changed(sess)
         return UploadResponse(
             ok=True,
-            message=f"Snapdeal loaded: {len(df):,} rows from {file_count} file(s)"
-                    + (f". Warnings: {'; '.join(skipped[:3])}" if skipped else ""),
-            rows=len(df),
+            message=(
+                f"Snapdeal loaded: added {kept_rows:,} rows from {file_count} file(s). "
+                f"Parsed: {len(df):,}, Kept: {kept_rows:,}."
+                + (
+                    f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
+                    if dropped_rows > 0 else ""
+                )
+                + (f" Warnings: {'; '.join(skipped[:3])}" if skipped else "")
+            ),
+            rows=post_total,
+            parsed_rows=len(df),
+            kept_rows=kept_rows,
+            dropped_rows=dropped_rows,
+            dropped_reasons=dropped_reasons or None,
             years=years,
         )
     except Exception as e:
