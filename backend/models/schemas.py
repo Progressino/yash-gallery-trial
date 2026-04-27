@@ -12,6 +12,7 @@ class UploadResponse(BaseModel):
     kept_rows: Optional[int] = None
     dropped_rows: Optional[int] = None
     dropped_reasons: Optional[list[str]] = None
+    validation_warnings: Optional[list[str]] = None
     years: Optional[list[int]] = None
     sku_count: Optional[int] = None
     detected_platforms: Optional[list[str]] = None

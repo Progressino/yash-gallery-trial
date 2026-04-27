@@ -63,6 +63,29 @@ def _upload_quality_from_merge(
         reasons.append(f"{dropped} rows dropped as duplicate/overlap during merge")
     return kept, dropped, reasons
 
+
+def _collect_validation_warnings(skipped: List[str]) -> list[str]:
+    """
+    Pull actionable data-quality warnings from parser skipped/partial messages so the
+    user can fix source files and re-upload.
+    """
+    if not skipped:
+        return []
+    keys = (
+        "no date", "date col", "invalid date", "all dates invalid",
+        "no sku", "sku col", "no status", "status", "parse error",
+        "no data", "unrecognised", "empty file", "partial",
+    )
+    out: list[str] = []
+    for s in skipped:
+        t = str(s).strip()
+        if not t:
+            continue
+        tl = t.lower()
+        if any(k in tl for k in keys):
+            out.append(t)
+    return out[:5]
+
 _RAR_MAGIC = b"Rar!\x1a\x07"
 
 
@@ -305,6 +328,7 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
         kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
             parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
         )
+        val_warn = _collect_validation_warnings(skipped)
         years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
         _session_data_changed(sess)
@@ -317,12 +341,18 @@ async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: 
                     f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
                     if dropped_rows > 0 else ""
                 )
+                + (
+                    f" Validation issues: {' | '.join(val_warn[:3])}. "
+                    "Please fix file columns/values and re-upload."
+                    if val_warn else ""
+                )
             ),
             rows=total,
             parsed_rows=len(df),
             kept_rows=kept_rows,
             dropped_rows=dropped_rows,
             dropped_reasons=dropped_reasons or None,
+            validation_warnings=val_warn or None,
             years=years,
         )
     except Exception as e:
@@ -389,6 +419,7 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
         for rr in merge_reasons:
             if rr not in dropped_reasons:
                 dropped_reasons.append(rr)
+        val_warn = _collect_validation_warnings(skipped)
 
         extra_warn = ""
         if dropped_rows and dropped_rows > 0:
@@ -405,12 +436,18 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
                 f"Parsed: {(parsed_rows if parsed_rows is not None else len(df)):,}, "
                 f"Kept: {kept_rows:,}. Total: {total:,} rows."
                 f"{extra_warn}"
+                + (
+                    f" Validation issues: {' | '.join(val_warn[:3])}. "
+                    "Please fix file columns/values and re-upload."
+                    if val_warn else ""
+                )
             ),
             rows=total,
             parsed_rows=parsed_rows,
             kept_rows=kept_rows,
             dropped_rows=dropped_rows,
             dropped_reasons=dropped_reasons or None,
+            validation_warnings=val_warn or None,
             years=years,
         )
     except Exception as e:
@@ -452,6 +489,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
                     parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
                 )
+                val_warn: list[str] = []
                 background_tasks.add_task(_auto_save_cache, sess)
                 _session_data_changed(sess)
                 return UploadResponse(
@@ -463,12 +501,18 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                             f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
                             if dropped_rows > 0 else ""
                         )
+                        + (
+                            f" Validation issues: {' | '.join(val_warn[:3])}. "
+                            "Please fix file columns/values and re-upload."
+                            if val_warn else ""
+                        )
                     ),
                     rows=total,
                     parsed_rows=len(df),
                     kept_rows=kept_rows,
                     dropped_rows=dropped_rows,
                     dropped_reasons=dropped_reasons or None,
+                    validation_warnings=val_warn or None,
                     years=years,
                 )
             return UploadResponse(
@@ -507,6 +551,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
                 parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
             )
+            val_warn: list[str] = []
             background_tasks.add_task(_auto_save_cache, sess)
             _session_data_changed(sess)
             return UploadResponse(
@@ -518,12 +563,18 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                         f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
                         if dropped_rows > 0 else ""
                     )
+                    + (
+                        f" Validation issues: {' | '.join(val_warn[:3])}. "
+                        "Please fix file columns/values and re-upload."
+                        if val_warn else ""
+                    )
                 ),
                 rows=total,
                 parsed_rows=len(df),
                 kept_rows=kept_rows,
                 dropped_rows=dropped_rows,
                 dropped_reasons=dropped_reasons or None,
+                validation_warnings=val_warn or None,
                 years=years,
             )
         else:
@@ -552,6 +603,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
             kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
                 parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
             )
+            val_warn = _collect_validation_warnings(skipped)
             background_tasks.add_task(_auto_save_cache, sess)
             _session_data_changed(sess)
             return UploadResponse(
@@ -563,12 +615,18 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                         f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
                         if dropped_rows > 0 else ""
                     )
+                    + (
+                        f" Validation issues: {' | '.join(val_warn[:3])}. "
+                        "Please fix file columns/values and re-upload."
+                        if val_warn else ""
+                    )
                 ),
                 rows=total,
                 parsed_rows=len(df),
                 kept_rows=kept_rows,
                 dropped_rows=dropped_rows,
                 dropped_reasons=dropped_reasons or None,
+                validation_warnings=val_warn or None,
                 years=years,
             )
     except Exception as e:
@@ -614,6 +672,7 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
         kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
             parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
         )
+        val_warn = _collect_validation_warnings(skipped)
         years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
         _session_data_changed(sess)
@@ -626,12 +685,18 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
                     f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
                     if dropped_rows > 0 else ""
                 )
+                + (
+                    f" Validation issues: {' | '.join(val_warn[:3])}. "
+                    "Please fix file columns/values and re-upload."
+                    if val_warn else ""
+                )
             ),
             rows=total,
             parsed_rows=len(df),
             kept_rows=kept_rows,
             dropped_rows=dropped_rows,
             dropped_reasons=dropped_reasons or None,
+            validation_warnings=val_warn or None,
             years=years,
         )
     except Exception as e:
@@ -676,6 +741,7 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
         kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
             parsed_rows=len(df), pre_total=pre_total, post_total=post_total, saved_rows=saved_rows,
         )
+        val_warn = _collect_validation_warnings(skipped)
 
         # Rebuild sales_df if SKU mapping is loaded
         if sess.sku_mapping:
@@ -702,6 +768,11 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
                     f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
                     if dropped_rows > 0 else ""
                 )
+                + (
+                    f" Validation issues: {' | '.join(val_warn[:3])}. "
+                    "Please fix file columns/values and re-upload."
+                    if val_warn else ""
+                )
                 + (f" Warnings: {'; '.join(skipped[:3])}" if skipped else "")
             ),
             rows=post_total,
@@ -709,6 +780,7 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
             kept_rows=kept_rows,
             dropped_rows=dropped_rows,
             dropped_reasons=dropped_reasons or None,
+            validation_warnings=val_warn or None,
             years=years,
         )
     except Exception as e:
