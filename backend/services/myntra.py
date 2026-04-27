@@ -22,6 +22,8 @@ from .helpers import (
 
 
 _DMY_SLASH_DASH_RE = re.compile(r"^\s*\d{1,2}[-/]\d{1,2}[-/]\d{2,4}(?:\s|$)")
+_ISO_RANGE_IN_NAME_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[_-](\d{4}-\d{2}-\d{2})")
+_TIME_ONLY_RE = re.compile(r"^\s*\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*$")
 
 
 def _parse_myntra_datetime_series(series: pd.Series) -> pd.Series:
@@ -31,12 +33,32 @@ def _parse_myntra_datetime_series(series: pd.Series) -> pd.Series:
     """
     raw = series.astype(str)
     out = pd.to_datetime(raw, errors="coerce")
+    # Pandas interprets time-only tokens as "today HH:MM", which is wrong for reports.
+    time_only = raw.str.match(_TIME_ONLY_RE, na=False)
+    if time_only.any():
+        out = out.mask(time_only, pd.NaT)
     dmy_mask = raw.str.match(_DMY_SLASH_DASH_RE, na=False)
     if dmy_mask.any():
         dmy = pd.to_datetime(raw.where(dmy_mask), errors="coerce", dayfirst=True)
         use = dmy.notna()
         out = out.mask(use, dmy)
     return out
+
+
+def _myntra_filename_date_fallback(filename: str) -> pd.Timestamp | None:
+    """
+    Seller exports can contain time-only values (e.g. ``20:02.0``) in date columns.
+    Fall back to filename range ``YYYY-MM-DD_YYYY-MM-DD`` and use the range end date.
+    """
+    s = str(filename or "")
+    m = _ISO_RANGE_IN_NAME_RE.search(s)
+    if not m:
+        return None
+    try:
+        d1 = pd.Timestamp(m.group(2))
+        return d1.normalize()
+    except Exception:
+        return None
 
 
 def _tokens_for_myntra_lookup(raw) -> List[str]:
@@ -388,6 +410,13 @@ def _parse_myntra_csv(
         df.loc[null_mask, "_Date"] = pd.to_datetime(
             df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
         )
+    # Some seller CSVs have time-only values in created-on/shipped-on; recover month/day
+    # from filename date range so rows are not dropped as invalid.
+    if df["_Date"].isna().any():
+        _hint = _myntra_filename_date_fallback(filename)
+        if _hint is not None:
+            df["_Date"] = df["_Date"].fillna(_hint)
+
     # Default to order-created date for stable month totals. Dispatch-date bucketing is
     # available via MYNTRA_USE_DISPATCH_DATE=1 when explicitly needed.
     if _myntra_use_dispatch_date():

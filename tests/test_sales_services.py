@@ -612,6 +612,20 @@ def test_myntra_csv_parses_day_first_dates_for_monthly_buckets():
     assert d == pd.Timestamp("2026-03-05")
 
 
+def test_myntra_csv_uses_filename_range_when_created_on_is_time_only():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,order line id,seller sku code,myntra sku code,quantity\n"
+        "20:02.0,C,L1,SK1,Y1,7\n"
+    )
+    fn = "Seller_Orders_Report_36841_2026-03-01_2026-03-30_YG Myntra Mar-26.csv"
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), fn, {})
+    assert "OK" in msg
+    assert len(df) == 1
+    assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-30")
+
+
 def test_myntra_csv_prefers_order_line_id_over_store_order_id():
     """Seller report column order puts store order id before line id; line id must win for dedup."""
     from backend.services.myntra import _parse_myntra_csv
