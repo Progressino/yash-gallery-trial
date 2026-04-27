@@ -8,11 +8,19 @@ import {
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality,
-  type DailyUpload, type DailySummary,
+  type DailyUpload, type DailySummary, type UploadResponse,
 } from '../api/client'
 import { useSession } from '../store/session'
 
 type Toast = { type: 'success' | 'error'; msg: string }
+type UploadAlert = {
+  at: string
+  parsed?: number
+  kept?: number
+  dropped?: number
+  droppedReasons: string[]
+  validationWarnings: string[]
+}
 
 export default function Upload() {
   const setCoverage = useSession((s) => s.setCoverage)
@@ -22,6 +30,7 @@ export default function Upload() {
   const [toast, setToast]           = useState<Toast | null>(null)
   const [loading, setLoading]       = useState<Record<string, boolean>>({})
   const [buildingMsg, setBuildingMsg] = useState('')
+  const [uploadAlertsBySource, setUploadAlertsBySource] = useState<Record<string, UploadAlert>>({})
 
   useQuery({
     queryKey: ['coverage'],
@@ -34,15 +43,45 @@ export default function Upload() {
     setTimeout(() => setToast(null), 5000)
   }
 
+  const captureUploadAlerts = (source: string, res: UploadResponse) => {
+    const dropped = Number(res.dropped_rows ?? 0)
+    const hasDropped = dropped > 0
+    const hasValidation = (res.validation_warnings?.length ?? 0) > 0
+    if (!hasDropped && !hasValidation) return
+
+    const next: UploadAlert = {
+      at: new Date().toLocaleString(),
+      parsed: res.parsed_rows,
+      kept: res.kept_rows,
+      dropped: res.dropped_rows,
+      droppedReasons: res.dropped_reasons ?? [],
+      validationWarnings: res.validation_warnings ?? [],
+    }
+    setUploadAlertsBySource(prev => ({ ...prev, [source]: next }))
+  }
+
+  const clearUploadAlert = (source: string) => {
+    setUploadAlertsBySource(prev => {
+      if (!prev[source]) return prev
+      const next = { ...prev }
+      delete next[source]
+      return next
+    })
+  }
+
   const setL = (key: string, v: boolean) => setLoading(prev => ({ ...prev, [key]: v }))
 
   const refresh = async () => { const c = await getCoverage(); setCoverage(c); qc.invalidateQueries() }
 
-  const handle = (key: string, fn: (file: File) => Promise<{ ok: boolean; message: string }>) => async (file: File) => {
+  const handle = (key: string, fn: (file: File) => Promise<UploadResponse>) => async (file: File) => {
     setL(key, true)
     try {
       const res = await fn(file)
-      if (res.ok) { showToast('success', res.message); await refresh() }
+      if (res.ok) {
+        captureUploadAlerts(key, res)
+        showToast('success', res.message)
+        await refresh()
+      }
       else showToast('error', res.message)
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Upload failed')
@@ -183,6 +222,8 @@ export default function Upload() {
           title="1️⃣ SKU Mapping"
           subtitle="Master Yash map (~all panels) ships with the app. Upload your .xlsx to replace or extend it."
           loaded={coverage.sku_mapping}
+          alert={uploadAlertsBySource['sku_mapping']}
+          onClearAlert={() => clearUploadAlert('sku_mapping')}
         >
           <FileUpload
             label="Upload .xlsx"
@@ -193,6 +234,7 @@ export default function Upload() {
                 const res = await uploadSkuMapping(file)
                 setSkuMapGaps(res.unmapped_skus ?? [])
                 if (res.ok) {
+                  captureUploadAlerts('sku_mapping', res)
                   showToast('success', res.message)
                   await refresh()
                 } else showToast('error', res.message)
@@ -222,7 +264,7 @@ export default function Upload() {
           )}
         </UploadCard>
 
-        <UploadCard title="2️⃣ Amazon" subtitle="MTR master ZIP or RAR — upload multiple; data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']}>
+        <UploadCard title="2️⃣ Amazon" subtitle="MTR master ZIP or RAR — upload multiple; data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']} alert={uploadAlertsBySource['mtr']} onClearAlert={() => clearUploadAlert('mtr')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip or .rar"
@@ -239,7 +281,7 @@ export default function Upload() {
 
       {/* Tier 1 — Platforms */}
       <Section title="Tier 1 — Platform history (bulk / multi-year)">
-        <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={handleClear('myntra')} clearing={loading['clear_myntra']}>
+        <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={handleClear('myntra')} clearing={loading['clear_myntra']} alert={uploadAlertsBySource['myntra']} onClearAlert={() => clearUploadAlert('myntra')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
@@ -249,7 +291,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🛒 Meesho" subtitle="ZIP (TCS/ledger), Order CSV, or unified sales Excel (.xlsx/.xls) — select multiple" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']}>
+        <UploadCard title="🛒 Meesho" subtitle="ZIP (TCS/ledger), Order CSV, or unified sales Excel (.xlsx/.xls) — select multiple" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']} alert={uploadAlertsBySource['meesho']} onClearAlert={() => clearUploadAlert('meesho')}>
           <FileUpload
             label="Upload .zip, .csv, .xlsx, or .xls (select multiple)"
             accept={{
@@ -266,7 +308,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🟡 Flipkart" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.flipkart} rows={coverage.flipkart_rows} onClear={handleClear('flipkart')} clearing={loading['clear_flipkart']}>
+        <UploadCard title="🟡 Flipkart" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.flipkart} rows={coverage.flipkart_rows} onClear={handleClear('flipkart')} clearing={loading['clear_flipkart']} alert={uploadAlertsBySource['flipkart']} onClearAlert={() => clearUploadAlert('flipkart')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
@@ -276,7 +318,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🔴 Snapdeal" subtitle="OMS order reports (CSV/ZIP) or AG/PE/YG ZIPs" loaded={coverage.snapdeal} rows={coverage.snapdeal_rows} onClear={handleClear('snapdeal')} clearing={loading['clear_snapdeal']}>
+        <UploadCard title="🔴 Snapdeal" subtitle="OMS order reports (CSV/ZIP) or AG/PE/YG ZIPs" loaded={coverage.snapdeal} rows={coverage.snapdeal_rows} onClear={handleClear('snapdeal')} clearing={loading['clear_snapdeal']} alert={uploadAlertsBySource['snapdeal']} onClearAlert={() => clearUploadAlert('snapdeal')}>
           <FileUpload
             label="Upload files (select multiple)"
             accept={{ 'application/zip': ['.zip'], 'text/csv': ['.csv'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }}
@@ -310,7 +352,7 @@ export default function Upload() {
 
       {/* Tier 2 — Amazon Individual CSVs + Existing PO */}
       <Section title="Tier 2 — Amazon Orders & PO Pipeline">
-        <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false}>
+        <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false} alert={uploadAlertsBySource['b2c']} onClearAlert={() => clearUploadAlert('b2c')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload MTR .csv"
@@ -320,7 +362,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="📋 Amazon B2B CSV" subtitle="Single-month B2B report CSV" loaded={false}>
+        <UploadCard title="📋 Amazon B2B CSV" subtitle="Single-month B2B report CSV" loaded={false} alert={uploadAlertsBySource['b2b']} onClearAlert={() => clearUploadAlert('b2b')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload B2B .csv"
@@ -330,7 +372,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="📦 Existing PO Sheet" subtitle="Open/pending POs (XLSX or CSV)" loaded={coverage.existing_po}>
+        <UploadCard title="📦 Existing PO Sheet" subtitle="Open/pending POs (XLSX or CSV)" loaded={coverage.existing_po} alert={uploadAlertsBySource['existingpo']} onClearAlert={() => clearUploadAlert('existingpo')}>
           <FileUpload
             label="Upload PO Sheet"
             accept={{
@@ -573,10 +615,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function UploadCard({
-  title, subtitle, loaded, rows, onClear, clearing, children,
+  title, subtitle, loaded, rows, onClear, clearing, alert, onClearAlert, children,
 }: {
   title: string; subtitle: string; loaded: boolean
   rows?: number; onClear?: () => void; clearing?: boolean
+  alert?: UploadAlert; onClearAlert?: () => void
   children: React.ReactNode
 }) {
   return (
@@ -604,6 +647,35 @@ function UploadCard({
           )}
         </div>
       </div>
+      {alert && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs">
+          <div className="flex items-start justify-between gap-2">
+            <p className="font-medium text-amber-900">
+              Import warnings · {alert.at}
+            </p>
+            {onClearAlert && (
+              <button
+                type="button"
+                className="shrink-0 px-1.5 py-0.5 rounded border border-amber-300 text-amber-800 hover:bg-amber-100"
+                onClick={onClearAlert}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <p className="text-gray-700 mt-0.5">
+            Parsed: {alert.parsed ?? '—'} · Kept: {alert.kept ?? '—'} · Dropped: {alert.dropped ?? 0}
+          </p>
+          {alert.droppedReasons.length > 0 && (
+            <p className="text-amber-900 mt-1">Dropped reasons: {alert.droppedReasons.join(' | ')}</p>
+          )}
+          {alert.validationWarnings.length > 0 && (
+            <ul className="mt-1 list-disc list-inside text-amber-900">
+              {alert.validationWarnings.map((w, wi) => <li key={`${alert.at}-${wi}`}>{w}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
       {children}
     </div>
   )

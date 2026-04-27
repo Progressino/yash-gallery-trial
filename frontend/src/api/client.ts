@@ -17,6 +17,11 @@ export interface UploadResponse {
   ok: boolean
   message: string
   rows?: number
+  parsed_rows?: number
+  kept_rows?: number
+  dropped_rows?: number
+  dropped_reasons?: string[]
+  validation_warnings?: string[]
   years?: number[]
   sku_count?: number
   detected_platforms?: string[]
