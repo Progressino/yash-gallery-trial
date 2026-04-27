@@ -7,6 +7,11 @@ class UploadResponse(BaseModel):
     ok: bool
     message: str
     rows: Optional[int] = None
+    # Import quality diagnostics (optional; set by parsers that can measure row drops)
+    parsed_rows: Optional[int] = None
+    kept_rows: Optional[int] = None
+    dropped_rows: Optional[int] = None
+    dropped_reasons: Optional[list[str]] = None
     years: Optional[list[int]] = None
     sku_count: Optional[int] = None
     detected_platforms: Optional[list[str]] = None

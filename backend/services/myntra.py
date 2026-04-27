@@ -390,6 +390,7 @@ def _parse_myntra_csv(
 
     if df.empty:
         return pd.DataFrame(), "Empty file"
+    _rows_in = len(df)
 
     df.columns = df.columns.str.strip().str.lower()
 
@@ -422,6 +423,7 @@ def _parse_myntra_csv(
     if _myntra_use_dispatch_date():
         df["_Date"] = _coalesce_myntra_dispatch_over_order_date(df, df["_Date"])
     df = df.dropna(subset=["_Date"])
+    _dropped_invalid_date = max(0, _rows_in - len(df))
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
 
@@ -583,7 +585,13 @@ def _parse_myntra_csv(
     })
     out["Month"]       = out["Date"].dt.to_period("M").astype(str)
     out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
-    return out, f"OK | status_col={status_col!r}"
+    return (
+        out,
+        (
+            f"OK | status_col={status_col!r} | rows_in={_rows_in} | "
+            f"rows_out={len(out)} | dropped_invalid_date={_dropped_invalid_date}"
+        ),
+    )
 
 
 def load_myntra_from_zip(
@@ -597,6 +605,9 @@ def load_myntra_from_zip(
     """
     dfs: List[pd.DataFrame] = []
     skipped: List[str] = []
+    parsed_rows = 0
+    kept_rows_pre_dedup = 0
+    dropped_invalid_total = 0
 
     try:
         root_zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
@@ -610,10 +621,19 @@ def load_myntra_from_zip(
         try:
             data = root_zf.read(item_name)
             df, msg = _parse_myntra_csv(data, base, mapping)
+            m_in = re.search(r"rows_in=(\d+)", msg or "")
+            m_bad = re.search(r"dropped_invalid_date=(\d+)", msg or "")
+            if m_in:
+                parsed_rows += int(m_in.group(1))
+            else:
+                parsed_rows += int(len(df))
+            if m_bad:
+                dropped_invalid_total += int(m_bad.group(1))
             if df.empty:
                 skipped.append(f"{base}: {msg}")
             else:
                 dfs.append(df)
+                kept_rows_pre_dedup += int(len(df))
                 if not msg.startswith("OK"):
                     skipped.append(f"{base}: Partial ({msg})")
         except Exception as e:
@@ -627,7 +647,23 @@ def load_myntra_from_zip(
     from .helpers import apply_dsr_segment_from_upload_filename
 
     combined = _dedup_platform_df(combined, "myntra")
+    kept_rows_post_dedup = int(len(combined))
+    dedup_dropped = max(0, kept_rows_pre_dedup - kept_rows_post_dedup)
     combined = apply_dsr_segment_from_upload_filename(combined, source_filename, "Myntra")
+    dropped_total = max(0, parsed_rows - kept_rows_post_dedup)
+    if dropped_total > 0:
+        reason_bits: List[str] = []
+        if dropped_invalid_total > 0:
+            reason_bits.append(f"{dropped_invalid_total} invalid/undetected date rows")
+        if dedup_dropped > 0:
+            reason_bits.append(f"{dedup_dropped} duplicate rows")
+        if not reason_bits:
+            reason_bits.append(f"{dropped_total} rows filtered")
+        skipped.append(
+            "IMPORT_QUALITY: "
+            f"parsed={parsed_rows}, kept={kept_rows_post_dedup}, dropped={dropped_total}; "
+            + "; ".join(reason_bits)
+        )
     return combined, len(csv_items), skipped
 
 

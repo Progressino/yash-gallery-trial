@@ -325,10 +325,47 @@ async def upload_myntra(request: Request, background_tasks: BackgroundTasks, fil
         years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
         background_tasks.add_task(_auto_save_cache, sess)
         _session_data_changed(sess)
+        quality_line = next((s for s in skipped if str(s).startswith("IMPORT_QUALITY:")), "")
+        parsed_rows = None
+        kept_rows = int(len(df))
+        dropped_rows = None
+        dropped_reasons: list[str] = []
+        if quality_line:
+            import re as _re
+            m_parsed = _re.search(r"parsed=(\d+)", quality_line)
+            m_kept = _re.search(r"kept=(\d+)", quality_line)
+            m_drop = _re.search(r"dropped=(\d+)", quality_line)
+            if m_parsed:
+                parsed_rows = int(m_parsed.group(1))
+            if m_kept:
+                kept_rows = int(m_kept.group(1))
+            if m_drop:
+                dropped_rows = int(m_drop.group(1))
+            if ";" in quality_line:
+                tail = quality_line.split(";", 1)[1].strip()
+                dropped_reasons = [x.strip() for x in tail.split(";") if x.strip()]
+
+        extra_warn = ""
+        if dropped_rows and dropped_rows > 0:
+            reason_txt = f" ({'; '.join(dropped_reasons)})" if dropped_reasons else ""
+            extra_warn = (
+                f" Warning: {dropped_rows:,} rows were dropped during import{reason_txt}. "
+                "Please fix source rows before relying on dashboard totals."
+            )
+
         return UploadResponse(
             ok=True,
-            message=f"Myntra: added {len(df):,} rows ({csv_count} CSVs). Total: {total:,} rows.",
+            message=(
+                f"Myntra: added {len(df):,} rows ({csv_count} CSVs). "
+                f"Parsed: {(parsed_rows if parsed_rows is not None else len(df)):,}, "
+                f"Kept: {kept_rows:,}. Total: {total:,} rows."
+                f"{extra_warn}"
+            ),
             rows=total,
+            parsed_rows=parsed_rows,
+            kept_rows=kept_rows,
+            dropped_rows=dropped_rows,
+            dropped_reasons=dropped_reasons or None,
             years=years,
         )
     except Exception as e:
