@@ -806,26 +806,42 @@ def save_daily_file(
             _sl = _sl.getLogger("erp.daily_store")
             _d_from = datetime.date.fromisoformat(date_from)
             _f_date = datetime.date.fromisoformat(file_date)
+            # When Myntra dispatch-date bucketing is explicitly enabled, date ranges may
+            # legitimately extend past file_date in archive imports (e.g. dispatch-filtered
+            # monthly extracts). Do not block these saves.
+            _allow_myntra_dispatch = (
+                str(platform).strip().lower() == "myntra"
+                and (os.environ.get("MYNTRA_USE_DISPATCH_DATE") or "").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
             if _d_from > _f_date:
-                _sl.warning(
-                    "save_daily_file BLOCKED %s '%s': date_from=%s is after file_date=%s "
-                    "(dispatch-date artifact). Entry NOT saved to SQLite.",
-                    platform, filename[:80], date_from, file_date,
-                )
-                # Persist to blocked_dates so Phase-2 GitHub cache also strips it
-                _bc = _get_conn()
-                _bc.execute(
-                    "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) VALUES (?, ?)",
-                    (platform, date_from),
-                )
-                if date_to and date_to != date_from:
+                if _allow_myntra_dispatch:
+                    _sl.info(
+                        "save_daily_file ALLOW myntra dispatch-mode '%s': date_from=%s > file_date=%s",
+                        filename[:80], date_from, file_date,
+                    )
+                    # keep saving, do not mark blocked date
+                    pass
+                else:
+                    _sl.warning(
+                        "save_daily_file BLOCKED %s '%s': date_from=%s is after file_date=%s "
+                        "(dispatch-date artifact). Entry NOT saved to SQLite.",
+                        platform, filename[:80], date_from, file_date,
+                    )
+                    # Persist to blocked_dates so Phase-2 GitHub cache also strips it
+                    _bc = _get_conn()
                     _bc.execute(
                         "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) VALUES (?, ?)",
-                        (platform, date_to),
+                        (platform, date_from),
                     )
-                _bc.commit()
-                _bc.close()
-                return file_date, 0
+                    if date_to and date_to != date_from:
+                        _bc.execute(
+                            "INSERT OR IGNORE INTO platform_blocked_dates (platform, date) VALUES (?, ?)",
+                            (platform, date_to),
+                        )
+                    _bc.commit()
+                    _bc.close()
+                    return file_date, 0
         except Exception:
             pass  # Never block a save due to a validation bug
 
