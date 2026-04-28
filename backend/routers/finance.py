@@ -813,7 +813,9 @@ def _process_monthly_package_bytes(
             amz_rows += len(df)
             if "Invoice_Amount" in df.columns and "Transaction_Type" in df.columns:
                 amz_rev += float(df[df["Transaction_Type"] == "Shipment"]["Invoice_Amount"].sum())
-                amz_ret += float(df[df["Transaction_Type"] == "Return"]["Invoice_Amount"].sum())
+                # Amazon parser emits Refund; some legacy files may emit Return.
+                ret_mask = df["Transaction_Type"].isin(["Return", "Refund"])
+                amz_ret += float(df.loc[ret_mask, "Invoice_Amount"].abs().sum())
             elif "Invoice_Amount" in df.columns:
                 amz_rev += float(df["Invoice_Amount"].sum())
         except Exception as e:
@@ -1048,7 +1050,12 @@ async def upload_sales_file(
     if df is not None and not df.empty:
         if ship_col in df.columns and amt_col in df.columns:
             total_revenue = float(df[df[ship_col] == ship_val][amt_col].sum())
-            total_returns = float(df[df[ship_col] == ret_val][amt_col].sum())
+            if platform_lc in ('amazon', 'amazon mtr', 'mtr'):
+                # Amazon parser uses Refund labels; keep returns as positive value.
+                ret_mask = df[ship_col].isin([ret_val, 'Refund'])
+                total_returns = float(df.loc[ret_mask, amt_col].abs().sum())
+            else:
+                total_returns = float(df[df[ship_col] == ret_val][amt_col].abs().sum())
         elif amt_col in df.columns:
             total_revenue = float(df[amt_col].sum())
 
