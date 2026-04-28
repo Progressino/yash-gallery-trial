@@ -2784,6 +2784,15 @@ function SalesUploadsTab() {
   })
 
   const isPackage = platform === 'Monthly Package'
+  const statsContext = useMemo(() => {
+    const company = result?.company_breakdown?.[0]
+    const state = result?.state_breakdown?.[0]?.state || 'Unknown'
+    return {
+      companyName: company?.company || 'Unknown',
+      gstin: company?.seller_gstin || 'UNKNOWN',
+      state,
+    }
+  }, [result])
 
   async function handleFile(file: File) {
     if (!period) { setErr('Select a period (month) before uploading.'); return }
@@ -3020,11 +3029,18 @@ function SalesUploadsTab() {
             ) : (
               /* Single platform result */
               <>
-                <div className="flex items-center gap-2">
-                  <span className="text-green-600 text-lg">✅</span>
-                  <div>
-                    <p className="text-sm font-semibold text-green-800">Upload saved — {(result.rows_parsed ?? result.total_orders).toLocaleString()} rows parsed</p>
-                    <p className="text-xs text-green-600">{result.filename} · {result.platform} · {result.period}</p>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-green-600 text-lg">✅</span>
+                    <div>
+                      <p className="text-sm font-semibold text-green-800">Upload saved — {(result.rows_parsed ?? result.total_orders).toLocaleString()} rows parsed</p>
+                      <p className="text-xs text-green-600">{result.filename} · {result.platform} · {result.period}</p>
+                    </div>
+                  </div>
+                  <div className="shrink-0 bg-white rounded-lg border border-green-200 px-3 py-2 text-[11px] text-right">
+                    <p className="font-semibold text-gray-700">{statsContext.companyName}</p>
+                    <p className="text-gray-500">GSTIN: {statsContext.gstin}</p>
+                    <p className="text-gray-500">State: {statsContext.state}</p>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
