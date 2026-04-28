@@ -37,6 +37,7 @@ def _platform_rev(df: pd.DataFrame, txn_col: str, ship_val: str = "Shipment", re
 def get_platform_revenue_from_finance_uploads(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    company: Optional[str] = None,
 ) -> list[dict]:
     """
     Revenue/returns from Finance → Sales Uploads only (finance.db).
@@ -45,7 +46,7 @@ def get_platform_revenue_from_finance_uploads(
     """
     p_from = (start_date or "1970-01")[:7]
     p_to = (end_date or "2099-12")[:7]
-    rows = list_finance_sales_uploads(period_from=p_from, period_to=p_to)
+    rows = list_finance_sales_uploads(period_from=p_from, period_to=p_to, company=company)
     if not rows:
         return []
 
@@ -162,6 +163,7 @@ def get_pl_statement(
     start_date: Optional[str] = None,
     end_date:   Optional[str] = None,
     revenue_source: str = "session",
+    finance_company: Optional[str] = None,
 ) -> dict:
     """Full P&L statement.
 
@@ -170,7 +172,7 @@ def get_pl_statement(
       - ``finance_lock`` — totals from Finance → Sales Uploads (finance.db) only.
     """
     if revenue_source == "finance_lock":
-        platform_data = get_platform_revenue_from_finance_uploads(start_date, end_date)
+        platform_data = get_platform_revenue_from_finance_uploads(start_date, end_date, company=finance_company)
     else:
         platform_data = get_platform_revenue(
             mtr_df, myntra_df, meesho_df, flipkart_df, start_date, end_date

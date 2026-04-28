@@ -132,6 +132,9 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS finance_sales_uploads (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             platform      TEXT    NOT NULL,
+            company_name  TEXT    DEFAULT '',
+            seller_gstin  TEXT    DEFAULT '',
+            company_state TEXT    DEFAULT '',
             period        TEXT    NOT NULL,
             filename      TEXT    DEFAULT '',
             total_revenue REAL    DEFAULT 0,
@@ -176,6 +179,17 @@ def init_db() -> None:
         )
     """)
 
+    conn.commit()
+    # ── Migrate finance_sales_uploads — add company context columns ─────
+    for col_ddl in [
+        "ALTER TABLE finance_sales_uploads ADD COLUMN company_name TEXT DEFAULT ''",
+        "ALTER TABLE finance_sales_uploads ADD COLUMN seller_gstin TEXT DEFAULT ''",
+        "ALTER TABLE finance_sales_uploads ADD COLUMN company_state TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(col_ddl)
+        except Exception:
+            pass
     conn.commit()
 
     # ── Migrate expense_vouchers — add payment/bank columns ───────
@@ -1001,6 +1015,7 @@ def list_finance_sales_uploads(
     period: Optional[str] = None,
     period_from: Optional[str] = None,
     period_to: Optional[str] = None,
+    company: Optional[str] = None,
 ) -> list[dict]:
     conn = _connect()
     query = "SELECT * FROM finance_sales_uploads WHERE 1=1"
@@ -1018,6 +1033,9 @@ def list_finance_sales_uploads(
     if period_to:
         query += " AND period <= ?"
         params.append(period_to[:7])
+    if company:
+        query += " AND (company_name = ? OR seller_gstin = ?)"
+        params.extend([company, company])
     query += " ORDER BY period DESC, id DESC"
     rows = conn.execute(query, params).fetchall()
     conn.close()
@@ -1028,11 +1046,14 @@ def create_finance_sales_upload(data: dict) -> int:
     conn = _connect()
     cur = conn.execute(
         """INSERT INTO finance_sales_uploads
-           (platform, period, filename, total_revenue, total_orders,
+           (platform, company_name, seller_gstin, company_state, period, filename, total_revenue, total_orders,
             total_returns, net_revenue, uploaded_by, upload_notes)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             data.get('platform') or '',
+            data.get('company_name') or '',
+            data.get('seller_gstin') or '',
+            data.get('company_state') or '',
             data.get('period') or '',
             data.get('filename') or '',
             data.get('total_revenue') or 0,

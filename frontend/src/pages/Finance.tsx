@@ -141,6 +141,9 @@ interface Voucher {
 interface SalesUpload {
   id:            number
   platform:      string
+  company_name?: string
+  seller_gstin?: string
+  company_state?: string
   period:        string
   filename:      string
   total_revenue: number
@@ -249,6 +252,7 @@ export default function Finance() {
   const [activePreset, setActivePreset] = useState<string>('90D')
   /** Finance Sales Uploads (locked) vs operational session (Upload page — Dashboard / PO) */
   const [revenueSource, setRevenueSource] = useState<'finance_lock' | 'session'>('finance_lock')
+  const [financeCompany, setFinanceCompany] = useState('')
 
   // Expense form state
   const [expDate,  setExpDate]  = useState(TODAY)
@@ -278,8 +282,26 @@ export default function Finance() {
   const plAndRevQ = useMemo(() => {
     const p = new URLSearchParams(dateQ)
     p.set('revenue_source', revenueSource)
+    if (financeCompany && revenueSource === 'finance_lock') p.set('finance_company', financeCompany)
     return p.toString()
-  }, [dateQ, revenueSource])
+  }, [dateQ, revenueSource, financeCompany])
+
+  const { data: financeUploadRows = [] } = useQuery<SalesUpload[]>({
+    queryKey: ['finance-company-options'],
+    queryFn: async () => { const { data } = await api.get('/finance/sales-uploads'); return data },
+    staleTime: 5 * 60 * 1000,
+  })
+  const financeCompanyOptions = useMemo(() => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const r of financeUploadRows) {
+      const c = (r.company_name || '').trim()
+      const g = (r.seller_gstin || '').trim()
+      if (c && !seen.has(c)) { seen.add(c); out.push(c) }
+      if (g && !seen.has(g)) { seen.add(g); out.push(g) }
+    }
+    return out.sort((a, b) => a.localeCompare(b))
+  }, [financeUploadRows])
 
   // ── Queries ──────────────────────────────────────────────────
   const { data: pl, isLoading: loadPL } = useQuery<PLStatement>({
@@ -465,6 +487,16 @@ export default function Finance() {
                 <option value="finance_lock">Finance Sales Uploads (locked DB — separate from Dashboard)</option>
                 <option value="session">Operational (Upload page — same as Dashboard / PO)</option>
               </select>
+              {revenueSource === 'finance_lock' && (
+                <select
+                  value={financeCompany}
+                  onChange={e => setFinanceCompany(e.target.value)}
+                  className="text-xs border border-gray-200 rounded px-2 py-1.5 text-gray-700 max-w-[280px] focus:outline-none focus:ring-1 focus:ring-blue-300"
+                >
+                  <option value="">All companies / GSTIN</option>
+                  {financeCompanyOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
             </div>
           )}
         </div>
@@ -2737,7 +2769,8 @@ interface UploadResult {
   net_revenue: number; rows_parsed?: number
   skipped?: string[]
   state_breakdown?: { state: string; orders: number; gross_revenue: number; returns: number; net_revenue: number }[]
-  company_breakdown?: { company: string; seller_gstin: string; orders: number; gross_revenue: number; returns: number; net_revenue: number }[]
+  company_breakdown?: { company: string; seller_gstin: string; company_state?: string; orders: number; gross_revenue: number; returns: number; net_revenue: number }[]
+  saved_companies?: { id: number; company: string; seller_gstin: string; company_state: string; orders: number; gross_revenue: number; returns: number; net_revenue: number }[]
   // Monthly package fields
   saved?: { platform: string; id: number; orders: number; revenue: number; returns: number; net_revenue: number; note?: string }[]
 }
@@ -2766,17 +2799,30 @@ function SalesUploadsTab() {
   const [err,         setErr]         = useState('')
   const [filterPlatform, setFilterPlatform] = useState('')
   const [filterPeriod,   setFilterPeriod]   = useState('')
+  const [filterCompany,  setFilterCompany]  = useState('')
 
   const { data: uploads = [], isLoading } = useQuery<SalesUpload[]>({
-    queryKey: ['finance-sales-uploads', filterPlatform, filterPeriod],
+    queryKey: ['finance-sales-uploads', filterPlatform, filterPeriod, filterCompany],
     queryFn: async () => {
       const params = new URLSearchParams()
       if (filterPlatform) params.set('platform', filterPlatform)
       if (filterPeriod)   params.set('period',   filterPeriod)
+      if (filterCompany)  params.set('company',  filterCompany)
       const { data } = await api.get(`/finance/sales-uploads?${params}`)
       return data
     },
   })
+  const companyOptions = useMemo(() => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const r of uploads) {
+      const c = (r.company_name || '').trim()
+      const g = (r.seller_gstin || '').trim()
+      if (c && !seen.has(c)) { seen.add(c); out.push(c) }
+      if (g && !seen.has(g)) { seen.add(g); out.push(g) }
+    }
+    return out.sort((a, b) => a.localeCompare(b))
+  }, [uploads])
 
   const delMut = useMutation({
     mutationFn: (id: number) => api.delete(`/finance/sales-uploads/${id}`),
@@ -3043,6 +3089,11 @@ function SalesUploadsTab() {
                     <p className="text-gray-500">State: {statsContext.state}</p>
                   </div>
                 </div>
+                {result.saved_companies && result.saved_companies.length > 0 && (
+                  <div className="mt-2 text-xs text-emerald-700">
+                    Saved {result.saved_companies.length} company row(s) for this upload.
+                  </div>
+                )}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {[
                     { label: 'Gross Revenue', value: fmt(result.total_revenue), color: 'text-gray-800' },
@@ -3137,8 +3188,13 @@ function SalesUploadsTab() {
         </select>
         <input type="month" value={filterPeriod} onChange={e => setFilterPeriod(e.target.value)}
           className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none" />
-        {(filterPlatform || filterPeriod) && (
-          <button onClick={() => { setFilterPlatform(''); setFilterPeriod('') }}
+        <select value={filterCompany} onChange={e => setFilterCompany(e.target.value)}
+          className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none">
+          <option value="">All Companies / GSTIN</option>
+          {companyOptions.map(c => <option key={c}>{c}</option>)}
+        </select>
+        {(filterPlatform || filterPeriod || filterCompany) && (
+          <button onClick={() => { setFilterPlatform(''); setFilterPeriod(''); setFilterCompany('') }}
             className="text-xs text-gray-400 hover:text-gray-600">Clear</button>
         )}
       </div>
@@ -3158,6 +3214,9 @@ function SalesUploadsTab() {
               <thead>
                 <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
                   <th className="px-3 py-2.5 text-left">Platform</th>
+                  <th className="px-3 py-2.5 text-left">Company</th>
+                  <th className="px-3 py-2.5 text-left">GSTIN</th>
+                  <th className="px-3 py-2.5 text-left">State</th>
                   <th className="px-3 py-2.5 text-left">Period</th>
                   <th className="px-3 py-2.5 text-left">File</th>
                   <th className="px-3 py-2.5 text-right">Gross Rev</th>
@@ -3177,6 +3236,9 @@ function SalesUploadsTab() {
                       <span style={{ backgroundColor: PLATFORM_COLORS[u.platform] ?? '#6B7280' }}
                         className="text-white px-1.5 py-0.5 rounded text-[10px] font-semibold">{u.platform}</span>
                     </td>
+                    <td className="px-3 py-2 text-gray-700">{u.company_name || '—'}</td>
+                    <td className="px-3 py-2 text-gray-500">{u.seller_gstin || '—'}</td>
+                    <td className="px-3 py-2 text-gray-500">{u.company_state || '—'}</td>
                     <td className="px-3 py-2 font-medium text-gray-700">{u.period}</td>
                     <td className="px-3 py-2 text-gray-500 max-w-[120px] truncate" title={u.filename}>{u.filename || '—'}</td>
                     <td className="px-3 py-2 text-right text-gray-700">{fmt(u.total_revenue)}</td>
@@ -3198,7 +3260,7 @@ function SalesUploadsTab() {
               {uploads.length > 0 && (
                 <tfoot>
                   <tr className="bg-[#002B5B] text-white text-xs font-semibold">
-                    <td className="px-3 py-2.5" colSpan={3}>Total ({uploads.length} records)</td>
+                    <td className="px-3 py-2.5" colSpan={6}>Total ({uploads.length} records)</td>
                     <td className="px-3 py-2.5 text-right">{fmt(uploads.reduce((s,u)=>s+u.total_revenue,0))}</td>
                     <td className="px-3 py-2.5 text-right">{fmt(uploads.reduce((s,u)=>s+u.total_returns,0))}</td>
                     <td className="px-3 py-2.5 text-right">{fmt(uploads.reduce((s,u)=>s+u.net_revenue,0))}</td>

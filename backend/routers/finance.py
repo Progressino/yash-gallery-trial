@@ -47,6 +47,22 @@ from ..services.finance import (
 )
 
 _FINANCE_PIN = os.environ.get("FINANCE_PIN", "").strip()
+_GSTIN_COMPANY_MAP = {
+    "08AABCY3804E1ZJ": ("Yash Gallery Pvt Ltd Rajasthan", "Rajasthan"),
+    "06AABCY3804E1ZN": ("Yash Gallery Pvt Ltd Haryana", "Haryana"),
+    "29AABCY3804E1ZF": ("Yash Gallery Pvt Ltd Karnataka", "Karnataka"),
+    "27AABCY3804E1ZJ": ("Yash Gallery Pvt Ltd Maharashtra", "Maharashtra"),
+    "33AABCY3804E1ZQ": ("Yash Gallery Pvt Ltd Tamil Nadu", "Tamil Nadu"),
+    "36AABCY3804E1ZK": ("Yash Gallery Pvt Ltd Telangana", "Telangana"),
+    "09AABCY3804E1ZH": ("Yash Gallery Pvt Ltd Uttar Pradesh", "Uttar Pradesh"),
+    "19AABCY3804E1ZG": ("Yash Gallery Pvt Ltd West Bengal", "West Bengal"),
+    "18AABCY3804E1ZI": ("Yash Gallery Pvt Ltd Assam", "Assam"),
+    "10AABCY3804E1ZY": ("Yash Gallery Pvt Ltd Bihar", "Bihar"),
+    "24AABCY3804E1ZP": ("Yash Gallery Pvt Ltd Gujarat", "Gujarat"),
+    "23AABCY3804E1ZR": ("Yash Gallery Pvt Ltd Madhya Pradesh", "Madhya Pradesh"),
+    "21AABCY3804E1ZV": ("Yash Gallery Pvt Ltd Odisha", "Odisha"),
+    "03AABCY3804E1ZT": ("Yash Gallery Pvt Ltd Punjab", "Punjab"),
+}
 
 router = APIRouter()
 
@@ -249,6 +265,10 @@ def pl_statement(
         description="finance_lock = Sales Uploads tab (finance.db) only; session = Upload page / Dashboard basis",
         pattern="^(session|finance_lock)$",
     ),
+    finance_company: Optional[str] = Query(
+        None,
+        description="Optional company name or GSTIN filter when revenue_source=finance_lock",
+    ),
 ):
     sess = _sess(request)
     return get_pl_statement(
@@ -261,6 +281,7 @@ def pl_statement(
         start_date  = start_date,
         end_date    = end_date,
         revenue_source=revenue_source,
+        finance_company=finance_company,
     )
 
 
@@ -283,10 +304,11 @@ def platform_revenue(
         "finance_lock",
         pattern="^(session|finance_lock)$",
     ),
+    finance_company: Optional[str] = Query(None),
 ):
     sess = _sess(request)
     if revenue_source == "finance_lock":
-        return get_platform_revenue_from_finance_uploads(start_date, end_date)
+        return get_platform_revenue_from_finance_uploads(start_date, end_date, company=finance_company)
     return get_platform_revenue(
         mtr_df      = sess.mtr_df,
         myntra_df   = sess.myntra_df,
@@ -633,8 +655,9 @@ def trial_balance(
 def get_sales_uploads(
     platform: Optional[str] = None,
     period:   Optional[str] = None,
+    company:  Optional[str] = None,
 ):
-    return list_finance_sales_uploads(platform=platform, period=period)
+    return list_finance_sales_uploads(platform=platform, period=period, company=company)
 
 
 @router.post("/sales-uploads")
@@ -966,9 +989,16 @@ def _build_geo_company_breakdowns(df, ship_col: str, amt_col: str, ship_val: str
             gross = float(r["gross_revenue"])
             ret = float(r["returns"])
             gstin = str(r["_gstin"])
+            mapped = _GSTIN_COMPANY_MAP.get(gstin)
+            mapped_name = mapped[0] if mapped else ""
+            mapped_state = mapped[1] if mapped else ""
+            company_name = str(r["_company"]).strip() if str(r["_company"]).strip() else mapped_name
+            if not company_name:
+                company_name = gstin if gstin != "UNKNOWN" else "Unknown"
             company_rows.append({
-                "company": str(r["_company"]) if str(r["_company"]).strip() else (gstin if gstin != "UNKNOWN" else "Unknown"),
+                "company": company_name,
                 "seller_gstin": gstin,
+                "company_state": mapped_state,
                 "orders": int(r["orders"]),
                 "gross_revenue": round(gross, 2),
                 "returns": round(ret, 2),
@@ -1148,17 +1178,47 @@ async def upload_sales_file(
 
     net_revenue = total_revenue - total_returns
 
-    new_id = create_finance_sales_upload({
-        'platform':      platform,
-        'period':        period,
-        'filename':      filename,
-        'total_revenue': round(total_revenue, 2),
-        'total_orders':  total_orders,
-        'total_returns': round(total_returns, 2),
-        'net_revenue':   round(net_revenue, 2),
-        'uploaded_by':   uploaded_by,
-        'upload_notes':  notes,
-    })
+    # Save one row per company for Amazon when GST/company split is available.
+    saved_rows = []
+    if platform_lc in ('amazon', 'amazon mtr', 'mtr') and company_breakdown:
+        for c in company_breakdown:
+            nid = create_finance_sales_upload({
+                'platform': 'Amazon',
+                'company_name': c.get('company') or '',
+                'seller_gstin': c.get('seller_gstin') or '',
+                'company_state': c.get('company_state') or '',
+                'period': period,
+                'filename': filename,
+                'total_revenue': round(float(c.get('gross_revenue') or 0), 2),
+                'total_orders': int(c.get('orders') or 0),
+                'total_returns': round(float(c.get('returns') or 0), 2),
+                'net_revenue': round(float(c.get('net_revenue') or 0), 2),
+                'uploaded_by': uploaded_by,
+                'upload_notes': notes,
+            })
+            saved_rows.append({
+                "id": nid,
+                "company": c.get("company"),
+                "seller_gstin": c.get("seller_gstin"),
+                "company_state": c.get("company_state"),
+                "orders": int(c.get("orders") or 0),
+                "gross_revenue": round(float(c.get("gross_revenue") or 0), 2),
+                "returns": round(float(c.get("returns") or 0), 2),
+                "net_revenue": round(float(c.get("net_revenue") or 0), 2),
+            })
+        new_id = saved_rows[0]["id"] if saved_rows else None
+    else:
+        new_id = create_finance_sales_upload({
+            'platform':      platform,
+            'period':        period,
+            'filename':      filename,
+            'total_revenue': round(total_revenue, 2),
+            'total_orders':  total_orders,
+            'total_returns': round(total_returns, 2),
+            'net_revenue':   round(net_revenue, 2),
+            'uploaded_by':   uploaded_by,
+            'upload_notes':  notes,
+        })
 
     return {
         'ok':            True,
@@ -1174,6 +1234,7 @@ async def upload_sales_file(
         'skipped':       parse_skipped,
         'state_breakdown': state_breakdown,
         'company_breakdown': company_breakdown,
+        'saved_companies': saved_rows,
     }
 
 
