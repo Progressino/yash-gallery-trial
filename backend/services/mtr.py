@@ -56,7 +56,7 @@ def _parse_date_flexible(series: pd.Series) -> pd.Series:
 
 def _downcast_mtr(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["Report_Type", "Transaction_Type", "Ship_To_State",
-              "Warehouse_Id", "Fulfillment", "Payment_Method",
+              "Warehouse_Id", "Fulfillment", "Payment_Method", "Seller_GSTIN", "Seller_Company",
               "IRN_Status", "Month", "Month_Label"]:
         if c in df.columns:
             df[c] = df[c].astype("category")
@@ -200,6 +200,8 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     _order_id_col = next((c for c in ["order id", "amazon order id", "merchant order id"] if c in raw.columns), None)
     _inv_amt_col  = next((c for c in ["invoice amount", "product amount", "order total", "item price"] if c in raw.columns), None)
     _state_col    = next((c for c in ["ship to state", "shipment to state", "ship state"] if c in raw.columns), None)
+    _seller_gstin_col = next((c for c in ["seller gstin", "seller gstin number", "seller gst registration no"] if c in raw.columns), None)
+    _seller_company_col = next((c for c in ["seller legal name", "seller name", "seller"] if c in raw.columns), None)
 
     out = pd.DataFrame({
         "Date":             raw["_Date"],
@@ -218,6 +220,8 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "Payment_Method":   g("payment method code"),
         "Order_Id":         g(_order_id_col) if _order_id_col else pd.Series("", index=raw.index, dtype=str),
         "Invoice_Number":   g("invoice number"),
+        "Seller_GSTIN":     g(_seller_gstin_col).str.upper() if _seller_gstin_col else pd.Series("", index=raw.index, dtype=str),
+        "Seller_Company":   g(_seller_company_col) if _seller_company_col else pd.Series("", index=raw.index, dtype=str),
         "Buyer_Name":       g("buyer name"),
         "IRN_Status":       g("irn filing status"),
     })

@@ -914,6 +914,70 @@ def _process_monthly_package_bytes(
     return payload
 
 
+def _build_geo_company_breakdowns(df, ship_col: str, amt_col: str, ship_val: str, return_values: set[str]) -> tuple[list[dict], list[dict]]:
+    """Build state and company/GSTIN revenue breakdowns for upload diagnostics."""
+    import pandas as pd
+    if df is None or df.empty or ship_col not in df.columns or amt_col not in df.columns:
+        return [], []
+
+    work = df.copy()
+    work["_amt"] = pd.to_numeric(work[amt_col], errors="coerce").fillna(0.0)
+    work["_is_ship"] = work[ship_col] == ship_val
+    work["_is_ret"] = work[ship_col].isin(list(return_values))
+
+    # State-wise (where sale happened)
+    state_col = "Ship_To_State" if "Ship_To_State" in work.columns else None
+    state_rows: list[dict] = []
+    if state_col:
+        st = work.copy()
+        st["_state"] = st[state_col].astype(str).str.strip().replace({"": "Unknown", "nan": "Unknown", "NaN": "Unknown"})
+        grp = st.groupby("_state", dropna=False).agg(
+            gross_revenue=("_amt", lambda s: float(s[st.loc[s.index, "_is_ship"]].sum())),
+            returns=("_amt", lambda s: float(s[st.loc[s.index, "_is_ret"]].abs().sum())),
+            orders=("_is_ship", "sum"),
+        ).reset_index()
+        for _, r in grp.sort_values("gross_revenue", ascending=False).iterrows():
+            gross = float(r["gross_revenue"])
+            ret = float(r["returns"])
+            state_rows.append({
+                "state": str(r["_state"]),
+                "orders": int(r["orders"]),
+                "gross_revenue": round(gross, 2),
+                "returns": round(ret, 2),
+                "net_revenue": round(gross - ret, 2),
+            })
+
+    # Company/GSTIN wise (who sold it)
+    has_gstin = "Seller_GSTIN" in work.columns
+    has_company = "Seller_Company" in work.columns
+    company_rows: list[dict] = []
+    if has_gstin or has_company:
+        cp = work.copy()
+        cp["_gstin"] = cp["Seller_GSTIN"].astype(str).str.strip().str.upper() if has_gstin else "UNKNOWN"
+        cp["_company"] = cp["Seller_Company"].astype(str).str.strip() if has_company else ""
+        cp.loc[cp["_gstin"].isin(["", "NAN", "NONE"]), "_gstin"] = "UNKNOWN"
+        cp.loc[cp["_company"].isin(["", "nan", "NaN", "NONE"]), "_company"] = ""
+        grp = cp.groupby(["_gstin", "_company"], dropna=False).agg(
+            gross_revenue=("_amt", lambda s: float(s[cp.loc[s.index, "_is_ship"]].sum())),
+            returns=("_amt", lambda s: float(s[cp.loc[s.index, "_is_ret"]].abs().sum())),
+            orders=("_is_ship", "sum"),
+        ).reset_index()
+        for _, r in grp.sort_values("gross_revenue", ascending=False).iterrows():
+            gross = float(r["gross_revenue"])
+            ret = float(r["returns"])
+            gstin = str(r["_gstin"])
+            company_rows.append({
+                "company": str(r["_company"]) if str(r["_company"]).strip() else (gstin if gstin != "UNKNOWN" else "Unknown"),
+                "seller_gstin": gstin,
+                "orders": int(r["orders"]),
+                "gross_revenue": round(gross, 2),
+                "returns": round(ret, 2),
+                "net_revenue": round(gross - ret, 2),
+            })
+
+    return state_rows, company_rows
+
+
 # ── Finance Sales Upload — parse file and save locked record ──────
 
 @router.post("/sales-uploads/upload-file")
@@ -1046,6 +1110,8 @@ async def upload_sales_file(
     total_revenue = 0.0
     total_returns = 0.0
     total_orders  = 0
+    state_breakdown: list[dict] = []
+    company_breakdown: list[dict] = []
 
     if df is not None and not df.empty:
         if ship_col in df.columns and amt_col in df.columns:
@@ -1064,6 +1130,15 @@ async def upload_sales_file(
             total_orders = int((df[ship_col] == ship_val).sum())
         else:
             total_orders = len(df)
+
+        if platform_lc in ('amazon', 'amazon mtr', 'mtr'):
+            state_breakdown, company_breakdown = _build_geo_company_breakdowns(
+                df=df,
+                ship_col=ship_col,
+                amt_col=amt_col,
+                ship_val=ship_val,
+                return_values={ret_val, 'Refund'},
+            )
     elif parse_skipped:
         # Surface parser reasons clearly instead of silently saving zero totals.
         raise HTTPException(
@@ -1097,6 +1172,8 @@ async def upload_sales_file(
         'net_revenue':   round(net_revenue, 2),
         'rows_parsed':   len(df) if df is not None else 0,
         'skipped':       parse_skipped,
+        'state_breakdown': state_breakdown,
+        'company_breakdown': company_breakdown,
     }
 
 

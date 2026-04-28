@@ -2736,6 +2736,8 @@ interface UploadResult {
   total_revenue: number; total_orders: number; total_returns: number
   net_revenue: number; rows_parsed?: number
   skipped?: string[]
+  state_breakdown?: { state: string; orders: number; gross_revenue: number; returns: number; net_revenue: number }[]
+  company_breakdown?: { company: string; seller_gstin: string; orders: number; gross_revenue: number; returns: number; net_revenue: number }[]
   // Monthly package fields
   saved?: { platform: string; id: number; orders: number; revenue: number; returns: number; net_revenue: number; note?: string }[]
 }
@@ -3041,6 +3043,66 @@ function SalesUploadsTab() {
                 {result.skipped && result.skipped.length > 0 && (
                   <div className="mt-2 text-xs text-amber-700">
                     Skipped: {result.skipped.join(' | ')}
+                  </div>
+                )}
+                {(result.state_breakdown && result.state_breakdown.length > 0) && (
+                  <div className="mt-3 bg-white rounded-lg border border-green-100 p-3">
+                    <p className="text-xs font-semibold text-gray-700 mb-2">State-wise sales (where sale happened)</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px]">
+                        <thead>
+                          <tr className="text-gray-500">
+                            <th className="text-left py-1">State</th>
+                            <th className="text-right py-1">Orders</th>
+                            <th className="text-right py-1">Gross</th>
+                            <th className="text-right py-1">Returns</th>
+                            <th className="text-right py-1">Net</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {result.state_breakdown.map((r, i) => (
+                            <tr key={`${r.state}-${i}`} className="border-t border-gray-100">
+                              <td className="py-1 text-gray-700">{r.state}</td>
+                              <td className="py-1 text-right text-gray-600">{r.orders.toLocaleString()}</td>
+                              <td className="py-1 text-right text-gray-700">{fmt(r.gross_revenue)}</td>
+                              <td className="py-1 text-right text-red-600">{fmt(r.returns)}</td>
+                              <td className="py-1 text-right font-semibold text-green-700">{fmt(r.net_revenue)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                {(result.company_breakdown && result.company_breakdown.length > 0) && (
+                  <div className="mt-3 bg-white rounded-lg border border-green-100 p-3">
+                    <p className="text-xs font-semibold text-gray-700 mb-2">Company-wise sales (seller GSTIN)</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px]">
+                        <thead>
+                          <tr className="text-gray-500">
+                            <th className="text-left py-1">Company</th>
+                            <th className="text-left py-1">Seller GSTIN</th>
+                            <th className="text-right py-1">Orders</th>
+                            <th className="text-right py-1">Gross</th>
+                            <th className="text-right py-1">Returns</th>
+                            <th className="text-right py-1">Net</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {result.company_breakdown.map((r, i) => (
+                            <tr key={`${r.seller_gstin}-${i}`} className="border-t border-gray-100">
+                              <td className="py-1 text-gray-700">{r.company}</td>
+                              <td className="py-1 text-gray-500">{r.seller_gstin || 'UNKNOWN'}</td>
+                              <td className="py-1 text-right text-gray-600">{r.orders.toLocaleString()}</td>
+                              <td className="py-1 text-right text-gray-700">{fmt(r.gross_revenue)}</td>
+                              <td className="py-1 text-right text-red-600">{fmt(r.returns)}</td>
+                              <td className="py-1 text-right font-semibold text-green-700">{fmt(r.net_revenue)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 )}
               </>
