@@ -703,6 +703,215 @@ def _parse_snapdeal_settlement_for_finance(file_bytes: bytes) -> dict:
     return result
 
 
+def _looks_like_monthly_sales_package(zip_bytes: bytes) -> bool:
+    """Detect outer monthly package ZIP by platform-folder signatures."""
+    import io, zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = [n.lower() for n in zf.namelist() if n and not n.endswith("/")]
+    except Exception:
+        return False
+    hits = 0
+    for key in ("amazon/", "myntra/", "meesho/", "flipkart/", "snapdeal/"):
+        if any(key in n for n in names):
+            hits += 1
+    # Treat as package when at least two platform folder signatures are present.
+    return hits >= 2
+
+
+def _process_monthly_package_bytes(
+    raw: bytes,
+    filename: str,
+    period: str,
+    uploaded_by: str,
+    notes: str,
+    *,
+    dry_run: bool,
+) -> dict:
+    """Parse full monthly package ZIP and optionally persist Finance rows."""
+    import io, zipfile
+    from ..services.mtr import load_mtr_from_zip
+    from ..services.myntra import load_myntra_from_zip
+    from ..services.meesho import load_meesho_from_zip
+
+    results: list = []
+    skipped: list = []
+
+    try:
+        outer_zf = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Cannot open ZIP: {e}")
+
+    names = outer_zf.namelist()
+
+    amazon_files: dict = {}   # basename → bytes
+    myntra_csvs: dict = {}    # sub-account → [(fname, bytes)]
+    meesho_zips: list = []
+    flipkart_zips: list = []
+    snapdeal_files: list = []
+
+    for name in names:
+        if name.endswith("/"):
+            continue
+        parts = [p for p in name.split("/") if p]
+        basename = parts[-1]
+        lower = basename.lower()
+        path_lc = name.lower()
+
+        if "amazon" in path_lc and lower.endswith(".zip"):
+            amazon_files[basename] = outer_zf.read(name)
+        elif "myntra" in path_lc and lower.endswith(".csv"):
+            sub = parts[-2] if len(parts) >= 2 else "Myntra"
+            if "tp" in sub.lower():
+                skipped.append(f"{name} — Myntra TP is duplicate of PPMP, skipped")
+                continue
+            myntra_csvs.setdefault(sub, []).append((basename, outer_zf.read(name)))
+        elif "meesho" in path_lc and lower.endswith(".zip"):
+            meesho_zips.append((basename, outer_zf.read(name)))
+        elif "flipkart" in path_lc and lower.endswith(".zip"):
+            flipkart_zips.append((basename, outer_zf.read(name)))
+        elif "snapdeal" in path_lc and lower.endswith((".xlsx", ".xls", ".csv", ".zip")):
+            snapdeal_files.append((basename, outer_zf.read(name)))
+
+    outer_zf.close()
+
+    def _record(platform, rev, ret, orders, fname, note=""):
+        entry = {
+            "platform": platform,
+            "orders": orders,
+            "revenue": round(rev, 2),
+            "returns": round(ret, 2),
+            "net_revenue": round(rev - ret, 2),
+            "filename": fname,
+        }
+        if note:
+            entry["note"] = note
+        if not dry_run:
+            nid = create_finance_sales_upload({
+                "platform": platform,
+                "period": period,
+                "filename": fname,
+                "total_revenue": round(rev, 2),
+                "total_orders": orders,
+                "total_returns": round(ret, 2),
+                "net_revenue": round(rev - ret, 2),
+                "uploaded_by": uploaded_by,
+                "upload_notes": notes,
+            })
+            entry["id"] = nid
+        return entry
+
+    # Amazon — MTR uses Transaction_Type (underscore)
+    amz_rev = amz_ret = amz_rows = 0
+    for fname, fbytes in amazon_files.items():
+        if any(x in fname.lower() for x in ("stock", "transfer")):
+            continue
+        try:
+            df, _, _ = load_mtr_from_zip(fbytes)
+            if df.empty:
+                continue
+            amz_rows += len(df)
+            if "Invoice_Amount" in df.columns and "Transaction_Type" in df.columns:
+                amz_rev += float(df[df["Transaction_Type"] == "Shipment"]["Invoice_Amount"].sum())
+                amz_ret += float(df[df["Transaction_Type"] == "Return"]["Invoice_Amount"].sum())
+            elif "Invoice_Amount" in df.columns:
+                amz_rev += float(df["Invoice_Amount"].sum())
+        except Exception as e:
+            skipped.append(f"Amazon {fname}: {e}")
+    if amz_rows:
+        results.append(_record("Amazon", amz_rev, amz_ret, amz_rows, filename or "monthly"))
+
+    # Myntra per sub-account — uses TxnType
+    for sub, csv_list in myntra_csvs.items():
+        try:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as mzf:
+                for fn, fb in csv_list:
+                    mzf.writestr(fn, fb)
+            df, _, _ = load_myntra_from_zip(buf.getvalue(), {})
+            if df.empty:
+                skipped.append(f"Myntra {sub}: no data")
+                continue
+            rev = float(df[df["TxnType"] == "Shipment"]["Invoice_Amount"].sum()) if "TxnType" in df.columns else 0.0
+            ret = float(df[df["TxnType"] == "Refund"]["Invoice_Amount"].sum()) if "TxnType" in df.columns else 0.0
+            results.append(_record(f"Myntra ({sub})", rev, ret, len(df), filename or "monthly"))
+        except Exception as e:
+            skipped.append(f"Myntra {sub}: {e}")
+
+    # Meesho
+    for fname, fbytes in meesho_zips:
+        try:
+            if fname.lower().startswith("gst_"):
+                s = _parse_meesho_gst_for_finance(fbytes)
+                if s["orders"] == 0 and s["revenue"] == 0:
+                    skipped.append(f"Meesho {fname}: empty gst file")
+                    continue
+                results.append(_record("Meesho", s["revenue"], s["returns"], s["orders"], fname))
+            else:
+                df, _, _ = load_meesho_from_zip(fbytes)
+                if df.empty:
+                    skipped.append(f"Meesho {fname}: no data")
+                    continue
+                txn_col = next((c for c in df.columns if "transaction" in c.lower() or "txn" in c.lower()), None)
+                if txn_col and "Invoice_Amount" in df.columns:
+                    rev = float(df[df[txn_col] == "Shipment"]["Invoice_Amount"].sum())
+                elif "Invoice_Amount" in df.columns:
+                    rev = float(df["Invoice_Amount"].sum())
+                else:
+                    rev = 0.0
+                results.append(_record("Meesho", rev, 0.0, len(df), fname))
+        except Exception as e:
+            skipped.append(f"Meesho {fname}: {e}")
+
+    # Flipkart — invoice PDFs only
+    for fname, fbytes in flipkart_zips:
+        try:
+            with zipfile.ZipFile(io.BytesIO(fbytes)) as fzf:
+                pdf_count = sum(1 for n in fzf.namelist() if n.lower().endswith(".pdf"))
+            if pdf_count:
+                results.append(
+                    _record(
+                        "Flipkart", 0.0, 0.0, pdf_count, fname,
+                        note=f"{pdf_count} invoice PDFs — revenue not parseable from PDFs",
+                    )
+                )
+            else:
+                skipped.append(f"Flipkart {fname}: no parseable data")
+        except Exception as e:
+            skipped.append(f"Flipkart {fname}: {e}")
+
+    # Snapdeal settlement
+    for fname, fbytes in snapdeal_files:
+        try:
+            s = _parse_snapdeal_settlement_for_finance(fbytes)
+            if s["revenue"] == 0 and s["returns"] == 0:
+                skipped.append(f"Snapdeal {fname}: no revenue found")
+                continue
+            results.append(_record("Snapdeal", s["revenue"], s["returns"], s["orders"], fname))
+        except Exception as e:
+            skipped.append(f"Snapdeal {fname}: {e}")
+
+    if not results and not skipped:
+        raise HTTPException(status_code=422, detail="No recognisable platform folders found in ZIP.")
+
+    total_rev = sum(r.get("revenue", 0) for r in results)
+    total_ret = sum(r.get("returns", 0) for r in results)
+    payload = {
+        "ok": True,
+        "period": period,
+        "total_revenue": round(total_rev, 2),
+        "total_returns": round(total_ret, 2),
+        "net_revenue": round(total_rev - total_ret, 2),
+        "skipped": skipped,
+    }
+    if dry_run:
+        payload["preview"] = True
+        payload["platforms"] = results
+    else:
+        payload["saved"] = results
+    return payload
+
+
 # ── Finance Sales Upload — parse file and save locked record ──────
 
 @router.post("/sales-uploads/upload-file")
@@ -731,6 +940,17 @@ async def upload_sales_file(
     raw = await file.read()
     filename = file.filename or ''
     platform_lc = platform.lower()
+
+    # If user drops a full monthly package ZIP in single-file mode, auto-route it.
+    if filename.lower().endswith(".zip") and _looks_like_monthly_sales_package(raw):
+        return _process_monthly_package_bytes(
+            raw=raw,
+            filename=filename,
+            period=period,
+            uploaded_by=uploaded_by,
+            notes=notes,
+            dry_run=False,
+        )
 
     df = None
     ship_col  = 'Transaction_Type'
@@ -867,166 +1087,15 @@ async def upload_monthly_package(
     Auto-detects platform subfolders and parses each with the right parser.
     Creates one finance_sales_upload record per platform/account found.
     """
-    import io, zipfile
-    from ..services.mtr    import load_mtr_from_zip
-    from ..services.myntra import load_myntra_from_zip
-    from ..services.meesho import load_meesho_from_zip
-
     raw = await file.read()
-    results: list = []
-    skipped: list = []
-
-    try:
-        outer_zf = zipfile.ZipFile(io.BytesIO(raw))
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Cannot open ZIP: {e}")
-
-    names = outer_zf.namelist()
-
-    amazon_files:  dict  = {}   # basename → bytes
-    myntra_csvs:   dict  = {}   # sub-account → [(fname, bytes)]
-    meesho_zips:   list  = []
-    flipkart_zips: list  = []
-    snapdeal_files:list  = []
-
-    for name in names:
-        if name.endswith("/"):
-            continue
-        parts    = [p for p in name.split("/") if p]
-        basename = parts[-1]
-        lower    = basename.lower()
-        path_lc  = name.lower()
-
-        if "amazon" in path_lc and lower.endswith(".zip"):
-            amazon_files[basename] = outer_zf.read(name)
-        elif "myntra" in path_lc and lower.endswith(".csv"):
-            sub = parts[-2] if len(parts) >= 2 else "Myntra"
-            if "tp" in sub.lower():
-                skipped.append(f"{name} — Myntra TP is duplicate of PPMP, skipped")
-                continue
-            myntra_csvs.setdefault(sub, []).append((basename, outer_zf.read(name)))
-        elif "meesho" in path_lc and lower.endswith(".zip"):
-            meesho_zips.append((basename, outer_zf.read(name)))
-        elif "flipkart" in path_lc and lower.endswith(".zip"):
-            flipkart_zips.append((basename, outer_zf.read(name)))
-        elif "snapdeal" in path_lc and lower.endswith((".xlsx", ".xls", ".csv", ".zip")):
-            snapdeal_files.append((basename, outer_zf.read(name)))
-
-    outer_zf.close()
-
-    dry_run = False  # save mode
-
-    def _record(platform, rev, ret, orders, fname, note=""):
-        entry = {"platform": platform, "orders": orders,
-                 "revenue": round(rev, 2), "returns": round(ret, 2),
-                 "net_revenue": round(rev - ret, 2), "filename": fname}
-        if note:
-            entry["note"] = note
-        if not dry_run:
-            nid = create_finance_sales_upload({
-                "platform":      platform, "period": period, "filename": fname,
-                "total_revenue": round(rev, 2), "total_orders": orders,
-                "total_returns": round(ret, 2), "net_revenue": round(rev - ret, 2),
-                "uploaded_by":   uploaded_by, "upload_notes": notes,
-            })
-            entry["id"] = nid
-        return entry
-
-    # Amazon — MTR uses Transaction_Type (underscore)
-    amz_rev = amz_ret = amz_rows = 0
-    for fname, fbytes in amazon_files.items():
-        if any(x in fname.lower() for x in ("stock", "transfer")):
-            continue
-        try:
-            df, _, _ = load_mtr_from_zip(fbytes)
-            if df.empty: continue
-            amz_rows += len(df)
-            if "Invoice_Amount" in df.columns and "Transaction_Type" in df.columns:
-                amz_rev += float(df[df["Transaction_Type"] == "Shipment"]["Invoice_Amount"].sum())
-                amz_ret += float(df[df["Transaction_Type"] == "Return"]["Invoice_Amount"].sum())
-            elif "Invoice_Amount" in df.columns:
-                amz_rev += float(df["Invoice_Amount"].sum())
-        except Exception as e:
-            skipped.append(f"Amazon {fname}: {e}")
-    if amz_rows:
-        results.append(_record("Amazon", amz_rev, amz_ret, amz_rows, file.filename or "monthly"))
-
-    # Myntra per sub-account — uses TxnType
-    for sub, csv_list in myntra_csvs.items():
-        try:
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w") as mzf:
-                for fn, fb in csv_list:
-                    mzf.writestr(fn, fb)
-            df, _, _ = load_myntra_from_zip(buf.getvalue(), {})
-            if df.empty:
-                skipped.append(f"Myntra {sub}: no data"); continue
-            rev = float(df[df["TxnType"] == "Shipment"]["Invoice_Amount"].sum()) if "TxnType" in df.columns else 0.0
-            ret = float(df[df["TxnType"] == "Refund"]["Invoice_Amount"].sum()) if "TxnType" in df.columns else 0.0
-            results.append(_record(f"Myntra ({sub})", rev, ret, len(df), file.filename or "monthly"))
-        except Exception as e:
-            skipped.append(f"Myntra {sub}: {e}")
-
-    # Meesho
-    for fname, fbytes in meesho_zips:
-        try:
-            if fname.lower().startswith("gst_"):
-                s = _parse_meesho_gst_for_finance(fbytes)
-                if s["orders"] == 0 and s["revenue"] == 0:
-                    skipped.append(f"Meesho {fname}: empty gst file"); continue
-                results.append(_record("Meesho", s["revenue"], s["returns"], s["orders"], fname))
-            else:
-                df, _, _ = load_meesho_from_zip(fbytes)
-                if df.empty:
-                    skipped.append(f"Meesho {fname}: no data"); continue
-                txn_col = next((c for c in df.columns if "transaction" in c.lower() or "txn" in c.lower()), None)
-                rev = float(df[df[txn_col] == "Shipment"]["Invoice_Amount"].sum()) if txn_col and "Invoice_Amount" in df.columns else float(df["Invoice_Amount"].sum()) if "Invoice_Amount" in df.columns else 0.0
-                ret = 0.0
-                results.append(_record("Meesho", rev, ret, len(df), fname))
-        except Exception as e:
-            skipped.append(f"Meesho {fname}: {e}")
-
-    # Flipkart — invoice PDFs only
-    for fname, fbytes in flipkart_zips:
-        try:
-            with zipfile.ZipFile(io.BytesIO(fbytes)) as fzf:
-                pdf_count = sum(1 for n in fzf.namelist() if n.lower().endswith(".pdf"))
-            if pdf_count:
-                entry = _record("Flipkart", 0.0, 0.0, pdf_count, fname,
-                                note=f"{pdf_count} invoice PDFs — revenue not parseable from PDFs")
-                if not dry_run and "id" in entry:
-                    # Update upload_notes for Flipkart
-                    pass
-                results.append(entry)
-            else:
-                skipped.append(f"Flipkart {fname}: no parseable data")
-        except Exception as e:
-            skipped.append(f"Flipkart {fname}: {e}")
-
-    # Snapdeal settlement
-    for fname, fbytes in snapdeal_files:
-        try:
-            s = _parse_snapdeal_settlement_for_finance(fbytes)
-            if s["revenue"] == 0 and s["returns"] == 0:
-                skipped.append(f"Snapdeal {fname}: no revenue found"); continue
-            results.append(_record("Snapdeal", s["revenue"], s["returns"], s["orders"], fname))
-        except Exception as e:
-            skipped.append(f"Snapdeal {fname}: {e}")
-
-    if not results and not skipped:
-        raise HTTPException(status_code=422, detail="No recognisable platform folders found in ZIP.")
-
-    total_rev = sum(r.get("revenue", 0) for r in results)
-    total_ret = sum(r.get("returns", 0) for r in results)
-    return {
-        "ok":            True,
-        "period":        period,
-        "saved":         results,
-        "skipped":       skipped,
-        "total_revenue": round(total_rev, 2),
-        "total_returns": round(total_ret, 2),
-        "net_revenue":   round(total_rev - total_ret, 2),
-    }
+    return _process_monthly_package_bytes(
+        raw=raw,
+        filename=file.filename or "monthly",
+        period=period,
+        uploaded_by=uploaded_by,
+        notes=notes,
+        dry_run=False,
+    )
 
 
 @router.post("/sales-uploads/preview-monthly-package")
@@ -1039,132 +1108,12 @@ async def preview_monthly_package(
     but nothing is saved to the database. Returns a preview so the user can
     verify numbers before committing.
     """
-    import io, zipfile
-    from ..services.mtr    import load_mtr_from_zip
-    from ..services.myntra import load_myntra_from_zip
-    from ..services.meesho import load_meesho_from_zip
-
     raw = await file.read()
-    results: list = []
-    skipped: list = []
-
-    try:
-        outer_zf = zipfile.ZipFile(io.BytesIO(raw))
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Cannot open ZIP: {e}")
-
-    names = outer_zf.namelist()
-    amazon_files: dict = {}
-    myntra_csvs:  dict = {}
-    meesho_zips:  list = []
-    flipkart_zips:list = []
-    snapdeal_files:list= []
-
-    for name in names:
-        if name.endswith("/"): continue
-        parts    = [p for p in name.split("/") if p]
-        basename = parts[-1]
-        lower    = basename.lower()
-        path_lc  = name.lower()
-        if "amazon" in path_lc and lower.endswith(".zip"):
-            amazon_files[basename] = outer_zf.read(name)
-        elif "myntra" in path_lc and lower.endswith(".csv"):
-            sub = parts[-2] if len(parts) >= 2 else "Myntra"
-            if "tp" in sub.lower(): continue
-            myntra_csvs.setdefault(sub, []).append((basename, outer_zf.read(name)))
-        elif "meesho" in path_lc and lower.endswith(".zip"):
-            meesho_zips.append((basename, outer_zf.read(name)))
-        elif "flipkart" in path_lc and lower.endswith(".zip"):
-            flipkart_zips.append((basename, outer_zf.read(name)))
-        elif "snapdeal" in path_lc and lower.endswith((".xlsx", ".xls", ".csv", ".zip")):
-            snapdeal_files.append((basename, outer_zf.read(name)))
-    outer_zf.close()
-
-    # Amazon
-    amz_rev = amz_ret = amz_rows = 0
-    for fname, fbytes in amazon_files.items():
-        if any(x in fname.lower() for x in ("stock", "transfer")): continue
-        try:
-            df, _, _ = load_mtr_from_zip(fbytes)
-            if df.empty: continue
-            amz_rows += len(df)
-            if "Invoice_Amount" in df.columns and "Transaction_Type" in df.columns:
-                amz_rev += float(df[df["Transaction_Type"] == "Shipment"]["Invoice_Amount"].sum())
-                amz_ret += float(df[df["Transaction_Type"] == "Return"]["Invoice_Amount"].sum())
-            elif "Invoice_Amount" in df.columns:
-                amz_rev += float(df["Invoice_Amount"].sum())
-        except Exception as e:
-            skipped.append(f"Amazon {fname}: {e}")
-    if amz_rows:
-        results.append({"platform": "Amazon", "orders": amz_rows,
-                         "revenue": round(amz_rev, 2), "returns": round(amz_ret, 2),
-                         "net_revenue": round(amz_rev - amz_ret, 2)})
-
-    # Myntra
-    for sub, csv_list in myntra_csvs.items():
-        try:
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w") as mzf:
-                for fn, fb in csv_list: mzf.writestr(fn, fb)
-            df, _, _ = load_myntra_from_zip(buf.getvalue(), {})
-            if df.empty: skipped.append(f"Myntra {sub}: no data"); continue
-            rev = float(df[df["TxnType"] == "Shipment"]["Invoice_Amount"].sum()) if "TxnType" in df.columns else 0.0
-            ret = float(df[df["TxnType"] == "Refund"]["Invoice_Amount"].sum()) if "TxnType" in df.columns else 0.0
-            results.append({"platform": f"Myntra ({sub})", "orders": len(df),
-                             "revenue": round(rev, 2), "returns": round(ret, 2),
-                             "net_revenue": round(rev - ret, 2)})
-        except Exception as e:
-            skipped.append(f"Myntra {sub}: {e}")
-
-    # Meesho
-    for fname, fbytes in meesho_zips:
-        try:
-            s = _parse_meesho_gst_for_finance(fbytes) if fname.lower().startswith("gst_") else None
-            if s and (s["orders"] or s["revenue"]):
-                results.append({"platform": "Meesho", "orders": s["orders"],
-                                 "revenue": round(s["revenue"], 2), "returns": round(s["returns"], 2),
-                                 "net_revenue": round(s["revenue"] - s["returns"], 2)})
-            else:
-                skipped.append(f"Meesho {fname}: empty")
-        except Exception as e:
-            skipped.append(f"Meesho {fname}: {e}")
-
-    # Flipkart
-    for fname, fbytes in flipkart_zips:
-        try:
-            with zipfile.ZipFile(io.BytesIO(fbytes)) as fzf:
-                pdf_count = sum(1 for n in fzf.namelist() if n.lower().endswith(".pdf"))
-            if pdf_count:
-                results.append({"platform": "Flipkart", "orders": pdf_count,
-                                 "revenue": 0, "returns": 0, "net_revenue": 0,
-                                 "note": f"{pdf_count} PDF invoices — revenue not parseable"})
-            else:
-                skipped.append(f"Flipkart {fname}: no data")
-        except Exception as e:
-            skipped.append(f"Flipkart {fname}: {e}")
-
-    # Snapdeal
-    for fname, fbytes in snapdeal_files:
-        try:
-            s = _parse_snapdeal_settlement_for_finance(fbytes)
-            if s["revenue"] or s["returns"]:
-                results.append({"platform": "Snapdeal", "orders": s["orders"],
-                                 "revenue": round(s["revenue"], 2), "returns": round(s["returns"], 2),
-                                 "net_revenue": round(s["revenue"] - s["returns"], 2)})
-            else:
-                skipped.append(f"Snapdeal {fname}: no revenue found")
-        except Exception as e:
-            skipped.append(f"Snapdeal {fname}: {e}")
-
-    total_rev = sum(r.get("revenue", 0) for r in results)
-    total_ret = sum(r.get("returns", 0) for r in results)
-    return {
-        "ok":            True,
-        "preview":       True,
-        "period":        period,
-        "platforms":     results,
-        "skipped":       skipped,
-        "total_revenue": round(total_rev, 2),
-        "total_returns": round(total_ret, 2),
-        "net_revenue":   round(total_rev - total_ret, 2),
-    }
+    return _process_monthly_package_bytes(
+        raw=raw,
+        filename=file.filename or "monthly",
+        period=period,
+        uploaded_by="",
+        notes="",
+        dry_run=True,
+    )
