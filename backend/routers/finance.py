@@ -931,7 +931,7 @@ async def upload_sales_file(
     only finance.db (see ``revenue_source=finance_lock`` on /pl and /platform-revenue).
     """
     import pandas as pd
-    from ..services.mtr      import load_mtr_from_zip
+    from ..services.mtr      import load_mtr_from_zip, parse_mtr_csv
     from ..services.myntra   import load_myntra_from_zip
     from ..services.meesho   import load_meesho_from_zip
     from ..services.flipkart import load_flipkart_from_zip
@@ -953,6 +953,7 @@ async def upload_sales_file(
         )
 
     df = None
+    parse_skipped: list[str] = []
     ship_col  = 'Transaction_Type'
     ship_val  = 'Shipment'
     ret_val   = 'Return'
@@ -961,7 +962,17 @@ async def upload_sales_file(
 
     try:
         if platform_lc in ('amazon', 'amazon mtr', 'mtr'):
-            df, _, _ = load_mtr_from_zip(raw)
+            if filename.lower().endswith(".csv"):
+                # Allow direct B2B/B2C CSV uploads in finance flow.
+                df_csv, msg = parse_mtr_csv(raw, filename)
+                if df_csv.empty:
+                    parse_skipped.append(f"{filename}: {msg}")
+                else:
+                    df = df_csv
+                    if msg != "OK":
+                        parse_skipped.append(f"{filename}: Partial ({msg})")
+            else:
+                df, _, parse_skipped = load_mtr_from_zip(raw)
             platform = 'Amazon'
         elif platform_lc == 'myntra':
             # Myntra needs sku_mapping; skip mapping → parse raw directly
@@ -1046,6 +1057,12 @@ async def upload_sales_file(
             total_orders = int((df[ship_col] == ship_val).sum())
         else:
             total_orders = len(df)
+    elif parse_skipped:
+        # Surface parser reasons clearly instead of silently saving zero totals.
+        raise HTTPException(
+            status_code=422,
+            detail="No usable rows parsed. " + " | ".join(parse_skipped[:8]),
+        )
 
     net_revenue = total_revenue - total_returns
 
@@ -1072,6 +1089,7 @@ async def upload_sales_file(
         'total_returns': round(total_returns, 2),
         'net_revenue':   round(net_revenue, 2),
         'rows_parsed':   len(df) if df is not None else 0,
+        'skipped':       parse_skipped,
     }
 
 

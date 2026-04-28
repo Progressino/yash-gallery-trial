@@ -2735,9 +2735,9 @@ interface UploadResult {
   id?: number; platform: string; period: string; filename: string
   total_revenue: number; total_orders: number; total_returns: number
   net_revenue: number; rows_parsed?: number
+  skipped?: string[]
   // Monthly package fields
   saved?: { platform: string; id: number; orders: number; revenue: number; returns: number; net_revenue: number; note?: string }[]
-  skipped?: string[]
 }
 
 interface PreviewResult {
@@ -3038,6 +3038,11 @@ function SalesUploadsTab() {
                     </div>
                   ))}
                 </div>
+                {result.skipped && result.skipped.length > 0 && (
+                  <div className="mt-2 text-xs text-amber-700">
+                    Skipped: {result.skipped.join(' | ')}
+                  </div>
+                )}
               </>
             )}
           </div>
