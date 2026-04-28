@@ -106,6 +106,8 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "quantity", "invoice amount", "total tax amount",
         "cgst tax", "sgst tax", "igst tax", "ship to state", "warehouse id",
         "fulfillment channel", "payment method code", "order id", "invoice number",
+        "seller gstin", "seller gstin number", "seller gst registration no",
+        "seller legal name", "seller name", "seller", "bill from state",
         # Amazon Order Report (after dash → space normalization):
         "amazon order id", "merchant order id", "purchase date", "last updated date",
         "order status", "order total", "item price", "ship date", "ship state",
