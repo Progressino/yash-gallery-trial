@@ -538,7 +538,7 @@ export default function Finance() {
           )}
           {pl?.revenue_source === 'session' && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700">
-              <strong>Operational basis:</strong> P&amp;L revenue matches the Upload page session (Dashboard / PO). Finance Sales Uploads are not included here — switch <em>Revenue basis</em> above to use locked finance totals.
+              <strong>Operational basis:</strong> Uses Upload page session data. Finance Sales Uploads are available across finance tabs by default with Revenue basis set to Finance Sales Uploads.
             </div>
           )}
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-4">
@@ -773,7 +773,7 @@ export default function Finance() {
         <div className="space-y-4">
           {revenueSource === 'finance_lock' && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700">
-              Totals below are summed from <strong>Sales Uploads</strong> (finance.db) for months overlapping the date range — not from the operational Upload page. Use <em>Operational</em> in Revenue basis to match Dashboard.
+              Totals below are auto-synced from <strong>Sales Uploads</strong> (finance.db) for months overlapping the date range, and flow across Finance Dashboard / Day Book / Vouchers / GSTR3B / P&amp;L tabs.
             </div>
           )}
           {revenueSource === 'session' && (
@@ -2904,7 +2904,7 @@ function SalesUploadsTab() {
         <span className="text-amber-500 mt-0.5">🔒</span>
         <div>
           <p className="text-xs font-semibold text-amber-800">Finance-locked uploads</p>
-          <p className="text-xs text-amber-700 mt-0.5">Records saved here stay in the finance database only — they do not merge into the Upload page, Dashboard, or PO engine. Use P&amp;L / Platform Revenue with <strong>Revenue basis → Finance Sales Uploads</strong> to view these totals.</p>
+          <p className="text-xs text-amber-700 mt-0.5">Records saved here stay in finance database and now automatically reflect across Finance tabs (Dashboard, Day Book, Vouchers, GSTR3B, P&amp;L, Platform Revenue). They do not merge into main Upload page / PO engine.</p>
         </div>
       </div>
 
