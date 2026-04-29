@@ -5,6 +5,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+ensure_python_packaging() {
+  if python3 -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "Installing python packaging tools (python3-pip/python3-venv)..."
+    apt-get update -y >/dev/null
+    apt-get install -y python3-pip python3-venv >/dev/null
+    python3 -m pip --version >/dev/null 2>&1
+    return 0
+  fi
+  echo "ERROR: python3 pip is unavailable and auto-install is unsupported on this runner." >&2
+  return 1
+}
+
+ensure_python_packaging
+
 VENV="$ROOT/.venv-tests"
 PYTHON_BIN="python3"
 PIP_CMD=(python3 -m pip)
