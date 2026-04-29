@@ -8,6 +8,9 @@ cd "$ROOT"
 VENV="$ROOT/.venv-tests"
 if [[ ! -x "$VENV/bin/python" ]]; then
   python3 -m venv "$VENV"
+fi
+# Ensure test deps exist even when an older venv is already present.
+if ! "$VENV/bin/python" -c "import pytest" >/dev/null 2>&1; then
   "$VENV/bin/pip" install -q -r "$ROOT/backend/requirements-test.txt"
 fi
 
