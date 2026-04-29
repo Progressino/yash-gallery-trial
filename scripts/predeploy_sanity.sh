@@ -19,7 +19,9 @@ echo "==> Backend sanity tests"
 
 echo "==> Frontend build + chromium smoke"
 pushd "$ROOT/frontend" >/dev/null
-if [[ ! -d node_modules ]]; then
+if [[ -f package-lock.json ]]; then
+  npm ci
+else
   npm install
 fi
 if ! npm ls @playwright/test >/dev/null 2>&1; then
@@ -30,20 +32,30 @@ npx playwright install chromium
 
 PORT="${E2E_PORT:-4173}"
 E2E_BASE_URL="${E2E_BASE_URL:-http://127.0.0.1:${PORT}}"
+LOG_FILE="/tmp/forecast-e2e-ui.log"
 
-npm run dev -- --host 127.0.0.1 --port "$PORT" >/tmp/forecast-e2e-ui.log 2>&1 &
+npm run preview -- --host 127.0.0.1 --port "$PORT" >"$LOG_FILE" 2>&1 &
 UI_PID=$!
 cleanup() {
   kill "$UI_PID" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
+READY=0
 for _ in {1..40}; do
   if curl -sf "$E2E_BASE_URL/login" >/dev/null; then
+    READY=1
     break
   fi
   sleep 1
 done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "UI preview server did not become ready at $E2E_BASE_URL"
+  echo "--- preview log ---"
+  tail -n 80 "$LOG_FILE" || true
+  exit 1
+fi
 
 E2E_BASE_URL="$E2E_BASE_URL" npm run test:smoke
 popd >/dev/null
