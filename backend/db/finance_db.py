@@ -1100,11 +1100,11 @@ def list_vouchers(
     q = "SELECT * FROM finance_sales_uploads WHERE 1=1"
     params: list = []
     if start_date:
-        q += " AND substr(created_at,1,10) >= ?"
-        params.append(start_date)
+        q += " AND period >= ?"
+        params.append(start_date[:7])
     if end_date:
-        q += " AND substr(created_at,1,10) <= ?"
-        params.append(end_date)
+        q += " AND period <= ?"
+        params.append(end_date[:7])
     q += " ORDER BY created_at DESC, id DESC"
     rows = [dict(r) for r in conn.execute(q, params).fetchall()]
     conn.close()
@@ -1114,13 +1114,13 @@ def list_vouchers(
         synthetic.append({
             "id": 1_000_000 + int(r["id"]),
             "voucher_no": f"SU-{r['id']}",
-            "voucher_date": (r.get("created_at") or "")[:10],
+            "voucher_date": f"{str(r.get('period') or '')[:7]}-01",
             "voucher_type": "Sales Upload",
             "party_name": r.get("company_name") or r.get("seller_gstin") or r.get("platform") or "",
             "party_gstin": r.get("seller_gstin") or "",
             "party_state": r.get("company_state") or "",
             "bill_no": r.get("filename") or "",
-            "bill_date": (r.get("created_at") or "")[:10],
+            "bill_date": f"{str(r.get('period') or '')[:7]}-01",
             "supply_type": "",
             "narration": f"Finance sales upload ({r.get('platform','')}) {r.get('period','')}",
             "taxable_amount": float(r.get("total_revenue") or 0.0),
@@ -1155,21 +1155,21 @@ def get_voucher_summary_by_date(date: str) -> list[dict]:
         ).fetchall()
         v['lines'] = [dict(ln) for ln in lines]
     uploads = [dict(r) for r in conn.execute(
-        "SELECT * FROM finance_sales_uploads WHERE substr(created_at,1,10) = ? ORDER BY id ASC",
-        (date,),
+        "SELECT * FROM finance_sales_uploads WHERE period = ? ORDER BY id ASC",
+        (date[:7],),
     ).fetchall()]
     conn.close()
     for r in uploads:
         vouchers.append({
             "id": 1_000_000 + int(r["id"]),
             "voucher_no": f"SU-{r['id']}",
-            "voucher_date": date,
+            "voucher_date": f"{str(r.get('period') or '')[:7]}-01",
             "voucher_type": "Sales Upload",
             "party_name": r.get("company_name") or r.get("seller_gstin") or r.get("platform") or "",
             "party_gstin": r.get("seller_gstin") or "",
             "party_state": r.get("company_state") or "",
             "bill_no": r.get("filename") or "",
-            "bill_date": date,
+            "bill_date": f"{str(r.get('period') or '')[:7]}-01",
             "supply_type": "",
             "narration": f"Finance sales upload ({r.get('platform','')}) {r.get('period','')}",
             "taxable_amount": float(r.get("total_revenue") or 0.0),
@@ -1214,8 +1214,8 @@ def get_gstr3b_data(start_date: str, end_date: str) -> dict:
     su = conn.execute(
         """SELECT SUM(total_revenue) AS gross
            FROM finance_sales_uploads
-           WHERE substr(created_at,1,10) >= ? AND substr(created_at,1,10) <= ?""",
-        (start_date, end_date),
+           WHERE period >= ? AND period <= ?""",
+        (start_date[:7], end_date[:7]),
     ).fetchone()
     su_gross = round(float((su["gross"] if su and su["gross"] is not None else 0) or 0), 2)
     if su_gross:
@@ -1252,15 +1252,15 @@ def get_gstr3b_data(start_date: str, end_date: str) -> dict:
     su_rows = conn.execute(
         """SELECT id, platform, period, company_name, seller_gstin, filename, total_revenue, created_at
            FROM finance_sales_uploads
-           WHERE substr(created_at,1,10) >= ? AND substr(created_at,1,10) <= ?
+           WHERE period >= ? AND period <= ?
            ORDER BY created_at ASC, id ASC""",
-        (start_date, end_date),
+        (start_date[:7], end_date[:7]),
     ).fetchall()
     for r in su_rows:
         rr = dict(r)
         breakdown.append({
             "voucher_no": f"SU-{rr.get('id')}",
-            "voucher_date": str(rr.get("created_at") or "")[:10],
+            "voucher_date": f"{str(rr.get('period') or '')[:7]}-01",
             "voucher_type": "Sales Upload",
             "party_name": rr.get("company_name") or rr.get("seller_gstin") or rr.get("platform") or "",
             "taxable_amount": round(float(rr.get("total_revenue") or 0), 2),
@@ -1470,11 +1470,11 @@ def get_trial_balance(
     """
     su_params: list = []
     if start_date:
-        su_q += " AND substr(created_at,1,10) >= ?"
-        su_params.append(start_date)
+        su_q += " AND period >= ?"
+        su_params.append(start_date[:7])
     if end_date:
-        su_q += " AND substr(created_at,1,10) <= ?"
-        su_params.append(end_date)
+        su_q += " AND period <= ?"
+        su_params.append(end_date[:7])
     su_row = conn.execute(su_q, su_params).fetchone()
     su_credit = float((su_row["net_rev"] if su_row else 0) or 0)
     if su_credit:
