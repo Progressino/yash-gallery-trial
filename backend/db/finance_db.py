@@ -510,6 +510,17 @@ def init_db() -> None:
             seed_vt,
         )
         conn.commit()
+    # Ensure Sales Upload voucher type exists on existing installs too.
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO voucher_types
+               (name, voucher_category, abbreviation, is_active, allow_narration, numbering_method)
+               VALUES (?,?,?,?,?,?)""",
+            ("Sales Upload", "Sales", "SU", 1, 1, "Auto"),
+        )
+    except Exception:
+        pass
+    conn.commit()
 
     # ── Seed default ledgers (INSERT OR IGNORE) ───────────────────
     def _grp_id(name):
@@ -561,6 +572,7 @@ def init_db() -> None:
         ('Meesho Sales A/c',             'Sales Accounts',    '', 0, '', ''),
         ('Flipkart Sales A/c',           'Sales Accounts',    '', 0, '', ''),
         ('Snapdeal Sales A/c',           'Sales Accounts',    '', 0, '', ''),
+        ('Finance Sales Upload A/c',     'Sales Accounts',    '', 0, '', ''),
         # Capital
         ('Capital A/c',                  'Capital Account',   '', 0, '', ''),
         ('Drawing A/c',                  'Capital Account',   '', 0, '', ''),
@@ -1449,6 +1461,25 @@ def get_trial_balance(
             'dr': float(row['dr'] or 0),
             'cr': float(row['cr'] or 0),
         }
+
+    # Reflect finance sales uploads as a synthetic sales ledger credit.
+    su_q = """
+        SELECT SUM(net_revenue) AS net_rev
+        FROM finance_sales_uploads
+        WHERE 1=1
+    """
+    su_params: list = []
+    if start_date:
+        su_q += " AND substr(created_at,1,10) >= ?"
+        su_params.append(start_date)
+    if end_date:
+        su_q += " AND substr(created_at,1,10) <= ?"
+        su_params.append(end_date)
+    su_row = conn.execute(su_q, su_params).fetchone()
+    su_credit = float((su_row["net_rev"] if su_row else 0) or 0)
+    if su_credit:
+        mv = movements.setdefault("Finance Sales Upload A/c", {"dr": 0.0, "cr": 0.0})
+        mv["cr"] += su_credit
     conn.close()
 
     rows = []
