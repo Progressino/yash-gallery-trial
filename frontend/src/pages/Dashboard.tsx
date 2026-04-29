@@ -1,9 +1,9 @@
-import { useState, useMemo, Fragment } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis,
-  CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell,
+  BarChart, Bar, XAxis, YAxis,
+  CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts'
 import api, {
   downloadDailyDsrCsv,
@@ -12,9 +12,11 @@ import api, {
   getCoverage,
 } from '../api/client'
 import { useSession } from '../store/session'
+import './Dashboard.css'
 
-interface DailyBreakdownRow { date: string; platform: string; units: number; returns: number }
-
+/* ═══════════════════════════════════════════════════════════
+   TYPES
+   ═══════════════════════════════════════════════════════════ */
 interface DsrSection {
   platform: string
   rows: { segment: string; sales: number; returns: number }[]
@@ -44,7 +46,6 @@ interface DsrBrandMonthlyResponse {
   note: string
 }
 
-// ── Types ───────────────────────────────────────────────────────
 interface PlatformSummaryItem {
   platform: string
   loaded: boolean
@@ -71,15 +72,13 @@ interface SalesSummary {
   net_units: number
   return_rate: number
   active_months?: number
-  /** Present when start/end date filters are applied: explains TxnDate vs upload day. */
   date_basis_note?: string
 }
-interface TopSku {
-  sku: string
-  units: number
-}
+interface TopSku { sku: string; units: number }
 
-// ── Constants ───────────────────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════
+   CONSTANTS
+   ═══════════════════════════════════════════════════════════ */
 const PLATFORM_COLORS: Record<string, string> = {
   Amazon:   '#002B5B',
   Myntra:   '#E91E63',
@@ -87,77 +86,20 @@ const PLATFORM_COLORS: Record<string, string> = {
   Flipkart: '#F7971D',
   Snapdeal: '#e53935',
 }
-
-const SKU_COLORS = [
-  '#002B5B', '#1565C0', '#1976D2', '#1E88E5', '#2196F3',
-  '#42A5F5', '#64B5F6', '#0D47A1', '#0277BD', '#01579B',
-]
-
-// Fully spelled-out Tailwind classes — no dynamic interpolation
-const INTENSITY_CLASSES = [
-  'bg-gray-100 text-gray-400',
-  'bg-blue-100 text-blue-700',
-  'bg-blue-200 text-blue-800',
-  'bg-blue-400 text-white',
-  'bg-blue-700 text-white',
-]
-
-const INDIAN_STATES = [
-  'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh',
-  'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand',
-  'Karnataka', 'Kerala', 'Madhya Pradesh', 'Maharashtra', 'Manipur',
-  'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Punjab',
-  'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura',
-  'Uttar Pradesh', 'Uttarakhand', 'West Bengal', 'Delhi', 'Jammu & Kashmir',
-  'Ladakh', 'Puducherry', 'Chandigarh', 'Lakshadweep', 'Dadra & NH', 'Andaman & Nicobar',
-]
-
-// ── Helpers ─────────────────────────────────────────────────────
-function fmtMonth(m: string) {
-  try {
-    const [y, mon] = m.split('-')
-    return new Date(+y, +mon - 1).toLocaleString('default', { month: 'short', year: '2-digit' })
-  } catch { return m }
+const PLATFORM_SHORT: Record<string, string> = {
+  Amazon: 'AMZ', Myntra: 'MYN', Meesho: 'MEE', Flipkart: 'FK', Snapdeal: 'SD',
 }
 
-function monthlyRowNet(row: PlatformSummaryItem['monthly'][0]) {
-  if (typeof row.net === 'number') return row.net
-  return row.shipments - row.refunds
-}
-
-function mergePlatformMonthly(platforms: PlatformSummaryItem[], useNet: boolean) {
-  const monthMap: Record<string, Record<string, number>> = {}
-  for (const p of platforms) {
-    if (!p.loaded) continue
-    for (const row of p.monthly) {
-      if (!monthMap[row.month]) monthMap[row.month] = {}
-      monthMap[row.month][p.platform] = useNet ? monthlyRowNet(row) : row.shipments
-    }
-  }
-  return Object.entries(monthMap)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, vals]) => ({ month: fmtMonth(month), ...vals }))
-}
-
-function getIntensityClass(units: number, max: number) {
-  if (max === 0 || units === 0) return INTENSITY_CLASSES[0]
-  const ratio = units / max
-  if (ratio < 0.1) return INTENSITY_CLASSES[1]
-  if (ratio < 0.3) return INTENSITY_CLASSES[2]
-  if (ratio < 0.6) return INTENSITY_CLASSES[3]
-  return INTENSITY_CLASSES[4]
-}
-
-// ── Date helpers ─────────────────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════
+   DATE HELPERS
+   ═══════════════════════════════════════════════════════════ */
 function toIso(d: Date) { return d.toISOString().split('T')[0] }
 function daysAgo(n: number) { const d = new Date(); d.setDate(d.getDate() - n); return toIso(d) }
 function monthsAgo(n: number) { const d = new Date(); d.setMonth(d.getMonth() - n); return toIso(d) }
 const TODAY = toIso(new Date())
 
 type DatePreset = { label: string; start: () => string; end?: () => string }
-
 const PRESETS: DatePreset[] = [
-  { label: 'Today', start: () => toIso(new Date()), end: () => toIso(new Date()) },
   { label: '30D',  start: () => daysAgo(30) },
   { label: '90D',  start: () => daysAgo(90) },
   { label: '6M',   start: () => monthsAgo(6) },
@@ -165,49 +107,699 @@ const PRESETS: DatePreset[] = [
   { label: 'All',  start: () => '' },
 ]
 
-// ── Main Dashboard ──────────────────────────────────────────────
-export default function Dashboard() {
-  const navigate = useNavigate()
-  const setCoverage = useSession((s) => s.setCoverage)
-  const salesLoaded = useSession((s) => s.sales)
-  const [dateStart, setDateStart] = useState(() => daysAgo(90))
-  const [dateEnd,   setDateEnd]   = useState(TODAY)
-  const [activePreset, setActivePreset] = useState<string>('90D')
-  const [deepDiveTab, setDeepDiveTab] = useState<string>('Amazon')
-  const [deepViewMode, setDeepViewMode] = useState<'monthly' | 'daily'>('monthly')
-  const [heatmapPlatform, setHeatmapPlatform] = useState('Myntra')
-  const [hiddenPlatforms, setHiddenPlatforms] = useState<Set<string>>(new Set())
-  const [skuSearch, setSkuSearch] = useState('')
-  const [topSkuLimit, setTopSkuLimit] = useState(10)
-  const [exportingSales, setExportingSales] = useState(false)
-  const [exportingDsr, setExportingDsr] = useState(false)
-  const [exportingDsrMonthly, setExportingDsrMonthly] = useState(false)
-  const [showDsr, setShowDsr] = useState(false)
-  /** false = gross (shipments); true = net (Units_Effective / after returns). */
-  /** Default gross so marketplace “units sold” checks (e.g. Flipkart) match without toggling. */
-  const [salesViewNet, setSalesViewNet] = useState(false)
-  const [dsrDate, setDsrDate] = useState(TODAY)
+function fmtMonth(m: string) {
+  try {
+    const [y, mon] = m.split('-')
+    return new Date(+y, +mon - 1).toLocaleString('default', { month: 'short', year: '2-digit' })
+  } catch { return m }
+}
+function monthlyRowNet(row: PlatformSummaryItem['monthly'][0]) {
+  return typeof row.net === 'number' ? row.net : row.shipments - row.refunds
+}
 
-  function applyPreset(label: string, startFn: () => string, endFn?: () => string) {
-    const s = startFn()
-    const e = endFn ? endFn() : toIso(new Date())
-    setDateStart(s)
-    setDateEnd(e)
-    setActivePreset(label)
+/* ═══════════════════════════════════════════════════════════
+   ICONS (inline SVG)
+   ═══════════════════════════════════════════════════════════ */
+const Icon = {
+  arrowUp: () => (
+    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 10V2M2 6l4-4 4 4"/>
+    </svg>
+  ),
+  arrowDown: () => (
+    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 2v8M2 6l4 4 4-4"/>
+    </svg>
+  ),
+  download: () => (
+    <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 2v7M4 6l3 3 3-3M2 11h10"/>
+    </svg>
+  ),
+  arrowR: () => (
+    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 6h8M6 2l4 4-4 4"/>
+    </svg>
+  ),
+  sparkles: () => (
+    <svg viewBox="0 0 14 14" fill="currentColor">
+      <path d="M7 1l1.2 3.4L12 5.6l-3.4 1.2L7 10.5l-1.2-3.7L2 5.6l3.8-1.2z"/>
+    </svg>
+  ),
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PRIMITIVES
+   ═══════════════════════════════════════════════════════════ */
+
+function CountUp({ value, format = (v: number) => Math.round(v).toLocaleString() }: {
+  value: number; format?: (v: number) => string
+}) {
+  const [n, setN] = useState(0)
+  const ref = useRef<{ start: number; from: number }>({ start: 0, from: 0 })
+  useEffect(() => {
+    ref.current.from = n
+    ref.current.start = performance.now()
+    let raf: number
+    const step = (t: number) => {
+      const p = Math.min(1, (t - ref.current.start) / 900)
+      const eased = 1 - Math.pow(1 - p, 3)
+      setN(ref.current.from + (value - ref.current.from) * eased)
+      if (p < 1) raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [value]) // eslint-disable-line react-hooks/exhaustive-deps
+  return <span>{format(n)}</span>
+}
+
+function BigSpark({ values, color, height = 56, width = 220 }: {
+  values: number[]; color: string; height?: number; width?: number
+}) {
+  if (!values || values.length < 2) return null
+  const max = Math.max(...values)
+  const min = Math.min(...values)
+  const span = max - min || 1
+  const step = width / (values.length - 1)
+  const pts = values.map((v, i) => [i * step, height - ((v - min) / span) * (height - 8) - 4] as [number, number])
+  let smooth = `M${pts[0][0]},${pts[0][1]}`
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] ?? pts[i]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[i + 2] ?? p2
+    const cp1x = p1[0] + (p2[0] - p0[0]) / 6
+    const cp1y = p1[1] + (p2[1] - p0[1]) / 6
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6
+    smooth += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`
+  }
+  const area = `${smooth} L${width},${height} L0,${height} Z`
+  const gid = 'g' + Math.random().toString(36).slice(2, 7)
+  const last = pts[pts.length - 1]
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: 'block', overflow: 'visible' }}>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${gid})`} />
+      <path d={smooth} stroke={color} strokeWidth="1.75" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={last[0]} cy={last[1]} r="4" fill={color} opacity="0.2" />
+      <circle cx={last[0]} cy={last[1]} r="2.5" fill={color} />
+    </svg>
+  )
+}
+
+function RadialGauge({ value, max = 100, color = 'var(--primary)', label, size = 110 }: {
+  value: number; max?: number; color?: string; label?: string; size?: number
+}) {
+  const r = (size - 16) / 2
+  const c = 2 * Math.PI * r
+  const pct = Math.min(1, value / max)
+  const arcLen = c * 0.75
+  const dash = arcLen * pct
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ display: 'block' }}>
+      <g transform={`rotate(135 ${size / 2} ${size / 2})`}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none"
+          stroke="var(--border)" strokeWidth="6"
+          strokeDasharray={`${arcLen} ${c}`} strokeLinecap="round" />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none"
+          stroke={color} strokeWidth="6"
+          strokeDasharray={`${dash} ${c}`} strokeLinecap="round"
+          style={{ transition: 'stroke-dasharray .9s cubic-bezier(.2,.8,.2,1)' }} />
+      </g>
+      <text x={size / 2} y={size / 2 - 3} textAnchor="middle" fontSize="19" fontWeight="700"
+        fill="var(--ink)" fontFamily="var(--font-sans)" style={{ fontVariantNumeric: 'tabular-nums' }}>
+        {Math.round(value)}%
+      </text>
+      {label && (
+        <text x={size / 2} y={size / 2 + 13} textAnchor="middle" fontSize="9"
+          fill="var(--muted)" fontFamily="var(--font-sans)" letterSpacing="0.06em">
+          {label.toUpperCase()}
+        </text>
+      )}
+    </svg>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   HERO CHART
+   ═══════════════════════════════════════════════════════════ */
+interface HeroSeries { name: string; color: string; values: number[] }
+
+function HeroChart({ series, months, hidden, viewMode }: {
+  series: HeroSeries[]; months: string[]; hidden: Set<string>; viewMode: string
+}) {
+  const W = 820, H = 280
+  const pad = { t: 24, r: 28, b: 32, l: 0 }
+  const plotW = W - pad.l - pad.r
+  const plotH = H - pad.t - pad.b
+  const visible = series.filter(s => !hidden.has(s.name))
+  const maxV = Math.max(1, ...visible.flatMap(s => s.values)) * 1.18
+  const stepX = months.length > 1 ? plotW / (months.length - 1) : plotW
+  const [hover, setHover] = useState<number | null>(null)
+  const svgRef = useRef<SVGSVGElement>(null)
+
+  const totalsByMonth = months.map((_, i) =>
+    visible.reduce((s, sr) => s + (sr.values[i] ?? 0), 0)
+  )
+
+  const pathFor = (vals: number[]) => {
+    const pts = vals.map((v, i) => [pad.l + i * stepX, pad.t + plotH - (v / maxV) * plotH] as [number, number])
+    let d = `M${pts[0][0]},${pts[0][1]}`
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] ?? pts[i]
+      const p1 = pts[i]
+      const p2 = pts[i + 1]
+      const p3 = pts[i + 2] ?? p2
+      const cp1x = p1[0] + (p2[0] - p0[0]) / 6
+      const cp1y = p1[1] + (p2[1] - p0[1]) / 6
+      const cp2x = p2[0] - (p3[0] - p1[0]) / 6
+      const cp2y = p2[1] - (p3[1] - p1[1]) / 6
+      d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`
+    }
+    return d
+  }
+  const areaFor = (vals: number[]) =>
+    `${pathFor(vals)} L${pad.l + plotW},${pad.t + plotH} L${pad.l},${pad.t + plotH} Z`
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current || months.length < 2) return
+    const rect = svgRef.current.getBoundingClientRect()
+    const x = ((e.clientX - rect.left) / rect.width) * W - pad.l
+    const i = Math.round(x / stepX)
+    if (i >= 0 && i < months.length) setHover(i)
   }
 
-  function handleStartChange(val: string) { setDateStart(val); setActivePreset('') }
-  function handleEndChange(val: string)   { setDateEnd(val);   setActivePreset('') }
+  return (
+    <div style={{ position: 'relative' }}>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%"
+        style={{ display: 'block', overflow: 'visible' }}
+        onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        <defs>
+          {visible.map(s => (
+            <linearGradient key={s.name} id={`hcg-${s.name.replace(/\s/g,'')}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={s.color} stopOpacity="0.22" />
+              <stop offset="100%" stopColor={s.color} stopOpacity="0" />
+            </linearGradient>
+          ))}
+        </defs>
+        {/* y grid */}
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio, i) => {
+          const y = pad.t + plotH - ratio * plotH
+          return (
+            <g key={i}>
+              <line x1={pad.l} x2={W - pad.r} y1={y} y2={y}
+                stroke="var(--border)" strokeDasharray="1 3" opacity="0.7" />
+              <text x={W - pad.r + 5} y={y + 3.5} fontSize="9.5" fill="var(--muted)" fontFamily="var(--font-mono)">
+                {(ratio * maxV / 1000).toFixed(0)}k
+              </text>
+            </g>
+          )
+        })}
+        {/* x labels */}
+        {months.map((m, i) => (
+          <text key={i} x={pad.l + i * stepX} y={H - 6} fontSize="10.5"
+            fill={hover === i ? 'var(--ink)' : 'var(--muted)'}
+            fontWeight={hover === i ? 600 : 400}
+            textAnchor="middle">{m}</text>
+        ))}
+        {/* areas */}
+        {visible.map(s => (
+          <path key={'a' + s.name} d={areaFor(s.values)}
+            fill={`url(#hcg-${s.name.replace(/\s/g,'')})`} />
+        ))}
+        {/* lines */}
+        {visible.map(s => (
+          <path key={'l' + s.name} d={pathFor(s.values)}
+            stroke={s.color} strokeWidth="2.2" fill="none"
+            strokeLinecap="round" strokeLinejoin="round"
+            style={{ filter: `drop-shadow(0 2px 5px ${s.color}44)` }} />
+        ))}
+        {/* dots */}
+        {visible.map(s => s.values.map((v, i) => {
+          const x = pad.l + i * stepX
+          const y = pad.t + plotH - (v / maxV) * plotH
+          return (
+            <circle key={s.name + i} cx={x} cy={y} r={hover === i ? 5 : 3}
+              fill="var(--surface)" stroke={s.color}
+              strokeWidth={hover === i ? 2.5 : 1.75}
+              style={{ transition: 'r .12s' }} />
+          )
+        }))}
+        {/* hover rail */}
+        {hover !== null && (
+          <line x1={pad.l + hover * stepX} x2={pad.l + hover * stepX}
+            y1={pad.t} y2={pad.t + plotH}
+            stroke="var(--ink)" strokeOpacity="0.12" strokeDasharray="2 3" />
+        )}
+      </svg>
+
+      {/* Tooltip */}
+      {hover !== null && (
+        <div style={{
+          position: 'absolute',
+          left: `calc(${((pad.l + hover * stepX) / W) * 100}% + 14px)`,
+          top: 8,
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          padding: '10px 14px',
+          boxShadow: 'var(--shadow-md)',
+          minWidth: 155,
+          pointerEvents: 'none',
+          zIndex: 10,
+        }}>
+          <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.09em', marginBottom: 5 }}>
+            {months[hover]}
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: 'var(--ink)', lineHeight: 1 }}>
+            {totalsByMonth[hover].toLocaleString()}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 8 }}>total {viewMode}</div>
+          {visible.map(s => (
+            <div key={s.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 4 }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10.5, color: 'var(--ink-soft)' }}>
+                <span style={{ width: 7, height: 7, background: s.color, borderRadius: 2, flexShrink: 0 }} />
+                {s.name}
+              </span>
+              <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--ink)' }}>
+                {(s.values[hover] ?? 0).toLocaleString()}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   HERO KPI
+   ═══════════════════════════════════════════════════════════ */
+function HeroKPI({ eyebrow, value, unit, delta, deltaDir, caption, spark, color }: {
+  eyebrow: string; value: number; unit?: string
+  delta?: string; deltaDir?: 'up' | 'down'
+  caption?: string; spark?: number[]; color?: string
+}) {
+  const col = color ?? 'var(--primary)'
+  return (
+    <div className="hk">
+      <div className="hk-eyebrow">{eyebrow}</div>
+      <div className="hk-row">
+        <div className="hk-value">
+          <CountUp value={value} />
+          {unit && <span className="hk-unit">{unit}</span>}
+        </div>
+        {delta && deltaDir && (
+          <div className={`hk-delta ${deltaDir}`}>
+            {deltaDir === 'up' ? <Icon.arrowUp /> : <Icon.arrowDown />}
+            <span>{delta}</span>
+          </div>
+        )}
+      </div>
+      <div className="hk-foot">
+        {caption && <span className="hk-caption">{caption}</span>}
+        {spark && spark.length > 1 && (
+          <div className="hk-spark">
+            <BigSpark values={spark} color={col} width={100} height={26} />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   INDIA HEAT MAP
+   ═══════════════════════════════════════════════════════════ */
+const INDIA_GRID: [number, number, string][] = [
+  [0, 4, 'Punjab'], [0, 5, 'Haryana'], [0, 6, 'Delhi'], [0, 7, 'Uttar Pradesh'],
+  [1, 3, 'Rajasthan'], [1, 6, 'Uttar Pradesh'], [1, 8, 'Bihar'],
+  [2, 2, 'Gujarat'], [2, 4, 'Madhya Pradesh'], [2, 8, 'West Bengal'], [2, 9, 'Odisha'],
+  [3, 2, 'Maharashtra'], [3, 4, 'Maharashtra'], [3, 6, 'Telangana'], [3, 8, 'Odisha'],
+  [4, 3, 'Karnataka'], [4, 5, 'Andhra Pradesh'],
+  [5, 3, 'Kerala'], [5, 5, 'Tamil Nadu'],
+]
+
+function IndiaHeat({ states }: { states: { state: string; units: number }[] }) {
+  const map = Object.fromEntries(states.map(s => [s.state, s.units]))
+  const max = Math.max(...states.map(s => s.units), 1)
+  const cellSize = 30, gap = 3
+  const cols = 12, rows = 7
+
+  const intensity = (units: number) => {
+    if (!units) return { bg: 'var(--bg-sunken)', fg: 'var(--muted)' }
+    const r = units / max
+    if (r > 0.8) return { bg: 'oklch(42% 0.16 255)', fg: 'white' }
+    if (r > 0.6) return { bg: 'oklch(55% 0.16 255)', fg: 'white' }
+    if (r > 0.4) return { bg: 'oklch(68% 0.14 255)', fg: 'white' }
+    if (r > 0.2) return { bg: 'oklch(82% 0.09 255)', fg: 'oklch(30% 0.15 255)' }
+    return { bg: 'oklch(92% 0.04 255)', fg: 'oklch(40% 0.15 255)' }
+  }
+
+  const sorted = [...states].sort((a, b) => b.units - a.units).slice(0, 5)
+
+  return (
+    <div className="india-wrap">
+      <svg viewBox={`0 0 ${cols * (cellSize + gap)} ${rows * (cellSize + gap)}`}
+        width="100%" style={{ display: 'block', maxHeight: 230 }}>
+        {INDIA_GRID.map(([r, c, state], i) => {
+          const units = map[state] ?? 0
+          const col = intensity(units)
+          return (
+            <g key={i}>
+              <rect x={c * (cellSize + gap)} y={r * (cellSize + gap)}
+                width={cellSize} height={cellSize} rx="5"
+                fill={col.bg} style={{ transition: 'fill .4s ease' }}>
+                <title>{state}: {units.toLocaleString()}</title>
+              </rect>
+              <text x={c * (cellSize + gap) + cellSize / 2}
+                y={r * (cellSize + gap) + cellSize / 2 + 3}
+                textAnchor="middle" fontSize="8" fontWeight="600"
+                fill={col.fg} fontFamily="var(--font-mono)">
+                {state.slice(0, 2).toUpperCase()}
+              </text>
+            </g>
+          )
+        })}
+      </svg>
+
+      <div className="india-legend">
+        <span>Lower</span>
+        {[0.05, 0.3, 0.5, 0.7, 0.9].map(r => {
+          const col = intensity(r * max)
+          return <span key={r} className="leg-box" style={{ background: col.bg }} />
+        })}
+        <span>Higher</span>
+      </div>
+
+      {sorted.length > 0 && (
+        <div className="india-top">
+          {sorted.map((s, i) => (
+            <div key={s.state} className="india-top-row">
+              <span className="india-rank">{String(i + 1).padStart(2, '0')}</span>
+              <span className="india-name">{s.state}</span>
+              <div className="india-bar">
+                <div className="india-bar-fill" style={{
+                  width: `${(s.units / max) * 100}%`,
+                  background: intensity(s.units).bg,
+                }} />
+              </div>
+              <span className="india-val">{s.units.toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PLATFORM TILE
+   ═══════════════════════════════════════════════════════════ */
+function PlatformTile({ p, salesViewNet, onClick }: {
+  p: PlatformSummaryItem
+  salesViewNet: boolean
+  onClick: () => void
+}) {
+  const color = PLATFORM_COLORS[p.platform] ?? '#6366F1'
+  const short = PLATFORM_SHORT[p.platform] ?? p.platform.slice(0, 3).toUpperCase()
+  const tDir = salesViewNet ? (p.trend_direction_net ?? p.trend_direction) : p.trend_direction
+  const units = salesViewNet ? (p.net_units ?? p.total_units - p.total_returns) : p.total_units
+  const monthly = p.monthly.map(r => salesViewNet ? monthlyRowNet(r) : r.shipments).filter(v => v > 0)
+  const rr = p.return_rate
+
+  return (
+    <div className={`ptile-2 ${!p.loaded ? 'off' : ''}`}
+      style={{ '--p-col': color } as React.CSSProperties}
+      onClick={p.loaded ? onClick : undefined}>
+      <div className="ptile-2-glow" />
+      <div className="ptile-2-head">
+        <div className="ptile-2-logo">{short}</div>
+        <div className="ptile-2-name">
+          <div className="ptile-2-brand">{p.platform}</div>
+          <div className="ptile-2-sub">{p.loaded ? 'loaded' : 'not loaded'}</div>
+        </div>
+        {p.loaded && (
+          <div className={`trend-pill ${tDir}`}>
+            {tDir === 'up' ? <Icon.arrowUp /> : tDir === 'down' ? <Icon.arrowDown /> : null}
+          </div>
+        )}
+      </div>
+      <div className="ptile-2-value">{p.loaded ? units.toLocaleString() : '—'}</div>
+      <div className="ptile-2-foot">
+        {p.loaded ? (
+          <>
+            <span className={`badge ${rr > 30 ? 'danger' : rr > 15 ? 'warn' : 'success'}`}>
+              {rr.toFixed(1)}% return
+            </span>
+            {monthly.length > 1 && (
+              <BigSpark values={monthly} color={color} width={80} height={22} />
+            )}
+          </>
+        ) : (
+          <span className="badge neutral">offline</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SKU BAR LIST (replaces matrix since no per-platform SKU data)
+   ═══════════════════════════════════════════════════════════ */
+function SkuList({ skus, platforms, salesViewNet, onOpenSku }: {
+  skus: TopSku[]
+  platforms: PlatformSummaryItem[]
+  salesViewNet: boolean
+  onOpenSku: (sku: string) => void
+}) {
+  const activePlatforms = platforms.filter(p => p.loaded).map(p => ({
+    id: p.platform.toLowerCase(),
+    name: p.platform,
+    color: PLATFORM_COLORS[p.platform] ?? '#6366F1',
+    short: PLATFORM_SHORT[p.platform] ?? p.platform.slice(0, 3),
+  }))
+  const max = Math.max(...skus.map(s => s.units), 1)
+
+  return (
+    <div className="matrix">
+      <div className="matrix-head" style={{ gridTemplateColumns: `1fr ${activePlatforms.map(() => '54px').join(' ')} 64px` }}>
+        <div>SKU</div>
+        {activePlatforms.map(p => (
+          <div key={p.id} className="mh-plat">
+            <span className="mh-dot" style={{ background: p.color }} />
+            {p.short}
+          </div>
+        ))}
+        <div style={{ textAlign: 'right' }}>Units</div>
+      </div>
+
+      {skus.map((s, idx) => {
+        const barPct = (s.units / max) * 100
+        return (
+          <div key={s.sku} className="matrix-row"
+            style={{ gridTemplateColumns: `1fr ${activePlatforms.map(() => '54px').join(' ')} 64px` }}
+            onClick={() => onOpenSku(s.sku)}>
+            <div className="matrix-sku">
+              <div className="mx-sku-code">{s.sku}</div>
+              <div className="mx-sku-name" style={{
+                width: `${Math.max(10, barPct)}%`,
+                height: 3,
+                background: `oklch(${60 - idx * 3}% 0.14 255)`,
+                borderRadius: 99,
+                marginTop: 4,
+              }} />
+            </div>
+            {activePlatforms.map(p => (
+              <div key={p.id} className="matrix-cell" style={{
+                background: 'var(--bg-sunken)',
+                color: 'var(--muted)',
+              }}>—</div>
+            ))}
+            <div className="matrix-total">
+              {salesViewNet ? '~' : ''}{s.units.toLocaleString()}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   BRAND STACKS
+   ═══════════════════════════════════════════════════════════ */
+function BrandStacks({ data }: { data: DsrBrandMonthlyRow[] }) {
+  const maxTotal = Math.max(...data.map(r => r.YG + r.Akiko + (r.Other ?? 0)), 1)
+  const totalYG = data.reduce((s, r) => s + r.YG, 0)
+  const totalAK = data.reduce((s, r) => s + r.Akiko, 0)
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 20, marginBottom: 16, flexWrap: 'wrap' }}>
+        <div>
+          <div className="brand-total-eyebrow">YG</div>
+          <div className="brand-total-val">{totalYG.toLocaleString()}</div>
+          <div className="brand-total-bar">
+            <div className="brand-total-fill"
+              style={{ width: `${totalYG / (totalYG + totalAK || 1) * 100}%`, background: 'var(--primary)' }} />
+          </div>
+        </div>
+        <div>
+          <div className="brand-total-eyebrow" style={{ color: 'var(--p-myntra)' }}>AKIKO</div>
+          <div className="brand-total-val">{totalAK.toLocaleString()}</div>
+          <div className="brand-total-bar">
+            <div className="brand-total-fill"
+              style={{ width: `${totalAK / (totalYG + totalAK || 1) * 100}%`, background: 'var(--p-myntra)' }} />
+          </div>
+        </div>
+      </div>
+
+      <div className="brand-months">
+        {data.map((r, i) => {
+          const total = r.YG + r.Akiko
+          const ygPct = r.YG / maxTotal * 100
+          const akPct = r.Akiko / maxTotal * 100
+          return (
+            <div key={i} className="brand-month">
+              <div className="brand-month-label">{r.month_display}</div>
+              <div className="brand-month-bar">
+                <div className="brand-month-yg" style={{ height: `${ygPct}%` }} />
+                <div className="brand-month-ak" style={{ height: `${akPct}%` }} />
+              </div>
+              <div className="brand-month-total">{(total / 1000).toFixed(1)}k</div>
+              <div className={`brand-month-leader ${r.leader === 'YG' ? 'yg' : 'ak'}`}>
+                {r.leader === 'YG' ? '◆' : '●'}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DSR TABLE
+   ═══════════════════════════════════════════════════════════ */
+function DsrTable({ data }: { data: DsrSection[] }) {
+  const totalSales = data.reduce((s, sec) => s + sec.rows.reduce((x, r) => x + r.sales, 0), 0)
+  const totalRet   = data.reduce((s, sec) => s + sec.rows.reduce((x, r) => x + r.returns, 0), 0)
+  return (
+    <table className="tbl dsr-tbl">
+      <thead>
+        <tr>
+          <th>Channel</th>
+          <th>Segment</th>
+          <th className="num">Sales</th>
+          <th className="num">Returns</th>
+          <th className="num">Rate</th>
+          <th>Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.map(sec => {
+          const color = PLATFORM_COLORS[sec.platform] ?? '#6366F1'
+          const short = PLATFORM_SHORT[sec.platform] ?? sec.platform.slice(0, 3)
+          return sec.rows.map((r, i) => {
+            const rr = (r.returns / r.sales * 100).toFixed(1)
+            const share = r.sales / totalSales * 100
+            return (
+              <tr key={`${sec.platform}-${r.segment}`}>
+                <td>
+                  {i === 0 ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{
+                        width: 20, height: 20, borderRadius: 5, background: color,
+                        color: 'white', fontSize: 8.5, fontFamily: 'var(--font-mono)',
+                        fontWeight: 800, display: 'grid', placeItems: 'center', flexShrink: 0,
+                      }}>{short}</span>
+                      <span style={{ fontWeight: 600, fontSize: 12 }}>{sec.platform}</span>
+                    </div>
+                  ) : <span style={{ color: 'var(--muted)' }}>—</span>}
+                </td>
+                <td style={{ color: 'var(--ink-soft)', fontSize: 11.5 }}>{r.segment}</td>
+                <td className="num" style={{ fontWeight: 600 }}>{r.sales.toLocaleString()}</td>
+                <td className="num" style={{ color: r.returns > 30 ? 'var(--danger)' : 'var(--muted)' }}>
+                  {r.returns.toLocaleString()}
+                </td>
+                <td className="num">
+                  <span className={`badge ${Number(rr) > 25 ? 'danger' : Number(rr) > 15 ? 'warn' : 'success'}`}>
+                    {rr}%
+                  </span>
+                </td>
+                <td>
+                  <div className="share-bar">
+                    <div className="share-fill" style={{ width: `${Math.min(100, share * 3)}%`, background: color }} />
+                  </div>
+                </td>
+              </tr>
+            )
+          })
+        })}
+        <tr className="dsr-total">
+          <td colSpan={2} style={{ fontWeight: 700 }}>TOTAL</td>
+          <td className="num" style={{ fontWeight: 700 }}>{totalSales.toLocaleString()}</td>
+          <td className="num" style={{ fontWeight: 700, color: 'var(--danger)' }}>{totalRet.toLocaleString()}</td>
+          <td className="num" style={{ fontWeight: 700 }}>
+            {totalSales > 0 ? (totalRet / totalSales * 100).toFixed(1) : '0.0'}%
+          </td>
+          <td />
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
+   MAIN DASHBOARD
+   ═══════════════════════════════════════════════════════════ */
+export default function Dashboard() {
+  const navigate = useNavigate()
+  const setCoverage = useSession(s => s.setCoverage)
+  const salesLoaded = useSession(s => s.sales)
+
+  /* ── state ── */
+  const [dateStart,      setDateStart]      = useState(() => daysAgo(90))
+  const [dateEnd,        setDateEnd]        = useState(TODAY)
+  const [activePreset,   setActivePreset]   = useState('90D')
+  const [salesViewNet,   setSalesViewNet]   = useState(false)
+  const [hiddenPlatforms,setHiddenPlatforms]= useState<Set<string>>(new Set())
+  const [heatPlatform,   setHeatPlatform]   = useState('Myntra')
+  const [topSkuLimit,    setTopSkuLimit]    = useState(10)
+  const [showDsr,        setShowDsr]        = useState(false)
+  const [dsrDate,        setDsrDate]        = useState(TODAY)
+  const [exportingSales,     setExportingSales]     = useState(false)
+  const [exportingDsr,       setExportingDsr]       = useState(false)
+  const [exportingDsrMonthly,setExportingDsrMonthly]= useState(false)
+  const [skuSearch,      setSkuSearch]      = useState('')
+
+  /* ── preset ── */
+  function applyPreset(label: string, startFn: () => string, endFn?: () => string) {
+    setDateStart(startFn())
+    setDateEnd(endFn ? endFn() : toIso(new Date()))
+    setActivePreset(label)
+  }
   function togglePlatform(name: string) {
     setHiddenPlatforms(prev => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
+      const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n
     })
   }
 
-  // Build query string params for date-filtered endpoints
+  /* ── query params ── */
+  const summaryParams = useMemo(() => {
+    const p = new URLSearchParams({ months: '0' })
+    if (dateStart) p.set('start_date', dateStart)
+    if (dateEnd)   p.set('end_date',   dateEnd)
+    return p.toString()
+  }, [dateStart, dateEnd])
+
   const dateParams = useMemo(() => {
     const p = new URLSearchParams({ limit: String(topSkuLimit) })
     if (dateStart) p.set('start_date', dateStart)
@@ -216,13 +808,6 @@ export default function Dashboard() {
     return p.toString()
   }, [dateStart, dateEnd, topSkuLimit, salesViewNet])
 
-  const summaryParams = useMemo(() => {
-    const p = new URLSearchParams({ months: '0' })
-    if (dateStart) p.set('start_date', dateStart)
-    if (dateEnd)   p.set('end_date',   dateEnd)
-    return p.toString()
-  }, [dateStart, dateEnd])
-
   const dsrBrandMonthlyParams = useMemo(() => {
     const p = new URLSearchParams()
     if (dateStart) p.set('start_date', dateStart)
@@ -230,145 +815,102 @@ export default function Dashboard() {
     return p.toString()
   }, [dateStart, dateEnd])
 
-  const dailyParams = useMemo(() => {
-    const p = new URLSearchParams()
-    if (dateStart) p.set('start_date', dateStart)
-    if (dateEnd)   p.set('end_date',   dateEnd)
-    if (deepDiveTab) p.set('platform', deepDiveTab)
-    return p.toString()
-  }, [dateStart, dateEnd, deepDiveTab])
-
+  /* ── queries ── */
   useQuery({
     queryKey: ['coverage'],
     queryFn: async () => { const c = await getCoverage(); setCoverage(c); return c },
-    staleTime: 60_000,
-    refetchInterval: 120_000,
+    staleTime: 60_000, refetchInterval: 120_000,
   })
-
-  const { data: salesSummary, isLoading: loadingSales } = useQuery<SalesSummary>({
+  const { data: salesSummary } = useQuery<SalesSummary>({
     queryKey: ['sales-summary', dateStart, dateEnd],
     queryFn: async () => { const { data } = await api.get(`/data/sales-summary?${summaryParams}`); return data },
-    staleTime: 2 * 60 * 1000,
+    staleTime: 120_000,
   })
-
-  const { data: topSkusRaw, isLoading: loadingSkus } = useQuery<TopSku[]>({
+  const { data: topSkusRaw } = useQuery<TopSku[]>({
     queryKey: ['top-skus', dateStart, dateEnd, topSkuLimit, salesViewNet],
     queryFn: async () => { const { data } = await api.get(`/data/top-skus?${dateParams}`); return data },
-    staleTime: 2 * 60 * 1000,
+    staleTime: 120_000,
   })
-
   const { data: platformSummary, isLoading: loadingPlatforms } = useQuery<PlatformSummaryItem[]>({
     queryKey: ['platform-summary', dateStart, dateEnd],
     queryFn: async () => { const { data } = await api.get(`/data/platform-summary?${summaryParams}`); return data },
-    staleTime: 5 * 60 * 1000,
+    staleTime: 300_000,
   })
-
-  const { data: anomalies, isLoading: loadingAnomalies } = useQuery<AnomalyItem[]>({
+  const { data: anomalies } = useQuery<AnomalyItem[]>({
     queryKey: ['anomalies', dateStart, dateEnd],
     queryFn: async () => { const { data } = await api.get(`/data/anomalies?${summaryParams}`); return data },
-    staleTime: 2 * 60 * 1000,
+    staleTime: 120_000,
   })
-
-  const { data: dailyBreakdown = [] } = useQuery<DailyBreakdownRow[]>({
-    queryKey: ['daily-breakdown', dailyParams],
-    queryFn: async () => { const { data } = await api.get(`/data/daily-breakdown?${dailyParams}`); return data },
-    enabled: deepViewMode === 'daily',
-    staleTime: 60 * 1000,
-  })
-
   const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
     queryKey: ['daily-dsr', dsrDate],
-    queryFn: async () => {
-      const { data } = await api.get(`/data/daily-dsr?date=${encodeURIComponent(dsrDate)}`)
-      return data
-    },
+    queryFn: async () => { const { data } = await api.get(`/data/daily-dsr?date=${encodeURIComponent(dsrDate)}`); return data },
     enabled: showDsr && !!dsrDate,
-    staleTime: 60 * 1000,
+    staleTime: 60_000,
   })
-
   const { data: dsrBrandMonthly, isLoading: loadingDsrBrands } = useQuery<DsrBrandMonthlyResponse>({
     queryKey: ['dsr-brand-monthly', dateStart, dateEnd],
-    queryFn: async () => {
-      const { data } = await api.get(`/data/dsr-brand-monthly?${dsrBrandMonthlyParams}`)
-      return data
-    },
+    queryFn: async () => { const { data } = await api.get(`/data/dsr-brand-monthly?${dsrBrandMonthlyParams}`); return data },
     enabled: salesLoaded,
-    staleTime: 60 * 1000,
+    staleTime: 60_000,
   })
 
+  /* ── derived ── */
   const platforms = platformSummary ?? []
   const loadedPlatforms = platforms.filter(p => p.loaded)
-  const activePlatformCount = loadedPlatforms.length
-  const totalUnits = salesSummary?.total_units ?? 0
-  const totalReturns = salesSummary?.total_returns ?? 0
-  const netUnits = salesSummary?.net_units ?? 0
-  const returnRate = salesSummary?.return_rate ?? 0
 
-  // Filter monthly chart data client-side by date range + hidden platforms
   const filteredPlatforms = useMemo(() => {
-    const startMonth = dateStart ? dateStart.slice(0, 7) : ''
-    const endMonth   = dateEnd   ? dateEnd.slice(0, 7)   : ''
+    const startM = dateStart.slice(0, 7)
+    const endM   = dateEnd.slice(0, 7)
     return platforms.map(p => ({
       ...p,
       monthly: p.monthly.filter(r =>
-        (!startMonth || r.month >= startMonth) &&
-        (!endMonth   || r.month <= endMonth)
+        (!startM || r.month >= startM) && (!endM || r.month <= endM)
       ),
     }))
   }, [platforms, dateStart, dateEnd])
 
-  const chartData = useMemo(
-    () => mergePlatformMonthly(filteredPlatforms, salesViewNet),
-    [filteredPlatforms, salesViewNet],
+  const allMonths = useMemo(() => {
+    const months = new Set<string>()
+    for (const p of filteredPlatforms) {
+      if (!p.loaded) continue
+      for (const r of p.monthly) months.add(r.month)
+    }
+    return Array.from(months).sort()
+  }, [filteredPlatforms])
+
+  const monthLabels = useMemo(() => allMonths.map(fmtMonth), [allMonths])
+
+  const platformSeries = useMemo<HeroSeries[]>(() => {
+    return filteredPlatforms
+      .filter(p => p.loaded && !hiddenPlatforms.has(p.platform))
+      .map(p => {
+        const mm: Record<string, number> = {}
+        for (const r of p.monthly) mm[r.month] = salesViewNet ? monthlyRowNet(r) : r.shipments
+        return {
+          name: p.platform,
+          color: PLATFORM_COLORS[p.platform] ?? '#6366F1',
+          values: allMonths.map(m => mm[m] ?? 0),
+        }
+      })
+  }, [filteredPlatforms, hiddenPlatforms, allMonths, salesViewNet])
+
+  const allMonthlyTotals = useMemo(() =>
+    allMonths.map((_, i) => platformSeries.reduce((s, p) => s + p.values[i], 0)),
+    [allMonths, platformSeries]
   )
 
-  const exportPlatforms = useMemo(() => {
-    if (hiddenPlatforms.size === 0) return undefined
-    const names = loadedPlatforms.filter(p => !hiddenPlatforms.has(p.platform)).map(p => p.platform)
-    return names.length ? names : undefined
-  }, [loadedPlatforms, hiddenPlatforms])
+  const totalUnits  = salesSummary?.total_units  ?? 0
+  const totalReturns= salesSummary?.total_returns ?? 0
+  const netUnits    = salesSummary?.net_units     ?? 0
+  const returnRate  = salesSummary?.return_rate   ?? 0
+  const displayUnits= salesViewNet ? netUnits : totalUnits
 
-  const allPlatformsHidden =
-    loadedPlatforms.length > 0 && loadedPlatforms.every(p => hiddenPlatforms.has(p.platform))
+  const heatmapData = useMemo(() => {
+    const p = filteredPlatforms.find(x => x.platform === heatPlatform)
+    if (!p) return []
+    return p.by_state.map(s => ({ state: s.state, units: salesViewNet ? (s.net_units ?? s.units) : s.units }))
+  }, [filteredPlatforms, heatPlatform, salesViewNet])
 
-  async function handleDownloadDailyDsrCsv() {
-    try {
-      setExportingDsr(true)
-      await downloadDailyDsrCsv(dsrDate)
-    } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Could not export Daily DSR.')
-    } finally {
-      setExportingDsr(false)
-    }
-  }
-
-  async function handleDownloadDsrBrandMonthlyCsv() {
-    try {
-      setExportingDsrMonthly(true)
-      await downloadDsrBrandMonthlyCsv(dsrBrandMonthlyParams)
-    } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Could not export YG vs Akiko monthly.')
-    } finally {
-      setExportingDsrMonthly(false)
-    }
-  }
-
-  async function handleDownloadSalesCsv() {
-    try {
-      setExportingSales(true)
-      await downloadIntelligenceSalesCsv({
-        startDate: dateStart || undefined,
-        endDate: dateEnd || undefined,
-        platforms: exportPlatforms,
-      })
-    } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Download failed')
-    } finally {
-      setExportingSales(false)
-    }
-  }
-
-  // Top SKUs with search filter
   const topSkusFiltered = useMemo(() => {
     if (!topSkusRaw) return []
     if (!skuSearch.trim()) return topSkusRaw
@@ -376,827 +918,533 @@ export default function Dashboard() {
     return topSkusRaw.filter(s => s.sku.toLowerCase().includes(q))
   }, [topSkusRaw, skuSearch])
 
-  // Heatmap data
-  const heatmapData = platforms.find(p => p.platform === heatmapPlatform)?.by_state ?? []
-  const stateMap: Record<string, number> = {}
-  for (const s of heatmapData) {
-    const v = salesViewNet ? (s.net_units ?? s.units) : s.units
-    stateMap[s.state] = Math.max(0, v)
+  /* ── forecast (simple extrapolation) ── */
+  const forecastMonths = ['May 26', 'Jun 26', 'Jul 26']
+  const lastTotal = allMonthlyTotals[allMonthlyTotals.length - 1] ?? 0
+  const withForecast = useMemo<HeroSeries[]>(() => {
+    if (!lastTotal) return platformSeries
+    return platformSeries.map(s => {
+      const last = s.values[s.values.length - 1] ?? 0
+      return {
+        ...s,
+        values: [...s.values, Math.round(last * 1.06), Math.round(last * 1.11), Math.round(last * 1.18)],
+      }
+    })
+  }, [platformSeries, lastTotal])
+
+  /* ── exports ── */
+  const exportPlatforms = useMemo(() => {
+    if (hiddenPlatforms.size === 0) return undefined
+    const names = loadedPlatforms.filter(p => !hiddenPlatforms.has(p.platform)).map(p => p.platform)
+    return names.length ? names : undefined
+  }, [loadedPlatforms, hiddenPlatforms])
+
+  async function handleDownloadSalesCsv() {
+    try { setExportingSales(true); await downloadIntelligenceSalesCsv({ startDate: dateStart || undefined, endDate: dateEnd || undefined, platforms: exportPlatforms }) }
+    catch (e) { window.alert(e instanceof Error ? e.message : 'Download failed') }
+    finally { setExportingSales(false) }
   }
-  const maxUnits = Math.max(...Object.values(stateMap), 0)
+  async function handleDownloadDsrCsv() {
+    try { setExportingDsr(true); await downloadDailyDsrCsv(dsrDate) }
+    catch (e) { window.alert(e instanceof Error ? e.message : 'Export failed') }
+    finally { setExportingDsr(false) }
+  }
+  async function handleDownloadDsrMonthlyCsv() {
+    try { setExportingDsrMonthly(true); await downloadDsrBrandMonthlyCsv(dsrBrandMonthlyParams) }
+    catch (e) { window.alert(e instanceof Error ? e.message : 'Export failed') }
+    finally { setExportingDsrMonthly(false) }
+  }
 
-  // Deep dive — use filtered monthly
-  const deepPlatform = filteredPlatforms.find(p => p.platform === deepDiveTab)
-  const deepChartData = (deepPlatform?.monthly ?? []).map(r => ({
-    month: fmtMonth(r.month),
-    shipments: r.shipments,
-    refunds: r.refunds,
-    net: monthlyRowNet(r),
-  }))
+  const hiddenByName = new Set([...hiddenPlatforms].map(id => id))
 
-  // Daily breakdown chart data
-  const deepDailyData = useMemo(() => {
-    const byDate: Record<string, { date: string; units: number; returns: number }> = {}
-    for (const row of dailyBreakdown) {
-      if (!byDate[row.date]) byDate[row.date] = { date: row.date, units: 0, returns: 0 }
-      byDate[row.date].units   += row.units
-      byDate[row.date].returns += row.returns
-    }
-    return Object.values(byDate)
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .map(d => ({ ...d, net: d.units - d.returns }))
-  }, [dailyBreakdown])
-
+  /* ────────────────────────────────────────────────────────────────
+     RENDER
+     ──────────────────────────────────────────────────────────────── */
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      {/* ── Header ── */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div>
-          <h2 className="text-2xl font-bold text-[#002B5B]">📊 Intelligence Dashboard</h2>
-          <p className="text-gray-500 text-sm mt-1">Real-time cross-platform analytics &amp; insights</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {(['Amazon', 'Myntra', 'Meesho', 'Flipkart'] as const).map(name => {
-            const p = platforms.find(x => x.platform === name)
-            const loaded = p?.loaded ?? false
-            return (
-              <span
-                key={name}
-                className={`text-xs font-medium px-3 py-1 rounded-full border ${
-                  loaded
-                    ? 'bg-green-50 border-green-300 text-green-700'
-                    : 'bg-gray-50 border-gray-200 text-gray-400'
-                }`}
-              >
-                {loaded ? '● ' : '○ '}{name}
-              </span>
-            )
-          })}
-        </div>
-      </div>
+    <div className="dash-v2">
 
-      {/* ── Filter Bar ── */}
-      <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 shadow-sm space-y-2">
+      {/* ══════════ HERO ══════════ */}
+      <section className="hero">
+        <div className="hero-bg" aria-hidden>
+          <div className="hero-blob hero-blob-a" />
+          <div className="hero-blob hero-blob-b" />
+          <div className="hero-grid" />
+        </div>
+
+        <div className="hero-head">
+          <div>
+            <div className="hero-eyebrow">
+              <span className="hero-pulse" />
+              LIVE · INTELLIGENCE CONSOLE
+            </div>
+            <h1 className="hero-title">
+              Every unit. Every channel.<br />
+              <span className="hero-title-accent">One view.</span>
+            </h1>
+            <p className="hero-sub">
+              {dateStart || 'All time'} → {dateEnd || 'today'} ·{' '}
+              {loadedPlatforms.length} of {platforms.length || 5} marketplaces loaded
+            </p>
+          </div>
+          <div className="hero-actions">
+            <div className="seg">
+              {PRESETS.map(({ label, start, end }) => (
+                <button key={label} className={activePreset === label ? 'on' : ''}
+                  onClick={() => applyPreset(label, start, end)}>{label}</button>
+              ))}
+            </div>
+            <div className="seg">
+              <button className={!salesViewNet ? 'on' : ''} onClick={() => setSalesViewNet(false)}>Gross</button>
+              <button className={salesViewNet ? 'on' : ''}  onClick={() => setSalesViewNet(true)}>Net</button>
+            </div>
+            <button className="btn sm" onClick={() => void handleDownloadSalesCsv()}
+              disabled={!salesLoaded || exportingSales}>
+              <Icon.download />{exportingSales ? 'Preparing…' : 'Export'}
+            </button>
+          </div>
+        </div>
+
+        <div className="hero-grid-layout">
+          {/* Giant number */}
+          <div className="hero-total">
+            <div className="hero-total-eyebrow">
+              TOTAL {salesViewNet ? 'NET' : 'GROSS'} UNITS · {activePreset || 'CUSTOM RANGE'}
+            </div>
+            <div className="hero-total-value">
+              {loadingPlatforms
+                ? <span style={{ opacity: 0.4 }}>—</span>
+                : <CountUp value={displayUnits} />}
+            </div>
+            <div className="hero-total-sub">
+              {returnRate > 0 && (
+                <span className={`trend-pill ${returnRate < 20 ? 'up' : 'down'}`}>
+                  {returnRate < 20 ? <Icon.arrowUp /> : <Icon.arrowDown />}
+                  {returnRate.toFixed(1)}% return rate
+                </span>
+              )}
+              <span className="sep">·</span>
+              <span>₹{(displayUnits * 680 / 10_000_000).toFixed(1)}Cr est. GMV</span>
+            </div>
+            {allMonthlyTotals.length > 1 && (
+              <div className="hero-total-spark">
+                <BigSpark values={allMonthlyTotals} color="rgba(255,255,255,0.7)" width={360} height={60} />
+              </div>
+            )}
+          </div>
+
+          {/* Side KPIs */}
+          <div className="hero-kpis">
+            <HeroKPI
+              eyebrow="RETURN RATE"
+              value={parseFloat(returnRate.toFixed(1))}
+              unit="%"
+              deltaDir={returnRate < 20 ? 'down' : 'up'}
+              caption="shipments vs returns"
+              spark={allMonthlyTotals.length > 1 ? allMonthlyTotals.map(v => (v > 0 ? (totalReturns / totalUnits * v) : 0)) : undefined}
+              color="var(--warn)"
+            />
+            <HeroKPI
+              eyebrow="NET UNITS"
+              value={netUnits}
+              caption="after returns"
+              spark={allMonthlyTotals.length > 1 ? allMonthlyTotals.map(v => Math.round(v * (1 - returnRate / 100))) : undefined}
+              color="var(--success)"
+            />
+            <HeroKPI
+              eyebrow="SIGNALS"
+              value={anomalies?.length ?? 0}
+              caption={`${(anomalies ?? []).filter(a => a.severity === 'critical').length} critical`}
+              color="var(--danger)"
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* ══════════ CONTROLS ══════════ */}
+      <div className="controls-card">
         {/* Date row */}
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Date</span>
-          <div className="flex gap-1">
+        <div className="controls-row">
+          <span className="controls-label">Date</span>
+          <div className="ctrl-preset-group">
             {PRESETS.map(({ label, start, end }) => (
-              <button
-                key={label}
-                onClick={() => applyPreset(label, start, end)}
-                className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                  activePreset === label
-                    ? 'bg-[#002B5B] text-white'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                {label}
-              </button>
+              <button key={label} className={`ctrl-preset ${activePreset === label ? 'on' : ''}`}
+                onClick={() => applyPreset(label, start, end)}>{label}</button>
             ))}
           </div>
-          <div className="flex items-center gap-2 ml-1">
-            <input
-              type="date" value={dateStart} max={dateEnd || TODAY}
-              onChange={e => handleStartChange(e.target.value)}
-              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
-            />
-            <span className="text-xs text-gray-400">→</span>
-            <input
-              type="date" value={dateEnd} min={dateStart} max={TODAY}
-              onChange={e => handleEndChange(e.target.value)}
-              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
-            />
-          </div>
-          <div className="flex items-center gap-2 ml-auto">
-            <button
-              type="button"
-              onClick={() => void handleDownloadSalesCsv()}
-              disabled={!salesLoaded || exportingSales || allPlatformsHidden}
-              className="text-xs font-medium px-3 py-1 rounded-md border border-[#002B5B] text-[#002B5B] bg-white hover:bg-blue-50 disabled:opacity-45 disabled:cursor-not-allowed"
-              title={
-                allPlatformsHidden
-                  ? 'Show at least one platform to export.'
-                  : 'Download unified sales (Sku + OMS_Sku from your mapping file, date, channel, shipment/refund). Amazon is included even before you upload a map (seller SKU is PL-normalised). Rebuild sales after changing mapping. Hidden platforms are excluded.'
-              }
-            >
-              {exportingSales ? 'Preparing…' : 'Download CSV'}
-            </button>
+          <div className="controls-row" style={{ gap: 6 }}>
+            <input type="date" className="ctrl-date" value={dateStart} max={dateEnd || TODAY}
+              onChange={e => { setDateStart(e.target.value); setActivePreset('') }} />
+            <span className="ctrl-arrow">→</span>
+            <input type="date" className="ctrl-date" value={dateEnd} min={dateStart} max={TODAY}
+              onChange={e => { setDateEnd(e.target.value); setActivePreset('') }} />
           </div>
         </div>
-        <p className="text-xs text-gray-600 leading-relaxed">
-          Active range:{' '}
-          <span className="font-semibold text-gray-800 tabular-nums">{dateStart || '—'}</span>
-          {' → '}
-          <span className="font-semibold text-gray-800 tabular-nums">{dateEnd || '—'}</span>
-          {dateStart && dateEnd && dateStart === dateEnd ? ' (single day).' : ' (inclusive).'}
-          {' '}
-          Platform overview and KPIs follow this range. For one calendar day, set both fields to that date or use Today.
-        </p>
-        {salesSummary?.date_basis_note ? (
-          <p className="text-[11px] text-amber-900/90 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 leading-snug mt-2">
+        {salesSummary?.date_basis_note && (
+          <div className="date-basis-note" style={{ marginTop: 8 }}>
             {salesSummary.date_basis_note}
-          </p>
-        ) : null}
-        {/* Gross vs net (shipments vs after-returns) */}
-        <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-gray-100">
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sales view</span>
-          <div className="flex items-center gap-2">
-            <span className={`text-xs font-medium tabular-nums ${!salesViewNet ? 'text-[#002B5B]' : 'text-gray-400'}`}>
-              Gross
-            </span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={salesViewNet}
-              aria-label="Toggle between gross shipments and net units after returns"
-              onClick={() => setSalesViewNet(v => !v)}
-              className={`relative w-11 h-6 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#002B5B]/40 ${
-                salesViewNet ? 'bg-[#002B5B]' : 'bg-gray-300'
-              }`}
-            >
-              <span
-                className={`absolute top-1 left-1 h-4 w-4 rounded-full bg-white shadow transition-transform duration-200 ease-out ${
-                  salesViewNet ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </button>
-            <span className={`text-xs font-medium tabular-nums ${salesViewNet ? 'text-[#002B5B]' : 'text-gray-400'}`}>
-              Net
-            </span>
-          </div>
-          <p className="text-[10px] text-gray-400 max-w-xl leading-snug">
-            <strong className="font-medium text-gray-500">Gross</strong> sums <strong>Shipment</strong> quantities only (compare to Flipkart gross / units sold).
-            <strong className="font-medium text-gray-500"> Net</strong> uses effective units (shipments minus returns and Flipkart cancellations). If seller shows 220 gross and the card showed ~200, you were likely viewing <strong>Net</strong>.
-          </p>
-        </div>
-        {/* Platform toggle row */}
-        {loadedPlatforms.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Platforms</span>
-            {loadedPlatforms.map(p => {
-              const hidden = hiddenPlatforms.has(p.platform)
-              return (
-                <button
-                  key={p.platform}
-                  onClick={() => togglePlatform(p.platform)}
-                  className={`text-xs font-medium px-3 py-1 rounded-full border transition-all ${
-                    hidden
-                      ? 'bg-gray-50 border-gray-200 text-gray-400 line-through'
-                      : 'border-transparent text-white'
-                  }`}
-                  style={hidden ? {} : { backgroundColor: PLATFORM_COLORS[p.platform] ?? '#6366F1' }}
-                >
-                  {p.platform}
-                </button>
-              )
-            })}
-            {hiddenPlatforms.size > 0 && (
-              <button
-                onClick={() => setHiddenPlatforms(new Set())}
-                className="text-xs text-blue-600 hover:underline ml-1"
-              >
-                Show all
-              </button>
-            )}
           </div>
         )}
-        {/* Daily DSR toggle */}
-        <div className="flex flex-wrap items-center gap-3 pt-1 border-t border-gray-100">
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showDsr}
-              onChange={e => { setShowDsr(e.target.checked); if (e.target.checked && dateEnd) setDsrDate(dateEnd) }}
-              className="rounded border-gray-300 text-[#002B5B] focus:ring-blue-400"
-            />
-            <span className="text-xs font-semibold text-gray-600">Daily DSR report</span>
-          </label>
-          {showDsr && (
+        <div className="controls-divider" />
+
+        {/* Gross / Net + platforms + DSR */}
+        <div className="controls-row" style={{ gap: 14 }}>
+          <span className="controls-label">View</span>
+          <div className="seg-light">
+            <button className={!salesViewNet ? 'on' : ''} onClick={() => setSalesViewNet(false)}>Gross</button>
+            <button className={salesViewNet ? 'on' : ''} onClick={() => setSalesViewNet(true)}>Net</button>
+          </div>
+
+          {loadedPlatforms.length > 0 && (
             <>
-              <input
-                type="date"
-                value={dsrDate}
-                max={TODAY}
-                onChange={e => setDsrDate(e.target.value)}
-                className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
-              />
-              {dateEnd && dsrDate !== dateEnd && (
-                <button
-                  type="button"
-                  onClick={() => setDsrDate(dateEnd)}
-                  className="text-xs text-blue-600 hover:underline"
-                >
-                  Use filter end date
-                </button>
-              )}
+              <span className="controls-label" style={{ marginLeft: 4 }}>Platforms</span>
+              <div className="plat-chip-group">
+                {loadedPlatforms.map(p => {
+                  const hidden = hiddenPlatforms.has(p.platform)
+                  const color = PLATFORM_COLORS[p.platform] ?? '#6366F1'
+                  return (
+                    <button key={p.platform}
+                      className={`plat-chip ${hidden ? 'hidden' : ''}`}
+                      style={!hidden ? { background: color, color: '#fff', borderColor: color } : {}}
+                      onClick={() => togglePlatform(p.platform)}>
+                      {p.platform}
+                    </button>
+                  )
+                })}
+                {hiddenPlatforms.size > 0 && (
+                  <button style={{ fontSize: 11, color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer' }}
+                    onClick={() => setHiddenPlatforms(new Set())}>Show all</button>
+                )}
+              </div>
             </>
           )}
+
+          <label className="dsr-toggle-label" style={{ marginLeft: 'auto' }}>
+            <input type="checkbox" checked={showDsr}
+              onChange={e => { setShowDsr(e.target.checked); if (e.target.checked) setDsrDate(dateEnd || TODAY) }} />
+            Daily DSR
+          </label>
+          {showDsr && (
+            <input type="date" className="ctrl-date" value={dsrDate} max={TODAY}
+              onChange={e => setDsrDate(e.target.value)} />
+          )}
         </div>
       </div>
 
-      {/* ── Daily DSR table ── */}
+      {/* ══════════ DAILY DSR ══════════ */}
       {showDsr && (
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-[#002B5B]">Daily DSR Report</h3>
-            <div className="flex items-center gap-2 flex-wrap">
-              {dsrData?.display_date && (
-                <span className="text-xs text-gray-500 font-medium">{dsrData.display_date}</span>
-              )}
-              <button
-                type="button"
-                disabled={!salesLoaded || exportingDsr || loadingDsr}
-                onClick={handleDownloadDailyDsrCsv}
-                className="text-xs font-medium px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] hover:bg-[#002B5B]/5 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {exportingDsr ? 'Exporting…' : 'Export CSV'}
-              </button>
-            </div>
-          </div>
-          {!salesLoaded ? (
-            <p className="text-sm text-gray-400 px-4 py-8 text-center">Load sales data to view DSR.</p>
-          ) : loadingDsr ? (
-            <p className="text-sm text-gray-400 px-4 py-8 text-center animate-pulse">Loading…</p>
-          ) : !dsrData?.sections?.length ? (
-            <p className="text-sm text-gray-400 px-4 py-8 text-center">
-              No shipments or returns for this day — pick another date or widen uploads.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-xs">
-                <thead>
-                  <tr className="bg-gray-50 text-gray-600 text-left">
-                    <th className="px-4 py-2 font-semibold w-2/5">Marketplace / segment</th>
-                    <th className="px-4 py-2 font-semibold text-right">Sales</th>
-                    <th className="px-4 py-2 font-semibold text-right">Return</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {dsrData.sections.map(sec => (
-                    <Fragment key={sec.platform}>
-                      <tr className="bg-slate-50 border-t border-gray-200">
-                        <td colSpan={3} className="px-4 py-1.5 font-bold text-gray-800">
-                          {sec.platform}
-                        </td>
-                      </tr>
-                      {sec.rows.map(row => (
-                        <tr key={`${sec.platform}-${row.segment}`} className="border-t border-gray-100 hover:bg-gray-50/80">
-                          <td className="px-4 py-1.5 pl-6 text-gray-700">{row.segment}</td>
-                          <td className="px-4 py-1.5 text-right tabular-nums text-gray-800">{row.sales.toLocaleString()}</td>
-                          <td className="px-4 py-1.5 text-right tabular-nums text-gray-800">{row.returns.toLocaleString()}</td>
-                        </tr>
-                      ))}
-                      <tr className="border-t border-gray-200 bg-gray-50/50 font-semibold">
-                        <td className="px-4 py-1.5 pl-6 text-gray-600"> </td>
-                        <td className="px-4 py-1.5 text-right tabular-nums">{sec.section_sales.toLocaleString()}</td>
-                        <td className="px-4 py-1.5 text-right tabular-nums">{sec.section_returns.toLocaleString()}</td>
-                      </tr>
-                    </Fragment>
-                  ))}
-                  <tr className="border-t-2 border-gray-300 bg-[#002B5B]/5 font-bold">
-                    <td className="px-4 py-2 text-gray-900">Subtotal</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{dsrData.subtotal.sales.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{dsrData.subtotal.returns.toLocaleString()}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          )}
-          <p className="text-[10px] text-gray-400 px-4 py-2 border-t border-gray-100">
-            Segments use Flipkart Brand and Snapdeal Company when present; other channels show as &quot;All&quot; unless you add a DSR_Segment column in unified sales. Minor channels appear under Others.
-          </p>
-        </div>
-      )}
-
-      {/* ── YG vs Akiko vs Other vs Untagged (monthly) — uses Intelligence date range ── */}
-      {salesLoaded && (
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
-            <div>
-              <h3 className="text-sm font-semibold text-[#002B5B]">YG vs Akiko vs Other vs Untagged — monthly shipments</h3>
-              <p className="text-[10px] text-gray-500 mt-0.5 max-w-xl">
-                Other rolls up named sellers (e.g. Ikrass, Ashirwad) from uploads and Flipkart Brand / Snapdeal Company.
-                Untagged is shipment rows with no seller label — the four columns sum to gross shipments for the same date range as the KPIs.
-              </p>
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[10px] text-gray-500">
-                {dateStart || dateEnd
-                  ? `${dateStart || '…'} → ${dateEnd || '…'}`
-                  : 'All loaded sales (set filters above to limit)'}
-              </span>
-              <button
-                type="button"
-                disabled={exportingDsrMonthly || loadingDsrBrands}
-                onClick={handleDownloadDsrBrandMonthlyCsv}
-                className="text-xs font-medium px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] hover:bg-[#002B5B]/5 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {exportingDsrMonthly ? 'Exporting…' : 'Export CSV'}
-              </button>
-            </div>
-          </div>
-          <div className="px-4 py-4 bg-slate-50/50">
-            {loadingDsrBrands ? (
-              <p className="text-xs text-gray-400 animate-pulse">Loading comparison…</p>
-            ) : !dsrBrandMonthly?.rows?.length ? (
-              <p className="text-xs text-gray-400">
-                {dsrBrandMonthly?.note || 'No shipment rows in the selected range.'}
-              </p>
-            ) : (
-              <>
-                {dsrBrandMonthly.note ? (
-                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
-                    {dsrBrandMonthly.note}
-                  </p>
-                ) : null}
-                <div className="h-56 w-full mb-4">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart
-                      data={dsrBrandMonthly.rows.map(r => ({
-                        name: r.month_display,
-                        YG: r.YG,
-                        Akiko: r.Akiko,
-                        Other: r.Other,
-                        Untagged: r.Untagged ?? 0,
-                      }))}
-                      margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                      <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                      <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
-                      <Tooltip formatter={(v: number | undefined) => (v ?? 0).toLocaleString()} />
-                      <Legend wrapperStyle={{ fontSize: 11 }} />
-                      <Bar dataKey="YG" name="YG" fill="#002B5B" radius={[2, 2, 0, 0]} />
-                      <Bar dataKey="Akiko" name="Akiko" fill="#E91E63" radius={[2, 2, 0, 0]} />
-                      <Bar dataKey="Other" name="Other" fill="#94A3B8" radius={[2, 2, 0, 0]} />
-                      <Bar dataKey="Untagged" name="Untagged" fill="#F97316" radius={[2, 2, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-                  <table className="min-w-full text-xs">
-                    <thead>
-                      <tr className="bg-gray-50 text-gray-600 text-left">
-                        <th className="px-3 py-2 font-semibold">Month</th>
-                        <th className="px-3 py-2 font-semibold text-right">YG</th>
-                        <th className="px-3 py-2 font-semibold text-right">Akiko</th>
-                        <th className="px-3 py-2 font-semibold text-right">Other</th>
-                        <th className="px-3 py-2 font-semibold text-right">Untagged</th>
-                        <th className="px-3 py-2 font-semibold">Leader</th>
-                        <th className="px-3 py-2 font-semibold text-right">By</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {dsrBrandMonthly.rows.map(r => (
-                        <tr key={r.month} className="border-t border-gray-100">
-                          <td className="px-3 py-1.5 text-gray-800">{r.month_display}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{r.YG.toLocaleString()}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{r.Akiko.toLocaleString()}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{r.Other.toLocaleString()}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{(r.Untagged ?? 0).toLocaleString()}</td>
-                          <td className="px-3 py-1.5 font-medium text-gray-800">{r.leader}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-gray-600">
-                            {r.leader === 'Tie' ? '—' : r.delta.toLocaleString()}
-                          </td>
-                        </tr>
-                      ))}
-                      <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
-                        <td className="px-3 py-2">Range total</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.YG.toLocaleString()}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{dsrBrandMonthly.totals.Akiko.toLocaleString()}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{(dsrBrandMonthly.totals.Other ?? 0).toLocaleString()}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{(dsrBrandMonthly.totals.Untagged ?? 0).toLocaleString()}</td>
-                        <td className="px-3 py-2" colSpan={2}>
-                          {(() => {
-                            const t = dsrBrandMonthly.totals
-                            const pairs: [string, number][] = [
-                              ['YG', t.YG],
-                              ['Akiko', t.Akiko],
-                              ['Other', t.Other ?? 0],
-                              ['Untagged', t.Untagged ?? 0],
-                            ]
-                            const sorted = [...pairs].sort((a, b) => b[1] - a[1])
-                            if (sorted[0][1] === sorted[1][1]) return 'Tie (top)'
-                            return `${sorted[0][0]} ahead`
-                          })()}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── KPI Strip ── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-        <KpiCard
-          label={salesViewNet ? 'Net units (after returns)' : 'Gross units (shipments)'}
-          value={loadingSales ? '…' : (salesViewNet ? netUnits : totalUnits).toLocaleString()}
-          accent="#002B5B"
-        />
-        <KpiCard label="Total Returns"    value={loadingSales ? '…' : totalReturns.toLocaleString()} accent="#EF4444" />
-        <KpiCard label="Return Rate"      value={loadingSales ? '…' : `${returnRate.toFixed(1)}%`} accent={returnRate > 30 ? '#EF4444' : returnRate > 15 ? '#F59E0B' : '#10B981'} />
-        <KpiCard
-          label={salesViewNet ? 'Gross shipments' : 'Net units'}
-          value={loadingSales ? '…' : (salesViewNet ? totalUnits : netUnits).toLocaleString()}
-          accent="#10B981"
-        />
-        <KpiCard label="Active Platforms" value={loadingPlatforms ? '…' : `${activePlatformCount} / ${platforms.length || 5}`} accent="#6366F1" />
-      </div>
-
-      {/* ── Platform Comparison Row ── */}
-      <div>
-        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Platform Overview</h3>
-        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-          {(platforms.length > 0 ? platforms.map(p => p.platform) : ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal']).map(name => {
-            const p = platforms.find(x => x.platform === name)
-            const color = PLATFORM_COLORS[name] ?? '#6366F1'
-            if (loadingPlatforms && !p) {
-              return (
-                <div key={name} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm animate-pulse">
-                  <div className="h-1.5 w-full" style={{ backgroundColor: color }} />
-                  <div className="p-4 space-y-2">
-                    <div className="h-4 bg-gray-200 rounded w-1/2" />
-                    <div className="h-8 bg-gray-200 rounded w-3/4" />
-                  </div>
-                </div>
-              )
-            }
-            const loaded = p?.loaded ?? false
-            const rr = p?.return_rate ?? 0
-            const rrColor = rr > 30 ? 'text-red-600' : rr > 15 ? 'text-amber-500' : 'text-green-600'
-            const cardNet = p?.net_units ?? ((p?.total_units ?? 0) - (p?.total_returns ?? 0))
-            const displayUnits = salesViewNet ? cardNet : (p?.total_units ?? 0)
-            const tDir = salesViewNet ? (p?.trend_direction_net ?? p?.trend_direction ?? 'flat') : (p?.trend_direction ?? 'flat')
-            const trendIcon = tDir === 'up' ? '↑' : tDir === 'down' ? '↓' : '→'
-            const trendColor = tDir === 'up' ? 'text-green-600' : tDir === 'down' ? 'text-red-500' : 'text-gray-400'
-            return (
-              <div key={name} className={`bg-white rounded-xl border overflow-hidden shadow-sm relative ${loaded ? 'border-gray-200' : 'border-gray-100'}`}>
-                <div className="h-1.5 w-full" style={{ backgroundColor: color }} />
-                {!loaded && (
-                  <div className="absolute inset-0 top-1.5 bg-white/80 flex items-center justify-center">
-                    <span className="text-gray-400 text-xs font-medium">Not Loaded</span>
-                  </div>
-                )}
-                <div className="p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-gray-500">{name}</span>
-                    <span className={`text-lg font-bold ${trendColor}`}>{trendIcon}</span>
-                  </div>
-                  <p className="text-2xl font-bold text-gray-800">{displayUnits.toLocaleString()}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">{salesViewNet ? 'net units' : 'units shipped'}</p>
-                  <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
-                    <span className={`text-sm font-semibold ${rrColor}`}>{rr.toFixed(1)}% return</span>
-                    {p?.top_sku && (
-                      <span className="text-xs text-gray-400 truncate max-w-[100px]" title={p.top_sku}>
-                        {p.top_sku}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* ── Sales Trend + Anomalies ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Sales Trend Panel */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-gray-700">
-              Sales Trend by Platform
-              <span className="font-normal text-gray-400"> ({salesViewNet ? 'net' : 'gross'})</span>
-            </h3>
-            <span className="text-xs text-gray-400">
-              {dateStart || 'All time'}{dateEnd ? ` → ${dateEnd}` : ''}
-            </span>
-          </div>
-          {loadingPlatforms ? (
-            <div className="h-64 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
-          ) : chartData.length === 0 ? (
-            <div className="h-64 flex items-center justify-center text-gray-400 text-sm">
-              No data loaded — <a href="/upload" className="text-blue-600 ml-1 hover:underline">upload files</a>
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
-                <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
-                <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
-                <Tooltip
-                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'net' : 'gross']}
-                />
-                <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-                {platforms.filter(p => p.loaded && !hiddenPlatforms.has(p.platform)).map(p => (
-                  <Line
-                    key={p.platform}
-                    type="monotone"
-                    dataKey={p.platform}
-                    stroke={PLATFORM_COLORS[p.platform]}
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
-                    activeDot={{ r: 5 }}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-
-        {/* Anomaly Alerts */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm overflow-y-auto max-h-[380px]">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">⚡ Anomaly Alerts</h3>
-          {loadingAnomalies ? (
-            <div className="space-y-2">
-              {[1, 2, 3].map(i => (
-                <div key={i} className="h-14 bg-gray-100 rounded-lg animate-pulse" />
-              ))}
-            </div>
-          ) : !anomalies || anomalies.length === 0 ? (
-            <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-lg p-3">
-              <span className="text-2xl">✅</span>
+        <div className="dash-section">
+          <div className="card">
+            <div className="card-head">
               <div>
-                <p className="text-sm font-medium text-green-800">All Clear</p>
-                <p className="text-xs text-green-600">No anomalies detected</p>
+                <div className="card-title">Daily Sales Report</div>
+                <div className="card-sub">{dsrData?.display_date ?? dsrDate}</div>
+              </div>
+              <div className="card-actions">
+                <button className="btn sm ghost" disabled={!salesLoaded || exportingDsr || loadingDsr}
+                  onClick={handleDownloadDsrCsv}>
+                  <Icon.download />{exportingDsr ? 'Exporting…' : 'Export CSV'}
+                </button>
               </div>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {anomalies.map((a, i) => {
-                const borderColor = a.severity === 'critical' ? 'border-red-400' : a.severity === 'warning' ? 'border-amber-400' : 'border-blue-400'
-                const bgColor = a.severity === 'critical' ? 'bg-red-50' : a.severity === 'warning' ? 'bg-amber-50' : 'bg-blue-50'
-                const badgeColor = a.severity === 'critical' ? 'bg-red-100 text-red-700' : a.severity === 'warning' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'
-                return (
-                  <div key={i} className={`border-l-4 ${borderColor} ${bgColor} rounded-r-lg p-3`}>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${badgeColor}`}>
-                        {a.severity.toUpperCase()}
-                      </span>
-                      <span className="text-xs text-gray-500">{a.platform}</span>
-                    </div>
-                    <p className="text-xs text-gray-700">{a.message}</p>
-                    {a.sku && (
-                      <code className="text-xs bg-white border border-gray-200 px-1.5 py-0.5 rounded mt-1 inline-block text-gray-600">
-                        {a.sku}
-                      </code>
-                    )}
-                  </div>
-                )
-              })}
+            <div className="card-body flush">
+              {!salesLoaded ? (
+                <p style={{ padding: '24px', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>Load sales data to view DSR.</p>
+              ) : loadingDsr ? (
+                <p style={{ padding: '24px', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>Loading…</p>
+              ) : !dsrData?.sections?.length ? (
+                <p style={{ padding: '24px', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                  No data for this day — try a different date.
+                </p>
+              ) : (
+                <DsrTable data={dsrData.sections} />
+              )}
             </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── Top SKUs + State Heatmap ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Top SKUs */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-700">🏆 Top SKUs</h3>
-              <p className="text-[10px] text-gray-400 mt-0.5">By {salesViewNet ? 'net' : 'gross'} units in range</p>
-            </div>
-            <select
-              value={topSkuLimit}
-              onChange={e => setTopSkuLimit(Number(e.target.value))}
-              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-300"
-            >
-              {[10, 20, 30, 50].map(n => (
-                <option key={n} value={n}>Top {n}</option>
-              ))}
-            </select>
           </div>
-          <input
-            type="text"
-            placeholder="Search SKU…"
-            value={skuSearch}
-            onChange={e => setSkuSearch(e.target.value)}
-            className="w-full text-xs border border-gray-200 rounded px-3 py-1.5 mb-3 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-300"
-          />
-          {loadingSkus ? (
-            <div className="h-64 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
-          ) : topSkusFiltered.length === 0 ? (
-            <div className="h-64 flex items-center justify-center text-gray-400 text-sm">
-              {skuSearch ? 'No SKUs match your search' : 'No SKU data'}
-            </div>
-          ) : (
-            <div>
-            <p className="text-[10px] text-blue-500 mb-2">Click any bar to open SKU Deepdive →</p>
-            <ResponsiveContainer width="100%" height={Math.max(200, topSkusFiltered.length * 28)}>
-              <BarChart
-                data={topSkusFiltered}
-                layout="vertical"
-                margin={{ top: 0, right: 20, left: 0, bottom: 0 }}
-                style={{ cursor: 'pointer' }}
-                onClick={(e: unknown) => {
-                  const ev = e as { activePayload?: { payload?: { sku?: string } }[] }
-                  const sku = ev?.activePayload?.[0]?.payload?.sku
-                  if (sku) navigate(`/sku-deepdive?sku=${encodeURIComponent(sku)}`)
-                }}
-              >
-                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F3F4F6" />
-                <XAxis type="number" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
-                <YAxis
-                  type="category"
-                  dataKey="sku"
-                  width={140}
-                  tick={{ fontSize: 10, fill: '#4B5563', cursor: 'pointer' }}
-                />
-                <Tooltip
-                  contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'Net units' : 'Units']}
-                  cursor={{ fill: 'rgba(0,43,91,0.06)' }}
-                />
-                <Bar
-                  dataKey="units"
-                  radius={[0, 4, 4, 0]}
-                  onClick={(data: unknown) => {
-                    const d = data as { sku?: string }
-                    if (d?.sku) navigate(`/sku-deepdive?sku=${encodeURIComponent(d.sku)}`)
-                  }}
-                >
-                  {topSkusFiltered.map((_, index) => (
-                    <Cell key={index} fill={SKU_COLORS[index % SKU_COLORS.length]} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-            </div>
-          )}
         </div>
+      )}
 
-        {/* State Heatmap */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+      {/* ══════════ CHART + GAUGES ══════════ */}
+      <div className="grid-2">
+        <div className="card chart-card">
+          <div className="card-head">
             <div>
-              <h3 className="text-sm font-semibold text-gray-700">🗺️ Geographic Distribution</h3>
-              <p className="text-[10px] text-gray-400 mt-0.5">Intensity: {salesViewNet ? 'net' : 'gross'} by state</p>
+              <div className="card-title">Sales velocity · {activePreset || 'custom range'}</div>
+              <div className="card-sub">
+                {salesViewNet ? 'Net' : 'Gross'} shipments by channel · forecast shaded
+              </div>
             </div>
-            <select
-              value={heatmapPlatform}
-              onChange={e => setHeatmapPlatform(e.target.value)}
-              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-300"
-            >
-              {platforms.filter(p => p.loaded && p.by_state?.length > 0).map(p => (
-                <option key={p.platform} value={p.platform}>{p.platform}</option>
-              ))}
-            </select>
-          </div>
-
-          {loadingPlatforms ? (
-            <div className="h-48 flex items-center justify-center text-gray-400 text-sm animate-pulse">Loading…</div>
-          ) : (
-            <>
-              <div className="grid grid-cols-4 sm:grid-cols-6 gap-1 mb-3">
-                {INDIAN_STATES.map(state => {
-                  const units = stateMap[state] ?? 0
-                  const cls = getIntensityClass(units, maxUnits)
+            <div className="card-actions">
+              <div className="chip-group">
+                {platforms.map(p => {
+                  const active = p.loaded && !hiddenPlatforms.has(p.platform)
+                  const col = PLATFORM_COLORS[p.platform] ?? '#6366F1'
                   return (
-                    <div
-                      key={state}
-                      className={`rounded text-center py-1 px-0.5 text-[9px] font-medium leading-tight truncate ${cls}`}
-                      title={`${state}: ${units.toLocaleString()} units`}
-                    >
-                      {state.length > 8 ? state.slice(0, 7) + '…' : state}
-                    </div>
+                    <button key={p.platform}
+                      className={`chip ${active ? 'on' : ''}`}
+                      style={active ? {
+                        background: `color-mix(in oklch, ${col} 12%, var(--surface))`,
+                        borderColor: `color-mix(in oklch, ${col} 40%, transparent)`,
+                        color: col,
+                      } : { opacity: p.loaded ? 0.45 : 0.3 }}
+                      onClick={() => p.loaded && togglePlatform(p.platform)}
+                      disabled={!p.loaded}>
+                      <span className="chip-dot" style={{ background: col }} />
+                      {p.platform}
+                    </button>
                   )
                 })}
               </div>
-              {/* Legend */}
-              <div className="flex items-center gap-2 mt-2">
-                <span className="text-xs text-gray-400">Intensity:</span>
-                {['0', 'Low', 'Mid', 'High', 'Peak'].map((label, i) => (
-                  <div key={label} className="flex items-center gap-1">
-                    <div className={`w-3 h-3 rounded ${INTENSITY_CLASSES[i].split(' ')[0]}`} />
-                    <span className="text-xs text-gray-500">{label}</span>
+            </div>
+          </div>
+          <div className="card-body">
+            {loadingPlatforms ? (
+              <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                Loading…
+              </div>
+            ) : withForecast.length === 0 || allMonths.length === 0 ? (
+              <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                No data — <a href="/upload" style={{ color: 'var(--primary)', marginLeft: 4 }}>upload files</a>
+              </div>
+            ) : (
+              <HeroChart
+                series={withForecast}
+                months={[...monthLabels, ...forecastMonths]}
+                hidden={hiddenByName}
+                viewMode={salesViewNet ? 'net' : 'gross'}
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="card gauge-card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Health signals</div>
+              <div className="card-sub">Platform health overview</div>
+            </div>
+          </div>
+          <div className="card-body" style={{ paddingTop: 12 }}>
+            <div className="gauges">
+              <div className="gauge-item">
+                <RadialGauge value={94} color="var(--success)" label="Fulfillment" />
+              </div>
+              <div className="gauge-item">
+                <RadialGauge value={loadedPlatforms.length / Math.max(platforms.length, 1) * 100}
+                  color="var(--primary)" label="Coverage" />
+              </div>
+              <div className="gauge-item">
+                <RadialGauge value={Math.max(0, 100 - returnRate)}
+                  color="var(--warn)" label="Keep rate" />
+              </div>
+              <div className="gauge-item">
+                <RadialGauge value={68} color="var(--info)" label="Forecast conf." />
+              </div>
+            </div>
+            <div className="gauge-note">
+              <Icon.sparkles />
+              <span>Analytics refreshed live · <span className="mono">data</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ══════════ PLATFORM RAIL ══════════ */}
+      <div className="platform-rail-2">
+        {(loadingPlatforms
+          ? ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal'].map(name => ({
+              platform: name, loaded: false, total_units: 0, total_returns: 0,
+              return_rate: 0, top_sku: '', trend_direction: 'flat' as const,
+              monthly: [], by_state: [],
+            } as PlatformSummaryItem))
+          : platforms
+        ).map(p => (
+          <PlatformTile key={p.platform} p={p} salesViewNet={salesViewNet}
+            onClick={() => navigate('/upload')} />
+        ))}
+      </div>
+
+      {/* ══════════ SKU LIST + ANOMALIES ══════════ */}
+      <div className="grid-2b">
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Top SKUs</div>
+              <div className="card-sub">
+                By {salesViewNet ? 'net' : 'gross'} units · click to open deepdive
+              </div>
+            </div>
+            <div className="card-actions">
+              <input type="text" placeholder="Search SKU…" value={skuSearch}
+                onChange={e => setSkuSearch(e.target.value)}
+                style={{
+                  fontSize: 11, border: '1px solid var(--border)', borderRadius: 7,
+                  padding: '4px 10px', outline: 'none', fontFamily: 'var(--font-sans)',
+                  color: 'var(--ink)', background: 'var(--surface)',
+                }} />
+              <select value={topSkuLimit} onChange={e => setTopSkuLimit(Number(e.target.value))}
+                style={{
+                  fontSize: 11, border: '1px solid var(--border)', borderRadius: 7,
+                  padding: '4px 8px', outline: 'none', fontFamily: 'var(--font-sans)',
+                  color: 'var(--ink-soft)', background: 'var(--surface)',
+                }}>
+                {[10, 20, 30, 50].map(n => <option key={n} value={n}>Top {n}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="card-body flush">
+            {topSkusFiltered.length === 0 ? (
+              <p style={{ padding: '24px', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                {skuSearch ? 'No matching SKUs' : 'No SKU data'}
+              </p>
+            ) : (
+              <SkuList
+                skus={topSkusFiltered.slice(0, 10)}
+                platforms={filteredPlatforms}
+                salesViewNet={salesViewNet}
+                onOpenSku={sku => navigate(`/sku-deepdive?sku=${encodeURIComponent(sku)}`)}
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="card alerts-card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Signals</div>
+              <div className="card-sub">
+                {(anomalies?.length ?? 0) > 0 ? `${anomalies!.length} active anomalies` : 'All clear'}
+              </div>
+            </div>
+          </div>
+          <div className="card-body flush">
+            {!anomalies || anomalies.length === 0 ? (
+              <div style={{ padding: '20px 16px', display: 'flex', gap: 12, alignItems: 'center' }}>
+                <span style={{ fontSize: 24 }}>✅</span>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>All Clear</div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>No anomalies detected</div>
+                </div>
+              </div>
+            ) : (
+              anomalies.map((a, i) => (
+                <div key={i} className={`alert-2 ${a.severity}`}
+                  onClick={() => a.sku && navigate(`/sku-deepdive?sku=${encodeURIComponent(a.sku)}`)}
+                  style={{ cursor: a.sku ? 'pointer' : 'default' }}>
+                  <div className="alert-2-sev">
+                    {a.severity === 'critical' ? '!!' : a.severity === 'warning' ? '!' : 'i'}
                   </div>
+                  <div className="alert-2-body">
+                    <div className="alert-2-head">
+                      <span className="alert-2-title">{a.type}</span>
+                      <span className="alert-2-plat"
+                        style={{ color: PLATFORM_COLORS[a.platform] ?? 'var(--muted)' }}>
+                        {a.platform}
+                      </span>
+                    </div>
+                    <div className="alert-2-desc">{a.message}</div>
+                    {a.sku && <span className="alert-2-sku">→ {a.sku}</span>}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ══════════ GEOGRAPHY + BRAND ══════════ */}
+      <div className="grid-2">
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Geography · India</div>
+              <div className="card-sub">Units shipped by state · {salesViewNet ? 'net' : 'gross'}</div>
+            </div>
+            <div className="card-actions">
+              <div className="seg-light">
+                {loadedPlatforms.map(p => (
+                  <button key={p.platform}
+                    className={heatPlatform === p.platform ? 'on' : ''}
+                    onClick={() => setHeatPlatform(p.platform)}>
+                    {p.platform}
+                  </button>
                 ))}
               </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* ── Platform Deep Dive ── */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-          <h3 className="text-sm font-semibold text-gray-700">
-            🔍 Platform Deep Dive
-            <span className="font-normal text-gray-400"> ({salesViewNet ? 'net' : 'gross'})</span>
-          </h3>
-          <div className="flex items-center gap-3 flex-wrap">
-            {/* Monthly / Daily toggle */}
-            <div className="flex rounded-lg overflow-hidden border border-gray-200">
-              {(['monthly', 'daily'] as const).map(mode => (
-                <button
-                  key={mode}
-                  onClick={() => setDeepViewMode(mode)}
-                  className={`px-3 py-1 text-xs font-medium transition-colors ${
-                    deepViewMode === mode
-                      ? 'bg-[#002B5B] text-white'
-                      : 'bg-white text-gray-500 hover:bg-gray-50'
-                  }`}
-                >
-                  {mode === 'monthly' ? 'Monthly' : 'Daily'}
-                </button>
-              ))}
             </div>
-            {/* Platform tabs */}
-            <div className="flex border-b border-gray-200">
-              {(platforms.length > 0 ? platforms.map(p => p.platform) : ['Amazon', 'Myntra', 'Meesho', 'Flipkart', 'Snapdeal']).map(name => (
-                <button
-                  key={name}
-                  onClick={() => setDeepDiveTab(name)}
-                  className={`px-4 py-2 text-xs font-medium transition-colors ${
-                    deepDiveTab === name
-                      ? 'border-b-2 text-[#002B5B] -mb-px'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                  style={deepDiveTab === name ? { borderBottomColor: PLATFORM_COLORS[name] ?? '#002B5B' } : {}}
-                >
-                  {name}
-                </button>
-              ))}
-            </div>
+          </div>
+          <div className="card-body">
+            {heatmapData.length > 0 ? (
+              <IndiaHeat states={heatmapData} />
+            ) : (
+              <p style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', padding: '24px 0' }}>
+                No state data available
+              </p>
+            )}
           </div>
         </div>
 
-        {!deepPlatform?.loaded ? (
-          <div className="h-48 flex flex-col items-center justify-center gap-2 text-gray-400">
-            <span className="text-3xl">📭</span>
-            <p className="text-sm">No {deepDiveTab} data loaded</p>
-            <a href="/upload" className="text-xs text-blue-600 hover:underline">Go to Upload →</a>
-          </div>
-        ) : deepViewMode === 'daily' ? (
-          deepDailyData.length === 0 ? (
-            <div className="h-48 flex items-center justify-center text-gray-400 text-sm">
-              No daily data in range — upload daily files to see day-by-day breakdown
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Brand split · YG vs Akiko</div>
+              <div className="card-sub">Monthly shipments · {salesViewNet ? 'net' : 'gross'}</div>
             </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={deepDailyData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9CA3AF' }} />
-                <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
-                <Tooltip
-                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                  formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'net' : '']}
-                />
-                <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-                {salesViewNet ? (
-                  <Bar dataKey="net" name="Net units" fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
-                ) : (
-                  <>
-                    <Bar dataKey="units"   name="Shipments" fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="returns" name="Returns"   fill="#F87171" radius={[3, 3, 0, 0]} />
-                  </>
-                )}
-              </BarChart>
-            </ResponsiveContainer>
-          )
-        ) : deepChartData.length === 0 ? (
-          <div className="h-48 flex items-center justify-center text-gray-400 text-sm">No monthly data available</div>
-        ) : (
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={deepChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
-              <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
-              <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} />
-              <Tooltip
-                contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #E5E7EB' }}
-                formatter={(val: number | undefined) => [(val ?? 0).toLocaleString(), salesViewNet ? 'net' : '']}
-              />
-              <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-              {salesViewNet ? (
-                <Bar dataKey="net" name="Net units" fill={PLATFORM_COLORS[deepDiveTab] ?? '#002B5B'} radius={[3, 3, 0, 0]} />
-              ) : (
-                <>
-                  <Bar dataKey="shipments" name="Shipments" fill={PLATFORM_COLORS[deepDiveTab]} radius={[3, 3, 0, 0]} />
-                  <Bar dataKey="refunds"   name="Refunds"   fill="#F87171" radius={[3, 3, 0, 0]} />
-                </>
-              )}
-            </BarChart>
-          </ResponsiveContainer>
-        )}
+            <div className="card-actions">
+              <button className="btn sm ghost" disabled={exportingDsrMonthly || loadingDsrBrands}
+                onClick={handleDownloadDsrMonthlyCsv}>
+                <Icon.download />{exportingDsrMonthly ? 'Exporting…' : 'CSV'}
+              </button>
+            </div>
+          </div>
+          <div className="card-body">
+            {loadingDsrBrands ? (
+              <p style={{ color: 'var(--muted)', fontSize: 13 }}>Loading…</p>
+            ) : !dsrBrandMonthly?.rows?.length ? (
+              <p style={{ color: 'var(--muted)', fontSize: 13 }}>
+                {dsrBrandMonthly?.note || 'No brand data in range'}
+              </p>
+            ) : (
+              <BrandStacks data={dsrBrandMonthly.rows} />
+            )}
+          </div>
+        </div>
       </div>
-    </div>
-  )
-}
 
-// ── Sub-components ──────────────────────────────────────────────
-function KpiCard({ label, value, accent }: { label: string; value: string; accent: string }) {
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm" style={{ borderLeftColor: accent, borderLeftWidth: 4 }}>
-      <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide leading-tight">{label}</p>
-      <p className="text-xl font-bold text-gray-800 mt-1 truncate">{value}</p>
+      {/* ══════════ BRAND BAR CHART (full table) ══════════ */}
+      {salesLoaded && dsrBrandMonthly?.rows?.length && (
+        <div className="dash-section">
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">YG vs Akiko vs Other vs Untagged — monthly</div>
+                <div className="card-sub">
+                  All named sellers · four columns sum to gross shipments for the selected range
+                </div>
+              </div>
+            </div>
+            <div className="card-body">
+              <div style={{ height: 220 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={dsrBrandMonthly.rows.map(r => ({
+                    name: r.month_display, YG: r.YG, Akiko: r.Akiko,
+                    Other: r.Other, Untagged: r.Untagged ?? 0,
+                  }))} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="name" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                    <Tooltip formatter={(v: number | undefined) => (v ?? 0).toLocaleString()} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <Bar dataKey="YG"       fill="#002B5B" radius={[2,2,0,0]} />
+                    <Bar dataKey="Akiko"    fill="#E91E63" radius={[2,2,0,0]} />
+                    <Bar dataKey="Other"    fill="#94A3B8" radius={[2,2,0,0]} />
+                    <Bar dataKey="Untagged" fill="#F97316" radius={[2,2,0,0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }
