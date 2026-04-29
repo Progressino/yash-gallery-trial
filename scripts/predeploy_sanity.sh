@@ -6,24 +6,30 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VENV="$ROOT/.venv-tests"
-if [[ ! -x "$VENV/bin/python" ]]; then
-  python3 -m venv "$VENV"
+PYTHON_BIN="python3"
+PIP_CMD=(python3 -m pip)
+if [[ -x "$VENV/bin/python" && -x "$VENV/bin/pip" ]]; then
+  PYTHON_BIN="$VENV/bin/python"
+  PIP_CMD=("$VENV/bin/pip")
+else
+  rm -rf "$VENV" >/dev/null 2>&1 || true
+  if python3 -m venv "$VENV" >/dev/null 2>&1 && [[ -x "$VENV/bin/python" && -x "$VENV/bin/pip" ]]; then
+    PYTHON_BIN="$VENV/bin/python"
+    PIP_CMD=("$VENV/bin/pip")
+  else
+    echo "Warning: python venv unavailable; falling back to system python/pip." >&2
+  fi
 fi
-# Runner can have a stale/partial venv (python present, pip missing).
-if [[ ! -x "$VENV/bin/pip" ]]; then
-  rm -rf "$VENV"
-  python3 -m venv "$VENV"
-fi
-# Ensure test deps exist even when an older venv is already present.
-if ! "$VENV/bin/python" -c "import pytest" >/dev/null 2>&1; then
-  "$VENV/bin/pip" install -q -r "$ROOT/backend/requirements-test.txt"
+# Ensure test deps exist even when an older env is present.
+if ! "$PYTHON_BIN" -c "import pytest" >/dev/null 2>&1; then
+  "${PIP_CMD[@]}" install -q -r "$ROOT/backend/requirements-test.txt"
 fi
 
 echo "==> Backend sanity tests"
-"$VENV/bin/python" -m pytest tests/test_inventory_amazon_parser.py -q
-"$VENV/bin/python" -m pytest tests/test_sales_services.py -k "myntra" -q
-"$VENV/bin/python" -m pytest tests/test_myntra_resolve.py -q
-"$VENV/bin/python" -m pytest tests/test_api_data_po_sales.py -q
+"$PYTHON_BIN" -m pytest tests/test_inventory_amazon_parser.py -q
+"$PYTHON_BIN" -m pytest tests/test_sales_services.py -k "myntra" -q
+"$PYTHON_BIN" -m pytest tests/test_myntra_resolve.py -q
+"$PYTHON_BIN" -m pytest tests/test_api_data_po_sales.py -q
 
 echo "==> Frontend build + chromium smoke"
 pushd "$ROOT/frontend" >/dev/null
