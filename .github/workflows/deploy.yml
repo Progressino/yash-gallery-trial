@@ -19,6 +19,10 @@ jobs:
           git checkout main
           git reset --hard origin/main
 
+      - name: Predeploy sanity gate (backend + frontend smoke)
+        run: |
+          bash scripts/predeploy_sanity.sh
+
       - name: Rebuild and restart containers
         run: |
           docker compose -f docker-compose.prod.yml build

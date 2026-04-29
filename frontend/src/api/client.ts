@@ -78,7 +78,14 @@ export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', f
 
 export async function uploadInventoryAuto(
   files: File[]
-): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown>; detected?: string[] }> {
+): Promise<{
+  ok: boolean
+  message: string
+  rows?: number
+  debug?: Record<string, unknown>
+  detected?: string[]
+  warnings?: string[]
+}> {
   const fd = new FormData()
   files.forEach(f => fd.append('files', f))
   const { data } = await api.post('/upload/inventory-auto', fd, {
@@ -105,7 +112,15 @@ export async function uploadInventory(files: {
 
 export async function uploadDailyAuto(
   files: File[]
-): Promise<{ ok: boolean; message: string; detected_platforms?: string[] }> {
+): Promise<{
+  ok: boolean
+  message: string
+  detected_platforms?: string[]
+  warnings?: string[]
+  processed_files?: number
+  detected_files?: number
+  unknown_files?: number
+}> {
   const fd = new FormData()
   files.forEach(f => fd.append('files', f))
   const { data } = await api.post('/upload/daily-auto', fd, {

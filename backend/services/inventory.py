@@ -170,35 +170,15 @@ def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """
     Amazon Inventory Ledger CSV (Summary view).
-    The report has one row per MSKU × Disposition × Location × Date — multi-period exports
-    contain many date rows per MSKU.  We keep only the MOST RECENT date per
-    (MSKU, Disposition, Location) before summing, giving current stock levels.
+    The report has one row per MSKU × Disposition × Location × Date.
+    For inventory uploads we preserve all uploaded rows (after disposition/location
+    filters) so totals match the source file the user uploaded.
     Then filter to SELLABLE disposition to match OMS 'Amazon Other Warehouse'.
     Returns OMS_SKU, Amazon_Inventory.
     """
     df = read_csv_safe(csv_bytes)
     if df.empty or not {"MSKU", "Ending Warehouse Balance"}.issubset(df.columns):
         return pd.DataFrame()
-
-    # ── Deduplicate by keeping the most recent Date per (MSKU, Disposition, Location) ──
-    # Amazon Inventory Ledger exported over a date range has one row per period per SKU;
-    # summing all periods inflates the total.  Only the latest row = current balance.
-    group_keys = ["MSKU"]
-    if "Disposition" in df.columns:
-        group_keys.append("Disposition")
-    if "Location" in df.columns:
-        group_keys.append("Location")
-
-    if "Date" in df.columns:
-        df["_date_parsed"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=False)
-        # Within each (MSKU, Disposition, Location) group keep only the latest date row
-        df = (
-            df.sort_values("_date_parsed")
-              .groupby(group_keys, sort=False)
-              .last()
-              .reset_index()
-        )
-        df = df.drop(columns=["_date_parsed"], errors="ignore")
 
     # ── Filter to SELLABLE only ──────────────────────────────────────────────────────
     disp_col = next((c for c in df.columns if c.strip().lower() in ("disposition", "inventory disposition")), None)

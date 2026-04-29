@@ -931,11 +931,24 @@ async def upload_inventory_auto(
     parts = [f"{len(df_variant):,} total SKUs"]
     for src, info in debug.items():
         parts.append(f"{src}: {info}")
+    inv_warnings: list[str] = []
+    try:
+        # Inventory import disclaimer to explain intentional parser rules.
+        inv_warnings.append(
+            "Amazon inventory imports SELLABLE disposition rows only."
+        )
+        if isinstance(debug.get("amz_location_totals"), dict) and "ZNNE" in debug.get("amz_location_totals", {}):
+            inv_warnings.append(
+                "ZNNE location is excluded from Amazon inventory totals (virtual/non-warehouse location)."
+            )
+    except Exception:
+        pass
     return JSONResponse(content={
         "ok":      True,
         "message": " | ".join(parts),
         "rows":    len(df_variant),
         "debug":   debug,
+        "warnings": inv_warnings,
         "detected": detected,
         "v":       "inv-v8",   # RAR: all Myntra/FK/OMS/Amazon CSVs + byte dedupe; multi-Myntra auto-upload
     })
@@ -1525,7 +1538,15 @@ async def upload_daily_auto(
 
     if not detected:
         warn_str = "; ".join(warnings) if warnings else "No valid files found."
-        return JSONResponse(content={"ok": False, "message": warn_str})
+        return JSONResponse(content={
+            "ok": False,
+            "message": warn_str,
+            "detected_platforms": [],
+            "warnings": warnings,
+            "processed_files": len(files),
+            "detected_files": 0,
+            "unknown_files": len(files),
+        })
 
     # Track loaded platforms & auto-rebuild sales_df
     # Always rebuild. Amazon merges even with an empty user map; bundled/Yash master fills gaps when set.
@@ -1553,6 +1574,10 @@ async def upload_daily_auto(
         "ok": True,
         "message": " ".join(msg_parts),
         "detected_platforms": detected,
+        "warnings": warnings,
+        "processed_files": len(files),
+        "detected_files": len(detected),
+        "unknown_files": max(0, len(files) - len(detected)),
     })
 
 
@@ -1662,7 +1687,15 @@ async def upload_daily(
 
     if not detected:
         warn_str = "; ".join(warnings) if warnings else "No valid files provided."
-        return JSONResponse(content={"ok": False, "message": warn_str})
+        return JSONResponse(content={
+            "ok": False,
+            "message": warn_str,
+            "detected_platforms": [],
+            "warnings": warnings,
+            "processed_files": len(files),
+            "detected_files": 0,
+            "unknown_files": len(files),
+        })
 
     _session_data_changed(sess)
     msg_parts = [f"Daily data loaded — {', '.join(detected)}."]
@@ -1672,6 +1705,10 @@ async def upload_daily(
         "ok": True,
         "message": " ".join(msg_parts),
         "detected_platforms": detected,
+        "warnings": warnings,
+        "processed_files": len(files),
+        "detected_files": len(detected),
+        "unknown_files": max(0, len(files) - len(detected)),
     })
 
 
