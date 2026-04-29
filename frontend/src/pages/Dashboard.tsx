@@ -80,11 +80,11 @@ interface TopSku { sku: string; units: number }
    CONSTANTS
    ═══════════════════════════════════════════════════════════ */
 const PLATFORM_COLORS: Record<string, string> = {
-  Amazon:   '#002B5B',
-  Myntra:   '#E91E63',
-  Meesho:   '#9C27B0',
-  Flipkart: '#F7971D',
-  Snapdeal: '#e53935',
+  Amazon:   'oklch(55% 0.15 260)',
+  Myntra:   'oklch(62% 0.18 355)',
+  Meesho:   'oklch(55% 0.17 310)',
+  Flipkart: 'oklch(70% 0.17 65)',
+  Snapdeal: 'oklch(60% 0.19 25)',
 }
 const PLATFORM_SHORT: Record<string, string> = {
   Amazon: 'AMZ', Myntra: 'MYN', Meesho: 'MEE', Flipkart: 'FK', Snapdeal: 'SD',
@@ -118,34 +118,37 @@ function monthlyRowNet(row: PlatformSummaryItem['monthly'][0]) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   ICONS (inline SVG)
+   ICONS  (lucide-style, 16×16 rendered, 24 viewBox, 1.75 stroke)
    ═══════════════════════════════════════════════════════════ */
+type SvgP = React.SVGProps<SVGSVGElement>
+const svgBase: SvgP = {
+  width: 16, height: 16, viewBox: '0 0 24 24',
+  fill: 'none', stroke: 'currentColor',
+  strokeWidth: 1.75, strokeLinecap: 'round', strokeLinejoin: 'round',
+} as const
+
 const Icon = {
-  arrowUp: () => (
-    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6 10V2M2 6l4-4 4 4"/>
-    </svg>
-  ),
-  arrowDown: () => (
-    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6 2v8M2 6l4 4 4-4"/>
-    </svg>
-  ),
-  download: () => (
-    <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M7 2v7M4 6l3 3 3-3M2 11h10"/>
-    </svg>
-  ),
-  arrowR: () => (
-    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M2 6h8M6 2l4 4-4 4"/>
-    </svg>
-  ),
-  sparkles: () => (
-    <svg viewBox="0 0 14 14" fill="currentColor">
-      <path d="M7 1l1.2 3.4L12 5.6l-3.4 1.2L7 10.5l-1.2-3.7L2 5.6l3.8-1.2z"/>
-    </svg>
-  ),
+  arrowUp:   (p?: SvgP) => <svg {...svgBase} {...p}><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>,
+  arrowDown: (p?: SvgP) => <svg {...svgBase} {...p}><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>,
+  arrowR:    (p?: SvgP) => <svg {...svgBase} {...p}><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>,
+  download:  (p?: SvgP) => <svg {...svgBase} {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>,
+  upload:    (p?: SvgP) => <svg {...svgBase} {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5-5 5 5"/><path d="M12 5v12"/></svg>,
+  refresh:   (p?: SvgP) => <svg {...svgBase} {...p}><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>,
+  check:     (p?: SvgP) => <svg {...svgBase} {...p}><path d="M5 13l4 4L19 7"/></svg>,
+  x:         (p?: SvgP) => <svg {...svgBase} {...p}><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>,
+  plus:      (p?: SvgP) => <svg {...svgBase} {...p}><path d="M12 5v14"/><path d="M5 12h14"/></svg>,
+  more:      (p?: SvgP) => <svg {...svgBase} {...p}><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg>,
+  filter:    (p?: SvgP) => <svg {...svgBase} {...p}><path d="M3 5h18l-7 9v6l-4-2v-4L3 5z"/></svg>,
+  search:    (p?: SvgP) => <svg {...svgBase} {...p}><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>,
+  chevR:     (p?: SvgP) => <svg {...svgBase} {...p}><path d="M9 6l6 6-6 6"/></svg>,
+  chevD:     (p?: SvgP) => <svg {...svgBase} {...p}><path d="M6 9l6 6 6-6"/></svg>,
+  alert:     (p?: SvgP) => <svg {...svgBase} {...p}><path d="M10.3 3.7l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3.3l-8-14a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>,
+  info:      (p?: SvgP) => <svg {...svgBase} {...p}><circle cx="12" cy="12" r="9"/><path d="M12 16v-5"/><path d="M12 8h.01"/></svg>,
+  sparkles:  (p?: SvgP) => <svg {...svgBase} {...p}><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/></svg>,
+  sun:       (p?: SvgP) => <svg {...svgBase} {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>,
+  moon:      (p?: SvgP) => <svg {...svgBase} {...p}><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>,
+  sliders:   (p?: SvgP) => <svg {...svgBase} {...p}><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><circle cx="4" cy="12" r="2"/><circle cx="12" cy="10" r="2"/><circle cx="20" cy="14" r="2"/></svg>,
+  trendUp:   (p?: SvgP) => <svg {...svgBase} {...p}><path d="M22 7l-10 10-5-5-5 5"/><path d="M16 7h6v6"/></svg>,
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -1027,7 +1030,7 @@ export default function Dashboard() {
             </div>
             {allMonthlyTotals.length > 1 && (
               <div className="hero-total-spark">
-                <BigSpark values={allMonthlyTotals} color="rgba(255,255,255,0.7)" width={360} height={60} />
+                <BigSpark values={allMonthlyTotals} color="var(--primary)" width={360} height={60} />
               </div>
             )}
           </div>
