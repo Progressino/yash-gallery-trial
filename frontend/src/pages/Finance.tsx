@@ -1361,6 +1361,7 @@ function GSTR3BTab() {
 // ── Vouchers Tab ─────────────────────────────────────────────────
 function VouchersTab() {
   const qc = useQueryClient()
+  const [showVoucherHelp, setShowVoucherHelp] = useState(false)
 
   // Queries for dropdowns
   const { data: ledgers = [] } = useQuery<Ledger[]>({
@@ -1525,6 +1526,34 @@ function VouchersTab() {
 
   return (
     <div className="space-y-5">
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+        <button
+          type="button"
+          onClick={() => setShowVoucherHelp(v => !v)}
+          className="w-full flex items-center justify-between text-left"
+        >
+          <span className="text-xs font-semibold text-blue-900 uppercase tracking-wide">
+            Voucher Help: GL, Sales Fields & GST Rules
+          </span>
+          <span className="text-blue-700 text-xs">{showVoucherHelp ? 'Hide' : 'Show'}</span>
+        </button>
+        {showVoucherHelp && (
+          <div className="mt-3 text-xs text-blue-900 space-y-1">
+            <p><strong>General Ledger (GL):</strong> Main accounting record containing posted transactions across sales, purchases, GST output, bank/cash, parties and expenses.</p>
+            <p><strong>Import Order ID:</strong> Source platform order reference for traceability.</p>
+            <p><strong>Invoice No.:</strong> Tax invoice reference used for accounting and GST compliance.</p>
+            <p><strong>Ship From / Ship To:</strong> Dispatch origin state and delivery destination state.</p>
+            <p><strong>Type of Sale:</strong> Registered (B2B with GSTIN), Unregistered (B2C), E-commerce (marketplace/operator sale).</p>
+            <p><strong>GST Type (Tax Split):</strong> Intra-state supply applies CGST + SGST; inter-state supply applies IGST.</p>
+            <p><strong>HSN Code:</strong> Product HSN for category and GST rate.</p>
+            <p><strong>Item Sold / Product Name:</strong> Product/SKU description aligned with item master/inventory naming.</p>
+            <div className="rounded border border-blue-300 bg-white/70 px-2 py-1.5 mt-2">
+              <p className="font-semibold">Quick GST Decision Rule</p>
+              <p>Same state (Ship From = Ship To): <strong>CGST + SGST</strong>. Different states: <strong>IGST</strong>.</p>
+            </div>
+          </div>
+        )}
+      </div>
       {/* Form */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
         <h3 className="text-sm font-semibold text-gray-700">
@@ -2905,6 +2934,31 @@ function SalesUploadsTab() {
         <div>
           <p className="text-xs font-semibold text-amber-800">Finance-locked uploads</p>
           <p className="text-xs text-amber-700 mt-0.5">Records saved here stay in finance database and now automatically reflect across Finance tabs (Dashboard, Day Book, Vouchers, GSTR3B, P&amp;L, Platform Revenue). They do not merge into main Upload page / PO engine.</p>
+        </div>
+      </div>
+
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+        <p className="text-xs font-semibold text-blue-900 uppercase tracking-wide">
+          Sales Report &amp; General Ledger: Field Definitions (Notes)
+        </p>
+        <p className="text-xs text-blue-800">
+          <strong>Purpose:</strong> Use these notes to understand what each field means in General Ledger (GL) and Sales Report, and how to determine the correct GST tax type.
+        </p>
+        <div className="text-xs text-blue-900 space-y-1">
+          <p><strong>1) General Ledger (GL):</strong> Main accounting record containing all posted financial transactions under sales, purchases, GST output, bank, cash, customer/vendor and expense accounts.</p>
+          <p><strong>2) Sales Report: Common Fields</strong></p>
+          <p><strong>Import Order ID:</strong> Unique order reference from source platform/system for traceability.</p>
+          <p><strong>Invoice No.:</strong> Tax invoice number for accounting and GST compliance reference.</p>
+          <p><strong>Ship From:</strong> Dispatch/origin location (warehouse/store/state).</p>
+          <p><strong>Ship To:</strong> Delivery/destination location (customer address/state).</p>
+          <p><strong>Type of Sale:</strong> <strong>Registered</strong> (B2B with GSTIN), <strong>Unregistered</strong> (B2C without GSTIN), <strong>E-commerce</strong> (marketplace/operator sale).</p>
+          <p><strong>GST Type (Tax Split):</strong> Based on place of supply and supplier state (typically Ship To vs Ship From/supplier registered state).</p>
+          <p><strong>HSN Code:</strong> Product HSN used for category and GST rate determination.</p>
+          <p><strong>Item Sold / Product Name:</strong> Product/SKU description; should match item master/inventory naming.</p>
+        </div>
+        <div className="rounded-lg border border-blue-300 bg-white/70 px-3 py-2 text-xs text-blue-900">
+          <p className="font-semibold">3) Quick GST Decision Rule</p>
+          <p className="mt-0.5">If <strong>Ship From</strong> and <strong>Ship To</strong> are in the same state: <strong>CGST + SGST</strong>. If they are in different states: <strong>IGST</strong>.</p>
         </div>
       </div>
 
