@@ -1547,6 +1547,10 @@ function VouchersTab() {
             <p><strong>GST Type (Tax Split):</strong> Intra-state supply applies CGST + SGST; inter-state supply applies IGST.</p>
             <p><strong>HSN Code:</strong> Product HSN for category and GST rate.</p>
             <p><strong>Item Sold / Product Name:</strong> Product/SKU description aligned with item master/inventory naming.</p>
+            <p><strong>Static Log (Platform Mapping):</strong> Keep fixed master mapping for channel name, order-ID format, default party, default sales ledger, GST/TCS settings, and return/refund mapping so posting stays consistent.</p>
+            <p><strong>Sales Ledger Type:</strong> Post invoice into the correct ledger (B2B, B2C, platform-wise e-commerce, and inter-state/intra-state ledgers if maintained separately).</p>
+            <p><strong>Sales Invoice Print Checklist:</strong> Customer/billing/shipping details, invoice date/no, Ship From state, warehouse/dispatch location, Ship To state, correct branch GSTIN, customer GSTIN (B2B), place of supply, line-item SKU/HSN/qty/taxable value/GST rate/tax split, and final invoice total.</p>
+            <p><strong>Inventory Effect:</strong> Invoice SKU must match item master so posting reduces stock by item and warehouse correctly, keeping stock and taxable-value reports accurate.</p>
             <div className="rounded border border-blue-300 bg-white/70 px-2 py-1.5 mt-2">
               <p className="font-semibold">Quick GST Decision Rule</p>
               <p>Same state (Ship From = Ship To): <strong>CGST + SGST</strong>. Different states: <strong>IGST</strong>.</p>
@@ -2955,6 +2959,10 @@ function SalesUploadsTab() {
           <p><strong>GST Type (Tax Split):</strong> Based on place of supply and supplier state (typically Ship To vs Ship From/supplier registered state).</p>
           <p><strong>HSN Code:</strong> Product HSN used for category and GST rate determination.</p>
           <p><strong>Item Sold / Product Name:</strong> Product/SKU description; should match item master/inventory naming.</p>
+          <p><strong>4) Static Log (Platform Mapping) for E-commerce Sales:</strong> Maintain a fixed mapping for platform/operator name, channel order-ID capture format, default party/customer, default sales ledger, GST/TCS setup, and return/refund mapping rules.</p>
+          <p><strong>5) Sales Ledger Type:</strong> Every sales invoice should post to the right revenue ledger (B2B, B2C, platform-wise e-commerce, and inter-state/intra-state ledgers if separately maintained).</p>
+          <p><strong>6) Sales Invoice Print — what should be visible:</strong> Customer/billing/shipping details, invoice date/no, Ship From state, warehouse/dispatch location name, Ship To state, correct source-state GSTIN, customer GSTIN (for B2B), place of supply, and line-wise item details (SKU, HSN, quantity, taxable value, GST rate, CGST/SGST/IGST split), plus invoice total.</p>
+          <p><strong>7) Inventory Effect:</strong> Invoice SKU must match inventory item master so stock is reduced correctly by item and warehouse/location; this keeps stock, sales quantity, and item-wise taxable value reporting accurate.</p>
         </div>
         <div className="rounded-lg border border-blue-300 bg-white/70 px-3 py-2 text-xs text-blue-900">
           <p className="font-semibold">3) Quick GST Decision Rule</p>
@@ -3441,7 +3449,12 @@ function ChartOfAccountsTab() {
     staleTime: 60 * 1000,
   })
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
-  const toggle = (id: number) => setCollapsed(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const toggle = (id: number) => setCollapsed(s => {
+    const n = new Set(s)
+    if (n.has(id)) n.delete(id)
+    else n.add(id)
+    return n
+  })
 
   const NATURE_SECTIONS: { nature: string; label: string; color: string }[] = [
     { nature: 'asset',     label: 'Assets',      color: 'bg-blue-50 border-blue-200' },
