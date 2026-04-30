@@ -170,9 +170,8 @@ def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """
     Amazon Inventory Ledger CSV (Summary view).
-    The report has one row per MSKU × Disposition × Location × Date.
-    For inventory uploads we preserve all uploaded rows (after disposition/location
-    filters) so totals match the source file the user uploaded.
+    The report has one row per MSKU × Disposition × Location × Date — multi-period exports
+    contain many date rows. Keep only the latest report-day snapshot.
     Then filter to SELLABLE disposition to match OMS 'Amazon Other Warehouse'.
     Returns OMS_SKU, Amazon_Inventory.
     """
@@ -191,9 +190,66 @@ def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     if "Location" in df.columns:
         df = df[df["Location"].astype(str).str.strip().str.upper() != "ZNNE"]
 
+    # One-day snapshot only: keep rows from latest report date in this file.
+    if "Date" in df.columns:
+        _d = pd.to_datetime(df["Date"], errors="coerce", dayfirst=False)
+        if _d.notna().any():
+            df = df[_d == _d.max()]
+
     df["OMS_SKU"]          = df["MSKU"].apply(lambda x: _resolve_amz_sku(x, mapping))
     df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
     return df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
+
+
+def _analyze_amz_ledger_filters(csv_bytes: bytes) -> dict:
+    """Build disclaimer metrics for Amazon inventory row exclusions."""
+    df = read_csv_safe(csv_bytes)
+    if df.empty or "Ending Warehouse Balance" not in df.columns:
+        return {}
+
+    work = df.copy()
+    work["_bal"] = pd.to_numeric(work["Ending Warehouse Balance"], errors="coerce").fillna(0)
+    out: dict = {
+        "raw_total_units": float(work["_bal"].sum()),
+        "raw_rows": int(len(work)),
+    }
+
+    disp_col = next((c for c in work.columns if c.strip().lower() in ("disposition", "inventory disposition")), None)
+    if disp_col:
+        sell = work[work[disp_col].astype(str).str.strip().str.upper() == "SELLABLE"].copy()
+        out["excluded_non_sellable_units"] = float(work["_bal"].sum() - sell["_bal"].sum())
+    else:
+        sell = work.copy()
+        out["excluded_non_sellable_units"] = 0.0
+
+    if "Location" in sell.columns:
+        no_znne = sell[sell["Location"].astype(str).str.strip().str.upper() != "ZNNE"].copy()
+        out["excluded_znne_units"] = float(sell["_bal"].sum() - no_znne["_bal"].sum())
+    else:
+        no_znne = sell.copy()
+        out["excluded_znne_units"] = 0.0
+
+    out["sellable_non_znne_units"] = float(no_znne["_bal"].sum())
+
+    if "Date" in no_znne.columns:
+        d = pd.to_datetime(no_znne["Date"], errors="coerce", dayfirst=False)
+        if d.notna().any():
+            latest = d.max()
+            latest_units = float(no_znne.loc[d == latest, "_bal"].sum())
+            out["latest_report_date"] = str(latest.date())
+            out["latest_report_units"] = latest_units
+            out["excluded_older_date_units"] = float(no_znne["_bal"].sum() - latest_units)
+            out["date_count"] = int(d.dt.normalize().nunique())
+        else:
+            out["latest_report_units"] = float(no_znne["_bal"].sum())
+            out["excluded_older_date_units"] = 0.0
+            out["date_count"] = 0
+    else:
+        out["latest_report_units"] = float(no_znne["_bal"].sum())
+        out["excluded_older_date_units"] = 0.0
+        out["date_count"] = 0
+
+    return out
 
 
 def _parse_fba_tsv(tsv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
@@ -649,6 +705,16 @@ def load_inventory_consolidated(
                     fk_parts.append(p)
 
             amz_blobs, _ = _dedupe_identical_byte_payloads(extracted["amz_csvs"])
+            amz_disclaimer: dict = {
+                "raw_total_units": 0.0,
+                "excluded_non_sellable_units": 0.0,
+                "excluded_znne_units": 0.0,
+                "sellable_non_znne_units": 0.0,
+                "excluded_older_date_units": 0.0,
+                "latest_report_units": 0.0,
+                "raw_rows": 0,
+                "date_count": 0,
+            }
             if amz_blobs:
                 _amz_peek = read_csv_safe(amz_blobs[0])
                 debug["amz_csv_cols"] = list(_amz_peek.columns) if not _amz_peek.empty else []
@@ -665,9 +731,25 @@ def load_inventory_consolidated(
                     )
                     debug["amz_sellable_total"] = int(_amz_sellable["_bal"].sum())
             for ab in amz_blobs:
+                metrics = _analyze_amz_ledger_filters(ab)
+                for k in ["raw_rows", "date_count"]:
+                    amz_disclaimer[k] += int(metrics.get(k, 0))
+                for k in [
+                    "raw_total_units",
+                    "excluded_non_sellable_units",
+                    "excluded_znne_units",
+                    "sellable_non_znne_units",
+                    "excluded_older_date_units",
+                    "latest_report_units",
+                ]:
+                    amz_disclaimer[k] += float(metrics.get(k, 0.0))
+                if metrics.get("latest_report_date"):
+                    amz_disclaimer["latest_report_date"] = metrics["latest_report_date"]
                 p = _parse_amz_csv(ab, mapping)
                 if not p.empty:
                     amz_rar_parts.append(p)
+            if amz_blobs:
+                debug["amz_disclaimer"] = amz_disclaimer
             if amz_rar_parts:
                 amz_cat = pd.concat(amz_rar_parts, ignore_index=True)
                 part = amz_cat.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()

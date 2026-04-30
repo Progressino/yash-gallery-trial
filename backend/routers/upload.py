@@ -931,24 +931,11 @@ async def upload_inventory_auto(
     parts = [f"{len(df_variant):,} total SKUs"]
     for src, info in debug.items():
         parts.append(f"{src}: {info}")
-    inv_warnings: list[str] = []
-    try:
-        # Inventory import disclaimer to explain intentional parser rules.
-        inv_warnings.append(
-            "Amazon inventory imports SELLABLE disposition rows only."
-        )
-        if isinstance(debug.get("amz_location_totals"), dict) and "ZNNE" in debug.get("amz_location_totals", {}):
-            inv_warnings.append(
-                "ZNNE location is excluded from Amazon inventory totals (virtual/non-warehouse location)."
-            )
-    except Exception:
-        pass
     return JSONResponse(content={
         "ok":      True,
         "message": " | ".join(parts),
         "rows":    len(df_variant),
         "debug":   debug,
-        "warnings": inv_warnings,
         "detected": detected,
         "v":       "inv-v8",   # RAR: all Myntra/FK/OMS/Amazon CSVs + byte dedupe; multi-Myntra auto-upload
     })

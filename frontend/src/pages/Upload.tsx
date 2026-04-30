@@ -23,6 +23,14 @@ type UploadAlert = {
   droppedReasons: string[]
   validationWarnings: string[]
 }
+type InventoryAmazonDisclaimer = {
+  raw_total_units?: number
+  excluded_non_sellable_units?: number
+  excluded_znne_units?: number
+  excluded_older_date_units?: number
+  latest_report_units?: number
+  latest_report_date?: string
+}
 
 export default function Upload() {
   const setCoverage = useSession((s) => s.setCoverage)
@@ -129,6 +137,7 @@ export default function Upload() {
   const [resetClearTier3, setResetClearTier3] = useState(false)
   const [resetClearWarm, setResetClearWarm] = useState(true)
   const [showImportCompleteness, setShowImportCompleteness] = useState(true)
+  const [inventoryAmzDisclaimer, setInventoryAmzDisclaimer] = useState<InventoryAmazonDisclaimer | null>(null)
   const [qualityReport, setQualityReport] = useState<Awaited<ReturnType<typeof getDataQuality>> | null>(null)
 
   const handleDailyAuto = async (files: File[]) => {
@@ -380,10 +389,12 @@ export default function Upload() {
               try {
                 const res = await uploadInventoryAuto(files)
                 if (res.ok) {
-                  const issues = res.warnings ?? []
+                  setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
+                  const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
+                    ? (res.debug.warnings as string[])
+                    : []
                   captureGenericAlert('inv', issues)
-                  const debugStr = res.debug ? '\n' + JSON.stringify(res.debug, null, 2) : ''
-                  showToast('success', res.message + debugStr)
+                  showToast('success', res.message)
                   await refresh()
                 } else showToast('error', res.message)
               } catch (e: unknown) {
@@ -391,6 +402,22 @@ export default function Upload() {
               } finally { setL('inv', false) }
             }}
           />
+          {inventoryAmzDisclaimer && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900">
+              <p className="font-medium">Amazon inventory disclaimer</p>
+              <p className="mt-1">
+                Only latest 1 report day is used
+                {inventoryAmzDisclaimer.latest_report_date ? ` (${inventoryAmzDisclaimer.latest_report_date})` : ''}.
+              </p>
+              <p className="mt-1">
+                Raw: {Number(inventoryAmzDisclaimer.raw_total_units ?? 0).toLocaleString()} ·
+                Non-sellable excluded: {Number(inventoryAmzDisclaimer.excluded_non_sellable_units ?? 0).toLocaleString()} ·
+                ZNNE excluded: {Number(inventoryAmzDisclaimer.excluded_znne_units ?? 0).toLocaleString()} ·
+                Older-date excluded: {Number(inventoryAmzDisclaimer.excluded_older_date_units ?? 0).toLocaleString()} ·
+                Included: {Number(inventoryAmzDisclaimer.latest_report_units ?? 0).toLocaleString()}
+              </p>
+            </div>
+          )}
         </UploadCard>
       </Section>
 

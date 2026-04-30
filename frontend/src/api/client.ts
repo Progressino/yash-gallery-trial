@@ -78,14 +78,7 @@ export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', f
 
 export async function uploadInventoryAuto(
   files: File[]
-): Promise<{
-  ok: boolean
-  message: string
-  rows?: number
-  debug?: Record<string, unknown>
-  detected?: string[]
-  warnings?: string[]
-}> {
+): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown>; detected?: string[] }> {
   const fd = new FormData()
   files.forEach(f => fd.append('files', f))
   const { data } = await api.post('/upload/inventory-auto', fd, {

@@ -8,6 +8,7 @@ interface InventoryData {
   rows: Array<Record<string, number | string>>
   columns: string[]
   totals?: Record<string, number>
+  debug?: Record<string, unknown>
 }
 
 export default function Inventory() {
@@ -40,6 +41,7 @@ export default function Inventory() {
   const totalInventory = data.rows.reduce((s, r) => s + Number(r['Total_Inventory'] ?? 0), 0)
   const totalSkus = data.rows.length
   const zeroStock = data.rows.filter(r => Number(r['Total_Inventory'] ?? 0) <= 0).length
+  const amzDisclaimer = (data.debug?.amz_disclaimer as Record<string, unknown> | undefined) ?? undefined
 
   const exportExcel = () => {
     const exportRows = filtered.map(r => {
@@ -90,6 +92,23 @@ export default function Inventory() {
                 </div>
               ))}
           </div>
+        </div>
+      )}
+
+      {amzDisclaimer && (
+        <div className="bg-amber-50 rounded-xl border border-amber-200 p-4 shadow-sm text-sm text-amber-900">
+          <p className="font-semibold">Amazon inventory disclaimer</p>
+          <p className="mt-1 text-xs">
+            Only latest 1 report day is used for Amazon inventory.
+            {amzDisclaimer.latest_report_date ? ` Latest date: ${String(amzDisclaimer.latest_report_date)}.` : ''}
+          </p>
+          <p className="mt-1 text-xs">
+            Raw units: {Number(amzDisclaimer.raw_total_units ?? 0).toLocaleString()} ·
+            Excluded non-sellable: {Number(amzDisclaimer.excluded_non_sellable_units ?? 0).toLocaleString()} ·
+            Excluded ZNNE: {Number(amzDisclaimer.excluded_znne_units ?? 0).toLocaleString()} ·
+            Excluded older dates: {Number(amzDisclaimer.excluded_older_date_units ?? 0).toLocaleString()} ·
+            Included (latest day, sellable, non-ZNNE): {Number(amzDisclaimer.latest_report_units ?? 0).toLocaleString()}
+          </p>
         </div>
       )}
 
