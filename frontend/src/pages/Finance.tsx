@@ -182,7 +182,7 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'coa' | 'trial-balance'
+type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
 
 // ── Chart of Accounts types ───────────────────────────────────────
 interface CoALedger {
@@ -516,6 +516,7 @@ export default function Finance() {
           ['coa','Chart of Accounts'],
           ['trial-balance','Trial Balance'],
           ['sales-uploads','Sales Uploads'],
+          ['help-notes','Help / Notes'],
         ] as [FinanceTab, string][]).map(([id, label]) => (
           <button key={id} onClick={() => setActiveTab(id)}
             className={`px-4 py-2.5 text-sm font-medium transition-colors rounded-t ${activeTab === id ? 'border-b-2 border-[#002B5B] text-[#002B5B] bg-blue-50' : 'text-gray-500 hover:text-gray-700'}`}>
@@ -879,11 +880,49 @@ export default function Finance() {
       {/* ── Tab: Sales Uploads ── */}
       {activeTab === 'sales-uploads' && <SalesUploadsTab />}
 
+      {/* ── Tab: Help / Notes ── */}
+      {activeTab === 'help-notes' && <FinanceHelpNotesTab />}
+
       {/* ── Tab: Chart of Accounts ── */}
       {activeTab === 'coa' && <ChartOfAccountsTab />}
 
       {/* ── Tab: Trial Balance ── */}
       {activeTab === 'trial-balance' && <TrialBalanceTab />}
+    </div>
+  )
+}
+
+function FinanceHelpNotesTab() {
+  return (
+    <div className="space-y-5">
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+        <p className="text-xs font-semibold text-blue-900 uppercase tracking-wide">
+          Sales Report &amp; General Ledger: Field Definitions (Notes)
+        </p>
+        <p className="text-xs text-blue-800">
+          <strong>Purpose:</strong> Use these notes to understand what each field means in General Ledger (GL) and Sales Report, and how to determine the correct GST tax type.
+        </p>
+        <div className="text-xs text-blue-900 space-y-1">
+          <p><strong>1) General Ledger (GL):</strong> Main accounting record containing all posted financial transactions under sales, purchases, GST output, bank, cash, customer/vendor and expense accounts.</p>
+          <p><strong>2) Sales Report: Common Fields</strong></p>
+          <p><strong>Import Order ID:</strong> Unique order reference from source platform/system for traceability.</p>
+          <p><strong>Invoice No.:</strong> Tax invoice number for accounting and GST compliance reference.</p>
+          <p><strong>Ship From:</strong> Dispatch/origin location (warehouse/store/state).</p>
+          <p><strong>Ship To:</strong> Delivery/destination location (customer address/state).</p>
+          <p><strong>Type of Sale:</strong> <strong>Registered</strong> (B2B with GSTIN), <strong>Unregistered</strong> (B2C without GSTIN), <strong>E-commerce</strong> (marketplace/operator sale).</p>
+          <p><strong>GST Type (Tax Split):</strong> Based on place of supply and supplier state (typically Ship To vs Ship From/supplier registered state).</p>
+          <p><strong>HSN Code:</strong> Product HSN used for category and GST rate determination.</p>
+          <p><strong>Item Sold / Product Name:</strong> Product/SKU description; should match item master/inventory naming.</p>
+          <p><strong>4) Static Log (Platform Mapping) for E-commerce Sales:</strong> Maintain a fixed mapping for platform/operator name, channel order-ID capture format, default party/customer, default sales ledger, GST/TCS setup, and return/refund mapping rules.</p>
+          <p><strong>5) Sales Ledger Type:</strong> Every sales invoice should post to the right revenue ledger (B2B, B2C, platform-wise e-commerce, and inter-state/intra-state ledgers if separately maintained).</p>
+          <p><strong>6) Sales Invoice Print — what should be visible:</strong> Customer/billing/shipping details, invoice date/no, Ship From state, warehouse/dispatch location name, Ship To state, correct source-state GSTIN, customer GSTIN (for B2B), place of supply, and line-wise item details (SKU, HSN, quantity, taxable value, GST rate, CGST/SGST/IGST split), plus invoice total.</p>
+          <p><strong>7) Inventory Effect:</strong> Invoice SKU must match inventory item master so stock is reduced correctly by item and warehouse/location; this keeps stock, sales quantity, and item-wise taxable value reporting accurate.</p>
+        </div>
+        <div className="rounded-lg border border-blue-300 bg-white/70 px-3 py-2 text-xs text-blue-900">
+          <p className="font-semibold">3) Quick GST Decision Rule</p>
+          <p className="mt-0.5">If <strong>Ship From</strong> and <strong>Ship To</strong> are in the same state: <strong>CGST + SGST</strong>. If they are in different states: <strong>IGST</strong>.</p>
+        </div>
+      </div>
     </div>
   )
 }
