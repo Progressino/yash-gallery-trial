@@ -16,7 +16,7 @@ def _amz_csv(rows: list[tuple[str, str, str, int]]) -> bytes:
     return (header + body).encode("utf-8")
 
 
-def test_parse_amz_csv_preserves_uploaded_balances_across_dates():
+def test_parse_amz_csv_uses_latest_report_day_only():
     csv_bytes = _amz_csv(
         [
             ("2026-04-26", "1001YKBEIGE-M", "BLR7", 10),
@@ -26,9 +26,9 @@ def test_parse_amz_csv_preserves_uploaded_balances_across_dates():
     )
     out = _parse_amz_csv(csv_bytes, mapping={})
     totals = out.set_index("OMS_SKU")["Amazon_Inventory"].to_dict()
-    assert int(totals["1001YKBEIGE-M"]) == 25
+    assert int(totals["1001YKBEIGE-M"]) == 15
     assert int(totals["1001YKBEIGE-L"]) == 8
-    assert int(out["Amazon_Inventory"].sum()) == 33
+    assert int(out["Amazon_Inventory"].sum()) == 23
 
 
 def test_parse_amz_csv_excludes_znne_location():
@@ -40,3 +40,4 @@ def test_parse_amz_csv_excludes_znne_location():
     )
     out = _parse_amz_csv(csv_bytes, mapping={})
     assert int(out["Amazon_Inventory"].sum()) == 7
+
