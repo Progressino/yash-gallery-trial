@@ -97,7 +97,10 @@ else
     exit 1
   fi
 
+  # Keep broad smoke and also pin the deep finance checklist explicitly so
+  # deploy gates cannot accidentally bypass it if smoke script changes later.
   E2E_BASE_URL="$E2E_BASE_URL" npm run test:smoke
+  E2E_BASE_URL="$E2E_BASE_URL" npx playwright test tests/e2e/manual-finance-checklist.spec.js
   popd >/dev/null
 fi
 
