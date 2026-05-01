@@ -1,7 +1,16 @@
 /**
  * In-app user guide: how to use the Finance module, mapped to Tally Prime and
- * Microsoft Dynamics 365 Business Central concepts.
+ * Microsoft Dynamics 365 Business Central concepts (including Microsoft Learn wording).
  */
+const MS_LEARN_FINANCE = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance-setup-finance'
+const MS_LEARN_COA = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance-chart-of-accounts'
+const MS_LEARN_GL = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance-general-ledger'
+const MS_LEARN_POSTING_GROUPS = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance-posting-groups'
+const MS_LEARN_DIMENSIONS = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance-dimensions'
+const MS_LEARN_VAT = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance-setup-vat'
+const MS_LEARN_ACCOUNT_PERIODS = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance-accounting-periods-and-fiscal-years'
+const MS_LEARN_BC_FINANCE = 'https://learn.microsoft.com/en-us/dynamics365/business-central/finance'
+
 export function FinanceUserGuideContent() {
   return (
     <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-4 text-xs text-slate-800">
@@ -15,6 +24,92 @@ export function FinanceUserGuideContent() {
           <strong>Microsoft Dynamics 365 Business Central</strong> (chart of accounts, general ledger
           mindset, trial balance). Use it to keep <strong>finance-locked</strong> sales and vouchers
           separate from day-to-day operational uploads on the Upload page.
+        </p>
+        <p className="mt-2 text-[11px] text-slate-600 leading-relaxed">
+          This product is <strong>not</strong> Business Central. The BC sections below summarize{' '}
+          <strong>official Microsoft Learn</strong> terminology so your team can train with the same
+          language used in Dynamics 365 documentation.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-indigo-200 bg-indigo-50/60 px-3 py-3 space-y-2">
+        <p className="font-semibold text-indigo-950 text-[11px] uppercase tracking-wide">
+          Dynamics 365 Business Central — concepts from Microsoft Learn
+        </p>
+        <p className="text-slate-800 leading-relaxed">
+          Per{' '}
+          <a href={MS_LEARN_FINANCE} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline font-medium">
+            Setting up finance
+          </a>
+          , you first define the core of accounting: the <strong>chart of accounts (COA)</strong>, then{' '}
+          <strong>posting groups</strong> so customers, vendors, items, and documents default to the right{' '}
+          <strong>general ledger (G/L)</strong> accounts. Optional setup covers dimensions, VAT, currencies,
+          fiscal periods, payment terms, and financial reporting.
+        </p>
+        <p className="text-slate-800 leading-relaxed">
+          Per{' '}
+          <a href={MS_LEARN_COA} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline font-medium">
+            Understanding the Chart of Accounts
+          </a>
+          , a COA is the directory of <strong>G/L accounts</strong> (with identifiers and descriptions). It groups{' '}
+          <strong>balance sheet</strong> accounts (assets, liabilities, equity) and{' '}
+          <strong>income statement</strong> accounts (revenue, expenses). You post transactions to the G/L through
+          these accounts. BC also describes <strong>dimensions</strong> as categories on entries (e.g. department,
+          project) so you can avoid exploding the COA with one account per department.
+        </p>
+        <p className="text-slate-800 leading-relaxed">
+          Per{' '}
+          <a href={MS_LEARN_GL} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline font-medium">
+            Understand the general ledger and Chart of Accounts
+          </a>
+          , the <strong>G/L stores financial data</strong>; the <strong>COA lists the accounts</strong> you post G/L
+          entries to. BC highlights <strong>General Ledger Setup</strong> and{' '}
+          <strong>General Posting Setup</strong> as central configuration (invoice rounding, reporting, and which G/L
+          accounts apply to which posting group combinations). In this app, maintain the same discipline via{' '}
+          <strong>Masters</strong> (groups, ledgers, tax masters) and consistent voucher lines.
+        </p>
+        <p className="text-slate-800 leading-relaxed">
+          <strong>Tax:</strong> BC documents{' '}
+          <a href={MS_LEARN_VAT} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline font-medium">
+            Value-Added Tax (VAT) setup
+          </a>{' '}
+          for reporting to tax authorities. In India your compliance focus here is <strong>GST</strong> (e.g.{' '}
+          <strong>GSTR-3B</strong> working from posted sales and vouchers), not VAT — use the BC article only as a{' '}
+          <em>parallel</em> for “how tax setup relates to G/L and posting.”
+        </p>
+        <p className="text-slate-800 leading-relaxed">
+          <strong>How our tabs map to BC ideas:</strong>{' '}
+          <strong>Chart of Accounts</strong> ≈ COA tree; <strong>Day Book</strong> ≈ dated view of posted activity
+          (like reviewing G/L entries by date); <strong>Vouchers</strong> ≈ general journals / voucher entry;{' '}
+          <strong>Trial Balance</strong> ≈ period debits, credits, and balancing check;{' '}
+          <strong>P&amp;L</strong> ≈ income statement view; <strong>Sales Uploads</strong> ≈ bringing external sales
+          data into the finance store (similar in spirit to journals or migration, but file-based here).{' '}
+          <strong>Posting groups</strong> in BC map conceptually to how you assign ledgers and defaults in{' '}
+          <strong>Masters</strong> — see{' '}
+          <a href={MS_LEARN_POSTING_GROUPS} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline font-medium">
+            Set Up Posting Groups
+          </a>
+          . Use{' '}
+          <a href={MS_LEARN_DIMENSIONS} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline font-medium">
+            Work with Dimensions
+          </a>{' '}
+          as reference if you use cost centres or analytic tags on voucher lines.
+        </p>
+        <p className="text-slate-800 leading-relaxed">
+          <strong>BC best practices</strong> (from Microsoft Learn COA guidance): design the COA for management
+          reporting; start simple and add detail later; use dimensions instead of one G/L account per product or
+          department; add accounts as needed but plan careful cleanup at period-end. Apply the same thinking to
+          ledger groups and ledgers here.
+        </p>
+        <p className="text-[11px] text-slate-600 leading-relaxed">
+          More:{' '}
+          <a href={MS_LEARN_ACCOUNT_PERIODS} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline">
+            Accounting periods and fiscal years
+          </a>
+          {' · '}
+          <a href={MS_LEARN_BC_FINANCE} target="_blank" rel="noopener noreferrer" className="text-indigo-800 underline">
+            Finance overview (Business Central)
+          </a>
         </p>
       </div>
 
