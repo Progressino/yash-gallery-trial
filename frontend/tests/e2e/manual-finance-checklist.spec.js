@@ -13,7 +13,8 @@ function createAuthToken(username = "qa-user") {
 }
 
 async function expectFinanceLoaded(page) {
-  await expect(page.getByRole("heading", { name: "Finance", exact: true })).toBeVisible();
+  await page.waitForURL(/\/(finance|login)/, { timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Finance", exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 async function assertCsvHeadersFromDownload(page, clickTarget, expectedHeaders) {
@@ -40,7 +41,7 @@ test("manual finance checklist across CRONUS menu paths", async ({ page, context
     },
   ]);
 
-  await page.goto("/finance", { waitUntil: "domcontentloaded" });
+  await page.goto("/finance", { waitUntil: "networkidle" });
   await expectFinanceLoaded(page);
   await expect(page.getByText("Finance workspace")).toBeVisible();
 
