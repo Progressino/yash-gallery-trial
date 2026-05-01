@@ -47,49 +47,57 @@ echo "==> Backend sanity tests"
 "$PYTHON_BIN" -m pytest tests/test_sales_services.py -k "myntra" -q
 "$PYTHON_BIN" -m pytest tests/test_myntra_resolve.py -q
 "$PYTHON_BIN" -m pytest tests/test_api_data_po_sales.py -q
+"$PYTHON_BIN" -m pytest tests/test_finance_sales_entries.py -q
 
-echo "==> Frontend build + chromium smoke"
-pushd "$ROOT/frontend" >/dev/null
-if [[ -f package-lock.json ]]; then
-  npm ci
+# Frontend smoke uses npm/npx; missing Node yields shell exit 127 on self-hosted runners.
+if [[ "${SKIP_E2E:-}" == "1" ]]; then
+  echo "==> SKIP_E2E=1 — skipping frontend build/playwright smoke."
+elif ! command -v npm >/dev/null 2>&1; then
+  echo "WARN: npm not on PATH — skipping frontend smoke (install Node.js to run Playwright here)."
 else
-  npm install
-fi
-if ! npm ls @playwright/test >/dev/null 2>&1; then
-  npm install -D @playwright/test
-fi
-npm run build
-npx playwright install chromium
-
-PORT="${E2E_PORT:-4173}"
-E2E_BASE_URL="${E2E_BASE_URL:-http://127.0.0.1:${PORT}}"
-LOG_FILE="/tmp/forecast-e2e-ui.log"
-
-npm run preview -- --host 127.0.0.1 --port "$PORT" >"$LOG_FILE" 2>&1 &
-UI_PID=$!
-cleanup() {
-  kill "$UI_PID" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-READY=0
-for _ in {1..40}; do
-  if curl -sf "$E2E_BASE_URL/login" >/dev/null; then
-    READY=1
-    break
+  echo "==> Frontend build + chromium smoke"
+  pushd "$ROOT/frontend" >/dev/null
+  if [[ -f package-lock.json ]]; then
+    npm ci
+  else
+    npm install
   fi
-  sleep 1
-done
+  if ! npm ls @playwright/test >/dev/null 2>&1; then
+    npm install -D @playwright/test
+  fi
+  npm run build
+  npx playwright install chromium
 
-if [[ "$READY" -ne 1 ]]; then
-  echo "UI preview server did not become ready at $E2E_BASE_URL"
-  echo "--- preview log ---"
-  tail -n 80 "$LOG_FILE" || true
-  exit 1
+  PORT="${E2E_PORT:-4173}"
+  E2E_BASE_URL="${E2E_BASE_URL:-http://127.0.0.1:${PORT}}"
+  LOG_FILE="/tmp/forecast-e2e-ui.log"
+
+  npm run preview -- --host 127.0.0.1 --port "$PORT" >"$LOG_FILE" 2>&1 &
+  UI_PID=$!
+  cleanup() {
+    kill "$UI_PID" >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT
+
+  READY=0
+  for _ in {1..40}; do
+    if curl -sf "$E2E_BASE_URL/login" >/dev/null; then
+      READY=1
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ "$READY" -ne 1 ]]; then
+    echo "UI preview server did not become ready at $E2E_BASE_URL"
+    echo "--- preview log ---"
+    tail -n 80 "$LOG_FILE" || true
+    exit 1
+  fi
+
+  E2E_BASE_URL="$E2E_BASE_URL" npm run test:smoke
+  popd >/dev/null
 fi
-
-E2E_BASE_URL="$E2E_BASE_URL" npm run test:smoke
-popd >/dev/null
 
 echo ""
 echo "All predeploy sanity checks passed."
