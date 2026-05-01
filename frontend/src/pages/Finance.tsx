@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useRef, useEffect, Fragment } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -467,11 +467,15 @@ export default function Finance() {
 
   // ── Render ───────────────────────────────────────────────────
   return (
-    <div className="max-w-7xl mx-auto space-y-5">
-      {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold text-[#002B5B]">Finance</h2>
-        <p className="text-gray-500 text-sm mt-1">P&amp;L · GST · Expenses · Platform Revenue · Vouchers · Masters</p>
+    <div className="max-w-[1400px] mx-auto space-y-4 pb-10 px-1 sm:px-0">
+      {/* Header — BC-inspired workspace title */}
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
+        <div>
+          <h2 className="text-xl sm:text-2xl font-semibold text-slate-800 tracking-tight">Finance</h2>
+          <p className="text-slate-500 text-xs sm:text-sm mt-0.5">
+            Activities, posting, and reports — layout inspired by Dynamics 365 Business Central
+          </p>
+        </div>
       </div>
 
       {/* Date Filter Bar — only for analytics tabs */}
@@ -520,28 +524,41 @@ export default function Finance() {
         </div>
       )}
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200 gap-1 flex-wrap">
-        {([
-          ['dashboard','Dashboard'],
-          ['daybook','Day Book'],
-          ['vouchers','Vouchers'],
-          ['gstr','GSTR3B'],
-          ['pl','P&L'],
-          ['gst','GST Summary'],
-          ['expenses','Expenses'],
-          ['masters','Masters'],
-          ['coa','Chart of Accounts'],
-          ['trial-balance','Trial Balance'],
-          ['sales-uploads','Sales Uploads'],
-          ['help-notes','Help / Notes'],
-        ] as [FinanceTab, string][]).map(([id, label]) => (
-          <button key={id} onClick={() => setActiveTab(id)}
-            className={`px-4 py-2.5 text-sm font-medium transition-colors rounded-t ${activeTab === id ? 'border-b-2 border-[#002B5B] text-[#002B5B] bg-blue-50' : 'text-gray-500 hover:text-gray-700'}`}>
-            {label}
-          </button>
-        ))}
+      {/* Tabs — horizontal module nav (BC-style) */}
+      <div className="bg-white rounded-t-lg border border-slate-200 border-b-0 shadow-sm">
+        <div className="flex gap-0.5 flex-wrap px-1 pt-1">
+          {([
+            ['dashboard', 'Dashboard'],
+            ['daybook', 'Day Book'],
+            ['vouchers', 'Vouchers'],
+            ['gstr', 'GSTR-3B'],
+            ['pl', 'P&L'],
+            ['gst', 'GST Summary'],
+            ['expenses', 'Expenses'],
+            ['revenue', 'Platform revenue'],
+            ['masters', 'Masters'],
+            ['coa', 'Chart of Accounts'],
+            ['trial-balance', 'Trial Balance'],
+            ['sales-uploads', 'Sales Uploads'],
+            ['help-notes', 'Help / Notes'],
+          ] as [FinanceTab, string][]).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setActiveTab(id)}
+              className={`px-3 sm:px-4 py-2.5 text-xs sm:text-sm font-medium transition-colors rounded-t-md border-b-2 -mb-px ${
+                activeTab === id
+                  ? 'border-teal-600 text-teal-800 bg-teal-50/80'
+                  : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
+
+      <div className="bg-white rounded-b-lg border border-t-0 border-slate-200 shadow-sm px-3 sm:px-5 py-5">
 
       {/* ── Tab: P&L ── */}
       {activeTab === 'pl' && (
@@ -906,6 +923,7 @@ export default function Finance() {
 
       {/* ── Tab: Trial Balance ── */}
       {activeTab === 'trial-balance' && <TrialBalanceTab />}
+      </div>
     </div>
   )
 }
@@ -919,9 +937,13 @@ function FinanceHelpNotesTab() {
   )
 }
 
-// ── Dashboard Tab ────────────────────────────────────────────────
+// ── Dashboard Tab — Business Central–style activities (Role Centre pattern) ──
 function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void }) {
   const todayStr = toIso(new Date())
+  const monthStart = useMemo(() => {
+    const n = new Date()
+    return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`
+  }, [])
 
   const { data: todayVouchers = [], isLoading: loadToday } = useQuery<DaybookVoucher[]>({
     queryKey: ['finance-daybook-today'],
@@ -929,12 +951,35 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
     staleTime: 30 * 1000,
   })
 
+  const { data: monthVouchers = [], isLoading: loadMonthVouchers } = useQuery<Voucher[]>({
+    queryKey: ['finance-vouchers-dashboard-month', monthStart, todayStr],
+    queryFn: async () => {
+      const { data } = await api.get(`/finance/vouchers?start_date=${monthStart}&end_date=${todayStr}`)
+      return data
+    },
+    staleTime: 60 * 1000,
+  })
+
+  const { data: uploads = [], isLoading: loadUploads } = useQuery<SalesUpload[]>({
+    queryKey: ['finance-dashboard-uploads'],
+    queryFn: async () => { const { data } = await api.get('/finance/sales-uploads'); return data },
+    staleTime: 60 * 1000,
+  })
+
+  const { data: platformMonth = [], isLoading: loadPlat } = useQuery<PlatformRev[]>({
+    queryKey: ['finance-dashboard-platform-m', monthStart, todayStr],
+    queryFn: async () => {
+      const p = new URLSearchParams({ start_date: monthStart, end_date: todayStr, revenue_source: 'finance_lock' })
+      const { data } = await api.get(`/finance/platform-revenue?${p}`)
+      return data
+    },
+    staleTime: 60 * 1000,
+  })
+
   const { data: monthExpenses } = useQuery<Expense[]>({
     queryKey: ['finance-expenses-month'],
     queryFn: async () => {
-      const now = new Date()
-      const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
-      const { data } = await api.get(`/finance/expenses?start_date=${start}&end_date=${todayStr}`)
+      const { data } = await api.get(`/finance/expenses?start_date=${monthStart}&end_date=${todayStr}`)
       return data
     },
     staleTime: 60 * 1000,
@@ -963,94 +1008,275 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
   const monthExpTotal = (monthExpenses ?? []).reduce((s, e) => s + e.amount + e.gst_amount, 0)
   const gstPayable = gstr3b?.net_total ?? 0
 
-  const QUICK_ACTIONS: { label: string; vtype?: string; icon: string }[] = [
-    { label: 'New Expense', icon: '📋' },
-    { label: 'New Payment', icon: '💳' },
-    { label: 'New Receipt', icon: '🧾' },
-    { label: 'New Journal', icon: '📒' },
+  const salesThisMonth = useMemo(
+    () => (platformMonth ?? []).filter(p => p.loaded).reduce((s, p) => s + p.net_revenue, 0),
+    [platformMonth],
+  )
+  const salesEntryToday = useMemo(
+    () => todayVouchers.filter(v => String(v.voucher_no).startsWith('SUE-')).length,
+    [todayVouchers],
+  )
+  const debtorTotal = useMemo(
+    () => (ledgerBalances?.debtors ?? []).reduce((s, d) => s + d.balance, 0),
+    [ledgerBalances],
+  )
+  const creditorTotal = useMemo(
+    () => (ledgerBalances?.creditors ?? []).reduce((s, c) => s + c.balance, 0),
+    [ledgerBalances],
+  )
+
+  const expenseVouchersMt = monthVouchers.filter(v => ['Expense', 'JWO Payment', 'Purchase Invoice'].includes(v.voucher_type)).length
+  const paymentCountMt = monthVouchers.filter(v => v.voucher_type === 'Payment').length
+  const receiptCountMt = monthVouchers.filter(v => v.voucher_type === 'Receipt').length
+  const journalCountMt = monthVouchers.filter(v => v.voucher_type === 'Journal').length
+  const monthVoucherTotal = loadMonthVouchers ? null : monthVouchers.length
+
+  const QUICK_LINKS: { label: string; tab: FinanceTab }[] = [
+    { label: 'Chart of Accounts', tab: 'coa' },
+    { label: 'Day Book', tab: 'daybook' },
+    { label: 'Vouchers', tab: 'vouchers' },
+    { label: 'Ledgers & masters', tab: 'masters' },
+    { label: 'Sales Uploads', tab: 'sales-uploads' },
+    { label: 'Trial Balance', tab: 'trial-balance' },
+    { label: 'GSTR-3B', tab: 'gstr' },
+    { label: 'P&L', tab: 'pl' },
   ]
 
+  function KpiCard(props: {
+    title: string
+    value: React.ReactNode
+    sub?: string
+    alert?: boolean
+    loading?: boolean
+    onSeeMore?: () => void
+  }) {
+    const { title, value, sub, alert, loading, onSeeMore } = props
+    return (
+      <div
+        className={`relative bg-white rounded-lg border border-slate-200 shadow-sm p-4 min-h-[108px] flex flex-col ${
+          alert ? 'border-l-4 border-l-red-500' : 'border-l-4 border-l-teal-500'
+        }`}
+      >
+        <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">{title}</p>
+        {loading ? (
+          <div className="h-8 bg-slate-100 rounded animate-pulse mt-2 flex-1" />
+        ) : (
+          <p className="text-2xl sm:text-[26px] font-semibold text-slate-900 mt-1 tabular-nums leading-tight">{value}</p>
+        )}
+        {sub && <p className="text-[11px] text-slate-400 mt-1">{sub}</p>}
+        {onSeeMore && (
+          <button
+            type="button"
+            onClick={onSeeMore}
+            className="mt-auto pt-2 text-left text-[11px] font-medium text-teal-700 hover:text-teal-900 hover:underline"
+          >
+            See more →
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  function CueTile({ label, count, onClick }: { label: string; count: number | null; onClick: () => void }) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex flex-col items-center justify-center rounded-md bg-teal-600 hover:bg-teal-700 text-white p-4 min-h-[88px] shadow-sm transition-colors text-center focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 focus-visible:ring-offset-2"
+      >
+        <span className="text-2xl font-bold tabular-nums leading-none">{count === null ? '…' : count}</span>
+        <span className="text-[10px] sm:text-xs font-medium mt-2 leading-snug opacity-95 px-1">{label}</span>
+      </button>
+    )
+  }
+
   return (
-    <div className="space-y-5">
-      {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">Today's Vouchers</p>
-          {loadToday ? (
-            <div className="h-7 bg-gray-100 rounded animate-pulse mt-2" />
-          ) : (
-            <p className="text-2xl font-bold text-[#002B5B] mt-1">{todayCount}</p>
-          )}
-          <p className="text-xs text-gray-400 mt-0.5">{todayStr}</p>
+    <div className="space-y-6">
+      <div className="rounded-md border border-sky-200 bg-sky-50/90 px-3 py-2 text-[11px] text-sky-900 flex flex-wrap gap-x-4 gap-y-1 items-center">
+        <span className="font-semibold">Activities</span>
+        <span className="text-sky-800/90">
+          Layout inspired by Dynamics 365 <strong>Business Central</strong> Role Centre — tiles drill through to lists and reports.
+        </span>
+      </div>
+
+      <div className="flex flex-col xl:flex-row gap-6">
+        <div className="flex-1 space-y-5 min-w-0">
+          <div>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Quick access</p>
+            <div className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs">
+              {QUICK_LINKS.map((link, i) => (
+                <Fragment key={link.tab}>
+                  {i > 0 && <span className="text-slate-300 select-none" aria-hidden>·</span>}
+                  <button
+                    type="button"
+                    onClick={() => onNavigate(link.tab)}
+                    className="text-teal-700 hover:text-teal-900 hover:underline font-medium px-0.5"
+                  >
+                    {link.label}
+                  </button>
+                </Fragment>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-gradient-to-r from-slate-50 to-white px-4 py-3">
+            <h3 className="text-sm font-semibold text-slate-800">Finance workspace</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              KPIs and cues update from your finance database. “Sales this month” uses <strong>Finance Sales Uploads</strong> (locked), not the operational Upload page.
+            </p>
+          </div>
+
+          <div>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">Insights</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              <KpiCard
+                title="Sales this month (locked)"
+                value={fmt(Math.round(salesThisMonth))}
+                sub="Net revenue · uploads basis"
+                loading={loadPlat}
+                onSeeMore={() => onNavigate('revenue')}
+              />
+              <KpiCard
+                title="Outstanding receivables"
+                value={fmt(Math.round(debtorTotal))}
+                sub="Top debtor ledgers (sum)"
+                alert={debtorTotal > 0}
+                loading={!ledgerBalances}
+                onSeeMore={() => onNavigate('trial-balance')}
+              />
+              <KpiCard
+                title="Outstanding payables"
+                value={fmt(Math.round(creditorTotal))}
+                sub="Top creditor ledgers (sum)"
+                alert={creditorTotal > 0}
+                loading={!ledgerBalances}
+                onSeeMore={() => onNavigate('trial-balance')}
+              />
+              <KpiCard
+                title="GST net (MTD)"
+                value={fmt(Math.round(gstPayable))}
+                sub="Current month · GSTR-3B basis"
+                alert={gstPayable > 0}
+                onSeeMore={() => onNavigate('gstr')}
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Today&apos;s vouchers</p>
+              {loadToday ? (
+                <div className="h-7 bg-slate-100 rounded animate-pulse mt-2" />
+              ) : (
+                <p className="text-xl font-bold text-slate-900 mt-1 tabular-nums">{todayCount}</p>
+              )}
+              <button type="button" className="text-[11px] font-medium text-teal-700 mt-1 hover:underline" onClick={() => onNavigate('daybook')}>
+                See more →
+              </button>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Today&apos;s net</p>
+              {loadToday ? (
+                <div className="h-7 bg-slate-100 rounded animate-pulse mt-2" />
+              ) : (
+                <p className="text-xl font-bold text-slate-900 mt-1 tabular-nums">{fmt(todayTotal)}</p>
+              )}
+              <p className="text-[11px] text-slate-400 mt-1">All voucher types</p>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm border-l-4 border-l-rose-500">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Expenses MTD</p>
+              <p className="text-xl font-bold text-rose-700 mt-1 tabular-nums">{fmt(Math.round(monthExpTotal))}</p>
+              <button type="button" className="text-[11px] font-medium text-teal-700 mt-1 hover:underline" onClick={() => onNavigate('expenses')}>
+                See more →
+              </button>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Sales uploads</p>
+              {loadUploads ? (
+                <div className="h-7 bg-slate-100 rounded animate-pulse mt-2" />
+              ) : (
+                <p className="text-xl font-bold text-teal-700 mt-1 tabular-nums">{uploads.length}</p>
+              )}
+              <button type="button" className="text-[11px] font-medium text-teal-700 mt-1 hover:underline" onClick={() => onNavigate('sales-uploads')}>
+                See more →
+              </button>
+            </div>
+          </div>
         </div>
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">Today's Total</p>
-          {loadToday ? (
-            <div className="h-7 bg-gray-100 rounded animate-pulse mt-2" />
-          ) : (
-            <p className="text-2xl font-bold text-gray-800 mt-1">{fmt(todayTotal)}</p>
-          )}
-          <p className="text-xs text-gray-400 mt-0.5">net payable</p>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">This Month Expenses</p>
-          <p className="text-2xl font-bold text-red-600 mt-1">{fmt(monthExpTotal)}</p>
-          <p className="text-xs text-gray-400 mt-0.5">incl. GST</p>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">GST Payable</p>
-          <p className={`text-2xl font-bold mt-1 ${gstPayable > 0 ? 'text-orange-600' : 'text-green-600'}`}>{fmt(gstPayable)}</p>
-          <p className="text-xs text-gray-400 mt-0.5">current month net</p>
+
+        <div className="w-full xl:w-52 shrink-0 space-y-3">
+          <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Actions</p>
+          <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden shadow-sm">
+            {[
+              { label: 'Find entries…', tab: 'daybook' as FinanceTab },
+              { label: 'New voucher', tab: 'vouchers' as FinanceTab },
+              { label: 'Reports — P&L', tab: 'pl' as FinanceTab },
+              { label: 'Platform revenue', tab: 'revenue' as FinanceTab },
+              { label: 'Help / Notes', tab: 'help-notes' as FinanceTab },
+            ].map(a => (
+              <button
+                key={a.label}
+                type="button"
+                onClick={() => onNavigate(a.tab)}
+                className="w-full text-left px-3 py-2.5 text-xs font-medium text-slate-700 hover:bg-teal-50 hover:text-teal-900 transition-colors"
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-400 leading-snug">
+            Use <strong>Find entries</strong> to open Day Book and pick any date, similar to filtering lists in BC.
+          </p>
         </div>
       </div>
 
-      {/* Quick Actions */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-        <h3 className="text-sm font-semibold text-gray-700 mb-3">Quick Actions</h3>
-        <div className="flex flex-wrap gap-2">
-          {QUICK_ACTIONS.map(({ label, icon }) => (
-            <button key={label} onClick={() => onNavigate('vouchers')}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[#002B5B] text-white rounded-lg hover:bg-[#003875] transition-colors">
-              <span>{icon}</span>
-              {label}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div>
+          <p className="text-sm font-semibold text-slate-800">Vouchers this month</p>
+          <p className="text-[11px] text-slate-500 mb-3">Cue tiles — counts of posted voucher types (drill to Vouchers).</p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <CueTile label="All vouchers" count={monthVoucherTotal} onClick={() => onNavigate('vouchers')} />
+            <CueTile label="Expense & purchase" count={loadMonthVouchers ? null : expenseVouchersMt} onClick={() => onNavigate('vouchers')} />
+            <CueTile label="Payments" count={loadMonthVouchers ? null : paymentCountMt} onClick={() => onNavigate('vouchers')} />
+            <CueTile label="Receipts" count={loadMonthVouchers ? null : receiptCountMt} onClick={() => onNavigate('vouchers')} />
+            <CueTile label="Journals" count={loadMonthVouchers ? null : journalCountMt} onClick={() => onNavigate('vouchers')} />
+            <CueTile label="Sales entries today" count={loadToday ? null : salesEntryToday} onClick={() => onNavigate('daybook')} />
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between bg-slate-50/80">
+            <h3 className="text-sm font-semibold text-slate-800">Today&apos;s day book</h3>
+            <button type="button" onClick={() => onNavigate('daybook')} className="text-[11px] font-medium text-teal-700 hover:underline">
+              Open →
             </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Today's Day Book */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-700">Today's Day Book</h3>
-            <button onClick={() => onNavigate('daybook')} className="text-xs text-blue-600 hover:underline">View Full →</button>
           </div>
           {loadToday ? (
-            <div className="p-6 text-center text-gray-400 text-sm animate-pulse">Loading…</div>
+            <div className="p-8 text-center text-slate-400 text-sm animate-pulse">Loading…</div>
           ) : todayVouchers.length === 0 ? (
-            <div className="p-6 text-center text-gray-400 text-sm">No vouchers today.</div>
+            <div className="p-8 text-center text-slate-400 text-sm">No vouchers for {todayStr}.</div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-h-[280px] overflow-y-auto">
               <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
-                    <th className="px-3 py-2 text-left">Voucher No</th>
-                    <th className="px-3 py-2 text-left">Type</th>
-                    <th className="px-3 py-2 text-left">Party</th>
-                    <th className="px-3 py-2 text-right">Net</th>
+                <thead className="sticky top-0 bg-slate-50">
+                  <tr className="text-slate-500 uppercase tracking-wide text-[10px]">
+                    <th className="px-3 py-2 text-left font-semibold">No.</th>
+                    <th className="px-3 py-2 text-left font-semibold">Type</th>
+                    <th className="px-3 py-2 text-left font-semibold">Party</th>
+                    <th className="px-3 py-2 text-right font-semibold">Net</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {todayVouchers.slice(0, 8).map(v => (
-                    <tr key={v.id} className="border-t border-gray-50 hover:bg-gray-50">
-                      <td className="px-3 py-1.5 font-mono font-semibold text-[#002B5B]">{v.voucher_no}</td>
+                  {todayVouchers.slice(0, 12).map(v => (
+                    <tr key={v.id} className="border-t border-slate-100 hover:bg-teal-50/40">
+                      <td className="px-3 py-1.5 font-mono font-semibold text-teal-900">{v.voucher_no}</td>
                       <td className="px-3 py-1.5">
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${VOUCHER_COLORS[v.voucher_type] ?? 'bg-gray-100 text-gray-600'}`}>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${VOUCHER_COLORS[v.voucher_type] ?? 'bg-slate-100 text-slate-600'}`}>
                           {v.voucher_type}
                         </span>
                       </td>
-                      <td className="px-3 py-1.5 text-gray-600 max-w-[80px] truncate">{v.party_name || '—'}</td>
-                      <td className="px-3 py-1.5 text-right font-semibold text-gray-800">{fmt(v.net_payable)}</td>
+                      <td className="px-3 py-1.5 text-slate-600 max-w-[100px] truncate">{v.party_name || '—'}</td>
+                      <td className="px-3 py-1.5 text-right font-semibold text-slate-800">{fmt(v.net_payable)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1058,45 +1284,45 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
             </div>
           )}
         </div>
+      </div>
 
-        {/* Outstanding Summary */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100">
-            <h3 className="text-sm font-semibold text-gray-700">Outstanding Summary</h3>
-          </div>
-          {!ledgerBalances ? (
-            <div className="p-6 text-center text-gray-400 text-sm animate-pulse">Loading…</div>
-          ) : (
-            <div className="grid grid-cols-2 divide-x divide-gray-100">
-              <div className="p-3">
-                <p className="text-[10px] font-bold text-green-700 uppercase tracking-widest mb-2">Top Debtors</p>
-                {(ledgerBalances.debtors ?? []).slice(0, 5).length === 0 ? (
-                  <p className="text-xs text-gray-400">None</p>
-                ) : (
-                  (ledgerBalances.debtors ?? []).slice(0, 5).map((d, i) => (
-                    <div key={i} className="flex justify-between items-center py-0.5">
-                      <span className="text-xs text-gray-600 truncate max-w-[80px]" title={d.name}>{d.name}</span>
-                      <span className="text-xs font-semibold text-green-700">{fmt(d.balance)}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-              <div className="p-3">
-                <p className="text-[10px] font-bold text-red-700 uppercase tracking-widest mb-2">Top Creditors</p>
-                {(ledgerBalances.creditors ?? []).slice(0, 5).length === 0 ? (
-                  <p className="text-xs text-gray-400">None</p>
-                ) : (
-                  (ledgerBalances.creditors ?? []).slice(0, 5).map((c, i) => (
-                    <div key={i} className="flex justify-between items-center py-0.5">
-                      <span className="text-xs text-gray-600 truncate max-w-[80px]" title={c.name}>{c.name}</span>
-                      <span className="text-xs font-semibold text-red-600">{fmt(c.balance)}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
+      <div className="rounded-lg border border-slate-200 bg-white shadow-sm overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-slate-100">
+          <h3 className="text-sm font-semibold text-slate-800">Outstanding summary</h3>
+          <p className="text-[11px] text-slate-500 mt-0.5">Top ledgers — receivables vs payables (BC-style balance cues).</p>
         </div>
+        {!ledgerBalances ? (
+          <div className="p-8 text-center text-slate-400 text-sm animate-pulse">Loading…</div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
+            <div className="p-4">
+              <p className="text-[10px] font-bold text-emerald-800 uppercase tracking-widest mb-2">Debtors</p>
+              {(ledgerBalances.debtors ?? []).slice(0, 6).length === 0 ? (
+                <p className="text-xs text-slate-400">None</p>
+              ) : (
+                (ledgerBalances.debtors ?? []).slice(0, 6).map((d, i) => (
+                  <div key={i} className="flex justify-between items-center py-1 border-b border-slate-50 last:border-0">
+                    <span className="text-xs text-slate-600 truncate max-w-[140px]" title={d.name}>{d.name}</span>
+                    <span className="text-xs font-semibold text-emerald-800 tabular-nums">{fmt(d.balance)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="p-4">
+              <p className="text-[10px] font-bold text-red-800 uppercase tracking-widest mb-2">Creditors</p>
+              {(ledgerBalances.creditors ?? []).slice(0, 6).length === 0 ? (
+                <p className="text-xs text-slate-400">None</p>
+              ) : (
+                (ledgerBalances.creditors ?? []).slice(0, 6).map((c, i) => (
+                  <div key={i} className="flex justify-between items-center py-1 border-b border-slate-50 last:border-0">
+                    <span className="text-xs text-slate-600 truncate max-w-[140px]" title={c.name}>{c.name}</span>
+                    <span className="text-xs font-semibold text-red-700 tabular-nums">{fmt(c.balance)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
