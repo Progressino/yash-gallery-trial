@@ -170,6 +170,29 @@ void SALES_PLATFORMS
 const fmt    = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
 const fmtPct = (n: number) => n.toFixed(1) + '%'
 
+function downloadCsv(filename: string, rows: (string | number)[][]) {
+  const esc = (c: string | number) => `"${String(c).replace(/"/g, '""')}"`
+  const body = rows.map(r => r.map(esc).join(',')).join('\n')
+  const blob = new Blob(['\ufeff' + body], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+/** BC CRONUS-style primary nav buckets */
+type CronusMega = 'finance' | 'cash' | 'sales' | 'purchasing' | 'india' | 'voucher' | null
+
+function cronusMegaForTab(tab: FinanceTab): CronusMega | 'dash' {
+  if (tab === 'dashboard') return 'dash'
+  if (tab === 'gstr' || tab === 'gst') return 'india'
+  if (tab === 'sales-uploads' || tab === 'revenue') return 'sales'
+  if (tab === 'vouchers' || tab === 'daybook') return 'voucher'
+  if (tab === 'expenses') return 'purchasing'
+  return 'finance'
+}
+
 // ── Date helpers ─────────────────────────────────────────────────
 function toIso(d: Date) { return d.toISOString().split('T')[0] }
 function daysAgo(n: number)   { const d = new Date(); d.setDate(d.getDate() - n); return toIso(d) }
@@ -247,6 +270,241 @@ interface GSTR3BData {
   breakdown: { voucher_no: string; voucher_date: string; voucher_type: string; party_name: string; taxable_amount: number; cgst_amount: number; sgst_amount: number; igst_amount: number; total_amount: number }[]
 }
 
+// ── CRONUS / Business Central–style mega navigation ────────────────
+function FinanceCronusNav(props: {
+  activeTab: FinanceTab
+  setActiveTab: (t: FinanceTab) => void
+  megaOpen: CronusMega
+  setMegaOpen: (m: CronusMega) => void
+  jumpVoucher: (voucherType: string) => void
+  jumpMasters: (sub: MastersSubTab) => void
+}) {
+  const { activeTab, setActiveTab, megaOpen, setMegaOpen, jumpVoucher, jumpMasters } = props
+  const panelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!megaOpen) return
+    function onDocDown(e: MouseEvent) {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) setMegaOpen(null)
+    }
+    document.addEventListener('mousedown', onDocDown)
+    return () => document.removeEventListener('mousedown', onDocDown)
+  }, [megaOpen, setMegaOpen])
+
+  function go(tab: FinanceTab) {
+    setActiveTab(tab)
+    setMegaOpen(null)
+  }
+
+  const hi = (id: CronusMega) =>
+    cronusMegaForTab(activeTab) === id
+      ? 'text-teal-800 border-b-2 border-teal-600 bg-teal-50/60'
+      : 'text-slate-600 border-b-2 border-transparent hover:bg-slate-50'
+
+  function MegaCol({ title, children }: { title: string; children: React.ReactNode }) {
+    return (
+      <div className="min-w-[140px]">
+        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-2 border-b border-slate-100 pb-1">{title}</p>
+        <div className="flex flex-col gap-1">{children}</div>
+      </div>
+    )
+  }
+
+  function L({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="text-left text-xs text-teal-700 hover:text-teal-950 hover:underline py-1 leading-snug"
+      >
+        {children}
+      </button>
+    )
+  }
+
+  return (
+    <div ref={panelRef} className="bg-white rounded-t-lg border border-slate-200 border-b-0 shadow-sm relative z-40">
+      <div className="flex flex-wrap items-stretch gap-0 px-1 border-b border-slate-100">
+        <button
+          type="button"
+          onClick={() => { setMegaOpen(null); setActiveTab('dashboard') }}
+          className={`px-3 py-2.5 text-xs font-semibold transition-colors rounded-t-md ${activeTab === 'dashboard' ? 'text-teal-800 border-b-2 border-teal-600 bg-teal-50/80' : 'text-slate-600 hover:bg-slate-50'}`}
+        >
+          Role Centre
+        </button>
+        {([
+          ['finance', 'Finance'],
+          ['cash', 'Cash Management'],
+          ['sales', 'Sales'],
+          ['purchasing', 'Purchasing'],
+          ['india', 'India Taxation'],
+          ['voucher', 'Voucher Interface'],
+        ] as const).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setMegaOpen(megaOpen === id ? null : id)}
+            className={`px-3 py-2.5 text-xs font-medium transition-colors rounded-t-md flex items-center gap-1 ${hi(id)}`}
+          >
+            {label}
+            <span className="text-[10px] opacity-60" aria-hidden>▾</span>
+          </button>
+        ))}
+      </div>
+
+      {megaOpen && (
+        <div className="absolute left-0 right-0 top-full bg-white border border-slate-200 shadow-xl rounded-b-lg p-4 max-h-[min(70vh,520px)] overflow-y-auto">
+          {megaOpen === 'finance' && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-left">
+              <MegaCol title="General ledger">
+                <L onClick={() => jumpVoucher('Journal')}>General Journals</L>
+                <L onClick={() => go('coa')}>Chart of Accounts</L>
+                <L onClick={() => jumpMasters('ledger-groups')}>G/L groups &amp; categories</L>
+              </MegaCol>
+              <MegaCol title="Budgets &amp; assets">
+                <L onClick={() => go('help-notes')}>G/L budgets (see Help)</L>
+                <L onClick={() => go('help-notes')}>Fixed assets (see Help)</L>
+                <L onClick={() => go('pl')}>Financial reporting / P&amp;L</L>
+              </MegaCol>
+              <MegaCol title="Analysis">
+                <L onClick={() => go('revenue')}>Sales analysis — platform revenue</L>
+                <L onClick={() => go('expenses')}>Purchase / expense register</L>
+                <L onClick={() => go('help-notes')}>Inventory analysis (ops)</L>
+              </MegaCol>
+              <MegaCol title="Tax &amp; local">
+                <L onClick={() => go('gstr')}>GST returns — GSTR-3B</L>
+                <L onClick={() => go('gst')}>GST summary (Amazon MTR)</L>
+                <L onClick={() => go('help-notes')}>VAT / e-invoice notes</L>
+              </MegaCol>
+              <MegaCol title="Setup">
+                <L onClick={() => go('masters')}>Currencies &amp; masters</L>
+                <L onClick={() => jumpMasters('voucher-types')}>Voucher types</L>
+                <L onClick={() => go('trial-balance')}>Trial balance</L>
+              </MegaCol>
+              <MegaCol title="Dimensions">
+                <L onClick={() => go('vouchers')}>Cost centre on lines</L>
+                <L onClick={() => go('help-notes')}>Statistical / allocation (Help)</L>
+                <L onClick={() => go('help-notes')}>Microsoft Learn mapping</L>
+              </MegaCol>
+            </div>
+          )}
+          {megaOpen === 'cash' && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+              <MegaCol title="Cash flow">
+                <L onClick={() => go('pl')}>Cash view — P&amp;L / expenses</L>
+                <L onClick={() => go('trial-balance')}>Bank &amp; cash ledgers (T/B)</L>
+                <L onClick={() => go('help-notes')}>Cash flow forecasts (Help)</L>
+              </MegaCol>
+              <MegaCol title="Journals">
+                <L onClick={() => jumpVoucher('Receipt')}>Cash receipt journals</L>
+                <L onClick={() => jumpVoucher('Payment')}>Payment journals</L>
+                <L onClick={() => jumpVoucher('Contra')}>Contra (bank ↔ cash)</L>
+              </MegaCol>
+              <MegaCol title="Bank">
+                <L onClick={() => jumpMasters('ledgers')}>Bank accounts (ledgers)</L>
+                <L onClick={() => go('daybook')}>Bank book — Day Book</L>
+                <L onClick={() => go('vouchers')}>Payment reconciliation</L>
+              </MegaCol>
+              <MegaCol title="Terms">
+                <L onClick={() => jumpMasters('ledgers')}>Payment terms (party ledgers)</L>
+                <L onClick={() => go('expenses')}>Deposits &amp; batches</L>
+              </MegaCol>
+              <MegaCol title="Reconciliation">
+                <L onClick={() => go('trial-balance')}>Bank reconciliation — T/B</L>
+                <L onClick={() => go('daybook')}>Find entries</L>
+              </MegaCol>
+            </div>
+          )}
+          {megaOpen === 'sales' && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+              <MegaCol title="Master data">
+                <L onClick={() => jumpMasters('ledgers')}>Customers (debtor ledgers)</L>
+                <L onClick={() => go('help-notes')}>Items (Item Master — ops)</L>
+              </MegaCol>
+              <MegaCol title="Orders &amp; quotes">
+                <L onClick={() => go('sales-uploads')}>Sales invoices — uploads</L>
+                <L onClick={() => go('daybook')}>Posted sales — Day Book</L>
+              </MegaCol>
+              <MegaCol title="Returns">
+                <L onClick={() => go('revenue')}>Returns in platform revenue</L>
+              </MegaCol>
+              <MegaCol title="Posted documents">
+                <L onClick={() => go('daybook')}>Posted invoices (by date)</L>
+                <L onClick={() => go('gstr')}>GST on outward supplies</L>
+              </MegaCol>
+            </div>
+          )}
+          {megaOpen === 'purchasing' && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+              <MegaCol title="Master data">
+                <L onClick={() => jumpMasters('ledgers')}>Vendors (creditor ledgers)</L>
+                <L onClick={() => go('help-notes')}>Incoming docs (Help)</L>
+              </MegaCol>
+              <MegaCol title="Documents">
+                <L onClick={() => jumpVoucher('Purchase Invoice')}>Purchase invoices</L>
+                <L onClick={() => jumpVoucher('Expense')}>Expense vouchers</L>
+              </MegaCol>
+              <MegaCol title="Posted">
+                <L onClick={() => go('daybook')}>Posted purchases — Day Book</L>
+                <L onClick={() => go('vouchers')}>Voucher register</L>
+              </MegaCol>
+            </div>
+          )}
+          {megaOpen === 'india' && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <MegaCol title="Common setup">
+                <L onClick={() => jumpMasters('gst-classifications')}>GST HSN / rates</L>
+                <L onClick={() => jumpMasters('tds-sections')}>TDS sections</L>
+                <L onClick={() => jumpMasters('ledgers')}>Party GSTIN / ledgers</L>
+              </MegaCol>
+              <MegaCol title="Goods &amp; Services Tax">
+                <L onClick={() => go('gstr')}>GSTR-3B (monthly)</L>
+                <L onClick={() => go('gst')}>GST summary — MTR</L>
+                <L onClick={() => go('sales-uploads')}>Sales uploads / reconciliation</L>
+              </MegaCol>
+              <MegaCol title="TDS">
+                <L onClick={() => jumpMasters('tds-sections')}>TDS master</L>
+                <L onClick={() => go('vouchers')}>TDS on vouchers</L>
+              </MegaCol>
+              <MegaCol title="TCS">
+                <L onClick={() => jumpMasters('ledgers')}>TCS on ledgers</L>
+                <L onClick={() => go('help-notes')}>TCS process (Help / Notes)</L>
+              </MegaCol>
+            </div>
+          )}
+          {megaOpen === 'voucher' && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+              <MegaCol title="Payments">
+                <L onClick={() => jumpVoucher('Payment')}>Bank payment voucher</L>
+                <L onClick={() => jumpVoucher('Payment')}>Cash payment voucher</L>
+              </MegaCol>
+              <MegaCol title="Receipts">
+                <L onClick={() => jumpVoucher('Receipt')}>Cash receipt voucher</L>
+                <L onClick={() => jumpVoucher('Receipt')}>Bank receipt voucher</L>
+              </MegaCol>
+              <MegaCol title="Other">
+                <L onClick={() => jumpVoucher('Journal')}>Journal voucher</L>
+                <L onClick={() => jumpVoucher('Contra')}>Contra voucher</L>
+              </MegaCol>
+              <MegaCol title="Books">
+                <L onClick={() => go('daybook')}>Day Book</L>
+                <L onClick={() => go('trial-balance')}>Ledger / T/B</L>
+              </MegaCol>
+              <MegaCol title="Register">
+                <L onClick={() => go('vouchers')}>Voucher register</L>
+              </MegaCol>
+            </div>
+          )}
+        </div>
+      )}
+
+      <p className="px-3 py-1.5 text-[10px] text-slate-400 border-t border-slate-50 bg-slate-50/50">
+        BC demo menus mapped to this app — items marked “Help” are definitions or Microsoft Learn pointers in <strong>Help / Notes</strong>.
+      </p>
+    </div>
+  )
+}
+
 // ── Main Component ───────────────────────────────────────────────
 export default function Finance() {
   const qc = useQueryClient()
@@ -265,9 +523,23 @@ export default function Finance() {
   }, [])
 
   const [activeTab,    setActiveTab]    = useState<FinanceTab>('dashboard')
+  const [cronusMegaOpen, setCronusMegaOpen] = useState<CronusMega>(null)
+  const [voucherPreset, setVoucherPreset] = useState<{ n: number; type: string } | null>(null)
+  const [mastersJump, setMastersJump] = useState<{ n: number; sub: MastersSubTab } | null>(null)
   const [dateStart,    setDateStart]    = useState(() => daysAgo(90))
   const [dateEnd,      setDateEnd]      = useState(TODAY)
   const [activePreset, setActivePreset] = useState<string>('90D')
+
+  function jumpVoucher(type: string) {
+    setVoucherPreset({ n: Date.now(), type })
+    setActiveTab('vouchers')
+    setCronusMegaOpen(null)
+  }
+  function jumpMasters(sub: MastersSubTab) {
+    setMastersJump({ n: Date.now(), sub })
+    setActiveTab('masters')
+    setCronusMegaOpen(null)
+  }
   /** Finance Sales Uploads (locked) vs operational session (Upload page — Dashboard / PO) */
   const [revenueSource, setRevenueSource] = useState<'finance_lock' | 'session'>('finance_lock')
   const [financeCompany, setFinanceCompany] = useState('')
@@ -524,41 +796,55 @@ export default function Finance() {
         </div>
       )}
 
-      {/* Tabs — horizontal module nav (BC-style) */}
-      <div className="bg-white rounded-t-lg border border-slate-200 border-b-0 shadow-sm">
-        <div className="flex gap-0.5 flex-wrap px-1 pt-1">
+      <FinanceCronusNav
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        megaOpen={cronusMegaOpen}
+        setMegaOpen={setCronusMegaOpen}
+        jumpVoucher={jumpVoucher}
+        jumpMasters={jumpMasters}
+      />
+
+      <div className="bg-white rounded-b-lg border border-t-0 border-slate-200 shadow-sm overflow-hidden">
+        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads') && (
+          <div className="px-3 sm:px-5 py-2 flex flex-wrap gap-x-1 gap-y-1 items-center border-b border-teal-100 bg-gradient-to-r from-teal-50/90 to-cyan-50/50">
+            <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide mr-2">India Taxation</span>
+            <button type="button" onClick={() => setActiveTab('gstr')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gstr' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GSTR-3B</button>
+            <button type="button" onClick={() => setActiveTab('gst')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gst' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GST summary</button>
+            <button type="button" onClick={() => setActiveTab('sales-uploads')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-uploads' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales uploads</button>
+            <button type="button" onClick={() => jumpMasters('tds-sections')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">TDS masters</button>
+            <button type="button" onClick={() => jumpMasters('gst-classifications')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">GST classifications</button>
+            <span className="text-[10px] text-teal-700/80 ml-auto hidden sm:inline">GSTR-1: use government portal; outward detail here via Day Book / uploads.</span>
+          </div>
+        )}
+
+        <div className="px-3 sm:px-5 py-2 flex flex-wrap gap-2 items-center border-b border-slate-100 bg-slate-50/40 text-[11px]">
+          <span className="text-slate-500 font-medium">Open:</span>
           {([
-            ['dashboard', 'Dashboard'],
             ['daybook', 'Day Book'],
             ['vouchers', 'Vouchers'],
-            ['gstr', 'GSTR-3B'],
-            ['pl', 'P&L'],
-            ['gst', 'GST Summary'],
-            ['expenses', 'Expenses'],
-            ['revenue', 'Platform revenue'],
-            ['masters', 'Masters'],
-            ['coa', 'Chart of Accounts'],
+            ['coa', 'COA'],
             ['trial-balance', 'Trial Balance'],
-            ['sales-uploads', 'Sales Uploads'],
-            ['help-notes', 'Help / Notes'],
+            ['pl', 'P&L'],
+            ['expenses', 'Expenses'],
+            ['revenue', 'Revenue'],
+            ['masters', 'Masters'],
+            ['help-notes', 'Help'],
           ] as [FinanceTab, string][]).map(([id, label]) => (
             <button
               key={id}
               type="button"
-              onClick={() => setActiveTab(id)}
-              className={`px-3 sm:px-4 py-2.5 text-xs sm:text-sm font-medium transition-colors rounded-t-md border-b-2 -mb-px ${
-                activeTab === id
-                  ? 'border-teal-600 text-teal-800 bg-teal-50/80'
-                  : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+              onClick={() => { setCronusMegaOpen(null); setActiveTab(id) }}
+              className={`px-2 py-0.5 rounded font-medium transition-colors ${
+                activeTab === id ? 'bg-slate-700 text-white' : 'text-teal-700 hover:bg-slate-100'
               }`}
             >
               {label}
             </button>
           ))}
         </div>
-      </div>
 
-      <div className="bg-white rounded-b-lg border border-t-0 border-slate-200 shadow-sm px-3 sm:px-5 py-5">
+        <div className="px-3 sm:px-5 py-5">
 
       {/* ── Tab: P&L ── */}
       {activeTab === 'pl' && (
@@ -907,10 +1193,10 @@ export default function Finance() {
       {activeTab === 'gstr' && <GSTR3BTab />}
 
       {/* ── Tab: Vouchers ── */}
-      {activeTab === 'vouchers' && <VouchersTab />}
+      {activeTab === 'vouchers' && <VouchersTab voucherPreset={voucherPreset} />}
 
       {/* ── Tab: Masters ── */}
-      {activeTab === 'masters' && <MastersTab />}
+      {activeTab === 'masters' && <MastersTab mastersJump={mastersJump} />}
 
       {/* ── Tab: Sales Uploads ── */}
       {activeTab === 'sales-uploads' && <SalesUploadsTab />}
@@ -923,6 +1209,7 @@ export default function Finance() {
 
       {/* ── Tab: Trial Balance ── */}
       {activeTab === 'trial-balance' && <TrialBalanceTab />}
+        </div>
       </div>
     </div>
   )
@@ -1097,6 +1384,70 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
         <span className="text-sky-800/90">
           Layout inspired by Dynamics 365 <strong>Business Central</strong> Role Centre — tiles drill through to lists and reports.
         </span>
+      </div>
+
+      <div className="rounded-lg border border-teal-200 bg-gradient-to-r from-teal-50/80 to-cyan-50/50 px-3 py-3 space-y-2 shadow-sm">
+        <div className="flex flex-wrap items-center gap-2 justify-between">
+          <p className="text-[11px] font-bold text-teal-900 uppercase tracking-wide">India Taxation (CRONUS-style)</p>
+          <div className="flex flex-wrap gap-1 justify-end">
+            <button type="button" onClick={() => onNavigate('gstr')} className="text-xs px-2.5 py-1 rounded-md bg-teal-600 text-white font-semibold hover:bg-teal-700 shadow-sm">
+              GSTR-3B
+            </button>
+            <button type="button" onClick={() => onNavigate('gst')} className="text-xs px-2.5 py-1 rounded-md bg-white border border-teal-300 text-teal-900 font-medium hover:bg-teal-50">
+              GST summary
+            </button>
+            <button type="button" onClick={() => onNavigate('sales-uploads')} className="text-xs px-2.5 py-1 rounded-md bg-white border border-teal-300 text-teal-900 font-medium hover:bg-teal-50">
+              Sales uploads
+            </button>
+            <button type="button" onClick={() => onNavigate('masters')} className="text-xs px-2.5 py-1 rounded-md bg-white border border-teal-300 text-teal-900 font-medium hover:bg-teal-50">
+              TDS / GST masters
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 items-center pt-2 border-t border-teal-100/80">
+          <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide">Export</span>
+          <button
+            type="button"
+            onClick={() => {
+              const rows: (string | number)[][] = [['voucher_no', 'voucher_type', 'party', 'net_payable', 'taxable_amount']]
+              for (const v of todayVouchers) {
+                rows.push([v.voucher_no, v.voucher_type, v.party_name || '', v.net_payable, v.taxable_amount])
+              }
+              downloadCsv(`finance-daybook-${todayStr}.csv`, rows)
+            }}
+            className="text-[11px] font-medium px-2 py-1 rounded border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+          >
+            Today&apos;s day book (CSV)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const br = gstr3b?.breakdown ?? []
+              const rows: (string | number)[][] = [['voucher_no', 'voucher_date', 'voucher_type', 'party_name', 'taxable_amount', 'cgst', 'sgst', 'igst', 'total_amount']]
+              for (const r of br) {
+                rows.push([r.voucher_no, r.voucher_date, r.voucher_type, r.party_name, r.taxable_amount, r.cgst_amount, r.sgst_amount, r.igst_amount, r.total_amount])
+              }
+              downloadCsv(`gstr3b-breakdown-mtd-${todayStr.slice(0, 7)}.csv`, rows)
+            }}
+            className="text-[11px] font-medium px-2 py-1 rounded border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+          >
+            GSTR-3B breakdown (CSV)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const rows: (string | number)[][] = [['platform', 'net_revenue', 'gross_revenue', 'returns_value']]
+              for (const p of platformMonth.filter(x => x.loaded)) {
+                rows.push([p.platform, p.net_revenue, p.gross_revenue, p.returns_value])
+              }
+              downloadCsv(`platform-revenue-mtd-${todayStr.slice(0, 7)}.csv`, rows)
+            }}
+            className="text-[11px] font-medium px-2 py-1 rounded border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+          >
+            Locked sales by platform (CSV)
+          </button>
+        </div>
+        <p className="text-[10px] text-teal-800/80">GSTR-1 and other statutory filings: prepare in the government portal; use Day Book and uploads here for outward line detail.</p>
       </div>
 
       <div className="flex flex-col xl:flex-row gap-6">
@@ -1594,11 +1945,29 @@ function GSTR3BTab() {
   return (
     <div className="space-y-4">
       {/* Month picker */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3 flex items-center gap-3">
-        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Return Period</span>
-        <input type="month" value={month} onChange={e => setMonth(e.target.value)}
-          className="text-sm font-semibold border border-gray-200 rounded px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
-        <span className="text-xs text-gray-400">{startDate} to {endDate}</span>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3 flex flex-wrap items-center gap-3 justify-between">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Return Period</span>
+          <input type="month" value={month} onChange={e => setMonth(e.target.value)}
+            className="text-sm font-semibold border border-gray-200 rounded px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-300" />
+          <span className="text-xs text-gray-400">{startDate} to {endDate}</span>
+        </div>
+        {!isLoading && gstr && (
+          <button
+            type="button"
+            onClick={() => {
+              const br = gstr.breakdown ?? []
+              const rows: (string | number)[][] = [['voucher_no', 'voucher_date', 'voucher_type', 'party_name', 'taxable_amount', 'cgst', 'sgst', 'igst', 'total_amount']]
+              for (const r of br) {
+                rows.push([r.voucher_no, r.voucher_date, r.voucher_type, r.party_name, r.taxable_amount, r.cgst_amount, r.sgst_amount, r.igst_amount, r.total_amount])
+              }
+              downloadCsv(`gstr3b-${month}.csv`, rows)
+            }}
+            className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
+          >
+            Export breakdown (CSV)
+          </button>
+        )}
       </div>
 
       {isLoading ? (
@@ -1745,9 +2114,10 @@ function GSTR3BTab() {
 }
 
 // ── Vouchers Tab ─────────────────────────────────────────────────
-function VouchersTab() {
+function VouchersTab({ voucherPreset }: { voucherPreset: { n: number; type: string } | null }) {
   const qc = useQueryClient()
   const [showVoucherHelp, setShowVoucherHelp] = useState(false)
+  const lastPresetN = useRef(0)
 
   // Queries for dropdowns
   const { data: ledgers = [] } = useQuery<Ledger[]>({
@@ -1775,6 +2145,13 @@ function VouchersTab() {
   const [partyGstin,  setPartyGstin]  = useState('')
   const [partyState,  setPartyState]  = useState('')
   const [supplyType,  setSupplyType]  = useState<'Intra' | 'Inter'>('Intra')
+
+  useEffect(() => {
+    if (voucherPreset && voucherPreset.n > lastPresetN.current) {
+      lastPresetN.current = voucherPreset.n
+      setVType(voucherPreset.type)
+    }
+  }, [voucherPreset])
   const [cgstRate,    setCgstRate]    = useState('9')
   const [igstRate,    setIgstRate]    = useState('18')
   const [applyTds,    setApplyTds]    = useState(false)
@@ -2399,8 +2776,16 @@ function VouchersTab() {
 }
 
 // ── Masters Tab ──────────────────────────────────────────────────
-function MastersTab() {
+function MastersTab({ mastersJump }: { mastersJump: { n: number; sub: MastersSubTab } | null }) {
   const [sub, setSub] = useState<MastersSubTab>('ledger-groups')
+  const lastJumpN = useRef(0)
+
+  useEffect(() => {
+    if (mastersJump && mastersJump.n > lastJumpN.current) {
+      lastJumpN.current = mastersJump.n
+      setSub(mastersJump.sub)
+    }
+  }, [mastersJump])
 
   return (
     <div className="space-y-4">
