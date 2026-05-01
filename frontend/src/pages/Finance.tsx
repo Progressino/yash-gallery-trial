@@ -771,7 +771,7 @@ export default function Finance() {
         <div>
           <h2 className="text-xl sm:text-2xl font-semibold text-slate-800 tracking-tight">Finance</h2>
           <p className="text-slate-500 text-xs sm:text-sm mt-0.5">
-            Activities, posting, and reports — layout inspired by Dynamics 365 Business Central
+            Activities, posting, and reports
           </p>
         </div>
       </div>
