@@ -5,6 +5,7 @@ import {
   Legend, ResponsiveContainer, Cell,
 } from 'recharts'
 import api from '../api/client'
+import { GlSalesNotesContent } from '../components/finance/GlSalesNotesContent'
 
 // ── Types ────────────────────────────────────────────────────────
 interface TallyPL {
@@ -911,34 +912,7 @@ export default function Finance() {
 function FinanceHelpNotesTab() {
   return (
     <div className="space-y-5">
-      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
-        <p className="text-xs font-semibold text-blue-900 uppercase tracking-wide">
-          Sales Report &amp; General Ledger: Field Definitions (Notes)
-        </p>
-        <p className="text-xs text-blue-800">
-          <strong>Purpose:</strong> Use these notes to understand what each field means in General Ledger (GL) and Sales Report, and how to determine the correct GST tax type.
-        </p>
-        <div className="text-xs text-blue-900 space-y-1">
-          <p><strong>1) General Ledger (GL):</strong> Main accounting record containing all posted financial transactions under sales, purchases, GST output, bank, cash, customer/vendor and expense accounts.</p>
-          <p><strong>2) Sales Report: Common Fields</strong></p>
-          <p><strong>Import Order ID:</strong> Unique order reference from source platform/system for traceability.</p>
-          <p><strong>Invoice No.:</strong> Tax invoice number for accounting and GST compliance reference.</p>
-          <p><strong>Ship From:</strong> Dispatch/origin location (warehouse/store/state).</p>
-          <p><strong>Ship To:</strong> Delivery/destination location (customer address/state).</p>
-          <p><strong>Type of Sale:</strong> <strong>Registered</strong> (B2B with GSTIN), <strong>Unregistered</strong> (B2C without GSTIN), <strong>E-commerce</strong> (marketplace/operator sale).</p>
-          <p><strong>GST Type (Tax Split):</strong> Based on place of supply and supplier state (typically Ship To vs Ship From/supplier registered state).</p>
-          <p><strong>HSN Code:</strong> Product HSN used for category and GST rate determination.</p>
-          <p><strong>Item Sold / Product Name:</strong> Product/SKU description; should match item master/inventory naming.</p>
-          <p><strong>4) Static Log (Platform Mapping) for E-commerce Sales:</strong> Maintain a fixed mapping for platform/operator name, channel order-ID capture format, default party/customer, default sales ledger, GST/TCS setup, and return/refund mapping rules.</p>
-          <p><strong>5) Sales Ledger Type:</strong> Every sales invoice should post to the right revenue ledger (B2B, B2C, platform-wise e-commerce, and inter-state/intra-state ledgers if separately maintained).</p>
-          <p><strong>6) Sales Invoice Print — what should be visible:</strong> Customer/billing/shipping details, invoice date/no, Ship From state, warehouse/dispatch location name, Ship To state, correct source-state GSTIN, customer GSTIN (for B2B), place of supply, and line-wise item details (SKU, HSN, quantity, taxable value, GST rate, CGST/SGST/IGST split), plus invoice total.</p>
-          <p><strong>7) Inventory Effect:</strong> Invoice SKU must match inventory item master so stock is reduced correctly by item and warehouse/location; this keeps stock, sales quantity, and item-wise taxable value reporting accurate.</p>
-        </div>
-        <div className="rounded-lg border border-blue-300 bg-white/70 px-3 py-2 text-xs text-blue-900">
-          <p className="font-semibold">3) Quick GST Decision Rule</p>
-          <p className="mt-0.5">If <strong>Ship From</strong> and <strong>Ship To</strong> are in the same state: <strong>CGST + SGST</strong>. If they are in different states: <strong>IGST</strong>.</p>
-        </div>
-      </div>
+      <GlSalesNotesContent showAccountantChecklist />
     </div>
   )
 }
@@ -1723,18 +1697,9 @@ function VouchersTab() {
         </button>
         {showVoucherHelp && (
           <div className="mt-3 text-xs text-blue-900 space-y-1">
-            <p><strong>General Ledger (GL):</strong> Main accounting record containing posted transactions across sales, purchases, GST output, bank/cash, parties and expenses.</p>
-            <p><strong>Import Order ID:</strong> Source platform order reference for traceability.</p>
-            <p><strong>Invoice No.:</strong> Tax invoice reference used for accounting and GST compliance.</p>
-            <p><strong>Ship From / Ship To:</strong> Dispatch origin state and delivery destination state.</p>
-            <p><strong>Type of Sale:</strong> Registered (B2B with GSTIN), Unregistered (B2C), E-commerce (marketplace/operator sale).</p>
-            <p><strong>GST Type (Tax Split):</strong> Intra-state supply applies CGST + SGST; inter-state supply applies IGST.</p>
-            <p><strong>HSN Code:</strong> Product HSN for category and GST rate.</p>
-            <p><strong>Item Sold / Product Name:</strong> Product/SKU description aligned with item master/inventory naming.</p>
-            <p><strong>Static Log (Platform Mapping):</strong> Keep fixed master mapping for channel name, order-ID format, default party, default sales ledger, GST/TCS settings, and return/refund mapping so posting stays consistent.</p>
-            <p><strong>Sales Ledger Type:</strong> Post invoice into the correct ledger (B2B, B2C, platform-wise e-commerce, and inter-state/intra-state ledgers if maintained separately).</p>
-            <p><strong>Sales Invoice Print Checklist:</strong> Customer/billing/shipping details, invoice date/no, Ship From state, warehouse/dispatch location, Ship To state, correct branch GSTIN, customer GSTIN (B2B), place of supply, line-item SKU/HSN/qty/taxable value/GST rate/tax split, and final invoice total.</p>
-            <p><strong>Inventory Effect:</strong> Invoice SKU must match item master so posting reduces stock by item and warehouse correctly, keeping stock and taxable-value reports accurate.</p>
+            <p><strong>Full GL &amp; Sales Report definitions</strong> (warehouse, e-invoice, e-way bill, ledger master, print checklist): open Finance → <strong>Help / Notes</strong>.</p>
+            <p><strong>GL:</strong> Main record of posted amounts under sales, purchases, GST, bank/cash, parties, expenses.</p>
+            <p><strong>Key fields:</strong> Import Order ID, Invoice No., Ship From / Ship To (and warehouse name on reports), type of sale (B2B/B2C/e-com), HSN, SKU/item name.</p>
             <div className="rounded border border-blue-300 bg-white/70 px-2 py-1.5 mt-2">
               <p className="font-semibold">Quick GST Decision Rule</p>
               <p>Same state (Ship From = Ship To): <strong>CGST + SGST</strong>. Different states: <strong>IGST</strong>.</p>
@@ -3125,34 +3090,7 @@ function SalesUploadsTab() {
         </div>
       </div>
 
-      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
-        <p className="text-xs font-semibold text-blue-900 uppercase tracking-wide">
-          Sales Report &amp; General Ledger: Field Definitions (Notes)
-        </p>
-        <p className="text-xs text-blue-800">
-          <strong>Purpose:</strong> Use these notes to understand what each field means in General Ledger (GL) and Sales Report, and how to determine the correct GST tax type.
-        </p>
-        <div className="text-xs text-blue-900 space-y-1">
-          <p><strong>1) General Ledger (GL):</strong> Main accounting record containing all posted financial transactions under sales, purchases, GST output, bank, cash, customer/vendor and expense accounts.</p>
-          <p><strong>2) Sales Report: Common Fields</strong></p>
-          <p><strong>Import Order ID:</strong> Unique order reference from source platform/system for traceability.</p>
-          <p><strong>Invoice No.:</strong> Tax invoice number for accounting and GST compliance reference.</p>
-          <p><strong>Ship From:</strong> Dispatch/origin location (warehouse/store/state).</p>
-          <p><strong>Ship To:</strong> Delivery/destination location (customer address/state).</p>
-          <p><strong>Type of Sale:</strong> <strong>Registered</strong> (B2B with GSTIN), <strong>Unregistered</strong> (B2C without GSTIN), <strong>E-commerce</strong> (marketplace/operator sale).</p>
-          <p><strong>GST Type (Tax Split):</strong> Based on place of supply and supplier state (typically Ship To vs Ship From/supplier registered state).</p>
-          <p><strong>HSN Code:</strong> Product HSN used for category and GST rate determination.</p>
-          <p><strong>Item Sold / Product Name:</strong> Product/SKU description; should match item master/inventory naming.</p>
-          <p><strong>4) Static Log (Platform Mapping) for E-commerce Sales:</strong> Maintain a fixed mapping for platform/operator name, channel order-ID capture format, default party/customer, default sales ledger, GST/TCS setup, and return/refund mapping rules.</p>
-          <p><strong>5) Sales Ledger Type:</strong> Every sales invoice should post to the right revenue ledger (B2B, B2C, platform-wise e-commerce, and inter-state/intra-state ledgers if separately maintained).</p>
-          <p><strong>6) Sales Invoice Print — what should be visible:</strong> Customer/billing/shipping details, invoice date/no, Ship From state, warehouse/dispatch location name, Ship To state, correct source-state GSTIN, customer GSTIN (for B2B), place of supply, and line-wise item details (SKU, HSN, quantity, taxable value, GST rate, CGST/SGST/IGST split), plus invoice total.</p>
-          <p><strong>7) Inventory Effect:</strong> Invoice SKU must match inventory item master so stock is reduced correctly by item and warehouse/location; this keeps stock, sales quantity, and item-wise taxable value reporting accurate.</p>
-        </div>
-        <div className="rounded-lg border border-blue-300 bg-white/70 px-3 py-2 text-xs text-blue-900">
-          <p className="font-semibold">3) Quick GST Decision Rule</p>
-          <p className="mt-0.5">If <strong>Ship From</strong> and <strong>Ship To</strong> are in the same state: <strong>CGST + SGST</strong>. If they are in different states: <strong>IGST</strong>.</p>
-        </div>
-      </div>
+      <GlSalesNotesContent />
 
       {/* Upload card */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">

@@ -48,6 +48,7 @@ echo "==> Backend sanity tests"
 "$PYTHON_BIN" -m pytest tests/test_myntra_resolve.py -q
 "$PYTHON_BIN" -m pytest tests/test_api_data_po_sales.py -q
 "$PYTHON_BIN" -m pytest tests/test_finance_sales_entries.py -q
+"$PYTHON_BIN" -m pytest tests/test_finance_accountant_dry_run.py -q
 
 # Frontend smoke uses npm/npx; missing Node yields shell exit 127 on self-hosted runners.
 if [[ "${SKIP_E2E:-}" == "1" ]]; then
