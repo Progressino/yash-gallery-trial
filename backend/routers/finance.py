@@ -33,9 +33,9 @@ from ..db.finance_db import (
     list_gst_classifications, create_gst_classification, delete_gst_classification,
     list_tds_sections, create_tds_section, delete_tds_section,
     list_expense_vouchers, get_expense_voucher, create_expense_voucher, delete_expense_voucher,
-    list_finance_sales_uploads, create_finance_sales_upload, delete_finance_sales_upload,
+    list_finance_sales_uploads, create_finance_sales_upload, create_finance_sales_entries, delete_finance_sales_upload,
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
-    list_vouchers, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances,
+    list_vouchers, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
     get_chart_of_accounts, get_trial_balance,
     list_tally_pl, upsert_tally_pl, delete_tally_pl,
 )
@@ -578,6 +578,9 @@ def post_voucher(body: VoucherCreate):
 
 @router.get("/vouchers/{voucher_id}")
 def get_voucher(voucher_id: int):
+    v = get_sales_entry_voucher(voucher_id)
+    if v:
+        return v
     v = get_expense_voucher(voucher_id)
     if not v:
         raise HTTPException(status_code=404, detail="Voucher not found")
@@ -753,6 +756,7 @@ def _process_monthly_package_bytes(
 ) -> dict:
     """Parse full monthly package ZIP and optionally persist Finance rows."""
     import io, zipfile
+    import pandas as pd
     from ..services.mtr import load_mtr_from_zip
     from ..services.myntra import load_myntra_from_zip
     from ..services.meesho import load_meesho_from_zip
@@ -826,6 +830,8 @@ def _process_monthly_package_bytes(
 
     # Amazon — MTR uses Transaction_Type (underscore)
     amz_rev = amz_ret = amz_rows = 0
+    amazon_dfs: list = []
+    amz_result_index: Optional[int] = None
     for fname, fbytes in amazon_files.items():
         if any(x in fname.lower() for x in ("stock", "transfer")):
             continue
@@ -833,6 +839,7 @@ def _process_monthly_package_bytes(
             df, _, _ = load_mtr_from_zip(fbytes)
             if df.empty:
                 continue
+            amazon_dfs.append(df)
             amz_rows += len(df)
             if "Invoice_Amount" in df.columns and "Transaction_Type" in df.columns:
                 amz_rev += float(df[df["Transaction_Type"] == "Shipment"]["Invoice_Amount"].sum())
@@ -844,6 +851,7 @@ def _process_monthly_package_bytes(
         except Exception as e:
             skipped.append(f"Amazon {fname}: {e}")
     if amz_rows:
+        amz_result_index = len(results)
         results.append(_record("Amazon", amz_rev, amz_ret, amz_rows, filename or "monthly"))
 
     # Myntra per sub-account — uses TxnType
@@ -915,6 +923,23 @@ def _process_monthly_package_bytes(
             results.append(_record("Snapdeal", s["revenue"], s["returns"], s["orders"], fname))
         except Exception as e:
             skipped.append(f"Snapdeal {fname}: {e}")
+
+    if not dry_run and amz_result_index is not None and amazon_dfs:
+        combined_amz = pd.concat(amazon_dfs, ignore_index=True)
+        entry = results[amz_result_index]
+        upload_id = entry.get("id")
+        if upload_id and combined_amz is not None and not combined_amz.empty:
+            n = _persist_amazon_finance_sales_entries(
+                combined_amz,
+                sales_upload_id=int(upload_id),
+                platform="Amazon",
+                period=period,
+                source_filename=filename or "monthly",
+                company_name="",
+                seller_gstin="",
+                company_state="",
+            )
+            entry["sales_entry_rows"] = n
 
     if not results and not skipped:
         raise HTTPException(status_code=422, detail="No recognisable platform folders found in ZIP.")
@@ -1006,6 +1031,157 @@ def _build_geo_company_breakdowns(df, ship_col: str, amt_col: str, ship_val: str
             })
 
     return state_rows, company_rows
+
+
+def _persist_amazon_finance_sales_entries(
+    df,
+    *,
+    sales_upload_id: int,
+    platform: str,
+    period: str,
+    source_filename: str,
+    company_name: str,
+    seller_gstin: str,
+    company_state: str,
+    seller_gstin_filter: Optional[str] = None,
+) -> int:
+    """
+    Build one Day Book row per Amazon invoice (or per order when invoice no missing).
+    Refunds/credits are stored as negative amounts. Line-level SKU rows kept in line_items JSON.
+    """
+    import json
+    import pandas as pd
+
+    if df is None or df.empty or "Transaction_Type" not in df.columns:
+        return 0
+    work = df.copy()
+    if seller_gstin_filter and str(seller_gstin_filter).strip().upper() not in ("", "UNKNOWN", "NAN"):
+        sg = str(seller_gstin_filter).strip().upper()
+        if "Seller_GSTIN" in work.columns:
+            work = work[work["Seller_GSTIN"].astype(str).str.strip().str.upper() == sg]
+    if work.empty:
+        return 0
+
+    work["_dt"] = pd.to_datetime(work["Date"], errors="coerce")
+    work["_inv"] = (
+        work["Invoice_Number"].astype(str).str.strip()
+        if "Invoice_Number" in work.columns
+        else pd.Series("", index=work.index, dtype=str)
+    )
+    work["_oid"] = (
+        work["Order_Id"].astype(str).str.strip()
+        if "Order_Id" in work.columns
+        else pd.Series("", index=work.index, dtype=str)
+    )
+    work["_buyer"] = (
+        work["Buyer_Name"].astype(str).str.strip()
+        if "Buyer_Name" in work.columns
+        else pd.Series("", index=work.index, dtype=str)
+    )
+    work["_ship_st"] = (
+        work["Ship_To_State"].astype(str).str.strip().str.upper()
+        if "Ship_To_State" in work.columns
+        else pd.Series("", index=work.index, dtype=str)
+    )
+    work["_amt"] = pd.to_numeric(work["Invoice_Amount"], errors="coerce").fillna(0.0)
+    work["_ttax"] = pd.to_numeric(work.get("Total_Tax", 0), errors="coerce").fillna(0.0)
+    work["_cgst"] = pd.to_numeric(work.get("CGST", 0), errors="coerce").fillna(0.0)
+    work["_sgst"] = pd.to_numeric(work.get("SGST", 0), errors="coerce").fillna(0.0)
+    work["_igst"] = pd.to_numeric(work.get("IGST", 0), errors="coerce").fillna(0.0)
+
+    def _row_key(r) -> str:
+        inv = str(r["_inv"]).strip()
+        if inv and inv.lower() not in ("nan", "none", ""):
+            return inv
+        oid = str(r["_oid"]).strip()
+        if oid and oid.lower() not in ("nan", "none", ""):
+            return f"OID:{oid}"
+        return ""
+
+    work["_inv_key"] = work.apply(_row_key, axis=1)
+    party_disp = (company_name or "").strip() or (seller_gstin or "").strip() or platform
+
+    entries: list[dict] = []
+    for txn_type, sign in (("Shipment", 1), ("Refund", -1), ("Return", -1)):
+        sub = work[work["Transaction_Type"] == txn_type]
+        if sub.empty:
+            continue
+        bad_key = sub["_inv_key"].eq("")
+        if bad_key.any():
+            sub = sub.copy()
+            sub.loc[bad_key, "_inv_key"] = "ROW_" + sub.index[bad_key].astype(str)
+        for inv_key, g in sub.groupby("_inv_key", dropna=False):
+            g2 = g.sort_values("_dt")
+            first = g2.iloc[0]
+            vdt = first["_dt"]
+            vdate = vdt.date().isoformat() if pd.notna(vdt) else f"{str(period or '')[:7]}-01"
+            buyer = str(first["_buyer"] or "").strip()
+            if buyer.lower() in ("nan", "none"):
+                buyer = ""
+            ship_st = str(first["_ship_st"] or "").strip()
+            if ship_st.lower() in ("nan", "none"):
+                ship_st = ""
+            oids = sorted({str(x).strip() for x in g2["_oid"].tolist() if str(x).strip() and str(x).lower() not in ("nan", "none")})
+            oid_disp = ", ".join(oids[:3])
+            if len(oids) > 3:
+                oid_disp += f" (+{len(oids) - 3} more)"
+            inv_disp = str(inv_key)
+            if inv_disp.startswith("OID:"):
+                inv_disp = ""
+
+            taxable = float(sign * g2["_amt"].sum())
+            cgst = float(sign * g2["_cgst"].sum())
+            sgst = float(sign * g2["_sgst"].sum())
+            igst = float(sign * g2["_igst"].sum())
+            tax_from_tt = float(sign * g2["_ttax"].sum())
+            if cgst == 0.0 and sgst == 0.0 and igst == 0.0:
+                gst_total = tax_from_tt
+            else:
+                gst_total = cgst + sgst + igst
+            total_amt = taxable + gst_total
+            net_pay = total_amt
+
+            items: list[dict] = []
+            for _, rr in g2.iterrows():
+                items.append({
+                    "sku": str(rr.get("SKU", "") or ""),
+                    "quantity": float(rr.get("Quantity", 0) or 0),
+                    "invoice_amount": float(sign * float(rr["_amt"])),
+                    "total_tax": float(sign * float(rr["_ttax"])),
+                    "cgst": float(sign * float(rr["_cgst"])),
+                    "sgst": float(sign * float(rr["_sgst"])),
+                    "igst": float(sign * float(rr["_igst"])),
+                    "ship_to_state": str(rr.get("_ship_st") or ""),
+                })
+
+            narration = f"{platform} {period} — {txn_type}"
+            if inv_disp:
+                narration += f" — Inv {inv_disp}"
+            if oid_disp:
+                narration += f" — Order {oid_disp}"
+
+            entries.append({
+                "platform": platform,
+                "period": period,
+                "voucher_date": vdate,
+                "invoice_no": inv_disp,
+                "order_id": oid_disp,
+                "party_name": buyer or party_disp,
+                "party_gstin": seller_gstin or "",
+                "party_state": company_state or "",
+                "ship_to_state": ship_st,
+                "taxable_amount": round(taxable, 2),
+                "cgst_amount": round(cgst, 2),
+                "sgst_amount": round(sgst, 2),
+                "igst_amount": round(igst, 2),
+                "total_amount": round(total_amt, 2),
+                "net_payable": round(net_pay, 2),
+                "narration": narration,
+                "source_filename": source_filename or "",
+                "line_items": json.dumps(items),
+            })
+
+    return create_finance_sales_entries(sales_upload_id, entries)
 
 
 # ── Finance Sales Upload — parse file and save locked record ──────
@@ -1220,6 +1396,34 @@ async def upload_sales_file(
             'upload_notes':  notes,
         })
 
+    # Invoice/order-level Day Book rows for Amazon MTR (one row per invoice / order).
+    sales_entry_rows = 0
+    if platform_lc in ('amazon', 'amazon mtr', 'mtr') and df is not None and not df.empty:
+        if saved_rows:
+            for row in saved_rows:
+                sales_entry_rows += _persist_amazon_finance_sales_entries(
+                    df,
+                    sales_upload_id=int(row["id"]),
+                    platform='Amazon',
+                    period=period,
+                    source_filename=filename,
+                    company_name=str(row.get('company') or ''),
+                    seller_gstin=str(row.get('seller_gstin') or ''),
+                    company_state=str(row.get('company_state') or ''),
+                    seller_gstin_filter=str(row.get('seller_gstin') or ''),
+                )
+        elif new_id:
+            sales_entry_rows += _persist_amazon_finance_sales_entries(
+                df,
+                sales_upload_id=int(new_id),
+                platform='Amazon',
+                period=period,
+                source_filename=filename,
+                company_name='',
+                seller_gstin='',
+                company_state='',
+            )
+
     return {
         'ok':            True,
         'id':            new_id,
@@ -1235,6 +1439,7 @@ async def upload_sales_file(
         'state_breakdown': state_breakdown,
         'company_breakdown': company_breakdown,
         'saved_companies': saved_rows,
+        'sales_entry_rows': sales_entry_rows,
     }
 
 

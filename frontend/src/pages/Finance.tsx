@@ -220,6 +220,22 @@ interface DaybookVoucher {
   cgst_amount: number; sgst_amount: number; igst_amount: number
   tds_amount: number; total_amount: number; net_payable: number
   payment_mode: string; bank_ledger: string; lines: VoucherLine[]
+  bill_no?: string
+  bill_date?: string
+  ref_number?: string
+  party_gstin?: string
+  party_state?: string
+  supply_type?: string
+  meta?: {
+    source?: string
+    invoice_no?: string
+    order_id?: string
+    ship_to_state?: string
+    platform?: string
+    period?: string
+    source_filename?: string
+    line_items?: Array<Record<string, unknown>>
+  }
 }
 
 interface GSTR3BData {
@@ -1114,6 +1130,7 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
 function DaybookTab() {
   const qc = useQueryClient()
   const [dateStr, setDateStr] = useState(toIso(new Date()))
+  const [openEntryId, setOpenEntryId] = useState<number | null>(null)
 
   function prevDay() {
     const d = new Date(dateStr)
@@ -1132,6 +1149,16 @@ function DaybookTab() {
     staleTime: 30 * 1000,
   })
 
+  const { data: entryDetail, isLoading: entryLoading } = useQuery<DaybookVoucher>({
+    queryKey: ['finance-voucher-detail', openEntryId],
+    queryFn: async () => {
+      const { data } = await api.get(`/finance/vouchers/${openEntryId}`)
+      return data
+    },
+    enabled: openEntryId != null && openEntryId > 0,
+    staleTime: 30 * 1000,
+  })
+
   const delMut = useMutation({
     mutationFn: (id: number) => api.delete(`/finance/vouchers/${id}`),
     onSuccess: () => {
@@ -1147,6 +1174,108 @@ function DaybookTab() {
 
   return (
     <div className="space-y-4">
+      {openEntryId != null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sales-entry-title"
+          onClick={() => setOpenEntryId(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col border border-gray-200"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-3 border-b border-gray-100 flex items-start justify-between gap-3 bg-[#002B5B] text-white">
+              <div>
+                <h3 id="sales-entry-title" className="text-sm font-semibold">
+                  {entryDetail?.voucher_no ?? '…'} — Sales entry
+                </h3>
+                <p className="text-xs text-blue-200 mt-0.5">
+                  {entryDetail?.meta?.platform ?? ''}{entryDetail?.meta?.period ? ` · ${entryDetail.meta.period}` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="text-xs font-medium text-white/90 hover:text-white px-2 py-1 rounded border border-white/30"
+                onClick={() => setOpenEntryId(null)}
+              >
+                Close
+              </button>
+            </div>
+            {entryLoading || !entryDetail ? (
+              <div className="p-10 text-center text-gray-400 text-sm">Loading…</div>
+            ) : (
+              <div className="overflow-y-auto p-5 space-y-5 text-xs">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="rounded-lg border border-gray-200 p-3 space-y-2">
+                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">General</p>
+                    <p><span className="text-gray-500">Party / Customer:</span> <span className="font-medium text-gray-800">{entryDetail.party_name || '—'}</span></p>
+                    <p><span className="text-gray-500">Document date:</span> <span className="font-mono">{entryDetail.voucher_date}</span></p>
+                    <p><span className="text-gray-500">Invoice no.:</span> <span className="font-mono">{entryDetail.meta?.invoice_no || entryDetail.bill_no || '—'}</span></p>
+                    <p><span className="text-gray-500">Order ID (external):</span> <span className="font-mono break-all">{entryDetail.meta?.order_id || entryDetail.ref_number || '—'}</span></p>
+                    <p><span className="text-gray-500">Seller GSTIN:</span> <span className="font-mono">{entryDetail.party_gstin || '—'}</span></p>
+                    <p><span className="text-gray-500">Branch / seller state:</span> {entryDetail.party_state || '—'}</p>
+                    <p><span className="text-gray-500">Ship-to state:</span> {entryDetail.meta?.ship_to_state || '—'}</p>
+                    <p><span className="text-gray-500">Supply:</span> {entryDetail.supply_type === 'Inter' ? 'Inter-state (IGST)' : entryDetail.supply_type === 'Intra' ? 'Intra-state (CGST+SGST)' : '—'}</p>
+                    <p><span className="text-gray-500">Source file:</span> <span className="break-all">{entryDetail.meta?.source_filename || '—'}</span></p>
+                    {entryDetail.narration ? <p className="text-gray-600 pt-1 border-t border-gray-100">{entryDetail.narration}</p> : null}
+                  </div>
+                  <div className="rounded-lg border border-gray-200 p-3 space-y-2 bg-gray-50/80">
+                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Amounts</p>
+                    <p><span className="text-gray-500">Taxable:</span> <span className="font-semibold">{fmt(entryDetail.taxable_amount)}</span></p>
+                    <p><span className="text-gray-500">CGST:</span> {entryDetail.cgst_amount > 0 ? fmt(entryDetail.cgst_amount) : '—'}</p>
+                    <p><span className="text-gray-500">SGST:</span> {entryDetail.sgst_amount > 0 ? fmt(entryDetail.sgst_amount) : '—'}</p>
+                    <p><span className="text-gray-500">IGST:</span> {entryDetail.igst_amount > 0 ? fmt(entryDetail.igst_amount) : '—'}</p>
+                    <p><span className="text-gray-500">Total:</span> <span className="font-semibold">{fmt(entryDetail.total_amount)}</span></p>
+                    <p><span className="text-gray-500">Net payable:</span> <span className="font-bold text-[#002B5B]">{fmt(entryDetail.net_payable)}</span></p>
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Lines (SKU)</p>
+                  {(entryDetail.meta?.line_items?.length ?? 0) === 0 && (entryDetail.lines?.length ?? 0) === 0 ? (
+                    <p className="text-gray-400">No line detail stored for this entry.</p>
+                  ) : (
+                    <div className="overflow-x-auto rounded-lg border border-gray-200">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                            <th className="px-3 py-2 text-left">SKU</th>
+                            <th className="px-3 py-2 text-right">Qty</th>
+                            <th className="px-3 py-2 text-right">Taxable</th>
+                            <th className="px-3 py-2 text-right">Tax</th>
+                            <th className="px-3 py-2 text-left">Ship-to ST</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(entryDetail.meta?.line_items ?? []).map((li, i) => (
+                            <tr key={i} className="border-t border-gray-100">
+                              <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
+                              <td className="px-3 py-1.5 text-right">{Number(li.quantity ?? 0)}</td>
+                              <td className="px-3 py-1.5 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
+                              <td className="px-3 py-1.5 text-right">{fmt(Number(li.total_tax ?? 0))}</td>
+                              <td className="px-3 py-1.5">{String(li.ship_to_state ?? '')}</td>
+                            </tr>
+                          ))}
+                          {(entryDetail.meta?.line_items?.length ?? 0) === 0 && (entryDetail.lines ?? []).map((ln, i) => (
+                            <tr key={`l-${i}`} className="border-t border-gray-100">
+                              <td className="px-3 py-1.5 font-mono">{ln.expense_head}</td>
+                              <td className="px-3 py-1.5 text-right">—</td>
+                              <td className="px-3 py-1.5 text-right">{fmt(ln.amount)}</td>
+                              <td className="px-3 py-1.5 text-right">—</td>
+                              <td className="px-3 py-1.5">{ln.cost_centre || ''}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {/* Date navigator */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-4 py-3 flex items-center gap-3">
         <button onClick={prevDay} className="px-3 py-1.5 text-xs font-medium bg-gray-100 text-gray-600 rounded hover:bg-gray-200 transition-colors">← Prev</button>
@@ -1186,9 +1315,13 @@ function DaybookTab() {
               </thead>
               <tbody>
                 {vouchers.map(v => (
-                  <tr key={v.id} className="border-t border-gray-50 hover:bg-gray-50">
+                  <tr
+                    key={v.id}
+                    className="border-t border-gray-50 hover:bg-gray-50 cursor-pointer"
+                    onClick={() => setOpenEntryId(v.id)}
+                  >
                     <td className="px-3 py-2 text-gray-500">{v.voucher_date}</td>
-                    <td className="px-3 py-2 font-mono font-semibold text-[#002B5B]">{v.voucher_no}</td>
+                    <td className="px-3 py-2 font-mono font-semibold text-[#002B5B] underline-offset-2 hover:underline">{v.voucher_no}</td>
                     <td className="px-3 py-2">
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${VOUCHER_COLORS[v.voucher_type] ?? 'bg-gray-100 text-gray-600'}`}>
                         {v.voucher_type}
@@ -1203,8 +1336,20 @@ function DaybookTab() {
                     <td className="px-3 py-2 text-right text-gray-700">{fmt(v.total_amount)}</td>
                     <td className="px-3 py-2 text-right font-semibold text-gray-800">{fmt(v.net_payable)}</td>
                     <td className="px-3 py-2 text-right">
-                      <button onClick={() => { if (window.confirm('Delete voucher ' + v.voucher_no + '?')) delMut.mutate(v.id) }}
-                        className="text-red-400 hover:text-red-600">✕</button>
+                      {v.id < 1_000_000 ? (
+                        <button
+                          type="button"
+                          onClick={e => {
+                            e.stopPropagation()
+                            if (window.confirm('Delete voucher ' + v.voucher_no + '?')) delMut.mutate(v.id)
+                          }}
+                          className="text-red-400 hover:text-red-600"
+                        >
+                          ✕
+                        </button>
+                      ) : (
+                        <span className="text-gray-300" title="Sales upload entries are removed from Sales Uploads tab">—</span>
+                      )}
                     </td>
                   </tr>
                 ))}

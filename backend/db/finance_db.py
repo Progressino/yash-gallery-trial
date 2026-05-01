@@ -148,6 +148,33 @@ def init_db() -> None:
         )
     """)
 
+    # ── Finance Sales Entries (invoice / order level for Day Book) ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS finance_sales_entries (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            sales_upload_id INTEGER NOT NULL REFERENCES finance_sales_uploads(id) ON DELETE CASCADE,
+            platform        TEXT    NOT NULL,
+            period          TEXT    NOT NULL,
+            voucher_date    TEXT    NOT NULL,
+            invoice_no      TEXT    DEFAULT '',
+            order_id        TEXT    DEFAULT '',
+            party_name      TEXT    DEFAULT '',
+            party_gstin     TEXT    DEFAULT '',
+            party_state     TEXT    DEFAULT '',
+            ship_to_state   TEXT    DEFAULT '',
+            taxable_amount  REAL    DEFAULT 0,
+            cgst_amount     REAL    DEFAULT 0,
+            sgst_amount     REAL    DEFAULT 0,
+            igst_amount     REAL    DEFAULT 0,
+            total_amount    REAL    DEFAULT 0,
+            net_payable     REAL    DEFAULT 0,
+            narration       TEXT    DEFAULT '',
+            source_filename TEXT    DEFAULT '',
+            line_items      TEXT    DEFAULT '[]',
+            created_at      TEXT    DEFAULT (datetime('now'))
+        )
+    """)
+
     # ── Voucher Types ─────────────────────────────────────────────
     conn.execute("""
         CREATE TABLE IF NOT EXISTS voucher_types (
@@ -1082,6 +1109,121 @@ def create_finance_sales_upload(data: dict) -> int:
     return new_id
 
 
+def create_finance_sales_entries(sales_upload_id: int, entries: list[dict]) -> int:
+    """Persist invoice/order-level rows for a finance sales upload."""
+    if not entries:
+        return 0
+    conn = _connect()
+    count = 0
+    for e in entries:
+        conn.execute(
+            """INSERT INTO finance_sales_entries
+               (sales_upload_id, platform, period, voucher_date, invoice_no, order_id,
+                party_name, party_gstin, party_state, ship_to_state,
+                taxable_amount, cgst_amount, sgst_amount, igst_amount,
+                total_amount, net_payable, narration, source_filename, line_items)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                sales_upload_id,
+                e.get("platform") or "",
+                e.get("period") or "",
+                e.get("voucher_date") or "",
+                e.get("invoice_no") or "",
+                e.get("order_id") or "",
+                e.get("party_name") or "",
+                e.get("party_gstin") or "",
+                e.get("party_state") or "",
+                e.get("ship_to_state") or "",
+                float(e.get("taxable_amount") or 0.0),
+                float(e.get("cgst_amount") or 0.0),
+                float(e.get("sgst_amount") or 0.0),
+                float(e.get("igst_amount") or 0.0),
+                float(e.get("total_amount") or 0.0),
+                float(e.get("net_payable") or 0.0),
+                e.get("narration") or "",
+                e.get("source_filename") or "",
+                e.get("line_items") or "[]",
+            ),
+        )
+        count += 1
+    conn.commit()
+    conn.close()
+    return count
+
+
+def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
+    """Synthetic voucher payload for a finance_sales_entries row (id offset 2_000_000)."""
+    if voucher_id < 2_000_000:
+        return None
+    entry_id = voucher_id - 2_000_000
+    conn = _connect()
+    r = conn.execute(
+        "SELECT * FROM finance_sales_entries WHERE id = ?",
+        (entry_id,),
+    ).fetchone()
+    conn.close()
+    if not r:
+        return None
+    rr = dict(r)
+    import json
+
+    raw_lines = rr.get("line_items") or "[]"
+    try:
+        line_items = json.loads(raw_lines) if isinstance(raw_lines, str) else raw_lines
+    except Exception:
+        line_items = []
+    voucher_lines = []
+    for i, li in enumerate(line_items):
+        sku = str(li.get("sku") or li.get("SKU") or "").strip() or "Item"
+        qty = li.get("quantity") or li.get("Quantity") or ""
+        voucher_lines.append({
+            "id": i + 1,
+            "expense_head": sku,
+            "description": f"Qty {qty}" if qty != "" else (li.get("description") or ""),
+            "amount": float(li.get("invoice_amount") or li.get("Invoice_Amount") or 0.0),
+            "cost_centre": str(li.get("ship_to_state") or li.get("Ship_To_State") or ""),
+            "is_debit": 1,
+        })
+    vdate = rr.get("voucher_date") or f"{str(rr.get('period') or '')[:7]}-01"
+    return {
+        "id": 2_000_000 + int(rr["id"]),
+        "voucher_no": f"SUE-{rr['id']}",
+        "voucher_date": vdate,
+        "voucher_type": "Sales Upload",
+        "party_name": rr.get("party_name") or rr.get("platform") or "",
+        "party_gstin": rr.get("party_gstin") or "",
+        "party_state": rr.get("party_state") or "",
+        "bill_no": rr.get("invoice_no") or "",
+        "bill_date": vdate,
+        "supply_type": "Inter" if float(rr.get("igst_amount") or 0) > 0 else "Intra",
+        "narration": rr.get("narration") or "",
+        "taxable_amount": float(rr.get("taxable_amount") or 0.0),
+        "cgst_amount": float(rr.get("cgst_amount") or 0.0),
+        "sgst_amount": float(rr.get("sgst_amount") or 0.0),
+        "igst_amount": float(rr.get("igst_amount") or 0.0),
+        "tds_section": "",
+        "tds_rate": 0.0,
+        "tds_amount": 0.0,
+        "total_amount": float(rr.get("total_amount") or 0.0),
+        "net_payable": float(rr.get("net_payable") or 0.0),
+        "payment_mode": "",
+        "bank_ledger": "",
+        "cheque_no": "",
+        "ref_number": rr.get("order_id") or "",
+        "lines": voucher_lines,
+        "meta": {
+            "source": "finance_sales_entry",
+            "platform": rr.get("platform"),
+            "period": rr.get("period"),
+            "invoice_no": rr.get("invoice_no"),
+            "order_id": rr.get("order_id"),
+            "ship_to_state": rr.get("ship_to_state"),
+            "source_filename": rr.get("source_filename"),
+            "line_items": line_items,
+        },
+    }
+
+
 def list_vouchers(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1097,7 +1239,49 @@ def list_vouchers(
         return base
 
     conn = _connect()
-    q = "SELECT * FROM finance_sales_uploads WHERE 1=1"
+    synthetic: list[dict] = []
+
+    eq = "SELECT * FROM finance_sales_entries WHERE 1=1"
+    eparams: list = []
+    if start_date:
+        eq += " AND voucher_date >= ?"
+        eparams.append(start_date)
+    if end_date:
+        eq += " AND voucher_date <= ?"
+        eparams.append(end_date)
+    eq += " ORDER BY voucher_date DESC, id DESC"
+    for rr in conn.execute(eq, eparams).fetchall():
+        rr = dict(rr)
+        synthetic.append({
+            "id": 2_000_000 + int(rr["id"]),
+            "voucher_no": f"SUE-{rr['id']}",
+            "voucher_date": rr.get("voucher_date") or f"{str(rr.get('period') or '')[:7]}-01",
+            "voucher_type": "Sales Upload",
+            "party_name": rr.get("party_name") or rr.get("platform") or "",
+            "party_gstin": rr.get("party_gstin") or "",
+            "party_state": rr.get("party_state") or "",
+            "bill_no": rr.get("invoice_no") or "",
+            "bill_date": rr.get("voucher_date") or "",
+            "supply_type": "",
+            "narration": rr.get("narration") or "",
+            "taxable_amount": float(rr.get("taxable_amount") or 0.0),
+            "cgst_amount": float(rr.get("cgst_amount") or 0.0),
+            "sgst_amount": float(rr.get("sgst_amount") or 0.0),
+            "igst_amount": float(rr.get("igst_amount") or 0.0),
+            "tds_section": "",
+            "tds_rate": 0.0,
+            "tds_amount": 0.0,
+            "total_amount": float(rr.get("total_amount") or 0.0),
+            "net_payable": float(rr.get("net_payable") or 0.0),
+            "payment_mode": "",
+            "bank_ledger": "",
+            "cheque_no": "",
+            "ref_number": rr.get("order_id") or "",
+            "lines": [],
+        })
+
+    q = """SELECT * FROM finance_sales_uploads su WHERE 1=1
+           AND NOT EXISTS (SELECT 1 FROM finance_sales_entries se WHERE se.sales_upload_id = su.id)"""
     params: list = []
     if start_date:
         q += " AND period >= ?"
@@ -1109,7 +1293,6 @@ def list_vouchers(
     rows = [dict(r) for r in conn.execute(q, params).fetchall()]
     conn.close()
 
-    synthetic: list[dict] = []
     for r in rows:
         synthetic.append({
             "id": 1_000_000 + int(r["id"]),
@@ -1154,11 +1337,45 @@ def get_voucher_summary_by_date(date: str) -> list[dict]:
             (v['id'],),
         ).fetchall()
         v['lines'] = [dict(ln) for ln in lines]
+    entries = [dict(r) for r in conn.execute(
+        "SELECT * FROM finance_sales_entries WHERE voucher_date = ? ORDER BY id ASC",
+        (date,),
+    ).fetchall()]
     uploads = [dict(r) for r in conn.execute(
-        "SELECT * FROM finance_sales_uploads WHERE period = ? ORDER BY id ASC",
+        """SELECT * FROM finance_sales_uploads su WHERE period = ?
+           AND NOT EXISTS (SELECT 1 FROM finance_sales_entries se WHERE se.sales_upload_id = su.id)
+           ORDER BY id ASC""",
         (date[:7],),
     ).fetchall()]
     conn.close()
+    for rr in entries:
+        vouchers.append({
+            "id": 2_000_000 + int(rr["id"]),
+            "voucher_no": f"SUE-{rr['id']}",
+            "voucher_date": rr.get("voucher_date") or date,
+            "voucher_type": "Sales Upload",
+            "party_name": rr.get("party_name") or rr.get("platform") or "",
+            "party_gstin": rr.get("party_gstin") or "",
+            "party_state": rr.get("party_state") or "",
+            "bill_no": rr.get("invoice_no") or "",
+            "bill_date": rr.get("voucher_date") or date,
+            "supply_type": "",
+            "narration": rr.get("narration") or "",
+            "taxable_amount": float(rr.get("taxable_amount") or 0.0),
+            "cgst_amount": float(rr.get("cgst_amount") or 0.0),
+            "sgst_amount": float(rr.get("sgst_amount") or 0.0),
+            "igst_amount": float(rr.get("igst_amount") or 0.0),
+            "tds_section": "",
+            "tds_rate": 0.0,
+            "tds_amount": 0.0,
+            "total_amount": float(rr.get("total_amount") or 0.0),
+            "net_payable": float(rr.get("net_payable") or 0.0),
+            "payment_mode": "",
+            "bank_ledger": "",
+            "cheque_no": "",
+            "ref_number": rr.get("order_id") or "",
+            "lines": [],
+        })
     for r in uploads:
         vouchers.append({
             "id": 1_000_000 + int(r["id"]),
@@ -1210,11 +1427,31 @@ def get_gstr3b_data(start_date: str, end_date: str) -> dict:
         'igst':    round(out_rows['igst']    or 0, 2),
         'total':   round(out_rows['total']   or 0, 2),
     }
-    # Include finance sales uploads as outward supplies (tax split unknown in uploads).
+    # Finance: invoice-level entries (Amazon etc.) + summary uploads without line detail.
+    ent = conn.execute(
+        """SELECT SUM(taxable_amount) AS taxable, SUM(cgst_amount) AS cgst,
+                  SUM(sgst_amount) AS sgst, SUM(igst_amount) AS igst,
+                  SUM(total_amount) AS total
+           FROM finance_sales_entries
+           WHERE voucher_date >= ? AND voucher_date <= ?""",
+        (start_date, end_date),
+    ).fetchone()
+    ent_taxable = round(float((ent["taxable"] if ent and ent["taxable"] is not None else 0) or 0), 2)
+    ent_cgst = round(float((ent["cgst"] if ent and ent["cgst"] is not None else 0) or 0), 2)
+    ent_sgst = round(float((ent["sgst"] if ent and ent["sgst"] is not None else 0) or 0), 2)
+    ent_igst = round(float((ent["igst"] if ent and ent["igst"] is not None else 0) or 0), 2)
+    ent_total = round(float((ent["total"] if ent and ent["total"] is not None else 0) or 0), 2)
+    if ent_taxable or ent_total:
+        outward["taxable"] = round(outward["taxable"] + ent_taxable, 2)
+        outward["cgst"] = round(outward["cgst"] + ent_cgst, 2)
+        outward["sgst"] = round(outward["sgst"] + ent_sgst, 2)
+        outward["igst"] = round(outward["igst"] + ent_igst, 2)
+        outward["total"] = round(outward["total"] + ent_total, 2)
     su = conn.execute(
-        """SELECT SUM(total_revenue) AS gross
-           FROM finance_sales_uploads
-           WHERE period >= ? AND period <= ?""",
+        """SELECT SUM(su.total_revenue) AS gross
+           FROM finance_sales_uploads su
+           WHERE su.period >= ? AND su.period <= ?
+             AND NOT EXISTS (SELECT 1 FROM finance_sales_entries se WHERE se.sales_upload_id = su.id)""",
         (start_date[:7], end_date[:7]),
     ).fetchone()
     su_gross = round(float((su["gross"] if su and su["gross"] is not None else 0) or 0), 2)
@@ -1249,11 +1486,34 @@ def get_gstr3b_data(start_date: str, end_date: str) -> dict:
         (start_date, end_date),
     ).fetchall()
     breakdown = [dict(r) for r in breakdown_rows]
+    ent_rows = conn.execute(
+        """SELECT id, voucher_date, party_name, invoice_no, order_id,
+                  taxable_amount, cgst_amount, sgst_amount, igst_amount, total_amount
+           FROM finance_sales_entries
+           WHERE voucher_date >= ? AND voucher_date <= ?
+           ORDER BY voucher_date ASC, id ASC""",
+        (start_date, end_date),
+    ).fetchall()
+    for r in ent_rows:
+        rr = dict(r)
+        breakdown.append({
+            "voucher_no": f"SUE-{rr.get('id')}",
+            "voucher_date": rr.get("voucher_date") or "",
+            "voucher_type": "Sales Upload",
+            "party_name": rr.get("party_name") or "",
+            "taxable_amount": round(float(rr.get("taxable_amount") or 0), 2),
+            "cgst_amount": round(float(rr.get("cgst_amount") or 0), 2),
+            "sgst_amount": round(float(rr.get("sgst_amount") or 0), 2),
+            "igst_amount": round(float(rr.get("igst_amount") or 0), 2),
+            "total_amount": round(float(rr.get("total_amount") or 0), 2),
+        })
     su_rows = conn.execute(
-        """SELECT id, platform, period, company_name, seller_gstin, filename, total_revenue, created_at
-           FROM finance_sales_uploads
-           WHERE period >= ? AND period <= ?
-           ORDER BY created_at ASC, id ASC""",
+        """SELECT su.id, su.platform, su.period, su.company_name, su.seller_gstin, su.filename,
+                  su.total_revenue, su.created_at
+           FROM finance_sales_uploads su
+           WHERE su.period >= ? AND su.period <= ?
+             AND NOT EXISTS (SELECT 1 FROM finance_sales_entries se WHERE se.sales_upload_id = su.id)
+           ORDER BY su.created_at ASC, su.id ASC""",
         (start_date[:7], end_date[:7]),
     ).fetchall()
     for r in su_rows:
@@ -1304,6 +1564,7 @@ def get_ledger_balances() -> list[dict]:
 
 def delete_finance_sales_upload(upload_id: int) -> bool:
     conn = _connect()
+    conn.execute("DELETE FROM finance_sales_entries WHERE sales_upload_id = ?", (upload_id,))
     cur = conn.execute("DELETE FROM finance_sales_uploads WHERE id = ?", (upload_id,))
     conn.commit()
     deleted = cur.rowcount > 0
@@ -1462,24 +1723,40 @@ def get_trial_balance(
             'cr': float(row['cr'] or 0),
         }
 
-    # Reflect finance sales uploads as a synthetic sales ledger credit.
-    su_q = """
-        SELECT SUM(net_revenue) AS net_rev
-        FROM finance_sales_uploads
+    # Finance sales: invoice-level net + summary uploads without line detail (no double count).
+    ent_q = """
+        SELECT SUM(net_payable) AS net_rev
+        FROM finance_sales_entries
         WHERE 1=1
+    """
+    ent_params: list = []
+    if start_date:
+        ent_q += " AND voucher_date >= ?"
+        ent_params.append(start_date)
+    if end_date:
+        ent_q += " AND voucher_date <= ?"
+        ent_params.append(end_date)
+    ent_row = conn.execute(ent_q, ent_params).fetchone()
+    ent_credit = float((ent_row["net_rev"] if ent_row else 0) or 0)
+    su_q = """
+        SELECT SUM(su.net_revenue) AS net_rev
+        FROM finance_sales_uploads su
+        WHERE 1=1
+          AND NOT EXISTS (SELECT 1 FROM finance_sales_entries se WHERE se.sales_upload_id = su.id)
     """
     su_params: list = []
     if start_date:
-        su_q += " AND period >= ?"
+        su_q += " AND su.period >= ?"
         su_params.append(start_date[:7])
     if end_date:
-        su_q += " AND period <= ?"
+        su_q += " AND su.period <= ?"
         su_params.append(end_date[:7])
     su_row = conn.execute(su_q, su_params).fetchone()
     su_credit = float((su_row["net_rev"] if su_row else 0) or 0)
-    if su_credit:
+    total_fin = ent_credit + su_credit
+    if total_fin:
         mv = movements.setdefault("Finance Sales Upload A/c", {"dr": 0.0, "cr": 0.0})
-        mv["cr"] += su_credit
+        mv["cr"] += total_fin
     conn.close()
 
     rows = []
