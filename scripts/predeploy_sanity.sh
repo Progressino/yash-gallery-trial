@@ -84,10 +84,25 @@ PY
     fi
   fi
 
+  npm_install_with_retry() {
+    local mode="$1" # ci|install
+    if [[ "$mode" == "ci" ]]; then
+      npm ci && return 0
+      echo "WARN: npm ci failed; cleaning node_modules and retrying once..." >&2
+      rm -rf node_modules
+      npm ci
+    else
+      npm install && return 0
+      echo "WARN: npm install failed; cleaning node_modules and retrying once..." >&2
+      rm -rf node_modules
+      npm install
+    fi
+  }
+
   if [[ -f package-lock.json ]]; then
-    npm ci
+    npm_install_with_retry ci
   else
-    npm install
+    npm_install_with_retry install
   fi
   if ! npm ls @playwright/test >/dev/null 2>&1; then
     npm install -D @playwright/test
