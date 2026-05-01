@@ -1,5 +1,3 @@
-import React from 'react'
-
 type Props = {
   /** Full checklist for accountants (Help / Notes tab). */
   showAccountantChecklist?: boolean
