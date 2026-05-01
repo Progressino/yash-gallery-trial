@@ -98,11 +98,30 @@ PY
       npm install
     fi
   }
+  node_modules_integrity_ok() {
+    [[ -f node_modules/typescript/lib/lib.es2022.d.ts ]] \
+      && [[ -f node_modules/typescript/lib/lib.dom.d.ts ]] \
+      && [[ -f node_modules/vite/package.json ]] \
+      && [[ -f node_modules/@playwright/test/package.json ]]
+  }
 
   if [[ -f package-lock.json ]]; then
     npm_install_with_retry ci
   else
     npm_install_with_retry install
+  fi
+  if ! node_modules_integrity_ok; then
+    echo "WARN: node_modules integrity check failed; reinstalling cleanly..." >&2
+    rm -rf node_modules
+    if [[ -f package-lock.json ]]; then
+      npm_install_with_retry ci
+    else
+      npm_install_with_retry install
+    fi
+    if ! node_modules_integrity_ok; then
+      echo "ERROR: node_modules still incomplete after reinstall." >&2
+      exit 1
+    fi
   fi
   if ! npm ls @playwright/test >/dev/null 2>&1; then
     npm install -D @playwright/test
