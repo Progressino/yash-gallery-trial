@@ -59,6 +59,31 @@ elif ! command -v npm >/dev/null 2>&1; then
 else
   echo "==> Frontend build + chromium smoke"
   pushd "$ROOT/frontend" >/dev/null
+  # Load JWT secret for Playwright auth-cookie generation in deep checklist.
+  if [[ -z "${JWT_SECRET:-}" && -f "$ROOT/.env" ]]; then
+    _jwt_from_env="$(python3 - <<'PY'
+import os
+from pathlib import Path
+
+env_path = Path(os.environ.get("ROOT", ".")) / ".env"
+val = ""
+if env_path.exists():
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip() == "JWT_SECRET":
+            val = v.strip().strip('"').strip("'")
+            break
+print(val)
+PY
+)"
+    if [[ -n "$_jwt_from_env" ]]; then
+      export JWT_SECRET="$_jwt_from_env"
+    fi
+  fi
+
   if [[ -f package-lock.json ]]; then
     npm ci
   else
@@ -73,11 +98,15 @@ else
   PORT="${E2E_PORT:-4173}"
   E2E_BASE_URL="${E2E_BASE_URL:-http://127.0.0.1:${PORT}}"
   LOG_FILE="/tmp/forecast-e2e-ui.log"
+  API_LOG_FILE="/tmp/forecast-e2e-api.log"
 
+  "$PYTHON_BIN" -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 >"$API_LOG_FILE" 2>&1 &
+  API_PID=$!
   npm run preview -- --host 127.0.0.1 --port "$PORT" >"$LOG_FILE" 2>&1 &
   UI_PID=$!
   cleanup() {
     kill "$UI_PID" >/dev/null 2>&1 || true
+    kill "$API_PID" >/dev/null 2>&1 || true
   }
   trap cleanup EXIT
 
