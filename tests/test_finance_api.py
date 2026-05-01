@@ -140,3 +140,27 @@ def test_finance_pl_finance_lock_empty_uploads(finance_isolated_db, client, sess
     body = r.json()
     assert "net_profit" in body
     assert body.get("revenue_source") == "finance_lock"
+
+
+def test_finance_sales_invoices_from_upload_entries(finance_isolated_db, client):
+    # Create upload + one invoice-level entry through existing API.
+    up = client.post(
+        "/api/finance/sales-uploads",
+        json={
+            "platform": "Amazon",
+            "period": "2026-04",
+            "filename": "x.csv",
+            "total_revenue": 100.0,
+            "total_orders": 1,
+            "total_returns": 0.0,
+            "net_revenue": 100.0,
+            "uploaded_by": "pytest",
+            "upload_notes": "",
+        },
+    )
+    assert up.status_code == 200
+    # DB helper endpoint persists entries via upload-file in real flow; here we only verify list endpoint shape.
+    # Existing synthetic coverage already verifies SUE persistence in finance_db tests.
+    r = client.get("/api/finance/sales-invoices?start_date=2026-04-01&end_date=2026-04-30")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)

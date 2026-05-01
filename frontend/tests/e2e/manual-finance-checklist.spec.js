@@ -47,6 +47,7 @@ test("manual finance checklist across CRONUS menu paths", async ({ page, context
   // Quick-open row (tab-level coverage)
   const quickOpenExpectations = [
     ["Day Book", /Day Book —/],
+    ["Sales Invoices", /Sales invoices \(auto-picked from uploaded sales\)/],
     ["Vouchers", /Saved Vouchers/],
     ["Voucher Register", /Export register \(CSV\)/],
     ["Cash Book", /Export Cash Book \(CSV\)/],
@@ -87,8 +88,8 @@ test("manual finance checklist across CRONUS menu paths", async ({ page, context
   await expect(page.getByText(/Export Bank Book \(CSV\)/)).toBeVisible();
 
   await page.getByRole("button", { name: /^Sales/i }).first().click();
-  await page.getByRole("button", { name: "Sales invoices — uploads" }).click();
-  await expect(page.getByText(/Upload Sales File/)).toBeVisible();
+  await page.getByRole("button", { name: "Sales invoices", exact: true }).first().click();
+  await expect(page.getByText(/Sales invoices \(auto-picked from uploaded sales\)/)).toBeVisible();
 
   await page.getByRole("button", { name: /Purchasing/i }).first().click();
   await page.getByRole("button", { name: "Purchase invoices" }).click();

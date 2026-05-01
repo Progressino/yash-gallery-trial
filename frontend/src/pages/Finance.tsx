@@ -159,6 +159,26 @@ interface SalesUpload {
   upload_notes:  string
   created_at:    string
 }
+interface SalesInvoiceRow {
+  id: number
+  voucher_no: string
+  voucher_date: string
+  platform: string
+  period: string
+  invoice_no: string
+  order_id: string
+  party_name: string
+  party_gstin: string
+  party_state: string
+  ship_to_state: string
+  taxable_amount: number
+  cgst_amount: number
+  sgst_amount: number
+  igst_amount: number
+  total_amount: number
+  net_payable: number
+  source_filename: string
+}
 
 // ── Constants ────────────────────────────────────────────────────
 const PLATFORM_COLORS: Record<string, string> = {
@@ -189,7 +209,7 @@ type CronusMega = 'finance' | 'cash' | 'sales' | 'purchasing' | 'india' | 'vouch
 function cronusMegaForTab(tab: FinanceTab): CronusMega | 'dash' {
   if (tab === 'dashboard') return 'dash'
   if (tab === 'gstr' || tab === 'gst') return 'india'
-  if (tab === 'sales-uploads' || tab === 'revenue') return 'sales'
+  if (tab === 'sales-uploads' || tab === 'sales-invoices' || tab === 'revenue') return 'sales'
   if (tab === 'vouchers' || tab === 'daybook' || tab === 'voucher-register') return 'voucher'
   if (tab === 'cash-book' || tab === 'bank-book') return 'cash'
   if (tab === 'expenses') return 'purchasing'
@@ -210,7 +230,7 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
+type FinanceTab = 'dashboard' | 'daybook' | 'sales-invoices' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
 
 // ── Chart of Accounts types ───────────────────────────────────────
 interface CoALedger {
@@ -425,7 +445,8 @@ function FinanceCronusNav(props: {
                 <L onClick={() => go('help-notes')}>Items (Item Master — ops)</L>
               </MegaCol>
               <MegaCol title="Orders &amp; quotes">
-                <L onClick={() => go('sales-uploads')}>Sales invoices — uploads</L>
+                <L onClick={() => go('sales-invoices')}>Sales invoices</L>
+                <L onClick={() => go('sales-uploads')}>Sales uploads</L>
                 <L onClick={() => go('daybook')}>Posted sales — Day Book</L>
               </MegaCol>
               <MegaCol title="Returns">
@@ -811,11 +832,12 @@ export default function Finance() {
       />
 
       <div className="bg-white rounded-b-lg border border-t-0 border-slate-200 shadow-sm overflow-hidden">
-        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads') && (
+        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads' || activeTab === 'sales-invoices') && (
           <div className="px-3 sm:px-5 py-2 flex flex-wrap gap-x-1 gap-y-1 items-center border-b border-teal-100 bg-gradient-to-r from-teal-50/90 to-cyan-50/50">
             <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide mr-2">India Taxation</span>
             <button type="button" onClick={() => setActiveTab('gstr')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gstr' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GSTR-3B</button>
             <button type="button" onClick={() => setActiveTab('gst')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gst' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GST summary</button>
+            <button type="button" onClick={() => setActiveTab('sales-invoices')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-invoices' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales invoices</button>
             <button type="button" onClick={() => setActiveTab('sales-uploads')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-uploads' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales uploads</button>
             <button type="button" onClick={() => jumpMasters('tds-sections')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">TDS masters</button>
             <button type="button" onClick={() => jumpMasters('gst-classifications')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">GST classifications</button>
@@ -827,6 +849,7 @@ export default function Finance() {
           <span className="text-slate-500 font-medium">Open:</span>
           {([
             ['daybook', 'Day Book'],
+            ['sales-invoices', 'Sales Invoices'],
             ['vouchers', 'Vouchers'],
             ['voucher-register', 'Voucher Register'],
             ['cash-book', 'Cash Book'],
@@ -1197,6 +1220,9 @@ export default function Finance() {
       {/* ── Tab: Day Book ── */}
       {activeTab === 'daybook' && <DaybookTab />}
 
+      {/* ── Tab: Sales Invoices ── */}
+      {activeTab === 'sales-invoices' && <SalesInvoicesTab />}
+
       {/* ── Tab: GSTR3B ── */}
       {activeTab === 'gstr' && <GSTR3BTab />}
 
@@ -1336,6 +1362,7 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
   const QUICK_LINKS: { label: string; tab: FinanceTab }[] = [
     { label: 'Chart of Accounts', tab: 'coa' },
     { label: 'Day Book', tab: 'daybook' },
+    { label: 'Sales Invoices', tab: 'sales-invoices' },
     { label: 'Vouchers', tab: 'vouchers' },
     { label: 'Ledgers & masters', tab: 'masters' },
     { label: 'Sales Uploads', tab: 'sales-uploads' },
@@ -1859,6 +1886,168 @@ function CashBankBookTab({ mode }: { mode: 'cash' | 'bank' }) {
             </table>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Sales Invoices Tab (auto from Finance Sales Uploads) ───────────
+function SalesInvoicesTab() {
+  const [startDate, setStartDate] = useState(daysAgo(30))
+  const [endDate, setEndDate] = useState(TODAY)
+  const [search, setSearch] = useState('')
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+
+  const q = useMemo(() => {
+    const p = new URLSearchParams()
+    if (startDate) p.set('start_date', startDate)
+    if (endDate) p.set('end_date', endDate)
+    if (search.trim()) p.set('search', search.trim())
+    return p.toString()
+  }, [startDate, endDate, search])
+
+  const { data: rows = [], isLoading } = useQuery<SalesInvoiceRow[]>({
+    queryKey: ['finance-sales-invoices', startDate, endDate, search],
+    queryFn: async () => { const { data } = await api.get(`/finance/sales-invoices?${q}`); return data },
+    staleTime: 30 * 1000,
+  })
+
+  useEffect(() => {
+    if (rows.length === 0) { setSelectedId(null); return }
+    if (selectedId == null || !rows.some(r => r.id === selectedId)) setSelectedId(rows[0].id)
+  }, [rows, selectedId])
+
+  const selected = rows.find(r => r.id === selectedId) || null
+  const { data: detail } = useQuery<DaybookVoucher>({
+    queryKey: ['finance-sales-invoice-detail', selectedId],
+    queryFn: async () => { const { data } = await api.get(`/finance/vouchers/${selectedId}`); return data },
+    enabled: !!selectedId,
+    staleTime: 30 * 1000,
+  })
+
+  const stats = useMemo(() => {
+    const total = rows.reduce((s, r) => s + r.net_payable, 0)
+    const tax = rows.reduce((s, r) => s + r.cgst_amount + r.sgst_amount + r.igst_amount, 0)
+    return { total, tax, count: rows.length }
+  }, [rows])
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3 flex flex-wrap gap-2 items-end justify-between">
+        <div className="flex flex-wrap gap-2 items-end">
+          <div>
+            <label className="text-xs text-gray-500">From</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">To</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">Search</label>
+            <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Invoice / Order / Customer" className="block text-xs border border-gray-200 rounded px-2 py-1.5 w-56" />
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const csv: (string | number)[][] = [['voucher_no','invoice_no','order_id','date','customer','platform','taxable','cgst','sgst','igst','net_payable']]
+            for (const r of rows) csv.push([r.voucher_no, r.invoice_no, r.order_id, r.voucher_date, r.party_name, r.platform, r.taxable_amount, r.cgst_amount, r.sgst_amount, r.igst_amount, r.net_payable])
+            downloadCsv(`sales-invoices-${startDate || 'all'}-${endDate || 'all'}.csv`, csv)
+          }}
+          className="text-xs font-semibold px-3 py-1.5 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
+        >
+          Export invoices (CSV)
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <div className="xl:col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-700">Sales invoices (auto-picked from uploaded sales)</h3>
+            <span className="text-xs text-gray-500">{stats.count} invoices · {fmt(stats.total)}</span>
+          </div>
+          {isLoading ? (
+            <div className="p-8 text-center text-gray-400 text-sm">Loading invoices…</div>
+          ) : rows.length === 0 ? (
+            <div className="p-8 text-center text-gray-400 text-sm">No invoice rows found. Upload test sales in Sales Uploads to auto-populate this screen.</div>
+          ) : (
+            <div className="overflow-x-auto max-h-[540px] overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-gray-50">
+                  <tr className="text-gray-500 uppercase tracking-wide">
+                    <th className="px-3 py-2 text-left">No.</th>
+                    <th className="px-3 py-2 text-left">Invoice</th>
+                    <th className="px-3 py-2 text-left">Customer</th>
+                    <th className="px-3 py-2 text-left">Platform</th>
+                    <th className="px-3 py-2 text-right">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(r => (
+                    <tr key={r.id} className={`border-t border-gray-100 hover:bg-teal-50/40 cursor-pointer ${selectedId === r.id ? 'bg-teal-50/60' : ''}`} onClick={() => setSelectedId(r.id)}>
+                      <td className="px-3 py-1.5 font-mono text-teal-900">{r.voucher_no}</td>
+                      <td className="px-3 py-1.5">
+                        <p className="font-medium text-gray-800">{r.invoice_no || '—'}</p>
+                        <p className="text-[10px] text-gray-500">{r.voucher_date} · Order {r.order_id || '—'}</p>
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-700">{r.party_name || '—'}</td>
+                      <td className="px-3 py-1.5 text-gray-600">{r.platform || '—'}</td>
+                      <td className="px-3 py-1.5 text-right font-semibold">{fmt(r.net_payable)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-gray-700">Invoice details</h3>
+          {!selected ? (
+            <p className="text-xs text-gray-400">Select an invoice row to view details.</p>
+          ) : (
+            <>
+              <div className="text-xs space-y-1">
+                <p><span className="text-gray-500">Invoice:</span> <span className="font-mono">{selected.invoice_no || '—'}</span></p>
+                <p><span className="text-gray-500">Order ID:</span> <span className="font-mono">{selected.order_id || '—'}</span></p>
+                <p><span className="text-gray-500">Date:</span> {selected.voucher_date}</p>
+                <p><span className="text-gray-500">Customer:</span> {selected.party_name || '—'}</p>
+                <p><span className="text-gray-500">Platform:</span> {selected.platform || '—'}</p>
+                <p><span className="text-gray-500">Ship to state:</span> {selected.ship_to_state || '—'}</p>
+                <p><span className="text-gray-500">Source:</span> <span className="break-all">{selected.source_filename || '—'}</span></p>
+              </div>
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs space-y-1">
+                <p><span className="text-gray-500">Taxable:</span> <strong>{fmt(selected.taxable_amount)}</strong></p>
+                <p><span className="text-gray-500">CGST:</span> {selected.cgst_amount > 0 ? fmt(selected.cgst_amount) : '—'}</p>
+                <p><span className="text-gray-500">SGST:</span> {selected.sgst_amount > 0 ? fmt(selected.sgst_amount) : '—'}</p>
+                <p><span className="text-gray-500">IGST:</span> {selected.igst_amount > 0 ? fmt(selected.igst_amount) : '—'}</p>
+                <p><span className="text-gray-500">Net:</span> <strong className="text-teal-800">{fmt(selected.net_payable)}</strong></p>
+              </div>
+              {detail?.meta?.line_items?.length ? (
+                <div className="text-xs">
+                  <p className="text-gray-500 mb-1">Lines ({detail.meta.line_items.length})</p>
+                  <div className="max-h-44 overflow-auto border border-gray-200 rounded">
+                    <table className="w-full text-[11px]">
+                      <thead className="bg-gray-50">
+                        <tr><th className="px-2 py-1 text-left">SKU</th><th className="px-2 py-1 text-right">Qty</th><th className="px-2 py-1 text-right">Taxable</th></tr>
+                      </thead>
+                      <tbody>
+                        {detail.meta.line_items.map((li, i) => (
+                          <tr key={i} className="border-t border-gray-100">
+                            <td className="px-2 py-1 font-mono">{String(li.sku ?? '')}</td>
+                            <td className="px-2 py-1 text-right">{Number(li.quantity ?? 0)}</td>
+                            <td className="px-2 py-1 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
       </div>
     </div>
   )

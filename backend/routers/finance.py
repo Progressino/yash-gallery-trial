@@ -35,7 +35,7 @@ from ..db.finance_db import (
     list_expense_vouchers, get_expense_voucher, create_expense_voucher, delete_expense_voucher,
     list_finance_sales_uploads, create_finance_sales_upload, create_finance_sales_entries, delete_finance_sales_upload,
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
-    list_vouchers, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
+    list_vouchers, list_sales_invoices, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
     get_chart_of_accounts, get_trial_balance,
     list_tally_pl, upsert_tally_pl, delete_tally_pl,
 )
@@ -565,6 +565,20 @@ def get_vouchers(
         start_date   = start_date,
         end_date     = end_date,
         voucher_type = voucher_type,
+    )
+
+
+@router.get("/sales-invoices")
+def get_sales_invoices(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    """Invoice-level rows persisted from Finance Sales Uploads."""
+    return list_sales_invoices(
+        start_date=start_date,
+        end_date=end_date,
+        search=search,
     )
 
 

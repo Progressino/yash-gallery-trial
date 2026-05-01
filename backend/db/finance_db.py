@@ -1224,6 +1224,63 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
     }
 
 
+def list_sales_invoices(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+) -> list[dict]:
+    """Invoice-level finance sales rows from uploaded sales files."""
+    conn = _connect()
+    q = """
+        SELECT id, voucher_date, platform, period, invoice_no, order_id,
+               party_name, party_gstin, party_state, ship_to_state,
+               taxable_amount, cgst_amount, sgst_amount, igst_amount,
+               total_amount, net_payable, source_filename
+        FROM finance_sales_entries
+        WHERE 1=1
+    """
+    params: list = []
+    if start_date:
+        q += " AND voucher_date >= ?"
+        params.append(start_date)
+    if end_date:
+        q += " AND voucher_date <= ?"
+        params.append(end_date)
+    if search:
+        like = f"%{search}%"
+        q += " AND (invoice_no LIKE ? OR order_id LIKE ? OR party_name LIKE ? OR platform LIKE ?)"
+        params.extend([like, like, like, like])
+    q += " ORDER BY voucher_date DESC, id DESC"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+
+    out: list[dict] = []
+    for row in rows:
+        rr = dict(row)
+        rid = int(rr.get("id") or 0)
+        out.append({
+            "id": 2_000_000 + rid,
+            "voucher_no": f"SUE-{rid}",
+            "voucher_date": rr.get("voucher_date") or "",
+            "platform": rr.get("platform") or "",
+            "period": rr.get("period") or "",
+            "invoice_no": rr.get("invoice_no") or "",
+            "order_id": rr.get("order_id") or "",
+            "party_name": rr.get("party_name") or "",
+            "party_gstin": rr.get("party_gstin") or "",
+            "party_state": rr.get("party_state") or "",
+            "ship_to_state": rr.get("ship_to_state") or "",
+            "taxable_amount": round(float(rr.get("taxable_amount") or 0), 2),
+            "cgst_amount": round(float(rr.get("cgst_amount") or 0), 2),
+            "sgst_amount": round(float(rr.get("sgst_amount") or 0), 2),
+            "igst_amount": round(float(rr.get("igst_amount") or 0), 2),
+            "total_amount": round(float(rr.get("total_amount") or 0), 2),
+            "net_payable": round(float(rr.get("net_payable") or 0), 2),
+            "source_filename": rr.get("source_filename") or "",
+        })
+    return out
+
+
 def list_vouchers(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
