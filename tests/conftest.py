@@ -36,3 +36,14 @@ def session_for_client(client):
     sess = store.get(sid)
     assert sess is not None
     return sid, sess
+
+
+@pytest.fixture
+def finance_isolated_db(tmp_path, monkeypatch):
+    """Fresh finance SQLite + schema seed for HTTP tests (avoids touching dev finance.db)."""
+    path = str(tmp_path / "finance_isolated.db")
+    monkeypatch.setattr("backend.db.finance_db.DB_PATH", path)
+    from backend.db.finance_db import init_db
+
+    init_db()
+    return path

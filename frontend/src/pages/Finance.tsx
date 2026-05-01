@@ -6,6 +6,7 @@ import {
 } from 'recharts'
 import api from '../api/client'
 import { GlSalesNotesContent } from '../components/finance/GlSalesNotesContent'
+import { FinanceUserGuideContent } from '../components/finance/FinanceUserGuideContent'
 
 // ── Types ────────────────────────────────────────────────────────
 interface TallyPL {
@@ -912,6 +913,7 @@ export default function Finance() {
 function FinanceHelpNotesTab() {
   return (
     <div className="space-y-5">
+      <FinanceUserGuideContent />
       <GlSalesNotesContent showAccountantChecklist />
     </div>
   )

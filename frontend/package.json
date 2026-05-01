@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test:smoke": "npx playwright test tests/e2e/smoke-login.spec.js"
+    "test:smoke": "npx playwright test tests/e2e"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.21",

@@ -118,3 +118,16 @@ def test_delete_sales_upload_removes_entries(fin_db):
     assert fdb.delete_finance_sales_upload(uid)
     day = fdb.get_voucher_summary_by_date("2026-04-01")
     assert not any(v["voucher_no"].startswith("SUE-") for v in day)
+
+
+def test_chart_of_accounts_has_groups(fin_db):
+    tree = fdb.get_chart_of_accounts()
+    assert "groups" in tree
+    assert isinstance(tree["groups"], list)
+    assert len(tree["groups"]) >= 1
+
+
+def test_trial_balance_returns_structure(fin_db):
+    tb = fdb.get_trial_balance("2026-01-01", "2026-12-31")
+    assert "rows" in tb and isinstance(tb["rows"], list)
+    assert "balanced" in tb and "total_debit" in tb and "total_credit" in tb
