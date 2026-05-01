@@ -138,6 +138,8 @@ interface Voucher {
   tds_amount:     number
   total_amount:   number
   net_payable:    number
+  payment_mode:   string
+  bank_ledger:    string
   lines:          VoucherLine[]
 }
 interface SalesUpload {
@@ -188,7 +190,8 @@ function cronusMegaForTab(tab: FinanceTab): CronusMega | 'dash' {
   if (tab === 'dashboard') return 'dash'
   if (tab === 'gstr' || tab === 'gst') return 'india'
   if (tab === 'sales-uploads' || tab === 'revenue') return 'sales'
-  if (tab === 'vouchers' || tab === 'daybook') return 'voucher'
+  if (tab === 'vouchers' || tab === 'daybook' || tab === 'voucher-register') return 'voucher'
+  if (tab === 'cash-book' || tab === 'bank-book') return 'cash'
   if (tab === 'expenses') return 'purchasing'
   return 'finance'
 }
@@ -207,7 +210,7 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
+type FinanceTab = 'dashboard' | 'daybook' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
 
 // ── Chart of Accounts types ───────────────────────────────────────
 interface CoALedger {
@@ -402,7 +405,7 @@ function FinanceCronusNav(props: {
               </MegaCol>
               <MegaCol title="Bank">
                 <L onClick={() => jumpMasters('ledgers')}>Bank accounts (ledgers)</L>
-                <L onClick={() => go('daybook')}>Bank book — Day Book</L>
+                <L onClick={() => go('bank-book')}>Bank Book</L>
                 <L onClick={() => go('vouchers')}>Payment reconciliation</L>
               </MegaCol>
               <MegaCol title="Terms">
@@ -446,7 +449,7 @@ function FinanceCronusNav(props: {
               </MegaCol>
               <MegaCol title="Posted">
                 <L onClick={() => go('daybook')}>Posted purchases — Day Book</L>
-                <L onClick={() => go('vouchers')}>Voucher register</L>
+                <L onClick={() => go('voucher-register')}>Voucher register</L>
               </MegaCol>
             </div>
           )}
@@ -488,10 +491,12 @@ function FinanceCronusNav(props: {
               </MegaCol>
               <MegaCol title="Books">
                 <L onClick={() => go('daybook')}>Day Book</L>
+                <L onClick={() => go('cash-book')}>Cash Book</L>
+                <L onClick={() => go('bank-book')}>Bank Book</L>
                 <L onClick={() => go('trial-balance')}>Ledger / T/B</L>
               </MegaCol>
               <MegaCol title="Register">
-                <L onClick={() => go('vouchers')}>Voucher register</L>
+                <L onClick={() => go('voucher-register')}>Voucher register</L>
               </MegaCol>
             </div>
           )}
@@ -823,6 +828,9 @@ export default function Finance() {
           {([
             ['daybook', 'Day Book'],
             ['vouchers', 'Vouchers'],
+            ['voucher-register', 'Voucher Register'],
+            ['cash-book', 'Cash Book'],
+            ['bank-book', 'Bank Book'],
             ['coa', 'COA'],
             ['trial-balance', 'Trial Balance'],
             ['pl', 'P&L'],
@@ -1194,6 +1202,13 @@ export default function Finance() {
 
       {/* ── Tab: Vouchers ── */}
       {activeTab === 'vouchers' && <VouchersTab voucherPreset={voucherPreset} />}
+
+      {/* ── Tab: Voucher Register ── */}
+      {activeTab === 'voucher-register' && <VoucherRegisterTab />}
+
+      {/* ── Tab: Cash / Bank Books ── */}
+      {activeTab === 'cash-book' && <CashBankBookTab mode='cash' />}
+      {activeTab === 'bank-book' && <CashBankBookTab mode='bank' />}
 
       {/* ── Tab: Masters ── */}
       {activeTab === 'masters' && <MastersTab mastersJump={mastersJump} />}
@@ -1672,6 +1687,176 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
                 ))
               )}
             </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+// ── Voucher Register / Cash / Bank Books ─────────────────────────
+function VoucherRegisterTab() {
+  const [startDate, setStartDate] = useState(daysAgo(30))
+  const [endDate, setEndDate] = useState(TODAY)
+
+  const { data: vouchers = [], isLoading } = useQuery<Voucher[]>({
+    queryKey: ['finance-voucher-register', startDate, endDate],
+    queryFn: async () => {
+      const p = new URLSearchParams()
+      if (startDate) p.set('start_date', startDate)
+      if (endDate) p.set('end_date', endDate)
+      const { data } = await api.get(`/finance/vouchers?${p.toString()}`)
+      return data
+    },
+    staleTime: 30 * 1000,
+  })
+
+  const total = vouchers.reduce((s, v) => s + v.net_payable, 0)
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3 flex flex-wrap gap-2 items-end justify-between">
+        <div className="flex items-end gap-2 flex-wrap">
+          <div>
+            <label className="text-xs text-gray-500">From</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">To</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const rows: (string | number)[][] = [['date', 'voucher_no', 'voucher_type', 'party_name', 'taxable', 'cgst', 'sgst', 'igst', 'net_payable']]
+            for (const v of vouchers) rows.push([v.voucher_date, v.voucher_no, v.voucher_type, v.party_name || '', v.taxable_amount, v.cgst_amount, v.sgst_amount, v.igst_amount, v.net_payable])
+            downloadCsv(`voucher-register-${startDate || 'all'}-${endDate || 'all'}.csv`, rows)
+          }}
+          className="text-xs font-semibold px-3 py-1.5 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
+        >
+          Export register (CSV)
+        </button>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading voucher register…</div>
+        ) : vouchers.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No vouchers in this range.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                  <th className="px-3 py-2 text-left">Date</th><th className="px-3 py-2 text-left">No</th><th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-left">Party</th><th className="px-3 py-2 text-right">Net</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vouchers.map(v => (
+                  <tr key={v.id} className="border-t border-gray-100 hover:bg-gray-50">
+                    <td className="px-3 py-1.5">{v.voucher_date}</td>
+                    <td className="px-3 py-1.5 font-mono text-[#002B5B]">{v.voucher_no}</td>
+                    <td className="px-3 py-1.5"><span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${VOUCHER_COLORS[v.voucher_type] ?? 'bg-gray-100 text-gray-600'}`}>{v.voucher_type}</span></td>
+                    <td className="px-3 py-1.5 text-gray-600 max-w-[180px] truncate">{v.party_name || '—'}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{fmt(v.net_payable)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="bg-slate-800 text-white text-xs font-semibold"><td colSpan={4} className="px-3 py-2">Total ({vouchers.length})</td><td className="px-3 py-2 text-right">{fmt(total)}</td></tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function CashBankBookTab({ mode }: { mode: 'cash' | 'bank' }) {
+  const title = mode === 'cash' ? 'Cash Book' : 'Bank Book'
+  const [startDate, setStartDate] = useState(daysAgo(30))
+  const [endDate, setEndDate] = useState(TODAY)
+
+  const { data: vouchers = [], isLoading } = useQuery<Voucher[]>({
+    queryKey: ['finance-book', mode, startDate, endDate],
+    queryFn: async () => {
+      const p = new URLSearchParams()
+      if (startDate) p.set('start_date', startDate)
+      if (endDate) p.set('end_date', endDate)
+      const { data } = await api.get(`/finance/vouchers?${p.toString()}`)
+      return data
+    },
+    staleTime: 30 * 1000,
+  })
+
+  const rows = useMemo(() => {
+    if (mode === 'cash') {
+      return vouchers.filter(v => {
+        const pm = (v.payment_mode || '').toLowerCase()
+        const hasBank = !!(v.bank_ledger || '').trim()
+        return pm === 'cash' || (!hasBank && ['Receipt', 'Payment', 'Contra'].includes(v.voucher_type))
+      })
+    }
+    return vouchers.filter(v => {
+      const pm = (v.payment_mode || '').toLowerCase()
+      const hasBank = !!(v.bank_ledger || '').trim()
+      return hasBank || (pm && pm !== 'cash')
+    })
+  }, [mode, vouchers])
+
+  const total = rows.reduce((s, v) => s + v.net_payable, 0)
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3 flex flex-wrap gap-2 items-end justify-between">
+        <div className="flex items-end gap-2 flex-wrap">
+          <p className="text-xs font-semibold text-gray-700 mr-2">{title}</p>
+          <div>
+            <label className="text-xs text-gray-500">From</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">To</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const csv: (string | number)[][] = [['date','voucher_no','voucher_type','party_name','payment_mode','bank_ledger','net_payable']]
+            for (const v of rows) csv.push([v.voucher_date, v.voucher_no, v.voucher_type, v.party_name || '', v.payment_mode || '', v.bank_ledger || '', v.net_payable])
+            downloadCsv(`${mode}-book-${startDate || 'all'}-${endDate || 'all'}.csv`, csv)
+          }}
+          className="text-xs font-semibold px-3 py-1.5 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
+        >
+          Export {title} (CSV)
+        </button>
+      </div>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading {title.toLowerCase()}…</div>
+        ) : rows.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No entries for {title.toLowerCase()} in this range.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                  <th className="px-3 py-2 text-left">Date</th><th className="px-3 py-2 text-left">No</th><th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-left">Payment mode</th><th className="px-3 py-2 text-left">Bank ledger</th><th className="px-3 py-2 text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(v => (
+                  <tr key={v.id} className="border-t border-gray-100 hover:bg-gray-50">
+                    <td className="px-3 py-1.5">{v.voucher_date}</td><td className="px-3 py-1.5 font-mono text-[#002B5B]">{v.voucher_no}</td><td className="px-3 py-1.5">{v.voucher_type}</td><td className="px-3 py-1.5">{v.payment_mode || '—'}</td><td className="px-3 py-1.5">{v.bank_ledger || '—'}</td><td className="px-3 py-1.5 text-right font-semibold">{fmt(v.net_payable)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot><tr className="bg-slate-800 text-white text-xs font-semibold"><td colSpan={5} className="px-3 py-2">Total ({rows.length})</td><td className="px-3 py-2 text-right">{fmt(total)}</td></tr></tfoot>
+            </table>
           </div>
         )}
       </div>
