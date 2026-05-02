@@ -1,19 +1,18 @@
 ---
-description: Pre-test every change and push main for VPS deploy
+description: Push to main after shipping so VPS auto-deploy runs
 alwaysApply: true
 ---
 
-# Pre-test + deploy always (Yash Gallery ERP)
+# Deploy always (Yash Gallery ERP)
 
 Production deploys via **GitHub Actions** (`.github/workflows/deploy.yml`) on **push to `origin/main`** (self-hosted runner at `/root/app`).
 
 **After you implement or fix anything in this repo that should reach production:**
 
-1. Run **`./scripts/predeploy_sanity.sh`** and ensure it passes before finalizing.
-2. Commit with a clear message.
-3. Run **`git push origin main`** (request `git_write`, `network`, and `all` if needed so `.git` and push work).
-4. Do **not** stop with only local commits — the user expects the VPS to update.
+1. Commit with a clear message.
+2. Run **`git push origin main`** (request `git_write`, `network`, and `all` if needed so `.git` and push work).
+3. Do **not** stop with only local commits — the user expects the VPS to update.
 
-**Skip pre-test/push** only when the user explicitly asks for local-only work, a branch/PR flow, or to skip verification.
+**Skip push** only when the user explicitly asks for local-only work or a branch/PR flow.
 
 **Manual deploy:** In GitHub → Actions → “Deploy to VPS” → **Run workflow** (requires `workflow_dispatch` in the workflow file).

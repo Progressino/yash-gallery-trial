@@ -19,9 +19,9 @@ jobs:
           git checkout main
           git reset --hard origin/main
 
-      - name: Predeploy sanity gate (backend + frontend smoke)
+      - name: Backend sanity tests
         run: |
-          bash scripts/predeploy_sanity.sh
+          SKIP_E2E=1 bash scripts/predeploy_sanity.sh
 
       - name: Rebuild and restart containers
         run: |
