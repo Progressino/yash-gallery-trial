@@ -178,6 +178,8 @@ interface SalesInvoiceRow {
   total_amount: number
   net_payable: number
   source_filename: string
+  row_kind?: 'entry' | 'upload_summary'
+  sales_upload_id?: number
 }
 
 // ── Constants ────────────────────────────────────────────────────
@@ -1892,9 +1894,45 @@ function CashBankBookTab({ mode }: { mode: 'cash' | 'bank' }) {
 }
 
 // ── Sales Invoices Tab (auto from Finance Sales Uploads) ───────────
+function salesInvoicesDedupedNet(rows: SalesInvoiceRow[]) {
+  const uploadsWithEntry = new Set<number>()
+  for (const r of rows) {
+    if (r.row_kind === 'entry' && r.sales_upload_id != null && r.sales_upload_id > 0)
+      uploadsWithEntry.add(r.sales_upload_id)
+  }
+  let total = 0
+  for (const r of rows) {
+    if (r.row_kind === 'upload_summary' || r.voucher_no?.startsWith('SUP-')) {
+      const m = /^SUP-(\d+)$/.exec(r.voucher_no || '')
+      const uid = m ? parseInt(m[1], 10) : NaN
+      if (!Number.isNaN(uid) && uploadsWithEntry.has(uid)) continue
+    }
+    total += r.net_payable
+  }
+  return total
+}
+
+function salesInvoicesDedupedTax(rows: SalesInvoiceRow[]) {
+  const uploadsWithEntry = new Set<number>()
+  for (const r of rows) {
+    if (r.row_kind === 'entry' && r.sales_upload_id != null && r.sales_upload_id > 0)
+      uploadsWithEntry.add(r.sales_upload_id)
+  }
+  let tax = 0
+  for (const r of rows) {
+    if (r.row_kind === 'upload_summary' || r.voucher_no?.startsWith('SUP-')) {
+      const m = /^SUP-(\d+)$/.exec(r.voucher_no || '')
+      const uid = m ? parseInt(m[1], 10) : NaN
+      if (!Number.isNaN(uid) && uploadsWithEntry.has(uid)) continue
+    }
+    tax += r.cgst_amount + r.sgst_amount + r.igst_amount
+  }
+  return tax
+}
+
 function SalesInvoicesTab() {
-  const [startDate, setStartDate] = useState(daysAgo(30))
-  const [endDate, setEndDate] = useState(TODAY)
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState<number | null>(null)
 
@@ -1926,8 +1964,8 @@ function SalesInvoicesTab() {
   })
 
   const stats = useMemo(() => {
-    const total = rows.reduce((s, r) => s + r.net_payable, 0)
-    const tax = rows.reduce((s, r) => s + r.cgst_amount + r.sgst_amount + r.igst_amount, 0)
+    const total = salesInvoicesDedupedNet(rows)
+    const tax = salesInvoicesDedupedTax(rows)
     return { total, tax, count: rows.length }
   }, [rows])
 
@@ -1938,6 +1976,7 @@ function SalesInvoicesTab() {
           <div>
             <label className="text-xs text-gray-500">From</label>
             <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+            <p className="text-[10px] text-gray-400 mt-0.5 max-w-[11rem]">Leave From/To empty to load all uploads and invoice lines.</p>
           </div>
           <div>
             <label className="text-xs text-gray-500">To</label>
@@ -1951,8 +1990,8 @@ function SalesInvoicesTab() {
         <button
           type="button"
           onClick={() => {
-            const csv: (string | number)[][] = [['voucher_no','invoice_no','order_id','date','customer','platform','taxable','cgst','sgst','igst','net_payable']]
-            for (const r of rows) csv.push([r.voucher_no, r.invoice_no, r.order_id, r.voucher_date, r.party_name, r.platform, r.taxable_amount, r.cgst_amount, r.sgst_amount, r.igst_amount, r.net_payable])
+            const csv: (string | number)[][] = [['voucher_no','row_kind','sales_upload_id','invoice_no','order_id','date','customer','platform','taxable','cgst','sgst','igst','net_payable']]
+            for (const r of rows) csv.push([r.voucher_no, r.row_kind ?? '', r.sales_upload_id ?? '', r.invoice_no, r.order_id, r.voucher_date, r.party_name, r.platform, r.taxable_amount, r.cgst_amount, r.sgst_amount, r.igst_amount, r.net_payable])
             downloadCsv(`sales-invoices-${startDate || 'all'}-${endDate || 'all'}.csv`, csv)
           }}
           className="text-xs font-semibold px-3 py-1.5 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
@@ -1964,13 +2003,13 @@ function SalesInvoicesTab() {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="xl:col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-700">Sales invoices (auto-picked from uploaded sales)</h3>
-            <span className="text-xs text-gray-500">{stats.count} invoices · {fmt(stats.total)}</span>
+            <h3 className="text-sm font-semibold text-gray-700">Sales invoices (uploads + parsed lines)</h3>
+            <span className="text-xs text-gray-500">{stats.count} rows · net {fmt(stats.total)}</span>
           </div>
           {isLoading ? (
             <div className="p-8 text-center text-gray-400 text-sm">Loading invoices…</div>
           ) : rows.length === 0 ? (
-            <div className="p-8 text-center text-gray-400 text-sm">No invoice rows found. Upload test sales in Sales Uploads to auto-populate this screen.</div>
+            <div className="p-8 text-center text-gray-400 text-sm">No rows match your filters. Clear dates to show everything from Sales Uploads, or adjust search.</div>
           ) : (
             <div className="overflow-x-auto max-h-[540px] overflow-y-auto">
               <table className="w-full text-xs">

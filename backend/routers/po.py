@@ -2,8 +2,11 @@
 PO Engine router.
 POST /api/po/calculate  → run PO calculation, return table
 GET  /api/po/quarterly  → quarterly history pivot
+POST /api/po/sku-status-lead → upload SKU status & lead time (Excel/CSV) for PO rules
 """
-from fastapi import APIRouter, Request
+from io import BytesIO
+
+from fastapi import APIRouter, File, Request, UploadFile
 from pydantic import BaseModel
 from typing import Optional
 
@@ -21,6 +24,49 @@ class PORequest(BaseModel):
     min_denominator:  int   = 7
     grace_days:       int   = 0
     safety_pct:       float = 0.0
+    enforce_two_size_minimum: bool = True
+
+
+@router.post("/sku-status-lead")
+async def po_upload_sku_status_lead(request: Request, file: UploadFile = File(...)):
+    """Upload 'Sku Status & Lead Time' style sheet: SKU, Status, Lead time (days)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    from ..services.sku_status_lead import parse_sku_status_lead_upload
+
+    raw = await file.read()
+    if not raw:
+        return {"ok": False, "message": "Empty file."}
+    try:
+        df = parse_sku_status_lead_upload(
+            BytesIO(raw),
+            file.filename or "sku_status.xlsx",
+            sku_mapping=sess.sku_mapping or None,
+        )
+    except Exception as e:
+        return {"ok": False, "message": f"Parse error: {e}"}
+    if df.empty:
+        return {"ok": False, "message": "No valid SKU rows found (need SKU, Status, and Lead time columns)."}
+    sess.sku_status_lead_df = df
+    sess._quarterly_cache.clear()
+    return {"ok": True, "rows": int(len(df)), "message": f"Loaded {len(df)} SKU rows (status + lead time) for PO."}
+
+
+@router.get("/sku-status-lead")
+def po_get_sku_status_lead(request: Request):
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "loaded": False}
+    df = sess.sku_status_lead_df
+    if df is None or df.empty:
+        return {"ok": True, "loaded": False, "rows": [], "columns": []}
+    return {
+        "ok": True,
+        "loaded": True,
+        "columns": list(df.columns),
+        "rows": df.fillna("").to_dict("records"),
+    }
 
 
 @router.post("/calculate")
@@ -53,6 +99,8 @@ def po_calculate(request: Request, body: PORequest):
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=body.group_by_parent,
             existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
+            sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
+            enforce_two_size_minimum=body.enforce_two_size_minimum,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
@@ -60,8 +108,16 @@ def po_calculate(request: Request, body: PORequest):
     if po_df.empty:
         return {"ok": False, "message": "PO result is empty."}
 
-    # Serialize — convert any period types etc.
-    rows = po_df.fillna(0).round(3).to_dict("records")
+    # Serialize — keep string hints; round numerics only
+    import numpy as np
+
+    po_df = po_df.copy()
+    for c in ["Suggest_Close_SKU", "PO_Block_Reason", "SKU_Sheet_Status"]:
+        if c in po_df.columns:
+            po_df[c] = po_df[c].fillna("").astype(str)
+    num_cols = po_df.select_dtypes(include=[np.number]).columns
+    po_df[num_cols] = po_df[num_cols].fillna(0).round(3)
+    rows = po_df.to_dict("records")
     return {
         "ok":      True,
         "rows":    rows,

@@ -1151,6 +1151,11 @@ def create_finance_sales_entries(sales_upload_id: int, entries: list[dict]) -> i
     return count
 
 
+# Synthetic voucher id for upload rows that have no persisted finance_sales_entries (summary-only).
+# Keep well above 2_000_000 + max(finance_sales_entries.id) to avoid colliding with SUE-* voucher ids.
+UPLOAD_SUMMARY_VOUCHER_BASE = 10_000_000
+
+
 def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
     """Synthetic voucher payload for a finance_sales_entries row (id offset 2_000_000)."""
     if voucher_id < 2_000_000:
@@ -1224,15 +1229,75 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
     }
 
 
+def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
+    """Voucher-shaped payload for a finance_sales_uploads row (synthetic id base UPLOAD_SUMMARY_VOUCHER_BASE)."""
+    if voucher_id < UPLOAD_SUMMARY_VOUCHER_BASE:
+        return None
+    upload_id = voucher_id - UPLOAD_SUMMARY_VOUCHER_BASE
+    if upload_id <= 0:
+        return None
+    conn = _connect()
+    r = conn.execute("SELECT * FROM finance_sales_uploads WHERE id = ?", (upload_id,)).fetchone()
+    if not r:
+        conn.close()
+        return None
+    rr = dict(r)
+    conn.close()
+    p = str(rr.get("period") or "").strip()
+    vdate = f"{p[:7]}-01" if len(p) >= 7 else (str(rr.get("created_at") or "")[:10] or "")
+    gross = float(rr.get("total_revenue") or 0.0)
+    ret = float(rr.get("total_returns") or 0.0)
+    net = float(rr.get("net_revenue") or 0.0)
+    party = (rr.get("company_name") or "").strip() or (rr.get("seller_gstin") or "").strip() or (rr.get("platform") or "")
+    return {
+        "id": UPLOAD_SUMMARY_VOUCHER_BASE + int(rr["id"]),
+        "voucher_no": f"SUP-{rr['id']}",
+        "voucher_date": vdate,
+        "voucher_type": "Sales Upload",
+        "party_name": party,
+        "party_gstin": str(rr.get("seller_gstin") or ""),
+        "party_state": str(rr.get("company_state") or ""),
+        "bill_no": "",
+        "bill_date": vdate,
+        "supply_type": "Intra",
+        "narration": f"Upload summary · {int(rr.get('total_orders') or 0)} orders in file; SUE rows list parsed invoices when present.",
+        "taxable_amount": round(gross - ret, 2),
+        "cgst_amount": 0.0,
+        "sgst_amount": 0.0,
+        "igst_amount": 0.0,
+        "tds_section": "",
+        "tds_rate": 0.0,
+        "tds_amount": 0.0,
+        "total_amount": round(gross, 2),
+        "net_payable": round(net, 2),
+        "payment_mode": "",
+        "bank_ledger": "",
+        "cheque_no": "",
+        "ref_number": f"UPLOAD-{rr['id']}",
+        "lines": [],
+        "meta": {
+            "source": "finance_sales_upload_summary",
+            "sales_upload_id": int(rr["id"]),
+            "platform": rr.get("platform"),
+            "period": rr.get("period"),
+            "filename": rr.get("filename"),
+            "total_orders": int(rr.get("total_orders") or 0),
+            "total_revenue": round(gross, 2),
+            "total_returns": round(ret, 2),
+            "line_items": [],
+        },
+    }
+
+
 def list_sales_invoices(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     search: Optional[str] = None,
 ) -> list[dict]:
-    """Invoice-level finance sales rows from uploaded sales files."""
+    """All finance_sales_entries rows plus every finance_sales_uploads summary (same coverage as Sales Uploads)."""
     conn = _connect()
     q = """
-        SELECT id, voucher_date, platform, period, invoice_no, order_id,
+        SELECT id, sales_upload_id, voucher_date, platform, period, invoice_no, order_id,
                party_name, party_gstin, party_state, ship_to_state,
                taxable_amount, cgst_amount, sgst_amount, igst_amount,
                total_amount, net_payable, source_filename
@@ -1248,11 +1313,13 @@ def list_sales_invoices(
         params.append(end_date)
     if search:
         like = f"%{search}%"
-        q += " AND (invoice_no LIKE ? OR order_id LIKE ? OR party_name LIKE ? OR platform LIKE ?)"
-        params.extend([like, like, like, like])
+        q += """ AND (
+            invoice_no LIKE ? OR order_id LIKE ? OR party_name LIKE ? OR platform LIKE ?
+            OR party_gstin LIKE ? OR source_filename LIKE ? OR ship_to_state LIKE ?
+        )"""
+        params.extend([like, like, like, like, like, like, like])
     q += " ORDER BY voucher_date DESC, id DESC"
     rows = conn.execute(q, params).fetchall()
-    conn.close()
 
     out: list[dict] = []
     for row in rows:
@@ -1261,6 +1328,8 @@ def list_sales_invoices(
         out.append({
             "id": 2_000_000 + rid,
             "voucher_no": f"SUE-{rid}",
+            "row_kind": "entry",
+            "sales_upload_id": int(rr.get("sales_upload_id") or 0),
             "voucher_date": rr.get("voucher_date") or "",
             "platform": rr.get("platform") or "",
             "period": rr.get("period") or "",
@@ -1278,6 +1347,74 @@ def list_sales_invoices(
             "net_payable": round(float(rr.get("net_payable") or 0), 2),
             "source_filename": rr.get("source_filename") or "",
         })
+
+    # Upload summaries for every row in finance_sales_uploads (same grid as Sales Uploads), in addition to entries.
+    q2 = """
+        SELECT su.id, su.platform, su.period, su.company_name, su.seller_gstin, su.company_state,
+               su.filename, su.total_revenue, su.total_returns, su.net_revenue, su.total_orders,
+               su.created_at
+        FROM finance_sales_uploads su
+        WHERE 1=1
+    """
+    params2: list = []
+    if start_date:
+        q2 += """
+          AND date(
+            CASE WHEN length(trim(COALESCE(su.period, ''))) >= 7 THEN trim(su.period) || '-01'
+                 ELSE substr(COALESCE(su.created_at, ''), 1, 10) END
+          ) >= date(?)
+        """
+        params2.append(start_date)
+    if end_date:
+        q2 += """
+          AND date(
+            CASE WHEN length(trim(COALESCE(su.period, ''))) >= 7 THEN trim(su.period) || '-01'
+                 ELSE substr(COALESCE(su.created_at, ''), 1, 10) END
+          ) <= date(?)
+        """
+        params2.append(end_date)
+    if search:
+        like = f"%{search}%"
+        q2 += """ AND (
+            su.platform LIKE ? OR su.company_name LIKE ? OR su.seller_gstin LIKE ?
+            OR su.filename LIKE ? OR CAST(su.id AS TEXT) LIKE ?
+        )"""
+        params2.extend([like, like, like, like, like])
+    q2 += " ORDER BY su.period DESC, su.id DESC"
+    for row in conn.execute(q2, params2).fetchall():
+        su = dict(row)
+        uid = int(su["id"])
+        p = str(su.get("period") or "").strip()
+        vdate = f"{p[:7]}-01" if len(p) >= 7 else (str(su.get("created_at") or "")[:10] or "")
+        gross = float(su.get("total_revenue") or 0.0)
+        ret = float(su.get("total_returns") or 0.0)
+        net = float(su.get("net_revenue") or 0.0)
+        party = (su.get("company_name") or "").strip() or (su.get("seller_gstin") or "").strip() or (su.get("platform") or "")
+        out.append({
+            "id": UPLOAD_SUMMARY_VOUCHER_BASE + uid,
+            "voucher_no": f"SUP-{uid}",
+            "row_kind": "upload_summary",
+            "sales_upload_id": uid,
+            "voucher_date": vdate,
+            "platform": str(su.get("platform") or ""),
+            "period": str(su.get("period") or ""),
+            "invoice_no": "",
+            "order_id": f"UPLOAD-{uid}",
+            "party_name": party,
+            "party_gstin": str(su.get("seller_gstin") or ""),
+            "party_state": str(su.get("company_state") or ""),
+            "ship_to_state": "",
+            "taxable_amount": round(gross - ret, 2),
+            "cgst_amount": 0.0,
+            "sgst_amount": 0.0,
+            "igst_amount": 0.0,
+            "total_amount": round(gross, 2),
+            "net_payable": round(net, 2),
+            "source_filename": str(su.get("filename") or ""),
+        })
+    conn.close()
+
+    out.sort(key=lambda r: (r.get("voucher_date") or "", r.get("id")), reverse=True)
     return out
 
 

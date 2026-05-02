@@ -301,6 +301,8 @@ def calculate_po_base(
     sku_mapping: Optional[Dict[str, str]] = None,
     group_by_parent: bool = False,
     existing_po_df: Optional[pd.DataFrame] = None,
+    sku_status_df: Optional[pd.DataFrame] = None,
+    enforce_two_size_minimum: bool = True,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -330,6 +332,44 @@ def calculate_po_base(
     po_df   = pd.merge(inv_df, summary, on="OMS_SKU", how="left").fillna(
         {"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0}
     )
+
+    # ── Shipments in last ~5 months (for close-SKU hint) ─────────────────
+    cut150 = max_date - timedelta(days=150)
+    ship150 = (
+        df[(df["TxnDate"] >= cut150) & (df["Transaction Type"] == "Shipment")]
+        .groupby("Sku")["Quantity"].sum()
+        .reset_index()
+        .rename(columns={"Sku": "OMS_SKU", "Quantity": "Ship_Units_150d"})
+    )
+    po_df = po_df.merge(ship150, on="OMS_SKU", how="left")
+    po_df["Ship_Units_150d"] = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0).astype(int)
+
+    # ── SKU Status / Lead sheet (optional) ────────────────────────────────
+    po_df["Lead_Time_Days"] = int(max(1, int(lead_time)))
+    po_df["PO_Block_Reason"] = ""
+    if sku_status_df is not None and not sku_status_df.empty:
+        m = sku_status_df.copy()
+        m["OMS_SKU"] = m["OMS_SKU"].astype(str).str.strip().str.upper()
+        keep = [c for c in ["OMS_SKU", "SKU_Sheet_Status", "SKU_Sheet_Closed", "Lead_Time_From_Sheet"] if c in m.columns]
+        m = m[keep].drop_duplicates(subset=["OMS_SKU"], keep="last")
+        po_df = po_df.merge(m, on="OMS_SKU", how="left")
+        po_df["SKU_Sheet_Status"] = po_df["SKU_Sheet_Status"].fillna("").astype(str)
+        po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"].fillna(False).astype(bool)
+        if "Lead_Time_From_Sheet" in po_df.columns:
+            lt_vals = pd.to_numeric(po_df["Lead_Time_From_Sheet"], errors="coerce")
+            repl = lt_vals.where(lt_vals > 0)
+            po_df["Lead_Time_Days"] = (
+                pd.to_numeric(repl, errors="coerce")
+                .fillna(po_df["Lead_Time_Days"])
+                .clip(lower=1, upper=730)
+                .round()
+                .astype(int)
+            )
+            po_df.drop(columns=["Lead_Time_From_Sheet"], inplace=True, errors="ignore")
+    else:
+        po_df["SKU_Sheet_Status"] = ""
+        po_df["SKU_Sheet_Closed"] = False
+    po_df["Lead_Time_Days"] = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1, upper=730).astype(int)
 
     # ADS starts from period_days-window Recent_ADS / LY blend, is floored by
     # seasonal same-month+next-month history, and by Flat30_ADS (Req.xlsx FREQ).
@@ -475,15 +515,33 @@ def calculate_po_base(
 
     inv_vals = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
 
-    # PO calculation — total coverage = lead_time + target_days
-    # Rounded up to nearest 10 to match team's manual formula
-    lead_demand  = po_df["ADS"] * lead_time
+    # PO calculation — per-SKU lead from sheet when uploaded, else global lead_time
+    lt_vec = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1)
+    lead_demand  = po_df["ADS"] * lt_vec
     target_stock = po_df["ADS"] * (target_days + grace_days)
     base_req     = lead_demand + target_stock
     safety       = base_req * (safety_pct / 100.0)
     total_req    = base_req + safety
     gross_po     = (total_req - inv_vals).clip(lower=0)
     po_df["Gross_PO_Qty"] = (np.ceil(gross_po / 10) * 10).astype(int)
+
+    closed_m = po_df["SKU_Sheet_Closed"].astype(bool)
+    po_df.loc[closed_m, "Gross_PO_Qty"] = 0
+    po_df.loc[closed_m, "PO_Block_Reason"] = "Closed SKU (sheet)"
+
+    if enforce_two_size_minimum:
+        _par_key = po_df["OMS_SKU"].apply(get_parent_sku)
+        has_g = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0) > 0
+        n_sizes = has_g.astype(int).groupby(_par_key).transform("sum")
+        single_only = has_g & (n_sizes == 1)
+        po_df.loc[single_only, "Gross_PO_Qty"] = 0
+        br = po_df.loc[single_only, "PO_Block_Reason"].astype(str).str.strip()
+        add = "Single size only (need ≥2 sizes with demand)"
+        po_df.loc[single_only, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"),
+            add,
+            br + "; " + add,
+        )
 
     # Pipeline deduction from existing PO sheet
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
@@ -535,11 +593,24 @@ def calculate_po_base(
             ghost["Flat30_ADS"]      = 0.0
             ghost["Days_Left"]       = 999.0
             ghost["Gross_PO_Qty"]    = 0
+            ghost["Lead_Time_Days"] = int(max(1, int(lead_time)))
+            ghost["SKU_Sheet_Status"] = ""
+            ghost["SKU_Sheet_Closed"] = False
+            ghost["PO_Block_Reason"] = ""
+            ghost["Ship_Units_150d"] = 0
+            ghost["Suggest_Close_SKU"] = ""
             for c in ["PO_Pipeline_Total"] + _breakdown_cols:
                 ghost[c] = missing_po[c].values if c in missing_po.columns else 0
             # Fill any other columns po_df already has
             for c in po_df.columns:
-                if c not in ghost.columns:
+                if c in ghost.columns:
+                    continue
+                dt = po_df[c].dtype
+                if c in ("SKU_Sheet_Closed",):
+                    ghost[c] = False
+                elif dt == object or str(dt).startswith("string"):
+                    ghost[c] = ""
+                else:
                     ghost[c] = 0
             po_df = pd.concat([po_df, ghost[po_df.columns]], ignore_index=True)
 
@@ -553,10 +624,11 @@ def calculate_po_base(
         (po_df["ADS"] > 0) & (inv_for_metrics <= 0), "OOS", ""
     )
 
-    # Priority classification (vectorised)
+    # Priority classification (vectorised) — uses per-SKU lead days when present
+    lt_arr = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(float(lead_time)).clip(lower=1)
     conditions = [
-        (po_df["Days_Left"] < lead_time) & (po_df["PO_Qty"] > 0),
-        (po_df["Days_Left"] < (lead_time + grace_days)) & (po_df["PO_Qty"] > 0),
+        (po_df["Days_Left"] < lt_arr) & (po_df["PO_Qty"] > 0),
+        (po_df["Days_Left"] < (lt_arr + float(grace_days))) & (po_df["PO_Qty"] > 0),
         po_df["PO_Qty"] > 0,
         po_df["PO_Pipeline_Total"] > 0,
     ]
@@ -602,6 +674,24 @@ def calculate_po_base(
         po_df["ADS"] > 0,
         (total_supply / po_df["ADS"]).round(1),
         999.0,
+    )
+
+    # Heuristic: flag SKUs with ~no recent demand but meaningful returns (review / close)
+    ret_ratio = np.where(
+        po_df["Sold_Units"].astype(float) > 0,
+        po_df["Return_Units"].astype(float) / np.maximum(po_df["Sold_Units"].astype(float), 1.0),
+        0.0,
+    )
+    ship150v = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0)
+    po_df["Suggest_Close_SKU"] = np.where(
+        (ship150v <= 0)
+        & (
+            (po_df["Return_Units"].astype(float) >= 5)
+            | ((po_df["Sold_Units"].astype(float) > 0) & (ret_ratio >= 0.35))
+            | ((po_df["Sold_Units"].astype(float) <= 0) & (po_df["Return_Units"].astype(float) >= 1))
+        ),
+        "Review: no shipments ~5 mo + notable returns — consider closing SKU",
+        "",
     )
 
     # Drop intermediate calc columns (datetime/float cols that break router serialisation)

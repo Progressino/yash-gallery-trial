@@ -99,6 +99,7 @@ def test_cutting_ratio_single_gross_size_no_ads_split():
         demand_basis="Sold",
         safety_pct=0.0,
         existing_po_df=existing,
+        enforce_two_size_minimum=False,
     )
     row_l = po[po["OMS_SKU"] == "CUTPARENT-L"].iloc[0]
     row_xl = po[po["OMS_SKU"] == "CUTPARENT-XL"].iloc[0]
@@ -127,9 +128,81 @@ def test_cutting_ratio_two_gross_sizes_uses_demand_split():
         target_days=60,
         demand_basis="Sold",
         safety_pct=0.0,
+        enforce_two_size_minimum=False,
     )
     row_l = po[po["OMS_SKU"] == "CUTPARENT-L"].iloc[0]
     row_xl = po[po["OMS_SKU"] == "CUTPARENT-XL"].iloc[0]
     assert row_l["Gross_PO_Qty"] > 0 and row_xl["Gross_PO_Qty"] > 0
     assert row_l["Cutting_Ratio"] > row_xl["Cutting_Ratio"]
     assert abs(float(row_l["Cutting_Ratio"]) + float(row_xl["Cutting_Ratio"]) - 1.0) < 0.02
+
+
+def test_sku_status_parse_detects_closed_and_lead():
+    from backend.services.sku_status_lead import parse_sku_status_lead_dataframe
+
+    raw = pd.DataFrame(
+        {
+            "SKU": ["ABC-L", "XYZ-M"],
+            "Status": ["Open", "Closed SKU"],
+            "Lead Time": [10, 22],
+        }
+    )
+    out = parse_sku_status_lead_dataframe(raw, None)
+    assert len(out) == 2
+    r = out.set_index("OMS_SKU").loc["XYZ-M"]
+    assert bool(r["SKU_Sheet_Closed"]) is True
+    assert int(r["Lead_Time_From_Sheet"]) == 22
+
+
+def test_closed_sku_sheet_suppresses_po_qty():
+    sales = _minimal_sales()
+    inv = _minimal_inventory()
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["TEST-SKU-1"],
+            "SKU_Sheet_Status": ["Closed SKU"],
+            "SKU_Sheet_Closed": [True],
+            "Lead_Time_From_Sheet": [float("nan")],
+        }
+    )
+    po = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=sheet)
+    assert int(po.iloc[0]["Gross_PO_Qty"]) == 0
+    assert "Closed" in str(po.iloc[0]["PO_Block_Reason"])
+
+
+def test_single_size_minimum_zeros_gross_when_only_one_variant_needs_stock():
+    sales = _sales_two_sizes_same_parent()
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["CUTPARENT-L", "CUTPARENT-XL"],
+            "Total_Inventory": [0, 99_999],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        enforce_two_size_minimum=True,
+    )
+    row_l = po[po["OMS_SKU"] == "CUTPARENT-L"].iloc[0]
+    assert int(row_l["Gross_PO_Qty"]) == 0
+    assert "Single size" in str(row_l["PO_Block_Reason"])
+
+
+def test_sheet_lead_time_applied_per_row():
+    sales = _minimal_sales()
+    inv = _minimal_inventory()
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["TEST-SKU-1"],
+            "SKU_Sheet_Status": ["Active"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [45.0],
+        }
+    )
+    po = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=sheet)
+    assert int(po.iloc[0]["Lead_Time_Days"]) == 45

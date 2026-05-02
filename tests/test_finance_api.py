@@ -159,8 +159,57 @@ def test_finance_sales_invoices_from_upload_entries(finance_isolated_db, client)
         },
     )
     assert up.status_code == 200
-    # DB helper endpoint persists entries via upload-file in real flow; here we only verify list endpoint shape.
-    # Existing synthetic coverage already verifies SUE persistence in finance_db tests.
+    upload_id = int(up.json().get("id") or 0)
+    assert upload_id > 0
+    # No finance_sales_entries for JSON-only upload → list should still show one upload-summary row (SUP-*).
     r = client.get("/api/finance/sales-invoices?start_date=2026-04-01&end_date=2026-04-30")
     assert r.status_code == 200
-    assert isinstance(r.json(), list)
+    rows = r.json()
+    assert isinstance(rows, list)
+    sup = [x for x in rows if str(x.get("voucher_no") or "").startswith("SUP-")]
+    assert len(sup) >= 1
+    assert any(int(x.get("id") or 0) >= 10_000_000 for x in sup)
+    vid = 10_000_000 + upload_id
+    rv = client.get(f"/api/finance/vouchers/{vid}")
+    assert rv.status_code == 200
+    assert rv.json().get("voucher_type") == "Sales Upload"
+
+    import backend.db.finance_db as fdb
+
+    fdb.create_finance_sales_entries(
+        upload_id,
+        [
+            {
+                "platform": "Amazon",
+                "period": "2026-04",
+                "voucher_date": "2026-04-10",
+                "invoice_no": "INV-X",
+                "order_id": "ORD-1",
+                "party_name": "Buyer",
+                "party_gstin": "",
+                "party_state": "KA",
+                "ship_to_state": "",
+                "taxable_amount": 50.0,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 0.0,
+                "total_amount": 50.0,
+                "net_payable": 50.0,
+                "narration": "",
+                "source_filename": "x.csv",
+                "line_items": "[]",
+            }
+        ],
+    )
+    r2 = client.get("/api/finance/sales-invoices?start_date=2026-04-01&end_date=2026-04-30")
+    assert r2.status_code == 200
+    rows2 = r2.json()
+    assert any(x.get("voucher_no") == f"SUP-{upload_id}" for x in rows2)
+    sue_rows = [x for x in rows2 if str(x.get("voucher_no") or "").startswith("SUE-")]
+    assert len(sue_rows) >= 1
+    assert sue_rows[0].get("sales_upload_id") == upload_id
+    assert sue_rows[0].get("row_kind") == "entry"
+
+    r_all = client.get("/api/finance/sales-invoices")
+    assert r_all.status_code == 200
+    assert len(r_all.json()) >= len(rows2)

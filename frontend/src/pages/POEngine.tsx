@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback, memo } from 'react'
-import { api } from '../api/client'
+import { useState, useMemo, useCallback, memo, useRef } from 'react'
+import { api, getCoverage } from '../api/client'
+import { useSession } from '../store/session'
 import { usePOStore } from '../store/po'
 
 interface PORow {
@@ -67,11 +68,12 @@ interface QuarterlyResult {
 }
 
 const PO_DISPLAY_COLS = [
-  'Priority', 'OMS_SKU', 'Total_Inventory', 'Days_Left',
-  'Sold_Units', 'Eff_Days', 'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
+  'Priority', 'OMS_SKU', 'SKU_Sheet_Status', 'Lead_Time_Days', 'Total_Inventory', 'Days_Left',
+  'Sold_Units', 'Ship_Units_150d', 'Eff_Days', 'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
   'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
   'PO_Pipeline_Total', 'Projected_Running_Days', 'PO_Qty',
+  'PO_Block_Reason', 'Suggest_Close_SKU',
 ]
 
 const COL_LABEL: Record<string, string> = {
@@ -88,6 +90,11 @@ const COL_LABEL: Record<string, string> = {
   'Balance_to_Dispatch':      '📦 Bal. Dispatch',
   'Projected_Running_Days':   '📅 Proj. Run Days',
   'Cutting_Ratio':            '✂️ Cut Ratio',
+  'Lead_Time_Days':          '📅 Lead (d)',
+  'SKU_Sheet_Status':        '📋 Sheet status',
+  'Ship_Units_150d':         '📉 Ship ~5mo',
+  'PO_Block_Reason':         '🚫 Block reason',
+  'Suggest_Close_SKU':       '💡 Close hint',
 }
 
 const PRIORITY_ORDER: Record<string, number> = {
@@ -118,6 +125,13 @@ interface ShipmentParams {
 }
 
 export default function POEngine() {
+  const setCoverage = useSession(s => s.setCoverage)
+  const skuStatusLoaded = useSession(s => s.sku_status_lead ?? false)
+  const skuStatusRows = useSession(s => s.sku_status_lead_rows ?? 0)
+  const skuFileRef = useRef<HTMLInputElement>(null)
+  const [skuUploadBusy, setSkuUploadBusy] = useState(false)
+  const [skuUploadMsg, setSkuUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+
   const {
     activeTab, setActiveTab,
     params, setParams,
@@ -160,6 +174,30 @@ export default function POEngine() {
   const [materialQty, setMaterialQty] = useState<Record<string, number>>({})
 
   // ── Calculate PO + quarterly in parallel ──
+  const onSkuStatusFile = async (files: FileList | null) => {
+    const f = files?.[0]
+    if (!f) return
+    setSkuUploadBusy(true)
+    setSkuUploadMsg(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', f)
+      const { data } = await api.post<{ ok: boolean; message?: string; rows?: number }>('/po/sku-status-lead', fd)
+      if (data.ok) {
+        setSkuUploadMsg({ type: 'ok', text: data.message || `Loaded ${data.rows ?? 0} rows.` })
+        const c = await getCoverage()
+        setCoverage(c)
+      } else {
+        setSkuUploadMsg({ type: 'err', text: data.message || 'Upload failed' })
+      }
+    } catch (e: unknown) {
+      setSkuUploadMsg({ type: 'err', text: e instanceof Error ? e.message : 'Upload failed' })
+    } finally {
+      setSkuUploadBusy(false)
+      if (skuFileRef.current) skuFileRef.current.value = ''
+    }
+  }
+
   const run = async () => {
     setLoading(true)
     setEditedQty({})
@@ -473,6 +511,39 @@ export default function POEngine() {
               )}
               <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
                 onChange={v => setParams({ ...params, group_by_parent: v })} />
+              <Toggle
+                label="Require ≥2 sizes to place PO"
+                checked={params.enforce_two_size_minimum}
+                onChange={v => setParams({ ...params, enforce_two_size_minimum: v })}
+              />
+            </div>
+
+            <div className="mt-5 p-4 rounded-lg border border-dashed border-gray-300 bg-gray-50/80">
+              <h4 className="text-sm font-semibold text-gray-700 mb-1">SKU status &amp; lead time (for PO)</h4>
+              <p className="text-xs text-gray-500 mb-3">
+                Upload Excel/CSV with <strong>SKU</strong>, <strong>Status</strong>, and <strong>Lead time</strong> columns.
+                Rows marked <strong>Closed SKU</strong> (or any status containing &quot;closed&quot;) are excluded from PO quantities.
+                Lead time per SKU overrides the default above when present.
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <input ref={skuFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e => void onSkuStatusFile(e.target.files)} />
+                <button
+                  type="button"
+                  disabled={skuUploadBusy}
+                  onClick={() => skuFileRef.current?.click()}
+                  className="text-xs px-4 py-2 rounded-lg border border-[#002B5B] text-[#002B5B] font-semibold hover:bg-blue-50 disabled:opacity-50"
+                >
+                  {skuUploadBusy ? 'Uploading…' : '📤 Upload sheet'}
+                </button>
+                <span className="text-xs text-gray-600">
+                  {skuStatusLoaded ? <span className="text-green-700 font-medium">✓ {skuStatusRows} SKU rows loaded</span> : <span>No sheet loaded (optional)</span>}
+                </span>
+              </div>
+              {skuUploadMsg && (
+                <p className={`mt-2 text-xs rounded px-2 py-1 ${skuUploadMsg.type === 'ok' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}>
+                  {skuUploadMsg.text}
+                </p>
+              )}
             </div>
 
             <button

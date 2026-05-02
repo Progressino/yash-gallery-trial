@@ -193,12 +193,14 @@ def get_coverage(request: Request):
         inventory=not sess.inventory_df_variant.empty,
         daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
         existing_po=not sess.existing_po_df.empty,
+        sku_status_lead=not sess.sku_status_lead_df.empty,
         mtr_rows=len(sess.mtr_df),
         sales_rows=len(sess.sales_df),
         myntra_rows=len(sess.myntra_df),
         meesho_rows=len(sess.meesho_df),
         flipkart_rows=len(sess.flipkart_df),
         snapdeal_rows=len(sess.snapdeal_df),
+        sku_status_lead_rows=int(len(sess.sku_status_lead_df)),
         pause_auto_data_restore=paused,
     )
 

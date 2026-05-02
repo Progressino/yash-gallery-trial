@@ -35,6 +35,7 @@ interface POParams {
   group_by_parent: boolean
   grace_days: number
   safety_pct: number
+  enforce_two_size_minimum: boolean
 }
 
 interface POState {
@@ -75,6 +76,7 @@ export const usePOStore = create<POState>((set) => ({
     group_by_parent: false,
     grace_days: 0,
     safety_pct: 0,
+    enforce_two_size_minimum: true,
   },
   result: null,
   quarterly: null,

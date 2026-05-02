@@ -40,12 +40,14 @@ export interface CoverageResponse {
   inventory: boolean
   daily_orders: boolean
   existing_po: boolean
+  sku_status_lead?: boolean
   mtr_rows: number
   sales_rows: number
   myntra_rows: number
   meesho_rows: number
   flipkart_rows: number
   snapdeal_rows: number
+  sku_status_lead_rows?: number
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
 }

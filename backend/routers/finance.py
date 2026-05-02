@@ -35,7 +35,7 @@ from ..db.finance_db import (
     list_expense_vouchers, get_expense_voucher, create_expense_voucher, delete_expense_voucher,
     list_finance_sales_uploads, create_finance_sales_upload, create_finance_sales_entries, delete_finance_sales_upload,
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
-    list_vouchers, list_sales_invoices, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
+    list_vouchers, list_sales_invoices, get_upload_summary_voucher, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
     get_chart_of_accounts, get_trial_balance,
     list_tally_pl, upsert_tally_pl, delete_tally_pl,
 )
@@ -593,6 +593,9 @@ def post_voucher(body: VoucherCreate):
 @router.get("/vouchers/{voucher_id}")
 def get_voucher(voucher_id: int):
     v = get_sales_entry_voucher(voucher_id)
+    if v:
+        return v
+    v = get_upload_summary_voucher(voucher_id)
     if v:
         return v
     v = get_expense_voucher(voucher_id)

@@ -27,6 +27,7 @@ class AppSession:
     inventory_df_parent: pd.DataFrame = field(default_factory=pd.DataFrame)
     daily_orders_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     existing_po_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sku_status_lead_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     transfer_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     cogs_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -74,6 +75,7 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.inventory_df_parent = pd.DataFrame()
     sess.daily_orders_df = pd.DataFrame()
     sess.existing_po_df = pd.DataFrame()
+    sess.sku_status_lead_df = pd.DataFrame()
     sess.transfer_df = pd.DataFrame()
     sess.cogs_df = pd.DataFrame()
     sess.amazon_date_basis = "Shipment Date"

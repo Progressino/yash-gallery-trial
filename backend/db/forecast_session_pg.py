@@ -40,6 +40,7 @@ _PARQUET_KEYS = (
     "inventory_df_parent",
     "daily_orders_df",
     "existing_po_df",
+    "sku_status_lead_df",
     "transfer_df",
     "cogs_df",
 )
