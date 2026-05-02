@@ -56,7 +56,10 @@ services:
     volumes:
       - /root/app-data/finance:/data
     expose:
-      - "8000"          # internal only, nginx proxies to it
+      - "8000"          # docker network; nginx uses backend:8000
+    # Loopback-only publish so same-host deploy health + curl work without going through nginx/TLS.
+    ports:
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
