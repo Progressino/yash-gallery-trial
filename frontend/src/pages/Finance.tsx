@@ -2273,8 +2273,12 @@ function SalesInvoicesTab({
   }
 
   const openRow = (id: number) => {
+    const hit = rows.find(r => r.id === id)
+    const isUploadSummary =
+      hit?.row_kind === 'upload_summary' || (hit?.voucher_no ?? '').toUpperCase().startsWith('SUP-')
     setSelectedId(id)
-    setCardTab('general')
+    // SKU / mandatory columns live under Lines; upload summaries used to open on General only.
+    setCardTab(isUploadSummary ? 'lines' : 'general')
     setCardOpen(true)
   }
 
@@ -2318,6 +2322,8 @@ function SalesInvoicesTab({
     const lis = detail?.meta?.line_items ?? []
     return lis.some(li => String((li as { source_invoice_no?: string }).source_invoice_no || '').trim() !== '')
   }, [detail?.meta?.line_items])
+
+  const lineItemCount = Array.isArray(detail?.meta?.line_items) ? detail.meta!.line_items!.length : 0
 
   return (
     <div className="space-y-4">
@@ -2439,6 +2445,9 @@ function SalesInvoicesTab({
                 onClick={() => setCardTab('lines')}
               >
                 Lines
+                {lineItemCount > 0 ? (
+                  <span className="ml-1.5 rounded-full bg-teal-100 text-teal-900 px-1.5 py-0.5 text-[10px] tabular-nums">{lineItemCount}</span>
+                ) : null}
               </button>
             </div>
 
@@ -2471,8 +2480,50 @@ function SalesInvoicesTab({
                   ) : null}
                   {selected?.row_kind === 'upload_summary' ? (
                     <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 leading-snug">
-                      <strong>SUP- / SUM-</strong> is the <strong>upload file summary</strong>. Open the <strong>Lines</strong> tab for SKU detail rolled up from parsed invoices (SUE-…) in this upload, or pick an <strong>SUE-</strong> row in the list for a single invoice.
+                      <strong>SUP- / SUM-</strong> is the <strong>upload file summary</strong>. This screen opens on the <strong>Lines</strong> tab by default so SKU-level rows are visible. Use <strong>General</strong> for file name, period, and header totals. You can also open an <strong>SUE-</strong> row for a single invoice.
                     </p>
+                  ) : null}
+                  {selected?.row_kind === 'upload_summary' && detail && lineItemCount > 0 ? (
+                    <div className="mb-4 rounded border border-slate-200 bg-white overflow-hidden shadow-sm">
+                      <div className="px-3 py-2 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 bg-slate-50/90">
+                        <p className="text-[11px] font-semibold text-slate-700">SKU preview (first {Math.min(5, lineItemCount)} of {lineItemCount})</p>
+                        <button
+                          type="button"
+                          className="text-[11px] font-semibold text-teal-800 hover:underline"
+                          onClick={() => setCardTab('lines')}
+                        >
+                          All columns on Lines →
+                        </button>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[11px]">
+                          <thead className="bg-slate-50 text-slate-600">
+                            <tr>
+                              <th className="text-left px-2 py-1.5">SKU / item no.</th>
+                              <th className="text-right px-2 py-1.5">Qty</th>
+                              <th className="text-right px-2 py-1.5">Invoice amt.</th>
+                              <th className="text-left px-2 py-1.5">Invoice</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(detail.meta!.line_items as Record<string, unknown>[]).slice(0, 5).map((li, i) => (
+                              <tr key={i} className="border-t border-slate-100">
+                                <td className="px-2 py-1.5 font-mono text-slate-800 max-w-[14rem] truncate" title={liStr(li, 'sku', 'SKU', 'item_no', 'Item_No')}>
+                                  {liStr(li, 'sku', 'SKU', 'item_no', 'Item_No') || '—'}
+                                </td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{Number(li.quantity ?? li.Quantity ?? 0) || '—'}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">
+                                  {fmtDec(Number(li.invoice_amount ?? li.Invoice_Amount ?? 0))}
+                                </td>
+                                <td className="px-2 py-1.5 font-mono text-slate-600 max-w-[8rem] truncate" title={liStr(li, 'source_invoice_no', 'invoice_number', 'Invoice_Number')}>
+                                  {liStr(li, 'source_invoice_no', 'invoice_number', 'Invoice_Number') || '—'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   ) : null}
                   <SiFormField label="No. / external" value={draft.invoice_no ?? ''} onChange={v => setD('invoice_no', v)} />
                   <SiFormField label="Posting date" value={draft.voucher_date ?? ''} onChange={v => setD('voucher_date', v)} type="date" />
@@ -2538,13 +2589,19 @@ function SalesInvoicesTab({
                   <SiFormField label="Net" value={draft.net_payable ?? ''} onChange={v => setD('net_payable', v)} />
                 </div>
               ) : (
-                <div className="bg-transparent rounded-sm">
+                <div className="bg-transparent rounded-sm space-y-2">
+                  {selected?.row_kind === 'upload_summary' ? (
+                    <p className="text-[11px] text-slate-700 bg-slate-100 border border-slate-200 rounded px-3 py-2 leading-snug">
+                      These rows are rolled-up <strong>SKU / item lines</strong> from every saved invoice (<strong>SUE-…</strong>) for this upload. Use <strong>General</strong> for file name, period, and header totals.
+                    </p>
+                  ) : null}
                   {detail?.meta?.line_items && detail.meta.line_items.length > 0 ? (
                     <SalesInvoiceBcDetailPanel detail={detail} lineItemsShowSourceInv={lineItemsShowSourceInv} />
                   ) : (
                     <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm">
-                      <p className="text-sm text-slate-500">
-                        No line items on this document. For <strong>SUP-</strong> summaries, lines roll up from parsed SUE entries; re-upload the MTR to capture HSN, ASIN/FNSKU, and bill-from state when the CSV includes them.
+                      <p className="text-sm text-slate-600 mb-2">No SKU line items are stored for this document yet.</p>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        For an upload summary (<strong>SUP-</strong>), the grid is filled from parsed MTR rows saved as <strong>SUE-</strong> entries. If this upload predates that step, <strong>re-upload the same CSV</strong> from Finance → Sales uploads. You can also click an <strong>SUE-</strong> row in the list for lines on a single invoice.
                       </p>
                     </div>
                   )}
