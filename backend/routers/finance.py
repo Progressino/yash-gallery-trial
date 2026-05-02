@@ -1255,7 +1255,57 @@ def _persist_amazon_finance_sales_entries(
                 wh = str(rr.get("Warehouse_Id", "") or "").strip() if "Warehouse_Id" in g2.columns else ""
                 ful = str(rr.get("Fulfillment", "") or "").strip() if "Fulfillment" in g2.columns else ""
                 pay = str(rr.get("Payment_Method", "") or "").strip() if "Payment_Method" in g2.columns else ""
-                irn = str(rr.get("IRN_Status", "") or "").strip() if "IRN_Status" in g2.columns else ""
+                irn_status = str(rr.get("IRN_Status", "") or "").strip() if "IRN_Status" in g2.columns else ""
+                irn_hash = str(rr.get("IRN_Hash", "") or "").strip() if "IRN_Hash" in g2.columns else ""
+                if irn_hash.lower() in ("nan", "none"):
+                    irn_hash = ""
+                ship_from = str(rr.get("Ship_From_State", "") or "").strip() if "Ship_From_State" in g2.columns else ""
+                if ship_from.lower() in ("nan", "none"):
+                    ship_from = bf or ""
+                loc_ln = str(rr.get("Location_Line", "") or "").strip() if "Location_Line" in g2.columns else ""
+                if loc_ln.lower() in ("nan", "none"):
+                    loc_ln = ""
+                if not loc_ln:
+                    loc_ln = " · ".join(p for p in (city_row, st_row, wh) if p and str(p).lower() not in ("nan", "none", ""))
+                inv_dt_txt = str(rr.get("Invoice_Date_Text", "") or "").strip() if "Invoice_Date_Text" in g2.columns else ""
+                if inv_dt_txt.lower() in ("nan", "none"):
+                    inv_dt_txt = ""
+                if not inv_dt_txt and "Date" in g2.columns and pd.notna(rr.get("Date")):
+                    try:
+                        inv_dt_txt = str(pd.Timestamp(rr["Date"]).date())
+                    except Exception:
+                        inv_dt_txt = ""
+                txn_row = str(rr.get("Transaction_Type", "") or "").strip() if "Transaction_Type" in g2.columns else ""
+                gst_r = float(rr.get("GST_Rate", 0) or 0) if "GST_Rate" in g2.columns else 0.0
+                line_tt = float(sign * float(rr["_ttax"]))
+                base_for_rate = abs(line_taxable) if abs(line_taxable) > 1e-9 else abs(amt_l)
+                if (gst_r <= 0 or gst_r != gst_r) and base_for_rate > 1e-9 and abs(line_tt) > 1e-9:
+                    gst_r = round(100.0 * abs(line_tt) / base_for_rate, 4)
+                cn_no = str(rr.get("Credit_Note_No", "") or "").strip() if "Credit_Note_No" in g2.columns else ""
+                cn_dt = str(rr.get("Credit_Note_Date", "") or "").strip() if "Credit_Note_Date" in g2.columns else ""
+                if cn_no.lower() in ("nan", "none"):
+                    cn_no = ""
+                if cn_dt.lower() in ("nan", "none"):
+                    cn_dt = ""
+                ack_dt = str(rr.get("Acknowledgement_Date", "") or "").strip() if "Acknowledgement_Date" in g2.columns else ""
+                if ack_dt.lower() in ("nan", "none"):
+                    ack_dt = ""
+                party_ln = str(rr.get("Buyer_Name", "") or "").strip() if "Buyer_Name" in g2.columns else ""
+                if party_ln.lower() in ("nan", "none"):
+                    party_ln = ""
+                if not party_ln and "Customer_Name_Alt" in g2.columns:
+                    party_ln = str(rr.get("Customer_Name_Alt", "") or "").strip()
+                cust_gst_ln = str(rr.get("Buyer_GSTIN", "") or "").strip().upper() if "Buyer_GSTIN" in g2.columns else ""
+                if cust_gst_ln.lower() in ("nan", "none"):
+                    cust_gst_ln = ""
+                inv_no_row = str(rr.get("Invoice_Number", "") or "").strip() if "Invoice_Number" in g2.columns else ""
+                oid_row = str(rr.get("Order_Id", "") or "").strip() if "Order_Id" in g2.columns else ""
+                ship_to_raw = str(rr.get("Ship_To_State", "") or "").strip() if "Ship_To_State" in g2.columns else ""
+                if ship_to_raw.lower() in ("nan", "none"):
+                    ship_to_raw = ""
+                pos = str(rr.get("Place_Of_Supply", "") or "").strip() if "Place_Of_Supply" in g2.columns else ""
+                if pos and not ship_to_raw:
+                    ship_to_raw = pos
                 items.append({
                     "type": "Item",
                     "sku": str(rr.get("SKU", "") or ""),
@@ -1266,21 +1316,40 @@ def _persist_amazon_finance_sales_entries(
                     "unit_price": round(unit_px, 4),
                     "tax_exclusive_amount": round(line_taxable, 2),
                     "invoice_amount": round(amt_l, 2),
-                    "total_tax": float(sign * float(rr["_ttax"])),
+                    "total_tax": line_tt,
+                    "total_tax_amount": line_tt,
                     "cgst": float(sign * float(rr["_cgst"])),
                     "sgst": float(sign * float(rr["_sgst"])),
                     "igst": float(sign * float(rr["_igst"])),
                     "ship_to_city": city_row,
                     "ship_to_state": loc_line,
+                    "ship_from_state": ship_from,
+                    "location": loc_ln,
+                    "party_name": party_ln,
+                    "invoice_number": inv_no_row,
+                    "invoice_date": inv_dt_txt,
+                    "transaction_type": txn_row,
                     "hsn_sac": hsn,
+                    "item_no": str(rr.get("SKU", "") or ""),
+                    "ship_to_state_code": ship_to_raw,
+                    "tax_exclusive_gross": round(line_taxable, 2),
+                    "gst_rate": gst_r,
+                    "order_id": oid_row,
+                    "credit_note_no": cn_no,
+                    "credit_note_date": cn_dt,
+                    "customer_name": party_ln,
+                    "customer_gst_no": cust_gst_ln,
+                    "irn_hash": irn_hash,
+                    "irn_status": irn_status,
+                    "acknowledgement_date": ack_dt,
                     "bill_from_state": bf,
+                    "place_of_supply": pos,
                     "asin": asin,
                     "fnsku": fnsku,
                     "order_item_id": oid_it,
                     "warehouse_id": wh,
                     "fulfillment": ful,
                     "payment_method": pay,
-                    "irn_status": irn,
                 })
 
             narration = f"{platform} {period} — {txn_type}"

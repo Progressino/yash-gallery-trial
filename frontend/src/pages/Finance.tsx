@@ -1934,6 +1934,14 @@ function liStr(li: Record<string, unknown>, ...keys: string[]): string {
   return ''
 }
 
+function fmtGstRatePct(li: Record<string, unknown>): string {
+  const r = Number(li.gst_rate ?? li.GST_Rate ?? 0)
+  if (!Number.isFinite(r) || r <= 0) return '—'
+  // File may store 5 for 5% or 0.05 for 5%
+  const pct = r <= 1 && r > 0 ? r * 100 : r
+  return `${pct.toFixed(2)}%`
+}
+
 function SalesInvoiceBcDetailPanel({
   detail,
   lineItemsShowSourceInv,
@@ -1959,68 +1967,96 @@ function SalesInvoiceBcDetailPanel({
           <span className="text-[10px] text-slate-500">{lines.length} row{lines.length !== 1 ? 's' : ''}</span>
         </div>
         <div className="overflow-auto max-h-[52vh]">
-          <table className="w-full text-[11px] min-w-[920px]">
+          <table className="w-full text-[10px] min-w-[2200px]">
             <thead className="bg-slate-50 sticky top-0 z-[1]">
               <tr className="text-left text-slate-600">
-                {lineItemsShowSourceInv ? <th className="px-2 py-2 whitespace-nowrap">Invoice</th> : null}
-                <th className="px-2 py-2 whitespace-nowrap">Type</th>
-                <th className="px-2 py-2 whitespace-nowrap">No.</th>
-                <th className="px-2 py-2 whitespace-nowrap">Variant</th>
-                <th className="px-2 py-2 whitespace-nowrap">Item ref.</th>
-                <th className="px-2 py-2 min-w-[7rem]">Description</th>
-                <th className="px-2 py-2 whitespace-nowrap">Location</th>
-                <th className="px-2 py-2 whitespace-nowrap">HSN/SAC</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">Qty</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">Unit price</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">Tax excl.</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">CGST</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">SGST</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">IGST</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">Line tax</th>
-                <th className="px-2 py-2 text-right whitespace-nowrap">Line total</th>
+                {lineItemsShowSourceInv ? <th className="px-1.5 py-2 whitespace-nowrap">Source inv.</th> : null}
+                <th className="px-1.5 py-2 whitespace-nowrap">Ship from state</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Location</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Party name</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Invoice number</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Invoice date</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Transaction type</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">Qty</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">HSN/SAC</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Item no.</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Ship to state</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">Invoice amount</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">Tax excl. gross</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">Total tax</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">GST rate</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Order id</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Credit note no.</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Credit note date</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Customer name</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Customer GST no.</th>
+                <th className="px-1.5 py-2 whitespace-nowrap max-w-[8rem]">IRN hash</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Ack. date</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">CGST</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">SGST</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">IGST</th>
+                <th className="px-1.5 py-2 text-right whitespace-nowrap">Line total</th>
               </tr>
             </thead>
             <tbody>
               {lines.map((li, i) => {
                 const qty = Number(li.quantity ?? li.Quantity ?? 0)
-                const unit = Number(li.unit_price ?? 0)
-                const tex = Number(li.tax_exclusive_amount ?? li.invoice_amount ?? li.Invoice_Amount ?? 0)
+                const tex = Number(li.tax_exclusive_gross ?? li.tax_exclusive_amount ?? li.invoice_amount ?? li.Invoice_Amount ?? 0)
+                const invAmt = Number(li.invoice_amount ?? li.Invoice_Amount ?? 0)
                 const cg = Number(li.cgst ?? li.CGST ?? 0)
                 const sg = Number(li.sgst ?? li.SGST ?? 0)
                 const ig = Number(li.igst ?? li.IGST ?? 0)
-                const tt = Number(li.total_tax ?? 0) || cg + sg + ig
-                const invAmt = Number(li.invoice_amount ?? li.Invoice_Amount ?? 0)
+                const tt = Number(li.total_tax_amount ?? li.total_tax ?? 0) || cg + sg + ig
                 const base = Math.abs(tex) > 1e-9 ? tex : invAmt
                 const lineTot = base + (Number.isFinite(tt) ? tt : 0)
-                const loc = liStr(li, 'warehouse_id', 'Warehouse_Id') || liStr(li, 'fulfillment', 'Fulfillment')
+                const shipFrom = liStr(li, 'ship_from_state', 'Ship_From_State', 'bill_from_state', 'Bill_From_State')
+                const loc = liStr(li, 'location', 'Location_Line')
+                const party = liStr(li, 'party_name', 'Party_Name', 'customer_name', 'Customer_Name')
+                const invNo = liStr(li, 'invoice_number', 'Invoice_Number', 'source_invoice_no')
+                const invDt = liStr(li, 'invoice_date', 'Invoice_Date')
+                const txn = liStr(li, 'transaction_type', 'Transaction_Type', 'type', 'Type')
                 const hsn = liStr(li, 'hsn_sac', 'HSN_SAC')
-                const desc = liStr(li, 'product_name', 'Product_Name')
-                const typ = liStr(li, 'type', 'Type') || 'Item'
-                const variant = liStr(li, 'variant_code', 'fnsku', 'FNSKU')
-                const ref = liStr(li, 'item_reference', 'asin', 'ASIN')
-                const sku = liStr(li, 'sku', 'SKU')
+                const itemNo = liStr(li, 'item_no', 'Item_No', 'sku', 'SKU')
+                const shipTo = liStr(li, 'ship_to_state_code', 'Ship_To_State') || liStr(li, 'ship_to_state', 'place_of_supply', 'Place_Of_Supply')
+                const oid = liStr(li, 'order_id', 'Order_Id')
+                const cnNo = liStr(li, 'credit_note_no', 'Credit_Note_No')
+                const cnDt = liStr(li, 'credit_note_date', 'Credit_Note_Date')
+                const cust = liStr(li, 'customer_name', 'Customer_Name') || party
+                const custGst = liStr(li, 'customer_gst_no', 'Customer_Gst_No', 'customer_gstin')
+                const irnH = liStr(li, 'irn_hash', 'IRN_Hash')
+                const ack = liStr(li, 'acknowledgement_date', 'Acknowledgement_Date')
                 return (
                   <tr key={i} className="border-t border-slate-100 hover:bg-slate-50/80">
                     {lineItemsShowSourceInv ? (
-                      <td className="px-2 py-1.5 font-mono text-slate-600 max-w-[6.5rem] truncate" title={liStr(li, 'source_invoice_no')}>
+                      <td className="px-1.5 py-1.5 font-mono text-slate-600 max-w-[5rem] truncate" title={liStr(li, 'source_invoice_no')}>
                         {liStr(li, 'source_invoice_no') || '—'}
                       </td>
                     ) : null}
-                    <td className="px-2 py-1.5 text-slate-700">{typ}</td>
-                    <td className="px-2 py-1.5 font-mono text-slate-800 max-w-[7rem] truncate" title={sku}>{sku || '—'}</td>
-                    <td className="px-2 py-1.5 font-mono text-slate-600 max-w-[5rem] truncate" title={variant}>{variant || '—'}</td>
-                    <td className="px-2 py-1.5 font-mono text-slate-600 max-w-[7rem] truncate" title={ref}>{ref || '—'}</td>
-                    <td className="px-2 py-1.5 text-slate-700 max-w-[11rem] truncate" title={desc}>{desc || '—'}</td>
-                    <td className="px-2 py-1.5 text-slate-600 max-w-[5rem] truncate" title={loc}>{loc || '—'}</td>
-                    <td className="px-2 py-1.5 font-mono text-slate-600">{hsn || '—'}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{qty}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-700">{unit ? fmtDec(unit) : '—'}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{fmtDec(tex)}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-600">{cg ? fmtDec(cg) : '—'}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-600">{sg ? fmtDec(sg) : '—'}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-600">{ig ? fmtDec(ig) : '—'}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{tt ? fmtDec(tt) : '—'}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums font-medium text-slate-900">{fmtDec(lineTot)}</td>
+                    <td className="px-1.5 py-1.5 text-slate-800 max-w-[5rem] truncate" title={shipFrom}>{shipFrom || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-700 max-w-[7rem] truncate" title={loc}>{loc || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-800 max-w-[7rem] truncate" title={party}>{party || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={invNo}>{invNo || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-700 whitespace-nowrap">{invDt || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-700 max-w-[5rem] truncate" title={txn}>{txn || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">{qty}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-700">{hsn || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={itemNo}>{itemNo || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-700 max-w-[5rem] truncate" title={shipTo}>{shipTo || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">{fmtDec(invAmt)}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">{fmtDec(tex)}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">{fmtDec(tt)}</td>
+                    <td className="px-1.5 py-1.5 text-right font-mono text-slate-800">{fmtGstRatePct(li)}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-700 max-w-[6rem] truncate" title={oid}>{oid || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono max-w-[5rem] truncate" title={cnNo}>{cnNo || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono whitespace-nowrap">{cnDt || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-800 max-w-[7rem] truncate" title={cust}>{cust || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-[9px] max-w-[7rem] truncate" title={custGst}>{custGst || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-[9px] max-w-[8rem] break-all" title={irnH}>{irnH || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono whitespace-nowrap">{ack || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums text-slate-600">{cg ? fmtDec(cg) : '—'}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums text-slate-600">{sg ? fmtDec(sg) : '—'}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums text-slate-600">{ig ? fmtDec(ig) : '—'}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums font-medium text-slate-900">{fmtDec(lineTot)}</td>
                   </tr>
                 )
               })}
@@ -2065,7 +2101,7 @@ function SalesInvoiceBcDetailPanel({
           </table>
         </div>
         <p className="text-[10px] text-slate-500 border-t border-slate-100 pt-2 leading-snug">
-          Same layout idea as Dynamics 365 BC. Data comes from your marketplace file: re-upload Amazon MTR after upgrade to fill HSN, ASIN/FNSKU, and bill-from state when those columns exist. Meesho / other platforms keep their existing columns until extended.
+          Columns match your mandatory GST invoice field list when the Amazon MTR (or compatible CSV) includes them. Empty cells mean the column was missing in that file — re-upload after export updates. GST rate is taken from the file or derived from line tax ÷ taxable when absent.
         </p>
       </aside>
     </div>

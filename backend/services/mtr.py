@@ -60,7 +60,8 @@ def _downcast_mtr(df: pd.DataFrame) -> pd.DataFrame:
               "IRN_Status", "Month", "Month_Label"]:
         if c in df.columns:
             df[c] = df[c].astype("category")
-    for c in ["Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST"]:
+    for c in ["Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
+              "Tax_Exclusive_Gross", "Item_Price", "GST_Rate"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("float32")
     return df
@@ -118,6 +119,13 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "shipment to state", "shipment to city", "fnsku", "asin", "fc",
         # Tax / catalog (BC-style invoice lines when present in file)
         "hsn sac", "hsn code", "hsn", "tax exclusive gross", "order item id",
+        # Mandatory-style GST / e-invoice fields (Amazon MTR / GST report variants)
+        "ship from state", "ship from", "location", "place of supply", "place of supply state",
+        "gst rate", "tax rate", "integrated tax rate", "cess rate",
+        "credit note no", "credit note number", "credit note id", "credit note date",
+        "irn hash", "e invoice irn hash", "irn", "e invoice irn", "irn number",
+        "acknowledgement date", "acknowledgment date", "ack date", "acknowledgement no date",
+        "customer name", "customer gst no", "customer gstin", "buyer gstin",
     }
     want = (want_b2c | {"irn filing status", "customer bill to gstid"}) if is_b2b else want_b2c
     raw = raw[[c for c in raw.columns if c in want]]
@@ -215,6 +223,51 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     _seller_gstin_col = next((c for c in ["seller gstin", "seller gstin number", "seller gst registration no"] if c in raw.columns), None)
     _seller_company_col = next((c for c in ["seller legal name", "seller name", "seller"] if c in raw.columns), None)
 
+    buyer_raw = g("buyer name")
+    customer_alt = gcol("customer name", "party name")
+    buyer_merged = buyer_raw.where(buyer_raw.str.strip().ne(""), customer_alt)
+
+    inv_date_txt = g("invoice date") if "invoice date" in raw.columns else pd.Series("", index=raw.index, dtype=str)
+    ship_from_s = gcol("ship from state", "ship from")
+    bill_from_s = gcol("bill from state")
+    ship_from_final = ship_from_s.where(ship_from_s.str.strip().ne(""), bill_from_s)
+
+    loc_raw = gcol("location", "dispatch city")
+    city_for_loc = g(_city_col) if _city_col else pd.Series("", index=raw.index, dtype=str)
+    st_for_loc = g(_state_col).str.upper() if _state_col else pd.Series("", index=raw.index, dtype=str)
+    wh_for_loc = g("warehouse id")
+
+    def _clean_loc_part(x: str) -> str:
+        t = str(x).strip()
+        if not t or t.lower() in ("nan", "none", ""):
+            return ""
+        return t
+
+    loc_fallback = pd.Series(
+        [
+            " · ".join(p for p in (_clean_loc_part(c), _clean_loc_part(s), _clean_loc_part(w)) if p)
+            for c, s, w in zip(city_for_loc, st_for_loc, wh_for_loc)
+        ],
+        index=raw.index,
+        dtype=str,
+    )
+    location_line = loc_raw.where(loc_raw.str.strip().ne(""), loc_fallback)
+
+    gst_rate_col = (
+        gn("gst rate") if "gst rate" in raw.columns
+        else (gn("tax rate") if "tax rate" in raw.columns
+              else (gn("integrated tax rate") if "integrated tax rate" in raw.columns
+                    else pd.Series(0.0, index=raw.index, dtype="float32")))
+    )
+
+    cust_gst_alt = gcol("customer gst no", "customer gstin", "buyer gstin")
+    buyer_gstin_base = (
+        raw["customer bill to gstid"].fillna("").astype(str).str.strip().str.upper()
+        if "customer bill to gstid" in raw.columns
+        else pd.Series("", index=raw.index, dtype=str)
+    )
+    buyer_gstin_final = buyer_gstin_base.where(buyer_gstin_base.str.strip().ne(""), cust_gst_alt.str.upper())
+
     out = pd.DataFrame({
         "Date":             raw["_Date"],
         "Report_Type":      report_type,
@@ -227,6 +280,7 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "SGST":             gn("sgst tax"),
         "IGST":             gn("igst tax"),
         "Ship_To_State":    g(_state_col).str.upper() if _state_col else pd.Series("", index=raw.index, dtype=str),
+        "Place_Of_Supply":  gcol("place of supply", "place of supply state"),
         "Warehouse_Id":     g("warehouse id"),
         "Fulfillment":      g("fulfillment channel"),
         "Payment_Method":   g("payment method code"),
@@ -234,16 +288,24 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "Invoice_Number":   g("invoice number"),
         "Seller_GSTIN":     g(_seller_gstin_col).str.upper() if _seller_gstin_col else pd.Series("", index=raw.index, dtype=str),
         "Seller_Company":   g(_seller_company_col) if _seller_company_col else pd.Series("", index=raw.index, dtype=str),
-        "Buyer_Name":       g("buyer name"),
+        "Buyer_Name":       buyer_merged,
+        "Customer_Name_Alt": customer_alt,
         "IRN_Status":       g("irn filing status"),
         "Product_Name":    g("product name"),
         "Ship_To_City":    g(_city_col) if _city_col else pd.Series("", index=raw.index, dtype=str),
-        "Buyer_GSTIN": (
-            raw["customer bill to gstid"].fillna("").astype(str).str.strip().str.upper()
-            if "customer bill to gstid" in raw.columns
-            else pd.Series("", index=raw.index, dtype=str)
+        "Buyer_GSTIN": buyer_gstin_final,
+        "Ship_From_State":    ship_from_final,
+        "Bill_From_State":    bill_from_s,
+        "Location_Line":      location_line,
+        "Invoice_Date_Text":  inv_date_txt,
+        "GST_Rate":           gst_rate_col,
+        "Credit_Note_No":     gcol("credit note no", "credit note number", "credit note id"),
+        "Credit_Note_Date":   gcol("credit note date"),
+        "IRN_Hash":           gcol("irn hash", "e invoice irn hash", "e invoice irn", "irn number", "irn"),
+        "Acknowledgement_Date": gcol(
+            "acknowledgement date", "acknowledgment date", "ack date",
+            "acknowledgement no date", "ack no date",
         ),
-        "Bill_From_State":    gcol("bill from state"),
         "HSN_SAC":            gcol("hsn sac", "hsn code", "hsn"),
         "ASIN":               gcol("asin"),
         "FNSKU":              gcol("fnsku"),
@@ -326,13 +388,16 @@ def _amazon_fba_aggregate_order_lines(df: pd.DataFrame, *, has_order_id: bool) -
     sum_cols = [
         c for c in (
             "Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
+            "Tax_Exclusive_Gross", "Item_Price",
         ) if c in work.columns
     ]
     first_cols = [
         c for c in (
-            "Report_Type", "Ship_To_State", "Ship_To_City", "Warehouse_Id", "Fulfillment",
-            "Payment_Method", "Invoice_Number", "Buyer_Name", "Buyer_GSTIN", "IRN_Status",
-            "Product_Name",
+            "Report_Type", "Ship_To_State", "Ship_To_City", "Place_Of_Supply", "Warehouse_Id", "Fulfillment",
+            "Payment_Method", "Invoice_Number", "Buyer_Name", "Customer_Name_Alt", "Buyer_GSTIN", "IRN_Status",
+            "Product_Name", "Ship_From_State", "Bill_From_State", "Location_Line", "Invoice_Date_Text",
+            "GST_Rate", "Credit_Note_No", "Credit_Note_Date", "IRN_Hash", "Acknowledgement_Date",
+            "HSN_SAC", "ASIN", "FNSKU", "Order_Item_Id",
         ) if c in work.columns and c not in sum_cols
     ]
     agg: dict = {"Date": "max"}
