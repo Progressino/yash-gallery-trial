@@ -116,6 +116,8 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         # Amazon FBA Shipment Report (numeric-named files):
         "customer shipment date", "merchant sku", "product amount", "shipping amount",
         "shipment to state", "shipment to city", "fnsku", "asin", "fc",
+        # Tax / catalog (BC-style invoice lines when present in file)
+        "hsn sac", "hsn code", "hsn", "tax exclusive gross", "order item id",
     }
     want = (want_b2c | {"irn filing status", "customer bill to gstid"}) if is_b2b else want_b2c
     raw = raw[[c for c in raw.columns if c in want]]
@@ -184,6 +186,12 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
                 if name in raw.columns
                 else pd.Series(0.0, index=raw.index, dtype="float32"))
 
+    def gcol(*names: str) -> pd.Series:
+        for name in names:
+            if name in raw.columns:
+                return g(name)
+        return pd.Series("", index=raw.index, dtype=str)
+
     txn = g("transaction type").str.lower()
     txn_std = pd.Series("Shipment", index=raw.index, dtype=str)
     txn_std[txn.str.contains(
@@ -234,6 +242,19 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
             raw["customer bill to gstid"].fillna("").astype(str).str.strip().str.upper()
             if "customer bill to gstid" in raw.columns
             else pd.Series("", index=raw.index, dtype=str)
+        ),
+        "Bill_From_State":    gcol("bill from state"),
+        "HSN_SAC":            gcol("hsn sac", "hsn code", "hsn"),
+        "ASIN":               gcol("asin"),
+        "FNSKU":              gcol("fnsku"),
+        "Order_Item_Id":      gcol("order item id"),
+        "Tax_Exclusive_Gross": (
+            gn("tax exclusive gross") if "tax exclusive gross" in raw.columns
+            else pd.Series(0.0, index=raw.index, dtype="float32")
+        ),
+        "Item_Price": (
+            gn("item price") if "item price" in raw.columns
+            else pd.Series(0.0, index=raw.index, dtype="float32")
         ),
     })
     del raw

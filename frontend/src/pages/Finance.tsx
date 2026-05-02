@@ -284,6 +284,9 @@ interface DaybookVoucher {
     platform?: string
     period?: string
     source_filename?: string
+    seller_gstin?: string
+    seller_company?: string
+    seller_state?: string
     line_items?: Array<Record<string, unknown>>
   }
 }
@@ -2258,6 +2261,27 @@ function SalesInvoicesTab({
               ) : cardTab === 'general' ? (
                 <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm max-w-3xl">
                   <p className="text-[11px] font-semibold text-slate-500 uppercase mb-3">Invoice &amp; customer</p>
+                  {detail ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4 p-3 rounded border border-slate-200 bg-slate-50/90 text-[11px]">
+                      <div>
+                        <span className="text-slate-500 font-semibold">Status</span>
+                        <p className="text-slate-900">Posted to Finance (upload lock)</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 font-semibold">Document type</span>
+                        <p className="text-slate-900">{detail.voucher_type}</p>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <span className="text-slate-500 font-semibold">Seller (from upload)</span>
+                        <p className="text-slate-900 truncate" title={(detail.meta?.seller_company || '').toString()}>
+                          {(detail.meta?.seller_company || '—').toString()}
+                          {(detail.meta?.seller_gstin || '').toString() ? (
+                            <span className="block font-mono text-[10px] text-slate-600 mt-0.5">{detail.meta?.seller_gstin}</span>
+                          ) : null}
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
                   {selected?.row_kind === 'upload_summary' ? (
                     <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 leading-snug">
                       <strong>SUP- / SUM-</strong> is the <strong>upload file summary</strong>. Open the <strong>Lines</strong> tab for SKU detail rolled up from parsed invoices (SUE-…) in this upload, or pick an <strong>SUE-</strong> row in the list for a single invoice.
