@@ -2,9 +2,10 @@
 SQLite persistence layer for Finance module.
 DB path: /data/finance.db (env FINANCE_DB_PATH), fallback ./finance_dev.db for local dev.
 """
+import json
 import os
 import sqlite3
-from typing import Optional
+from typing import Any, Optional
 
 DB_PATH = os.environ.get("FINANCE_DB_PATH", "/data/finance.db")
 
@@ -172,6 +173,14 @@ def init_db() -> None:
             source_filename TEXT    DEFAULT '',
             line_items      TEXT    DEFAULT '[]',
             created_at      TEXT    DEFAULT (datetime('now'))
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS finance_sales_invoice_edits (
+            voucher_id INTEGER PRIMARY KEY,
+            patch_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT DEFAULT (datetime('now'))
         )
     """)
 
@@ -1155,6 +1164,153 @@ def create_finance_sales_entries(sales_upload_id: int, entries: list[dict]) -> i
 # Keep well above 2_000_000 + max(finance_sales_entries.id) to avoid colliding with SUE-* voucher ids.
 UPLOAD_SUMMARY_VOUCHER_BASE = 10_000_000
 
+_NUM_PATCH_KEYS = frozenset(
+    {"taxable_amount", "cgst_amount", "sgst_amount", "igst_amount", "total_amount", "net_payable"}
+)
+
+
+def get_sales_invoice_edit_patch(voucher_id: int) -> dict:
+    """User overrides for synthetic / sales-upload voucher payloads (JSON merge)."""
+    conn = _connect()
+    r = conn.execute(
+        "SELECT patch_json FROM finance_sales_invoice_edits WHERE voucher_id = ?",
+        (int(voucher_id),),
+    ).fetchone()
+    conn.close()
+    if not r or not r[0]:
+        return {}
+    try:
+        return json.loads(r[0])
+    except Exception:
+        return {}
+
+
+def _invoice_edit_map(conn: sqlite3.Connection, voucher_ids: list[int]) -> dict[int, dict]:
+    if not voucher_ids:
+        return {}
+    ph = ",".join("?" * len(voucher_ids))
+    rows = conn.execute(
+        f"SELECT voucher_id, patch_json FROM finance_sales_invoice_edits WHERE voucher_id IN ({ph})",
+        [int(x) for x in voucher_ids],
+    ).fetchall()
+    out: dict[int, dict] = {}
+    for row in rows:
+        try:
+            out[int(row["voucher_id"])] = json.loads(row["patch_json"] or "{}")
+        except Exception:
+            out[int(row["voucher_id"])] = {}
+    return out
+
+
+def upsert_sales_invoice_edit_patch(voucher_id: int, patch: dict[str, Any]) -> dict:
+    """Merge `patch` into stored JSON for this voucher id. Returns merged dict."""
+    vid = int(voucher_id)
+    conn = _connect()
+    old = conn.execute(
+        "SELECT patch_json FROM finance_sales_invoice_edits WHERE voucher_id = ?",
+        (vid,),
+    ).fetchone()
+    merged: dict = {}
+    if old and old[0]:
+        try:
+            merged = json.loads(old[0])
+        except Exception:
+            merged = {}
+    for k, v in patch.items():
+        if v is None:
+            continue
+        merged[str(k)] = v
+    conn.execute(
+        """INSERT INTO finance_sales_invoice_edits (voucher_id, patch_json, updated_at)
+           VALUES (?,?,datetime('now'))
+           ON CONFLICT(voucher_id) DO UPDATE SET
+             patch_json = excluded.patch_json,
+             updated_at = excluded.updated_at""",
+        (vid, json.dumps(merged)),
+    )
+    conn.commit()
+    conn.close()
+    return merged
+
+
+def _apply_sales_invoice_row_patch(row: dict, patch: dict) -> dict:
+    if not patch:
+        return row
+    r = dict(row)
+    if patch.get("invoice_no") is not None:
+        r["invoice_no"] = str(patch["invoice_no"])
+    if patch.get("voucher_date") is not None:
+        r["voucher_date"] = str(patch["voucher_date"])
+    if patch.get("party_name") is not None:
+        r["party_name"] = str(patch["party_name"])
+    if patch.get("party_gstin") is not None:
+        r["party_gstin"] = str(patch["party_gstin"])
+    if patch.get("party_state") is not None:
+        r["party_state"] = str(patch["party_state"])
+    if patch.get("ship_to_state") is not None:
+        r["ship_to_state"] = str(patch["ship_to_state"])
+    if patch.get("order_id") is not None:
+        r["order_id"] = str(patch["order_id"])
+    if patch.get("source_filename") is not None:
+        r["source_filename"] = str(patch["source_filename"])
+    if patch.get("platform") is not None:
+        r["platform"] = str(patch["platform"])
+    if patch.get("period") is not None:
+        r["period"] = str(patch["period"])
+    for nk in _NUM_PATCH_KEYS:
+        if nk in patch and patch[nk] is not None:
+            try:
+                r[nk] = round(float(patch[nk]), 2)
+            except (TypeError, ValueError):
+                pass
+    return r
+
+
+def _apply_sales_invoice_patch_to_voucher(v: dict, patch: dict) -> dict:
+    if not patch:
+        return v
+    out = dict(v)
+    meta = dict(out.get("meta") or {})
+    if patch.get("invoice_no") is not None:
+        inv = str(patch["invoice_no"])
+        out["bill_no"] = inv
+        meta["invoice_no"] = inv
+    if patch.get("voucher_date") is not None:
+        out["voucher_date"] = str(patch["voucher_date"])
+        if patch.get("bill_date") is None:
+            out["bill_date"] = str(patch["voucher_date"])
+    if patch.get("bill_date") is not None:
+        out["bill_date"] = str(patch["bill_date"])
+    if patch.get("party_name") is not None:
+        out["party_name"] = str(patch["party_name"])
+    if patch.get("party_gstin") is not None:
+        out["party_gstin"] = str(patch["party_gstin"])
+    if patch.get("party_state") is not None:
+        out["party_state"] = str(patch["party_state"])
+    if patch.get("ship_to_state") is not None:
+        meta["ship_to_state"] = str(patch["ship_to_state"])
+    if patch.get("order_id") is not None:
+        meta["order_id"] = str(patch["order_id"])
+        out["ref_number"] = str(patch["order_id"])
+    if patch.get("source_filename") is not None:
+        meta["source_filename"] = str(patch["source_filename"])
+    if patch.get("platform") is not None:
+        meta["platform"] = str(patch["platform"])
+    if patch.get("period") is not None:
+        meta["period"] = str(patch["period"])
+    if patch.get("narration") is not None:
+        out["narration"] = str(patch["narration"])
+    if patch.get("supply_type") is not None:
+        out["supply_type"] = str(patch["supply_type"])
+    for nk in _NUM_PATCH_KEYS:
+        if nk in patch and patch[nk] is not None:
+            try:
+                out[nk] = round(float(patch[nk]), 2)
+            except (TypeError, ValueError):
+                pass
+    out["meta"] = meta
+    return out
+
 
 def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
     """Synthetic voucher payload for a finance_sales_entries row (id offset 2_000_000)."""
@@ -1190,8 +1346,9 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
             "is_debit": 1,
         })
     vdate = rr.get("voucher_date") or f"{str(rr.get('period') or '')[:7]}-01"
-    return {
-        "id": 2_000_000 + int(rr["id"]),
+    vid = 2_000_000 + int(rr["id"])
+    v = {
+        "id": vid,
         "voucher_no": f"SUE-{rr['id']}",
         "voucher_date": vdate,
         "voucher_type": "Sales Upload",
@@ -1227,6 +1384,8 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
             "line_items": line_items,
         },
     }
+    patch = get_sales_invoice_edit_patch(vid)
+    return _apply_sales_invoice_patch_to_voucher(v, patch)
 
 
 def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
@@ -1249,15 +1408,19 @@ def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
     ret = float(rr.get("total_returns") or 0.0)
     net = float(rr.get("net_revenue") or 0.0)
     party = (rr.get("company_name") or "").strip() or (rr.get("seller_gstin") or "").strip() or (rr.get("platform") or "")
-    return {
-        "id": UPLOAD_SUMMARY_VOUCHER_BASE + int(rr["id"]),
-        "voucher_no": f"SUP-{rr['id']}",
+    uid = int(rr["id"])
+    doc_no = f"SUM-{uid}"
+    cstate = str(rr.get("company_state") or "")
+    vid = UPLOAD_SUMMARY_VOUCHER_BASE + uid
+    v = {
+        "id": vid,
+        "voucher_no": f"SUP-{uid}",
         "voucher_date": vdate,
         "voucher_type": "Sales Upload",
         "party_name": party,
         "party_gstin": str(rr.get("seller_gstin") or ""),
-        "party_state": str(rr.get("company_state") or ""),
-        "bill_no": "",
+        "party_state": cstate,
+        "bill_no": doc_no,
         "bill_date": vdate,
         "supply_type": "Intra",
         "narration": f"Upload summary · {int(rr.get('total_orders') or 0)} orders in file; SUE rows list parsed invoices when present.",
@@ -1273,20 +1436,26 @@ def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
         "payment_mode": "",
         "bank_ledger": "",
         "cheque_no": "",
-        "ref_number": f"UPLOAD-{rr['id']}",
+        "ref_number": f"UPLOAD-{uid}",
         "lines": [],
         "meta": {
             "source": "finance_sales_upload_summary",
-            "sales_upload_id": int(rr["id"]),
+            "sales_upload_id": uid,
             "platform": rr.get("platform"),
             "period": rr.get("period"),
             "filename": rr.get("filename"),
+            "invoice_no": doc_no,
+            "order_id": f"UPLOAD-{uid}",
+            "ship_to_state": cstate,
+            "source_filename": str(rr.get("filename") or ""),
             "total_orders": int(rr.get("total_orders") or 0),
             "total_revenue": round(gross, 2),
             "total_returns": round(ret, 2),
             "line_items": [],
         },
     }
+    patch = get_sales_invoice_edit_patch(vid)
+    return _apply_sales_invoice_patch_to_voucher(v, patch)
 
 
 def list_sales_invoices(
@@ -1390,6 +1559,8 @@ def list_sales_invoices(
         ret = float(su.get("total_returns") or 0.0)
         net = float(su.get("net_revenue") or 0.0)
         party = (su.get("company_name") or "").strip() or (su.get("seller_gstin") or "").strip() or (su.get("platform") or "")
+        doc_no = f"SUM-{uid}"
+        cst = str(su.get("company_state") or "")
         out.append({
             "id": UPLOAD_SUMMARY_VOUCHER_BASE + uid,
             "voucher_no": f"SUP-{uid}",
@@ -1398,12 +1569,12 @@ def list_sales_invoices(
             "voucher_date": vdate,
             "platform": str(su.get("platform") or ""),
             "period": str(su.get("period") or ""),
-            "invoice_no": "",
+            "invoice_no": doc_no,
             "order_id": f"UPLOAD-{uid}",
             "party_name": party,
             "party_gstin": str(su.get("seller_gstin") or ""),
-            "party_state": str(su.get("company_state") or ""),
-            "ship_to_state": "",
+            "party_state": cst,
+            "ship_to_state": cst,
             "taxable_amount": round(gross - ret, 2),
             "cgst_amount": 0.0,
             "sgst_amount": 0.0,
@@ -1412,6 +1583,10 @@ def list_sales_invoices(
             "net_payable": round(net, 2),
             "source_filename": str(su.get("filename") or ""),
         })
+
+    ids = [int(r["id"]) for r in out]
+    pmap = _invoice_edit_map(conn, ids)
+    out = [_apply_sales_invoice_row_patch(r, pmap.get(int(r["id"]), {})) for r in out]
     conn.close()
 
     out.sort(key=lambda r: (r.get("voucher_date") or "", r.get("id")), reverse=True)

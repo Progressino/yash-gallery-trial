@@ -1893,6 +1893,29 @@ function CashBankBookTab({ mode }: { mode: 'cash' | 'bank' }) {
   )
 }
 
+// ── Sales Invoices — BC-style document form fields ─────────────────
+function SiFormField(props: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  type?: string
+  disabled?: boolean
+}) {
+  const { label, value, onChange, type = 'text', disabled } = props
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-[10rem_1fr] gap-1 sm:gap-2 py-1.5 border-b border-slate-200/80">
+      <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide pt-1.5">{label}</label>
+      <input
+        type={type}
+        disabled={disabled}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className={`text-sm border rounded px-2 py-1.5 w-full ${disabled ? 'bg-slate-50 text-slate-500' : 'border-slate-300 bg-white'}`}
+      />
+    </div>
+  )
+}
+
 // ── Sales Invoices Tab (auto from Finance Sales Uploads) ───────────
 function salesInvoicesDedupedNet(rows: SalesInvoiceRow[]) {
   const uploadsWithEntry = new Set<number>()
@@ -1931,10 +1954,15 @@ function salesInvoicesDedupedTax(rows: SalesInvoiceRow[]) {
 }
 
 function SalesInvoicesTab() {
+  const qc = useQueryClient()
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [cardOpen, setCardOpen] = useState(false)
+  const [cardTab, setCardTab] = useState<'general' | 'lines'>('general')
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [saveMsg, setSaveMsg] = useState<string | null>(null)
 
   const q = useMemo(() => {
     const p = new URLSearchParams()
@@ -1951,17 +1979,103 @@ function SalesInvoicesTab() {
   })
 
   useEffect(() => {
-    if (rows.length === 0) { setSelectedId(null); return }
+    if (rows.length === 0) {
+      setSelectedId(null)
+      setCardOpen(false)
+      return
+    }
     if (selectedId == null || !rows.some(r => r.id === selectedId)) setSelectedId(rows[0].id)
   }, [rows, selectedId])
 
   const selected = rows.find(r => r.id === selectedId) || null
-  const { data: detail } = useQuery<DaybookVoucher>({
+  const { data: detail, isLoading: detailLoading } = useQuery<DaybookVoucher>({
     queryKey: ['finance-sales-invoice-detail', selectedId],
     queryFn: async () => { const { data } = await api.get(`/finance/vouchers/${selectedId}`); return data },
     enabled: !!selectedId,
     staleTime: 30 * 1000,
   })
+
+  useEffect(() => {
+    if (!detail || !cardOpen) return
+    const inv = (detail.bill_no || detail.meta?.invoice_no || '').toString()
+    setDraft({
+      invoice_no: inv,
+      voucher_date: (detail.voucher_date || '').toString(),
+      bill_date: (detail.bill_date || detail.voucher_date || '').toString(),
+      party_name: detail.party_name || '',
+      party_gstin: (detail.party_gstin || '').toString(),
+      party_state: (detail.party_state || '').toString(),
+      ship_to_state: (detail.meta?.ship_to_state || '').toString(),
+      order_id: (detail.meta?.order_id || detail.ref_number || '').toString(),
+      source_filename: (detail.meta?.source_filename || '').toString(),
+      narration: detail.narration || '',
+      supply_type: (detail.supply_type || '').toString(),
+      platform: (detail.meta?.platform || '').toString(),
+      period: (detail.meta?.period || '').toString(),
+      taxable_amount: String(detail.taxable_amount ?? ''),
+      cgst_amount: String(detail.cgst_amount ?? ''),
+      sgst_amount: String(detail.sgst_amount ?? ''),
+      igst_amount: String(detail.igst_amount ?? ''),
+      total_amount: String(detail.total_amount ?? ''),
+      net_payable: String(detail.net_payable ?? ''),
+    })
+    setSaveMsg(null)
+  }, [detail, cardOpen, selectedId])
+
+  useEffect(() => {
+    if (!cardOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCardOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [cardOpen])
+
+  const saveMutation = useMutation({
+    mutationFn: async (body: Record<string, unknown>) => {
+      if (selectedId == null) throw new Error('No invoice selected')
+      const { data } = await api.patch<{ ok?: boolean; message?: string }>(`/finance/sales-invoices/${selectedId}`, body)
+      return data
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['finance-sales-invoices'] })
+      if (selectedId != null) void qc.invalidateQueries({ queryKey: ['finance-sales-invoice-detail', selectedId] })
+      setSaveMsg('Saved.')
+    },
+    onError: (e: unknown) => {
+      setSaveMsg(e instanceof Error ? e.message : 'Save failed')
+    },
+  })
+
+  const setD = (key: string, v: string) => {
+    setDraft(prev => ({ ...prev, [key]: v }))
+  }
+
+  const openRow = (id: number) => {
+    setSelectedId(id)
+    setCardTab('general')
+    setCardOpen(true)
+  }
+
+  const saveInvoice = () => {
+    if (selectedId == null) return
+    const body: Record<string, unknown> = {}
+    const strKeys = [
+      'invoice_no', 'voucher_date', 'bill_date', 'party_name', 'party_gstin', 'party_state', 'ship_to_state',
+      'order_id', 'source_filename', 'narration', 'supply_type', 'platform', 'period',
+    ] as const
+    for (const k of strKeys) {
+      if (draft[k] !== undefined) body[k] = draft[k]
+    }
+    const numKeys = ['taxable_amount', 'cgst_amount', 'sgst_amount', 'igst_amount', 'total_amount', 'net_payable'] as const
+    for (const k of numKeys) {
+      const raw = (draft[k] ?? '').trim()
+      if (raw === '') continue
+      const n = Number(raw)
+      if (!Number.isNaN(n)) body[k] = n
+    }
+    saveMutation.mutate(body)
+  }
 
   const stats = useMemo(() => {
     const total = salesInvoicesDedupedNet(rows)
@@ -2000,94 +2114,182 @@ function SalesInvoicesTab() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <div className="xl:col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-700">Sales invoices (uploads + parsed lines)</h3>
-            <span className="text-xs text-gray-500">{stats.count} rows · net {fmt(stats.total)}</span>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-800">Sales invoices (uploads + parsed lines)</h3>
+            <p className="text-[11px] text-gray-500 mt-0.5">Click a row to open the document card (Business Central style). Press Esc to close.</p>
           </div>
-          {isLoading ? (
-            <div className="p-8 text-center text-gray-400 text-sm">Loading invoices…</div>
-          ) : rows.length === 0 ? (
-            <div className="p-8 text-center text-gray-400 text-sm">No rows match your filters. Clear dates to show everything from Sales Uploads, or adjust search.</div>
-          ) : (
-            <div className="overflow-x-auto max-h-[540px] overflow-y-auto">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-gray-50">
-                  <tr className="text-gray-500 uppercase tracking-wide">
-                    <th className="px-3 py-2 text-left">No.</th>
-                    <th className="px-3 py-2 text-left">Invoice</th>
-                    <th className="px-3 py-2 text-left">Customer</th>
-                    <th className="px-3 py-2 text-left">Platform</th>
-                    <th className="px-3 py-2 text-right">Net</th>
+          <span className="text-xs text-gray-500">{stats.count} rows · net {fmt(stats.total)}</span>
+        </div>
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading invoices…</div>
+        ) : rows.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No rows match your filters. Clear dates to show everything from Sales Uploads, or adjust search.</div>
+        ) : (
+          <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-50 z-[1] shadow-sm">
+                <tr className="text-gray-500 uppercase tracking-wide">
+                  <th className="px-3 py-2 text-left">No.</th>
+                  <th className="px-3 py-2 text-left">Invoice</th>
+                  <th className="px-3 py-2 text-left">Customer</th>
+                  <th className="px-3 py-2 text-left">Platform</th>
+                  <th className="px-3 py-2 text-right">Net</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr
+                    key={r.id}
+                    className={`border-t border-gray-100 hover:bg-teal-50/50 cursor-pointer ${selectedId === r.id ? 'bg-teal-50/70' : ''}`}
+                    onClick={() => openRow(r.id)}
+                  >
+                    <td className="px-3 py-1.5 font-mono text-teal-900">{r.voucher_no}</td>
+                    <td className="px-3 py-1.5">
+                      <p className="font-medium text-gray-800">{r.invoice_no || '—'}</p>
+                      <p className="text-[10px] text-gray-500">{r.voucher_date} · Order {r.order_id || '—'}</p>
+                    </td>
+                    <td className="px-3 py-1.5 text-gray-700">{r.party_name || '—'}</td>
+                    <td className="px-3 py-1.5 text-gray-600">{r.platform || '—'}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{fmt(r.net_payable)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {rows.map(r => (
-                    <tr key={r.id} className={`border-t border-gray-100 hover:bg-teal-50/40 cursor-pointer ${selectedId === r.id ? 'bg-teal-50/60' : ''}`} onClick={() => setSelectedId(r.id)}>
-                      <td className="px-3 py-1.5 font-mono text-teal-900">{r.voucher_no}</td>
-                      <td className="px-3 py-1.5">
-                        <p className="font-medium text-gray-800">{r.invoice_no || '—'}</p>
-                        <p className="text-[10px] text-gray-500">{r.voucher_date} · Order {r.order_id || '—'}</p>
-                      </td>
-                      <td className="px-3 py-1.5 text-gray-700">{r.party_name || '—'}</td>
-                      <td className="px-3 py-1.5 text-gray-600">{r.platform || '—'}</td>
-                      <td className="px-3 py-1.5 text-right font-semibold">{fmt(r.net_payable)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 space-y-3">
-          <h3 className="text-sm font-semibold text-gray-700">Invoice details</h3>
-          {!selected ? (
-            <p className="text-xs text-gray-400">Select an invoice row to view details.</p>
-          ) : (
-            <>
-              <div className="text-xs space-y-1">
-                <p><span className="text-gray-500">Invoice:</span> <span className="font-mono">{selected.invoice_no || '—'}</span></p>
-                <p><span className="text-gray-500">Order ID:</span> <span className="font-mono">{selected.order_id || '—'}</span></p>
-                <p><span className="text-gray-500">Date:</span> {selected.voucher_date}</p>
-                <p><span className="text-gray-500">Customer:</span> {selected.party_name || '—'}</p>
-                <p><span className="text-gray-500">Platform:</span> {selected.platform || '—'}</p>
-                <p><span className="text-gray-500">Ship to state:</span> {selected.ship_to_state || '—'}</p>
-                <p><span className="text-gray-500">Source:</span> <span className="break-all">{selected.source_filename || '—'}</span></p>
-              </div>
-              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs space-y-1">
-                <p><span className="text-gray-500">Taxable:</span> <strong>{fmt(selected.taxable_amount)}</strong></p>
-                <p><span className="text-gray-500">CGST:</span> {selected.cgst_amount > 0 ? fmt(selected.cgst_amount) : '—'}</p>
-                <p><span className="text-gray-500">SGST:</span> {selected.sgst_amount > 0 ? fmt(selected.sgst_amount) : '—'}</p>
-                <p><span className="text-gray-500">IGST:</span> {selected.igst_amount > 0 ? fmt(selected.igst_amount) : '—'}</p>
-                <p><span className="text-gray-500">Net:</span> <strong className="text-teal-800">{fmt(selected.net_payable)}</strong></p>
-              </div>
-              {detail?.meta?.line_items?.length ? (
-                <div className="text-xs">
-                  <p className="text-gray-500 mb-1">Lines ({detail.meta.line_items.length})</p>
-                  <div className="max-h-44 overflow-auto border border-gray-200 rounded">
-                    <table className="w-full text-[11px]">
-                      <thead className="bg-gray-50">
-                        <tr><th className="px-2 py-1 text-left">SKU</th><th className="px-2 py-1 text-right">Qty</th><th className="px-2 py-1 text-right">Taxable</th></tr>
-                      </thead>
-                      <tbody>
-                        {detail.meta.line_items.map((li, i) => (
-                          <tr key={i} className="border-t border-gray-100">
-                            <td className="px-2 py-1 font-mono">{String(li.sku ?? '')}</td>
-                            <td className="px-2 py-1 text-right">{Number(li.quantity ?? 0)}</td>
-                            <td className="px-2 py-1 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : null}
-            </>
-          )}
-        </div>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
+
+      {cardOpen && selectedId != null && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center p-3 sm:p-6 bg-slate-900/50 backdrop-blur-[1px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="si-card-title"
+          onClick={() => setCardOpen(false)}
+        >
+          <div
+            className="bg-[#f9fbfd] w-full max-w-5xl max-h-[92vh] flex flex-col rounded-sm border border-slate-300 shadow-2xl overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <header className="shrink-0 flex items-center justify-between px-4 py-2.5 bg-[#002B5B] text-white border-b border-[#001a3d]">
+              <div className="min-w-0">
+                <p className="text-[10px] uppercase tracking-wider text-blue-200/90">Sales · Posted document</p>
+                <h2 id="si-card-title" className="text-base font-semibold truncate">
+                  {selected?.voucher_no ?? 'Invoice'} · {draft.invoice_no || '—'}
+                </h2>
+              </div>
+              <button
+                type="button"
+                className="text-sm px-3 py-1.5 rounded border border-white/30 hover:bg-white/10"
+                onClick={() => setCardOpen(false)}
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="shrink-0 flex gap-1 px-3 pt-2 border-b border-slate-200 bg-white">
+              <button
+                type="button"
+                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'general' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                onClick={() => setCardTab('general')}
+              >
+                General
+              </button>
+              <button
+                type="button"
+                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'lines' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                onClick={() => setCardTab('lines')}
+              >
+                Lines
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 bg-[#f9fbfd]">
+              {detailLoading && !detail ? (
+                <p className="text-sm text-slate-500">Loading document…</p>
+              ) : cardTab === 'general' ? (
+                <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm max-w-3xl">
+                  <p className="text-[11px] font-semibold text-slate-500 uppercase mb-3">Invoice &amp; customer</p>
+                  <SiFormField label="No. / external" value={draft.invoice_no ?? ''} onChange={v => setD('invoice_no', v)} />
+                  <SiFormField label="Posting date" value={draft.voucher_date ?? ''} onChange={v => setD('voucher_date', v)} type="date" />
+                  <SiFormField label="Document date" value={draft.bill_date ?? ''} onChange={v => setD('bill_date', v)} type="date" />
+                  <SiFormField label="Customer name" value={draft.party_name ?? ''} onChange={v => setD('party_name', v)} />
+                  <SiFormField label="GSTIN" value={draft.party_gstin ?? ''} onChange={v => setD('party_gstin', v)} />
+                  <SiFormField label="Bill-to state" value={draft.party_state ?? ''} onChange={v => setD('party_state', v)} />
+                  <SiFormField label="Ship-to state" value={draft.ship_to_state ?? ''} onChange={v => setD('ship_to_state', v)} />
+                  <SiFormField label="External doc no. (order)" value={draft.order_id ?? ''} onChange={v => setD('order_id', v)} />
+                  <SiFormField label="Source file" value={draft.source_filename ?? ''} onChange={v => setD('source_filename', v)} />
+                  <SiFormField label="Platform" value={draft.platform ?? ''} onChange={v => setD('platform', v)} />
+                  <SiFormField label="Period" value={draft.period ?? ''} onChange={v => setD('period', v)} />
+                  <SiFormField label="Supply type" value={draft.supply_type ?? ''} onChange={v => setD('supply_type', v)} />
+                  <div className="grid grid-cols-1 sm:grid-cols-[10rem_1fr] gap-1 sm:gap-2 py-1.5 border-b border-slate-200/80">
+                    <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide pt-1.5">Description</label>
+                    <textarea
+                      value={draft.narration ?? ''}
+                      onChange={e => setD('narration', e.target.value)}
+                      rows={3}
+                      className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full"
+                    />
+                  </div>
+                  <p className="text-[11px] font-semibold text-slate-500 uppercase mt-6 mb-3">Amounts</p>
+                  <SiFormField label="Taxable" value={draft.taxable_amount ?? ''} onChange={v => setD('taxable_amount', v)} />
+                  <SiFormField label="CGST" value={draft.cgst_amount ?? ''} onChange={v => setD('cgst_amount', v)} />
+                  <SiFormField label="SGST" value={draft.sgst_amount ?? ''} onChange={v => setD('sgst_amount', v)} />
+                  <SiFormField label="IGST" value={draft.igst_amount ?? ''} onChange={v => setD('igst_amount', v)} />
+                  <SiFormField label="Total" value={draft.total_amount ?? ''} onChange={v => setD('total_amount', v)} />
+                  <SiFormField label="Net" value={draft.net_payable ?? ''} onChange={v => setD('net_payable', v)} />
+                </div>
+              ) : (
+                <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm">
+                  {detail?.meta?.line_items && detail.meta.line_items.length > 0 ? (
+                    <div className="overflow-auto max-h-[50vh] border border-slate-200 rounded">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-50 sticky top-0">
+                          <tr className="text-left text-slate-600">
+                            <th className="px-3 py-2">SKU</th>
+                            <th className="px-3 py-2 text-right">Qty</th>
+                            <th className="px-3 py-2 text-right">Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {detail.meta.line_items.map((li, i) => (
+                            <tr key={i} className="border-t border-slate-100">
+                              <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
+                              <td className="px-3 py-1.5 text-right">{Number(li.quantity ?? 0)}</td>
+                              <td className="px-3 py-1.5 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">No line items on this document (upload summaries are header-only until MTR lines are parsed).</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <footer className="shrink-0 flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-t border-slate-200 bg-white">
+              <p className="text-xs text-slate-500">{saveMsg ? <span className={saveMsg === 'Saved.' ? 'text-green-700' : 'text-red-600'}>{saveMsg}</span> : null}</p>
+              <div className="flex gap-2">
+                <button type="button" className="text-xs px-4 py-2 rounded border border-slate-300 hover:bg-slate-50" onClick={() => setCardOpen(false)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={saveMutation.isPending || detailLoading}
+                  className="text-xs px-4 py-2 rounded bg-[#002B5B] text-white font-semibold hover:bg-blue-900 disabled:opacity-50"
+                  onClick={() => void saveInvoice()}
+                >
+                  {saveMutation.isPending ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

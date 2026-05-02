@@ -182,7 +182,11 @@ export default function POEngine() {
     try {
       const fd = new FormData()
       fd.append('file', f)
-      const { data } = await api.post<{ ok: boolean; message?: string; rows?: number }>('/po/sku-status-lead', fd)
+      const { data } = await api.post<{ ok: boolean; message?: string; rows?: number }>(
+        '/po/sku-status-lead',
+        fd,
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      )
       if (data.ok) {
         setSkuUploadMsg({ type: 'ok', text: data.message || `Loaded ${data.rows ?? 0} rows.` })
         const c = await getCoverage()

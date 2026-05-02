@@ -213,3 +213,39 @@ def test_finance_sales_invoices_from_upload_entries(finance_isolated_db, client)
     r_all = client.get("/api/finance/sales-invoices")
     assert r_all.status_code == 200
     assert len(r_all.json()) >= len(rows2)
+
+
+def test_finance_sales_invoice_patch_upload_summary(finance_isolated_db, client):
+    up = client.post(
+        "/api/finance/sales-uploads",
+        json={
+            "platform": "Amazon",
+            "period": "2026-04",
+            "filename": "mtr.csv",
+            "total_revenue": 200.0,
+            "total_orders": 2,
+            "total_returns": 0.0,
+            "net_revenue": 200.0,
+            "uploaded_by": "pytest",
+            "upload_notes": "",
+        },
+    )
+    assert up.status_code == 200
+    uid = int(up.json().get("id") or 0)
+    vid = 10_000_000 + uid
+    p = client.patch(
+        f"/api/finance/sales-invoices/{vid}",
+        json={"invoice_no": "EXT-INV-99", "ship_to_state": "Maharashtra", "net_payable": 199.5},
+    )
+    assert p.status_code == 200
+    assert p.json().get("ok") is True
+    lst = client.get("/api/finance/sales-invoices?start_date=2026-04-01&end_date=2026-04-30").json()
+    row = next(x for x in lst if int(x.get("id") or 0) == vid)
+    assert row.get("invoice_no") == "EXT-INV-99"
+    assert row.get("ship_to_state") == "Maharashtra"
+    assert float(row.get("net_payable") or 0) == 199.5
+    rv = client.get(f"/api/finance/vouchers/{vid}")
+    assert rv.status_code == 200
+    j = rv.json()
+    assert j.get("bill_no") == "EXT-INV-99"
+    assert float(j.get("net_payable") or 0) == 199.5

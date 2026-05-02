@@ -36,6 +36,7 @@ from ..db.finance_db import (
     list_finance_sales_uploads, create_finance_sales_upload, create_finance_sales_entries, delete_finance_sales_upload,
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
     list_vouchers, list_sales_invoices, get_upload_summary_voucher, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
+    upsert_sales_invoice_edit_patch, get_sales_invoice_edit_patch,
     get_chart_of_accounts, get_trial_balance,
     list_tally_pl, upsert_tally_pl, delete_tally_pl,
 )
@@ -580,6 +581,47 @@ def get_sales_invoices(
         end_date=end_date,
         search=search,
     )
+
+
+class SalesInvoicePatch(BaseModel):
+    """Partial update for sales upload / entry voucher display (stored as JSON overlay)."""
+    invoice_no: Optional[str] = None
+    voucher_date: Optional[str] = None
+    bill_date: Optional[str] = None
+    party_name: Optional[str] = None
+    party_gstin: Optional[str] = None
+    party_state: Optional[str] = None
+    ship_to_state: Optional[str] = None
+    order_id: Optional[str] = None
+    source_filename: Optional[str] = None
+    narration: Optional[str] = None
+    supply_type: Optional[str] = None
+    platform: Optional[str] = None
+    period: Optional[str] = None
+    taxable_amount: Optional[float] = None
+    cgst_amount: Optional[float] = None
+    sgst_amount: Optional[float] = None
+    igst_amount: Optional[float] = None
+    total_amount: Optional[float] = None
+    net_payable: Optional[float] = None
+
+
+@router.patch("/sales-invoices/{voucher_id}")
+def patch_sales_invoice(voucher_id: int, body: SalesInvoicePatch):
+    """Persist editable header/amount fields for a sales invoice row (SUP-* or SUE-* synthetic ids)."""
+    v = get_sales_entry_voucher(voucher_id) or get_upload_summary_voucher(voucher_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="Sales invoice not found")
+    raw = body.model_dump(exclude_unset=True)
+    patch = {}
+    for k, val in raw.items():
+        if val is None:
+            continue
+        patch[k] = val
+    if not patch:
+        return {"ok": True, "patch": get_sales_invoice_edit_patch(voucher_id)}
+    merged = upsert_sales_invoice_edit_patch(voucher_id, patch)
+    return {"ok": True, "patch": merged}
 
 
 @router.post("/vouchers")
