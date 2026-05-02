@@ -13,7 +13,14 @@ function createAuthToken(username = "qa-user") {
 }
 
 async function loginIfNeeded(page) {
-  if (!/\/login(?:\?|$)/.test(page.url())) return;
+  // SPA may keep URL as /finance while showing the login form (no redirect to /login).
+  const onLoginPath = /\/login(?:\?|$)/.test(page.url());
+  const welcomeVisible = await page
+    .getByRole("heading", { name: "Welcome back" })
+    .waitFor({ state: "visible", timeout: 2_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!onLoginPath && !welcomeVisible) return;
   const username = process.env.E2E_AUTH_USERNAME || "e2e-finance";
   const password = process.env.E2E_AUTH_PASSWORD || "e2e-finance-123";
   await page.getByPlaceholder("admin").fill(username);
