@@ -112,6 +112,7 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "amazon order id", "merchant order id", "purchase date", "last updated date",
         "order status", "order total", "item price", "ship date", "ship state",
         "buyer name", "product name",
+        "shipment to city", "bill to city", "ship city", "ship to city",
         # Amazon FBA Shipment Report (numeric-named files):
         "customer shipment date", "merchant sku", "product amount", "shipping amount",
         "shipment to state", "shipment to city", "fnsku", "asin", "fc",
@@ -202,6 +203,7 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     _order_id_col = next((c for c in ["order id", "amazon order id", "merchant order id"] if c in raw.columns), None)
     _inv_amt_col  = next((c for c in ["invoice amount", "product amount", "order total", "item price"] if c in raw.columns), None)
     _state_col    = next((c for c in ["ship to state", "shipment to state", "ship state"] if c in raw.columns), None)
+    _city_col     = next((c for c in ["shipment to city", "ship to city", "bill to city", "ship city"] if c in raw.columns), None)
     _seller_gstin_col = next((c for c in ["seller gstin", "seller gstin number", "seller gst registration no"] if c in raw.columns), None)
     _seller_company_col = next((c for c in ["seller legal name", "seller name", "seller"] if c in raw.columns), None)
 
@@ -226,6 +228,13 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "Seller_Company":   g(_seller_company_col) if _seller_company_col else pd.Series("", index=raw.index, dtype=str),
         "Buyer_Name":       g("buyer name"),
         "IRN_Status":       g("irn filing status"),
+        "Product_Name":    g("product name"),
+        "Ship_To_City":    g(_city_col) if _city_col else pd.Series("", index=raw.index, dtype=str),
+        "Buyer_GSTIN": (
+            raw["customer bill to gstid"].fillna("").astype(str).str.strip().str.upper()
+            if "customer bill to gstid" in raw.columns
+            else pd.Series("", index=raw.index, dtype=str)
+        ),
     })
     del raw
 
@@ -300,8 +309,9 @@ def _amazon_fba_aggregate_order_lines(df: pd.DataFrame, *, has_order_id: bool) -
     ]
     first_cols = [
         c for c in (
-            "Report_Type", "Ship_To_State", "Warehouse_Id", "Fulfillment",
-            "Payment_Method", "Invoice_Number", "Buyer_Name", "IRN_Status",
+            "Report_Type", "Ship_To_State", "Ship_To_City", "Warehouse_Id", "Fulfillment",
+            "Payment_Method", "Invoice_Number", "Buyer_Name", "Buyer_GSTIN", "IRN_Status",
+            "Product_Name",
         ) if c in work.columns and c not in sum_cols
     ]
     agg: dict = {"Date": "max"}

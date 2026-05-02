@@ -24,7 +24,7 @@ class PORequest(BaseModel):
     min_denominator:  int   = 7
     grace_days:       int   = 0
     safety_pct:       float = 0.0
-    enforce_two_size_minimum: bool = True
+    enforce_two_size_minimum: bool = False
 
 
 @router.post("/sku-status-lead")

@@ -45,9 +45,9 @@ def test_finance_sales_entries_daybook_by_voucher_date(fin_db):
                 "invoice_no": "INV-1",
                 "order_id": "O-99",
                 "party_name": "Buyer A",
-                "party_gstin": "29AABCY3804E1ZF",
-                "party_state": "Karnataka",
-                "ship_to_state": "TN",
+                "party_gstin": "",
+                "party_state": "TN",
+                "ship_to_state": "Chennai, TN",
                 "taxable_amount": 100.0,
                 "cgst_amount": 0.0,
                 "sgst_amount": 0.0,
@@ -74,6 +74,8 @@ def test_finance_sales_entries_daybook_by_voucher_date(fin_db):
     assert detail["meta"]["invoice_no"] == "INV-1"
     assert detail["meta"]["order_id"] == "O-99"
     assert len(detail["meta"]["line_items"]) == 1
+    assert detail["meta"].get("seller_gstin") == "29AABCY3804E1ZF"
+    assert detail["meta"].get("seller_company") == "TestCo"
 
 
 def test_delete_sales_upload_removes_entries(fin_db):

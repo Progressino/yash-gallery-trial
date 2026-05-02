@@ -1322,10 +1322,24 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
         "SELECT * FROM finance_sales_entries WHERE id = ?",
         (entry_id,),
     ).fetchone()
-    conn.close()
     if not r:
+        conn.close()
         return None
     rr = dict(r)
+    upload_meta: dict = {}
+    su_id = rr.get("sales_upload_id")
+    if su_id:
+        urow = conn.execute(
+            "SELECT seller_gstin, company_name, company_state FROM finance_sales_uploads WHERE id = ?",
+            (int(su_id),),
+        ).fetchone()
+        if urow:
+            upload_meta = {
+                "seller_gstin": str(urow["seller_gstin"] or ""),
+                "seller_company": str(urow["company_name"] or ""),
+                "seller_state": str(urow["company_state"] or ""),
+            }
+    conn.close()
     import json
 
     raw_lines = rr.get("line_items") or "[]"
@@ -1333,14 +1347,22 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
         line_items = json.loads(raw_lines) if isinstance(raw_lines, str) else raw_lines
     except Exception:
         line_items = []
+
     voucher_lines = []
     for i, li in enumerate(line_items):
         sku = str(li.get("sku") or li.get("SKU") or "").strip() or "Item"
         qty = li.get("quantity") or li.get("Quantity") or ""
+        prod = str(li.get("product_name") or li.get("Product_Name") or "").strip()
+        desc_parts = [sku]
+        if prod:
+            desc_parts.append(prod[:120] + ("…" if len(prod) > 120 else ""))
+        if qty != "":
+            desc_parts.append(f"Qty {qty}")
+        description = " — ".join(desc_parts)
         voucher_lines.append({
             "id": i + 1,
             "expense_head": sku,
-            "description": f"Qty {qty}" if qty != "" else (li.get("description") or ""),
+            "description": description,
             "amount": float(li.get("invoice_amount") or li.get("Invoice_Amount") or 0.0),
             "cost_centre": str(li.get("ship_to_state") or li.get("Ship_To_State") or ""),
             "is_debit": 1,
@@ -1352,7 +1374,7 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
         "voucher_no": f"SUE-{rr['id']}",
         "voucher_date": vdate,
         "voucher_type": "Sales Upload",
-        "party_name": rr.get("party_name") or rr.get("platform") or "",
+        "party_name": rr.get("party_name") or "",
         "party_gstin": rr.get("party_gstin") or "",
         "party_state": rr.get("party_state") or "",
         "bill_no": rr.get("invoice_no") or "",
@@ -1382,6 +1404,7 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
             "ship_to_state": rr.get("ship_to_state"),
             "source_filename": rr.get("source_filename"),
             "line_items": line_items,
+            **upload_meta,
         },
     }
     patch = get_sales_invoice_edit_patch(vid)

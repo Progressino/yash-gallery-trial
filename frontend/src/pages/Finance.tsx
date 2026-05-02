@@ -2215,10 +2215,10 @@ function SalesInvoicesTab() {
                   <SiFormField label="No. / external" value={draft.invoice_no ?? ''} onChange={v => setD('invoice_no', v)} />
                   <SiFormField label="Posting date" value={draft.voucher_date ?? ''} onChange={v => setD('voucher_date', v)} type="date" />
                   <SiFormField label="Document date" value={draft.bill_date ?? ''} onChange={v => setD('bill_date', v)} type="date" />
-                  <SiFormField label="Customer name" value={draft.party_name ?? ''} onChange={v => setD('party_name', v)} />
-                  <SiFormField label="GSTIN" value={draft.party_gstin ?? ''} onChange={v => setD('party_gstin', v)} />
-                  <SiFormField label="Bill-to state" value={draft.party_state ?? ''} onChange={v => setD('party_state', v)} />
-                  <SiFormField label="Ship-to state" value={draft.ship_to_state ?? ''} onChange={v => setD('ship_to_state', v)} />
+                  <SiFormField label="Customer name (from sale file)" value={draft.party_name ?? ''} onChange={v => setD('party_name', v)} />
+                  <SiFormField label="Customer GSTIN (B2B, from file)" value={draft.party_gstin ?? ''} onChange={v => setD('party_gstin', v)} />
+                  <SiFormField label="Customer / ship-to state (from file)" value={draft.party_state ?? ''} onChange={v => setD('party_state', v)} />
+                  <SiFormField label="Ship-to location (city, state from file)" value={draft.ship_to_state ?? ''} onChange={v => setD('ship_to_state', v)} />
                   <SiFormField label="External doc no. (order)" value={draft.order_id ?? ''} onChange={v => setD('order_id', v)} />
                   <SiFormField label="Source file" value={draft.source_filename ?? ''} onChange={v => setD('source_filename', v)} />
                   <SiFormField label="Platform" value={draft.platform ?? ''} onChange={v => setD('platform', v)} />
@@ -2249,6 +2249,8 @@ function SalesInvoicesTab() {
                         <thead className="bg-slate-50 sticky top-0">
                           <tr className="text-left text-slate-600">
                             <th className="px-3 py-2">SKU</th>
+                            <th className="px-3 py-2">Product (from file)</th>
+                            <th className="px-3 py-2">Ship-to</th>
                             <th className="px-3 py-2 text-right">Qty</th>
                             <th className="px-3 py-2 text-right">Amount</th>
                           </tr>
@@ -2257,6 +2259,8 @@ function SalesInvoicesTab() {
                           {detail.meta.line_items.map((li, i) => (
                             <tr key={i} className="border-t border-slate-100">
                               <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
+                              <td className="px-3 py-1.5 text-slate-700 max-w-[14rem] truncate" title={String(li.product_name ?? '')}>{String(li.product_name ?? '')}</td>
+                              <td className="px-3 py-1.5 text-slate-700 max-w-[12rem] truncate" title={String(li.ship_to_state ?? '')}>{String(li.ship_to_state ?? '')}</td>
                               <td className="px-3 py-1.5 text-right">{Number(li.quantity ?? 0)}</td>
                               <td className="px-3 py-1.5 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
                             </tr>
@@ -2378,13 +2382,16 @@ function DaybookTab() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="rounded-lg border border-gray-200 p-3 space-y-2">
                     <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">General</p>
-                    <p><span className="text-gray-500">Party / Customer:</span> <span className="font-medium text-gray-800">{entryDetail.party_name || '—'}</span></p>
+                    <p><span className="text-gray-500">Customer:</span> <span className="font-medium text-gray-800">{entryDetail.party_name || '—'}</span></p>
                     <p><span className="text-gray-500">Document date:</span> <span className="font-mono">{entryDetail.voucher_date}</span></p>
                     <p><span className="text-gray-500">Invoice no.:</span> <span className="font-mono">{entryDetail.meta?.invoice_no || entryDetail.bill_no || '—'}</span></p>
                     <p><span className="text-gray-500">Order ID (external):</span> <span className="font-mono break-all">{entryDetail.meta?.order_id || entryDetail.ref_number || '—'}</span></p>
-                    <p><span className="text-gray-500">Seller GSTIN:</span> <span className="font-mono">{entryDetail.party_gstin || '—'}</span></p>
-                    <p><span className="text-gray-500">Branch / seller state:</span> {entryDetail.party_state || '—'}</p>
-                    <p><span className="text-gray-500">Ship-to state:</span> {entryDetail.meta?.ship_to_state || '—'}</p>
+                    <p><span className="text-gray-500">Customer GSTIN:</span> <span className="font-mono">{entryDetail.party_gstin || '—'}</span></p>
+                    <p><span className="text-gray-500">Customer / ship-to state:</span> {entryDetail.party_state || '—'}</p>
+                    <p><span className="text-gray-500">Ship-to location:</span> {entryDetail.meta?.ship_to_state || '—'}</p>
+                    <p><span className="text-gray-500">Seller GSTIN (upload):</span> <span className="font-mono">{entryDetail.meta?.seller_gstin || '—'}</span></p>
+                    <p><span className="text-gray-500">Seller company (upload):</span> {entryDetail.meta?.seller_company || '—'}</p>
+                    <p><span className="text-gray-500">Seller branch state:</span> {entryDetail.meta?.seller_state || '—'}</p>
                     <p><span className="text-gray-500">Supply:</span> {entryDetail.supply_type === 'Inter' ? 'Inter-state (IGST)' : entryDetail.supply_type === 'Intra' ? 'Intra-state (CGST+SGST)' : '—'}</p>
                     <p><span className="text-gray-500">Source file:</span> <span className="break-all">{entryDetail.meta?.source_filename || '—'}</span></p>
                     {entryDetail.narration ? <p className="text-gray-600 pt-1 border-t border-gray-100">{entryDetail.narration}</p> : null}
@@ -2400,7 +2407,7 @@ function DaybookTab() {
                   </div>
                 </div>
                 <div>
-                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Lines (SKU)</p>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Lines (SKU &amp; product)</p>
                   {(entryDetail.meta?.line_items?.length ?? 0) === 0 && (entryDetail.lines?.length ?? 0) === 0 ? (
                     <p className="text-gray-400">No line detail stored for this entry.</p>
                   ) : (
@@ -2409,20 +2416,22 @@ function DaybookTab() {
                         <thead>
                           <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
                             <th className="px-3 py-2 text-left">SKU</th>
+                            <th className="px-3 py-2 text-left">Product</th>
                             <th className="px-3 py-2 text-right">Qty</th>
                             <th className="px-3 py-2 text-right">Taxable</th>
                             <th className="px-3 py-2 text-right">Tax</th>
-                            <th className="px-3 py-2 text-left">Ship-to ST</th>
+                            <th className="px-3 py-2 text-left">Ship-to</th>
                           </tr>
                         </thead>
                         <tbody>
                           {(entryDetail.meta?.line_items ?? []).map((li, i) => (
                             <tr key={i} className="border-t border-gray-100">
                               <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
+                              <td className="px-3 py-1.5 text-gray-700 max-w-[12rem] truncate" title={String(li.product_name ?? '')}>{String(li.product_name ?? '')}</td>
                               <td className="px-3 py-1.5 text-right">{Number(li.quantity ?? 0)}</td>
                               <td className="px-3 py-1.5 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
                               <td className="px-3 py-1.5 text-right">{fmt(Number(li.total_tax ?? 0))}</td>
-                              <td className="px-3 py-1.5">{String(li.ship_to_state ?? '')}</td>
+                              <td className="px-3 py-1.5 max-w-[12rem] truncate" title={String(li.ship_to_state ?? '')}>{String(li.ship_to_state ?? '')}</td>
                             </tr>
                           ))}
                           {(entryDetail.meta?.line_items?.length ?? 0) === 0 && (entryDetail.lines ?? []).map((ln, i) => (

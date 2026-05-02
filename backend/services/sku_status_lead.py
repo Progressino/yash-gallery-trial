@@ -2,7 +2,7 @@
 Parse SKU Status & Lead Time master (Excel/CSV) for PO Engine.
 
 Expected columns (flexible names): SKU, Status, Lead time (days).
-Status values containing "closed" and "sku" (case-insensitive) mark the SKU as closed for PO.
+Status is stored for display; values that look like "closed SKU" set SKU_Sheet_Closed in the PO table only (PO quantities use the same engine rules as without a sheet, except per-SKU lead overrides).
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import BinaryIO, Optional
 
 import pandas as pd
 
-from .helpers import clean_sku
+from .helpers import clean_sku, normalize_id_token_for_mapping
 
 # Match Amazon PL infix stripping used in po_engine / inventory.
 _PL_RE = re.compile(r"^(\d+)PL(YK)", re.I)
@@ -65,7 +65,21 @@ def parse_sku_status_lead_dataframe(
     status_col = _pick_column(df, ["status", "sku status", "state"])
     lead_col = _pick_column(
         df,
-        ["lead time", "leadtime", "lead_time", "lead days", "days", "po lead", "lead time (days)", "lead"],
+        [
+            "lead time (days)",
+            "lead time days",
+            "leadtimedays",
+            "lead_time_days",
+            "lead time",
+            "leadtime",
+            "lead_time",
+            "manufacturing lead",
+            "factory lead",
+            "supplier lead",
+            "po lead",
+            "lead days",
+            "days to ship",
+        ],
     )
 
     if not sku_col:
@@ -82,7 +96,8 @@ def parse_sku_status_lead_dataframe(
         raw = row.get(sku_col)
         if raw is None or (isinstance(raw, float) and pd.isna(raw)):
             continue
-        s = clean_sku(raw)
+        tok = normalize_id_token_for_mapping(str(raw).strip())
+        s = clean_sku(tok or raw)
         if not s:
             continue
         s = _strip_pl_sku(s, _map)

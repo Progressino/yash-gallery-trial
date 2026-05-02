@@ -12,7 +12,7 @@ from pandas.tseries.offsets import MonthEnd
 
 import re
 
-from .helpers import map_to_oms_sku, get_parent_sku
+from .helpers import map_to_oms_sku, get_parent_sku, clean_sku, normalize_id_token_for_mapping
 from .myntra import myntra_to_sales_rows
 
 # Strip "PL" infix in Amazon seller SKUs (e.g. 1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL)
@@ -302,7 +302,7 @@ def calculate_po_base(
     group_by_parent: bool = False,
     existing_po_df: Optional[pd.DataFrame] = None,
     sku_status_df: Optional[pd.DataFrame] = None,
-    enforce_two_size_minimum: bool = True,
+    enforce_two_size_minimum: bool = False,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -314,8 +314,25 @@ def calculate_po_base(
         df["TxnDate"] = df["TxnDate"].dt.tz_localize(None)
 
     _map = sku_mapping if sku_mapping is not None else {}
-    df["Sku"] = df["Sku"].apply(lambda s: _strip_pl(str(s).strip(), _map))
-    df["Sku"] = df["Sku"].astype(str).str.strip().str.upper()
+
+    def _canonical_oms_key(raw) -> str:
+        """Align inventory, sales, and SKU-status sheet keys (Excel tokens + clean_sku + PL strip)."""
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            return ""
+        t = normalize_id_token_for_mapping(str(raw).strip())
+        t = clean_sku(t or raw)
+        if not t:
+            t = str(raw).strip().upper()
+        return _strip_pl(str(t).strip(), _map)
+
+    df["Sku"] = df["Sku"].map(_canonical_oms_key)
+    df = df[df["Sku"].astype(str).str.len() > 0]
+
+    inv_work = inv_df.copy()
+    inv_work["OMS_SKU"] = inv_work["OMS_SKU"].map(_canonical_oms_key)
+    inv_work = inv_work[inv_work["OMS_SKU"].astype(str).str.len() > 0]
+    if inv_work["OMS_SKU"].duplicated().any():
+        inv_work = inv_work.drop_duplicates(subset=["OMS_SKU"], keep="last")
 
     max_date = df["TxnDate"].max()
     cutoff   = max_date - timedelta(days=period_days)
@@ -329,27 +346,39 @@ def calculate_po_base(
     net.columns = ["OMS_SKU", "Net_Units"]
 
     summary = sold.merge(returns, on="OMS_SKU", how="outer").merge(net, on="OMS_SKU", how="outer").fillna(0)
-    po_df   = pd.merge(inv_df, summary, on="OMS_SKU", how="left").fillna(
+    po_df   = pd.merge(inv_work, summary, on="OMS_SKU", how="left").fillna(
         {"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0}
     )
 
-    # ── Shipments in last ~5 months (for close-SKU hint) ─────────────────
-    cut150 = max_date - timedelta(days=150)
-    ship150 = (
-        df[(df["TxnDate"] >= cut150) & (df["Transaction Type"] == "Shipment")]
-        .groupby("Sku")["Quantity"].sum()
-        .reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "Quantity": "Ship_Units_150d"})
-    )
-    po_df = po_df.merge(ship150, on="OMS_SKU", how="left")
-    po_df["Ship_Units_150d"] = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0).astype(int)
+    # Column kept for the PO table; not used in PO math (same as pre–SKU-sheet engine).
+    po_df["Ship_Units_150d"] = 0
 
     # ── SKU Status / Lead sheet (optional) ────────────────────────────────
+    # Upload only changes per-SKU lead days for the PO formula. Status / closed flags
+    # are merged for display in the UI; they do not change Gross_PO_Qty or ADS.
     po_df["Lead_Time_Days"] = int(max(1, int(lead_time)))
     po_df["PO_Block_Reason"] = ""
     if sku_status_df is not None and not sku_status_df.empty:
         m = sku_status_df.copy()
-        m["OMS_SKU"] = m["OMS_SKU"].astype(str).str.strip().str.upper()
+        m["OMS_SKU"] = m["OMS_SKU"].map(_canonical_oms_key)
+        m = m[m["OMS_SKU"].astype(str).str.len() > 0]
+        if group_by_parent:
+            m["_par_key"] = m["OMS_SKU"].apply(get_parent_sku)
+
+            def _max_positive_lead(series: pd.Series) -> float:
+                v = pd.to_numeric(series, errors="coerce")
+                v = v[v > 0]
+                return float(v.max()) if len(v) else float("nan")
+
+            m = (
+                m.groupby("_par_key", as_index=False)
+                .agg(
+                    Lead_Time_From_Sheet=("Lead_Time_From_Sheet", _max_positive_lead),
+                    SKU_Sheet_Status=("SKU_Sheet_Status", "first"),
+                    SKU_Sheet_Closed=("SKU_Sheet_Closed", "max"),
+                )
+                .rename(columns={"_par_key": "OMS_SKU"})
+            )
         keep = [c for c in ["OMS_SKU", "SKU_Sheet_Status", "SKU_Sheet_Closed", "Lead_Time_From_Sheet"] if c in m.columns]
         m = m[keep].drop_duplicates(subset=["OMS_SKU"], keep="last")
         po_df = po_df.merge(m, on="OMS_SKU", how="left")
@@ -514,6 +543,12 @@ def calculate_po_base(
         inv_col = po_df.columns[1]
 
     inv_vals = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
+    # "Running days" for operators: use total sellable stock when present (FBA + warehouse),
+    # while PO qty still uses OMS_Inventory only (inv_vals above).
+    if "Total_Inventory" in po_df.columns:
+        inv_days_left = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0)
+    else:
+        inv_days_left = inv_vals
 
     # PO calculation — per-SKU lead from sheet when uploaded, else global lead_time
     lt_vec = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1)
@@ -524,10 +559,6 @@ def calculate_po_base(
     total_req    = base_req + safety
     gross_po     = (total_req - inv_vals).clip(lower=0)
     po_df["Gross_PO_Qty"] = (np.ceil(gross_po / 10) * 10).astype(int)
-
-    closed_m = po_df["SKU_Sheet_Closed"].astype(bool)
-    po_df.loc[closed_m, "Gross_PO_Qty"] = 0
-    po_df.loc[closed_m, "PO_Block_Reason"] = "Closed SKU (sheet)"
 
     if enforce_two_size_minimum:
         _par_key = po_df["OMS_SKU"].apply(get_parent_sku)
@@ -562,11 +593,11 @@ def calculate_po_base(
     else:
         po_df["PO_Pipeline_Total"] = 0
 
-    # Days of stock remaining — includes pipeline so "Running Days" matches
-    # the team's manual formula: (inventory + pipeline) / ADS
+    # Days of stock remaining — includes pipeline; numerator uses total stock when the
+    # file exposes Total_Inventory so Days_Left matches the column users look at.
     po_df["Days_Left"] = np.where(
         po_df["ADS"] > 0,
-        ((inv_vals + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
+        ((inv_days_left + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
         999.0,
     )
 
@@ -676,23 +707,7 @@ def calculate_po_base(
         999.0,
     )
 
-    # Heuristic: flag SKUs with ~no recent demand but meaningful returns (review / close)
-    ret_ratio = np.where(
-        po_df["Sold_Units"].astype(float) > 0,
-        po_df["Return_Units"].astype(float) / np.maximum(po_df["Sold_Units"].astype(float), 1.0),
-        0.0,
-    )
-    ship150v = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0)
-    po_df["Suggest_Close_SKU"] = np.where(
-        (ship150v <= 0)
-        & (
-            (po_df["Return_Units"].astype(float) >= 5)
-            | ((po_df["Sold_Units"].astype(float) > 0) & (ret_ratio >= 0.35))
-            | ((po_df["Sold_Units"].astype(float) <= 0) & (po_df["Return_Units"].astype(float) >= 1))
-        ),
-        "Review: no shipments ~5 mo + notable returns — consider closing SKU",
-        "",
-    )
+    po_df["Suggest_Close_SKU"] = ""
 
     # Drop intermediate calc columns (datetime/float cols that break router serialisation)
     po_df.drop(

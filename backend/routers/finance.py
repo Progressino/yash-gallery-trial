@@ -65,6 +65,20 @@ _GSTIN_COMPANY_MAP = {
     "03AABCY3804E1ZT": ("Yash Gallery Pvt Ltd Punjab", "Punjab"),
 }
 
+
+def _format_ship_location(city: str, state: str) -> str:
+    """Exact ship-to display: city + state from the sales file when both exist."""
+    c = (city or "").strip()
+    s = (state or "").strip()
+    if c.lower() in ("nan", "none", "-", ""):
+        c = ""
+    if s.lower() in ("nan", "none", "-", ""):
+        s = ""
+    if c and s:
+        return f"{c}, {s}"
+    return s or c or ""
+
+
 router = APIRouter()
 
 
@@ -1158,7 +1172,6 @@ def _persist_amazon_finance_sales_entries(
         return ""
 
     work["_inv_key"] = work.apply(_row_key, axis=1)
-    party_disp = (company_name or "").strip() or (seller_gstin or "").strip() or platform
 
     entries: list[dict] = []
     for txn_type, sign in (("Shipment", 1), ("Refund", -1), ("Return", -1)):
@@ -1180,6 +1193,17 @@ def _persist_amazon_finance_sales_entries(
             ship_st = str(first["_ship_st"] or "").strip()
             if ship_st.lower() in ("nan", "none"):
                 ship_st = ""
+            buyer_gst = ""
+            if "Buyer_GSTIN" in g2.columns:
+                buyer_gst = str(first.get("Buyer_GSTIN", "") or "").strip().upper()
+            if buyer_gst.lower() in ("nan", "none", ""):
+                buyer_gst = ""
+            ship_city = ""
+            if "Ship_To_City" in g2.columns:
+                ship_city = str(first.get("Ship_To_City", "") or "").strip()
+            if ship_city.lower() in ("nan", "none"):
+                ship_city = ""
+            ship_location = _format_ship_location(ship_city, ship_st)
             oids = sorted({str(x).strip() for x in g2["_oid"].tolist() if str(x).strip() and str(x).lower() not in ("nan", "none")})
             oid_disp = ", ".join(oids[:3])
             if len(oids) > 3:
@@ -1202,15 +1226,25 @@ def _persist_amazon_finance_sales_entries(
 
             items: list[dict] = []
             for _, rr in g2.iterrows():
+                st_row = str(rr.get("_ship_st") or "").strip()
+                city_row = str(rr.get("Ship_To_City", "") or "").strip() if "Ship_To_City" in g2.columns else ""
+                if city_row.lower() in ("nan", "none"):
+                    city_row = ""
+                loc_line = _format_ship_location(city_row, st_row) or st_row
+                prod = str(rr.get("Product_Name", "") or "").strip() if "Product_Name" in g2.columns else ""
+                if prod.lower() in ("nan", "none"):
+                    prod = ""
                 items.append({
                     "sku": str(rr.get("SKU", "") or ""),
+                    "product_name": prod,
                     "quantity": float(rr.get("Quantity", 0) or 0),
                     "invoice_amount": float(sign * float(rr["_amt"])),
                     "total_tax": float(sign * float(rr["_ttax"])),
                     "cgst": float(sign * float(rr["_cgst"])),
                     "sgst": float(sign * float(rr["_sgst"])),
                     "igst": float(sign * float(rr["_igst"])),
-                    "ship_to_state": str(rr.get("_ship_st") or ""),
+                    "ship_to_city": city_row,
+                    "ship_to_state": loc_line,
                 })
 
             narration = f"{platform} {period} — {txn_type}"
@@ -1225,10 +1259,11 @@ def _persist_amazon_finance_sales_entries(
                 "voucher_date": vdate,
                 "invoice_no": inv_disp,
                 "order_id": oid_disp,
-                "party_name": buyer or party_disp,
-                "party_gstin": seller_gstin or "",
-                "party_state": company_state or "",
-                "ship_to_state": ship_st,
+                # Customer / ship-to from the marketplace file only — never substitute seller company.
+                "party_name": buyer,
+                "party_gstin": buyer_gst,
+                "party_state": ship_st,
+                "ship_to_state": ship_location or ship_st,
                 "taxable_amount": round(taxable, 2),
                 "cgst_amount": round(cgst, 2),
                 "sgst_amount": round(sgst, 2),

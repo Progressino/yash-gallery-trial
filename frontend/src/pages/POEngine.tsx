@@ -526,8 +526,8 @@ export default function POEngine() {
               <h4 className="text-sm font-semibold text-gray-700 mb-1">SKU status &amp; lead time (for PO)</h4>
               <p className="text-xs text-gray-500 mb-3">
                 Upload Excel/CSV with <strong>SKU</strong>, <strong>Status</strong>, and <strong>Lead time</strong> columns.
-                Rows marked <strong>Closed SKU</strong> (or any status containing &quot;closed&quot;) are excluded from PO quantities.
-                Lead time per SKU overrides the default above when present.
+                Status (including closed) is shown in the PO table for reference only; it does not change PO quantities.
+                A positive <strong>Lead time</strong> per SKU overrides the default lead above for that SKU&apos;s PO math only.
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <input ref={skuFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e => void onSkuStatusFile(e.target.files)} />
