@@ -62,13 +62,15 @@ jobs:
             echo "WARN: curl not installed — skipping HTTP health probe."
             exit 0
           fi
-          # Backend + nginx can take >8s on a cold VPS; retry before failing the job.
+          # Hit nginx on :80 (backend is not published on host :8000 in prod compose).
+          # nginx.conf must proxy /api for localhost — see default_server block there.
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -sf http://localhost/api/health || curl -sf http://localhost:8000/api/health; then
+            if curl -sf --connect-timeout 5 "http://127.0.0.1/api/health" \
+              || curl -sf --connect-timeout 5 "http://localhost/api/health"; then
               echo "OK: health check passed (attempt $i)"
               exit 0
             fi
-            echo "… waiting for /api/health (attempt $i/10)"
+            echo "… waiting for /api/health on :80 (attempt $i/10)"
             sleep 6
           done
           echo "ERROR: health check failed after retries"
