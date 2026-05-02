@@ -12,8 +12,20 @@ function createAuthToken(username = "qa-user") {
   return `${body}.${sig}`;
 }
 
+async function loginIfNeeded(page) {
+  if (!/\/login(?:\?|$)/.test(page.url())) return;
+  const username = process.env.E2E_AUTH_USERNAME || "e2e-finance";
+  const password = process.env.E2E_AUTH_PASSWORD || "e2e-finance-123";
+  await page.getByPlaceholder("admin").fill(username);
+  await page.getByPlaceholder("••••••••").fill(password);
+  await page.getByRole("button", { name: "Sign In" }).click();
+  await page.waitForURL(/\/(dashboard|finance)/, { timeout: 30_000 });
+  await page.goto("/finance", { waitUntil: "networkidle" });
+}
+
 async function expectFinanceLoaded(page) {
   await page.waitForURL(/\/(finance|login)/, { timeout: 30_000 });
+  await loginIfNeeded(page);
   await expect(page.getByRole("heading", { name: "Finance", exact: true })).toBeVisible({ timeout: 30_000 });
 }
 

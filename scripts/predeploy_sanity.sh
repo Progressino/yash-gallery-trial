@@ -60,12 +60,13 @@ else
   echo "==> Frontend build + chromium smoke"
   pushd "$ROOT/frontend" >/dev/null
   # Load JWT secret for Playwright auth-cookie generation in deep checklist.
+  # Must use repo ROOT (cwd here is frontend/ after pushd).
   if [[ -z "${JWT_SECRET:-}" && -f "$ROOT/.env" ]]; then
-    _jwt_from_env="$(python3 - <<'PY'
+    _jwt_from_env="$(ROOT="$ROOT" "$PYTHON_BIN" - <<'PY'
 import os
 from pathlib import Path
 
-env_path = Path(os.environ.get("ROOT", ".")) / ".env"
+env_path = Path(os.environ["ROOT"]) / ".env"
 val = ""
 if env_path.exists():
     for raw in env_path.read_text(encoding="utf-8").splitlines():
@@ -134,7 +135,23 @@ PY
   LOG_FILE="/tmp/forecast-e2e-ui.log"
   API_LOG_FILE="/tmp/forecast-e2e-api.log"
 
-  "$PYTHON_BIN" -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 >"$API_LOG_FILE" 2>&1 &
+  # Single Playwright worker avoids OOM kills (exit 137) on small VPS/self-hosted runners.
+  export PW_WORKERS="${PW_WORKERS:-1}"
+  # Deterministic login fallback for deep finance e2e (cookie JWT can drift from server secret).
+  export E2E_AUTH_USERNAME="${E2E_AUTH_USERNAME:-e2e-finance}"
+  export E2E_AUTH_PASSWORD="${E2E_AUTH_PASSWORD:-e2e-finance-123}"
+  export AUTH_USERNAME="$E2E_AUTH_USERNAME"
+  export AUTH_PASSWORD_HASH="$("$PYTHON_BIN" - <<'PY'
+import os
+import bcrypt
+
+pw = os.environ.get("E2E_AUTH_PASSWORD", "e2e-finance-123").encode("utf-8")
+print(bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8"))
+PY
+)"
+
+  # Run API from repo root so `load_dotenv()` reads `$ROOT/.env` (JWT + auth match Playwright).
+  ( cd "$ROOT" && exec "$PYTHON_BIN" -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 >"$API_LOG_FILE" 2>&1 ) &
   API_PID=$!
   npm run preview -- --host 127.0.0.1 --port "$PORT" >"$LOG_FILE" 2>&1 &
   UI_PID=$!

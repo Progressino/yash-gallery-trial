@@ -14,4 +14,14 @@ export default defineConfig({
       },
     },
   },
+  // Playwright + `npm run preview` use this; without proxy, /api calls fail (login breaks e2e).
+  preview: {
+    port: 4173,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+    },
+  },
 })
