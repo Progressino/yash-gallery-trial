@@ -51,7 +51,7 @@ jobs:
               exit 1
             fi
           }
-          _dc -f docker-compose.prod.yml build
+          _dc -f docker-compose.prod.yml build --no-cache
           _dc -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
 
