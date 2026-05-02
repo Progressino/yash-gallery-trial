@@ -1306,6 +1306,15 @@ def _persist_amazon_finance_sales_entries(
                 pos = str(rr.get("Place_Of_Supply", "") or "").strip() if "Place_Of_Supply" in g2.columns else ""
                 if pos and not ship_to_raw:
                     ship_to_raw = pos
+                ship_id_ln = str(rr.get("Shipment_Id", "") or "").strip() if "Shipment_Id" in g2.columns else ""
+                if ship_id_ln.lower() in ("nan", "none"):
+                    ship_id_ln = ""
+                ord_dt_txt = str(rr.get("Order_Date_Text", "") or "").strip() if "Order_Date_Text" in g2.columns else ""
+                if ord_dt_txt.lower() in ("nan", "none"):
+                    ord_dt_txt = ""
+                ship_dt_txt = str(rr.get("Shipment_Date_Text", "") or "").strip() if "Shipment_Date_Text" in g2.columns else ""
+                if ship_dt_txt.lower() in ("nan", "none"):
+                    ship_dt_txt = ""
                 items.append({
                     "type": "Item",
                     "sku": str(rr.get("SKU", "") or ""),
@@ -1335,6 +1344,9 @@ def _persist_amazon_finance_sales_entries(
                     "tax_exclusive_gross": round(line_taxable, 2),
                     "gst_rate": gst_r,
                     "order_id": oid_row,
+                    "shipment_id": ship_id_ln,
+                    "order_date_text": ord_dt_txt,
+                    "shipment_date_text": ship_dt_txt,
                     "credit_note_no": cn_no,
                     "credit_note_date": cn_dt,
                     "customer_name": party_ln,

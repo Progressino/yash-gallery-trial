@@ -1967,7 +1967,7 @@ function SalesInvoiceBcDetailPanel({
           <span className="text-[10px] text-slate-500">{lines.length} row{lines.length !== 1 ? 's' : ''}</span>
         </div>
         <div className="overflow-auto max-h-[52vh]">
-          <table className="w-full text-[10px] min-w-[2200px]">
+          <table className="w-full text-[10px] min-w-[2800px]">
             <thead className="bg-slate-50 sticky top-0 z-[1]">
               <tr className="text-left text-slate-600">
                 {lineItemsShowSourceInv ? <th className="px-1.5 py-2 whitespace-nowrap">Source inv.</th> : null}
@@ -1977,6 +1977,7 @@ function SalesInvoiceBcDetailPanel({
                 <th className="px-1.5 py-2 whitespace-nowrap">Invoice number</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">Invoice date</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">Transaction type</th>
+                <th className="px-1.5 py-2 whitespace-nowrap max-w-[14rem]">Product / item desc.</th>
                 <th className="px-1.5 py-2 text-right whitespace-nowrap">Qty</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">HSN/SAC</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">Item no.</th>
@@ -1986,6 +1987,10 @@ function SalesInvoiceBcDetailPanel({
                 <th className="px-1.5 py-2 text-right whitespace-nowrap">Total tax</th>
                 <th className="px-1.5 py-2 text-right whitespace-nowrap">GST rate</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">Order id</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Shipment id</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Shipment item id</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Order date</th>
+                <th className="px-1.5 py-2 whitespace-nowrap">Shipment date</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">Credit note no.</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">Credit note date</th>
                 <th className="px-1.5 py-2 whitespace-nowrap">Customer name</th>
@@ -2015,10 +2020,15 @@ function SalesInvoiceBcDetailPanel({
                 const invNo = liStr(li, 'invoice_number', 'Invoice_Number', 'source_invoice_no')
                 const invDt = liStr(li, 'invoice_date', 'Invoice_Date')
                 const txn = liStr(li, 'transaction_type', 'Transaction_Type', 'type', 'Type')
+                const prodDesc = liStr(li, 'product_name', 'Product_Name', 'item_description')
                 const hsn = liStr(li, 'hsn_sac', 'HSN_SAC')
                 const itemNo = liStr(li, 'item_no', 'Item_No', 'sku', 'SKU')
                 const shipTo = liStr(li, 'ship_to_state_code', 'Ship_To_State') || liStr(li, 'ship_to_state', 'place_of_supply', 'Place_Of_Supply')
                 const oid = liStr(li, 'order_id', 'Order_Id')
+                const shipAmazonId = liStr(li, 'shipment_id', 'Shipment_Id')
+                const shipItemId = liStr(li, 'order_item_id', 'Order_Item_Id')
+                const ordDtFile = liStr(li, 'order_date_text', 'Order_Date_Text')
+                const shipDtFile = liStr(li, 'shipment_date_text', 'Shipment_Date_Text')
                 const cnNo = liStr(li, 'credit_note_no', 'Credit_Note_No')
                 const cnDt = liStr(li, 'credit_note_date', 'Credit_Note_Date')
                 const cust = liStr(li, 'customer_name', 'Customer_Name') || party
@@ -2038,6 +2048,7 @@ function SalesInvoiceBcDetailPanel({
                     <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={invNo}>{invNo || '—'}</td>
                     <td className="px-1.5 py-1.5 font-mono text-slate-700 whitespace-nowrap">{invDt || '—'}</td>
                     <td className="px-1.5 py-1.5 text-slate-700 max-w-[5rem] truncate" title={txn}>{txn || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-700 max-w-[14rem] truncate" title={prodDesc}>{prodDesc || '—'}</td>
                     <td className="px-1.5 py-1.5 text-right tabular-nums">{qty}</td>
                     <td className="px-1.5 py-1.5 font-mono text-slate-700">{hsn || '—'}</td>
                     <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={itemNo}>{itemNo || '—'}</td>
@@ -2047,6 +2058,10 @@ function SalesInvoiceBcDetailPanel({
                     <td className="px-1.5 py-1.5 text-right tabular-nums">{fmtDec(tt)}</td>
                     <td className="px-1.5 py-1.5 text-right font-mono text-slate-800">{fmtGstRatePct(li)}</td>
                     <td className="px-1.5 py-1.5 font-mono text-slate-700 max-w-[6rem] truncate" title={oid}>{oid || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-600 max-w-[7rem] truncate text-[9px]" title={shipAmazonId}>{shipAmazonId || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-600 max-w-[6rem] truncate text-[9px]" title={shipItemId}>{shipItemId || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-600 whitespace-nowrap text-[9px]">{ordDtFile || '—'}</td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-600 whitespace-nowrap text-[9px]">{shipDtFile || '—'}</td>
                     <td className="px-1.5 py-1.5 font-mono max-w-[5rem] truncate" title={cnNo}>{cnNo || '—'}</td>
                     <td className="px-1.5 py-1.5 font-mono whitespace-nowrap">{cnDt || '—'}</td>
                     <td className="px-1.5 py-1.5 text-slate-800 max-w-[7rem] truncate" title={cust}>{cust || '—'}</td>
