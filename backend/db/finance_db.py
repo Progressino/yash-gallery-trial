@@ -1411,6 +1411,60 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
     return _apply_sales_invoice_patch_to_voucher(v, patch)
 
 
+def _rollup_line_items_from_sales_entries(upload_id: int) -> tuple[list, list]:
+    """Flatten SKU line_items from all finance_sales_entries for this upload; build synthetic voucher lines."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT invoice_no, order_id, line_items FROM finance_sales_entries
+           WHERE sales_upload_id = ? ORDER BY id""",
+        (int(upload_id),),
+    ).fetchall()
+    conn.close()
+    merged: list = []
+    for row in rows:
+        inv = str(row["invoice_no"] or "").strip()
+        oid = str(row["order_id"] or "").strip()
+        raw = row["line_items"] or "[]"
+        try:
+            items = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            items = []
+        if not isinstance(items, list):
+            continue
+        for li in items:
+            if not isinstance(li, dict):
+                continue
+            d = dict(li)
+            if inv:
+                d.setdefault("source_invoice_no", inv)
+            if oid:
+                d.setdefault("source_order_id", oid)
+            merged.append(d)
+    voucher_lines: list = []
+    for i, li in enumerate(merged):
+        sku = str(li.get("sku") or li.get("SKU") or "").strip() or "Item"
+        qty = li.get("quantity") or li.get("Quantity") or ""
+        prod = str(li.get("product_name") or li.get("Product_Name") or "").strip()
+        desc_parts = [sku]
+        if prod:
+            desc_parts.append(prod[:120] + ("…" if len(prod) > 120 else ""))
+        if qty != "":
+            desc_parts.append(f"Qty {qty}")
+        inv_tag = str(li.get("source_invoice_no") or "").strip()
+        if inv_tag:
+            desc_parts.append(f"Inv {inv_tag}")
+        description = " — ".join(desc_parts)
+        voucher_lines.append({
+            "id": i + 1,
+            "expense_head": sku,
+            "description": description,
+            "amount": float(li.get("invoice_amount") or li.get("Invoice_Amount") or 0.0),
+            "cost_centre": str(li.get("ship_to_state") or li.get("Ship_To_State") or ""),
+            "is_debit": 1,
+        })
+    return merged, voucher_lines
+
+
 def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
     """Voucher-shaped payload for a finance_sales_uploads row (synthetic id base UPLOAD_SUMMARY_VOUCHER_BASE)."""
     if voucher_id < UPLOAD_SUMMARY_VOUCHER_BASE:
@@ -1435,6 +1489,15 @@ def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
     doc_no = f"SUM-{uid}"
     cstate = str(rr.get("company_state") or "")
     vid = UPLOAD_SUMMARY_VOUCHER_BASE + uid
+    rolled_lines, voucher_lines = _rollup_line_items_from_sales_entries(uid)
+    narr = (
+        f"Upload summary · {int(rr.get('total_orders') or 0)} orders in file; "
+        f"SUE-… rows are per-invoice postings. "
+    )
+    if rolled_lines:
+        narr += f"Lines tab lists {len(rolled_lines)} SKU row(s) rolled up from parsed invoices in this upload."
+    else:
+        narr += "Product lines appear when MTR rows are parsed into finance_sales_entries for this upload."
     v = {
         "id": vid,
         "voucher_no": f"SUP-{uid}",
@@ -1446,7 +1509,7 @@ def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
         "bill_no": doc_no,
         "bill_date": vdate,
         "supply_type": "Intra",
-        "narration": f"Upload summary · {int(rr.get('total_orders') or 0)} orders in file; SUE rows list parsed invoices when present.",
+        "narration": narr,
         "taxable_amount": round(gross - ret, 2),
         "cgst_amount": 0.0,
         "sgst_amount": 0.0,
@@ -1460,7 +1523,7 @@ def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
         "bank_ledger": "",
         "cheque_no": "",
         "ref_number": f"UPLOAD-{uid}",
-        "lines": [],
+        "lines": voucher_lines,
         "meta": {
             "source": "finance_sales_upload_summary",
             "sales_upload_id": uid,
@@ -1474,7 +1537,8 @@ def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
             "total_orders": int(rr.get("total_orders") or 0),
             "total_revenue": round(gross, 2),
             "total_returns": round(ret, 2),
-            "line_items": [],
+            "line_items": rolled_lines,
+            "line_items_rollup_from_entries": bool(rolled_lines),
         },
     }
     patch = get_sales_invoice_edit_patch(vid)

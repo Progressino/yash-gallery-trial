@@ -77,6 +77,15 @@ def test_finance_sales_entries_daybook_by_voucher_date(fin_db):
     assert detail["meta"].get("seller_gstin") == "29AABCY3804E1ZF"
     assert detail["meta"].get("seller_company") == "TestCo"
 
+    sup_vid = fdb.UPLOAD_SUMMARY_VOUCHER_BASE + uid
+    sup = fdb.get_upload_summary_voucher(sup_vid)
+    assert sup is not None
+    assert sup["meta"].get("line_items_rollup_from_entries") is True
+    assert len(sup["meta"]["line_items"]) == 1
+    assert sup["meta"]["line_items"][0].get("source_invoice_no") == "INV-1"
+    assert sup["meta"]["line_items"][0].get("sku") == "SKU1"
+    assert len(sup.get("lines") or []) == 1
+
 
 def test_delete_sales_upload_removes_entries(fin_db):
     uid = fdb.create_finance_sales_upload(

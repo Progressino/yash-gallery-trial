@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect, Fragment } from 'react'
+import React, { useState, useMemo, useRef, useEffect, useCallback, Fragment } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -553,7 +553,8 @@ export default function Finance() {
   const [activeTab,    setActiveTab]    = useState<FinanceTab>('dashboard')
   const [cronusMegaOpen, setCronusMegaOpen] = useState<CronusMega>(null)
   const [voucherPreset, setVoucherPreset] = useState<{ n: number; type: string } | null>(null)
-  const [mastersJump, setMastersJump] = useState<{ n: number; sub: MastersSubTab } | null>(null)
+  const [mastersJump, setMastersJump] = useState<{ n: number; sub: MastersSubTab; ledgerSearch?: string } | null>(null)
+  const [tbSearchJump, setTbSearchJump] = useState<{ n: number; q: string } | null>(null)
   const [dateStart,    setDateStart]    = useState(() => daysAgo(90))
   const [dateEnd,      setDateEnd]      = useState(TODAY)
   const [activePreset, setActivePreset] = useState<string>('90D')
@@ -568,6 +569,20 @@ export default function Finance() {
     setActiveTab('masters')
     setCronusMegaOpen(null)
   }
+  const openTrialBalanceForParty = useCallback((q: string) => {
+    const s = q.trim()
+    if (!s) return
+    setTbSearchJump({ n: Date.now(), q: s })
+    setActiveTab('trial-balance')
+    setCronusMegaOpen(null)
+  }, [])
+  const openMastersLedgersForParty = useCallback((q: string) => {
+    const s = q.trim()
+    if (!s) return
+    setMastersJump({ n: Date.now(), sub: 'ledgers', ledgerSearch: s })
+    setActiveTab('masters')
+    setCronusMegaOpen(null)
+  }, [])
   /** Finance Sales Uploads (locked) vs operational session (Upload page — Dashboard / PO) */
   const [revenueSource, setRevenueSource] = useState<'finance_lock' | 'session'>('finance_lock')
   const [financeCompany, setFinanceCompany] = useState('')
@@ -1220,10 +1235,20 @@ export default function Finance() {
       {activeTab === 'dashboard' && <DashboardTab onNavigate={setActiveTab} />}
 
       {/* ── Tab: Day Book ── */}
-      {activeTab === 'daybook' && <DaybookTab />}
+      {activeTab === 'daybook' && (
+        <DaybookTab
+          openTrialBalanceForParty={openTrialBalanceForParty}
+          openMastersLedgersForParty={openMastersLedgersForParty}
+        />
+      )}
 
       {/* ── Tab: Sales Invoices ── */}
-      {activeTab === 'sales-invoices' && <SalesInvoicesTab />}
+      {activeTab === 'sales-invoices' && (
+        <SalesInvoicesTab
+          openTrialBalanceForParty={openTrialBalanceForParty}
+          openMastersLedgersForParty={openMastersLedgersForParty}
+        />
+      )}
 
       {/* ── Tab: GSTR3B ── */}
       {activeTab === 'gstr' && <GSTR3BTab />}
@@ -1251,7 +1276,7 @@ export default function Finance() {
       {activeTab === 'coa' && <ChartOfAccountsTab />}
 
       {/* ── Tab: Trial Balance ── */}
-      {activeTab === 'trial-balance' && <TrialBalanceTab />}
+      {activeTab === 'trial-balance' && <TrialBalanceTab searchJump={tbSearchJump} />}
         </div>
       </div>
     </div>
@@ -1953,7 +1978,13 @@ function salesInvoicesDedupedTax(rows: SalesInvoiceRow[]) {
   return tax
 }
 
-function SalesInvoicesTab() {
+function SalesInvoicesTab({
+  openTrialBalanceForParty,
+  openMastersLedgersForParty,
+}: {
+  openTrialBalanceForParty: (q: string) => void
+  openMastersLedgersForParty: (q: string) => void
+}) {
   const qc = useQueryClient()
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
@@ -2082,6 +2113,21 @@ function SalesInvoicesTab() {
     const tax = salesInvoicesDedupedTax(rows)
     return { total, tax, count: rows.length }
   }, [rows])
+
+  const partyTbQuery = useMemo(
+    () => (draft.party_name || '').trim() || (draft.party_gstin || '').trim(),
+    [draft.party_name, draft.party_gstin],
+  )
+  const partyMasterQuery = useMemo(() => {
+    const g = (draft.party_gstin || '').replace(/\s/g, '')
+    if (g.length >= 15) return g
+    return (draft.party_name || '').trim()
+  }, [draft.party_gstin, draft.party_name])
+
+  const lineItemsShowSourceInv = useMemo(() => {
+    const lis = detail?.meta?.line_items ?? []
+    return lis.some(li => String((li as { source_invoice_no?: string }).source_invoice_no || '').trim() !== '')
+  }, [detail?.meta?.line_items])
 
   return (
     <div className="space-y-4">
@@ -2212,10 +2258,49 @@ function SalesInvoicesTab() {
               ) : cardTab === 'general' ? (
                 <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm max-w-3xl">
                   <p className="text-[11px] font-semibold text-slate-500 uppercase mb-3">Invoice &amp; customer</p>
+                  {selected?.row_kind === 'upload_summary' ? (
+                    <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 leading-snug">
+                      <strong>SUP- / SUM-</strong> is the <strong>upload file summary</strong>. Open the <strong>Lines</strong> tab for SKU detail rolled up from parsed invoices (SUE-…) in this upload, or pick an <strong>SUE-</strong> row in the list for a single invoice.
+                    </p>
+                  ) : null}
                   <SiFormField label="No. / external" value={draft.invoice_no ?? ''} onChange={v => setD('invoice_no', v)} />
                   <SiFormField label="Posting date" value={draft.voucher_date ?? ''} onChange={v => setD('voucher_date', v)} type="date" />
                   <SiFormField label="Document date" value={draft.bill_date ?? ''} onChange={v => setD('bill_date', v)} type="date" />
-                  <SiFormField label="Customer name (from sale file)" value={draft.party_name ?? ''} onChange={v => setD('party_name', v)} />
+                  <div className="grid grid-cols-1 sm:grid-cols-[10rem_1fr] gap-1 sm:gap-2 py-1.5 border-b border-slate-200/80">
+                    <div className="flex flex-col gap-1 pt-1">
+                      <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Customer name</label>
+                      <span className="text-[10px] text-slate-500 normal-case font-normal">Open ledger views (chart party)</span>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2 sm:items-start">
+                      <input
+                        type="text"
+                        value={draft.party_name ?? ''}
+                        onChange={e => setD('party_name', e.target.value)}
+                        className="text-sm border rounded px-2 py-1.5 w-full border-slate-300 bg-white min-w-0"
+                        aria-label="Customer name from sale file"
+                      />
+                      <div className="flex flex-wrap gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          className="text-[11px] font-semibold px-2 py-1.5 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100 whitespace-nowrap"
+                          onClick={() => openTrialBalanceForParty(partyTbQuery)}
+                          disabled={!partyTbQuery}
+                          title="Filter Trial Balance by this party name / GSTIN"
+                        >
+                          Trial balance
+                        </button>
+                        <button
+                          type="button"
+                          className="text-[11px] font-semibold px-2 py-1.5 rounded border border-slate-400 text-slate-800 bg-slate-50 hover:bg-slate-100 whitespace-nowrap"
+                          onClick={() => openMastersLedgersForParty(partyMasterQuery)}
+                          disabled={!partyMasterQuery}
+                          title="Masters → Ledgers, filtered by GSTIN (if 15 chars) or name"
+                        >
+                          Ledger master
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                   <SiFormField label="Customer GSTIN (B2B, from file)" value={draft.party_gstin ?? ''} onChange={v => setD('party_gstin', v)} />
                   <SiFormField label="Customer / ship-to state (from file)" value={draft.party_state ?? ''} onChange={v => setD('party_state', v)} />
                   <SiFormField label="Ship-to location (city, state from file)" value={draft.ship_to_state ?? ''} onChange={v => setD('ship_to_state', v)} />
@@ -2248,6 +2333,7 @@ function SalesInvoicesTab() {
                       <table className="w-full text-xs">
                         <thead className="bg-slate-50 sticky top-0">
                           <tr className="text-left text-slate-600">
+                            {lineItemsShowSourceInv ? <th className="px-3 py-2">Invoice</th> : null}
                             <th className="px-3 py-2">SKU</th>
                             <th className="px-3 py-2">Product (from file)</th>
                             <th className="px-3 py-2">Ship-to</th>
@@ -2258,6 +2344,11 @@ function SalesInvoicesTab() {
                         <tbody>
                           {detail.meta.line_items.map((li, i) => (
                             <tr key={i} className="border-t border-slate-100">
+                              {lineItemsShowSourceInv ? (
+                                <td className="px-3 py-1.5 font-mono text-slate-600 max-w-[7rem] truncate" title={String((li as { source_invoice_no?: string }).source_invoice_no ?? '')}>
+                                  {String((li as { source_invoice_no?: string }).source_invoice_no ?? '—')}
+                                </td>
+                              ) : null}
                               <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
                               <td className="px-3 py-1.5 text-slate-700 max-w-[14rem] truncate" title={String(li.product_name ?? '')}>{String(li.product_name ?? '')}</td>
                               <td className="px-3 py-1.5 text-slate-700 max-w-[12rem] truncate" title={String(li.ship_to_state ?? '')}>{String(li.ship_to_state ?? '')}</td>
@@ -2299,7 +2390,13 @@ function SalesInvoicesTab() {
 }
 
 // ── Day Book Tab ──────────────────────────────────────────────────
-function DaybookTab() {
+function DaybookTab({
+  openTrialBalanceForParty,
+  openMastersLedgersForParty,
+}: {
+  openTrialBalanceForParty: (q: string) => void
+  openMastersLedgersForParty: (q: string) => void
+}) {
   const qc = useQueryClient()
   const [dateStr, setDateStr] = useState(toIso(new Date()))
   const [openEntryId, setOpenEntryId] = useState<number | null>(null)
@@ -2344,6 +2441,16 @@ function DaybookTab() {
   const totalTds = vouchers.reduce((s, v) => s + v.tds_amount, 0)
   const totalNet = vouchers.reduce((s, v) => s + v.net_payable, 0)
 
+  const entryPartyTb = (entryDetail?.party_name || '').trim() || (entryDetail?.party_gstin || '').trim()
+  const entryPartyMaster = (() => {
+    const g = (entryDetail?.party_gstin || '').replace(/\s/g, '')
+    if (g.length >= 15) return g
+    return (entryDetail?.party_name || '').trim()
+  })()
+  const daybookLineItemsShowInv = (entryDetail?.meta?.line_items ?? []).some(
+    li => String((li as { source_invoice_no?: string }).source_invoice_no || '').trim() !== '',
+  )
+
   return (
     <div className="space-y-4">
       {openEntryId != null && (
@@ -2382,7 +2489,30 @@ function DaybookTab() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="rounded-lg border border-gray-200 p-3 space-y-2">
                     <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">General</p>
-                    <p><span className="text-gray-500">Customer:</span> <span className="font-medium text-gray-800">{entryDetail.party_name || '—'}</span></p>
+                    <div className="flex flex-wrap items-start gap-2 justify-between">
+                      <p className="min-w-0">
+                        <span className="text-gray-500">Customer:</span>{' '}
+                        <span className="font-medium text-gray-800">{entryDetail.party_name || '—'}</span>
+                      </p>
+                      <div className="flex flex-wrap gap-1 shrink-0">
+                        <button
+                          type="button"
+                          className="text-[10px] font-semibold px-2 py-1 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
+                          onClick={() => openTrialBalanceForParty(entryPartyTb)}
+                          disabled={!entryPartyTb}
+                        >
+                          Trial balance
+                        </button>
+                        <button
+                          type="button"
+                          className="text-[10px] font-semibold px-2 py-1 rounded border border-gray-300 text-gray-800 bg-gray-50 hover:bg-gray-100"
+                          onClick={() => openMastersLedgersForParty(entryPartyMaster)}
+                          disabled={!entryPartyMaster}
+                        >
+                          Ledger master
+                        </button>
+                      </div>
+                    </div>
                     <p><span className="text-gray-500">Document date:</span> <span className="font-mono">{entryDetail.voucher_date}</span></p>
                     <p><span className="text-gray-500">Invoice no.:</span> <span className="font-mono">{entryDetail.meta?.invoice_no || entryDetail.bill_no || '—'}</span></p>
                     <p><span className="text-gray-500">Order ID (external):</span> <span className="font-mono break-all">{entryDetail.meta?.order_id || entryDetail.ref_number || '—'}</span></p>
@@ -2415,6 +2545,7 @@ function DaybookTab() {
                       <table className="w-full text-xs">
                         <thead>
                           <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                            {daybookLineItemsShowInv ? <th className="px-3 py-2 text-left">Invoice</th> : null}
                             <th className="px-3 py-2 text-left">SKU</th>
                             <th className="px-3 py-2 text-left">Product</th>
                             <th className="px-3 py-2 text-right">Qty</th>
@@ -2426,6 +2557,11 @@ function DaybookTab() {
                         <tbody>
                           {(entryDetail.meta?.line_items ?? []).map((li, i) => (
                             <tr key={i} className="border-t border-gray-100">
+                              {daybookLineItemsShowInv ? (
+                                <td className="px-3 py-1.5 font-mono text-gray-600 max-w-[7rem] truncate" title={String((li as { source_invoice_no?: string }).source_invoice_no ?? '')}>
+                                  {String((li as { source_invoice_no?: string }).source_invoice_no ?? '—')}
+                                </td>
+                              ) : null}
                               <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
                               <td className="px-3 py-1.5 text-gray-700 max-w-[12rem] truncate" title={String(li.product_name ?? '')}>{String(li.product_name ?? '')}</td>
                               <td className="px-3 py-1.5 text-right">{Number(li.quantity ?? 0)}</td>
@@ -3400,7 +3536,7 @@ function VouchersTab({ voucherPreset }: { voucherPreset: { n: number; type: stri
 }
 
 // ── Masters Tab ──────────────────────────────────────────────────
-function MastersTab({ mastersJump }: { mastersJump: { n: number; sub: MastersSubTab } | null }) {
+function MastersTab({ mastersJump }: { mastersJump: { n: number; sub: MastersSubTab; ledgerSearch?: string } | null }) {
   const [sub, setSub] = useState<MastersSubTab>('ledger-groups')
   const lastJumpN = useRef(0)
 
@@ -3430,7 +3566,7 @@ function MastersTab({ mastersJump }: { mastersJump: { n: number; sub: MastersSub
       </div>
 
       {sub === 'ledger-groups'       && <LedgerGroupsSubTab />}
-      {sub === 'ledgers'             && <LedgersSubTab />}
+      {sub === 'ledgers'             && <LedgersSubTab mastersJump={mastersJump} />}
       {sub === 'gst-classifications' && <GSTClassificationsSubTab />}
       {sub === 'tds-sections'        && <TDSSectionsSubTab />}
       {sub === 'voucher-types'       && <VoucherTypesSubTab />}
@@ -3530,7 +3666,7 @@ const blankLedgerForm = () => ({
   bank_name: '', bank_account: '', bank_ifsc: '',
 })
 
-function LedgersSubTab() {
+function LedgersSubTab({ mastersJump }: { mastersJump: { n: number; sub: MastersSubTab; ledgerSearch?: string } | null }) {
   const qc = useQueryClient()
   const { data: groups = [] } = useQuery<LedgerGroup[]>({
     queryKey: ['finance-ledger-groups'],
@@ -3542,6 +3678,18 @@ function LedgersSubTab() {
     staleTime: 5 * 60 * 1000,
   })
   const [filterGroup, setFilterGroup] = useState<string>('')
+  const [listFilter, setListFilter] = useState('')
+  const lastLedgerJumpN = useRef(0)
+  useEffect(() => {
+    if (
+      mastersJump?.sub === 'ledgers' &&
+      mastersJump.ledgerSearch &&
+      mastersJump.n > lastLedgerJumpN.current
+    ) {
+      lastLedgerJumpN.current = mastersJump.n
+      setListFilter(mastersJump.ledgerSearch)
+    }
+  }, [mastersJump])
   const { data: ledgers = [], isLoading } = useQuery<Ledger[]>({
     queryKey: ['finance-ledgers', filterGroup],
     queryFn: async () => {
@@ -3550,6 +3698,16 @@ function LedgersSubTab() {
       return data
     },
   })
+
+  const visibleLedgers = useMemo(() => {
+    const f = listFilter.trim().toLowerCase()
+    if (!f) return ledgers
+    return ledgers.filter(l =>
+      (l.name || '').toLowerCase().includes(f) ||
+      (l.alias || '').toLowerCase().includes(f) ||
+      (l.gstin || '').toLowerCase().includes(f),
+    )
+  }, [ledgers, listFilter])
 
   const [form, setForm] = useState(blankLedgerForm)
   const [err, setErr] = useState('')
@@ -3748,13 +3906,23 @@ function LedgersSubTab() {
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-3">
+        <div className="px-4 py-3 border-b border-gray-100 flex flex-wrap items-center gap-3">
           <span className="text-xs text-gray-500">Filter by group:</span>
           <select value={filterGroup} onChange={e => setFilterGroup(e.target.value)}
             className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none">
             <option value="">All Groups</option>
             {groups.map(g => <option key={g.id} value={String(g.id)}>{g.name}</option>)}
           </select>
+          <div className="flex items-center gap-2 ml-auto">
+            <label className="text-xs text-gray-500">Name / GSTIN</label>
+            <input
+              type="text"
+              value={listFilter}
+              onChange={e => setListFilter(e.target.value)}
+              placeholder="Filter table…"
+              className="text-xs border border-gray-200 rounded px-2 py-1 w-44 focus:outline-none focus:ring-1 focus:ring-blue-300"
+            />
+          </div>
         </div>
         {isLoading ? <div className="p-6 text-center text-gray-400 text-sm animate-pulse">Loading…</div> : (
           <div className="overflow-x-auto">
@@ -3770,7 +3938,7 @@ function LedgersSubTab() {
                 <th className="px-4 py-2.5"></th>
               </tr></thead>
               <tbody>
-                {ledgers.map(l => (
+                {visibleLedgers.map(l => (
                   <tr key={l.id} className="border-t border-gray-50 hover:bg-gray-50">
                     <td className="px-4 py-2 font-medium text-gray-700">
                       {l.name}
@@ -4918,13 +5086,20 @@ function collectIds(g: CoAGroup): number[] {
 }
 
 // ── Trial Balance Tab ──────────────────────────────────────────────
-function TrialBalanceTab() {
+function TrialBalanceTab({ searchJump }: { searchJump?: { n: number; q: string } | null }) {
   const now = new Date()
   const firstOfYear = `${now.getFullYear()}-04-01`  // Indian FY starts April
   const todayStr = now.toISOString().slice(0, 10)
   const [startDate, setStartDate] = useState(firstOfYear)
   const [endDate,   setEndDate]   = useState(todayStr)
   const [search,    setSearch]    = useState('')
+  const lastSearchJumpN = useRef(0)
+  useEffect(() => {
+    if (searchJump && searchJump.n > lastSearchJumpN.current) {
+      lastSearchJumpN.current = searchJump.n
+      setSearch(searchJump.q)
+    }
+  }, [searchJump])
 
   const { data, isLoading, refetch } = useQuery<{
     rows: TBRow[]; total_debit: number; total_credit: number; balanced: boolean
