@@ -20,7 +20,7 @@ async function loginIfNeeded(page) {
   await page.getByPlaceholder("••••••••").fill(password);
   await page.getByRole("button", { name: "Sign In" }).click();
   await page.waitForURL(/\/(dashboard|finance)/, { timeout: 30_000 });
-  await page.goto("/finance", { waitUntil: "networkidle" });
+  await page.goto("/finance", { waitUntil: "domcontentloaded" });
 }
 
 async function expectFinanceLoaded(page) {
@@ -53,7 +53,7 @@ test("manual finance checklist across CRONUS menu paths", async ({ page, context
     },
   ]);
 
-  await page.goto("/finance", { waitUntil: "networkidle" });
+  await page.goto("/finance", { waitUntil: "domcontentloaded" });
   await expectFinanceLoaded(page);
   await expect(page.getByText("Finance workspace")).toBeVisible();
 
