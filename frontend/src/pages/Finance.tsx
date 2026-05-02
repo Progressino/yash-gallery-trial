@@ -1921,6 +1921,157 @@ function CashBankBookTab({ mode }: { mode: 'cash' | 'bank' }) {
   )
 }
 
+// ── Sales invoice: BC-style line grid + tax summary (Finance + Daybook) ──
+function fmtDec(n: number) {
+  return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function liStr(li: Record<string, unknown>, ...keys: string[]): string {
+  for (const k of keys) {
+    const v = li[k]
+    if (v != null && String(v).trim() !== '' && String(v).toLowerCase() !== 'nan') return String(v).trim()
+  }
+  return ''
+}
+
+function SalesInvoiceBcDetailPanel({
+  detail,
+  lineItemsShowSourceInv,
+}: {
+  detail: DaybookVoucher
+  lineItemsShowSourceInv: boolean
+}) {
+  const lines = (detail.meta?.line_items ?? []) as Record<string, unknown>[]
+  const taxNum = detail.cgst_amount + detail.sgst_amount + detail.igst_amount
+  const hdrTaxable = Math.max(0.001, detail.taxable_amount || 0)
+  const effRate = hdrTaxable > 0 ? (100 * taxNum) / hdrTaxable : 0
+  const hsns = [...new Set(lines.map(li => liStr(li, 'hsn_sac', 'HSN_SAC')).filter(Boolean))]
+  const shipState = (detail.meta?.ship_to_state || detail.party_state || '').toString().trim()
+  const fromSt = (detail.meta?.seller_state || '').toString().trim()
+  const subExcl = detail.taxable_amount
+  const totalIncl = detail.total_amount || (subExcl + taxNum)
+
+  return (
+    <div className="flex flex-col xl:flex-row gap-4 min-h-0">
+      <div className="flex-1 min-w-0 border border-slate-200 rounded-sm bg-white overflow-hidden flex flex-col">
+        <div className="px-3 py-2 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+          <p className="text-[11px] font-bold text-slate-600 uppercase tracking-wide">Lines</p>
+          <span className="text-[10px] text-slate-500">{lines.length} row{lines.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div className="overflow-auto max-h-[52vh]">
+          <table className="w-full text-[11px] min-w-[920px]">
+            <thead className="bg-slate-50 sticky top-0 z-[1]">
+              <tr className="text-left text-slate-600">
+                {lineItemsShowSourceInv ? <th className="px-2 py-2 whitespace-nowrap">Invoice</th> : null}
+                <th className="px-2 py-2 whitespace-nowrap">Type</th>
+                <th className="px-2 py-2 whitespace-nowrap">No.</th>
+                <th className="px-2 py-2 whitespace-nowrap">Variant</th>
+                <th className="px-2 py-2 whitespace-nowrap">Item ref.</th>
+                <th className="px-2 py-2 min-w-[7rem]">Description</th>
+                <th className="px-2 py-2 whitespace-nowrap">Location</th>
+                <th className="px-2 py-2 whitespace-nowrap">HSN/SAC</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">Qty</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">Unit price</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">Tax excl.</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">CGST</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">SGST</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">IGST</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">Line tax</th>
+                <th className="px-2 py-2 text-right whitespace-nowrap">Line total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((li, i) => {
+                const qty = Number(li.quantity ?? li.Quantity ?? 0)
+                const unit = Number(li.unit_price ?? 0)
+                const tex = Number(li.tax_exclusive_amount ?? li.invoice_amount ?? li.Invoice_Amount ?? 0)
+                const cg = Number(li.cgst ?? li.CGST ?? 0)
+                const sg = Number(li.sgst ?? li.SGST ?? 0)
+                const ig = Number(li.igst ?? li.IGST ?? 0)
+                const tt = Number(li.total_tax ?? 0) || cg + sg + ig
+                const invAmt = Number(li.invoice_amount ?? li.Invoice_Amount ?? 0)
+                const base = Math.abs(tex) > 1e-9 ? tex : invAmt
+                const lineTot = base + (Number.isFinite(tt) ? tt : 0)
+                const loc = liStr(li, 'warehouse_id', 'Warehouse_Id') || liStr(li, 'fulfillment', 'Fulfillment')
+                const hsn = liStr(li, 'hsn_sac', 'HSN_SAC')
+                const desc = liStr(li, 'product_name', 'Product_Name')
+                const typ = liStr(li, 'type', 'Type') || 'Item'
+                const variant = liStr(li, 'variant_code', 'fnsku', 'FNSKU')
+                const ref = liStr(li, 'item_reference', 'asin', 'ASIN')
+                const sku = liStr(li, 'sku', 'SKU')
+                return (
+                  <tr key={i} className="border-t border-slate-100 hover:bg-slate-50/80">
+                    {lineItemsShowSourceInv ? (
+                      <td className="px-2 py-1.5 font-mono text-slate-600 max-w-[6.5rem] truncate" title={liStr(li, 'source_invoice_no')}>
+                        {liStr(li, 'source_invoice_no') || '—'}
+                      </td>
+                    ) : null}
+                    <td className="px-2 py-1.5 text-slate-700">{typ}</td>
+                    <td className="px-2 py-1.5 font-mono text-slate-800 max-w-[7rem] truncate" title={sku}>{sku || '—'}</td>
+                    <td className="px-2 py-1.5 font-mono text-slate-600 max-w-[5rem] truncate" title={variant}>{variant || '—'}</td>
+                    <td className="px-2 py-1.5 font-mono text-slate-600 max-w-[7rem] truncate" title={ref}>{ref || '—'}</td>
+                    <td className="px-2 py-1.5 text-slate-700 max-w-[11rem] truncate" title={desc}>{desc || '—'}</td>
+                    <td className="px-2 py-1.5 text-slate-600 max-w-[5rem] truncate" title={loc}>{loc || '—'}</td>
+                    <td className="px-2 py-1.5 font-mono text-slate-600">{hsn || '—'}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{qty}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-700">{unit ? fmtDec(unit) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{fmtDec(tex)}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-600">{cg ? fmtDec(cg) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-600">{sg ? fmtDec(sg) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-600">{ig ? fmtDec(ig) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{tt ? fmtDec(tt) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums font-medium text-slate-900">{fmtDec(lineTot)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-3 py-2 border-t border-slate-200 bg-slate-50/90 text-[11px] text-slate-600 grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div><span className="text-slate-500">Subtotal excl. tax</span><div className="font-semibold text-slate-900">₹{fmtDec(subExcl)}</div></div>
+          <div><span className="text-slate-500">Total tax</span><div className="font-semibold text-slate-900">₹{fmtDec(taxNum)}</div></div>
+          <div><span className="text-slate-500">Total excl. tax</span><div className="font-semibold text-slate-900">₹{fmtDec(subExcl)}</div></div>
+          <div><span className="text-slate-500">Total incl. tax</span><div className="font-semibold text-[#002B5B]">₹{fmtDec(totalIncl)}</div></div>
+        </div>
+      </div>
+      <aside className="w-full xl:w-[300px] shrink-0 border border-slate-200 rounded-sm bg-white p-3 space-y-4">
+        <div>
+          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-2">Tax information</p>
+          <dl className="space-y-2 text-[11px]">
+            <div className="flex justify-between gap-2"><dt className="text-slate-500">HSN/SAC</dt><dd className="font-mono text-right text-slate-800 break-all">{hsns.length ? hsns.join(', ') : '—'}</dd></div>
+            <div className="flex justify-between gap-2"><dt className="text-slate-500">Place of supply</dt><dd className="text-right text-slate-800">{shipState || '—'}</dd></div>
+            <div className="flex justify-between gap-2"><dt className="text-slate-500">Seller branch state</dt><dd className="text-right text-slate-800">{fromSt || '—'}</dd></div>
+            <div className="flex justify-between gap-2"><dt className="text-slate-500">Supply</dt><dd className="text-right text-slate-800">{detail.supply_type === 'Inter' ? 'Inter-state (IGST)' : detail.supply_type === 'Intra' ? 'Intra-state (CGST+SGST)' : '—'}</dd></div>
+            <div className="flex justify-between gap-2"><dt className="text-slate-500">Effective tax %</dt><dd className="text-right font-mono text-slate-800">{effRate > 0 ? `${effRate.toFixed(2)}%` : '—'}</dd></div>
+            <div className="flex justify-between gap-2"><dt className="text-slate-500">GST base (header)</dt><dd className="text-right font-mono">₹{fmtDec(detail.taxable_amount)}</dd></div>
+          </dl>
+        </div>
+        <div>
+          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-2">Tax components</p>
+          <table className="w-full text-[11px]">
+            <thead><tr className="text-slate-500 text-left"><th className="py-1">Component</th><th className="py-1 text-right">%</th><th className="py-1 text-right">Amount</th></tr></thead>
+            <tbody>
+              {detail.cgst_amount > 0 ? (
+                <tr className="border-t border-slate-100"><td className="py-1">CGST</td><td className="text-right font-mono">{hdrTaxable ? ((100 * detail.cgst_amount) / hdrTaxable).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(detail.cgst_amount)}</td></tr>
+              ) : null}
+              {detail.sgst_amount > 0 ? (
+                <tr className="border-t border-slate-100"><td className="py-1">SGST</td><td className="text-right font-mono">{hdrTaxable ? ((100 * detail.sgst_amount) / hdrTaxable).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(detail.sgst_amount)}</td></tr>
+              ) : null}
+              {detail.igst_amount > 0 ? (
+                <tr className="border-t border-slate-100"><td className="py-1">IGST</td><td className="text-right font-mono">{hdrTaxable ? ((100 * detail.igst_amount) / hdrTaxable).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(detail.igst_amount)}</td></tr>
+              ) : null}
+              {taxNum <= 0 ? <tr><td colSpan={3} className="py-2 text-slate-400">No tax on header — line taxes may still show per SKU.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[10px] text-slate-500 border-t border-slate-100 pt-2 leading-snug">
+          Same layout idea as Dynamics 365 BC. Data comes from your marketplace file: re-upload Amazon MTR after upgrade to fill HSN, ASIN/FNSKU, and bill-from state when those columns exist. Meesho / other platforms keep their existing columns until extended.
+        </p>
+      </aside>
+    </div>
+  )
+}
+
 // ── Sales Invoices — BC-style document form fields ─────────────────
 function SiFormField(props: {
   label: string
@@ -2219,7 +2370,7 @@ function SalesInvoicesTab({
           onClick={() => setCardOpen(false)}
         >
           <div
-            className="bg-[#f9fbfd] w-full max-w-5xl max-h-[92vh] flex flex-col rounded-sm border border-slate-300 shadow-2xl overflow-hidden"
+            className="bg-[#f9fbfd] w-full max-w-6xl max-h-[92vh] flex flex-col rounded-sm border border-slate-300 shadow-2xl overflow-hidden"
             onClick={e => e.stopPropagation()}
           >
             <header className="shrink-0 flex items-center justify-between px-4 py-2.5 bg-[#002B5B] text-white border-b border-[#001a3d]">
@@ -2351,40 +2502,15 @@ function SalesInvoicesTab({
                   <SiFormField label="Net" value={draft.net_payable ?? ''} onChange={v => setD('net_payable', v)} />
                 </div>
               ) : (
-                <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm">
+                <div className="bg-transparent rounded-sm">
                   {detail?.meta?.line_items && detail.meta.line_items.length > 0 ? (
-                    <div className="overflow-auto max-h-[50vh] border border-slate-200 rounded">
-                      <table className="w-full text-xs">
-                        <thead className="bg-slate-50 sticky top-0">
-                          <tr className="text-left text-slate-600">
-                            {lineItemsShowSourceInv ? <th className="px-3 py-2">Invoice</th> : null}
-                            <th className="px-3 py-2">SKU</th>
-                            <th className="px-3 py-2">Product (from file)</th>
-                            <th className="px-3 py-2">Ship-to</th>
-                            <th className="px-3 py-2 text-right">Qty</th>
-                            <th className="px-3 py-2 text-right">Amount</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {detail.meta.line_items.map((li, i) => (
-                            <tr key={i} className="border-t border-slate-100">
-                              {lineItemsShowSourceInv ? (
-                                <td className="px-3 py-1.5 font-mono text-slate-600 max-w-[7rem] truncate" title={String((li as { source_invoice_no?: string }).source_invoice_no ?? '')}>
-                                  {String((li as { source_invoice_no?: string }).source_invoice_no ?? '—')}
-                                </td>
-                              ) : null}
-                              <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
-                              <td className="px-3 py-1.5 text-slate-700 max-w-[14rem] truncate" title={String(li.product_name ?? '')}>{String(li.product_name ?? '')}</td>
-                              <td className="px-3 py-1.5 text-slate-700 max-w-[12rem] truncate" title={String(li.ship_to_state ?? '')}>{String(li.ship_to_state ?? '')}</td>
-                              <td className="px-3 py-1.5 text-right">{Number(li.quantity ?? 0)}</td>
-                              <td className="px-3 py-1.5 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <SalesInvoiceBcDetailPanel detail={detail} lineItemsShowSourceInv={lineItemsShowSourceInv} />
                   ) : (
-                    <p className="text-sm text-slate-500">No line items on this document (upload summaries are header-only until MTR lines are parsed).</p>
+                    <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm">
+                      <p className="text-sm text-slate-500">
+                        No line items on this document. For <strong>SUP-</strong> summaries, lines roll up from parsed SUE entries; re-upload the MTR to capture HSN, ASIN/FNSKU, and bill-from state when the CSV includes them.
+                      </p>
+                    </div>
                   )}
                 </div>
               )}
@@ -2486,7 +2612,7 @@ function DaybookTab({
           onClick={() => setOpenEntryId(null)}
         >
           <div
-            className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col border border-gray-200"
+            className="bg-white rounded-xl shadow-xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col border border-gray-200"
             onClick={e => e.stopPropagation()}
           >
             <div className="px-5 py-3 border-b border-gray-100 flex items-start justify-between gap-3 bg-[#002B5B] text-white">
@@ -2561,45 +2687,26 @@ function DaybookTab({
                   </div>
                 </div>
                 <div>
-                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Lines (SKU &amp; product)</p>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-2">Lines &amp; tax (BC-style)</p>
                   {(entryDetail.meta?.line_items?.length ?? 0) === 0 && (entryDetail.lines?.length ?? 0) === 0 ? (
                     <p className="text-gray-400">No line detail stored for this entry.</p>
+                  ) : (entryDetail.meta?.line_items?.length ?? 0) > 0 ? (
+                    <SalesInvoiceBcDetailPanel detail={entryDetail} lineItemsShowSourceInv={daybookLineItemsShowInv} />
                   ) : (
                     <div className="overflow-x-auto rounded-lg border border-gray-200">
                       <table className="w-full text-xs">
                         <thead>
                           <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide">
-                            {daybookLineItemsShowInv ? <th className="px-3 py-2 text-left">Invoice</th> : null}
-                            <th className="px-3 py-2 text-left">SKU</th>
-                            <th className="px-3 py-2 text-left">Product</th>
-                            <th className="px-3 py-2 text-right">Qty</th>
-                            <th className="px-3 py-2 text-right">Taxable</th>
-                            <th className="px-3 py-2 text-right">Tax</th>
-                            <th className="px-3 py-2 text-left">Ship-to</th>
+                            <th className="px-3 py-2 text-left">Ledger / head</th>
+                            <th className="px-3 py-2 text-right">Amount</th>
+                            <th className="px-3 py-2 text-left">Dim / centre</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {(entryDetail.meta?.line_items ?? []).map((li, i) => (
-                            <tr key={i} className="border-t border-gray-100">
-                              {daybookLineItemsShowInv ? (
-                                <td className="px-3 py-1.5 font-mono text-gray-600 max-w-[7rem] truncate" title={String((li as { source_invoice_no?: string }).source_invoice_no ?? '')}>
-                                  {String((li as { source_invoice_no?: string }).source_invoice_no ?? '—')}
-                                </td>
-                              ) : null}
-                              <td className="px-3 py-1.5 font-mono">{String(li.sku ?? '')}</td>
-                              <td className="px-3 py-1.5 text-gray-700 max-w-[12rem] truncate" title={String(li.product_name ?? '')}>{String(li.product_name ?? '')}</td>
-                              <td className="px-3 py-1.5 text-right">{Number(li.quantity ?? 0)}</td>
-                              <td className="px-3 py-1.5 text-right">{fmt(Number(li.invoice_amount ?? 0))}</td>
-                              <td className="px-3 py-1.5 text-right">{fmt(Number(li.total_tax ?? 0))}</td>
-                              <td className="px-3 py-1.5 max-w-[12rem] truncate" title={String(li.ship_to_state ?? '')}>{String(li.ship_to_state ?? '')}</td>
-                            </tr>
-                          ))}
-                          {(entryDetail.meta?.line_items?.length ?? 0) === 0 && (entryDetail.lines ?? []).map((ln, i) => (
+                          {(entryDetail.lines ?? []).map((ln, i) => (
                             <tr key={`l-${i}`} className="border-t border-gray-100">
                               <td className="px-3 py-1.5 font-mono">{ln.expense_head}</td>
-                              <td className="px-3 py-1.5 text-right">—</td>
                               <td className="px-3 py-1.5 text-right">{fmt(ln.amount)}</td>
-                              <td className="px-3 py-1.5 text-right">—</td>
                               <td className="px-3 py-1.5">{ln.cost_centre || ''}</td>
                             </tr>
                           ))}
