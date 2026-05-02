@@ -17,13 +17,16 @@ jobs:
           set -eu
           mkdir -p /root/app-data/postgres /root/app-data/finance
           test -d .git || { echo "ERROR: /root/app is not a git clone"; exit 1; }
+          export GIT_TERMINAL_PROMPT=0
           git remote -v
           git fetch origin main
           git checkout -f main
           git reset --hard origin/main
           git log -1 --oneline
 
+      # Never block deploy on diagnostics (docker/python quirks on self-hosted).
       - name: Tooling snapshot (debug)
+        continue-on-error: true
         run: |
           set -eu
           command -v docker && docker --version || true
@@ -38,18 +41,47 @@ jobs:
       - name: Rebuild and restart containers
         run: |
           set -eu
-          docker compose -f docker-compose.prod.yml build
-          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          _dc() {
+            if docker compose version >/dev/null 2>&1; then
+              docker compose "$@"
+            elif command -v docker-compose >/dev/null 2>&1; then
+              docker-compose "$@"
+            else
+              echo "ERROR: neither 'docker compose' nor docker-compose found." >&2
+              exit 1
+            fi
+          }
+          _dc -f docker-compose.prod.yml build
+          _dc -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
 
       - name: Health check
         run: |
           set -eu
-          sleep 8
-          curl -sf http://localhost/api/health || curl -sf http://localhost:8000/api/health || echo "Health check skipped"
+          if ! command -v curl >/dev/null 2>&1; then
+            echo "WARN: curl not installed — skipping HTTP health probe."
+            exit 0
+          fi
+          # Backend + nginx can take >8s on a cold VPS; retry before failing the job.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -sf http://localhost/api/health || curl -sf http://localhost:8000/api/health; then
+              echo "OK: health check passed (attempt $i)"
+              exit 0
+            fi
+            echo "… waiting for /api/health (attempt $i/10)"
+            sleep 6
+          done
+          echo "ERROR: health check failed after retries"
+          exit 1
 
       - name: Backend logs (on failure)
         if: failure()
         run: |
-          docker compose -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
-          docker compose -f docker-compose.prod.yml ps 2>&1 || true
+          set +e
+          if docker compose version >/dev/null 2>&1; then
+            docker compose -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
+            docker compose -f docker-compose.prod.yml ps 2>&1 || true
+          elif command -v docker-compose >/dev/null 2>&1; then
+            docker-compose -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
+            docker-compose -f docker-compose.prod.yml ps 2>&1 || true
+          fi
