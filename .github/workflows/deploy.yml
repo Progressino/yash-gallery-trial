@@ -14,22 +14,42 @@ jobs:
     steps:
       - name: Sync repo to origin/main
         run: |
+          set -euo pipefail
           mkdir -p /root/app-data/postgres /root/app-data/finance
+          test -d .git || { echo "ERROR: /root/app is not a git clone"; exit 1; }
+          git remote -v
           git fetch origin main
-          git checkout main
+          git checkout -f main
           git reset --hard origin/main
+          git log -1 --oneline
+
+      - name: Tooling snapshot (debug)
+        run: |
+          set -euo pipefail
+          command -v docker && docker --version || true
+          command -v python3 && python3 --version || true
+          command -v bash && bash --version | head -1
 
       - name: Backend sanity tests
         run: |
+          set -euo pipefail
           SKIP_E2E=1 bash scripts/predeploy_sanity.sh
 
       - name: Rebuild and restart containers
         run: |
+          set -euo pipefail
           docker compose -f docker-compose.prod.yml build
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
 
       - name: Health check
         run: |
+          set -euo pipefail
           sleep 8
           curl -sf http://localhost/api/health || curl -sf http://localhost:8000/api/health || echo "Health check skipped"
+
+      - name: Backend logs (on failure)
+        if: failure()
+        run: |
+          docker compose -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
+          docker compose -f docker-compose.prod.yml ps 2>&1 || true
