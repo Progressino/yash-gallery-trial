@@ -1234,17 +1234,53 @@ def _persist_amazon_finance_sales_entries(
                 prod = str(rr.get("Product_Name", "") or "").strip() if "Product_Name" in g2.columns else ""
                 if prod.lower() in ("nan", "none"):
                     prod = ""
+                qty_l = float(rr.get("Quantity", 0) or 0)
+                amt_l = float(sign * float(rr["_amt"]))
+                tex_l = float(rr.get("Tax_Exclusive_Gross", 0) or 0) if "Tax_Exclusive_Gross" in g2.columns else 0.0
+                tex_l = float(sign * tex_l) if tex_l else 0.0
+                item_px = float(rr.get("Item_Price", 0) or 0) if "Item_Price" in g2.columns else 0.0
+                line_taxable = tex_l if abs(tex_l) > 1e-6 else amt_l
+                unit_px = (line_taxable / qty_l) if abs(qty_l) > 1e-9 else (item_px if abs(item_px) > 1e-9 else 0.0)
+                hsn = str(rr.get("HSN_SAC", "") or "").strip() if "HSN_SAC" in g2.columns else ""
+                if hsn.lower() in ("nan", "none"):
+                    hsn = ""
+                asin = str(rr.get("ASIN", "") or "").strip() if "ASIN" in g2.columns else ""
+                fnsku = str(rr.get("FNSKU", "") or "").strip() if "FNSKU" in g2.columns else ""
+                oid_it = str(rr.get("Order_Item_Id", "") or "").strip() if "Order_Item_Id" in g2.columns else ""
+                ref_parts = [p for p in (asin, fnsku) if p and p.lower() not in ("nan", "none")]
+                item_ref = " · ".join(ref_parts) if ref_parts else (oid_it if oid_it and oid_it.lower() not in ("nan", "none") else "")
+                bf = str(rr.get("Bill_From_State", "") or "").strip() if "Bill_From_State" in g2.columns else ""
+                if bf.lower() in ("nan", "none"):
+                    bf = ""
+                wh = str(rr.get("Warehouse_Id", "") or "").strip() if "Warehouse_Id" in g2.columns else ""
+                ful = str(rr.get("Fulfillment", "") or "").strip() if "Fulfillment" in g2.columns else ""
+                pay = str(rr.get("Payment_Method", "") or "").strip() if "Payment_Method" in g2.columns else ""
+                irn = str(rr.get("IRN_Status", "") or "").strip() if "IRN_Status" in g2.columns else ""
                 items.append({
+                    "type": "Item",
                     "sku": str(rr.get("SKU", "") or ""),
                     "product_name": prod,
-                    "quantity": float(rr.get("Quantity", 0) or 0),
-                    "invoice_amount": float(sign * float(rr["_amt"])),
+                    "variant_code": fnsku if fnsku else "",
+                    "item_reference": item_ref,
+                    "quantity": qty_l,
+                    "unit_price": round(unit_px, 4),
+                    "tax_exclusive_amount": round(line_taxable, 2),
+                    "invoice_amount": round(amt_l, 2),
                     "total_tax": float(sign * float(rr["_ttax"])),
                     "cgst": float(sign * float(rr["_cgst"])),
                     "sgst": float(sign * float(rr["_sgst"])),
                     "igst": float(sign * float(rr["_igst"])),
                     "ship_to_city": city_row,
                     "ship_to_state": loc_line,
+                    "hsn_sac": hsn,
+                    "bill_from_state": bf,
+                    "asin": asin,
+                    "fnsku": fnsku,
+                    "order_item_id": oid_it,
+                    "warehouse_id": wh,
+                    "fulfillment": ful,
+                    "payment_method": pay,
+                    "irn_status": irn,
                 })
 
             narration = f"{platform} {period} — {txn_type}"
