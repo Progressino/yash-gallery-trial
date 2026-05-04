@@ -237,7 +237,7 @@ type CronusMega = 'finance' | 'cash' | 'sales' | 'purchasing' | 'india' | 'vouch
 function cronusMegaForTab(tab: FinanceTab): CronusMega | 'dash' {
   if (tab === 'dashboard') return 'dash'
   if (tab === 'gstr' || tab === 'gst') return 'india'
-  if (tab === 'sales-uploads' || tab === 'sales-invoices' || tab === 'sales-credit-memos' || tab === 'customer-ledger' || tab === 'revenue') return 'sales'
+  if (tab === 'sales-uploads' || tab === 'sales-invoices' || tab === 'sales-credit-memos' || tab === 'customer-ledger' || tab === 'inventory' || tab === 'revenue') return 'sales'
   if (tab === 'vouchers' || tab === 'daybook' || tab === 'voucher-register') return 'voucher'
   if (tab === 'cash-book' || tab === 'bank-book') return 'cash'
   if (tab === 'expenses') return 'purchasing'
@@ -258,7 +258,7 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'dashboard' | 'daybook' | 'sales-invoices' | 'sales-credit-memos' | 'customer-ledger' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
+type FinanceTab = 'dashboard' | 'daybook' | 'sales-invoices' | 'sales-credit-memos' | 'customer-ledger' | 'inventory' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
 
 // ── Chart of Accounts types ───────────────────────────────────────
 interface CoALedger {
@@ -481,6 +481,7 @@ function FinanceCronusNav(props: {
                 <L onClick={() => go('sales-invoices')}>Sales invoices</L>
                 <L onClick={() => go('sales-credit-memos')}>Sales credit memos</L>
                 <L onClick={() => go('customer-ledger')}>Customer ledger</L>
+                <L onClick={() => go('inventory')}>Inventory (shipments / returns)</L>
                 <L onClick={() => go('sales-uploads')}>Sales uploads</L>
                 <L onClick={() => go('daybook')}>Posted sales — Day Book</L>
               </MegaCol>
@@ -884,7 +885,7 @@ export default function Finance() {
       />
 
       <div className="bg-white rounded-b-lg border border-t-0 border-slate-200 shadow-sm overflow-hidden">
-        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads' || activeTab === 'sales-invoices' || activeTab === 'sales-credit-memos' || activeTab === 'customer-ledger') && (
+        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads' || activeTab === 'sales-invoices' || activeTab === 'sales-credit-memos' || activeTab === 'customer-ledger' || activeTab === 'inventory') && (
           <div className="px-3 sm:px-5 py-2 flex flex-wrap gap-x-1 gap-y-1 items-center border-b border-teal-100 bg-gradient-to-r from-teal-50/90 to-cyan-50/50">
             <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide mr-2">India Taxation</span>
             <button type="button" onClick={() => setActiveTab('gstr')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gstr' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GSTR-3B</button>
@@ -892,6 +893,7 @@ export default function Finance() {
             <button type="button" onClick={() => setActiveTab('sales-invoices')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-invoices' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales invoices</button>
             <button type="button" onClick={() => setActiveTab('sales-credit-memos')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-credit-memos' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales credit memos</button>
             <button type="button" onClick={() => setActiveTab('customer-ledger')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'customer-ledger' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Customer ledger</button>
+            <button type="button" onClick={() => setActiveTab('inventory')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'inventory' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Inventory</button>
             <button type="button" onClick={() => setActiveTab('sales-uploads')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-uploads' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales uploads</button>
             <button type="button" onClick={() => jumpMasters('tds-sections')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">TDS masters</button>
             <button type="button" onClick={() => jumpMasters('gst-classifications')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">GST classifications</button>
@@ -906,6 +908,7 @@ export default function Finance() {
             ['sales-invoices', 'Sales Invoices'],
             ['sales-credit-memos', 'Sales credit memos'],
             ['customer-ledger', 'Customer ledger'],
+            ['inventory', 'Inventory'],
             ['vouchers', 'Vouchers'],
             ['voucher-register', 'Voucher Register'],
             ['cash-book', 'Cash Book'],
@@ -1299,6 +1302,7 @@ export default function Finance() {
       )}
 
       {activeTab === 'customer-ledger' && <CustomerLedgerEntriesTab />}
+      {activeTab === 'inventory' && <FinanceInventoryTab />}
 
       {/* ── Tab: GSTR3B ── */}
       {activeTab === 'gstr' && <GSTR3BTab />}
@@ -1440,6 +1444,7 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
     { label: 'Chart of Accounts', tab: 'coa' },
     { label: 'Day Book', tab: 'daybook' },
     { label: 'Sales Invoices', tab: 'sales-invoices' },
+    { label: 'Inventory (Finance)', tab: 'inventory' },
     { label: 'Sales credit memos', tab: 'sales-credit-memos' },
     { label: 'Customer ledger', tab: 'customer-ledger' },
     { label: 'Vouchers', tab: 'vouchers' },
@@ -2000,13 +2005,89 @@ function SalesInvoiceBcDetailPanel({
 }) {
   const lines = (detail.meta?.line_items ?? []) as Record<string, unknown>[]
   const taxNum = detail.cgst_amount + detail.sgst_amount + detail.igst_amount
-  const hdrTaxable = Math.max(0.001, detail.taxable_amount || 0)
-  const effRate = hdrTaxable > 0 ? (100 * taxNum) / hdrTaxable : 0
+  const sumLineInvoice = useMemo(
+    () =>
+      lines.reduce((s, li) => {
+        const v = Number(li.invoice_amount ?? li.Invoice_Amount ?? 0)
+        return s + (Number.isFinite(v) ? v : 0)
+      }, 0),
+    [lines],
+  )
+
+  const {
+    subExcl,
+    taxNumDisp,
+    totalIncl,
+    hdrTaxableBase,
+    dispCgst,
+    dispSgst,
+    dispIgst,
+  } = useMemo(() => {
+    const subRaw = Number(detail.taxable_amount) || 0
+    const totRaw = Number(detail.total_amount) || 0
+    const tx = taxNum
+    const inclusiveLinePayable =
+      lines.length > 0 && Math.abs(sumLineInvoice - subRaw) < 1.5 && Math.abs(sumLineInvoice) > 0.01
+    const builtAsExclusivePlusTax =
+      tx > 0.01 &&
+      subRaw > 0 &&
+      Math.abs(subRaw + tx - totRaw) < 0.08 &&
+      totRaw > sumLineInvoice + 0.5
+    if (inclusiveLinePayable && builtAsExclusivePlusTax) {
+      let r: number | null = null
+      for (const li of lines) {
+        const gr = Number(li.gst_rate ?? li.GST_Rate ?? 0)
+        if (gr > 0 && Number.isFinite(gr)) {
+          const dec = gr <= 1 && gr > 0 ? gr : gr / 100
+          if (dec > 0.005 && dec < 0.28) {
+            r = dec
+            break
+          }
+        }
+      }
+      if (r == null) {
+        r = tx / subRaw
+      }
+      if (r > 0.005 && r < 0.28) {
+        const subE = subRaw / (1 + r)
+        const taxD = subRaw - subE
+        const sc = tx > 1e-9 ? taxD / tx : 1
+        return {
+          subExcl: subE,
+          taxNumDisp: taxD,
+          totalIncl: subRaw,
+          hdrTaxableBase: Math.max(0.001, subE),
+          dispCgst: detail.cgst_amount * sc,
+          dispSgst: detail.sgst_amount * sc,
+          dispIgst: detail.igst_amount * sc,
+        }
+      }
+    }
+    const hdr = Math.max(0.001, subRaw)
+    return {
+      subExcl: subRaw,
+      taxNumDisp: tx,
+      totalIncl: totRaw || subRaw + tx,
+      hdrTaxableBase: hdr,
+      dispCgst: detail.cgst_amount,
+      dispSgst: detail.sgst_amount,
+      dispIgst: detail.igst_amount,
+    }
+  }, [
+    detail.cgst_amount,
+    detail.sgst_amount,
+    detail.igst_amount,
+    detail.taxable_amount,
+    detail.total_amount,
+    lines,
+    sumLineInvoice,
+    taxNum,
+  ])
+
+  const effRate = hdrTaxableBase > 0 ? (100 * taxNumDisp) / hdrTaxableBase : 0
   const hsns = [...new Set(lines.map(li => liStr(li, 'hsn_sac', 'HSN_SAC')).filter(Boolean))]
   const shipState = (detail.meta?.ship_to_state || detail.party_state || '').toString().trim()
   const fromSt = (detail.meta?.seller_state || '').toString().trim()
-  const subExcl = detail.taxable_amount
-  const totalIncl = detail.total_amount || (subExcl + taxNum)
 
   return (
     <div className="flex flex-col xl:flex-row gap-4 min-h-0">
@@ -2129,7 +2210,7 @@ function SalesInvoiceBcDetailPanel({
         </div>
         <div className="px-3 py-2 border-t border-slate-200 bg-slate-50/90 text-[11px] text-slate-600 grid grid-cols-2 sm:grid-cols-4 gap-2">
           <div><span className="text-slate-500">Subtotal excl. tax</span><div className="font-semibold text-slate-900">₹{fmtDec(subExcl)}</div></div>
-          <div><span className="text-slate-500">Total tax</span><div className="font-semibold text-slate-900">₹{fmtDec(taxNum)}</div></div>
+          <div><span className="text-slate-500">Total tax</span><div className="font-semibold text-slate-900">₹{fmtDec(taxNumDisp)}</div></div>
           <div><span className="text-slate-500">Total excl. tax</span><div className="font-semibold text-slate-900">₹{fmtDec(subExcl)}</div></div>
           <div><span className="text-slate-500">Total incl. tax</span><div className="font-semibold text-[#002B5B]">₹{fmtDec(totalIncl)}</div></div>
         </div>
@@ -2143,7 +2224,7 @@ function SalesInvoiceBcDetailPanel({
             <div className="flex justify-between gap-2"><dt className="text-slate-500">Seller branch state</dt><dd className="text-right text-slate-800">{fromSt || '—'}</dd></div>
             <div className="flex justify-between gap-2"><dt className="text-slate-500">Supply</dt><dd className="text-right text-slate-800">{detail.supply_type === 'Inter' ? 'Inter-state (IGST)' : detail.supply_type === 'Intra' ? 'Intra-state (CGST+SGST)' : '—'}</dd></div>
             <div className="flex justify-between gap-2"><dt className="text-slate-500">Effective tax %</dt><dd className="text-right font-mono text-slate-800">{effRate > 0 ? `${effRate.toFixed(2)}%` : '—'}</dd></div>
-            <div className="flex justify-between gap-2"><dt className="text-slate-500">GST base (header)</dt><dd className="text-right font-mono">₹{fmtDec(detail.taxable_amount)}</dd></div>
+            <div className="flex justify-between gap-2"><dt className="text-slate-500">GST base (header)</dt><dd className="text-right font-mono">₹{fmtDec(hdrTaxableBase)}</dd></div>
           </dl>
         </div>
         <div>
@@ -2151,16 +2232,16 @@ function SalesInvoiceBcDetailPanel({
           <table className="w-full text-[11px]">
             <thead><tr className="text-slate-500 text-left"><th className="py-1">Component</th><th className="py-1 text-right">%</th><th className="py-1 text-right">Amount</th></tr></thead>
             <tbody>
-              {detail.cgst_amount > 0 ? (
-                <tr className="border-t border-slate-100"><td className="py-1">CGST</td><td className="text-right font-mono">{hdrTaxable ? ((100 * detail.cgst_amount) / hdrTaxable).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(detail.cgst_amount)}</td></tr>
+              {dispCgst > 0 ? (
+                <tr className="border-t border-slate-100"><td className="py-1">CGST</td><td className="text-right font-mono">{hdrTaxableBase ? ((100 * dispCgst) / hdrTaxableBase).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(dispCgst)}</td></tr>
               ) : null}
-              {detail.sgst_amount > 0 ? (
-                <tr className="border-t border-slate-100"><td className="py-1">SGST</td><td className="text-right font-mono">{hdrTaxable ? ((100 * detail.sgst_amount) / hdrTaxable).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(detail.sgst_amount)}</td></tr>
+              {dispSgst > 0 ? (
+                <tr className="border-t border-slate-100"><td className="py-1">SGST</td><td className="text-right font-mono">{hdrTaxableBase ? ((100 * dispSgst) / hdrTaxableBase).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(dispSgst)}</td></tr>
               ) : null}
-              {detail.igst_amount > 0 ? (
-                <tr className="border-t border-slate-100"><td className="py-1">IGST</td><td className="text-right font-mono">{hdrTaxable ? ((100 * detail.igst_amount) / hdrTaxable).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(detail.igst_amount)}</td></tr>
+              {dispIgst > 0 ? (
+                <tr className="border-t border-slate-100"><td className="py-1">IGST</td><td className="text-right font-mono">{hdrTaxableBase ? ((100 * dispIgst) / hdrTaxableBase).toFixed(2) : '—'}</td><td className="text-right font-mono">₹{fmtDec(dispIgst)}</td></tr>
               ) : null}
-              {taxNum <= 0 ? <tr><td colSpan={3} className="py-2 text-slate-400">No tax on header — line taxes may still show per SKU.</td></tr> : null}
+              {taxNumDisp <= 0 ? <tr><td colSpan={3} className="py-2 text-slate-400">No tax on header — line taxes may still show per SKU.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -2256,6 +2337,7 @@ function SalesInvoicesTab({
     { attribute_name: '', value_code: '', value_description: '' },
   ])
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
+  const [includeUploadSummaries, setIncludeUploadSummaries] = useState(true)
 
   const q = useMemo(() => {
     const p = new URLSearchParams()
@@ -2263,11 +2345,12 @@ function SalesInvoicesTab({
     if (startDate) p.set('start_date', startDate)
     if (endDate) p.set('end_date', endDate)
     if (search.trim()) p.set('search', search.trim())
+    if (!isCreditTab && !includeUploadSummaries) p.set('include_upload_summaries', 'false')
     return p.toString()
-  }, [startDate, endDate, search, isCreditTab])
+  }, [startDate, endDate, search, isCreditTab, includeUploadSummaries])
 
   const { data: rows = [], isLoading } = useQuery<SalesInvoiceRow[]>({
-    queryKey: ['finance-sales-invoices', mode, startDate, endDate, search],
+    queryKey: ['finance-sales-invoices', mode, startDate, endDate, search, includeUploadSummaries],
     queryFn: async () => { const { data } = await api.get(`/finance/sales-invoices?${q}`); return data },
     staleTime: 30 * 1000,
   })
@@ -2438,6 +2521,17 @@ function SalesInvoicesTab({
             <label className="text-xs text-gray-500">Search</label>
             <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Invoice / Order / Customer" className="block text-xs border border-gray-200 rounded px-2 py-1.5 w-56" />
           </div>
+          {!isCreditTab ? (
+            <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={includeUploadSummaries}
+                onChange={e => setIncludeUploadSummaries(e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              Show upload summaries (SUP-)
+            </label>
+          ) : null}
         </div>
         <button
           type="button"
@@ -2472,7 +2566,7 @@ function SalesInvoicesTab({
             <p className="text-[11px] text-gray-500 mt-0.5">
               {isCreditTab
                 ? 'Posted returns and adjustments (negative net or taxable, or narration mentioning refund). Press Esc to close the card.'
-                : 'Posted invoices and upload summaries only — returns live under Sales credit memos. Press Esc to close.'}
+                : 'Posted buyer invoices (SUE-) plus optional upload summaries (SUP-). Uncheck “Show upload summaries” to hide SUP-. One Amazon file often creates several SUP- rows — one Finance upload per seller GSTIN branch in the MTR (company name shows that branch), not separate manual uploads per state. Returns: Sales credit memos.'}
             </p>
           </div>
           <span className="text-xs text-gray-500">{stats.count} rows · net {fmt(stats.total)}</span>
@@ -2492,7 +2586,7 @@ function SalesInvoicesTab({
                 <tr className="text-gray-500 uppercase tracking-wide">
                   <th className="px-3 py-2 text-left">No.</th>
                   <th className="px-3 py-2 text-left">Invoice</th>
-                  <th className="px-3 py-2 text-left">Customer</th>
+                  <th className="px-3 py-2 text-left">Party</th>
                   <th className="px-3 py-2 text-left">Platform</th>
                   <th className="px-3 py-2 text-right">Net</th>
                 </tr>
@@ -2509,7 +2603,19 @@ function SalesInvoicesTab({
                       <p className="font-medium text-gray-800">{r.invoice_no || '—'}</p>
                       <p className="text-[10px] text-gray-500">{r.voucher_date} · Order {r.order_id || '—'}</p>
                     </td>
-                    <td className="px-3 py-1.5 text-gray-700">{r.party_name || '—'}</td>
+                    <td className="px-3 py-1.5 text-gray-700">
+                      <div className="flex flex-col gap-0.5 max-w-[16rem]">
+                        {(r.row_kind === 'upload_summary' || (r.voucher_no ?? '').toUpperCase().startsWith('SUP-')) ? (
+                          <span className="text-[9px] font-semibold uppercase tracking-wide text-amber-900 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 w-max">
+                            Seller · upload summary
+                          </span>
+                        ) : null}
+                        <span className="font-medium text-gray-800">{r.party_name || '—'}</span>
+                        {(r.party_state || r.ship_to_state) ? (
+                          <span className="text-[10px] text-gray-500">{r.party_state || r.ship_to_state}</span>
+                        ) : null}
+                      </div>
+                    </td>
                     <td className="px-3 py-1.5 text-gray-600">{r.platform || '—'}</td>
                     <td className="px-3 py-1.5 text-right font-semibold">{fmt(r.net_payable)}</td>
                   </tr>
@@ -2601,7 +2707,7 @@ function SalesInvoicesTab({
                   ) : null}
                   {selected?.row_kind === 'upload_summary' ? (
                     <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 leading-snug">
-                      <strong>SUP- / SUM-</strong> is the <strong>upload file summary</strong>. This screen opens on the <strong>Lines</strong> tab by default so SKU-level rows are visible. Use <strong>General</strong> for file name, period, and header totals. You can also open an <strong>SUE-</strong> row for a single invoice.
+                      <strong>SUP- / SUM-</strong> is the <strong>upload file summary</strong> (seller branch / GSTIN slice), not a buyer invoice. One Amazon MTR often creates <strong>several SUP- rows</strong> — one locked upload per <strong>seller GSTIN</strong> in the file — so you may see multiple company names ending in a state even though you uploaded a single file. This screen opens on <strong>Lines</strong> by default; use <strong>General</strong> for file and totals. Open <strong>SUE-</strong> for a single customer invoice.
                     </p>
                   ) : null}
                   {selected?.row_kind === 'upload_summary' && detail && lineItemCount > 0 ? (
@@ -2815,6 +2921,128 @@ function SalesInvoicesTab({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+interface InventoryMovementRow {
+  sku: string
+  product_name: string
+  qty_out: number
+  qty_in: number
+  net_qty: number
+  line_count: number
+}
+
+function fmtQtyCell(n: number) {
+  if (!Number.isFinite(n)) return '—'
+  const t = Math.abs(n % 1) < 1e-9 ? n.toFixed(0) : n.toFixed(3)
+  return Number(t).toLocaleString('en-IN')
+}
+
+// ── Finance inventory (qty from posted sales line_items) ────────────
+function FinanceInventoryTab() {
+  const [startDate, setStartDate] = useState(() => monthsAgo(1))
+  const [endDate, setEndDate] = useState(TODAY)
+  const [search, setSearch] = useState('')
+
+  const q = useMemo(() => {
+    const p = new URLSearchParams()
+    if (startDate) p.set('start_date', startDate)
+    if (endDate) p.set('end_date', endDate)
+    if (search.trim()) p.set('search', search.trim())
+    return p.toString()
+  }, [startDate, endDate, search])
+
+  const { data: rows = [], isLoading } = useQuery<InventoryMovementRow[]>({
+    queryKey: ['finance-inventory-movements', startDate, endDate, search],
+    queryFn: async () => {
+      const { data } = await api.get<InventoryMovementRow[]>(`/finance/inventory-movements?${q}`)
+      return data
+    },
+    staleTime: 30 * 1000,
+  })
+
+  const totals = useMemo(() => {
+    let o = 0
+    let i = 0
+    for (const r of rows) {
+      o += r.qty_out
+      i += r.qty_in
+    }
+    return { out: o, in: i, net: o - i }
+  }, [rows])
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-teal-100 bg-teal-50/70 px-4 py-3 text-[11px] text-teal-950 leading-snug">
+        <strong>Outbound</strong> totals shipment line quantities from posted Finance sales entries;{' '}
+        <strong>Inbound</strong> totals return / credit-memo lines (stock coming back). This view reads only the Finance lock DB — it does not replace the operational Inventory upload or warehouse on-hand.
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3 flex flex-wrap gap-3 items-end">
+        <div>
+          <label className="text-xs text-gray-500">From</label>
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">To</label>
+          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">SKU / product contains</label>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Filter…"
+            className="block text-xs border border-gray-200 rounded px-2 py-1.5 w-52"
+          />
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap justify-between gap-2 items-center">
+          <h3 className="text-sm font-semibold text-gray-800">SKU movement (Finance)</h3>
+          <span className="text-xs text-gray-500">
+            {rows.length} SKU{rows.length !== 1 ? 's' : ''} · out {fmtQtyCell(totals.out)} · in {fmtQtyCell(totals.in)} · net {fmtQtyCell(totals.net)}
+          </span>
+        </div>
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading movements…</div>
+        ) : rows.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">
+            No line quantities in range. Post Amazon (or other) sales with line_items from Finance → Sales uploads, then refresh.
+          </div>
+        ) : (
+          <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-50 z-[1] shadow-sm">
+                <tr className="text-gray-500 uppercase tracking-wide">
+                  <th className="px-3 py-2 text-left">SKU</th>
+                  <th className="px-3 py-2 text-left">Product</th>
+                  <th className="px-3 py-2 text-right">Outbound</th>
+                  <th className="px-3 py-2 text-right">Inbound</th>
+                  <th className="px-3 py-2 text-right">Net</th>
+                  <th className="px-3 py-2 text-right">Lines</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={r.sku} className="border-t border-gray-100 hover:bg-teal-50/40">
+                    <td className="px-3 py-1.5 font-mono text-gray-800">{r.sku}</td>
+                    <td className="px-3 py-1.5 text-gray-600 max-w-[20rem] truncate" title={r.product_name}>{r.product_name || '—'}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-emerald-800 font-medium">{fmtQtyCell(r.qty_out)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-amber-800 font-medium">{fmtQtyCell(r.qty_in)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums font-semibold text-gray-900">{fmtQtyCell(r.net_qty)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-gray-500">{r.line_count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

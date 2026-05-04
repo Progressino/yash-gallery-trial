@@ -215,6 +215,109 @@ def test_finance_sales_invoices_from_upload_entries(finance_isolated_db, client)
     assert len(r_all.json()) >= len(rows2)
 
 
+def test_finance_sales_invoices_exclude_upload_summaries_param(finance_isolated_db, client):
+    up = client.post(
+        "/api/finance/sales-uploads",
+        json={
+            "platform": "Amazon",
+            "period": "2026-07",
+            "filename": "suphide.csv",
+            "total_revenue": 50.0,
+            "total_orders": 1,
+            "total_returns": 0.0,
+            "net_revenue": 50.0,
+            "uploaded_by": "pytest",
+            "upload_notes": "",
+        },
+    )
+    assert up.status_code == 200
+    upload_id = int(up.json().get("id") or 0)
+    r_all = client.get("/api/finance/sales-invoices?start_date=2026-07-01&end_date=2026-07-31")
+    assert r_all.status_code == 200
+    assert any(x.get("voucher_no") == f"SUP-{upload_id}" for x in r_all.json())
+    r_no = client.get(
+        "/api/finance/sales-invoices?start_date=2026-07-01&end_date=2026-07-31&include_upload_summaries=false"
+    )
+    assert r_no.status_code == 200
+    assert not any(str(x.get("voucher_no") or "").startswith("SUP-") for x in r_no.json())
+
+
+def test_finance_inventory_movements_api(finance_isolated_db, client):
+    import json
+
+    import backend.db.finance_db as fdb
+
+    up = client.post(
+        "/api/finance/sales-uploads",
+        json={
+            "platform": "Amazon",
+            "period": "2026-08",
+            "filename": "inv.csv",
+            "total_revenue": 200.0,
+            "total_orders": 2,
+            "total_returns": 0.0,
+            "net_revenue": 200.0,
+            "uploaded_by": "pytest",
+            "upload_notes": "",
+        },
+    )
+    assert up.status_code == 200
+    uid = int(up.json()["id"])
+    fdb.create_finance_sales_entries(
+        uid,
+        [
+            {
+                "platform": "Amazon",
+                "period": "2026-08",
+                "voucher_date": "2026-08-10",
+                "invoice_no": "INV-M1",
+                "order_id": "O1",
+                "party_name": "Buyer",
+                "party_gstin": "",
+                "party_state": "KA",
+                "ship_to_state": "KA",
+                "taxable_amount": 200.0,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 0.0,
+                "total_amount": 200.0,
+                "net_payable": 200.0,
+                "narration": "",
+                "source_filename": "inv.csv",
+                "line_items": json.dumps([{"sku": "SKU-MOVE-1", "Quantity": 3, "product_name": "Widget"}]),
+            },
+            {
+                "platform": "Amazon",
+                "period": "2026-08",
+                "voucher_date": "2026-08-11",
+                "invoice_no": "CN-M1",
+                "order_id": "O1-R",
+                "party_name": "Buyer",
+                "party_gstin": "",
+                "party_state": "KA",
+                "ship_to_state": "KA",
+                "taxable_amount": -50.0,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 0.0,
+                "total_amount": -50.0,
+                "net_payable": -50.0,
+                "narration": "Refund",
+                "source_filename": "inv.csv",
+                "line_items": json.dumps([{"sku": "SKU-MOVE-1", "Quantity": 1, "product_name": "Widget"}]),
+            },
+        ],
+    )
+    r = client.get("/api/finance/inventory-movements?start_date=2026-08-01&end_date=2026-08-31")
+    assert r.status_code == 200
+    body = r.json()
+    hit = next((x for x in body if x.get("sku") == "SKU-MOVE-1"), None)
+    assert hit is not None
+    assert hit["qty_out"] == 3.0
+    assert hit["qty_in"] == 1.0
+    assert hit["net_qty"] == 2.0
+
+
 def test_finance_sales_invoices_document_kind_sales_vs_credit_memo(finance_isolated_db, client):
     up = client.post(
         "/api/finance/sales-uploads",

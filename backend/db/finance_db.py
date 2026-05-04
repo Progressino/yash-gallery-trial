@@ -1577,6 +1577,7 @@ def list_sales_invoices(
     end_date: Optional[str] = None,
     search: Optional[str] = None,
     document_kind: Optional[str] = None,
+    include_upload_summaries: bool = True,
 ) -> list[dict]:
     """All finance_sales_entries rows plus every finance_sales_uploads summary (same coverage as Sales Uploads).
 
@@ -1584,6 +1585,11 @@ def list_sales_invoices(
       - None / \"all\" — legacy combined list (invoices + credit memos + upload summaries).
       - \"sales\" — invoices & shipments only (exclude credit-memo SUE rows); include SUP summaries.
       - \"credit_memo\" — sales credit memos / returns only (SUE rows matching credit predicate); no SUP rows.
+
+    include_upload_summaries:
+      When False (with document_kind other than credit_memo), SUP-* upload summary rows are omitted.
+      Use this to hide one-summary-per-upload rows; Amazon uploads with multiple seller GSTINs still
+      create one Finance upload (and one SUP) per GSTIN from the same file.
     """
     conn = _connect()
     dk = (document_kind or "").strip().lower()
@@ -1683,7 +1689,7 @@ def list_sales_invoices(
         )"""
         params2.extend([like, like, like, like, like])
     q2 += " ORDER BY su.period DESC, su.id DESC"
-    if dk != "credit_memo":
+    if dk != "credit_memo" and include_upload_summaries:
         for row in conn.execute(q2, params2).fetchall():
             su = dict(row)
             uid = int(su["id"])
@@ -1726,6 +1732,94 @@ def list_sales_invoices(
     conn.close()
 
     out.sort(key=lambda r: (r.get("voucher_date") or "", r.get("id")), reverse=True)
+    return out
+
+
+def list_finance_inventory_movements(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """SKU quantities from ``finance_sales_entries.line_items`` (Finance uploads only).
+
+    * **qty_out** — shipment / invoice entries (not classified as sales credit memo).
+    * **qty_in** — returns / credits (negative net/taxable or refund narration), quantity as positive.
+
+    This does not read operational inventory sheets; it is a movement ledger derived from
+    posted Finance sales lines so you can see what left (sales) and came back (returns).
+    """
+    conn = _connect()
+    q = """
+        SELECT line_items, net_payable, taxable_amount, narration
+        FROM finance_sales_entries
+        WHERE COALESCE(trim(line_items), '') NOT IN ('', '[]', 'null')
+    """
+    params: list[Any] = []
+    if start_date:
+        q += " AND voucher_date >= ?"
+        params.append(start_date)
+    if end_date:
+        q += " AND voucher_date <= ?"
+        params.append(end_date)
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+
+    sk = (search or "").strip().lower()
+    agg: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        np_ = float(row["net_payable"] or 0)
+        tb = float(row["taxable_amount"] or 0)
+        narr = str(row["narration"] or "").lower()
+        is_credit = np_ < -1e-6 or tb < -1e-6 or ("refund" in narr)
+        raw = row["line_items"] or "[]"
+        try:
+            items = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            continue
+        if not isinstance(items, list):
+            continue
+        for li in items:
+            if not isinstance(li, dict):
+                continue
+            sku = str(li.get("sku") or li.get("SKU") or "").strip()
+            if not sku or sku.lower() in ("nan", "none"):
+                continue
+            try:
+                qty = float(li.get("quantity") or li.get("Quantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if abs(qty) < 1e-9:
+                continue
+            prod = str(li.get("product_name") or li.get("Product_Name") or "").strip()
+            if sk:
+                hay = f"{sku} {prod}".lower()
+                if sk not in hay:
+                    continue
+            if sku not in agg:
+                agg[sku] = {"sku": sku, "product_name": prod, "qty_out": 0.0, "qty_in": 0.0, "line_count": 0}
+            elif prod and not (agg[sku].get("product_name") or ""):
+                agg[sku]["product_name"] = prod
+            qv = abs(qty)
+            if is_credit:
+                agg[sku]["qty_in"] += qv
+            else:
+                agg[sku]["qty_out"] += qv
+            agg[sku]["line_count"] = int(agg[sku].get("line_count", 0)) + 1
+
+    out: list[dict[str, Any]] = []
+    for v in agg.values():
+        qo = round(float(v["qty_out"]), 3)
+        qi = round(float(v["qty_in"]), 3)
+        out.append({
+            "sku": v["sku"],
+            "product_name": (v.get("product_name") or "")[:200],
+            "qty_out": qo,
+            "qty_in": qi,
+            "net_qty": round(qo - qi, 3),
+            "line_count": int(v.get("line_count", 0)),
+        })
+    out.sort(key=lambda r: (r["qty_out"] + r["qty_in"], r["sku"]), reverse=True)
     return out
 
 

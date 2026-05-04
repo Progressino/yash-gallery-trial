@@ -88,7 +88,7 @@ const COL_LABEL: Record<string, string> = {
   'PO_Qty_Ordered':           '📋 PO Ordered',
   'Pending_Cutting':          '✂️ Pend. Cutting',
   'Balance_to_Dispatch':      '📦 Bal. Dispatch',
-  'Projected_Running_Days':   '📅 Proj. Run Days',
+  'Projected_Running_Days':   '📅 Proj. run (Tot inv + pipe) / ADS',
   'Cutting_Ratio':            '✂️ Cut Ratio',
   'Lead_Time_Days':          '📅 Lead (d)',
   'SKU_Sheet_Status':        '📋 Sheet status',

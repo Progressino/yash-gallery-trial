@@ -142,3 +142,42 @@ def test_trial_balance_returns_structure(fin_db):
     tb = fdb.get_trial_balance("2026-01-01", "2026-12-31")
     assert "rows" in tb and isinstance(tb["rows"], list)
     assert "balanced" in tb and "total_debit" in tb and "total_credit" in tb
+
+
+def test_reconcile_amazon_invoice_tax_inclusive_when_gst_rate_from_column():
+    """MTR often has Invoice_Amount tax-inclusive; GST_Rate column backs out exclusive base."""
+    from backend.routers.finance import _reconcile_amazon_invoice_taxable_inclusive
+
+    inv = 4592.30
+    tex_sum = 0.0
+    taxable, cgst, sgst, igst, gst_t, reconciled = _reconcile_amazon_invoice_taxable_inclusive(
+        inv,
+        tex_sum,
+        0.0,
+        0.0,
+        230.20,
+        0.0,
+        5.0,
+        gst_rate_from_column=True,
+    )
+    assert reconciled is True
+    assert abs(taxable - 4373.62) < 0.2
+    assert abs((taxable + gst_t) - inv) < 0.06
+    assert abs(igst - (inv - taxable)) < 0.2
+
+
+def test_reconcile_amazon_invoice_uses_tax_exclusive_gross_when_present():
+    from backend.routers.finance import _reconcile_amazon_invoice_taxable_inclusive
+
+    taxable, _c, _s, _i, _g, reco = _reconcile_amazon_invoice_taxable_inclusive(
+        1000.0,
+        900.0,
+        5.0,
+        5.0,
+        0.0,
+        0.0,
+        5.0,
+        gst_rate_from_column=True,
+    )
+    assert taxable == 900.0
+    assert reco is False

@@ -476,6 +476,12 @@ async def session_middleware(request: Request, call_next):
 
     response: Response = await call_next(request)
 
+    def _cookie_secure() -> bool:
+        xf = request.headers.get("x-forwarded-proto")
+        if xf:
+            return xf.split(",")[0].strip().lower() == "https"
+        return request.url.scheme == "https"
+
     try:
         from .db.forecast_session_pg import debounced_persist_session, pg_session_persist_enabled
 
@@ -495,6 +501,7 @@ async def session_middleware(request: Request, call_next):
         value=sid,
         httponly=True,
         samesite="lax",
+        secure=_cookie_secure(),
         max_age=14 * 24 * 3600,  # 14 days — must stay stable while PostgreSQL stores session blobs by this id
     )
     return response

@@ -5,6 +5,16 @@
     <link rel="icon" type="image/png" href="/logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Yash Gallery ERP — Progressino</title>
+    <!-- Force HTTPS on production hosts if the user opens http:// (avoids permanent "Not Secure" in the address bar). -->
+    <script>
+      (function () {
+        if (location.protocol !== 'http:') return
+        var h = location.hostname
+        if (h === 'localhost' || h === '127.0.0.1') return
+        if (!/^(app\.progressino\.com|raisinghanitextiles\.com|www\.raisinghanitextiles\.com)$/.test(h)) return
+        location.replace('https://' + location.host + location.pathname + location.search + location.hash)
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

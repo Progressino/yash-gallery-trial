@@ -760,12 +760,13 @@ def calculate_po_base(
         ),
     ).round(4)
 
-    # Projected Running Days = (current stock + full pipeline) / ADS
-    # Shows how many days stock will last once all pipeline orders arrive
-    total_supply = inv_for_metrics + po_df["PO_Pipeline_Total"] + po_df["Gross_PO_Qty"]
+    # Projected Running Days = (Total_Inventory + PO_Pipeline_Total) / ADS
+    # Same sellable stock basis as Days_Left (inv_days_left); do **not** add Gross_PO_Qty —
+    # suggested orders are not on hand and inflated this column vs the team's sheet.
+    projected_supply = inv_days_left + po_df["PO_Pipeline_Total"]
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
-        (total_supply / po_df["ADS"]).round(1),
+        (projected_supply / po_df["ADS"]).round(1),
         999.0,
     )
 

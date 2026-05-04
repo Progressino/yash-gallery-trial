@@ -1,0 +1,94 @@
+# Raisinghani-only nginx (single hostname). If app.progressino.com uses the same VPS IP,
+# use the merged ``nginx/nginx.conf`` in the repo instead — otherwise Progressino traffic
+# can fall into this vhost and get redirected to raisinghanitextiles.com.
+# Install (single-site only): cp nginx/nginx.conf.raisinghani nginx/nginx.conf
+# Upstream must match docker-compose service name: **backend** (not rt-backend).
+
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout 65;
+
+    client_max_body_size 500m;
+    proxy_read_timeout 900s;
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 900s;
+
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name raisinghanitextiles.com www.raisinghanitextiles.com;
+
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
+
+        location / {
+            return 308 https://raisinghanitextiles.com$request_uri;
+        }
+    }
+
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+        server_name raisinghanitextiles.com www.raisinghanitextiles.com;
+
+        ssl_certificate     /etc/letsencrypt/live/raisinghanitextiles.com/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/raisinghanitextiles.com/privkey.pem;
+        ssl_protocols       TLSv1.2 TLSv1.3;
+        ssl_ciphers         HIGH:!aNULL:!MD5;
+        ssl_session_timeout 1d;
+        ssl_session_cache   shared:SSL:10m;
+        ssl_prefer_server_ciphers off;
+
+        root /var/www/raisinghani;
+        index index.html;
+
+        add_header Strict-Transport-Security "max-age=31536000" always;
+
+        location = /index.html {
+            add_header Strict-Transport-Security "max-age=31536000" always;
+            add_header Cache-Control "no-store, no-cache, must-revalidate";
+            try_files $uri /index.html;
+        }
+
+        location ~* \.(js|css|woff2?|ttf|svg|ico|png|jpg|jpeg|gif|webp)$ {
+            add_header Strict-Transport-Security "max-age=31536000" always;
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+            try_files $uri =404;
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        location /api/ {
+            proxy_pass         http://backend:8000;
+            proxy_http_version 1.1;
+            proxy_set_header   Host $host;
+            proxy_set_header   X-Real-IP $remote_addr;
+            proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            client_max_body_size 20m;
+        }
+
+        location /uploads/ {
+            proxy_pass http://backend:8000;
+            add_header Strict-Transport-Security "max-age=31536000" always;
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript text/xml image/svg+xml;
+    }
+}

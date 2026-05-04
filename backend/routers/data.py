@@ -141,8 +141,9 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             except Exception:
                 pass
 
-        # Restore inventory from warm cache (fast — already in memory) or GitHub as fallback.
-        # Inventory has no SQLite backing so it's always lost on server restart.
+        # Restore inventory from warm cache only (fast — already in memory). Inventory has no
+        # SQLite backing so it's lost on server restart until warm cache is populated at startup
+        # or the user runs Load Cache from the UI.
         need_inventory = sess.inventory_df_variant.empty
         if need_inventory:
             try:
@@ -155,17 +156,11 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
                             setattr(sess, key, val)
                     if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
                         sess.sku_mapping = _main._warm_cache["sku_mapping"]
-                else:
-                    # Warm cache not ready yet — fall back to GitHub download
-                    from ..services.github_cache import load_cache_from_drive
-                    ok, _, loaded = load_cache_from_drive()
-                    if ok and loaded:
-                        for key in ["inventory_df_variant", "inventory_df_parent"]:
-                            val = loaded.get(key)
-                            if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                                setattr(sess, key, val)
-                        if not sess.sku_mapping and loaded.get("sku_mapping"):
-                            sess.sku_mapping = loaded["sku_mapping"]
+                # Intentionally do **not** call load_cache_from_drive() here: it can pull many
+                # large parquet assets from GitHub and block this request (and the whole session
+                # lock) for minutes — nginx/Cloudflare return 504 while the dashboard stays on
+                # "Loading…". Warm cache fills shortly after startup; users can use Load Cache /
+                # Fresh reload for an explicit GitHub restore.
             except Exception:
                 pass
 

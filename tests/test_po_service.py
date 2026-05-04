@@ -1,6 +1,7 @@
 """PO engine smoke test with minimal sales + inventory."""
 
 import pandas as pd
+import pytest
 
 from backend.services.po_engine import calculate_po_base, calculate_quarterly_history
 
@@ -456,3 +457,25 @@ def test_sheet_lead_increases_gross_vs_shorter_global_lead():
     assert int(long_lead.iloc[0]["Lead_Time_Days"]) == 90
     assert int(long_lead.iloc[0]["Gross_PO_Qty"]) > int(short.iloc[0]["Gross_PO_Qty"])
     assert float(long_lead.iloc[0]["ADS"]) == float(short.iloc[0]["ADS"])
+
+
+def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
+    """Sheet formula: (PO_Pipeline_Total + Total_Inventory) / ADS — exclude suggested Gross_PO_Qty."""
+    sales = _minimal_sales()
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["TEST-SKU-1"],
+            "Total_Inventory": [40],
+            "OMS_Inventory": [10],
+        }
+    )
+    existing = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "PO_Pipeline_Total": [20]})
+    po = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, existing_po_df=existing)
+    row = po.iloc[0]
+    ads = float(row["ADS"])
+    assert ads > 0
+    expected = round((40 + 20) / ads, 1)
+    assert float(row["Projected_Running_Days"]) == pytest.approx(expected, abs=0.05)
+    assert float(row["Days_Left"]) == pytest.approx(expected, abs=0.05)
+    # Uses Total_Inventory (40) in the numerator, not OMS_Inventory (10) alone.
+    assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20) / ads, 1), abs=0.05)

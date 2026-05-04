@@ -35,7 +35,7 @@ from ..db.finance_db import (
     list_expense_vouchers, get_expense_voucher, create_expense_voucher, delete_expense_voucher,
     list_finance_sales_uploads, create_finance_sales_upload, create_finance_sales_entries, delete_finance_sales_upload,
     list_voucher_types, create_voucher_type, update_voucher_type, delete_voucher_type,
-    list_vouchers, list_sales_invoices, list_customer_ledger_entries, get_upload_summary_voucher, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
+    list_vouchers, list_sales_invoices, list_finance_inventory_movements, list_customer_ledger_entries, get_upload_summary_voucher, get_voucher_summary_by_date, get_gstr3b_data, get_ledger_balances, get_sales_entry_voucher,
     upsert_sales_invoice_edit_patch, get_sales_invoice_edit_patch,
     get_chart_of_accounts, get_trial_balance,
     list_tally_pl, upsert_tally_pl, delete_tally_pl,
@@ -594,6 +594,10 @@ def get_sales_invoices(
         '"sales" = posted invoices/shipments only (no credit memos) + SUP summaries. '
         '"credit_memo" = sales credit memos / returns (SUE only).',
     ),
+    include_upload_summaries: bool = Query(
+        True,
+        description="When false, omit SUP-* upload summary rows. Parsed SUE-* lines remain.",
+    ),
 ):
     """Invoice-level rows persisted from Finance Sales Uploads."""
     return list_sales_invoices(
@@ -601,6 +605,21 @@ def get_sales_invoices(
         end_date=end_date,
         search=search,
         document_kind=document_kind,
+        include_upload_summaries=include_upload_summaries,
+    )
+
+
+@router.get("/inventory-movements")
+def get_finance_inventory_movements(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    """SKU outbound (shipments) vs inbound (returns) from posted Finance sales line_items."""
+    return list_finance_inventory_movements(
+        start_date=start_date,
+        end_date=end_date,
+        search=search,
     )
 
 
@@ -1135,6 +1154,85 @@ def _build_geo_company_breakdowns(df, ship_col: str, amt_col: str, ship_val: str
     return state_rows, company_rows
 
 
+def _reconcile_amazon_invoice_taxable_inclusive(
+    inv_sum: float,
+    tex_sum: float,
+    cgst: float,
+    sgst: float,
+    igst: float,
+    tax_from_tt: float,
+    gst_rate_median: Optional[float],
+    *,
+    gst_rate_from_column: bool = False,
+) -> tuple[float, float, float, float, float, bool]:
+    """Return (taxable, cgst, sgst, igst, gst_total, inclusive_reconciled).
+
+    Amazon MTR ``Invoice_Amount`` is often tax-inclusive while ``IGST``/``CGST``/``SGST``
+    are the tax component of that same total. Summing ``Invoice_Amount + GST`` double-counts.
+    When ``Tax_Exclusive_Gross`` is missing (``tex_sum`` ≈ 0) and we have a GST rate,
+    back out GST-exclusive taxable as ``inv / (1 + r)`` and scale tax components to match.
+    """
+    if abs(tex_sum) > 1e-4:
+        if cgst == 0.0 and sgst == 0.0 and igst == 0.0:
+            gst_t = tax_from_tt
+        else:
+            gst_t = cgst + sgst + igst
+        return tex_sum, cgst, sgst, igst, gst_t, False
+
+    if cgst == 0.0 and sgst == 0.0 and igst == 0.0:
+        gst_t = tax_from_tt
+    else:
+        gst_t = cgst + sgst + igst
+
+    taxable = inv_sum
+    if abs(gst_t) < 1e-9 or abs(inv_sum) < 1e-9:
+        return taxable, cgst, sgst, igst, gst_t, False
+
+    r: Optional[float] = None
+    if gst_rate_median is not None and gst_rate_median == gst_rate_median:
+        r = float(gst_rate_median)
+        if r > 1.0:
+            r = r / 100.0
+        if r <= 0 or r > 0.35:
+            r = None
+
+    if r is None:
+        abs_inv = abs(inv_sum)
+        abs_g = abs(gst_t)
+        den = abs_inv - abs_g
+        if abs(den) > 1e-6:
+            r_try = abs_g / den
+            if 0.0005 < r_try < 0.35:
+                r = r_try
+
+    if r is None or r <= 0:
+        return taxable, cgst, sgst, igst, gst_t, False
+
+    abs_inv = abs(inv_sum)
+    gst_if_inclusive = abs_inv * r / (1.0 + r)
+    apply_split = gst_rate_from_column
+    if not apply_split:
+        apply_split = abs(gst_if_inclusive - abs(gst_t)) <= max(2.0, 0.03 * abs(gst_t) + 1e-9)
+    if not apply_split:
+        return taxable, cgst, sgst, igst, gst_t, False
+
+    sign = -1.0 if inv_sum < 0 else 1.0
+    excl_abs = abs_inv / (1.0 + r)
+    new_tax_abs = abs_inv - excl_abs
+    taxable = round(sign * excl_abs, 2)
+    gst_abs_old = abs(cgst) + abs(sgst) + abs(igst)
+    if gst_abs_old > 1e-6:
+        sc = new_tax_abs / gst_abs_old
+        cgst = round(cgst * sc, 2)
+        sgst = round(sgst * sc, 2)
+        igst = round(igst * sc, 2)
+        gst_t = cgst + sgst + igst
+    else:
+        gst_t = round(sign * new_tax_abs, 2)
+
+    return taxable, cgst, sgst, igst, gst_t, True
+
+
 def _persist_amazon_finance_sales_entries(
     df,
     *,
@@ -1190,6 +1288,10 @@ def _persist_amazon_finance_sales_entries(
     work["_cgst"] = pd.to_numeric(work.get("CGST", 0), errors="coerce").fillna(0.0)
     work["_sgst"] = pd.to_numeric(work.get("SGST", 0), errors="coerce").fillna(0.0)
     work["_igst"] = pd.to_numeric(work.get("IGST", 0), errors="coerce").fillna(0.0)
+    if "Tax_Exclusive_Gross" in work.columns:
+        work["_tex"] = pd.to_numeric(work["Tax_Exclusive_Gross"], errors="coerce").fillna(0.0)
+    else:
+        work["_tex"] = 0.0
 
     def _row_key(r) -> str:
         inv = str(r["_inv"]).strip()
@@ -1241,17 +1343,47 @@ def _persist_amazon_finance_sales_entries(
             if inv_disp.startswith("OID:"):
                 inv_disp = ""
 
-            taxable = float(sign * g2["_amt"].sum())
+            inv_sum_pre = float(sign * g2["_amt"].sum())
+            tex_sum = float(sign * g2["_tex"].sum())
             cgst = float(sign * g2["_cgst"].sum())
             sgst = float(sign * g2["_sgst"].sum())
             igst = float(sign * g2["_igst"].sum())
             tax_from_tt = float(sign * g2["_ttax"].sum())
-            if cgst == 0.0 and sgst == 0.0 and igst == 0.0:
-                gst_total = tax_from_tt
-            else:
-                gst_total = cgst + sgst + igst
-            total_amt = taxable + gst_total
+
+            gst_rate_median: Optional[float] = None
+            gst_rate_from_column = False
+            if "GST_Rate" in g2.columns:
+                rt = pd.to_numeric(g2["GST_Rate"], errors="coerce")
+                rt = rt[rt.notna() & (rt > 0)]
+                if len(rt) > 0:
+                    gst_rate_median = float(rt.median())
+                    gst_rate_from_column = True
+
+            taxable, cgst, sgst, igst, gst_total, inclusive_reconciled = (
+                _reconcile_amazon_invoice_taxable_inclusive(
+                    inv_sum_pre,
+                    tex_sum,
+                    cgst,
+                    sgst,
+                    igst,
+                    tax_from_tt,
+                    gst_rate_median,
+                    gst_rate_from_column=gst_rate_from_column,
+                )
+            )
+            total_amt = round(taxable + gst_total, 2)
             net_pay = total_amt
+
+            r_line: Optional[float] = None
+            if inclusive_reconciled:
+                if gst_rate_median is not None and gst_rate_median == gst_rate_median:
+                    r_line = float(gst_rate_median)
+                    if r_line > 1.0:
+                        r_line = r_line / 100.0
+                    if r_line <= 0 or r_line > 0.35:
+                        r_line = None
+                if r_line is None and abs(taxable) > 1e-9:
+                    r_line = abs(gst_total) / abs(taxable)
 
             items: list[dict] = []
             for _, rr in g2.iterrows():
@@ -1265,10 +1397,31 @@ def _persist_amazon_finance_sales_entries(
                     prod = ""
                 qty_l = float(rr.get("Quantity", 0) or 0)
                 amt_l = float(sign * float(rr["_amt"]))
-                tex_l = float(rr.get("Tax_Exclusive_Gross", 0) or 0) if "Tax_Exclusive_Gross" in g2.columns else 0.0
-                tex_l = float(sign * tex_l) if tex_l else 0.0
+                tex_raw = float(rr["_tex"]) if "_tex" in g2.columns else 0.0
+                tex_l = float(sign * tex_raw) if abs(tex_raw) > 1e-12 else 0.0
+                row_cgst = float(sign * float(rr["_cgst"]))
+                row_sgst = float(sign * float(rr["_sgst"]))
+                row_igst = float(sign * float(rr["_igst"]))
+                row_gst_sum = row_cgst + row_sgst + row_igst
                 item_px = float(rr.get("Item_Price", 0) or 0) if "Item_Price" in g2.columns else 0.0
-                line_taxable = tex_l if abs(tex_l) > 1e-6 else amt_l
+                if abs(tex_l) > 1e-6:
+                    line_taxable = tex_l
+                    line_tt = float(sign * float(rr["_ttax"]))
+                elif inclusive_reconciled and r_line is not None and r_line > 0:
+                    line_taxable = round(amt_l / (1.0 + r_line), 2)
+                    line_target_gst = round(amt_l - line_taxable, 2)
+                    if abs(row_gst_sum) > 1e-9:
+                        sc_g = line_target_gst / row_gst_sum
+                        row_cgst = round(row_cgst * sc_g, 2)
+                        row_sgst = round(row_sgst * sc_g, 2)
+                        row_igst = round(row_igst * sc_g, 2)
+                    else:
+                        row_cgst, row_sgst = 0.0, 0.0
+                        row_igst = line_target_gst
+                    line_tt = row_cgst + row_sgst + row_igst
+                else:
+                    line_taxable = tex_l if abs(tex_l) > 1e-6 else amt_l
+                    line_tt = float(sign * float(rr["_ttax"]))
                 unit_px = (line_taxable / qty_l) if abs(qty_l) > 1e-9 else (item_px if abs(item_px) > 1e-9 else 0.0)
                 hsn = str(rr.get("HSN_SAC", "") or "").strip() if "HSN_SAC" in g2.columns else ""
                 if hsn.lower() in ("nan", "none"):
@@ -1306,7 +1459,6 @@ def _persist_amazon_finance_sales_entries(
                         inv_dt_txt = ""
                 txn_row = str(rr.get("Transaction_Type", "") or "").strip() if "Transaction_Type" in g2.columns else ""
                 gst_r = float(rr.get("GST_Rate", 0) or 0) if "GST_Rate" in g2.columns else 0.0
-                line_tt = float(sign * float(rr["_ttax"]))
                 base_for_rate = abs(line_taxable) if abs(line_taxable) > 1e-9 else abs(amt_l)
                 if (gst_r <= 0 or gst_r != gst_r) and base_for_rate > 1e-9 and abs(line_tt) > 1e-9:
                     gst_r = round(100.0 * abs(line_tt) / base_for_rate, 4)
@@ -1356,9 +1508,9 @@ def _persist_amazon_finance_sales_entries(
                     "invoice_amount": round(amt_l, 2),
                     "total_tax": line_tt,
                     "total_tax_amount": line_tt,
-                    "cgst": float(sign * float(rr["_cgst"])),
-                    "sgst": float(sign * float(rr["_sgst"])),
-                    "igst": float(sign * float(rr["_igst"])),
+                    "cgst": row_cgst,
+                    "sgst": row_sgst,
+                    "igst": row_igst,
                     "ship_to_city": city_row,
                     "ship_to_state": loc_line,
                     "ship_from_state": ship_from,

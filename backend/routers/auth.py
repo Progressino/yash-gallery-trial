@@ -15,6 +15,15 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
+
+def _cookie_secure(request: Request) -> bool:
+    """True when the client connection is HTTPS (TLS at nginx or X-Forwarded-Proto from Cloudflare)."""
+    xf = request.headers.get("x-forwarded-proto")
+    if xf:
+        return xf.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
 _SECRET = os.environ.get("JWT_SECRET", "change-me-set-jwt-secret-in-env")
 _ALGO   = "HS256"
 _TTL_H  = 24
@@ -44,7 +53,7 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/login")
-def login(body: LoginRequest, response: Response):
+def login(body: LoginRequest, request: Request, response: Response):
     expected_user = os.environ.get("AUTH_USERNAME", "")
     expected_hash = os.environ.get("AUTH_PASSWORD_HASH", "").encode()
 
@@ -56,11 +65,13 @@ def login(body: LoginRequest, response: Response):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     token = create_token(body.username)
+    sec = _cookie_secure(request)
     response.set_cookie(
         key="auth_token",
         value=token,
         httponly=True,
         samesite="lax",
+        secure=sec,
         max_age=_TTL_H * 3600,
     )
     return {"ok": True, "username": body.username}
@@ -80,8 +91,9 @@ def logout(request: Request, response: Response):
             pass
         from ..session import store as _store
         _store.delete(sid)
-    response.delete_cookie("auth_token")
-    response.delete_cookie("session_id")
+    sec = _cookie_secure(request)
+    response.delete_cookie("auth_token", path="/", secure=sec, httponly=True, samesite="lax")
+    response.delete_cookie("session_id", path="/", secure=sec, httponly=True, samesite="lax")
     return {"ok": True}
 
 
