@@ -92,18 +92,18 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             except Exception:
                 pass  # GitHub not configured or network error — skip silently
 
-        # Keep auto-restore bounded for large stores to avoid minute-long "syncing" stalls.
-        # Default 18 months so PO can compute prior-year windows/quarterly history.
-        # 0 or negative disables the cap (loads all history).
+        # Default restore should be full history. Operators can opt-in caps via env when
+        # they prefer faster startup over completeness.
+        # 0 or negative disables each cap (loads all history).
         try:
-            _auto_months = int((os.environ.get("AUTO_RESTORE_MONTHS") or "18").strip())
+            _auto_months = int((os.environ.get("AUTO_RESTORE_MONTHS") or "0").strip())
         except Exception:
-            _auto_months = 18
+            _auto_months = 0
         _auto_months = None if _auto_months <= 0 else _auto_months
         try:
-            _auto_max_files = int((os.environ.get("AUTO_RESTORE_MAX_FILES") or "20").strip())
+            _auto_max_files = int((os.environ.get("AUTO_RESTORE_MAX_FILES") or "0").strip())
         except Exception:
-            _auto_max_files = 20
+            _auto_max_files = 0
         _auto_max_files = None if _auto_max_files <= 0 else _auto_max_files
 
         changed = False
