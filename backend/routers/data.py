@@ -107,13 +107,14 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         _auto_max_files = None if _auto_max_files <= 0 else _auto_max_files
 
         changed = False
-        for platform, attr in [
+        platform_attrs = [
             ("amazon",   "mtr_df"),
             ("myntra",   "myntra_df"),
             ("meesho",   "meesho_df"),
             ("flipkart", "flipkart_df"),
             ("snapdeal", "snapdeal_df"),
-        ]:
+        ]
+        for platform, attr in platform_attrs:
             if getattr(sess, attr).empty:
                 # Fast path for session auto-restore: skip deep dedup here to avoid
                 # long blocking sync on first dashboard load. Upload-time merges and
@@ -127,6 +128,27 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
                 if not df.empty:
                     setattr(sess, attr, df)
                     changed = True
+
+        # Safety net: if bounded restore found nothing, do one full-history pass.
+        # This prevents "all data missing" after restart when the useful history sits
+        # outside the bounded month/file window.
+        if not changed:
+            for _p, _a in platform_attrs:
+                if not getattr(sess, _a).empty:
+                    changed = True
+                    break
+        if not changed:
+            for platform, attr in platform_attrs:
+                if getattr(sess, attr).empty:
+                    df = load_platform_data(
+                        platform,
+                        months=None,
+                        dedup=False,
+                        max_files=None,
+                    )
+                    if not df.empty:
+                        setattr(sess, attr, df)
+                        changed = True
 
         if changed:
             try:
