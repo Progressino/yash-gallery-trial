@@ -41,6 +41,64 @@ def test_calculate_quarterly_history_returns_rows():
     assert "OMS_SKU" in pivot.columns
 
 
+def test_calculate_quarterly_history_shipment_type_case_insensitive():
+    days = pd.date_range("2025-06-01", periods=10, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["CASE-SHIP"] * 10,
+            "TxnDate": days,
+            "Transaction Type": ["SHIPMENT"] * 10,
+            "Quantity": [2] * 10,
+        }
+    )
+    pivot = calculate_quarterly_history(
+        sales_df=sales,
+        mtr_df=None,
+        myntra_df=None,
+        sku_mapping=None,
+        group_by_parent=False,
+        n_quarters=2,
+    )
+    assert not pivot.empty
+    assert (pivot["OMS_SKU"] == "CASE-SHIP").any()
+
+
+def test_sheet_lead_on_parent_applies_to_variant_inventory_sku():
+    """Style-level lead row should propagate to size variants (e.g. STYLE-M)."""
+    days = pd.date_range("2025-11-01", periods=25, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["PARENTLEAD-M"] * 25,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 25,
+            "Quantity": [2] * 25,
+            "Units_Effective": [2] * 25,
+            "Source": ["Amazon"] * 25,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["PARENTLEAD-M"], "Total_Inventory": [80]})
+    sku_status = pd.DataFrame(
+        {
+            "OMS_SKU": ["PARENTLEAD"],
+            "SKU_Sheet_Status": ["Open"],
+            "Lead_Time_From_Sheet": [33.0],
+            "SKU_Sheet_Closed": [False],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        sku_status_df=sku_status,
+    )
+    row = po.iloc[0]
+    assert int(row["Lead_Time_Days"]) == 33
+
+
 def test_calculate_po_base_non_empty():
     sales = _minimal_sales()
     inv = _minimal_inventory()

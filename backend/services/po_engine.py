@@ -39,7 +39,8 @@ def get_indian_fy_quarter(date: pd.Timestamp) -> tuple:
     return fy, q
 
 
-_Q_LABELS = {1: "Apr–Jun", 2: "Jul–Sep", 3: "Oct–Dec", 4: "Jan–Mar"}
+# ASCII hyphen only — en/em dashes break in Excel/CSV when UTF-8 is misread as Latin-1.
+_Q_LABELS = {1: "Apr-Jun", 2: "Jul-Sep", 3: "Oct-Dec", 4: "Jan-Mar"}
 
 
 def quarter_col_name(fy: int, q: int) -> str:
@@ -118,7 +119,8 @@ def calculate_quarterly_history(
         return pd.DataFrame()
 
     hist = pd.concat(parts, ignore_index=True)
-    hist = hist[hist["TxnType"].astype(str).str.strip() == "Shipment"]
+    _txn = hist["TxnType"].astype(str).str.strip().str.lower()
+    hist = hist[_txn.eq("shipment")]
     hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
     hist = hist.dropna(subset=["Date"])
     hist["Qty"] = pd.to_numeric(hist["Qty"], errors="coerce").fillna(0)
@@ -267,8 +269,8 @@ def _seasonal_adjacent_months_ads(
         if demand_basis == "Net":
             g = chunk.groupby("Sku")["Units_Effective"].sum().clip(lower=0)
         else:
-            ship = chunk[chunk["Transaction Type"].astype(str).str.strip() == "Shipment"]
-            g = ship.groupby("Sku")["Quantity"].sum()
+            _sh = chunk["Transaction Type"].astype(str).str.strip().str.lower().eq("shipment")
+            g = chunk.loc[_sh].groupby("Sku")["Quantity"].sum()
         for sku, qty in g.items():
             if float(qty) <= 0:
                 continue
@@ -327,6 +329,7 @@ def calculate_po_base(
 
     df["Sku"] = df["Sku"].map(_canonical_oms_key)
     df = df[df["Sku"].astype(str).str.len() > 0]
+    df["_is_ship"] = df["Transaction Type"].astype(str).str.strip().str.lower().eq("shipment")
 
     inv_work = inv_df.copy()
     inv_work["OMS_SKU"] = inv_work["OMS_SKU"].map(_canonical_oms_key)
@@ -338,9 +341,10 @@ def calculate_po_base(
     cutoff   = max_date - timedelta(days=period_days)
     recent   = df[df["TxnDate"] >= cutoff].copy()
 
-    sold = recent[recent["Transaction Type"] == "Shipment"].groupby("Sku")["Quantity"].sum().reset_index()
+    sold = recent[recent["_is_ship"]].groupby("Sku")["Quantity"].sum().reset_index()
     sold.columns = ["OMS_SKU", "Sold_Units"]
-    returns = recent[recent["Transaction Type"] == "Refund"].groupby("Sku")["Quantity"].sum().reset_index()
+    _is_ref = recent["Transaction Type"].astype(str).str.strip().str.lower().eq("refund")
+    returns = recent[_is_ref].groupby("Sku")["Quantity"].sum().reset_index()
     returns.columns = ["OMS_SKU", "Return_Units"]
     net = recent.groupby("Sku")["Units_Effective"].sum().reset_index()
     net.columns = ["OMS_SKU", "Net_Units"]
@@ -362,14 +366,17 @@ def calculate_po_base(
         m = sku_status_df.copy()
         m["OMS_SKU"] = m["OMS_SKU"].map(_canonical_oms_key)
         m = m[m["OMS_SKU"].astype(str).str.len() > 0]
+
+        def _max_positive_lead(series: pd.Series) -> float:
+            v = pd.to_numeric(series, errors="coerce")
+            v = v[v > 0]
+            return float(v.max()) if len(v) else float("nan")
+
+        # Max lead per parent style — used when sheet lists parent SKU only, inventory is per-size.
+        m["_par_key"] = m["OMS_SKU"].map(get_parent_sku)
+        lead_by_parent = m.groupby("_par_key")["Lead_Time_From_Sheet"].apply(_max_positive_lead).to_dict()
+
         if group_by_parent:
-            m["_par_key"] = m["OMS_SKU"].apply(get_parent_sku)
-
-            def _max_positive_lead(series: pd.Series) -> float:
-                v = pd.to_numeric(series, errors="coerce")
-                v = v[v > 0]
-                return float(v.max()) if len(v) else float("nan")
-
             m = (
                 m.groupby("_par_key", as_index=False)
                 .agg(
@@ -379,6 +386,9 @@ def calculate_po_base(
                 )
                 .rename(columns={"_par_key": "OMS_SKU"})
             )
+        else:
+            m = m.drop(columns=["_par_key"], errors="ignore")
+
         keep = [c for c in ["OMS_SKU", "SKU_Sheet_Status", "SKU_Sheet_Closed", "Lead_Time_From_Sheet"] if c in m.columns]
         m = m[keep].drop_duplicates(subset=["OMS_SKU"], keep="last")
         po_df = po_df.merge(m, on="OMS_SKU", how="left")
@@ -386,6 +396,12 @@ def calculate_po_base(
         po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"].fillna(False).astype(bool)
         if "Lead_Time_From_Sheet" in po_df.columns:
             lt_vals = pd.to_numeric(po_df["Lead_Time_From_Sheet"], errors="coerce")
+            bad = lt_vals.isna() | (lt_vals <= 0)
+            if bad.any() and lead_by_parent:
+                pk = po_df["OMS_SKU"].astype(str).map(get_parent_sku)
+                fill_s = pd.to_numeric(pk.map(lead_by_parent), errors="coerce")
+                use = bad & (fill_s > 0)
+                lt_vals = lt_vals.where(~use, fill_s)
             repl = lt_vals.where(lt_vals > 0)
             po_df["Lead_Time_Days"] = (
                 pd.to_numeric(repl, errors="coerce")
@@ -407,7 +423,7 @@ def calculate_po_base(
     ads_recent = df[df["TxnDate"] >= ads_cutoff].copy()
 
     ads_sold = (
-        ads_recent[ads_recent["Transaction Type"] == "Shipment"]
+        ads_recent[ads_recent["_is_ship"]]
         .groupby("Sku")["Quantity"].sum().reset_index()
         .rename(columns={"Sku": "OMS_SKU", "Quantity": "ADS_Sold_Units"})
     )
@@ -468,8 +484,8 @@ def calculate_po_base(
             .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "MTD_Units"})
         )
     else:
-        roll_s = win_roll[win_roll["Transaction Type"] == "Shipment"]
-        mtd_s = win_mtd[win_mtd["Transaction Type"] == "Shipment"]
+        roll_s = win_roll[win_roll["_is_ship"]]
+        mtd_s = win_mtd[win_mtd["_is_ship"]]
         roll_g = roll_s.groupby("Sku")["Quantity"].sum().reset_index().rename(
             columns={"Sku": "OMS_SKU", "Quantity": "Roll30_Units"}
         )
@@ -493,7 +509,7 @@ def calculate_po_base(
     ly_window = df[(df["TxnDate"] >= ly_window_start) & (df["TxnDate"] < ly_window_end)]
 
     ly_sold_grp = (
-        ly_window[ly_window["Transaction Type"] == "Shipment"]
+        ly_window[ly_window["_is_ship"]]
         .groupby("Sku")["Quantity"].sum().reset_index()
         .rename(columns={"Sku": "OMS_SKU", "Quantity": "LY_Sold_Units"})
     )

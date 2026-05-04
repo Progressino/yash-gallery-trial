@@ -367,7 +367,7 @@ export default function POEngine() {
       g.totalFinalQty       += finalQty
       const p = String(row['Priority'] ?? '')
       if ((PRIORITY_ORDER[p] ?? 9) < (PRIORITY_ORDER[g.worstPriority] ?? 9)) g.worstPriority = p
-      const qRow = quarterMap[sku] ?? {}
+      const qRow = quarterMap[poSkuKey(sku)] ?? {}
       for (const c of quarterCols) {
         g.quarterTotals[c] = (g.quarterTotals[c] ?? 0) + Number(qRow[c] ?? 0)
       }
@@ -719,7 +719,7 @@ export default function POEngine() {
 
                       const computedQty  = Number(row['PO_Qty'] ?? 0)
                       const finalQty     = editedQty[sku] !== undefined ? editedQty[sku] : computedQty
-                      const qRow         = quarterMap[sku] ?? {}
+                      const qRow         = quarterMap[poSkuKey(sku)] ?? {}
                       const status       = String(qRow['Status'] ?? '')
                       const statusClass  = STATUS_COLORS[status] ?? 'text-gray-400 bg-gray-50'
 
@@ -1014,7 +1014,7 @@ export default function POEngine() {
                           : sku
                         const isSelected  = selected.has(sku)
                         const priority    = String(variant['Priority'] ?? '')
-                        const qRow        = quarterMap[sku] ?? {}
+                        const qRow        = quarterMap[poSkuKey(sku)] ?? {}
                         const vstatus     = String(qRow['Status'] ?? '')
                         const vSClass     = STATUS_COLORS[vstatus] ?? 'text-gray-400 bg-gray-50'
                         const computedQty = Number(variant['PO_Qty'] ?? 0)
@@ -1616,7 +1616,7 @@ function exportPOCsv(
   const header = all.join(',')
   const body = rows.map(r => {
     const sku = String(r['OMS_SKU'])
-    const qRow = quarterMap[sku] ?? {}
+    const qRow = quarterMap[poSkuKey(sku)] ?? {}
     return all.map(c => {
       if (c === 'PO_Qty') {
         const v = editedQty[sku] !== undefined ? editedQty[sku] : Number(r[c] ?? 0)
@@ -1648,8 +1648,13 @@ function downloadShipmentCsv(rows: PORow[], columns: string[]) {
   trigger(header + '\n' + body, 'shipment_' + new Date().toISOString().slice(0, 10) + '.csv')
 }
 
+/** Match quarterly pivot keys (built uppercase) to inventory / PO SKU casing. */
+function poSkuKey(sku: string | undefined | null) {
+  return String(sku ?? '').trim().toUpperCase()
+}
+
 function trigger(csv: string, filename: string) {
-  const blob = new Blob([csv], { type: 'text/csv' })
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
   a.download = filename
