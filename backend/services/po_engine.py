@@ -334,17 +334,16 @@ def _longest_prefix_lead(pk: str, lead_by_parent: dict) -> float:
     return best
 
 
-def _leading_style_digit_prefix(oms_sku: str) -> str:
-    """Leading digits at start of OMS / parent key (e.g. 1657YKWHITE-M → '1657').
-
-    Used when the SKU-status sheet lists a numeric style row (``1657``) but inventory
-    uses full seller SKUs (``1657YKWHITE-S``): :func:`get_parent_sku` yields ``1657YKWHITE``,
-    which does not equal ``1657``, so parent-key lead lookup would miss without this.
-    """
+def _style_digit_token(oms_sku: str) -> str:
+    """Extract style digits token from SKU/parent (e.g. 1657YK..., AK-1394BROWN -> 1657/1394)."""
     if oms_sku is None or (isinstance(oms_sku, float) and pd.isna(oms_sku)):
         return ""
-    m = re.match(r"^(\d{3,})", str(oms_sku).strip().upper())
-    return m.group(1) if m else ""
+    s = str(oms_sku).strip().upper()
+    m = re.search(r"(?:^|[-_])(\d{3,})", s)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"(\d{3,})", s)
+    return m2.group(1) if m2 else ""
 
 
 def calculate_po_base(
@@ -437,20 +436,21 @@ def calculate_po_base(
         m["_par_key"] = m["OMS_SKU"].map(get_parent_sku)
         lead_by_parent = m.groupby("_par_key")["Lead_Time_From_Sheet"].apply(_max_positive_lead).to_dict()
 
-        # Sheet may use numeric style only (e.g. ``1657``) while inventory is ``1657YK…-SIZE``.
-        lead_by_digit_prefix: dict[str, float] = {}
+        # Sheet may use numeric style only (e.g. ``1657``/``1394``) while inventory is
+        # ``1657YK…-SIZE`` or ``AK-1394BROWN-L``.
+        lead_by_digit_token: dict[str, float] = {}
         for _, rw in m.iterrows():
             lt_one = float(pd.to_numeric(rw.get("Lead_Time_From_Sheet"), errors="coerce"))
             if not np.isfinite(lt_one) or lt_one <= 0:
                 continue
             oms = str(rw.get("OMS_SKU") or "")
             par = str(rw.get("_par_key") or "")
-            for tok in {_leading_style_digit_prefix(oms), _leading_style_digit_prefix(par)}:
+            for tok in {_style_digit_token(oms), _style_digit_token(par)}:
                 if not tok:
                     continue
-                prev = lead_by_digit_prefix.get(tok, float("nan"))
+                prev = lead_by_digit_token.get(tok, float("nan"))
                 if not np.isfinite(prev) or lt_one > prev:
-                    lead_by_digit_prefix[tok] = float(lt_one)
+                    lead_by_digit_token[tok] = float(lt_one)
 
         if group_by_parent:
             m = (
@@ -487,10 +487,10 @@ def calculate_po_base(
                     use2 = bad & (fill_pfx > 0)
                     lt_vals = lt_vals.where(~use2, fill_pfx)
             bad = lt_vals.isna() | (lt_vals <= 0)
-            if bad.any() and lead_by_digit_prefix:
+            if bad.any() and lead_by_digit_token:
                 pk2 = po_df["OMS_SKU"].astype(str).map(get_parent_sku)
-                dig = pk2.map(_leading_style_digit_prefix)
-                fill2 = pd.to_numeric(dig.map(lead_by_digit_prefix), errors="coerce")
+                dig = pk2.map(_style_digit_token)
+                fill2 = pd.to_numeric(dig.map(lead_by_digit_token), errors="coerce")
                 use2 = bad & (fill2 > 0)
                 lt_vals = lt_vals.where(~use2, fill2)
             repl = lt_vals.where(lt_vals > 0)
@@ -816,13 +816,11 @@ def calculate_po_base(
         ),
     ).round(4)
 
-    # Projected Running Days = (Total_Inventory + PO_Pipeline_Total) / ADS
-    # Same sellable stock basis as Days_Left (inv_days_left); do **not** add Gross_PO_Qty —
-    # suggested orders are not on hand and inflated this column vs the team's sheet.
-    projected_supply = inv_days_left + po_df["PO_Pipeline_Total"]
+    # Projected Running Days (sheet parity) = PO_Pipeline_Total + (Total_Inventory / ADS)
+    # Keep this separate from Days_Left so export matches business spreadsheet exactly.
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
-        (projected_supply / po_df["ADS"]).round(1),
+        (po_df["PO_Pipeline_Total"] + (inv_days_left / po_df["ADS"])).round(1),
         999.0,
     )
 

@@ -461,18 +461,18 @@ def test_sheet_lead_increases_gross_vs_shorter_global_lead():
 
 
 def test_get_parent_sku_preserves_two_part_numeric_style_code():
-    """``AK-139`` style IDs must not collapse to ``AK`` (digit-only segment is not a size)."""
-    assert get_parent_sku("AK-139") == "AK-139"
-    assert get_parent_sku("AK-139BROWN-L") == "AK-139BROWN"
+    """``AK-1394`` style IDs must not collapse to ``AK`` (digit-only segment is not a size)."""
+    assert get_parent_sku("AK-1394") == "AK-1394"
+    assert get_parent_sku("AK-1394BROWN-L") == "AK-1394BROWN"
     assert get_parent_sku("1657-M") == "1657"
 
 
 def test_sheet_lead_from_style_code_applies_to_color_size_variant():
-    """Lead sheet lists ``AK-139``; inventory ``AK-139BROWN-L`` inherits that lead (prefix parent)."""
+    """Lead sheet lists ``1394``; inventory ``AK-1394BROWN-L`` inherits that lead."""
     days = pd.date_range("2025-11-01", periods=30, freq="D")
     sales = pd.DataFrame(
         {
-            "Sku": ["AK-139BROWN-L"] * 30,
+            "Sku": ["AK-1394BROWN-L"] * 30,
             "TxnDate": days,
             "Transaction Type": ["Shipment"] * 30,
             "Quantity": [1] * 30,
@@ -480,10 +480,10 @@ def test_sheet_lead_from_style_code_applies_to_color_size_variant():
             "Source": ["Amazon"] * 30,
         }
     )
-    inv = pd.DataFrame({"OMS_SKU": ["AK-139BROWN-L"], "Total_Inventory": [21]})
+    inv = pd.DataFrame({"OMS_SKU": ["AK-1394BROWN-L"], "Total_Inventory": [21]})
     sheet = pd.DataFrame(
         {
-            "OMS_SKU": ["AK-139"],
+            "OMS_SKU": ["1394"],
             "SKU_Sheet_Status": ["Open"],
             "SKU_Sheet_Closed": [False],
             "Lead_Time_From_Sheet": [55.0],
@@ -508,7 +508,7 @@ def test_sheet_lead_from_style_code_applies_to_color_size_variant():
 
 
 def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
-    """Sheet formula: (PO_Pipeline_Total + Total_Inventory) / ADS — exclude suggested Gross_PO_Qty."""
+    """Sheet formula: PO_Pipeline_Total + (Total_Inventory / ADS)."""
     sales = _minimal_sales()
     inv = pd.DataFrame(
         {
@@ -522,8 +522,9 @@ def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
     row = po.iloc[0]
     ads = float(row["ADS"])
     assert ads > 0
-    expected = round((40 + 20) / ads, 1)
+    expected = round(20 + (40 / ads), 1)
     assert float(row["Projected_Running_Days"]) == pytest.approx(expected, abs=0.05)
-    assert float(row["Days_Left"]) == pytest.approx(expected, abs=0.05)
-    # Uses Total_Inventory (40) in the numerator, not OMS_Inventory (10) alone.
-    assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20) / ads, 1), abs=0.05)
+    # Days_Left remains stock-cover days formula.
+    assert float(row["Days_Left"]) == pytest.approx(round((40 + 20) / ads, 1), abs=0.05)
+    # Uses Total_Inventory (40) in the inventory/ADS part, not OMS_Inventory (10).
+    assert float(row["Projected_Running_Days"]) != pytest.approx(round(20 + (10 / ads), 1), abs=0.05)
