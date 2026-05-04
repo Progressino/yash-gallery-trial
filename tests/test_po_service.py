@@ -553,7 +553,32 @@ def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
     ads = float(row["ADS"])
     assert ads > 0
     expected = round((40 + 20) / ads, 1)
+    expected_days_left = round(40 / ads, 1)
     assert float(row["Projected_Running_Days"]) == pytest.approx(expected, abs=0.05)
-    assert float(row["Days_Left"]) == pytest.approx(expected, abs=0.05)
+    assert float(row["Days_Left"]) == pytest.approx(expected_days_left, abs=0.05)
     # Uses Total_Inventory (40) in numerator, not OMS_Inventory (10) alone.
     assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20) / ads, 1), abs=0.05)
+
+
+def test_ads_equals_sales_over_effective_days():
+    """ADS uses Sales / Eff_Days (no seasonal/flat overrides)."""
+    rows = []
+    for d in pd.date_range("2025-11-01", periods=10, freq="D"):
+        rows.append(
+            {
+                "Sku": "ADS-SKU-1",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 3,
+                "Units_Effective": 3,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["ADS-SKU-1"], "Total_Inventory": [20]})
+    po = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, demand_basis="Sold")
+    r = po.iloc[0]
+    assert int(r["Eff_Days"]) == 10
+    assert float(r["Sold_Units"]) == pytest.approx(30.0, abs=0.01)
+    assert float(r["ADS"]) == pytest.approx(3.0, abs=0.02)
+    assert float(r["Days_Left"]) == pytest.approx(round(20 / 3.0, 1), abs=0.05)

@@ -645,11 +645,9 @@ def calculate_po_base(
     else:
         blended = np.maximum(po_df["Recent_ADS"], po_df["LY_ADS"])
 
-    # Never below: seasonal month-pair rate, or fixed 30-day run-rate (Req.xlsx FREQ).
-    po_df["ADS"] = np.maximum(
-        np.maximum(blended, po_df["Seasonal_Month_ADS"]),
-        po_df["Flat30_ADS"],
-    ).round(3)
+    # Final ADS must be Sales / Effective days from the selected window.
+    # Keep blended/seasonal/flat helpers as diagnostics only.
+    po_df["ADS"] = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0).round(3)
 
     # PO formula uses OMS_Inventory (physical warehouse only) when available.
     # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
@@ -713,11 +711,10 @@ def calculate_po_base(
     else:
         po_df["PO_Pipeline_Total"] = 0
 
-    # Days of stock remaining — includes pipeline; numerator uses total stock when the
-    # file exposes Total_Inventory so Days_Left matches the column users look at.
+    # Days of stock remaining = current inventory cover only (no pipeline).
     po_df["Days_Left"] = np.where(
         po_df["ADS"] > 0,
-        ((inv_days_left + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
+        (inv_days_left / po_df["ADS"]).round(1),
         999.0,
     )
 
@@ -818,8 +815,7 @@ def calculate_po_base(
         ),
     ).round(4)
 
-    # Projected Running Days = (Total_Inventory + PO_Pipeline_Total) / ADS
-    # Same stock-cover basis as Days_Left.
+    # Projected Running Days includes current inventory + pipeline.
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
         ((inv_days_left + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
