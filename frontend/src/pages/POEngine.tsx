@@ -133,6 +133,8 @@ export default function POEngine() {
   const skuStatusLoaded = useSession(s => s.sku_status_lead ?? false)
   const skuStatusRows = useSession(s => s.sku_status_lead_rows ?? 0)
   const skuFileRef = useRef<HTMLInputElement>(null)
+  /** Bumps on each Calculate / quarterly load so stale async responses are ignored. */
+  const poRunSeqRef = useRef(0)
   const [skuUploadBusy, setSkuUploadBusy] = useState(false)
   const [skuUploadMsg, setSkuUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
@@ -155,7 +157,9 @@ export default function POEngine() {
   const quarterly = _storeQuarterly as QuarterlyResult | null
 
   // ephemeral UI state (no need to persist across navigation)
-  const [loading, setLoading]       = useState(false)
+  const [loading, setLoading] = useState(false)
+  /** Quarterly pivot loads after PO (or alone on Quarterly tab); was bundled with PO and blocked the UI. */
+  const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [shipLoading, setShipLoading] = useState(false)
   const [raiseModal, setRaiseModal] = useState(false)
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
@@ -177,7 +181,41 @@ export default function POEngine() {
   // Cutting planner: parentSku → total pieces of material available
   const [materialQty, setMaterialQty] = useState<Record<string, number>>({})
 
-  // ── Calculate PO + quarterly in parallel ──
+  const loadQuarterlyForRun = async (seq: number) => {
+    setQuarterlyLoading(true)
+    try {
+      const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
+        params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
+      })
+      if (seq !== poRunSeqRef.current) return
+      setQuarterly(data)
+    } catch (e: unknown) {
+      if (seq === poRunSeqRef.current) {
+        console.warn('[PO] quarterly fetch failed:', e)
+      }
+    } finally {
+      if (seq === poRunSeqRef.current) setQuarterlyLoading(false)
+    }
+  }
+
+  /** Quarterly tab only — does not run PO math (fast). */
+  const runQuarterlyOnly = async () => {
+    const seq = ++poRunSeqRef.current
+    setQuarterlyLoading(true)
+    try {
+      const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
+        params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
+      })
+      if (seq !== poRunSeqRef.current) return
+      setQuarterly(data)
+    } catch (e: unknown) {
+      setQuarterly({ loaded: false, rows: [], columns: [] })
+      console.warn('[PO] quarterly-only load failed:', e)
+    } finally {
+      if (seq === poRunSeqRef.current) setQuarterlyLoading(false)
+    }
+  }
+
   const onSkuStatusFile = async (files: FileList | null) => {
     const f = files?.[0]
     if (!f) return
@@ -207,23 +245,26 @@ export default function POEngine() {
   }
 
   const run = async () => {
+    const seq = ++poRunSeqRef.current
     setLoading(true)
     setEditedQty({})
     setSelected(new Set())
+    let poRes: POResult | null = null
     try {
-      const [poRes, qRes] = await Promise.all([
-        api.post<POResult>('/po/calculate', params),
-        api.get<QuarterlyResult>('/po/quarterly', {
-          params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
-        }),
-      ])
-      setResult(poRes.data)
-      setQuarterly(qRes.data)
+      const res = await api.post<POResult>('/po/calculate', params)
+      if (seq !== poRunSeqRef.current) return
+      poRes = res.data
+      setResult(poRes)
     } catch (e: unknown) {
-      setResult({ ok: false, message: e instanceof Error ? e.message : 'Error' })
+      if (seq === poRunSeqRef.current) {
+        setResult({ ok: false, message: e instanceof Error ? e.message : 'Error' })
+      }
     } finally {
-      setLoading(false)
+      if (seq === poRunSeqRef.current) setLoading(false)
     }
+
+    if (seq !== poRunSeqRef.current || !poRes?.ok) return
+    void loadQuarterlyForRun(seq)
   }
 
   const runShipment = async () => {
@@ -249,12 +290,6 @@ export default function POEngine() {
   const quarterMap = useMemo(() => {
     const map: Record<string, Record<string, number | string>> = {}
     const rows = quarterly?.rows ?? []
-    if (rows.length > 0 && quarterCols.length > 0) {
-      // Debug: log first row to verify column key format matches quarterCols
-      const firstRow = rows[0]
-      const sampleCol = quarterCols[0]
-      console.debug('[PO quarterly] quarterCols sample:', sampleCol, '| row keys:', Object.keys(firstRow).slice(0, 5), '| sample value:', firstRow[sampleCol])
-    }
     for (const row of rows) {
       const omsSku = String(row.OMS_SKU).toUpperCase()
       map[omsSku] = {}
@@ -554,12 +589,21 @@ export default function POEngine() {
               )}
             </div>
 
-            <button
-              onClick={run} disabled={loading}
-              className="mt-5 px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
-            >
-              {loading ? '⏳ Calculating…' : '🎯 Calculate PO'}
-            </button>
+            <div className="mt-5 space-y-1">
+              <button
+                type="button"
+                onClick={() => void run()}
+                disabled={loading}
+                className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
+              >
+                {loading ? '⏳ Running PO…' : '🎯 Calculate PO'}
+              </button>
+              {loading && (
+                <p className="text-xs text-gray-500">
+                  Computing recommendations from sales and inventory (usually the quick step).
+                </p>
+              )}
+            </div>
 
             {result && !result.ok && (
               <p className="mt-3 text-sm text-red-600 bg-red-50 rounded p-2">{result.message}</p>
@@ -568,6 +612,21 @@ export default function POEngine() {
 
           {result?.ok && allRows.length > 0 && (
             <>
+              {quarterlyLoading && (
+                <div
+                  role="status"
+                  className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+                >
+                  <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-amber-600 border-t-transparent shrink-0" aria-hidden />
+                  <span>
+                    <strong className="font-semibold">Loading quarterly history…</strong>
+                    {' '}
+                    <span className="text-amber-800/90">
+                      PO numbers are ready; quarter columns appear when this finishes (large sales files can take a bit).
+                    </span>
+                  </span>
+                </div>
+              )}
               {/* KPI Strip */}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <KpiCard label="🔴 URGENT"      value={urgent}       accent="border-l-red-500" />
@@ -594,11 +653,15 @@ export default function POEngine() {
                   📐 Size Families
                 </button>
                 <span className="text-xs text-gray-400">{rows.length} SKUs</span>
-                {quarterCols.length > 0 && (
+                {quarterlyLoading ? (
+                  <span className="text-xs text-amber-800 font-medium bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                    … loading quarters
+                  </span>
+                ) : quarterCols.length > 0 ? (
                   <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded-full">
                     ✓ {quarterCols.length} quarters loaded
                   </span>
-                )}
+                ) : null}
                 {result?.ok && (
                   <button
                     onClick={async () => {
@@ -1157,12 +1220,14 @@ export default function POEngine() {
               <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
                 onChange={v => setParams({ ...params, group_by_parent: v })} />
               <button
-                onClick={run} disabled={loading}
+                type="button"
+                onClick={() => void runQuarterlyOnly()}
+                disabled={quarterlyLoading}
                 className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
               >
-                {loading ? 'Loading…' : '📊 Load Quarterly History'}
+                {quarterlyLoading ? '⏳ Loading history…' : '📊 Load Quarterly History'}
               </button>
-              {quarterly && !quarterly.loaded && !loading && (
+              {quarterly && !quarterly.loaded && !quarterlyLoading && (
                 <span className="text-sm text-red-500">No data — build Sales first.</span>
               )}
             </div>
