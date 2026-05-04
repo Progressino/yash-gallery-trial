@@ -1,9 +1,9 @@
 """
 Sales aggregation — build + dedup logic extracted from app.py.
 """
-import gc
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 import re
 from typing import Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
@@ -154,6 +154,12 @@ def _apply_unified_oms_skus(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.Dat
     if df.empty or "Sku" not in df.columns:
         return df
     m = mapping or {}
+    out = df.copy()
+    col = out["Sku"]
+
+    if not m:
+        out["Sku"] = canonical_sales_sku_series(col)
+        return out
 
     def _one(raw) -> str:
         if pd.isna(raw):
@@ -163,12 +169,11 @@ def _apply_unified_oms_skus(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.Dat
             return ""
         if _is_aggregate_sales_sku(c):
             return c
-        if m:
-            return canonical_sales_sku(map_to_oms_sku(c, m))
-        return canonical_sales_sku(c)
+        return canonical_sales_sku(map_to_oms_sku(c, m))
 
-    out = df.copy()
-    out["Sku"] = out["Sku"].apply(_one)
+    uniq = pd.unique(col.to_numpy())
+    sku_map = {u: _one(u) for u in uniq}
+    out["Sku"] = col.map(sku_map)
     return out
 
 
@@ -243,8 +248,11 @@ def _mtr_to_sales_df(
     m["TxnDate"]  = pd.to_datetime(m["TxnDate"], errors="coerce")
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
     m = m.dropna(subset=["TxnDate"])
-    m["Sku"] = m["Sku"].apply(lambda x: _resolve_mtr_sku(x, sku_mapping or {}))
-    m["Sku"] = m["Sku"].map(canonical_sales_sku)
+    _map = sku_mapping or {}
+    _raw_skus = m["Sku"]
+    _uniq = pd.unique(_raw_skus.to_numpy())
+    _resolved = {u: _resolve_mtr_sku(u, _map) for u in _uniq}
+    m["Sku"] = canonical_sales_sku_series(_raw_skus.map(_resolved))
 
     # Line-level keys for build_sales_df dedup (Amazon MTR exposes Order_Id / Invoice_Number).
     idx = m.index
@@ -354,6 +362,39 @@ def _dedup_sales_linekey_rows(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([rest, sub], ignore_index=True)
 
 
+def _build_myntra_sales_part(myntra_df: pd.DataFrame) -> pd.DataFrame:
+    from .daily_store import _dedup_platform_df
+
+    if myntra_df.empty:
+        return pd.DataFrame()
+    return _downcast_sales(myntra_to_sales_rows(_dedup_platform_df(myntra_df, "myntra")))
+
+
+def _build_flipkart_sales_part(flipkart_df: pd.DataFrame) -> pd.DataFrame:
+    from .daily_store import _dedup_platform_df
+
+    if flipkart_df.empty:
+        return pd.DataFrame()
+    return _downcast_sales(flipkart_to_sales_rows(_dedup_platform_df(flipkart_df, "flipkart")))
+
+
+def _build_snapdeal_sales_part(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
+    if snapdeal_df.empty:
+        return pd.DataFrame()
+    return _downcast_sales(snapdeal_to_sales_rows(snapdeal_df))
+
+
+def _build_mtr_sales_tagged(mtr_df: pd.DataFrame, sku_mapping: Dict[str, str]) -> pd.DataFrame:
+    if mtr_df.empty:
+        return pd.DataFrame()
+    _mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping or {})
+    if _mtr_sales.empty:
+        return pd.DataFrame()
+    out = _mtr_sales.copy()
+    out["Source"] = "Amazon"
+    return _downcast_sales(out)
+
+
 def build_sales_df(
     mtr_df: pd.DataFrame,
     myntra_df: pd.DataFrame,
@@ -370,36 +411,51 @@ def build_sales_df(
 
     sales_parts: List[pd.DataFrame] = []
 
+    # Meesho mutates its frame in-place for OMS refresh — keep out of the thread pool.
     if not meesho_df.empty:
         from .meesho import refresh_meesho_dataframe_oms_inplace
 
         refresh_meesho_dataframe_oms_inplace(meesho_df, sku_mapping or None)
         meesho_df = _dedup_platform_df(meesho_df, "meesho")
         sales_parts.append(_downcast_sales(meesho_to_sales_rows(meesho_df, sku_mapping=sku_mapping or None)))
+
+    _map_copy = dict(sku_mapping or {})
+    _workers = int(os.environ.get("SALES_BUILD_MAX_WORKERS", "0") or 0)
+    if _workers <= 0:
+        _workers = max(1, min(4, (os.cpu_count() or 4)))
+
+    _parallel_jobs: list[tuple[str, pd.DataFrame]] = []
     if not myntra_df.empty:
-        myntra_df = _dedup_platform_df(myntra_df, "myntra")
-        sales_parts.append(_downcast_sales(myntra_to_sales_rows(myntra_df)))
+        _parallel_jobs.append(("myntra", myntra_df))
     if not flipkart_df.empty:
-        flipkart_df = _dedup_platform_df(flipkart_df, "flipkart")
-        sales_parts.append(_downcast_sales(flipkart_to_sales_rows(flipkart_df)))
+        _parallel_jobs.append(("flipkart", flipkart_df))
     if snapdeal_df is not None and not snapdeal_df.empty:
-        sales_parts.append(_downcast_sales(snapdeal_to_sales_rows(snapdeal_df)))
-    # Amazon: always merge when MTR rows exist. Empty sku_mapping is OK — _resolve_mtr_sku
-    # falls back to PL-stripped seller SKU (same as other channels without a map).
+        _parallel_jobs.append(("snapdeal", snapdeal_df))
     if not mtr_df.empty:
-        _mtr_sales = _mtr_to_sales_df(mtr_df, sku_mapping or {})
-        if not _mtr_sales.empty:
-            _mtr_sales["Source"] = "Amazon"
-            sales_parts.append(_downcast_sales(_mtr_sales))
-        del _mtr_sales
-        gc.collect()
+        _parallel_jobs.append(("mtr", mtr_df))
+
+    if _parallel_jobs:
+        _nw = min(_workers, len(_parallel_jobs))
+        with ThreadPoolExecutor(max_workers=max(1, _nw)) as ex:
+            futs: dict = {}
+            for name, df in _parallel_jobs:
+                if name == "myntra":
+                    futs[name] = ex.submit(_build_myntra_sales_part, df)
+                elif name == "flipkart":
+                    futs[name] = ex.submit(_build_flipkart_sales_part, df)
+                elif name == "snapdeal":
+                    futs[name] = ex.submit(_build_snapdeal_sales_part, df)
+                else:
+                    futs[name] = ex.submit(_build_mtr_sales_tagged, df, _map_copy)
+            for name in (j[0] for j in _parallel_jobs):
+                part = futs[name].result()
+                if not part.empty:
+                    sales_parts.append(part)
 
     if not sales_parts:
         return pd.DataFrame()
 
     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
-    del sales_parts
-    gc.collect()
 
     # Single canonical resolution for all channels (same rules as SKU master).
     combined_sales = _apply_unified_oms_skus(combined_sales, sku_mapping or {})
@@ -443,15 +499,10 @@ def build_sales_df(
         subset=["Sku", "TxnDate", "Source", "Transaction Type", "Quantity"],
         keep="last",
     )
-    del combined_sales, _oid_valid, _oid_str, has_lk, lk_series, rest
-    gc.collect()
 
     result = pd.concat([_with_lk, _with_oid, _without_oid], ignore_index=True)
-    del _with_lk, _with_oid, _without_oid
-    gc.collect()
 
     result = _drop_amazon_unkeyed_shadows(result)
-    gc.collect()
 
     # Exact duplicate lines (same channel line key) — catches merge/upload bugs.
     _cols = [
@@ -460,7 +511,6 @@ def build_sales_df(
     ]
     if _cols and not result.empty:
         result = result.drop_duplicates(subset=_cols, keep="last")
-    gc.collect()
 
     if not result.empty and "DSR_Segment" not in result.columns:
         result["DSR_Segment"] = ""

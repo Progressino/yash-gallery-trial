@@ -131,7 +131,9 @@ export async function buildSales(): Promise<{
   rows?: number
   unmapped_skus?: string[]
 }> {
-  const { data } = await api.post('/upload/build-sales')
+  const { data } = await api.post('/upload/build-sales', undefined, {
+    timeout: UPLOAD_TIMEOUT_MS,
+  })
   return data
 }
 
