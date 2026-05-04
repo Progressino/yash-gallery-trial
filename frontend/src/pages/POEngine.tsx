@@ -112,6 +112,10 @@ type Tab = 'po' | 'quarterly' | 'shipment'
 const QUARTER_COL_RE = /^(Apr[-–]Jun|Jul[-–]Sep|Oct[-–]Dec|Jan[-–]Mar)\s+\d{4}$/i
 type Marketplace = 'amazon' | 'flipkart' | 'myntra' | 'meesho'
 
+/** Scroll region + max height so thead ``sticky top-0`` has a real scrollport (Layout uses ``main`` scroll otherwise). */
+const PO_TABLE_SCROLL_CLASS =
+  'max-h-[min(72vh,calc(100dvh-19rem))] overflow-auto overscroll-contain shadow-sm'
+
 interface ShipmentParams {
   marketplace: Marketplace
   period_days: number
@@ -650,12 +654,12 @@ export default function POEngine() {
 
               {/* ── Flat Table ── */}
               {!groupedView && (
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
-                <table className="w-full text-sm border-collapse">
-                  <thead className="sticky top-0 z-30">
-                    <tr className="bg-gray-50 border-b border-gray-200">
+              <div className={`bg-white rounded-xl border border-gray-200 ${PO_TABLE_SCROLL_CLASS}`}>
+                <table className="w-full text-sm border-separate border-spacing-0">
+                  <thead>
+                    <tr className="bg-gray-50">
                       {/* Checkbox */}
-                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-40">
+                      <th className="px-3 py-3 text-left sticky left-0 top-0 z-[45] bg-gray-50 border-b border-gray-200 shadow-[1px_0_0_0_rgb(229,231,235)]">
                         <input
                           type="checkbox"
                           checked={allVisibleSelected}
@@ -667,13 +671,14 @@ export default function POEngine() {
                       {/* PO columns */}
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
-                          className={`text-left px-4 py-3 font-semibold whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-9 bg-gray-50 z-40 shadow-sm text-gray-600' : ''}
+                          className={`text-left px-4 py-3 font-semibold whitespace-nowrap border-b border-gray-200 bg-gray-50
+                            ${c === 'OMS_SKU'
+                              ? 'sticky left-9 top-0 z-[45] shadow-[1px_0_0_0_rgb(229,231,235)] text-gray-600'
+                              : 'sticky top-0 z-30 text-gray-600'}
                             ${c === 'PO_Qty' ? 'text-orange-600' : ''}
                             ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
-                            ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}
-                            ${!['OMS_SKU','PO_Qty','PO_Qty_Ordered','Pending_Cutting','Balance_to_Dispatch'].includes(c) ? 'text-gray-600' : ''}`}
+                            ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}`}
                         >
                           {c === 'PO_Qty'
                             ? <span>PO Qty ✏️</span>
@@ -685,18 +690,18 @@ export default function POEngine() {
                       {/* Quarter history divider + columns */}
                       {quarterCols.length > 0 && (
                         <>
-                          <th className="px-2 py-3 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-indigo-100">
+                          <th className="px-2 py-3 sticky top-0 z-30 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-b border-gray-200 border-l border-r border-indigo-100">
                             ── QUARTERLY HISTORY ──
                           </th>
                           {quarterCols.map(c => (
-                            <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">
+                            <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">
                               {c}
                             </th>
                           ))}
-                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">
+                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">
                             Avg/Mo
                           </th>
-                          <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50">
+                          <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200">
                             Status
                           </th>
                         </>
@@ -724,7 +729,7 @@ export default function POEngine() {
                       const statusClass  = STATUS_COLORS[status] ?? 'text-gray-400 bg-gray-50'
 
                       return (
-                        <tr key={i} className={`border-b border-gray-100 hover:brightness-[0.97] transition-colors ${rowBg}`}>
+                        <tr key={i} className={`hover:brightness-[0.97] transition-colors ${rowBg} [&>td]:border-b [&>td]:border-gray-100`}>
                           {/* Checkbox */}
                           <td className={`px-3 py-2 sticky left-0 z-10 ${isSelected ? 'bg-blue-50' : 'bg-white'}`}>
                             <input
@@ -824,20 +829,21 @@ export default function POEngine() {
 
               {/* ── Grouped (Size Families) Table ── */}
               {groupedView && (
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
-                <table className="w-full text-sm border-collapse">
-                  <thead className="sticky top-0 z-30">
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="px-3 py-3 sticky left-0 bg-gray-50 z-40 w-14" />
+              <div className={`bg-white rounded-xl border border-gray-200 ${PO_TABLE_SCROLL_CLASS}`}>
+                <table className="w-full text-sm border-separate border-spacing-0">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="px-3 py-3 sticky left-0 top-0 z-[45] bg-gray-50 border-b border-gray-200 w-14 shadow-[1px_0_0_0_rgb(229,231,235)]" />
                       {PO_DISPLAY_COLS.map(c => (
                         <th key={c}
-                          className={`text-left px-4 py-3 font-semibold whitespace-nowrap
-                            ${c === 'OMS_SKU' ? 'sticky left-14 bg-gray-50 z-40 shadow-sm text-gray-600' : ''}
+                          className={`text-left px-4 py-3 font-semibold whitespace-nowrap border-b border-gray-200 bg-gray-50
+                            ${c === 'OMS_SKU'
+                              ? 'sticky left-14 top-0 z-[45] shadow-[1px_0_0_0_rgb(229,231,235)] text-gray-600'
+                              : 'sticky top-0 z-30 text-gray-600'}
                             ${c === 'PO_Qty' ? 'text-orange-600' : ''}
                             ${c === 'PO_Qty_Ordered' ? 'text-slate-600' : ''}
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
-                            ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}
-                            ${!['OMS_SKU','PO_Qty','PO_Qty_Ordered','Pending_Cutting','Balance_to_Dispatch'].includes(c) ? 'text-gray-600' : ''}`}
+                            ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}`}
                         >
                           {c === 'PO_Qty'
                             ? <span>PO Qty ✏️</span>
@@ -848,26 +854,26 @@ export default function POEngine() {
                       ))}
                       {quarterCols.length > 0 && (
                         <>
-                          <th className="px-2 py-3 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-indigo-100">
+                          <th className="px-2 py-3 sticky top-0 z-30 bg-indigo-50 text-indigo-400 text-xs font-bold whitespace-nowrap text-center border-b border-gray-200 border-l border-r border-indigo-100">
                             ── QUARTERLY HISTORY ──
                           </th>
                           {quarterCols.map(c => (
-                            <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">
+                            <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">
                               {c}
                             </th>
                           ))}
-                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50 border-r border-indigo-100">Avg/Mo</th>
-                          <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs bg-indigo-50">Status</th>
+                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">Avg/Mo</th>
+                          <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200">Status</th>
                         </>
                       )}
                       {/* Cutting planner columns */}
-                      <th className="px-2 py-3 bg-amber-50 text-amber-400 text-xs font-bold whitespace-nowrap text-center border-l border-r border-amber-100">
+                      <th className="px-2 py-3 sticky top-0 z-30 bg-amber-50 text-amber-400 text-xs font-bold whitespace-nowrap text-center border-b border-gray-200 border-l border-r border-amber-100">
                         ── CUTTING PLANNER ──
                       </th>
-                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">Cut Ratio</th>
-                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">PO Qty</th>
-                      <th className="text-center px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">🧵 Material Avail.</th>
-                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs bg-amber-50 border-r border-amber-100">✂️ Sug. Cut</th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">Cut Ratio</th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">PO Qty</th>
+                      <th className="text-center px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">🧵 Material Avail.</th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">✂️ Sug. Cut</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -879,7 +885,7 @@ export default function POEngine() {
                       const gSClass     = STATUS_COLORS[group.worstStatus] ?? 'text-gray-400 bg-gray-50'
 
                       const parentRow = (
-                        <tr key={group.parentSku + '-hdr'} className="bg-slate-100 border-b border-slate-200 hover:bg-slate-200/60 transition-colors">
+                        <tr key={group.parentSku + '-hdr'} className="bg-slate-100 hover:bg-slate-200/60 transition-colors [&>td]:border-b [&>td]:border-slate-200">
                           <td className="px-3 py-2.5 sticky left-0 bg-slate-100 z-10 w-14">
                             <div className="flex items-center gap-1.5">
                               <button
@@ -1022,7 +1028,7 @@ export default function POEngine() {
 
                         return (
                           <tr key={sku + '-' + vi}
-                            className={`border-b border-gray-100 hover:brightness-[0.97] transition-colors ${isSelected ? 'bg-blue-50' : 'bg-white'}`}
+                            className={`hover:brightness-[0.97] transition-colors ${isSelected ? 'bg-blue-50' : 'bg-white'} [&>td]:border-b [&>td]:border-gray-100`}
                           >
                             <td className={`px-3 py-2 sticky left-0 z-10 w-14 ${isSelected ? 'bg-blue-50' : 'bg-white'}`}>
                               <div className="pl-5 flex items-center">
