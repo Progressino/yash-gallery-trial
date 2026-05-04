@@ -22,7 +22,7 @@ Sales Uploads:
 GET/POST/DELETE /api/finance/sales-uploads
 """
 import os
-from typing import Optional, List
+from typing import Optional, List, Any
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel
 
@@ -588,12 +588,19 @@ def get_sales_invoices(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     search: Optional[str] = None,
+    document_kind: Optional[str] = Query(
+        None,
+        description='Omit or "all" = invoices + credit memos + upload summaries. '
+        '"sales" = posted invoices/shipments only (no credit memos) + SUP summaries. '
+        '"credit_memo" = sales credit memos / returns (SUE only).',
+    ),
 ):
     """Invoice-level rows persisted from Finance Sales Uploads."""
     return list_sales_invoices(
         start_date=start_date,
         end_date=end_date,
         search=search,
+        document_kind=document_kind,
     )
 
 
@@ -618,6 +625,8 @@ class SalesInvoicePatch(BaseModel):
     igst_amount: Optional[float] = None
     total_amount: Optional[float] = None
     net_payable: Optional[float] = None
+    # BC / D365-style default dimensions on the document (stored in sales_invoice_edits JSON).
+    dimension_assignments: Optional[List[dict[str, Any]]] = None
 
 
 @router.patch("/sales-invoices/{voucher_id}")

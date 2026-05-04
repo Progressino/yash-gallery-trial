@@ -68,6 +68,7 @@ test("manual finance checklist across CRONUS menu paths", async ({ page, context
   const quickOpenExpectations = [
     ["Day Book", /Day Book —/],
     ["Sales Invoices", /Sales invoices \(uploads \+ parsed lines\)/],
+    ["Sales credit memos", /Sales credit memos \(returns/],
     ["Vouchers", /Saved Vouchers/],
     ["Voucher Register", /Export register \(CSV\)/],
     ["Cash Book", /Export Cash Book \(CSV\)/],
@@ -110,6 +111,8 @@ test("manual finance checklist across CRONUS menu paths", async ({ page, context
   await page.getByRole("button", { name: /^Sales/i }).first().click();
   await page.getByRole("button", { name: "Sales invoices", exact: true }).first().click();
   await expect(page.getByText(/Sales invoices \(uploads \+ parsed lines\)/)).toBeVisible();
+  await page.getByRole("button", { name: "Sales credit memos", exact: true }).first().click();
+  await expect(page.getByText(/Sales credit memos \(returns/)).toBeVisible();
 
   await page.getByRole("button", { name: /Purchasing/i }).first().click();
   await page.getByRole("button", { name: "Purchase invoices" }).click();

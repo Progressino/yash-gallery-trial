@@ -178,6 +178,8 @@ interface SalesInvoiceRow {
   total_amount: number
   net_payable: number
   source_filename: string
+  narration?: string
+  document_subtype?: 'sales_invoice' | 'sales_credit_memo' | 'upload_summary'
   row_kind?: 'entry' | 'upload_summary'
   sales_upload_id?: number
 }
@@ -211,7 +213,7 @@ type CronusMega = 'finance' | 'cash' | 'sales' | 'purchasing' | 'india' | 'vouch
 function cronusMegaForTab(tab: FinanceTab): CronusMega | 'dash' {
   if (tab === 'dashboard') return 'dash'
   if (tab === 'gstr' || tab === 'gst') return 'india'
-  if (tab === 'sales-uploads' || tab === 'sales-invoices' || tab === 'revenue') return 'sales'
+  if (tab === 'sales-uploads' || tab === 'sales-invoices' || tab === 'sales-credit-memos' || tab === 'revenue') return 'sales'
   if (tab === 'vouchers' || tab === 'daybook' || tab === 'voucher-register') return 'voucher'
   if (tab === 'cash-book' || tab === 'bank-book') return 'cash'
   if (tab === 'expenses') return 'purchasing'
@@ -232,7 +234,7 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'dashboard' | 'daybook' | 'sales-invoices' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
+type FinanceTab = 'dashboard' | 'daybook' | 'sales-invoices' | 'sales-credit-memos' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
 
 // ── Chart of Accounts types ───────────────────────────────────────
 interface CoALedger {
@@ -288,6 +290,8 @@ interface DaybookVoucher {
     seller_company?: string
     seller_state?: string
     line_items?: Array<Record<string, unknown>>
+    /** BC / D365-style default dimensions (attribute → code → description). */
+    dimension_assignments?: Array<Record<string, unknown>>
   }
 }
 
@@ -451,10 +455,12 @@ function FinanceCronusNav(props: {
               </MegaCol>
               <MegaCol title="Orders &amp; quotes">
                 <L onClick={() => go('sales-invoices')}>Sales invoices</L>
+                <L onClick={() => go('sales-credit-memos')}>Sales credit memos</L>
                 <L onClick={() => go('sales-uploads')}>Sales uploads</L>
                 <L onClick={() => go('daybook')}>Posted sales — Day Book</L>
               </MegaCol>
               <MegaCol title="Returns">
+                <L onClick={() => go('sales-credit-memos')}>Sales credit memos (returns)</L>
                 <L onClick={() => go('revenue')}>Returns in platform revenue</L>
               </MegaCol>
               <MegaCol title="Posted documents">
@@ -852,12 +858,13 @@ export default function Finance() {
       />
 
       <div className="bg-white rounded-b-lg border border-t-0 border-slate-200 shadow-sm overflow-hidden">
-        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads' || activeTab === 'sales-invoices') && (
+        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads' || activeTab === 'sales-invoices' || activeTab === 'sales-credit-memos') && (
           <div className="px-3 sm:px-5 py-2 flex flex-wrap gap-x-1 gap-y-1 items-center border-b border-teal-100 bg-gradient-to-r from-teal-50/90 to-cyan-50/50">
             <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide mr-2">India Taxation</span>
             <button type="button" onClick={() => setActiveTab('gstr')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gstr' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GSTR-3B</button>
             <button type="button" onClick={() => setActiveTab('gst')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gst' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GST summary</button>
             <button type="button" onClick={() => setActiveTab('sales-invoices')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-invoices' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales invoices</button>
+            <button type="button" onClick={() => setActiveTab('sales-credit-memos')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-credit-memos' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales credit memos</button>
             <button type="button" onClick={() => setActiveTab('sales-uploads')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-uploads' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales uploads</button>
             <button type="button" onClick={() => jumpMasters('tds-sections')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">TDS masters</button>
             <button type="button" onClick={() => jumpMasters('gst-classifications')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">GST classifications</button>
@@ -870,6 +877,7 @@ export default function Finance() {
           {([
             ['daybook', 'Day Book'],
             ['sales-invoices', 'Sales Invoices'],
+            ['sales-credit-memos', 'Sales credit memos'],
             ['vouchers', 'Vouchers'],
             ['voucher-register', 'Voucher Register'],
             ['cash-book', 'Cash Book'],
@@ -1248,6 +1256,15 @@ export default function Finance() {
       {/* ── Tab: Sales Invoices ── */}
       {activeTab === 'sales-invoices' && (
         <SalesInvoicesTab
+          mode="sales"
+          openTrialBalanceForParty={openTrialBalanceForParty}
+          openMastersLedgersForParty={openMastersLedgersForParty}
+        />
+      )}
+
+      {activeTab === 'sales-credit-memos' && (
+        <SalesInvoicesTab
+          mode="credit_memo"
           openTrialBalanceForParty={openTrialBalanceForParty}
           openMastersLedgersForParty={openMastersLedgersForParty}
         />
@@ -1393,6 +1410,7 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
     { label: 'Chart of Accounts', tab: 'coa' },
     { label: 'Day Book', tab: 'daybook' },
     { label: 'Sales Invoices', tab: 'sales-invoices' },
+    { label: 'Sales credit memos', tab: 'sales-credit-memos' },
     { label: 'Vouchers', tab: 'vouchers' },
     { label: 'Ledgers & masters', tab: 'masters' },
     { label: 'Sales Uploads', tab: 'sales-uploads' },
@@ -2183,14 +2201,19 @@ function salesInvoicesDedupedTax(rows: SalesInvoiceRow[]) {
   return tax
 }
 
+type SalesInvoicesListMode = 'sales' | 'credit_memo'
+
 function SalesInvoicesTab({
+  mode,
   openTrialBalanceForParty,
   openMastersLedgersForParty,
 }: {
+  mode: SalesInvoicesListMode
   openTrialBalanceForParty: (q: string) => void
   openMastersLedgersForParty: (q: string) => void
 }) {
   const qc = useQueryClient()
+  const isCreditTab = mode === 'credit_memo'
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [search, setSearch] = useState('')
@@ -2198,18 +2221,22 @@ function SalesInvoicesTab({
   const [cardOpen, setCardOpen] = useState(false)
   const [cardTab, setCardTab] = useState<'general' | 'lines'>('general')
   const [draft, setDraft] = useState<Record<string, string>>({})
+  const [dimRows, setDimRows] = useState<Array<{ attribute_name: string; value_code: string; value_description: string }>>([
+    { attribute_name: '', value_code: '', value_description: '' },
+  ])
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
 
   const q = useMemo(() => {
     const p = new URLSearchParams()
+    p.set('document_kind', isCreditTab ? 'credit_memo' : 'sales')
     if (startDate) p.set('start_date', startDate)
     if (endDate) p.set('end_date', endDate)
     if (search.trim()) p.set('search', search.trim())
     return p.toString()
-  }, [startDate, endDate, search])
+  }, [startDate, endDate, search, isCreditTab])
 
   const { data: rows = [], isLoading } = useQuery<SalesInvoiceRow[]>({
-    queryKey: ['finance-sales-invoices', startDate, endDate, search],
+    queryKey: ['finance-sales-invoices', mode, startDate, endDate, search],
     queryFn: async () => { const { data } = await api.get(`/finance/sales-invoices?${q}`); return data },
     staleTime: 30 * 1000,
   })
@@ -2255,6 +2282,18 @@ function SalesInvoicesTab({
       total_amount: String(detail.total_amount ?? ''),
       net_payable: String(detail.net_payable ?? ''),
     })
+    const rawDims = detail.meta?.dimension_assignments
+    if (Array.isArray(rawDims) && rawDims.length > 0) {
+      setDimRows(
+        rawDims.map((x: Record<string, unknown>) => ({
+          attribute_name: String(x.attribute_name ?? x.attribute ?? ''),
+          value_code: String(x.value_code ?? x.code ?? ''),
+          value_description: String(x.value_description ?? x.description ?? x.financial_tag ?? ''),
+        })),
+      )
+    } else {
+      setDimRows([{ attribute_name: '', value_code: '', value_description: '' }])
+    }
     setSaveMsg(null)
   }, [detail, cardOpen, selectedId])
 
@@ -2314,6 +2353,13 @@ function SalesInvoicesTab({
       const n = Number(raw)
       if (!Number.isNaN(n)) body[k] = n
     }
+    body.dimension_assignments = dimRows
+      .map(d => ({
+        attribute_name: d.attribute_name.trim(),
+        value_code: d.value_code.trim(),
+        value_description: d.value_description.trim(),
+      }))
+      .filter(d => d.attribute_name || d.value_code || d.value_description)
     saveMutation.mutate(body)
   }
 
@@ -2347,7 +2393,11 @@ function SalesInvoicesTab({
           <div>
             <label className="text-xs text-gray-500">From</label>
             <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
-            <p className="text-[10px] text-gray-400 mt-0.5 max-w-[11rem]">Leave From/To empty to load all uploads and invoice lines.</p>
+            <p className="text-[10px] text-gray-400 mt-0.5 max-w-[11rem]">
+              {isCreditTab
+                ? 'Leave From/To empty to load all posted sales credit memos / returns (SUE lines only).'
+                : 'Leave From/To empty to load all uploads and invoice lines (excludes credit memos).'}
+            </p>
           </div>
           <div>
             <label className="text-xs text-gray-500">To</label>
@@ -2361,28 +2411,49 @@ function SalesInvoicesTab({
         <button
           type="button"
           onClick={() => {
-            const csv: (string | number)[][] = [['voucher_no','row_kind','sales_upload_id','invoice_no','order_id','date','customer','platform','taxable','cgst','sgst','igst','net_payable']]
-            for (const r of rows) csv.push([r.voucher_no, r.row_kind ?? '', r.sales_upload_id ?? '', r.invoice_no, r.order_id, r.voucher_date, r.party_name, r.platform, r.taxable_amount, r.cgst_amount, r.sgst_amount, r.igst_amount, r.net_payable])
-            downloadCsv(`sales-invoices-${startDate || 'all'}-${endDate || 'all'}.csv`, csv)
+            const csv: (string | number)[][] = [[
+              'voucher_no', 'document_subtype', 'row_kind', 'sales_upload_id', 'invoice_no', 'order_id', 'date', 'customer', 'platform',
+              'taxable', 'cgst', 'sgst', 'igst', 'net_payable', 'narration',
+            ]]
+            for (const r of rows) {
+              csv.push([
+                r.voucher_no, r.document_subtype ?? '', r.row_kind ?? '', r.sales_upload_id ?? '', r.invoice_no, r.order_id, r.voucher_date, r.party_name, r.platform,
+                r.taxable_amount, r.cgst_amount, r.sgst_amount, r.igst_amount, r.net_payable, r.narration ?? '',
+              ])
+            }
+            const fn = isCreditTab
+              ? `sales-credit-memos-${startDate || 'all'}-${endDate || 'all'}.csv`
+              : `sales-invoices-${startDate || 'all'}-${endDate || 'all'}.csv`
+            downloadCsv(fn, csv)
           }}
           className="text-xs font-semibold px-3 py-1.5 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
         >
-          Export invoices (CSV)
+          {isCreditTab ? 'Export credit memos (CSV)' : 'Export invoices (CSV)'}
         </button>
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-4 py-2.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 className="text-sm font-semibold text-gray-800">Sales invoices (uploads + parsed lines)</h3>
-            <p className="text-[11px] text-gray-500 mt-0.5">Click a row to open the document card (Business Central style). Press Esc to close.</p>
+            <h3 className="text-sm font-semibold text-gray-800">
+              {isCreditTab ? 'Sales credit memos (returns / credit notes)' : 'Sales invoices (uploads + parsed lines)'}
+            </h3>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              {isCreditTab
+                ? 'Posted returns and adjustments (negative net or taxable, or narration mentioning refund). Press Esc to close the card.'
+                : 'Posted invoices and upload summaries only — returns live under Sales credit memos. Press Esc to close.'}
+            </p>
           </div>
           <span className="text-xs text-gray-500">{stats.count} rows · net {fmt(stats.total)}</span>
         </div>
         {isLoading ? (
-          <div className="p-8 text-center text-gray-400 text-sm">Loading invoices…</div>
+          <div className="p-8 text-center text-gray-400 text-sm">{isCreditTab ? 'Loading credit memos…' : 'Loading invoices…'}</div>
         ) : rows.length === 0 ? (
-          <div className="p-8 text-center text-gray-400 text-sm">No rows match your filters. Clear dates to show everything from Sales Uploads, or adjust search.</div>
+          <div className="p-8 text-center text-gray-400 text-sm">
+            {isCreditTab
+              ? 'No sales credit memos match your filters. Clear dates or search; credit lines are detected from negative amounts or refund narration.'
+              : 'No rows match your filters. Clear dates to show everything from Sales Uploads, or adjust search.'}
+          </div>
         ) : (
           <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
             <table className="w-full text-xs">
@@ -2432,7 +2503,11 @@ function SalesInvoicesTab({
           >
             <header className="shrink-0 flex items-center justify-between px-4 py-2.5 bg-[#002B5B] text-white border-b border-[#001a3d]">
               <div className="min-w-0">
-                <p className="text-[10px] uppercase tracking-wider text-blue-200/90">Sales · Posted document</p>
+                <p className="text-[10px] uppercase tracking-wider text-blue-200/90">
+                  {detail?.voucher_type === 'Sales Credit Memo' || selected?.document_subtype === 'sales_credit_memo'
+                    ? 'Sales · Sales credit memo'
+                    : 'Sales · Posted document'}
+                </p>
                 <h2 id="si-card-title" className="text-base font-semibold truncate">
                   {selected?.voucher_no ?? 'Invoice'} · {draft.invoice_no || '—'}
                 </h2>
@@ -2594,6 +2669,72 @@ function SalesInvoicesTab({
                       rows={3}
                       className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full"
                     />
+                  </div>
+                  <p className="text-[11px] font-semibold text-slate-500 uppercase mt-5 mb-1">Default dimensions (D365-style)</p>
+                  <p className="text-[10px] text-slate-500 mb-2 leading-snug">
+                    Attribute (category name) → Value code → Description (friendly tag). Stored on this document and returned with the voucher.
+                  </p>
+                  <div className="space-y-2 mb-4">
+                    {dimRows.map((dr, idx) => (
+                      <div
+                        key={`dim-${idx}`}
+                        className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end rounded border border-slate-200 bg-slate-50/80 p-2"
+                      >
+                        <div>
+                          <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-0.5">Attribute</label>
+                          <input
+                            type="text"
+                            value={dr.attribute_name}
+                            onChange={e => {
+                              const v = e.target.value
+                              setDimRows(prev => prev.map((row, i) => (i === idx ? { ...row, attribute_name: v } : row)))
+                            }}
+                            className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full bg-white"
+                            placeholder="e.g. Department"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-0.5">Value code</label>
+                          <input
+                            type="text"
+                            value={dr.value_code}
+                            onChange={e => {
+                              const v = e.target.value
+                              setDimRows(prev => prev.map((row, i) => (i === idx ? { ...row, value_code: v } : row)))
+                            }}
+                            className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full bg-white"
+                            placeholder="e.g. 100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-0.5">Description</label>
+                          <input
+                            type="text"
+                            value={dr.value_description}
+                            onChange={e => {
+                              const v = e.target.value
+                              setDimRows(prev => prev.map((row, i) => (i === idx ? { ...row, value_description: v } : row)))
+                            }}
+                            className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full bg-white"
+                            placeholder="e.g. Sales Department"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="text-[11px] font-semibold px-2 py-1.5 rounded border border-slate-300 text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+                          onClick={() => setDimRows(prev => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)))}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      className="text-[11px] font-semibold text-teal-800 hover:underline"
+                      onClick={() => setDimRows(prev => [...prev, { attribute_name: '', value_code: '', value_description: '' }])}
+                    >
+                      + Add dimension row
+                    </button>
                   </div>
                   <p className="text-[11px] font-semibold text-slate-500 uppercase mt-6 mb-3">Amounts</p>
                   <SiFormField label="Taxable" value={draft.taxable_amount ?? ''} onChange={v => setD('taxable_amount', v)} />

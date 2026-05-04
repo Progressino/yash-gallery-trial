@@ -215,6 +215,90 @@ def test_finance_sales_invoices_from_upload_entries(finance_isolated_db, client)
     assert len(r_all.json()) >= len(rows2)
 
 
+def test_finance_sales_invoices_document_kind_sales_vs_credit_memo(finance_isolated_db, client):
+    up = client.post(
+        "/api/finance/sales-uploads",
+        json={
+            "platform": "Amazon",
+            "period": "2026-05",
+            "filename": "mix.csv",
+            "total_revenue": 150.0,
+            "total_orders": 2,
+            "total_returns": 30.0,
+            "net_revenue": 120.0,
+            "uploaded_by": "pytest",
+            "upload_notes": "",
+        },
+    )
+    assert up.status_code == 200
+    upload_id = int(up.json().get("id") or 0)
+    assert upload_id > 0
+
+    import backend.db.finance_db as fdb
+
+    fdb.create_finance_sales_entries(
+        upload_id,
+        [
+            {
+                "platform": "Amazon",
+                "period": "2026-05",
+                "voucher_date": "2026-05-12",
+                "invoice_no": "INV-OK",
+                "order_id": "ORD-A",
+                "party_name": "Buyer A",
+                "party_gstin": "",
+                "party_state": "KA",
+                "ship_to_state": "",
+                "taxable_amount": 80.0,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 0.0,
+                "total_amount": 80.0,
+                "net_payable": 80.0,
+                "narration": "",
+                "source_filename": "mix.csv",
+                "line_items": "[]",
+            },
+            {
+                "platform": "Amazon",
+                "period": "2026-05",
+                "voucher_date": "2026-05-12",
+                "invoice_no": "CN-1",
+                "order_id": "ORD-R",
+                "party_name": "Buyer B",
+                "party_gstin": "",
+                "party_state": "KA",
+                "ship_to_state": "",
+                "taxable_amount": -30.0,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 0.0,
+                "total_amount": -30.0,
+                "net_payable": -30.0,
+                "narration": "refund adjustment",
+                "source_filename": "mix.csv",
+                "line_items": "[]",
+            },
+        ],
+    )
+
+    r_sales = client.get("/api/finance/sales-invoices?document_kind=sales&start_date=2026-05-01&end_date=2026-05-31")
+    assert r_sales.status_code == 200
+    sales_rows = r_sales.json()
+    sue_sales = [x for x in sales_rows if str(x.get("voucher_no") or "").startswith("SUE-")]
+    assert len(sue_sales) >= 1
+    assert all(x.get("document_subtype") != "sales_credit_memo" for x in sue_sales)
+    assert any(str(x.get("voucher_no") or "").startswith("SUP-") for x in sales_rows)
+
+    r_cred = client.get("/api/finance/sales-invoices?document_kind=credit_memo&start_date=2026-05-01&end_date=2026-05-31")
+    assert r_cred.status_code == 200
+    cred_rows = r_cred.json()
+    sue_cred = [x for x in cred_rows if str(x.get("voucher_no") or "").startswith("SUE-")]
+    assert len(sue_cred) >= 1
+    assert all(x.get("document_subtype") == "sales_credit_memo" for x in sue_cred)
+    assert not any(str(x.get("voucher_no") or "").startswith("SUP-") for x in cred_rows)
+
+
 def test_finance_sales_invoice_patch_upload_summary(finance_isolated_db, client):
     up = client.post(
         "/api/finance/sales-uploads",

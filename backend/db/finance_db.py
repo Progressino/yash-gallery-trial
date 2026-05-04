@@ -1257,6 +1257,10 @@ def _apply_sales_invoice_row_patch(row: dict, patch: dict) -> dict:
         r["platform"] = str(patch["platform"])
     if patch.get("period") is not None:
         r["period"] = str(patch["period"])
+    if patch.get("narration") is not None:
+        r["narration"] = str(patch["narration"])
+    if patch.get("dimension_assignments") is not None:
+        r["dimension_assignments"] = patch["dimension_assignments"]
     for nk in _NUM_PATCH_KEYS:
         if nk in patch and patch[nk] is not None:
             try:
@@ -1302,6 +1306,8 @@ def _apply_sales_invoice_patch_to_voucher(v: dict, patch: dict) -> dict:
         out["narration"] = str(patch["narration"])
     if patch.get("supply_type") is not None:
         out["supply_type"] = str(patch["supply_type"])
+    if patch.get("dimension_assignments") is not None:
+        meta["dimension_assignments"] = patch["dimension_assignments"]
     for nk in _NUM_PATCH_KEYS:
         if nk in patch and patch[nk] is not None:
             try:
@@ -1369,11 +1375,16 @@ def get_sales_entry_voucher(voucher_id: int) -> Optional[dict]:
         })
     vdate = rr.get("voucher_date") or f"{str(rr.get('period') or '')[:7]}-01"
     vid = 2_000_000 + int(rr["id"])
+    _np = float(rr.get("net_payable") or 0)
+    _tb = float(rr.get("taxable_amount") or 0)
+    _nlow = str(rr.get("narration") or "").lower()
+    _is_credit = _np < 0 or _tb < 0 or ("refund" in _nlow)
+    vtype = "Sales Credit Memo" if _is_credit else "Sales Invoice"
     v = {
         "id": vid,
         "voucher_no": f"SUE-{rr['id']}",
         "voucher_date": vdate,
-        "voucher_type": "Sales Upload",
+        "voucher_type": vtype,
         "party_name": rr.get("party_name") or "",
         "party_gstin": rr.get("party_gstin") or "",
         "party_state": rr.get("party_state") or "",
@@ -1545,22 +1556,43 @@ def get_upload_summary_voucher(voucher_id: int) -> Optional[dict]:
     return _apply_sales_invoice_patch_to_voucher(v, patch)
 
 
+def _entry_is_sales_credit_memo_sql() -> str:
+    """SQLite predicate: posted credit / return lines (negative AR movement or Refund narration)."""
+    return (
+        "(COALESCE(net_payable,0) < 0 OR COALESCE(taxable_amount,0) < 0 "
+        "OR instr(lower(COALESCE(narration,'')),'refund') > 0)"
+    )
+
+
 def list_sales_invoices(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     search: Optional[str] = None,
+    document_kind: Optional[str] = None,
 ) -> list[dict]:
-    """All finance_sales_entries rows plus every finance_sales_uploads summary (same coverage as Sales Uploads)."""
+    """All finance_sales_entries rows plus every finance_sales_uploads summary (same coverage as Sales Uploads).
+
+    document_kind:
+      - None / \"all\" — legacy combined list (invoices + credit memos + upload summaries).
+      - \"sales\" — invoices & shipments only (exclude credit-memo SUE rows); include SUP summaries.
+      - \"credit_memo\" — sales credit memos / returns only (SUE rows matching credit predicate); no SUP rows.
+    """
     conn = _connect()
+    dk = (document_kind or "").strip().lower()
+    credit_pred = _entry_is_sales_credit_memo_sql()
     q = """
         SELECT id, sales_upload_id, voucher_date, platform, period, invoice_no, order_id,
                party_name, party_gstin, party_state, ship_to_state,
                taxable_amount, cgst_amount, sgst_amount, igst_amount,
-               total_amount, net_payable, source_filename
+               total_amount, net_payable, source_filename, narration
         FROM finance_sales_entries
         WHERE 1=1
     """
     params: list = []
+    if dk == "sales":
+        q += f" AND NOT ({credit_pred})"
+    elif dk == "credit_memo":
+        q += f" AND ({credit_pred})"
     if start_date:
         q += " AND voucher_date >= ?"
         params.append(start_date)
@@ -1581,10 +1613,15 @@ def list_sales_invoices(
     for row in rows:
         rr = dict(row)
         rid = int(rr.get("id") or 0)
+        _np = float(rr.get("net_payable") or 0)
+        _tb = float(rr.get("taxable_amount") or 0)
+        _narr = str(rr.get("narration") or "").lower()
+        is_credit = _np < 0 or _tb < 0 or ("refund" in _narr)
         out.append({
             "id": 2_000_000 + rid,
             "voucher_no": f"SUE-{rid}",
             "row_kind": "entry",
+            "document_subtype": "sales_credit_memo" if is_credit else "sales_invoice",
             "sales_upload_id": int(rr.get("sales_upload_id") or 0),
             "voucher_date": rr.get("voucher_date") or "",
             "platform": rr.get("platform") or "",
@@ -1602,6 +1639,7 @@ def list_sales_invoices(
             "total_amount": round(float(rr.get("total_amount") or 0), 2),
             "net_payable": round(float(rr.get("net_payable") or 0), 2),
             "source_filename": rr.get("source_filename") or "",
+            "narration": rr.get("narration") or "",
         })
 
     # Upload summaries for every row in finance_sales_uploads (same grid as Sales Uploads), in addition to entries.
@@ -1637,39 +1675,42 @@ def list_sales_invoices(
         )"""
         params2.extend([like, like, like, like, like])
     q2 += " ORDER BY su.period DESC, su.id DESC"
-    for row in conn.execute(q2, params2).fetchall():
-        su = dict(row)
-        uid = int(su["id"])
-        p = str(su.get("period") or "").strip()
-        vdate = f"{p[:7]}-01" if len(p) >= 7 else (str(su.get("created_at") or "")[:10] or "")
-        gross = float(su.get("total_revenue") or 0.0)
-        ret = float(su.get("total_returns") or 0.0)
-        net = float(su.get("net_revenue") or 0.0)
-        party = (su.get("company_name") or "").strip() or (su.get("seller_gstin") or "").strip() or (su.get("platform") or "")
-        doc_no = f"SUM-{uid}"
-        cst = str(su.get("company_state") or "")
-        out.append({
-            "id": UPLOAD_SUMMARY_VOUCHER_BASE + uid,
-            "voucher_no": f"SUP-{uid}",
-            "row_kind": "upload_summary",
-            "sales_upload_id": uid,
-            "voucher_date": vdate,
-            "platform": str(su.get("platform") or ""),
-            "period": str(su.get("period") or ""),
-            "invoice_no": doc_no,
-            "order_id": f"UPLOAD-{uid}",
-            "party_name": party,
-            "party_gstin": str(su.get("seller_gstin") or ""),
-            "party_state": cst,
-            "ship_to_state": cst,
-            "taxable_amount": round(gross - ret, 2),
-            "cgst_amount": 0.0,
-            "sgst_amount": 0.0,
-            "igst_amount": 0.0,
-            "total_amount": round(gross, 2),
-            "net_payable": round(net, 2),
-            "source_filename": str(su.get("filename") or ""),
-        })
+    if dk != "credit_memo":
+        for row in conn.execute(q2, params2).fetchall():
+            su = dict(row)
+            uid = int(su["id"])
+            p = str(su.get("period") or "").strip()
+            vdate = f"{p[:7]}-01" if len(p) >= 7 else (str(su.get("created_at") or "")[:10] or "")
+            gross = float(su.get("total_revenue") or 0.0)
+            ret = float(su.get("total_returns") or 0.0)
+            net = float(su.get("net_revenue") or 0.0)
+            party = (su.get("company_name") or "").strip() or (su.get("seller_gstin") or "").strip() or (su.get("platform") or "")
+            doc_no = f"SUM-{uid}"
+            cst = str(su.get("company_state") or "")
+            out.append({
+                "id": UPLOAD_SUMMARY_VOUCHER_BASE + uid,
+                "voucher_no": f"SUP-{uid}",
+                "row_kind": "upload_summary",
+                "document_subtype": "upload_summary",
+                "sales_upload_id": uid,
+                "voucher_date": vdate,
+                "platform": str(su.get("platform") or ""),
+                "period": str(su.get("period") or ""),
+                "invoice_no": doc_no,
+                "order_id": f"UPLOAD-{uid}",
+                "party_name": party,
+                "party_gstin": str(su.get("seller_gstin") or ""),
+                "party_state": cst,
+                "ship_to_state": cst,
+                "taxable_amount": round(gross - ret, 2),
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 0.0,
+                "total_amount": round(gross, 2),
+                "net_payable": round(net, 2),
+                "source_filename": str(su.get("filename") or ""),
+                "narration": "",
+            })
 
     ids = [int(r["id"]) for r in out]
     pmap = _invoice_edit_map(conn, ids)
