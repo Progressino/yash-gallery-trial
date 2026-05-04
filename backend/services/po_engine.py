@@ -417,6 +417,11 @@ def calculate_po_base(
         inv_work = inv_work.drop_duplicates(subset=["OMS_SKU"], keep="last")
 
     max_date = df["TxnDate"].max()
+    # PO only needs recent and LY windows; trimming old rows avoids multi-year
+    # full-table groupbys that make calculation feel stuck for large histories.
+    lookback_days = int(max(30, period_days) + 365 + period_days + 7)
+    hist_cutoff = max_date - timedelta(days=lookback_days)
+    df = df[df["TxnDate"] >= hist_cutoff].copy()
     cutoff   = max_date - timedelta(days=period_days)
     recent   = df[df["TxnDate"] >= cutoff].copy()
 

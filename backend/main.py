@@ -246,11 +246,12 @@ def _do_load_warm_cache() -> bool:
                 len(disk_data), _warm_cache_generation,
             )
 
-        # ── Phase 1: recent SQLite data (local, fast ~5-15s) ─────────────────
-        # Load only the last 4 months of uploads so this completes quickly.
-        # Phase 2 provides the full history from GitHub for older date ranges.
+        # ── Phase 1: SQLite data (local) ──────────────────────────────────────
+        # If Phase 0 disk cache is present, only top-up recent months for speed.
+        # If Phase 0 is absent, load full SQLite history so users still get full
+        # data even when GitHub Phase 2 is slow/unavailable.
         from .services.daily_store import load_platform_data as _load_plat
-        _P1_MONTHS = 4   # covers last ~120 days — typical dashboard range
+        _P1_MONTHS = 4 if disk_ok else None
 
         phase1_ok = False
         try:
@@ -292,9 +293,10 @@ def _do_load_warm_cache() -> bool:
                     _warm_cache_ready.set()       # ← unblocks first page-load immediately
                 phase1_ok = True
                 log.info(
-                    "Warm-cache Phase 1 complete: %d sales rows (last %d months from SQLite). "
+                    "Warm-cache Phase 1 complete: %d sales rows (%s from SQLite). "
                     "%s — fetching GitHub historical cache…",
-                    len(p1.get("sales_df", pd.DataFrame())), _P1_MONTHS,
+                    len(p1.get("sales_df", pd.DataFrame())),
+                    (f"last {_P1_MONTHS} months" if _P1_MONTHS is not None else "full history"),
                     "published to warm_cache" if not disk_ok else "NOT published (disk cache active)",
                 )
         except Exception as e:
