@@ -299,6 +299,63 @@ def test_finance_sales_invoices_document_kind_sales_vs_credit_memo(finance_isola
     assert not any(str(x.get("voucher_no") or "").startswith("SUP-") for x in cred_rows)
 
 
+def test_finance_customer_ledger_entries_bc_shape(finance_isolated_db, client):
+    up = client.post(
+        "/api/finance/sales-uploads",
+        json={
+            "platform": "Amazon",
+            "period": "2026-06",
+            "filename": "ledger.csv",
+            "total_revenue": 50.0,
+            "total_orders": 1,
+            "total_returns": 0.0,
+            "net_revenue": 50.0,
+            "uploaded_by": "pytest",
+            "upload_notes": "",
+        },
+    )
+    assert up.status_code == 200
+    uid = int(up.json().get("id") or 0)
+    import backend.db.finance_db as fdb
+
+    fdb.create_finance_sales_entries(
+        uid,
+        [
+            {
+                "platform": "Amazon",
+                "period": "2026-06",
+                "voucher_date": "2026-06-01",
+                "invoice_no": "BLR8-22106",
+                "order_id": "403-8195605-4690736",
+                "party_name": "MAJESTY",
+                "party_gstin": "29AABCY3804E1ZF",
+                "party_state": "KA",
+                "ship_to_state": "KA",
+                "taxable_amount": 637.14,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 31.857,
+                "total_amount": 669.0,
+                "net_payable": 669.0,
+                "narration": "Invoice SI-40797",
+                "source_filename": "ledger.csv",
+                "line_items": "[]",
+            },
+        ],
+    )
+    r = client.get("/api/finance/customer-ledger-entries?start_date=2026-06-01&end_date=2026-06-30")
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) >= 1
+    row = next(x for x in rows if x.get("document_no") == "BLR8-22106")
+    assert row.get("document_type") == "Invoice"
+    assert row.get("customer_name") == "MAJESTY"
+    assert row.get("location_code") == "BLR8"
+    assert row.get("external_document_no") == "403-8195605-4690736"
+    assert row.get("gst_jurisdiction_type") == "Interstate"
+    assert abs(float(row.get("gst_amount") or 0) - 31.857) < 0.02
+
+
 def test_finance_sales_invoice_patch_upload_summary(finance_isolated_db, client):
     up = client.post(
         "/api/finance/sales-uploads",

@@ -184,6 +184,30 @@ interface SalesInvoiceRow {
   sales_upload_id?: number
 }
 
+/** BC / D365 Customer Ledger Entries-style row (from posted sales uploads). */
+interface CustomerLedgerEntry {
+  id: number
+  document_date: string
+  document_type: string
+  document_no: string
+  customer_no: string
+  customer_name: string
+  description: string
+  branch_code: string
+  taxable_amount: number
+  gst_amount: number
+  invoice_amount: number
+  due_date: string
+  gst_customer_type: string
+  seller_state_code: string
+  seller_gst_reg_no: string
+  location_code: string
+  location_state_code: string
+  gst_jurisdiction_type: string
+  external_document_no: string
+  location_gst_reg_no: string
+}
+
 // ── Constants ────────────────────────────────────────────────────
 const PLATFORM_COLORS: Record<string, string> = {
   Amazon: '#002B5B', Myntra: '#E91E63', Meesho: '#9C27B0', Flipkart: '#F7971D',
@@ -213,7 +237,7 @@ type CronusMega = 'finance' | 'cash' | 'sales' | 'purchasing' | 'india' | 'vouch
 function cronusMegaForTab(tab: FinanceTab): CronusMega | 'dash' {
   if (tab === 'dashboard') return 'dash'
   if (tab === 'gstr' || tab === 'gst') return 'india'
-  if (tab === 'sales-uploads' || tab === 'sales-invoices' || tab === 'sales-credit-memos' || tab === 'revenue') return 'sales'
+  if (tab === 'sales-uploads' || tab === 'sales-invoices' || tab === 'sales-credit-memos' || tab === 'customer-ledger' || tab === 'revenue') return 'sales'
   if (tab === 'vouchers' || tab === 'daybook' || tab === 'voucher-register') return 'voucher'
   if (tab === 'cash-book' || tab === 'bank-book') return 'cash'
   if (tab === 'expenses') return 'purchasing'
@@ -234,7 +258,7 @@ const PRESETS = [
   { label: 'All', start: () => ''            },
 ] as const
 
-type FinanceTab = 'dashboard' | 'daybook' | 'sales-invoices' | 'sales-credit-memos' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
+type FinanceTab = 'dashboard' | 'daybook' | 'sales-invoices' | 'sales-credit-memos' | 'customer-ledger' | 'vouchers' | 'voucher-register' | 'cash-book' | 'bank-book' | 'gstr' | 'pl' | 'gst' | 'expenses' | 'revenue' | 'masters' | 'sales-uploads' | 'help-notes' | 'coa' | 'trial-balance'
 
 // ── Chart of Accounts types ───────────────────────────────────────
 interface CoALedger {
@@ -456,11 +480,13 @@ function FinanceCronusNav(props: {
               <MegaCol title="Orders &amp; quotes">
                 <L onClick={() => go('sales-invoices')}>Sales invoices</L>
                 <L onClick={() => go('sales-credit-memos')}>Sales credit memos</L>
+                <L onClick={() => go('customer-ledger')}>Customer ledger</L>
                 <L onClick={() => go('sales-uploads')}>Sales uploads</L>
                 <L onClick={() => go('daybook')}>Posted sales — Day Book</L>
               </MegaCol>
               <MegaCol title="Returns">
                 <L onClick={() => go('sales-credit-memos')}>Sales credit memos (returns)</L>
+                <L onClick={() => go('customer-ledger')}>Customer ledger (BC-style log)</L>
                 <L onClick={() => go('revenue')}>Returns in platform revenue</L>
               </MegaCol>
               <MegaCol title="Posted documents">
@@ -858,13 +884,14 @@ export default function Finance() {
       />
 
       <div className="bg-white rounded-b-lg border border-t-0 border-slate-200 shadow-sm overflow-hidden">
-        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads' || activeTab === 'sales-invoices' || activeTab === 'sales-credit-memos') && (
+        {(activeTab === 'gstr' || activeTab === 'gst' || activeTab === 'sales-uploads' || activeTab === 'sales-invoices' || activeTab === 'sales-credit-memos' || activeTab === 'customer-ledger') && (
           <div className="px-3 sm:px-5 py-2 flex flex-wrap gap-x-1 gap-y-1 items-center border-b border-teal-100 bg-gradient-to-r from-teal-50/90 to-cyan-50/50">
             <span className="text-[10px] font-bold text-teal-900 uppercase tracking-wide mr-2">India Taxation</span>
             <button type="button" onClick={() => setActiveTab('gstr')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gstr' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GSTR-3B</button>
             <button type="button" onClick={() => setActiveTab('gst')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'gst' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>GST summary</button>
             <button type="button" onClick={() => setActiveTab('sales-invoices')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-invoices' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales invoices</button>
             <button type="button" onClick={() => setActiveTab('sales-credit-memos')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-credit-memos' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales credit memos</button>
+            <button type="button" onClick={() => setActiveTab('customer-ledger')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'customer-ledger' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Customer ledger</button>
             <button type="button" onClick={() => setActiveTab('sales-uploads')} className={`text-xs font-medium px-2 py-1 rounded ${activeTab === 'sales-uploads' ? 'bg-teal-600 text-white' : 'text-teal-800 hover:bg-teal-100'}`}>Sales uploads</button>
             <button type="button" onClick={() => jumpMasters('tds-sections')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">TDS masters</button>
             <button type="button" onClick={() => jumpMasters('gst-classifications')} className="text-xs font-medium px-2 py-1 rounded text-teal-800 hover:bg-teal-100">GST classifications</button>
@@ -878,6 +905,7 @@ export default function Finance() {
             ['daybook', 'Day Book'],
             ['sales-invoices', 'Sales Invoices'],
             ['sales-credit-memos', 'Sales credit memos'],
+            ['customer-ledger', 'Customer ledger'],
             ['vouchers', 'Vouchers'],
             ['voucher-register', 'Voucher Register'],
             ['cash-book', 'Cash Book'],
@@ -1270,6 +1298,8 @@ export default function Finance() {
         />
       )}
 
+      {activeTab === 'customer-ledger' && <CustomerLedgerEntriesTab />}
+
       {/* ── Tab: GSTR3B ── */}
       {activeTab === 'gstr' && <GSTR3BTab />}
 
@@ -1411,6 +1441,7 @@ function DashboardTab({ onNavigate }: { onNavigate: (tab: FinanceTab) => void })
     { label: 'Day Book', tab: 'daybook' },
     { label: 'Sales Invoices', tab: 'sales-invoices' },
     { label: 'Sales credit memos', tab: 'sales-credit-memos' },
+    { label: 'Customer ledger', tab: 'customer-ledger' },
     { label: 'Vouchers', tab: 'vouchers' },
     { label: 'Ledgers & masters', tab: 'masters' },
     { label: 'Sales Uploads', tab: 'sales-uploads' },
@@ -2784,6 +2815,194 @@ function SalesInvoicesTab({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Customer Ledger (BC / D365-style export log) ───────────────────
+function CustomerLedgerEntriesTab() {
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
+  const [search, setSearch] = useState('')
+  const [docKind, setDocKind] = useState<'all' | 'sales' | 'credit_memo'>('all')
+
+  const q = useMemo(() => {
+    const p = new URLSearchParams()
+    if (docKind !== 'all') p.set('document_kind', docKind === 'sales' ? 'sales' : 'credit_memo')
+    if (startDate) p.set('start_date', startDate)
+    if (endDate) p.set('end_date', endDate)
+    if (search.trim()) p.set('search', search.trim())
+    return p.toString()
+  }, [startDate, endDate, search, docKind])
+
+  const { data: rows = [], isLoading } = useQuery<CustomerLedgerEntry[]>({
+    queryKey: ['finance-customer-ledger', startDate, endDate, search, docKind],
+    queryFn: async () => {
+      const { data } = await api.get(`/finance/customer-ledger-entries?${q}`)
+      return data
+    },
+    staleTime: 30 * 1000,
+  })
+
+  const stats = useMemo(() => {
+    let taxable = 0
+    let gst = 0
+    let inv = 0
+    for (const r of rows) {
+      taxable += Number(r.taxable_amount) || 0
+      gst += Number(r.gst_amount) || 0
+      inv += Number(r.invoice_amount) || 0
+    }
+    return { taxable, gst, inv, count: rows.length }
+  }, [rows])
+
+  const exportBcCsv = () => {
+    const headers = [
+      'Document Date', 'Document Type', 'Document No.', 'Customer No.', 'Customer Name', 'Description', 'BRANCH CODE',
+      'Taxable Amount2', 'Gst Amount', 'Invoice Amount', 'Due Date', 'GST Customer Type', 'Seller State Code',
+      'Seller GST Reg. No.', 'Location Code', 'Location State Code', 'GST Jurisdiction Type', 'External Document No.',
+      'Location GST Reg. No.',
+    ]
+    const csv: (string | number)[][] = [headers]
+    for (const r of rows) {
+      csv.push([
+        r.document_date,
+        r.document_type,
+        r.document_no,
+        r.customer_no,
+        r.customer_name,
+        r.description,
+        r.branch_code,
+        r.taxable_amount,
+        r.gst_amount,
+        r.invoice_amount,
+        r.due_date,
+        r.gst_customer_type,
+        r.seller_state_code,
+        r.seller_gst_reg_no,
+        r.location_code,
+        r.location_state_code,
+        r.gst_jurisdiction_type,
+        r.external_document_no,
+        r.location_gst_reg_no,
+      ])
+    }
+    downloadCsv(`customer-ledger-entries-${startDate || 'all'}-${endDate || 'all'}.csv`, csv)
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3 flex flex-wrap gap-2 items-end justify-between">
+        <div className="flex flex-wrap gap-2 items-end">
+          <div>
+            <label className="text-xs text-gray-500">From</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">To</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="block text-xs border border-gray-200 rounded px-2 py-1.5" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">Search</label>
+            <input
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Document / customer / order / GSTIN"
+              className="block text-xs border border-gray-200 rounded px-2 py-1.5 w-56"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">Documents</label>
+            <select
+              value={docKind}
+              onChange={e => setDocKind(e.target.value as 'all' | 'sales' | 'credit_memo')}
+              className="block text-xs border border-gray-200 rounded px-2 py-1.5 text-gray-800"
+            >
+              <option value="all">All (invoices + credit memos)</option>
+              <option value="sales">Invoices only</option>
+              <option value="credit_memo">Credit memos only</option>
+            </select>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={exportBcCsv}
+          className="text-xs font-semibold px-3 py-1.5 rounded border border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
+        >
+          Export (BC column names, CSV)
+        </button>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-800">Customer ledger entries</h3>
+            <p className="text-[11px] text-gray-500 mt-0.5 max-w-3xl">
+              Dynamics-style log from posted Finance sales lines (same column names as a BC Customer Ledger export). Edit headers on Sales invoices if amounts or parties need correction — this view reflects those overlays.
+            </p>
+          </div>
+          <span className="text-xs text-gray-500 whitespace-nowrap">
+            {stats.count} rows · taxable {fmtDec(stats.taxable)} · GST {fmtDec(stats.gst)} · invoice {fmtDec(stats.inv)}
+          </span>
+        </div>
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading ledger…</div>
+        ) : rows.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No posted customer lines match your filters. Parse sales uploads into invoice rows first.</div>
+        ) : (
+          <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+            <table className="w-full text-[11px] min-w-[1200px]">
+              <thead className="sticky top-0 bg-gray-50 z-[1] shadow-sm">
+                <tr className="text-gray-500 uppercase tracking-wide">
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Doc date</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Type</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Document no.</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Customer</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Description</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Branch</th>
+                  <th className="px-2 py-2 text-right whitespace-nowrap">Taxable</th>
+                  <th className="px-2 py-2 text-right whitespace-nowrap">GST</th>
+                  <th className="px-2 py-2 text-right whitespace-nowrap">Invoice amt.</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Due</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">GST cust.</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Seller st.</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Seller GSTIN</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Loc. code</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Loc. state</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Jurisdiction</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">External doc</th>
+                  <th className="px-2 py-2 text-left whitespace-nowrap">Loc. GSTIN</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={r.id} className="border-t border-gray-100 hover:bg-teal-50/40">
+                    <td className="px-2 py-1.5 whitespace-nowrap text-gray-700">{r.document_date}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap text-gray-800">{r.document_type}</td>
+                    <td className="px-2 py-1.5 font-mono text-teal-900 whitespace-nowrap">{r.document_no || '—'}</td>
+                    <td className="px-2 py-1.5 text-gray-800 max-w-[10rem] truncate" title={r.customer_name}>{r.customer_name || '—'}</td>
+                    <td className="px-2 py-1.5 text-gray-600 max-w-[12rem] truncate" title={r.description}>{r.description || '—'}</td>
+                    <td className="px-2 py-1.5 text-gray-600 max-w-[8rem] truncate" title={r.branch_code}>{r.branch_code || '—'}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{fmtDec(Number(r.taxable_amount) || 0)}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{fmtDec(Number(r.gst_amount) || 0)}</td>
+                    <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{fmtDec(Number(r.invoice_amount) || 0)}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap text-gray-500">{r.due_date}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">{r.gst_customer_type}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">{r.seller_state_code || '—'}</td>
+                    <td className="px-2 py-1.5 font-mono text-[10px] text-gray-600 max-w-[7rem] truncate" title={r.seller_gst_reg_no}>{r.seller_gst_reg_no || '—'}</td>
+                    <td className="px-2 py-1.5 font-mono whitespace-nowrap">{r.location_code || '—'}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">{r.location_state_code || '—'}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">{r.gst_jurisdiction_type}</td>
+                    <td className="px-2 py-1.5 font-mono text-[10px] max-w-[9rem] truncate" title={r.external_document_no}>{r.external_document_no || '—'}</td>
+                    <td className="px-2 py-1.5 font-mono text-[10px] max-w-[7rem] truncate" title={r.location_gst_reg_no}>{r.location_gst_reg_no || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

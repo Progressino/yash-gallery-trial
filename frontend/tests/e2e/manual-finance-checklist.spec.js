@@ -69,6 +69,7 @@ test("manual finance checklist across CRONUS menu paths", async ({ page, context
     ["Day Book", /Day Book —/],
     ["Sales Invoices", /Sales invoices \(uploads \+ parsed lines\)/],
     ["Sales credit memos", /Sales credit memos \(returns/],
+    ["Customer ledger", /Customer ledger entries/],
     ["Vouchers", /Saved Vouchers/],
     ["Voucher Register", /Export register \(CSV\)/],
     ["Cash Book", /Export Cash Book \(CSV\)/],

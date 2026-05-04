@@ -1564,6 +1564,14 @@ def _entry_is_sales_credit_memo_sql() -> str:
     )
 
 
+def _entry_is_sales_credit_memo_sql_se_alias() -> str:
+    """Same as _entry_is_sales_credit_memo_sql but for queries using table alias `se`."""
+    return (
+        "(COALESCE(se.net_payable,0) < 0 OR COALESCE(se.taxable_amount,0) < 0 "
+        "OR instr(lower(COALESCE(se.narration,'')),'refund') > 0)"
+    )
+
+
 def list_sales_invoices(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1718,6 +1726,156 @@ def list_sales_invoices(
     conn.close()
 
     out.sort(key=lambda r: (r.get("voucher_date") or "", r.get("id")), reverse=True)
+    return out
+
+
+def _bc_location_code_from_invoice_no(invoice_no: str) -> str:
+    """BC-style FC / warehouse code prefix before hyphen (e.g. BLR8-22106 → BLR8)."""
+    s = (invoice_no or "").strip()
+    if not s:
+        return ""
+    if "-" in s:
+        return s.split("-", 1)[0].strip()
+    return ""
+
+
+def _gst_customer_type_bc(party_gstin: str) -> str:
+    g = (party_gstin or "").replace(" ", "").upper()
+    return "Registered" if len(g) >= 15 else "Unregistered"
+
+
+def _gst_jurisdiction_bc(igst: float) -> str:
+    return "Interstate" if float(igst or 0) > 0.001 else "Intrastate"
+
+
+def list_customer_ledger_entries(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+    document_kind: Optional[str] = None,
+) -> list[dict]:
+    """Dynamics 365 / BC-style customer ledger lines (posted sales upload entries only).
+
+    Joins seller context from finance_sales_uploads. Rows match the common
+    "Customer Ledger Entries" export shape (document, customer, GST, amounts).
+
+    document_kind:
+      - None / \"all\" — invoices and credit memos.
+      - \"sales\" — positive invoices only (exclude credit-memo predicate).
+      - \"credit_memo\" — sales credit memos / returns only.
+    """
+    conn = _connect()
+    dk = (document_kind or "all").strip().lower()
+    credit_pred_se = _entry_is_sales_credit_memo_sql_se_alias()
+    q = """
+        SELECT se.id AS entry_id, se.sales_upload_id, se.voucher_date, se.platform, se.period,
+               se.invoice_no, se.order_id, se.party_name, se.party_gstin, se.party_state, se.ship_to_state,
+               se.taxable_amount, se.cgst_amount, se.sgst_amount, se.igst_amount,
+               se.total_amount, se.net_payable, se.source_filename, se.narration,
+               su.company_name, su.company_state, su.seller_gstin
+        FROM finance_sales_entries se
+        JOIN finance_sales_uploads su ON se.sales_upload_id = su.id
+        WHERE 1=1
+    """
+    params: list = []
+    if dk == "sales":
+        q += f" AND NOT ({credit_pred_se})"
+    elif dk == "credit_memo":
+        q += f" AND ({credit_pred_se})"
+    if start_date:
+        q += " AND se.voucher_date >= ?"
+        params.append(start_date)
+    if end_date:
+        q += " AND se.voucher_date <= ?"
+        params.append(end_date)
+    if search:
+        like = f"%{search}%"
+        q += """ AND (
+            se.invoice_no LIKE ? OR se.order_id LIKE ? OR se.party_name LIKE ? OR se.platform LIKE ?
+            OR se.party_gstin LIKE ? OR se.source_filename LIKE ? OR se.ship_to_state LIKE ?
+            OR se.narration LIKE ?
+        )"""
+        params.extend([like, like, like, like, like, like, like, like])
+    q += " ORDER BY se.voucher_date DESC, se.id DESC"
+    raw_rows = conn.execute(q, params).fetchall()
+
+    semi: list[dict] = []
+    for row in raw_rows:
+        rr = dict(row)
+        rid = int(rr.get("entry_id") or 0)
+        vid = 2_000_000 + rid
+        company = str(rr.get("company_name") or "").strip()
+        plat = str(rr.get("platform") or "").strip()
+        branch_core = company or plat
+        semi.append({
+            "id": vid,
+            "voucher_date": rr.get("voucher_date") or "",
+            "invoice_no": str(rr.get("invoice_no") or ""),
+            "order_id": str(rr.get("order_id") or ""),
+            "party_name": str(rr.get("party_name") or ""),
+            "party_gstin": str(rr.get("party_gstin") or ""),
+            "party_state": str(rr.get("party_state") or ""),
+            "ship_to_state": str(rr.get("ship_to_state") or ""),
+            "taxable_amount": round(float(rr.get("taxable_amount") or 0), 2),
+            "cgst_amount": round(float(rr.get("cgst_amount") or 0), 2),
+            "sgst_amount": round(float(rr.get("sgst_amount") or 0), 2),
+            "igst_amount": round(float(rr.get("igst_amount") or 0), 2),
+            "total_amount": round(float(rr.get("total_amount") or 0), 2),
+            "net_payable": round(float(rr.get("net_payable") or 0), 2),
+            "narration": str(rr.get("narration") or ""),
+            "_branch_core": branch_core,
+            "seller_company_state": str(rr.get("company_state") or ""),
+            "seller_gstin": str(rr.get("seller_gstin") or ""),
+        })
+
+    ids = [int(r["id"]) for r in semi]
+    pmap = _invoice_edit_map(conn, ids)
+    patched = [_apply_sales_invoice_row_patch(r, pmap.get(int(r["id"]), {})) for r in semi]
+    conn.close()
+
+    out: list[dict] = []
+    for r in patched:
+        cgst = float(r.get("cgst_amount") or 0)
+        sgst = float(r.get("sgst_amount") or 0)
+        igst = float(r.get("igst_amount") or 0)
+        gst_amount = round(cgst + sgst + igst, 2)
+        taxable = round(float(r.get("taxable_amount") or 0), 2)
+        inv = str(r.get("invoice_no") or "")
+        vdate = str(r.get("voucher_date") or "")
+        party_gstin = str(r.get("party_gstin") or "")
+        ship = str(r.get("ship_to_state") or "").strip()
+        loc_state = ship or str(r.get("party_state") or "")
+        narration = str(r.get("narration") or "").strip()
+        desc = narration if narration else (f"Posted {inv}".strip() if inv else "Posted entry")
+        core = str(r.get("_branch_core") or "").strip()
+        pst = str(r.get("party_state") or "").strip()
+        branch_code = f"{core} {pst}".strip()
+        _np = float(r.get("net_payable") or 0)
+        _tb = float(r.get("taxable_amount") or 0)
+        narr_l = str(r.get("narration") or "").lower()
+        is_credit = _np < 0 or _tb < 0 or ("refund" in narr_l)
+        out.append({
+            "id": int(r["id"]),
+            "document_date": vdate,
+            "document_type": "Credit Memo" if is_credit else "Invoice",
+            "document_no": inv,
+            "customer_no": "",
+            "customer_name": str(r.get("party_name") or ""),
+            "description": desc,
+            "branch_code": branch_code,
+            "taxable_amount": taxable,
+            "gst_amount": gst_amount,
+            "invoice_amount": round(float(r.get("total_amount") or 0), 2),
+            "due_date": vdate,
+            "gst_customer_type": _gst_customer_type_bc(party_gstin),
+            "seller_state_code": str(r.get("seller_company_state") or ""),
+            "seller_gst_reg_no": str(r.get("seller_gstin") or ""),
+            "location_code": _bc_location_code_from_invoice_no(inv),
+            "location_state_code": loc_state,
+            "gst_jurisdiction_type": _gst_jurisdiction_bc(igst),
+            "external_document_no": str(r.get("order_id") or ""),
+            "location_gst_reg_no": party_gstin,
+        })
     return out
 
 
