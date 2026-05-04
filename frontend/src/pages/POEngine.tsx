@@ -78,7 +78,7 @@ const PO_DISPLAY_COLS = [
 
 const COL_LABEL: Record<string, string> = {
   'Sold_Units':               '📦 Sold Units',
-  'Eff_Days':                 '📅 Eff. Days',
+  'Eff_Days':                 '📅 Eff. Days (active)',
   'Recent_ADS':               '📉 Recent ADS',
   'LY_ADS':                   '📈 LY ADS',
   'Seasonal_Month_ADS':       '🌗 Season ADS (mo+1)',
