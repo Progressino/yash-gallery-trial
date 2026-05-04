@@ -538,7 +538,7 @@ def test_sheet_lead_from_style_code_applies_to_color_size_variant():
 
 
 def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
-    """Sheet formula: PO_Pipeline_Total + (Total_Inventory / ADS)."""
+    """Sheet formula: (PO_Pipeline_Total + Total_Inventory) / ADS."""
     sales = _minimal_sales()
     inv = pd.DataFrame(
         {
@@ -552,9 +552,8 @@ def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
     row = po.iloc[0]
     ads = float(row["ADS"])
     assert ads > 0
-    expected = round(20 + (40 / ads), 1)
+    expected = round((40 + 20) / ads, 1)
     assert float(row["Projected_Running_Days"]) == pytest.approx(expected, abs=0.05)
-    # Days_Left remains stock-cover days formula.
-    assert float(row["Days_Left"]) == pytest.approx(round((40 + 20) / ads, 1), abs=0.05)
-    # Uses Total_Inventory (40) in the inventory/ADS part, not OMS_Inventory (10).
-    assert float(row["Projected_Running_Days"]) != pytest.approx(round(20 + (10 / ads), 1), abs=0.05)
+    assert float(row["Days_Left"]) == pytest.approx(expected, abs=0.05)
+    # Uses Total_Inventory (40) in numerator, not OMS_Inventory (10) alone.
+    assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20) / ads, 1), abs=0.05)

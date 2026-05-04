@@ -818,11 +818,11 @@ def calculate_po_base(
         ),
     ).round(4)
 
-    # Projected Running Days (sheet parity) = PO_Pipeline_Total + (Total_Inventory / ADS)
-    # Keep this separate from Days_Left so export matches business spreadsheet exactly.
+    # Projected Running Days = (Total_Inventory + PO_Pipeline_Total) / ADS
+    # Same stock-cover basis as Days_Left.
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
-        (po_df["PO_Pipeline_Total"] + (inv_days_left / po_df["ADS"])).round(1),
+        ((inv_days_left + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
         999.0,
     )
 
