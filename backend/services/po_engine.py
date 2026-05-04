@@ -550,10 +550,12 @@ def calculate_po_base(
     po_df["Sold_Units"] = po_df["ADS_Sold_Units"].astype(int)
     po_df["Net_Units"]  = po_df["ADS_Net_Units"].clip(lower=0).astype(int)
 
+    # Use true active-day span per SKU. Old min_denominator floor (often 7) forced many SKUs
+    # to show only 7/30 and diluted ADS, which distorted PO suggestions.
     po_df["Eff_Days"] = (
         pd.to_numeric(po_df["_eff_days_active"], errors="coerce")
         .fillna(float(ADS_WINDOW))
-        .clip(lower=float(min_denominator), upper=float(ADS_WINDOW))
+        .clip(lower=1.0, upper=float(ADS_WINDOW))
     )
     po_df.drop(columns=["_eff_days_active"], inplace=True, errors="ignore")
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]

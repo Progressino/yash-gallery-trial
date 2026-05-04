@@ -169,6 +169,36 @@ def test_eff_days_uses_active_demand_span_not_trailing_calendar():
     assert abs(float(row["Recent_ADS"]) - 3.0) < 0.02
 
 
+def test_eff_days_not_forced_to_min_denominator_for_single_active_day():
+    """One active shipment day should keep Eff_Days=1 (not forced to 7/30)."""
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "ONEDAY-SKU",
+                "TxnDate": pd.Timestamp("2025-11-10"),
+                "Transaction Type": "Shipment",
+                "Quantity": 21,
+                "Units_Effective": 21,
+                "Source": "Amazon",
+            }
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["ONEDAY-SKU"], "Total_Inventory": [100]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        min_denominator=7,
+    )
+    row = po.iloc[0]
+    assert int(row["Eff_Days"]) == 1
+    assert abs(float(row["Recent_ADS"]) - 21.0) < 0.02
+
+
 def test_calculate_po_base_non_empty():
     sales = _minimal_sales()
     inv = _minimal_inventory()
