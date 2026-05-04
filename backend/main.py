@@ -452,12 +452,30 @@ async def session_middleware(request: Request, call_next):
     _session_gen   = getattr(session, "_warm_cache_gen", 0)
     _wc_only       = getattr(session, "_warm_cache_only", False)
     _phase2_ready  = _warm_cache_generation >= 2 and _session_gen < _warm_cache_generation
+    def _warm_cache_has_more(sess) -> bool:
+        """True when warm cache has datasets that the current session is missing."""
+        if not _warm_cache:
+            return False
+        for key in ["mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df", "sales_df", "inventory_df_variant"]:
+            wc = _warm_cache.get(key)
+            cur = getattr(sess, key, None)
+            if isinstance(wc, pd.DataFrame) and not wc.empty:
+                if not isinstance(cur, pd.DataFrame) or cur.empty:
+                    return True
+        return False
     if not getattr(session, "pause_auto_data_restore", False):
         if session.mtr_df.empty and session.sales_df.empty:
             # Session has no data — copy from warm cache (available ~2 s after restart)
             copied_warm = _copy_warm_cache_to_session(session)
             if copied_warm:
                 session._warm_cache_gen  = _warm_cache_generation
+                session._warm_cache_only = True
+        elif _warm_cache_has_more(session):
+            # Session can hold stale/partial data from before deploy/restart.
+            # If warm cache has strictly more loaded datasets, upgrade session.
+            copied_warm = _copy_warm_cache_to_session(session)
+            if copied_warm:
+                session._warm_cache_gen = _warm_cache_generation
                 session._warm_cache_only = True
         elif _wc_only and _phase2_ready:
             # Session has Phase-1 SQLite data only; Phase 2 (GitHub historical) is ready.
