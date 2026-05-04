@@ -286,6 +286,54 @@ def _seasonal_adjacent_months_ads(
     return pd.DataFrame(rows)
 
 
+def _inv_parent_extends_sheet_style(pk: str, sk: str) -> bool:
+    """True when inventory parent (e.g. ``AK-139BROWN``) is the same style row or extends ``AK-139``."""
+    pk = str(pk or "").strip()
+    sk = str(sk or "").strip()
+    if not pk or not sk:
+        return False
+    if pk == sk:
+        return True
+    if not pk.startswith(sk):
+        return False
+    if len(pk) == len(sk):
+        return True
+    nxt = pk[len(sk)]
+    if nxt in "-_":
+        return True
+    # ``AK-139`` + ``BROWN`` (no extra hyphen before colour token)
+    if sk[-1].isdigit() and nxt.isalpha():
+        return True
+    return False
+
+
+def _longest_prefix_lead(pk: str, lead_by_parent: dict) -> float:
+    """Best lead when inventory parent extends a shorter sheet style key."""
+    pk = str(pk or "").strip()
+    if not pk or not lead_by_parent:
+        return float("nan")
+    direct = lead_by_parent.get(pk)
+    if direct is not None and np.isfinite(float(direct)) and float(direct) > 0:
+        return float(direct)
+    best = float("nan")
+    best_len = -1
+    for sk, lt in lead_by_parent.items():
+        sks = str(sk or "").strip()
+        if not sks:
+            continue
+        try:
+            ltv = float(lt)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(ltv) or ltv <= 0:
+            continue
+        if _inv_parent_extends_sheet_style(pk, sks):
+            if len(sks) > best_len:
+                best = ltv
+                best_len = len(sks)
+    return best
+
+
 def _leading_style_digit_prefix(oms_sku: str) -> str:
     """Leading digits at start of OMS / parent key (e.g. 1657YKWHITE-M → '1657').
 
@@ -430,6 +478,14 @@ def calculate_po_base(
                 fill_s = pd.to_numeric(pk.map(lead_by_parent), errors="coerce")
                 use = bad & (fill_s > 0)
                 lt_vals = lt_vals.where(~use, fill_s)
+                bad = lt_vals.isna() | (lt_vals <= 0)
+                # Sheet lists ``AK-139`` while inventory rows are ``AK-139BROWN-L`` → parent
+                # ``AK-139BROWN`` must inherit lead from longest matching sheet parent key.
+                if bad.any():
+                    fill_pfx = pk.map(lambda p: _longest_prefix_lead(str(p), lead_by_parent))
+                    fill_pfx = pd.to_numeric(fill_pfx, errors="coerce")
+                    use2 = bad & (fill_pfx > 0)
+                    lt_vals = lt_vals.where(~use2, fill_pfx)
             bad = lt_vals.isna() | (lt_vals <= 0)
             if bad.any() and lead_by_digit_prefix:
                 pk2 = po_df["OMS_SKU"].astype(str).map(get_parent_sku)

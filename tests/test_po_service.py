@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from backend.services.helpers import get_parent_sku
 from backend.services.po_engine import calculate_po_base, calculate_quarterly_history
 
 
@@ -457,6 +458,53 @@ def test_sheet_lead_increases_gross_vs_shorter_global_lead():
     assert int(long_lead.iloc[0]["Lead_Time_Days"]) == 90
     assert int(long_lead.iloc[0]["Gross_PO_Qty"]) > int(short.iloc[0]["Gross_PO_Qty"])
     assert float(long_lead.iloc[0]["ADS"]) == float(short.iloc[0]["ADS"])
+
+
+def test_get_parent_sku_preserves_two_part_numeric_style_code():
+    """``AK-139`` style IDs must not collapse to ``AK`` (digit-only segment is not a size)."""
+    assert get_parent_sku("AK-139") == "AK-139"
+    assert get_parent_sku("AK-139BROWN-L") == "AK-139BROWN"
+    assert get_parent_sku("1657-M") == "1657"
+
+
+def test_sheet_lead_from_style_code_applies_to_color_size_variant():
+    """Lead sheet lists ``AK-139``; inventory ``AK-139BROWN-L`` inherits that lead (prefix parent)."""
+    days = pd.date_range("2025-11-01", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["AK-139BROWN-L"] * 30,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 30,
+            "Quantity": [1] * 30,
+            "Units_Effective": [1] * 30,
+            "Source": ["Amazon"] * 30,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["AK-139BROWN-L"], "Total_Inventory": [21]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["AK-139"],
+            "SKU_Sheet_Status": ["Open"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [55.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=30,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        sku_status_df=sheet,
+    )
+    row = po.iloc[0]
+    assert int(row["Lead_Time_Days"]) == 55
+    ads = float(row["ADS"])
+    assert ads > 0
+    assert float(row["Projected_Running_Days"]) == pytest.approx(round(21 / ads, 1), abs=0.05)
+    assert float(row["Days_Left"]) == pytest.approx(float(row["Projected_Running_Days"]), abs=0.01)
 
 
 def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():

@@ -404,6 +404,10 @@ def get_parent_sku(oms_sku) -> str:
         parts = s.split("-")
         if len(parts) >= 2:
             last = parts[-1].upper()
+            # Two-part SKUs like ``AK-139`` or ``STYLE-1657``: trailing token is a numeric
+            # style id, not a size — do not strip (``139``.isdigit() used to collapse to ``AK``).
+            if len(parts) == 2 and last.isdigit() and len(last) >= 3:
+                return s
             size_patterns = {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL"}
             common_colors = {
                 "RED", "BLUE", "GREEN", "BLACK", "WHITE", "YELLOW", "PINK", "PURPLE",
