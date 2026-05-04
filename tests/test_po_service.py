@@ -135,6 +135,38 @@ def test_sheet_lead_numeric_style_row_applies_to_full_oms_sku():
     assert int(row["Lead_Time_Days"]) == 30
 
 
+def test_eff_days_uses_active_demand_span_not_trailing_calendar():
+    """Eff_Days counts first→last shipment in the ADS window, not empty days to max_date."""
+    rows = []
+    for d in pd.date_range("2025-11-01", periods=10, freq="D"):
+        rows.append(
+            {
+                "Sku": "ACTIVEDAYS-SKU",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 3,
+                "Units_Effective": 3,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["ACTIVEDAYS-SKU"], "Total_Inventory": [500]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        min_denominator=7,
+    )
+    row = po.iloc[0]
+    assert int(row["Eff_Days"]) == 10
+    # 10 days × 3 units = 30 sold; Recent_ADS = 30 / 10
+    assert abs(float(row["Recent_ADS"]) - 3.0) < 0.02
+
+
 def test_calculate_po_base_non_empty():
     sales = _minimal_sales()
     inv = _minimal_inventory()

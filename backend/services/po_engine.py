@@ -466,17 +466,28 @@ def calculate_po_base(
         ads_recent.groupby("Sku")["Units_Effective"].sum().reset_index()
         .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "ADS_Net_Units"})
     )
-    # Per-SKU effective days: from first sale within the ADS window to max_date.
-    # Prevents diluting ADS for recently-launched SKUs.
-    ads_first = (
-        ads_recent.groupby("Sku")["TxnDate"].min()
-        .reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "TxnDate": "ADS_First_Sale_Date"})
-    )
+    # Eff_Days = active demand days only (first→last qualifying txn within the ADS window,
+    # inclusive), not calendar days from first sale to max_date. Stops diluting ADS when
+    # sales paused mid-window while the clock still ran to ``max_date``.
+    if demand_basis == "Sold":
+        act = ads_recent[ads_recent["_is_ship"]].copy()
+    else:
+        act = ads_recent
+    if act.empty:
+        ads_active_span = pd.DataFrame(columns=["OMS_SKU", "_eff_days_active"])
+    else:
+        ads_active_span = (
+            act.groupby("Sku", as_index=False)
+            .agg(ADS_First_Active=("TxnDate", "min"), ADS_Last_Active=("TxnDate", "max"))
+            .rename(columns={"Sku": "OMS_SKU"})
+        )
+        ads_active_span["_eff_days_active"] = (
+            (ads_active_span["ADS_Last_Active"] - ads_active_span["ADS_First_Active"]).dt.days + 1
+        ).astype(int)
 
     po_df = po_df.merge(ads_sold, on="OMS_SKU", how="left")
-    po_df = po_df.merge(ads_net,  on="OMS_SKU", how="left")
-    po_df = po_df.merge(ads_first, on="OMS_SKU", how="left")
+    po_df = po_df.merge(ads_net, on="OMS_SKU", how="left")
+    po_df = po_df.merge(ads_active_span[["OMS_SKU", "_eff_days_active"]], on="OMS_SKU", how="left")
     po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
 
     # Sold_Units / Net_Units reflect the full ADS window (period_days).
@@ -484,11 +495,11 @@ def calculate_po_base(
     po_df["Net_Units"]  = po_df["ADS_Net_Units"].clip(lower=0).astype(int)
 
     po_df["Eff_Days"] = (
-        (max_date - po_df["ADS_First_Sale_Date"]).dt.days
-        .fillna(ADS_WINDOW)                            # no sales in window → ADS stays 0
-        .clip(lower=min_denominator, upper=ADS_WINDOW)
-        .astype(float)
+        pd.to_numeric(po_df["_eff_days_active"], errors="coerce")
+        .fillna(float(ADS_WINDOW))
+        .clip(lower=float(min_denominator), upper=float(ADS_WINDOW))
     )
+    po_df.drop(columns=["_eff_days_active"], inplace=True, errors="ignore")
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = (ads_demand / po_df["Eff_Days"]).fillna(0)
 
@@ -762,7 +773,7 @@ def calculate_po_base(
 
     # Drop intermediate calc columns (datetime/float cols that break router serialisation)
     po_df.drop(
-        columns=["ADS_First_Sale_Date", "ADS_Sold_Units", "ADS_Net_Units"],
+        columns=["ADS_Sold_Units", "ADS_Net_Units"],
         errors="ignore",
         inplace=True,
     )

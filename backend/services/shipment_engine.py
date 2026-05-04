@@ -91,20 +91,28 @@ def calculate_shipment_plan(
     net.columns = ["OMS_SKU", "Net_Units"]
     summary = sold.merge(net, on="OMS_SKU", how="outer").fillna(0)
 
-    sku_first = (
-        recent.groupby("Sku")["TxnDate"].min()
-        .reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "TxnDate": "First_Sale_Date"})
-    )
+    if demand_basis == "Net":
+        act = recent
+    else:
+        act = recent[recent["Transaction Type"].astype(str).str.strip().str.lower() == "shipment"].copy()
+    if act.empty:
+        sku_span = pd.DataFrame(columns=["OMS_SKU", "_eff_days_active"])
+    else:
+        sku_span = (
+            act.groupby("Sku", as_index=False)
+            .agg(ts_min=("TxnDate", "min"), ts_max=("TxnDate", "max"))
+            .rename(columns={"Sku": "OMS_SKU"})
+        )
+        sku_span["_eff_days_active"] = (sku_span["ts_max"] - sku_span["ts_min"]).dt.days + 1
 
     out = pd.merge(inv_df, summary, on="OMS_SKU", how="left").fillna({"Sold_Units": 0, "Net_Units": 0})
-    out = out.merge(sku_first, on="OMS_SKU", how="left")
+    out = out.merge(sku_span[["OMS_SKU", "_eff_days_active"]], on="OMS_SKU", how="left")
     out["Eff_Days"] = (
-        (max_date - out["First_Sale_Date"]).dt.days
-        .fillna(period_days)
-        .clip(lower=min_denominator, upper=period_days)
-        .astype(float)
+        pd.to_numeric(out["_eff_days_active"], errors="coerce")
+        .fillna(float(period_days))
+        .clip(lower=float(min_denominator), upper=float(period_days))
     )
+    out.drop(columns=["_eff_days_active"], inplace=True, errors="ignore")
 
     demand_units = out["Net_Units"].clip(lower=0) if demand_basis == "Net" else out["Sold_Units"]
     out["ADS"] = (demand_units / out["Eff_Days"]).fillna(0).round(3)
