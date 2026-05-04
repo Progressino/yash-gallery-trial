@@ -58,12 +58,13 @@ jobs:
           }
           # Exit 137 on small VPS is usually OOM during build. Avoid --no-cache on every push;
           # use workflow_dispatch checkbox "no_cache" when you need a clean rebuild.
-          # --parallel 1 builds one service at a time (lower peak RAM than default).
+          # Build backend then frontend (older compose parses "build --parallel 1" as service "1").
           _NO_CACHE=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.no_cache }}" = "true" ]; then
             _NO_CACHE="--no-cache"
           fi
-          _dc -f docker-compose.prod.yml build --parallel 1 ${_NO_CACHE}
+          _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
+          _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
           _dc -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
 
