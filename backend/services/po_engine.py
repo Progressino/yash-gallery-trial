@@ -319,31 +319,51 @@ def _inv_parent_extends_sheet_style(pk: str, sk: str) -> bool:
     return False
 
 
-def _longest_prefix_lead(pk: str, lead_by_parent: dict) -> float:
-    """Best lead when inventory parent extends a shorter sheet style key."""
+def _longest_prefix_lead(
+    pk: str,
+    lead_by_parent: dict,
+    sorted_sheet_keys: Optional[list] = None,
+) -> float:
+    """
+    Best lead when inventory parent extends a shorter sheet style key.
+
+    When ``sorted_sheet_keys`` is provided (sheet parent keys sorted by length,
+    descending), the first extending match is the longest — same result as the
+    original scan but with early exit. Callers should pass this list when
+    resolving many SKUs to avoid O(rows × keys) work.
+    """
     pk = str(pk or "").strip()
     if not pk or not lead_by_parent:
         return float("nan")
     direct = lead_by_parent.get(pk)
-    if direct is not None and np.isfinite(float(direct)) and float(direct) > 0:
-        return float(direct)
-    best = float("nan")
-    best_len = -1
-    for sk, lt in lead_by_parent.items():
-        sks = str(sk or "").strip()
+    if direct is not None:
+        try:
+            dv = float(direct)
+        except (TypeError, ValueError):
+            dv = float("nan")
+        if np.isfinite(dv) and dv > 0:
+            return dv
+    keys_iter = (
+        sorted_sheet_keys
+        if sorted_sheet_keys is not None
+        else sorted(
+            (str(sk).strip() for sk in lead_by_parent.keys() if str(sk).strip()),
+            key=len,
+            reverse=True,
+        )
+    )
+    for sks in keys_iter:
         if not sks:
             continue
         try:
-            ltv = float(lt)
+            ltv = float(lead_by_parent.get(sks, float("nan")))
         except (TypeError, ValueError):
             continue
         if not np.isfinite(ltv) or ltv <= 0:
             continue
         if _inv_parent_extends_sheet_style(pk, sks):
-            if len(sks) > best_len:
-                best = ltv
-                best_len = len(sks)
-    return best
+            return ltv
+    return float("nan")
 
 
 def _style_digit_token(oms_sku: str) -> str:
@@ -461,6 +481,11 @@ def calculate_po_base(
         # Max lead per parent style — used when sheet lists parent SKU only, inventory is per-size.
         m["_par_key"] = m["OMS_SKU"].map(get_parent_sku)
         lead_by_parent = m.groupby("_par_key")["Lead_Time_From_Sheet"].apply(_max_positive_lead).to_dict()
+        _sorted_lead_parent_keys = sorted(
+            (str(sk).strip() for sk in lead_by_parent if str(sk).strip()),
+            key=len,
+            reverse=True,
+        )
 
         # Sheet may use numeric style only (e.g. ``1657``/``1394``) while inventory is
         # ``1657YK…-SIZE`` or ``AK-1394BROWN-L``.
@@ -508,8 +533,18 @@ def calculate_po_base(
                 # Sheet lists ``AK-139`` while inventory rows are ``AK-139BROWN-L`` → parent
                 # ``AK-139BROWN`` must inherit lead from longest matching sheet parent key.
                 if bad.any():
-                    fill_pfx = pk.map(lambda p: _longest_prefix_lead(str(p), lead_by_parent))
-                    fill_pfx = pd.to_numeric(fill_pfx, errors="coerce")
+                    # Only unique inventory parents still missing lead — avoids calling
+                    # prefix matching once per row (was freezing PO with 10k+ rows × 1k+ keys).
+                    s_pk = pk.fillna("").astype(str).str.strip()
+                    uniq_bad = pd.unique(s_pk[bad].to_numpy())
+                    pfx_map: dict[str, float] = {}
+                    for p in uniq_bad:
+                        if not p or p.lower() == "nan":
+                            continue
+                        pfx_map[p] = _longest_prefix_lead(
+                            p, lead_by_parent, _sorted_lead_parent_keys
+                        )
+                    fill_pfx = pd.to_numeric(s_pk.map(pfx_map), errors="coerce")
                     use2 = bad & (fill_pfx > 0)
                     lt_vals = lt_vals.where(~use2, fill_pfx)
             bad = lt_vals.isna() | (lt_vals <= 0)
