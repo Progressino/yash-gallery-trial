@@ -295,6 +295,10 @@ def _copy_warm_cache_to_session(sess) -> bool:
     for key, val in _warm_cache.items():
         setattr(sess, key, val)
     sess._quarterly_cache.clear()
+    # Warm cache already contains rebuilt sales + merged platform history.
+    # Mark restored to avoid triggering a heavy synchronous SQLite restore on first
+    # /data/* request right after login (the main cause of "syncing..." slowness).
+    sess.daily_restored = True
     return True
 
 
