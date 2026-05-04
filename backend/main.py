@@ -459,9 +459,11 @@ async def session_middleware(request: Request, call_next):
         for key in ["mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df", "sales_df", "inventory_df_variant"]:
             wc = _warm_cache.get(key)
             cur = getattr(sess, key, None)
-            if isinstance(wc, pd.DataFrame) and not wc.empty:
-                if not isinstance(cur, pd.DataFrame) or cur.empty:
-                    return True
+            # Use duck typing — avoid importing pandas at module level
+            wc_has_data = hasattr(wc, "empty") and not wc.empty
+            cur_has_data = hasattr(cur, "empty") and not cur.empty
+            if wc_has_data and not cur_has_data:
+                return True
         return False
     if not getattr(session, "pause_auto_data_restore", False):
         if session.mtr_df.empty and session.sales_df.empty:
