@@ -1551,6 +1551,20 @@ def _persist_amazon_finance_sales_entries(
             if oid_disp:
                 narration += f" — Order {oid_disp}"
 
+            # Keep header taxable aligned with line grid taxable totals so Finance UI/ledger don't
+            # show a mismatch for the same invoice after parser rounding/reconciliation.
+            if items:
+                line_taxable_sum = round(sum(float(it.get("tax_exclusive_amount") or 0.0) for it in items), 2)
+                line_cgst_sum = round(sum(float(it.get("cgst") or 0.0) for it in items), 2)
+                line_sgst_sum = round(sum(float(it.get("sgst") or 0.0) for it in items), 2)
+                line_igst_sum = round(sum(float(it.get("igst") or 0.0) for it in items), 2)
+                line_total = round(line_taxable_sum + line_cgst_sum + line_sgst_sum + line_igst_sum, 2)
+                if abs(line_taxable_sum - taxable) > 0.01:
+                    taxable = line_taxable_sum
+                cgst, sgst, igst = line_cgst_sum, line_sgst_sum, line_igst_sum
+                total_amt = line_total
+                net_pay = total_amt
+
             entries.append({
                 "platform": platform,
                 "period": period,

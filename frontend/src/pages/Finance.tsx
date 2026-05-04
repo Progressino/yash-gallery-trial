@@ -2331,7 +2331,7 @@ function SalesInvoicesTab({
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [cardOpen, setCardOpen] = useState(false)
-  const [cardTab, setCardTab] = useState<'general' | 'lines'>('general')
+  const [cardTab, setCardTab] = useState<'general' | 'lines' | 'inventory' | 'location'>('general')
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [dimRows, setDimRows] = useState<Array<{ attribute_name: string; value_code: string; value_description: string }>>([
     { attribute_name: '', value_code: '', value_description: '' },
@@ -2499,6 +2499,43 @@ function SalesInvoicesTab({
   }, [detail?.meta?.line_items])
 
   const lineItemCount = Array.isArray(detail?.meta?.line_items) ? detail.meta!.line_items!.length : 0
+  const inventoryRows = useMemo(() => {
+    const lis = Array.isArray(detail?.meta?.line_items) ? detail.meta!.line_items! : []
+    const bySku = new Map<string, { sku: string; product_name: string; qty_out: number; qty_in: number; net_qty: number }>()
+    for (const li of lis) {
+      const obj = li as Record<string, unknown>
+      const sku = liStr(obj, 'sku', 'SKU', 'item_no', 'Item_No').trim()
+      if (!sku) continue
+      const prod = liStr(obj, 'product_name', 'Product_Name')
+      const qty = Number(obj.quantity ?? obj.Quantity ?? 0) || 0
+      const isCredit = (detail?.voucher_type || '').toLowerCase().includes('credit')
+      const qOut = isCredit ? 0 : Math.max(0, qty)
+      const qIn = isCredit ? Math.max(0, Math.abs(qty)) : 0
+      const hit = bySku.get(sku) || { sku, product_name: prod, qty_out: 0, qty_in: 0, net_qty: 0 }
+      hit.qty_out += qOut
+      hit.qty_in += qIn
+      hit.net_qty = hit.qty_out - hit.qty_in
+      if (!hit.product_name && prod) hit.product_name = prod
+      bySku.set(sku, hit)
+    }
+    return Array.from(bySku.values()).sort((a, b) => Math.abs(b.net_qty) - Math.abs(a.net_qty))
+  }, [detail])
+  const locationRows = useMemo(() => {
+    const lis = Array.isArray(detail?.meta?.line_items) ? detail.meta!.line_items! : []
+    const byLoc = new Map<string, { location: string; ship_to_state: string; qty: number; lines: number }>()
+    for (const li of lis) {
+      const obj = li as Record<string, unknown>
+      const location = liStr(obj, 'location', 'Location_Line')
+      const ship = liStr(obj, 'ship_to_state', 'ship_to_state_code', 'Ship_To_State')
+      const key = `${location}__${ship}`
+      const qty = Math.abs(Number(obj.quantity ?? obj.Quantity ?? 0) || 0)
+      const hit = byLoc.get(key) || { location, ship_to_state: ship, qty: 0, lines: 0 }
+      hit.qty += qty
+      hit.lines += 1
+      byLoc.set(key, hit)
+    }
+    return Array.from(byLoc.values()).sort((a, b) => b.qty - a.qty)
+  }, [detail])
 
   return (
     <div className="space-y-4">
@@ -2675,6 +2712,20 @@ function SalesInvoicesTab({
                 {lineItemCount > 0 ? (
                   <span className="ml-1.5 rounded-full bg-teal-100 text-teal-900 px-1.5 py-0.5 text-[10px] tabular-nums">{lineItemCount}</span>
                 ) : null}
+              </button>
+              <button
+                type="button"
+                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'inventory' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                onClick={() => setCardTab('inventory')}
+              >
+                Inventory
+              </button>
+              <button
+                type="button"
+                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'location' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                onClick={() => setCardTab('location')}
+              >
+                Location
               </button>
             </div>
 
@@ -2881,7 +2932,7 @@ function SalesInvoicesTab({
                   <SiFormField label="Total" value={draft.total_amount ?? ''} onChange={v => setD('total_amount', v)} />
                   <SiFormField label="Net" value={draft.net_payable ?? ''} onChange={v => setD('net_payable', v)} />
                 </div>
-              ) : (
+              ) : cardTab === 'lines' ? (
                 <div className="bg-transparent rounded-sm space-y-2">
                   {selected?.row_kind === 'upload_summary' ? (
                     <p className="text-[11px] text-slate-700 bg-slate-100 border border-slate-200 rounded px-3 py-2 leading-snug">
@@ -2896,6 +2947,68 @@ function SalesInvoicesTab({
                       <p className="text-xs text-slate-500 leading-relaxed">
                         For an upload summary (<strong>SUP-</strong>), the grid is filled from parsed MTR rows saved as <strong>SUE-</strong> entries. If this upload predates that step, <strong>re-upload the same CSV</strong> from Finance → Sales uploads. You can also click an <strong>SUE-</strong> row in the list for lines on a single invoice.
                       </p>
+                    </div>
+                  )}
+                </div>
+              ) : cardTab === 'inventory' ? (
+                <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm">
+                  <p className="text-[11px] text-slate-500 mb-3">Inventory view from this sales document’s line_items.</p>
+                  {inventoryRows.length === 0 ? (
+                    <p className="text-sm text-slate-500">No inventory lines found.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px]">
+                        <thead className="bg-slate-50 text-slate-600">
+                          <tr>
+                            <th className="px-2 py-1.5 text-left">SKU</th>
+                            <th className="px-2 py-1.5 text-left">Product</th>
+                            <th className="px-2 py-1.5 text-right">Out</th>
+                            <th className="px-2 py-1.5 text-right">In</th>
+                            <th className="px-2 py-1.5 text-right">Net</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {inventoryRows.map((r, i) => (
+                            <tr key={`${r.sku}-${i}`} className="border-t border-slate-100">
+                              <td className="px-2 py-1.5 font-mono">{r.sku}</td>
+                              <td className="px-2 py-1.5">{r.product_name || '—'}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">{fmtQtyCell(r.qty_out)}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">{fmtQtyCell(r.qty_in)}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">{fmtQtyCell(r.net_qty)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm">
+                  <p className="text-[11px] text-slate-500 mb-3">Location view from this sales document’s line_items.</p>
+                  {locationRows.length === 0 ? (
+                    <p className="text-sm text-slate-500">No location lines found.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px]">
+                        <thead className="bg-slate-50 text-slate-600">
+                          <tr>
+                            <th className="px-2 py-1.5 text-left">Location</th>
+                            <th className="px-2 py-1.5 text-left">Ship-to</th>
+                            <th className="px-2 py-1.5 text-right">Qty</th>
+                            <th className="px-2 py-1.5 text-right">Lines</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {locationRows.map((r, i) => (
+                            <tr key={`${r.location}-${r.ship_to_state}-${i}`} className="border-t border-slate-100">
+                              <td className="px-2 py-1.5">{r.location || '—'}</td>
+                              <td className="px-2 py-1.5">{r.ship_to_state || '—'}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">{fmtQtyCell(r.qty)}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">{r.lines}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   )}
                 </div>

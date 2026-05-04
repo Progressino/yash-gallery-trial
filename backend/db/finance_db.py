@@ -1123,6 +1123,9 @@ def create_finance_sales_entries(sales_upload_id: int, entries: list[dict]) -> i
     if not entries:
         return 0
     conn = _connect()
+    # Rebuilding the same upload (e.g. parse fix + re-save) should replace rows, not append
+    # duplicates that look like "extra invoices" in Sales Invoices / Customer Ledger.
+    conn.execute("DELETE FROM finance_sales_entries WHERE sales_upload_id = ?", (int(sales_upload_id),))
     count = 0
     for e in entries:
         conn.execute(
@@ -1241,6 +1244,8 @@ def _apply_sales_invoice_row_patch(row: dict, patch: dict) -> dict:
         r["invoice_no"] = str(patch["invoice_no"])
     if patch.get("voucher_date") is not None:
         r["voucher_date"] = str(patch["voucher_date"])
+    if patch.get("bill_date") is not None:
+        r["bill_date"] = str(patch["bill_date"])
     if patch.get("party_name") is not None:
         r["party_name"] = str(patch["party_name"])
     if patch.get("party_gstin") is not None:
@@ -1865,7 +1870,7 @@ def list_customer_ledger_entries(
         SELECT se.id AS entry_id, se.sales_upload_id, se.voucher_date, se.platform, se.period,
                se.invoice_no, se.order_id, se.party_name, se.party_gstin, se.party_state, se.ship_to_state,
                se.taxable_amount, se.cgst_amount, se.sgst_amount, se.igst_amount,
-               se.total_amount, se.net_payable, se.source_filename, se.narration,
+               se.total_amount, se.net_payable, se.source_filename, se.narration, se.line_items,
                su.company_name, su.company_state, su.seller_gstin
         FROM finance_sales_entries se
         JOIN finance_sales_uploads su ON se.sales_upload_id = su.id
@@ -1917,6 +1922,7 @@ def list_customer_ledger_entries(
             "total_amount": round(float(rr.get("total_amount") or 0), 2),
             "net_payable": round(float(rr.get("net_payable") or 0), 2),
             "narration": str(rr.get("narration") or ""),
+            "line_items": rr.get("line_items") or "[]",
             "_branch_core": branch_core,
             "seller_company_state": str(rr.get("company_state") or ""),
             "seller_gstin": str(rr.get("seller_gstin") or ""),
@@ -1928,6 +1934,21 @@ def list_customer_ledger_entries(
     conn.close()
 
     out: list[dict] = []
+    def _line_item_invoice_date(raw_line_items: Any) -> str:
+        try:
+            lis = json.loads(raw_line_items) if isinstance(raw_line_items, str) else raw_line_items
+        except Exception:
+            return ""
+        if not isinstance(lis, list):
+            return ""
+        for li in lis:
+            if not isinstance(li, dict):
+                continue
+            for k in ("invoice_date", "Invoice_Date", "invoice_date_text", "Invoice_Date_Text"):
+                v = str(li.get(k) or "").strip()
+                if v and v.lower() not in ("nan", "none"):
+                    return v
+        return ""
     for r in patched:
         cgst = float(r.get("cgst_amount") or 0)
         sgst = float(r.get("sgst_amount") or 0)
@@ -1936,6 +1957,10 @@ def list_customer_ledger_entries(
         taxable = round(float(r.get("taxable_amount") or 0), 2)
         inv = str(r.get("invoice_no") or "")
         vdate = str(r.get("voucher_date") or "")
+        bill_date = str(r.get("bill_date") or "").strip()
+        if not bill_date:
+            bill_date = _line_item_invoice_date(r.get("line_items"))
+        doc_date = bill_date or vdate
         party_gstin = str(r.get("party_gstin") or "")
         ship = str(r.get("ship_to_state") or "").strip()
         loc_state = ship or str(r.get("party_state") or "")
@@ -1950,7 +1975,7 @@ def list_customer_ledger_entries(
         is_credit = _np < 0 or _tb < 0 or ("refund" in narr_l)
         out.append({
             "id": int(r["id"]),
-            "document_date": vdate,
+            "document_date": doc_date,
             "document_type": "Credit Memo" if is_credit else "Invoice",
             "document_no": inv,
             "customer_no": "",
@@ -1960,7 +1985,7 @@ def list_customer_ledger_entries(
             "taxable_amount": taxable,
             "gst_amount": gst_amount,
             "invoice_amount": round(float(r.get("total_amount") or 0), 2),
-            "due_date": vdate,
+            "due_date": doc_date,
             "gst_customer_type": _gst_customer_type_bc(party_gstin),
             "seller_state_code": str(r.get("seller_company_state") or ""),
             "seller_gst_reg_no": str(r.get("seller_gstin") or ""),
