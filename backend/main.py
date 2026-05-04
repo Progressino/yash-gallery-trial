@@ -109,20 +109,108 @@ def publish_warm_cache_from_session(sess) -> None:
     _warm_cache_loaded_at = datetime.now(IST)
 
 
+import os as _os_main
+_DISK_CACHE_DIR     = _os_main.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+_DISK_CACHE_MAX_AGE = int(_os_main.environ.get("WARM_CACHE_MAX_AGE_HOURS", "24"))
+
+
+def _save_warm_cache_to_disk(cache_dict: dict) -> None:
+    """Persist warm_cache DataFrames + sku_mapping to /data/warm_cache/ as parquet/JSON.
+    Called after Phase 2 completes. ~2-3 s. Safe from any thread."""
+    import os, json
+    try:
+        os.makedirs(_DISK_CACHE_DIR, exist_ok=True)
+        saved: list[str] = []
+        for key, val in cache_dict.items():
+            if key == "sku_mapping":
+                path = os.path.join(_DISK_CACHE_DIR, "sku_mapping.json")
+                with open(path, "w") as f:
+                    json.dump(val if isinstance(val, dict) else {}, f)
+                saved.append(key)
+            elif hasattr(val, "to_parquet") and hasattr(val, "empty") and not val.empty:
+                path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
+                val.to_parquet(path, index=False)
+                saved.append(key)
+        manifest = {"saved_at": datetime.now(IST).isoformat(), "keys": saved}
+        with open(os.path.join(_DISK_CACHE_DIR, "_manifest.json"), "w") as f:
+            json.dump(manifest, f)
+        log.info("Warm-cache saved to disk (%d keys) → %s", len(saved), _DISK_CACHE_DIR)
+    except Exception as _e:
+        log.warning("Warm-cache disk save failed: %s", _e)
+
+
+def _load_warm_cache_from_disk() -> "tuple[bool, dict]":
+    """Load warm_cache from /data/warm_cache/ if the manifest is < WARM_CACHE_MAX_AGE_HOURS old.
+    Returns (ok, loaded_dict). ok=False means disk cache is absent, stale, or corrupt."""
+    import os, json
+    try:
+        manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
+        if not os.path.exists(manifest_path):
+            return False, {}
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        saved_at_str = manifest.get("saved_at", "")
+        if not saved_at_str:
+            return False, {}
+        saved_at = datetime.fromisoformat(saved_at_str)
+        # Ensure tz-aware comparison
+        if saved_at.tzinfo is None:
+            saved_at = saved_at.replace(tzinfo=IST)
+        age_hours = (datetime.now(IST) - saved_at).total_seconds() / 3600
+        if age_hours > _DISK_CACHE_MAX_AGE:
+            log.info(
+                "Disk cache is %.1fh old (limit %dh) — skipping, will reload from GitHub.",
+                age_hours, _DISK_CACHE_MAX_AGE,
+            )
+            return False, {}
+
+        import pandas as pd
+        keys = manifest.get("keys", [])
+        loaded: dict = {}
+        for key in keys:
+            if key == "sku_mapping":
+                path = os.path.join(_DISK_CACHE_DIR, "sku_mapping.json")
+                if os.path.exists(path):
+                    with open(path) as f:
+                        loaded["sku_mapping"] = json.load(f)
+            else:
+                path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
+                if os.path.exists(path):
+                    loaded[key] = pd.read_parquet(path)
+
+        if not loaded:
+            return False, {}
+
+        log.info(
+            "Phase 0 disk cache: %.1fh old, %d keys loaded from %s",
+            age_hours, len(loaded), _DISK_CACHE_DIR,
+        )
+        return True, loaded
+    except Exception as _e:
+        log.warning("Warm-cache disk load failed: %s", _e)
+        return False, {}
+
+
 def _do_load_warm_cache() -> bool:
     """
-    Two-phase warm-cache load. Thread-safe (GIL).
+    Three-phase warm-cache load. Thread-safe (GIL).
+
+    Phase 0 (~2-3 s): Load parquet files from /data/warm_cache/ (Docker volume,
+    survives container restarts). Written after each successful Phase 2. On the
+    NEXT deploy users get full historical data instantly instead of waiting
+    60-90 s for GitHub. If cache is absent or >24 h old, falls through to Phase 1.
 
     Phase 1 (~2 s): Load platform DataFrames from the local SQLite daily store,
-    publish to _warm_cache, and immediately signal _warm_cache_ready so the first
-    page-load after a deploy returns data within a couple of seconds.
+    publish to _warm_cache (only when Phase 0 is unavailable), and immediately
+    signal _warm_cache_ready so the first page-load after a deploy returns data
+    within a couple of seconds.
 
     Phase 2 (~60–90 s): Download GitHub historical cache in the same thread (no
     extra thread needed — lifespan already runs this in an executor). Strip any
     GitHub rows whose dates are already covered by the SQLite store (daily store
-    always wins), merge, rebuild sales_df, and update _warm_cache.  Existing
-    sessions that received Phase-1 data get the fuller historical view on their
-    next fresh request (new session or page reload).
+    always wins), merge, rebuild sales_df, update _warm_cache, and persist result
+    to disk (Phase 0 for the next restart). Existing sessions that received
+    Phase-0/Phase-1 data get the fuller historical view on their next request.
     """
     global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
     try:
@@ -139,6 +227,24 @@ def _do_load_warm_cache() -> bool:
                 ~(bad.isin(["", "NAN", "NONE", "UNKNOWN", "N/A", "NA", "NULL"])
                   | df["OMS_SKU"].astype(str).str.match(r'^\d+$'))
             ].reset_index(drop=True)
+
+        # ── Phase 0: local disk cache (fastest, ~2-3 s) ──────────────────────
+        # Parquet files written to /data/warm_cache/ after each successful Phase 2.
+        # /data is a Docker volume that persists across container restarts.
+        # If the cache is fresh (< WARM_CACHE_MAX_AGE_HOURS old) we serve it
+        # immediately and still run Phase 1+2 in the same thread to pick up any
+        # new uploads that arrived since the last deploy.
+        disk_ok, disk_data = _load_warm_cache_from_disk()
+        if disk_ok and disk_data:
+            _warm_cache = disk_data
+            _warm_cache_loaded_at = datetime.now(IST)
+            _warm_cache_generation += 1   # generation 1 = Phase-0 disk data
+            _warm_cache_ready.set()       # ← unblocks first page-load immediately
+            log.warning(
+                "Warm-cache Phase 0 ready from disk (%d keys, gen=%d). "
+                "Continuing Phase 1+2 to pick up new uploads…",
+                len(disk_data), _warm_cache_generation,
+            )
 
         # ── Phase 1: recent SQLite data (local, fast ~5-15s) ─────────────────
         # Load only the last 4 months of uploads so this completes quickly.
@@ -176,15 +282,20 @@ def _do_load_warm_cache() -> bool:
                         meesho_df=p1["meesho_df"], flipkart_df=p1["flipkart_df"],
                         sku_mapping={},            snapdeal_df=p1["snapdeal_df"],
                     )
-                _warm_cache = p1
-                _warm_cache_loaded_at = datetime.now(IST)
-                _warm_cache_generation += 1   # generation 1 = Phase-1 SQLite data
-                _warm_cache_ready.set()       # ← unblocks first page-load immediately
+                # Only publish Phase-1 data to _warm_cache when Phase 0 disk cache
+                # is absent — Phase 0 data is full historical and must not be
+                # replaced by the 4-month-only Phase-1 snapshot.
+                if not disk_ok:
+                    _warm_cache = p1
+                    _warm_cache_loaded_at = datetime.now(IST)
+                    _warm_cache_generation += 1   # generation 1 = Phase-1 SQLite data
+                    _warm_cache_ready.set()       # ← unblocks first page-load immediately
                 phase1_ok = True
                 log.info(
-                    "Warm-cache Phase 1 ready: %d sales rows (last %d months from SQLite). "
-                    "Fetching GitHub historical cache…",
+                    "Warm-cache Phase 1 complete: %d sales rows (last %d months from SQLite). "
+                    "%s — fetching GitHub historical cache…",
                     len(p1.get("sales_df", pd.DataFrame())), _P1_MONTHS,
+                    "published to warm_cache" if not disk_ok else "NOT published (disk cache active)",
                 )
         except Exception as e:
             log.warning("Warm-cache Phase 1 (SQLite) failed: %s — continuing to GitHub", e)
@@ -195,9 +306,9 @@ def _do_load_warm_cache() -> bool:
         if not ok or not loaded:
             log.warning("Warm-cache Phase 2 (GitHub) failed: %s", msg)
             if not phase1_ok:
-                # Nothing at all — try a pure SQLite fallback so we return something
-                if phase1_daily:
-                    log.info("Using Phase 1 SQLite data only (GitHub unavailable).")
+                # Nothing at all — no disk cache, no SQLite, no GitHub
+                if disk_ok and disk_data:
+                    log.info("Using Phase 0 disk cache only (GitHub unavailable, SQLite empty).")
                     return True
                 return False
             return True   # Phase 1 data is still good
@@ -276,6 +387,14 @@ def _do_load_warm_cache() -> bool:
         _warm_cache_generation += 1   # generation 2+ = Phase-2 GitHub+SQLite data
         log.info("Warm cache fully loaded (Phase 2, gen=%d) at %s — %s",
                  _warm_cache_generation, _warm_cache_loaded_at.strftime("%H:%M IST"), msg)
+
+        # ── Phase 0 save: persist to disk for sub-3-second load on next restart ──
+        # /data/warm_cache/ lives on the Docker volume that survives container restarts.
+        try:
+            _save_warm_cache_to_disk(_warm_cache)
+        except Exception as _disk_err:
+            log.warning("Warm-cache disk save failed (non-fatal): %s", _disk_err)
+
         return True
 
     except Exception as e:
