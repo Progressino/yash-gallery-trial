@@ -454,6 +454,8 @@ def test_sheet_lead_rollup_to_parent_when_group_by_parent():
     )
     row = po[po["OMS_SKU"] == "MYSTYLE"].iloc[0]
     assert int(row["Lead_Time_Days"]) == 25
+    # Sales were uploaded as ``MYSTYLE-L``; parent inventory row must inherit rolled-up units.
+    assert int(row["Sold_Units"]) == 60  # 30 days × 2 units/day, all in-period shipments
 
 
 def test_days_left_uses_total_inventory_when_column_present():

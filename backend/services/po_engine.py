@@ -428,6 +428,24 @@ def calculate_po_base(
     df = df[df["Sku"].str.len() > 0]
     df["_is_ship"] = df["Transaction Type"].astype(str).str.strip().str.lower().eq("shipment")
 
+    # Parent-level PO: ``inventory_df_parent`` uses style parents (e.g. ``1057YKBLUE``) while
+    # sales lines stay size-suffixed (``1057YKBLUE-6XL``). Without rolling sales up to the same
+    # key, merges leave ``Sold_Units`` / ADS columns near zero for almost every row.
+    if group_by_parent:
+        _uniq_for_parent = df["Sku"].unique()
+        _sku_to_parent: Dict[object, str] = {}
+        for _raw_s in _uniq_for_parent:
+            if _raw_s is None or (isinstance(_raw_s, float) and pd.isna(_raw_s)):
+                continue
+            _par = get_parent_sku(_raw_s)
+            if _par is None or (isinstance(_par, float) and pd.isna(_par)):
+                _tok = str(_raw_s).strip()
+            else:
+                _tok = str(_par).strip()
+            _sku_to_parent[_raw_s] = _tok if _tok else str(_raw_s).strip()
+        df["Sku"] = df["Sku"].map(_sku_to_parent).fillna("")
+        df = df[df["Sku"].str.len() > 0]
+
     inv_work = inv_df.copy()
     _unique_inv_skus = inv_work["OMS_SKU"].unique()
     _inv_canon_cache = {s: _canonical_oms_key(s) for s in _unique_inv_skus}
@@ -628,14 +646,8 @@ def calculate_po_base(
     #     only floor.
     # (b) Calendar month-to-date shipments / 30 — teams often type MTD as "month"
     #     and still divide by 30; that reproduces FREQ when MTD > rolling/30.
-    # Only copy when we need to modify Sku in-place (group_by_parent); otherwise reuse df.
-    if group_by_parent:
-        flat_sales = df.copy()
-        _uniq_fs = flat_sales["Sku"].unique()
-        _par_fs_cache = {s: get_parent_sku(s) for s in _uniq_fs}
-        flat_sales["Sku"] = flat_sales["Sku"].map(_par_fs_cache)
-    else:
-        flat_sales = df
+    # ``df["Sku"]`` is already parent tokens when ``group_by_parent`` (see above).
+    flat_sales = df
     flat_denom = 30.0
     flat_start_roll = max_date.normalize() - timedelta(days=29)
     win_roll = flat_sales[flat_sales["TxnDate"] >= flat_start_roll]
