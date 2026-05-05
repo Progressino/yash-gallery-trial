@@ -733,3 +733,48 @@ def test_ship_units_150d_shows_broader_context_than_period_sold_units():
     row = po.iloc[0]
     assert int(row["Sold_Units"]) == 10
     assert int(row["Ship_Units_150d"]) == 30
+
+
+def test_ads_falls_back_to_ly_when_recent_is_zero():
+    """If recent sales are zero but LY window has demand, ADS should not stay zero."""
+    rows = []
+    # Anchor max_date with another SKU in current window.
+    for d in pd.date_range("2025-11-01", periods=5, freq="D"):
+        rows.append(
+            {
+                "Sku": "ANCHOR-SKU-1",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        )
+    # Target SKU: sales only in LY-aligned window (not recent).
+    for d in pd.date_range("2024-11-01", periods=30, freq="D"):
+        rows.append(
+            {
+                "Sku": "LY-ONLY-SKU-1",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["LY-ONLY-SKU-1", "ANCHOR-SKU-1"], "Total_Inventory": [40, 10]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+    )
+    row = po[po["OMS_SKU"] == "LY-ONLY-SKU-1"].iloc[0]
+    assert float(row["Recent_ADS"]) == 0.0
+    assert float(row["LY_ADS"]) > 0.0
+    assert float(row["ADS"]) > 0.0

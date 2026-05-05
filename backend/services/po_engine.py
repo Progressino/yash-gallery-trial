@@ -828,9 +828,17 @@ def calculate_po_base(
     else:
         blended = np.maximum(po_df["Recent_ADS"], po_df["LY_ADS"])
 
-    # Final ADS must be Sales / Effective days from the selected window.
-    # Keep blended/seasonal/flat helpers as diagnostics only.
-    po_df["ADS"] = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0).round(3)
+    # Final ADS for PO should not collapse to zero only because recent window is quiet.
+    # Use recent as primary signal, then floor with LY/seasonal/flat diagnostics.
+    recent_ads = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0)
+    ly_ads = pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0)
+    seasonal_ads = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
+    flat_ads = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
+    if use_seasonality:
+        prim_ads = pd.to_numeric(pd.Series(blended, index=po_df.index), errors="coerce").fillna(0.0)
+    else:
+        prim_ads = np.maximum(recent_ads, ly_ads)
+    po_df["ADS"] = np.maximum.reduce([prim_ads, seasonal_ads, flat_ads]).round(3)
 
     # PO formula uses OMS_Inventory (physical warehouse only) when available.
     # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
