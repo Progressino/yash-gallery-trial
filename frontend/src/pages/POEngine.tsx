@@ -49,6 +49,10 @@ interface POResult {
   rows?: PORow[]
   columns?: string[]
 }
+interface PORiskRow extends PORow {
+  risk_reasons: string
+  risk_score: number
+}
 
 interface QuarterlyRow {
   OMS_SKU: string
@@ -332,6 +336,58 @@ export default function POEngine() {
       return s + (editedQty[sku] !== undefined ? editedQty[sku] : Number(r['PO_Qty'] || 0))
     }, 0),
   }), [allRows, editedQty])
+
+  const riskReviewRows = useMemo((): PORiskRow[] => {
+    const src = rows
+    if (!src.length) return []
+    const invVals = src.map(r => Number(r['Total_Inventory'] ?? 0))
+    const poVals = src.map(r => Number(r['PO_Qty'] ?? 0))
+    const invSorted = [...invVals].sort((a, b) => a - b)
+    const poSorted = [...poVals].sort((a, b) => a - b)
+    const q = (arr: number[], p: number) => {
+      if (!arr.length) return 0
+      const idx = Math.min(arr.length - 1, Math.max(0, Math.floor(p * (arr.length - 1))))
+      return arr[idx]
+    }
+    const highInventory = Math.max(150, q(invSorted, 0.9))
+    const veryHighPO = Math.max(300, q(poSorted, 0.99))
+    const po95 = Math.max(1, q(poSorted, 0.95))
+    const inv95 = Math.max(1, q(invSorted, 0.95))
+
+    const out: PORiskRow[] = []
+    for (const r of src) {
+      const reasons: string[] = []
+      const inv = Number(r['Total_Inventory'] ?? 0)
+      const ads = Number(r['ADS'] ?? 0)
+      const po = Number(r['PO_Qty'] ?? 0)
+      const pipelineQty = Number(r['PO_Pipeline_Total'] ?? 0)
+      const daysLeft = Number(r['Days_Left'] ?? 999)
+      const pr = String(r['Priority'] ?? '')
+      const signals = [
+        Number(r['Recent_ADS'] ?? 0),
+        Number(r['LY_ADS'] ?? 0),
+        Number(r['Seasonal_Month_ADS'] ?? 0),
+        Number(r['Flat30_ADS'] ?? 0),
+      ]
+      const demandSignalsPos = signals.filter(v => Number.isFinite(v) && v > 0).length
+
+      if (inv >= highInventory && ads <= 0) reasons.push('HIGH_INVENTORY_ZERO_ADS')
+      if (pr === '🔴 URGENT' && po > 0 && demandSignalsPos <= 1) reasons.push('URGENT_LOW_CONFIDENCE_DEMAND')
+      if (po >= veryHighPO) reasons.push('VERY_HIGH_PO_OUTLIER')
+      if (pipelineQty > 0 && po > 0 && daysLeft >= 999) reasons.push('PIPELINE_PLUS_NEW_ORDER_WITH_999_DAYS')
+      if (!reasons.length) continue
+
+      let score = 0
+      if (reasons.includes('HIGH_INVENTORY_ZERO_ADS')) score += 5
+      if (reasons.includes('URGENT_LOW_CONFIDENCE_DEMAND')) score += 4
+      if (reasons.includes('VERY_HIGH_PO_OUTLIER')) score += 3
+      if (reasons.includes('PIPELINE_PLUS_NEW_ORDER_WITH_999_DAYS')) score += 2
+      score += Math.min(5, po / po95)
+      score += Math.min(3, inv / inv95)
+      out.push({ ...r, risk_reasons: reasons.join(';'), risk_score: Number(score.toFixed(2)) })
+    }
+    return out.sort((a, b) => b.risk_score - a.risk_score)
+  }, [rows])
 
   // ── Selection helpers ──
   const visibleSkus = useMemo(() => rows.map(r => String(r['OMS_SKU'])), [rows])
@@ -662,6 +718,11 @@ export default function POEngine() {
                     ✓ {quarterCols.length} quarters loaded
                   </span>
                 ) : null}
+                {riskReviewRows.length > 0 && (
+                  <span className="text-xs text-red-700 font-medium bg-red-50 px-2 py-0.5 rounded-full border border-red-200">
+                    ⚠ {riskReviewRows.length} flagged
+                  </span>
+                )}
                 {result?.ok && (
                   <button
                     onClick={async () => {
@@ -691,6 +752,14 @@ export default function POEngine() {
                   >
                     ⬇ Export CSV
                   </button>
+                  {riskReviewRows.length > 0 && (
+                    <button
+                      onClick={() => exportRiskReviewCsv(riskReviewRows)}
+                      className="text-xs px-3 py-1.5 rounded border border-red-300 text-red-700 hover:bg-red-50"
+                    >
+                      ⚠ Export Review CSV
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1718,6 +1787,19 @@ function downloadShipmentCsv(rows: PORow[], columns: string[]) {
   const header = columns.join(',')
   const body   = rows.map(r => columns.map(c => JSON.stringify(r[c] ?? '')).join(',')).join('\n')
   trigger(header + '\n' + body, 'shipment_' + new Date().toISOString().slice(0, 10) + '.csv')
+}
+
+function exportRiskReviewCsv(rows: PORiskRow[]) {
+  const cols = [
+    'OMS_SKU', 'risk_reasons', 'risk_score', 'Priority',
+    'Total_Inventory', 'Days_Left',
+    'ADS', 'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS',
+    'Sold_Units', 'Ship_Units_150d',
+    'PO_Pipeline_Total', 'Gross_PO_Qty', 'PO_Qty', 'Lead_Time_Days',
+  ]
+  const header = cols.join(',')
+  const body = rows.map(r => cols.map(c => JSON.stringify(r[c] ?? '')).join(',')).join('\n')
+  trigger(header + '\n' + body, 'po_review_shortlist.csv')
 }
 
 /** Match quarterly pivot keys (built uppercase) to inventory / PO SKU casing. */
