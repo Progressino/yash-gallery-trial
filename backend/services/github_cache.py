@@ -30,6 +30,7 @@ _CACHE_FILES = {
     "sku_mapping":           "sku_mapping.json",
     "inventory_df_variant":  "inventory_df_variant.parquet",
     "inventory_df_parent":   "inventory_df_parent.parquet",
+    "existing_po_df":        "existing_po_df.parquet",
 }
 
 

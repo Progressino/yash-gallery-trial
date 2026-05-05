@@ -57,15 +57,32 @@ export interface CoverageResponse {
 /** Tier-1 multi-year ZIPs can take several minutes to parse; align with nginx proxy_read_timeout (e.g. 900s). */
 const UPLOAD_TIMEOUT_MS = 900_000
 
+function _errMessage(e: unknown, fallback: string): string {
+  if (axios.isAxiosError(e)) {
+    const data = e.response?.data as { message?: string; detail?: string } | undefined
+    if (typeof data?.message === 'string' && data.message.trim()) return data.message
+    if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail
+    if (e.code === 'ECONNABORTED') return 'Request timed out. File may be too large or server is busy.'
+    if (!e.response) return 'Network error. Check connection/VPN and try again.'
+  }
+  if (e instanceof Error && e.message.trim()) return e.message
+  return fallback
+}
+
+
 async function uploadFile(endpoint: string, file: File, extraFields?: Record<string, string>): Promise<UploadResponse> {
   const fd = new FormData()
   fd.append('file', file)
   if (extraFields) Object.entries(extraFields).forEach(([k, v]) => fd.append(k, v))
-  const { data } = await api.post<UploadResponse>(endpoint, fd, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: UPLOAD_TIMEOUT_MS,
-  })
-  return data
+  try {
+    const { data } = await api.post<UploadResponse>(endpoint, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+    })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Upload failed'))
+  }
 }
 
 export const uploadSkuMapping = (file: File) => uploadFile('/upload/sku-mapping', file)

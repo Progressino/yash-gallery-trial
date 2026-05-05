@@ -122,6 +122,7 @@ def _auto_save_cache(sess) -> None:
         "sku_mapping":          sess.sku_mapping,
         "inventory_df_variant": sess.inventory_df_variant,
         "inventory_df_parent":  sess.inventory_df_parent,
+        "existing_po_df":        sess.existing_po_df,
     }
     ok, msg = save_cache_to_drive(session_data)
     if ok:
@@ -184,6 +185,7 @@ def cache_save(request: Request):
         "flipkart_df": sess.flipkart_df,
         "snapdeal_df": sess.snapdeal_df,
         "sku_mapping": sess.sku_mapping,
+        "existing_po_df": sess.existing_po_df,
     }
     ok, msg = save_cache_to_drive(session_data)
     if ok:

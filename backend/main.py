@@ -77,6 +77,7 @@ _WARM_CACHE_KEYS = (
     "sku_mapping",
     "inventory_df_variant",
     "inventory_df_parent",
+    "existing_po_df",
 )
 
 
