@@ -459,7 +459,12 @@ def calculate_po_base(
         exact_keys = set(metric_df[sales_key_col].astype(str))
         if not exact_keys:
             return out
-        use_parent = ~out["OMS_SKU"].astype(str).isin(exact_keys)
+        out_sku = out["OMS_SKU"].astype(str)
+        _is_parent_token = out_sku.map(_fallback_parent_key).eq(out_sku)
+        # Parent-like inventory tokens (e.g. ``1007YKBLACK``) should represent the
+        # whole style family (exact + size variants), not only exact-key rows.
+        # Still fallback for non-parent rows when exact key is absent.
+        use_parent = _is_parent_token | (~out_sku.isin(exact_keys))
         if not use_parent.any():
             return out
         parent_metric = metric_df.copy()
@@ -696,6 +701,28 @@ def calculate_po_base(
         po_df, ads_summary, ["ADS_Sold_Units", "ADS_Net_Units"]
     )
     po_df = po_df.merge(ads_active_span[["OMS_SKU", "_eff_days_active"]], on="OMS_SKU", how="left")
+    if not group_by_parent and not ads_recent.empty:
+        span_exact_keys = set(ads_active_span["OMS_SKU"].astype(str)) if not ads_active_span.empty else set()
+        _p_act = act.copy()
+        if not _p_act.empty:
+            _p_act["_Parent_SKU"] = _p_act["Sku"].map(_fallback_parent_key)
+            p_ads_active_span = (
+                _p_act.groupby("_Parent_SKU", as_index=False)
+                .agg(P_ADS_First_Active=("TxnDate", "min"), P_ADS_Last_Active=("TxnDate", "max"))
+                .rename(columns={"_Parent_SKU": "OMS_SKU"})
+            )
+            p_ads_active_span["P__eff_days_active"] = (
+                (p_ads_active_span["P_ADS_Last_Active"] - p_ads_active_span["P_ADS_First_Active"]).dt.days + 1
+            ).astype(int)
+            po_df = po_df.merge(p_ads_active_span[["OMS_SKU", "P__eff_days_active"]], on="OMS_SKU", how="left")
+            out_sku = po_df["OMS_SKU"].astype(str)
+            use_parent_days = out_sku.map(_fallback_parent_key).eq(out_sku) | (~out_sku.isin(span_exact_keys))
+            po_df["_eff_days_active"] = np.where(
+                use_parent_days,
+                pd.to_numeric(po_df["P__eff_days_active"], errors="coerce"),
+                pd.to_numeric(po_df["_eff_days_active"], errors="coerce"),
+            )
+            po_df.drop(columns=["P__eff_days_active"], inplace=True, errors="ignore")
     po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
 
     # Sold_Units / Net_Units reflect the full ADS window (period_days).
