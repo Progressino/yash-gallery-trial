@@ -778,3 +778,53 @@ def test_ads_falls_back_to_ly_when_recent_is_zero():
     assert float(row["Recent_ADS"]) == 0.0
     assert float(row["LY_ADS"]) > 0.0
     assert float(row["ADS"]) > 0.0
+
+
+def test_recent_window_ignores_single_future_outlier_date():
+    """
+    One future-dated row from any SKU must not shift max_date and blank recent ADS for all.
+    """
+    rows = []
+    # Target SKU has healthy recent shipments.
+    for d in pd.date_range(pd.Timestamp.now().normalize() - pd.Timedelta(days=9), periods=10, freq="D"):
+        rows.append(
+            {
+                "Sku": "DATE-ANCHOR-SKU-1",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+        )
+    # Outlier future row for another SKU (bad source date).
+    rows.append(
+        {
+            "Sku": "BAD-FUTURE-SKU",
+            "TxnDate": pd.Timestamp("2099-01-01"),
+            "Transaction Type": "Shipment",
+            "Quantity": 1,
+            "Units_Effective": 1,
+            "Source": "Amazon",
+        }
+    )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["DATE-ANCHOR-SKU-1", "BAD-FUTURE-SKU"],
+            "Total_Inventory": [50, 10],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+    )
+    r = po[po["OMS_SKU"] == "DATE-ANCHOR-SKU-1"].iloc[0]
+    assert int(r["Sold_Units"]) == 20
+    assert float(r["Recent_ADS"]) > 0

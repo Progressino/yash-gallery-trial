@@ -521,6 +521,12 @@ def calculate_po_base(
         inv_work = inv_work.drop_duplicates(subset=["OMS_SKU"], keep="last")
 
     max_date = df["TxnDate"].max()
+    # Guard against stray future-dated rows (parse quirks / bad source dates).
+    # A single outlier can shift the global recent window and zero-out ADS for most SKUs.
+    _today = pd.Timestamp.now().normalize()
+    _max_allowed = _today + timedelta(days=1)
+    if pd.notna(max_date) and max_date > _max_allowed:
+        max_date = _today
     # PO only needs recent and LY windows; trimming old rows avoids multi-year
     # full-table groupbys that make calculation feel stuck for large histories.
     lookback_days = int(max(30, period_days) + 365 + period_days + 7)
