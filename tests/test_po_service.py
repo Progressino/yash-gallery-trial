@@ -620,3 +620,34 @@ def test_variant_mode_parent_inventory_sku_falls_back_to_child_sales_for_ads():
     assert float(row["ADS"]) == pytest.approx(2.0, abs=0.02)
     assert float(row["Flat30_ADS"]) > 0
     assert float(row["LY_ADS"]) >= 0
+
+
+def test_variant_mode_parent_fallback_handles_non_delimited_size_suffix():
+    """Sales SKU like ``1007YKBLACKXXL`` should roll up to parent ``1007YKBLACK``."""
+    rows = []
+    for d in pd.date_range("2025-11-01", periods=30, freq="D"):
+        rows.append(
+            {
+                "Sku": "1007YKBLACKXXL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["1007YKBLACK"], "Total_Inventory": [100]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+    )
+    row = po.iloc[0]
+    assert int(row["Sold_Units"]) == 30
+    assert float(row["ADS"]) == pytest.approx(1.0, abs=0.02)

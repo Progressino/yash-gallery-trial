@@ -18,6 +18,7 @@ from .myntra import myntra_to_sales_rows
 # Strip "PL" infix in Amazon seller SKUs (e.g. 1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL)
 # Must match the same pattern used in inventory.py _resolve_amz_sku.
 _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
+_SIZE_SUFFIX_RE = re.compile(r"(?:-|_)?(XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL|6XL)$", re.I)
 
 
 def _strip_pl(sku: str, mapping: Dict[str, str]) -> str:
@@ -378,6 +379,22 @@ def _style_digit_token(oms_sku: str) -> str:
     return m2.group(1) if m2 else ""
 
 
+def _fallback_parent_key(sku: str) -> str:
+    """
+    Parent key for sales↔inventory mismatch fallback.
+    Handles both hyphenated sizes (``ABC-BLACK-XL``) and non-delimited ones
+    (``ABCBLACKXL``) that appear in some marketplace extracts.
+    """
+    s = str(sku or "").strip().upper()
+    if not s:
+        return ""
+    p = get_parent_sku(s)
+    p = str(p or "").strip().upper() if p is not None else s
+    if p and p != s:
+        return p
+    return _SIZE_SUFFIX_RE.sub("", s).strip("-_")
+
+
 def calculate_po_base(
     sales_df: pd.DataFrame,
     inv_df: pd.DataFrame,
@@ -431,7 +448,11 @@ def calculate_po_base(
         Used only in variant mode where inventory can contain parent-like SKUs.
         """
         if metric_df is None or metric_df.empty:
-            return base_df
+            out = base_df.copy()
+            for c in metric_cols:
+                if c not in out.columns:
+                    out[c] = 0
+            return out
         out = base_df.merge(metric_df, on="OMS_SKU", how="left")
         if group_by_parent:
             return out
@@ -442,7 +463,7 @@ def calculate_po_base(
         if not use_parent.any():
             return out
         parent_metric = metric_df.copy()
-        parent_metric["_Parent_SKU"] = parent_metric[sales_key_col].map(get_parent_sku)
+        parent_metric["_Parent_SKU"] = parent_metric[sales_key_col].map(_fallback_parent_key)
         agg = (
             parent_metric.groupby("_Parent_SKU", as_index=False)[metric_cols]
             .sum()
