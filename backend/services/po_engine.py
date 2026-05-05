@@ -537,8 +537,18 @@ def calculate_po_base(
         inv_work, summary, ["Sold_Units", "Return_Units", "Net_Units"]
     ).fillna({"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0})
 
-    # Column kept for the PO table; not used in PO math (same as pre–SKU-sheet engine).
-    po_df["Ship_Units_150d"] = 0
+    # Shipment context column for operators (not used in PO math):
+    # show broader last ~5 months shipments even when period window is shorter.
+    ship_150_cutoff = max_date - timedelta(days=150)
+    ship_150 = (
+        df[(df["TxnDate"] >= ship_150_cutoff) & (df["_is_ship"])]
+        .groupby("Sku")["Quantity"].sum().reset_index()
+        .rename(columns={"Sku": "OMS_SKU", "Quantity": "Ship_Units_150d"})
+    )
+    po_df = _merge_metric_with_parent_fallback(
+        po_df, ship_150, ["Ship_Units_150d"]
+    )
+    po_df["Ship_Units_150d"] = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0).astype(int)
 
     # ── SKU Status / Lead sheet (optional) ────────────────────────────────
     # Upload only changes per-SKU lead days for the PO formula. Status / closed flags

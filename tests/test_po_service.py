@@ -651,3 +651,38 @@ def test_variant_mode_parent_fallback_handles_non_delimited_size_suffix():
     row = po.iloc[0]
     assert int(row["Sold_Units"]) == 30
     assert float(row["ADS"]) == pytest.approx(1.0, abs=0.02)
+
+
+def test_ship_units_150d_shows_broader_context_than_period_sold_units():
+    """Sold_Units stays period-based; Ship_Units_150d reflects broader shipment context."""
+    rows = []
+    # Older shipments outside 30d window but inside 150d window.
+    for d in pd.date_range("2025-07-01", periods=20, freq="D"):
+        rows.append(
+            {
+                "Sku": "WIDE-SKU-1",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        )
+    # Recent 30d window shipments.
+    for d in pd.date_range("2025-11-01", periods=10, freq="D"):
+        rows.append(
+            {
+                "Sku": "WIDE-SKU-1",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["WIDE-SKU-1"], "Total_Inventory": [50]})
+    po = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, group_by_parent=False)
+    row = po.iloc[0]
+    assert int(row["Sold_Units"]) == 10
+    assert int(row["Ship_Units_150d"]) == 30
