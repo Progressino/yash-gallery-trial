@@ -110,13 +110,25 @@ def po_calculate(request: Request, body: PORequest):
 
     # Serialize — keep string hints; round numerics only
     import numpy as np
+    import pandas as pd
 
     po_df = po_df.copy()
     for c in ["Suggest_Close_SKU", "PO_Block_Reason", "SKU_Sheet_Status"]:
         if c in po_df.columns:
             po_df[c] = po_df[c].fillna("").astype(str)
     num_cols = po_df.select_dtypes(include=[np.number]).columns
-    po_df[num_cols] = po_df[num_cols].fillna(0).round(3)
+    if len(num_cols) > 0:
+        po_df[num_cols] = (
+            po_df[num_cols]
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0)
+            .round(3)
+        )
+    # Days columns should always render with an explicit value in UI/export.
+    for c in ["Days_Left", "Projected_Running_Days"]:
+        if c in po_df.columns:
+            s = pd.to_numeric(po_df[c], errors="coerce")
+            po_df[c] = s.where(np.isfinite(s), 999.0).fillna(999.0).round(1)
     rows = po_df.to_dict("records")
     return {
         "ok":      True,

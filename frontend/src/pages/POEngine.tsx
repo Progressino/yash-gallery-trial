@@ -1596,9 +1596,10 @@ const PriorityBadge = memo(function PriorityBadge({ priority }: { priority: stri
 })
 
 const DaysLeftBadge = memo(function DaysLeftBadge({ days }: { days: number }) {
-  if (days >= 999) return <span className="text-gray-400">∞</span>
-  const color = days < 14 ? 'text-red-600 font-bold' : days < 30 ? 'text-yellow-600 font-semibold' : 'text-gray-700'
-  return <span className={color}>{Math.round(days)}</span>
+  const safe = Number.isFinite(days) ? days : 999
+  if (safe >= 999) return <span className="text-gray-400">999+</span>
+  const color = safe < 14 ? 'text-red-600 font-bold' : safe < 30 ? 'text-yellow-600 font-semibold' : 'text-gray-700'
+  return <span className={color}>{Math.round(safe)}</span>
 })
 
 const QtyInput = memo(function QtyInput({
