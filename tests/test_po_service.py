@@ -584,3 +584,37 @@ def test_ads_equals_sales_over_effective_days():
     assert float(r["Sold_Units"]) == pytest.approx(30.0, abs=0.01)
     assert float(r["ADS"]) == pytest.approx(3.0, abs=0.02)
     assert float(r["Days_Left"]) == pytest.approx(round(20 / 3.0, 1), abs=0.05)
+
+
+def test_variant_mode_parent_inventory_sku_falls_back_to_child_sales_for_ads():
+    """
+    Some inventory files contain parent-like OMS_SKU (no size suffix) even in variant mode.
+    When exact sales key is missing but child sizes sold, PO should inherit parent rollup.
+    """
+    rows = []
+    for d in pd.date_range("2025-11-01", periods=30, freq="D"):
+        rows.append(
+            {
+                "Sku": "1007YKBLACK-XL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["1007YKBLACK"], "Total_Inventory": [40]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+    )
+    row = po.iloc[0]
+    assert int(row["Sold_Units"]) == 60
+    assert float(row["ADS"]) == pytest.approx(2.0, abs=0.02)
