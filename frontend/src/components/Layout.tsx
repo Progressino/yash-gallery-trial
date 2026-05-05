@@ -47,9 +47,8 @@ export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const autoLoadAttempted = useRef(false)
 
-  // On mount: check what the server session already has (warm cache auto-populated it).
-  // If the session has data, show green badges immediately without clicking "Load Cache".
-  // If it's empty, auto-trigger Load Cache so the user never needs to click it manually.
+  // On mount: just refresh badges from server session state.
+  // Auto-restore is handled once in ProtectedRoute to avoid duplicate cacheLoad calls.
   useEffect(() => {
     if (autoLoadAttempted.current) return
     autoLoadAttempted.current = true
@@ -57,19 +56,6 @@ export default function Layout() {
     getCoverage()
       .then(c => {
         setCoverage(c)
-        // Server session is empty — auto-load from cache (not right after a full wipe)
-        if (!c.sales && !c.mtr && !c.pause_auto_data_restore) {
-          setCacheLoading('load')
-          cacheLoad()
-            .then(res => {
-              if (res.ok) {
-                getCoverage().then(setCoverage).catch(() => {})
-                qc.invalidateQueries()
-              }
-            })
-            .catch(() => {})
-            .finally(() => setCacheLoading(null))
-        }
       })
       .catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps

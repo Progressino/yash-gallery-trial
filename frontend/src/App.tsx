@@ -29,6 +29,22 @@ const SKUDeepDive            = lazy(() => import('./pages/SKUDeepDive'))
 
 const qc = new QueryClient()
 
+const AUTO_RESTORE_TIMEOUT_MS = 20_000
+
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race<T>([
+      p,
+      new Promise<T>((_, reject) => {
+        t = setTimeout(() => reject(new Error('Auto-restore timeout')), ms)
+      }),
+    ])
+  } finally {
+    if (t) clearTimeout(t)
+  }
+}
+
 function ProtectedRoute() {
   const setCoverage = useSession(s => s.setCoverage)
 
@@ -50,9 +66,14 @@ function ProtectedRoute() {
     queryFn: async () => {
       const coverage = await getCoverage()
       if (!coverage.mtr && !coverage.sales && !coverage.pause_auto_data_restore) {
-        await cacheLoad()
-        const refreshed = await getCoverage()
-        setCoverage(refreshed)
+        try {
+          await withTimeout(cacheLoad(), AUTO_RESTORE_TIMEOUT_MS)
+          const refreshed = await getCoverage()
+          setCoverage(refreshed)
+        } catch {
+          // Don't block app boot forever if cache restore is slow/unavailable.
+          setCoverage(coverage)
+        }
       } else {
         setCoverage(coverage)
       }
