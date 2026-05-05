@@ -420,6 +420,46 @@ def calculate_po_base(
             t = str(raw).strip().upper()
         return _strip_pl(str(t).strip(), _map)
 
+    def _merge_metric_with_parent_fallback(
+        base_df: pd.DataFrame,
+        metric_df: pd.DataFrame,
+        metric_cols: list[str],
+        sales_key_col: str = "OMS_SKU",
+    ) -> pd.DataFrame:
+        """
+        Merge metrics by exact SKU, then fallback to parent-rollup when exact key is missing.
+        Used only in variant mode where inventory can contain parent-like SKUs.
+        """
+        if metric_df is None or metric_df.empty:
+            return base_df
+        out = base_df.merge(metric_df, on="OMS_SKU", how="left")
+        if group_by_parent:
+            return out
+        exact_keys = set(metric_df[sales_key_col].astype(str))
+        if not exact_keys:
+            return out
+        use_parent = ~out["OMS_SKU"].astype(str).isin(exact_keys)
+        if not use_parent.any():
+            return out
+        parent_metric = metric_df.copy()
+        parent_metric["_Parent_SKU"] = parent_metric[sales_key_col].map(get_parent_sku)
+        agg = (
+            parent_metric.groupby("_Parent_SKU", as_index=False)[metric_cols]
+            .sum()
+            .rename(columns={"_Parent_SKU": "OMS_SKU"})
+        )
+        out = out.merge(agg, on="OMS_SKU", how="left", suffixes=("", "__p"))
+        for c in metric_cols:
+            pcol = f"{c}__p"
+            out[c] = np.where(
+                use_parent,
+                pd.to_numeric(out.get(pcol), errors="coerce").fillna(0),
+                pd.to_numeric(out[c], errors="coerce").fillna(0),
+            )
+        drop_cols = [f"{c}__p" for c in metric_cols]
+        out.drop(columns=drop_cols, inplace=True, errors="ignore")
+        return out
+
     # ── Unique-SKU cache: normalize once per unique raw value, not per row ──────
     # With 225k rows but only ~7-8k unique SKUs, this is ~28x faster than row-by-row.
     _unique_sales_skus = df["Sku"].unique()
@@ -472,44 +512,9 @@ def calculate_po_base(
     net.columns = ["OMS_SKU", "Net_Units"]
 
     summary = sold.merge(returns, on="OMS_SKU", how="outer").merge(net, on="OMS_SKU", how="outer").fillna(0)
-    _summary_exact_keys = set(summary["OMS_SKU"].astype(str))
-    po_df   = pd.merge(inv_work, summary, on="OMS_SKU", how="left").fillna(
-        {"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0}
-    )
-    # Variant-level PO can still receive parent-like inventory SKUs from messy files
-    # (e.g. ``1007YKBLACK`` while sales rows are ``1007YKBLACK-XL``). If no exact key
-    # exists in recent sales, roll up children by parent and use that as fallback.
-    if not group_by_parent and not recent.empty:
-        recent_parent = recent.copy()
-        _u_recent = recent_parent["Sku"].unique()
-        _recent_parent_cache = {s: get_parent_sku(s) for s in _u_recent}
-        recent_parent["_Parent_SKU"] = recent_parent["Sku"].map(_recent_parent_cache)
-        p_sold = (
-            recent_parent[recent_parent["_is_ship"]]
-            .groupby("_Parent_SKU")["Quantity"].sum().reset_index()
-            .rename(columns={"_Parent_SKU": "OMS_SKU", "Quantity": "P_Sold_Units"})
-        )
-        p_returns = (
-            recent_parent[_is_ref]
-            .groupby("_Parent_SKU")["Quantity"].sum().reset_index()
-            .rename(columns={"_Parent_SKU": "OMS_SKU", "Quantity": "P_Return_Units"})
-        )
-        p_net = (
-            recent_parent.groupby("_Parent_SKU")["Units_Effective"].sum().reset_index()
-            .rename(columns={"_Parent_SKU": "OMS_SKU", "Units_Effective": "P_Net_Units"})
-        )
-        p_summary = p_sold.merge(p_returns, on="OMS_SKU", how="outer").merge(p_net, on="OMS_SKU", how="outer").fillna(0)
-        po_df = po_df.merge(p_summary, on="OMS_SKU", how="left")
-        _has_exact = po_df["OMS_SKU"].astype(str).isin(_summary_exact_keys)
-        _use_parent = ~_has_exact
-        for _src, _parent in [
-            ("Sold_Units", "P_Sold_Units"),
-            ("Return_Units", "P_Return_Units"),
-            ("Net_Units", "P_Net_Units"),
-        ]:
-            _pv = pd.to_numeric(po_df[_parent], errors="coerce").fillna(0) if _parent in po_df.columns else 0
-            po_df[_src] = np.where(_use_parent, _pv, pd.to_numeric(po_df[_src], errors="coerce").fillna(0))
-        po_df.drop(columns=["P_Sold_Units", "P_Return_Units", "P_Net_Units"], inplace=True, errors="ignore")
+    po_df = _merge_metric_with_parent_fallback(
+        inv_work, summary, ["Sold_Units", "Return_Units", "Net_Units"]
+    ).fillna({"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0})
 
     # Column kept for the PO table; not used in PO math (same as pre–SKU-sheet engine).
     po_df["Ship_Units_150d"] = 0
@@ -655,64 +660,11 @@ def calculate_po_base(
             (ads_active_span["ADS_Last_Active"] - ads_active_span["ADS_First_Active"]).dt.days + 1
         ).astype(int)
 
-    _ads_exact_keys = set(ads_sold["OMS_SKU"].astype(str))
-    po_df = po_df.merge(ads_sold, on="OMS_SKU", how="left")
-    po_df = po_df.merge(ads_net, on="OMS_SKU", how="left")
+    ads_summary = ads_sold.merge(ads_net, on="OMS_SKU", how="outer").fillna(0)
+    po_df = _merge_metric_with_parent_fallback(
+        po_df, ads_summary, ["ADS_Sold_Units", "ADS_Net_Units"]
+    )
     po_df = po_df.merge(ads_active_span[["OMS_SKU", "_eff_days_active"]], on="OMS_SKU", how="left")
-    if not group_by_parent and not ads_recent.empty:
-        ads_parent = ads_recent.copy()
-        _u_ads = ads_parent["Sku"].unique()
-        _ads_parent_cache = {s: get_parent_sku(s) for s in _u_ads}
-        ads_parent["_Parent_SKU"] = ads_parent["Sku"].map(_ads_parent_cache)
-        p_ads_sold = (
-            ads_parent[ads_parent["_is_ship"]]
-            .groupby("_Parent_SKU")["Quantity"].sum().reset_index()
-            .rename(columns={"_Parent_SKU": "OMS_SKU", "Quantity": "P_ADS_Sold_Units"})
-        )
-        p_ads_net = (
-            ads_parent.groupby("_Parent_SKU")["Units_Effective"].sum().reset_index()
-            .rename(columns={"_Parent_SKU": "OMS_SKU", "Units_Effective": "P_ADS_Net_Units"})
-        )
-        if demand_basis == "Sold":
-            p_act = ads_parent[ads_parent["_is_ship"]].copy()
-        else:
-            p_act = ads_parent
-        if p_act.empty:
-            p_ads_span = pd.DataFrame(columns=["OMS_SKU", "P__eff_days_active"])
-        else:
-            p_ads_span = (
-                p_act.groupby("_Parent_SKU", as_index=False)
-                .agg(P_ADS_First_Active=("TxnDate", "min"), P_ADS_Last_Active=("TxnDate", "max"))
-                .rename(columns={"_Parent_SKU": "OMS_SKU"})
-            )
-            p_ads_span["P__eff_days_active"] = (
-                (p_ads_span["P_ADS_Last_Active"] - p_ads_span["P_ADS_First_Active"]).dt.days + 1
-            ).astype(int)
-        po_df = po_df.merge(p_ads_sold, on="OMS_SKU", how="left")
-        po_df = po_df.merge(p_ads_net, on="OMS_SKU", how="left")
-        po_df = po_df.merge(p_ads_span[["OMS_SKU", "P__eff_days_active"]], on="OMS_SKU", how="left")
-        _ads_has_exact = po_df["OMS_SKU"].astype(str).isin(_ads_exact_keys)
-        _ads_use_parent = ~_ads_has_exact
-        po_df["ADS_Sold_Units"] = np.where(
-            _ads_use_parent,
-            pd.to_numeric(po_df.get("P_ADS_Sold_Units"), errors="coerce").fillna(0),
-            pd.to_numeric(po_df["ADS_Sold_Units"], errors="coerce").fillna(0),
-        )
-        po_df["ADS_Net_Units"] = np.where(
-            _ads_use_parent,
-            pd.to_numeric(po_df.get("P_ADS_Net_Units"), errors="coerce").fillna(0),
-            pd.to_numeric(po_df["ADS_Net_Units"], errors="coerce").fillna(0),
-        )
-        po_df["_eff_days_active"] = np.where(
-            _ads_use_parent,
-            pd.to_numeric(po_df.get("P__eff_days_active"), errors="coerce"),
-            pd.to_numeric(po_df["_eff_days_active"], errors="coerce"),
-        )
-        po_df.drop(
-            columns=["P_ADS_Sold_Units", "P_ADS_Net_Units", "P__eff_days_active"],
-            inplace=True,
-            errors="ignore",
-        )
     po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
 
     # Sold_Units / Net_Units reflect the full ADS window (period_days).
@@ -767,7 +719,9 @@ def calculate_po_base(
     roll_rate = pd.to_numeric(flat_g["Roll30_Units"], errors="coerce").fillna(0) / flat_denom
     mtd_rate = pd.to_numeric(flat_g["MTD_Units"], errors="coerce").fillna(0) / flat_denom
     flat_g["Flat30_ADS"] = np.maximum(roll_rate, mtd_rate).round(3)
-    po_df = po_df.merge(flat_g[["OMS_SKU", "Flat30_ADS"]], on="OMS_SKU", how="left")
+    po_df = _merge_metric_with_parent_fallback(
+        po_df, flat_g[["OMS_SKU", "Flat30_ADS"]], ["Flat30_ADS"]
+    )
     po_df["Flat30_ADS"] = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
 
     # ── Last-year same-window ADS (always computed) ──────────────────────────────
@@ -789,7 +743,9 @@ def calculate_po_base(
         .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "LY_Net_Units"})
     )
     ly_summary = ly_sold_grp.merge(ly_net_grp, on="OMS_SKU", how="outer").fillna(0)
-    po_df = pd.merge(po_df, ly_summary, on="OMS_SKU", how="left").fillna(
+    po_df = _merge_metric_with_parent_fallback(
+        po_df, ly_summary, ["LY_Sold_Units", "LY_Net_Units"]
+    ).fillna(
         {"LY_Sold_Units": 0, "LY_Net_Units": 0}
     )
     ly_demand_col = po_df["LY_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["LY_Sold_Units"]
@@ -799,7 +755,9 @@ def calculate_po_base(
     seasonal_df = _seasonal_adjacent_months_ads(
         df, max_date, group_by_parent, demand_basis, years_lookback=2, min_denominator=min_denominator
     )
-    po_df = po_df.merge(seasonal_df, on="OMS_SKU", how="left")
+    po_df = _merge_metric_with_parent_fallback(
+        po_df, seasonal_df, ["Seasonal_Month_ADS"]
+    )
     po_df["Seasonal_Month_ADS"] = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
 
     if use_seasonality:

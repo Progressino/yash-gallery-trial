@@ -618,3 +618,5 @@ def test_variant_mode_parent_inventory_sku_falls_back_to_child_sales_for_ads():
     row = po.iloc[0]
     assert int(row["Sold_Units"]) == 60
     assert float(row["ADS"]) == pytest.approx(2.0, abs=0.02)
+    assert float(row["Flat30_ADS"]) > 0
+    assert float(row["LY_ADS"]) >= 0
