@@ -868,8 +868,10 @@ def calculate_po_base(
     # PO calculation — per-SKU lead from sheet when uploaded, else global lead_time
     lt_vec = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1)
     lead_demand  = po_df["ADS"] * lt_vec
-    target_stock = po_df["ADS"] * (target_days + grace_days)
-    base_req     = lead_demand + target_stock
+    # Order planning now follows lead-time cover from the uploaded sheet (or global lead)
+    # so projected coverage aligns with per-SKU lead windows like 45/60 days.
+    # Target/grace days remain user-facing parameters but are not used to inflate release qty.
+    base_req     = lead_demand
     safety       = base_req * (safety_pct / 100.0)
     total_req    = base_req + safety
     gross_po     = (total_req - inv_vals).clip(lower=0)
