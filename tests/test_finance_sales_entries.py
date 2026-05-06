@@ -173,6 +173,47 @@ def test_create_finance_sales_entries_replaces_existing_rows_for_same_upload(fin
     assert len(sue_rows) == 1
 
 
+def test_create_finance_sales_entries_dedupes_duplicate_rows_within_same_save(fin_db):
+    uid = fdb.create_finance_sales_upload(
+        {
+            "platform": "Amazon",
+            "period": "2026-04",
+            "filename": "x.csv",
+            "total_revenue": 10.0,
+            "total_orders": 1,
+            "total_returns": 0.0,
+            "net_revenue": 10.0,
+            "uploaded_by": "",
+            "upload_notes": "",
+        }
+    )
+    row = {
+        "platform": "Amazon",
+        "period": "2026-04",
+        "voucher_date": "2026-04-01",
+        "invoice_no": "A",
+        "order_id": "1",
+        "party_name": "P",
+        "party_gstin": "",
+        "party_state": "",
+        "ship_to_state": "",
+        "taxable_amount": 10.0,
+        "cgst_amount": 0.0,
+        "sgst_amount": 0.0,
+        "igst_amount": 0.0,
+        "total_amount": 10.0,
+        "net_payable": 10.0,
+        "narration": "",
+        "source_filename": "",
+        "line_items": "[]",
+    }
+    # Same payload repeated in one save should not create extra invoice rows.
+    fdb.create_finance_sales_entries(uid, [row, dict(row), dict(row)])
+    day = fdb.get_voucher_summary_by_date("2026-04-01")
+    sue_rows = [v for v in day if str(v.get("voucher_no") or "").startswith("SUE-")]
+    assert len(sue_rows) == 1
+
+
 def test_chart_of_accounts_has_groups(fin_db):
     tree = fdb.get_chart_of_accounts()
     assert "groups" in tree

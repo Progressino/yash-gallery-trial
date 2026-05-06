@@ -516,6 +516,58 @@ def test_customer_ledger_uses_bill_date_patch_for_document_date(finance_isolated
     assert row.get("due_date") == "2026-06-07"
 
 
+def test_customer_ledger_prefers_line_item_invoice_date_when_bill_date_missing(finance_isolated_db, client):
+    up = client.post(
+        "/api/finance/sales-uploads",
+        json={
+            "platform": "Amazon",
+            "period": "2026-07",
+            "filename": "ledger-line-date.csv",
+            "total_revenue": 100.0,
+            "total_orders": 1,
+            "total_returns": 0.0,
+            "net_revenue": 100.0,
+            "uploaded_by": "pytest",
+            "upload_notes": "",
+        },
+    )
+    assert up.status_code == 200
+    uid = int(up.json().get("id") or 0)
+    import backend.db.finance_db as fdb
+
+    fdb.create_finance_sales_entries(
+        uid,
+        [
+            {
+                "platform": "Amazon",
+                "period": "2026-07",
+                "voucher_date": "2026-07-10",
+                "invoice_no": "INV-LINE-DATE-1",
+                "order_id": "ORD-LINE-DATE-1",
+                "party_name": "Buyer E",
+                "party_gstin": "",
+                "party_state": "KA",
+                "ship_to_state": "KA",
+                "taxable_amount": 100.0,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 5.0,
+                "total_amount": 105.0,
+                "net_payable": 105.0,
+                "narration": "",
+                "source_filename": "ledger-line-date.csv",
+                "line_items": '[{"invoice_date":"09/07/2026"}]',
+            }
+        ],
+    )
+
+    r = client.get("/api/finance/customer-ledger-entries?start_date=2026-07-01&end_date=2026-07-31")
+    assert r.status_code == 200
+    row = next(x for x in r.json() if x.get("document_no") == "INV-LINE-DATE-1")
+    assert row.get("document_date") == "2026-07-09"
+    assert row.get("due_date") == "2026-07-09"
+
+
 def test_finance_sales_invoice_patch_upload_summary(finance_isolated_db, client):
     up = client.post(
         "/api/finance/sales-uploads",

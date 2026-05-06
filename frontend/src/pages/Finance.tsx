@@ -2707,17 +2707,17 @@ function SalesInvoicesTab({
               </button>
             </header>
 
-            <div className="shrink-0 flex gap-1 px-3 pt-2 border-b border-slate-200 bg-white">
+            <div className="shrink-0 flex gap-1 px-3 pt-2 border-b border-slate-200 bg-white overflow-x-auto whitespace-nowrap">
               <button
                 type="button"
-                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'general' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                className={`shrink-0 text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'general' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
                 onClick={() => setCardTab('general')}
               >
                 General
               </button>
               <button
                 type="button"
-                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'lines' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                className={`shrink-0 text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'lines' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
                 onClick={() => setCardTab('lines')}
               >
                 Lines
@@ -2727,14 +2727,14 @@ function SalesInvoicesTab({
               </button>
               <button
                 type="button"
-                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'inventory' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                className={`shrink-0 text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'inventory' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
                 onClick={() => setCardTab('inventory')}
               >
                 Inventory
               </button>
               <button
                 type="button"
-                className={`text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'location' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+                className={`shrink-0 text-xs font-semibold px-3 py-2 rounded-t ${cardTab === 'location' ? 'bg-[#f9fbfd] text-[#002B5B] border border-b-0 border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
                 onClick={() => setCardTab('location')}
               >
                 Location

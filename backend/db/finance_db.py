@@ -1127,7 +1127,34 @@ def create_finance_sales_entries(sales_upload_id: int, entries: list[dict]) -> i
     # duplicates that look like "extra invoices" in Sales Invoices / Customer Ledger.
     conn.execute("DELETE FROM finance_sales_entries WHERE sales_upload_id = ?", (int(sales_upload_id),))
     count = 0
+    seen: set[tuple] = set()
     for e in entries:
+        try:
+            _line_items_raw = e.get("line_items") or "[]"
+            _line_items_obj = json.loads(_line_items_raw) if isinstance(_line_items_raw, str) else _line_items_raw
+            _line_items_norm = json.dumps(_line_items_obj, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            _line_items_norm = str(e.get("line_items") or "[]")
+
+        sig = (
+            str(e.get("platform") or "").strip().upper(),
+            str(e.get("period") or "").strip(),
+            str(e.get("voucher_date") or "").strip(),
+            str(e.get("invoice_no") or "").strip().upper(),
+            str(e.get("order_id") or "").strip().upper(),
+            str(e.get("party_name") or "").strip().upper(),
+            round(float(e.get("taxable_amount") or 0.0), 2),
+            round(float(e.get("cgst_amount") or 0.0), 2),
+            round(float(e.get("sgst_amount") or 0.0), 2),
+            round(float(e.get("igst_amount") or 0.0), 2),
+            round(float(e.get("total_amount") or 0.0), 2),
+            round(float(e.get("net_payable") or 0.0), 2),
+            str(e.get("narration") or "").strip(),
+            _line_items_norm,
+        )
+        if sig in seen:
+            continue
+        seen.add(sig)
         conn.execute(
             """INSERT INTO finance_sales_entries
                (sales_upload_id, platform, period, voucher_date, invoice_no, order_id,
@@ -1934,6 +1961,22 @@ def list_customer_ledger_entries(
     conn.close()
 
     out: list[dict] = []
+    def _normalize_doc_date(v: Any) -> str:
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        # Keep plain YYYY-MM-DD unchanged for speed/stability.
+        if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+            return s[:10]
+        # Common ERP/date export patterns.
+        from datetime import datetime
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(s[:10], fmt).date().isoformat()
+            except Exception:
+                continue
+        return s[:10]
+
     def _line_item_invoice_date(raw_line_items: Any) -> str:
         try:
             lis = json.loads(raw_line_items) if isinstance(raw_line_items, str) else raw_line_items
@@ -1947,7 +1990,7 @@ def list_customer_ledger_entries(
             for k in ("invoice_date", "Invoice_Date", "invoice_date_text", "Invoice_Date_Text"):
                 v = str(li.get(k) or "").strip()
                 if v and v.lower() not in ("nan", "none"):
-                    return v
+                    return _normalize_doc_date(v)
         return ""
     for r in patched:
         cgst = float(r.get("cgst_amount") or 0)
@@ -1956,11 +1999,11 @@ def list_customer_ledger_entries(
         gst_amount = round(cgst + sgst + igst, 2)
         taxable = round(float(r.get("taxable_amount") or 0), 2)
         inv = str(r.get("invoice_no") or "")
-        vdate = str(r.get("voucher_date") or "")
+        vdate = _normalize_doc_date(r.get("voucher_date"))
         bill_date = str(r.get("bill_date") or "").strip()
         if not bill_date:
             bill_date = _line_item_invoice_date(r.get("line_items"))
-        doc_date = bill_date or vdate
+        doc_date = _normalize_doc_date(bill_date) or vdate
         party_gstin = str(r.get("party_gstin") or "")
         ship = str(r.get("ship_to_state") or "").strip()
         loc_state = ship or str(r.get("party_state") or "")
