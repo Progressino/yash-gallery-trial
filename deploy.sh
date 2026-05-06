@@ -5,10 +5,12 @@ set -euo pipefail
 
 BRANCH=${1:-main}
 COMPOSE="docker compose -f docker-compose.prod.yml"
+APP_DATA_DIR=${APP_DATA_DIR:-/root/app-data}
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " 🚀 Yash Gallery ERP — Deploy"
 echo "    Branch: $BRANCH"
+echo "    APP_DATA_DIR: $APP_DATA_DIR"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # 1. Pull latest code
@@ -25,7 +27,7 @@ if [ ! -f .env ]; then
 fi
 
 # 3. Data dirs for bind mounts (PostgreSQL session store + SQLite ERP DBs)
-mkdir -p /root/app-data/postgres /root/app-data/finance
+mkdir -p "$APP_DATA_DIR/postgres" "$APP_DATA_DIR/finance"
 
 # 4. Build and (re)start containers
 echo ""
