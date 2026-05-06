@@ -403,7 +403,7 @@ def calculate_po_base(
     target_days: int,
     demand_basis: str = "Sold",
     min_denominator: int = 7,
-    grace_days: int = 7,
+    grace_days: int = 0,
     safety_pct: float = 20.0,
     use_seasonality: bool = False,
     seasonal_weight: float = 0.5,
@@ -868,28 +868,8 @@ def calculate_po_base(
     # PO calculation — per-SKU lead from sheet when uploaded, else global lead_time
     lt_vec = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1)
     lead_demand  = po_df["ADS"] * lt_vec
-    # Order planning now follows lead-time cover from the uploaded sheet (or global lead)
-    # so projected coverage aligns with per-SKU lead windows like 45/60 days.
-    # Target/grace days remain user-facing parameters but are not used to inflate release qty.
-    base_req     = lead_demand
-    safety       = base_req * (safety_pct / 100.0)
-    total_req    = base_req + safety
-    gross_po     = (total_req - inv_vals).clip(lower=0)
-    po_df["Gross_PO_Qty"] = (np.ceil(gross_po / 10) * 10).astype(int)
-
-    if enforce_two_size_minimum:
-        _par_key = po_df["OMS_SKU"].apply(get_parent_sku)
-        has_g = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0) > 0
-        n_sizes = has_g.astype(int).groupby(_par_key).transform("sum")
-        single_only = has_g & (n_sizes == 1)
-        po_df.loc[single_only, "Gross_PO_Qty"] = 0
-        br = po_df.loc[single_only, "PO_Block_Reason"].astype(str).str.strip()
-        add = "Single size only (need ≥2 sizes with demand)"
-        po_df.loc[single_only, "PO_Block_Reason"] = np.where(
-            br.eq("") | br.eq("nan"),
-            add,
-            br + "; " + add,
-        )
+    # Gross/Net PO is finalised after pipeline merge below (sheet-style balance-days formula).
+    po_df["Gross_PO_Qty"] = 0
 
     # Pipeline deduction from existing PO sheet
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
@@ -961,22 +941,36 @@ def calculate_po_base(
                     ghost[c] = 0
             po_df = pd.concat([po_df, ghost[po_df.columns]], ignore_index=True)
 
-    net_po = (po_df["Gross_PO_Qty"] - po_df["PO_Pipeline_Total"]).clip(lower=0)
-    po_qty = (np.ceil(net_po / 10) * 10)
-    # Lead-time cap: do not release PO beyond SKU lead-time coverage.
-    lead_cap_raw = (po_df["ADS"] * lt_vec) - (inv_days_left + po_df["PO_Pipeline_Total"])
-    lead_cap_raw = np.maximum(pd.to_numeric(lead_cap_raw, errors="coerce").fillna(0.0), 0.0)
-    # Round DOWN to pack size so capped qty never exceeds lead-time cover.
-    lead_cap_qty = (np.floor(lead_cap_raw / 10.0) * 10.0)
-    po_qty_num = pd.to_numeric(po_qty, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    lead_cap_num = pd.to_numeric(lead_cap_qty, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    po_qty_capped = np.minimum(po_qty_num, lead_cap_num)
-    po_df["PO_Qty"] = np.floor(np.maximum(po_qty_capped, 0.0)).astype(int)
-    capped_mask = po_qty > po_qty_capped
-    if capped_mask.any():
-        br = po_df.loc[capped_mask, "PO_Block_Reason"].astype(str).str.strip()
-        add = "PO capped to lead-time cover"
-        po_df.loc[capped_mask, "PO_Block_Reason"] = np.where(
+    # Sheet formula:
+    # projected_days_now = (Total_Inventory + PO_Pipeline_Total) / ADS
+    # balance_days       = target_cover_days - projected_days_now
+    # po_qty_raw         = ADS * balance_days
+    # po_qty_round       = ceil(max(po_qty_raw, 0) / pack) * pack
+    target_cover_days = float(max(0, target_days + grace_days))
+    if "Total_Inventory" in po_df.columns:
+        inv_for_cover = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
+    else:
+        inv_for_cover = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0.0)
+    ads_num = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
+    pipe_num = pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0.0)
+    projected_days_now = np.where(ads_num > 0, (inv_for_cover + pipe_num) / ads_num, 999.0)
+    balance_days = target_cover_days - projected_days_now
+    raw_po = ads_num * balance_days
+    _pack = 5.0
+    po_qty_round = np.ceil(np.maximum(raw_po, 0.0) / _pack) * _pack
+    po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
+    po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
+
+    if enforce_two_size_minimum:
+        _par_key = po_df["OMS_SKU"].apply(get_parent_sku)
+        has_g = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0) > 0
+        n_sizes = has_g.astype(int).groupby(_par_key).transform("sum")
+        single_only = has_g & (n_sizes == 1)
+        po_df.loc[single_only, "Gross_PO_Qty"] = 0
+        po_df.loc[single_only, "PO_Qty"] = 0
+        br = po_df.loc[single_only, "PO_Block_Reason"].astype(str).str.strip()
+        add = "Single size only (need ≥2 sizes with demand)"
+        po_df.loc[single_only, "PO_Block_Reason"] = np.where(
             br.eq("") | br.eq("nan"),
             add,
             br + "; " + add,

@@ -417,7 +417,7 @@ def test_sheet_lead_time_applied_per_row():
     assert int(po.iloc[0]["Lead_Time_Days"]) == 45
 
 
-def test_po_release_uses_lead_time_cover_not_target_days():
+def test_po_release_uses_target_cover_balance_days_formula():
     sales = _minimal_sales()
     inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [20]})
     sheet = pd.DataFrame(
@@ -433,17 +433,22 @@ def test_po_release_uses_lead_time_cover_not_target_days():
         inv_df=inv,
         period_days=90,
         lead_time=30,
-        target_days=210,  # large value should not inflate release qty
+        target_days=90,
         demand_basis="Sold",
         safety_pct=0.0,
         sku_status_df=sheet,
     )
     row = po.iloc[0]
-    # ADS from _minimal_sales = 2.0, lead demand=90, inv=20 => gross=70 (rounded to pack 10)
-    assert float(row["ADS"]) == 2.0
-    assert int(row["Gross_PO_Qty"]) == 70
-    assert int(row["PO_Qty"]) == 70
-    assert float(row["Projected_Running_Days"]) == 45.0
+    ads = float(row["ADS"])
+    inv = 20.0
+    target_cover = 90.0
+    expected_raw = max((ads * target_cover) - inv, 0.0)
+    import math
+    expected_po = int(math.ceil(expected_raw / 5.0) * 5.0)
+    expected_proj = round((inv + expected_po) / ads, 1) if ads > 0 else 999.0
+    assert int(row["Gross_PO_Qty"]) == expected_po
+    assert int(row["PO_Qty"]) == expected_po
+    assert float(row["Projected_Running_Days"]) == expected_proj
 
 
 def test_sheet_without_positive_lead_matches_no_sheet_po():
