@@ -959,7 +959,23 @@ def calculate_po_base(
     _pack = 5.0
     po_qty_round = np.ceil(np.maximum(raw_po, 0.0) / _pack) * _pack
     po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
-    po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
+    # Hard lead-time guard:
+    # do not release quantity that would push post-PO cover beyond per-SKU lead days.
+    lead_cap_raw = (ads_num * pd.to_numeric(lt_vec, errors="coerce").fillna(float(lead_time))) - (inv_for_cover + pipe_num)
+    lead_cap_raw = np.maximum(pd.to_numeric(lead_cap_raw, errors="coerce").fillna(0.0), 0.0)
+    lead_cap_qty = np.floor(lead_cap_raw / _pack) * _pack
+    gross_num = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0.0)
+    po_qty_capped = np.minimum(gross_num, lead_cap_qty)
+    po_df["PO_Qty"] = np.floor(np.maximum(po_qty_capped, 0.0)).astype(int)
+    capped_mask = gross_num > po_qty_capped
+    if capped_mask.any():
+        br = po_df.loc[capped_mask, "PO_Block_Reason"].astype(str).str.strip()
+        add = "PO capped to lead-time cover"
+        po_df.loc[capped_mask, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"),
+            add,
+            br + "; " + add,
+        )
 
     if enforce_two_size_minimum:
         _par_key = po_df["OMS_SKU"].apply(get_parent_sku)
@@ -1018,16 +1034,16 @@ def calculate_po_base(
     #   adjust within one size; no phantom split across siblings).
     parent_po_sum = po_df.groupby("Parent_SKU")["PO_Qty"].transform("sum")
     parent_ads_sum = po_df.groupby("Parent_SKU")["ADS"].transform("sum")
-    gross_num = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0)
-    has_gross_req = gross_num > 0
+    gross_num2 = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0)
+    has_gross_req = gross_num2 > 0
     _par = po_df["Parent_SKU"]
     n_gross_sizes = has_gross_req.astype(int).groupby(_par).transform("sum")
-    parent_gross_sum = gross_num.groupby(_par).transform("sum")
+    parent_gross_sum = gross_num2.groupby(_par).transform("sum")
     ratio_from_po = np.where(parent_po_sum > 0, po_df["PO_Qty"] / parent_po_sum, 0.0)
     ratio_from_ads = np.where(
         parent_ads_sum > 0,
         po_df["ADS"] / parent_ads_sum,
-        np.where(parent_gross_sum > 0, gross_num / parent_gross_sum, 0.0),
+        np.where(parent_gross_sum > 0, gross_num2 / parent_gross_sum, 0.0),
     )
     ratio_single_gross = np.where(has_gross_req & (n_gross_sizes == 1), 1.0, 0.0)
     po_df["Cutting_Ratio"] = np.where(
