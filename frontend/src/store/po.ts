@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 
 interface PORow {
   OMS_SKU: string
@@ -64,7 +65,9 @@ interface POState {
   setCollapsedParents: (s: Set<string>) => void
 }
 
-export const usePOStore = create<POState>((set) => ({
+export const usePOStore = create<POState>()(
+  persist(
+    (set) => ({
   activeTab: 'po',
   params: {
     period_days: 90,
@@ -99,4 +102,16 @@ export const usePOStore = create<POState>((set) => ({
   setQSearch:          (s) => set({ qSearch: s }),
   setGroupedView:      (v) => set({ groupedView: v }),
   setCollapsedParents: (s) => set({ collapsedParents: s }),
-}))
+    }),
+    {
+      name: 'po-store-v1',
+      // Persist only user preferences/params; never persist large results or Sets.
+      partialize: (s) => ({
+        activeTab: s.activeTab,
+        params: s.params,
+        sortByPriority: s.sortByPriority,
+        groupedView: s.groupedView,
+      }),
+    }
+  )
+)
