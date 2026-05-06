@@ -442,7 +442,7 @@ def test_po_release_uses_target_cover_balance_days_formula():
     expected_po_cap = int(math.floor(lead_cap_raw / 5.0) * 5.0)
     expected_po = min(expected_po_target, expected_po_cap)
     expected_proj = round(inv / ads, 1) if ads > 0 else 999.0
-    assert int(row["Gross_PO_Qty"]) == expected_po
+    assert int(row["Gross_PO_Qty"]) == expected_po_target
     assert int(row["PO_Qty"]) == expected_po
     assert float(row["Projected_Running_Days"]) == expected_proj
 
