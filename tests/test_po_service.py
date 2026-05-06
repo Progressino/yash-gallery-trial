@@ -436,8 +436,11 @@ def test_po_release_uses_target_cover_balance_days_formula():
     inv = 20.0
     target_cover = 90.0
     expected_raw = max((ads * target_cover) - inv, 0.0)
+    lead_cap_raw = max((ads * float(row["Lead_Time_Days"])) - inv, 0.0)
     import math
-    expected_po = int(math.ceil(expected_raw / 5.0) * 5.0)
+    expected_po_target = int(math.ceil(expected_raw / 5.0) * 5.0)
+    expected_po_cap = int(math.floor(lead_cap_raw / 5.0) * 5.0)
+    expected_po = min(expected_po_target, expected_po_cap)
     expected_proj = round(inv / ads, 1) if ads > 0 else 999.0
     assert int(row["Gross_PO_Qty"]) == expected_po
     assert int(row["PO_Qty"]) == expected_po
@@ -923,8 +926,11 @@ def test_po_qty_is_target_cover_balance_days_based():
     assert float(row["ADS"]) > 0
     ads = float(row["ADS"])
     expected_raw = max((ads * 210.0) - 10.0, 0.0)
+    lead_cap_raw = max((ads * float(row["Lead_Time_Days"])) - 10.0, 0.0)
     import math
-    expected_po = int(math.ceil(expected_raw / 5.0) * 5.0)
+    expected_po_target = int(math.ceil(expected_raw / 5.0) * 5.0)
+    expected_po_cap = int(math.floor(lead_cap_raw / 5.0) * 5.0)
+    expected_po = min(expected_po_target, expected_po_cap)
     expected_proj = round(10.0 / ads, 1)
     assert int(row["PO_Qty"]) == expected_po
     assert float(row["Projected_Running_Days"]) == expected_proj
