@@ -368,6 +368,40 @@ def test_single_size_minimum_zeros_gross_when_only_one_variant_needs_stock():
     assert "Single size" in str(row_l["PO_Block_Reason"])
 
 
+def test_single_size_minimum_zeros_final_po_after_pipeline_or_caps():
+    sales = _sales_two_sizes_same_parent()
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["CUTPARENT-L", "CUTPARENT-XL"],
+            "Total_Inventory": [0, 0],
+        }
+    )
+    # Both sizes have gross demand, but XL is fully covered in existing pipeline.
+    existing = pd.DataFrame(
+        {
+            "OMS_SKU": ["CUTPARENT-L", "CUTPARENT-XL"],
+            "PO_Pipeline_Total": [0, 2_000_000],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        enforce_two_size_minimum=True,
+    )
+    row_l = po[po["OMS_SKU"] == "CUTPARENT-L"].iloc[0]
+    row_xl = po[po["OMS_SKU"] == "CUTPARENT-XL"].iloc[0]
+    assert int(row_l["Gross_PO_Qty"]) > 0
+    assert int(row_l["PO_Qty"]) == 0
+    assert int(row_xl["PO_Qty"]) == 0
+    assert "Single size only after caps/pipeline" in str(row_l["PO_Block_Reason"])
+
+
 def test_sheet_lead_time_applied_per_row():
     sales = _minimal_sales()
     inv = _minimal_inventory()

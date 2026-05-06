@@ -980,6 +980,20 @@ def calculate_po_base(
             br + "; " + add,
         )
 
+    if enforce_two_size_minimum:
+        _par_key_final = po_df["OMS_SKU"].apply(get_parent_sku)
+        has_final_po = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
+        n_sizes_final = has_final_po.astype(int).groupby(_par_key_final).transform("sum")
+        single_only_final = has_final_po & (n_sizes_final == 1)
+        po_df.loc[single_only_final, "PO_Qty"] = 0
+        br = po_df.loc[single_only_final, "PO_Block_Reason"].astype(str).str.strip()
+        add = "Single size only after caps/pipeline (need ≥2 sizes with demand)"
+        po_df.loc[single_only_final, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"),
+            add,
+            br + "; " + add,
+        )
+
     inv_for_metrics = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
 
     # Stockout flag (after ghost rows — length must match po_df)
