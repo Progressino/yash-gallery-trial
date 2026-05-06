@@ -2005,14 +2005,17 @@ function SalesInvoiceBcDetailPanel({
 }) {
   const lines = (detail.meta?.line_items ?? []) as Record<string, unknown>[]
   const taxNum = detail.cgst_amount + detail.sgst_amount + detail.igst_amount
-  const sumLineInvoice = useMemo(
-    () =>
-      lines.reduce((s, li) => {
-        const v = Number(li.invoice_amount ?? li.Invoice_Amount ?? 0)
-        return s + (Number.isFinite(v) ? v : 0)
-      }, 0),
-    [lines],
-  )
+  const { sumLineInvoiceIncl, sumLineTaxableExcl } = useMemo(() => {
+    let inv = 0
+    let tex = 0
+    for (const li of lines) {
+      const invAmt = Number(li.invoice_amount ?? li.Invoice_Amount ?? 0)
+      if (Number.isFinite(invAmt)) inv += invAmt
+      const t = Number(li.tax_exclusive_gross ?? li.tax_exclusive_amount ?? 0)
+      if (Number.isFinite(t)) tex += t
+    }
+    return { sumLineInvoiceIncl: inv, sumLineTaxableExcl: tex }
+  }, [lines])
 
   const {
     subExcl,
@@ -2026,13 +2029,17 @@ function SalesInvoiceBcDetailPanel({
     const subRaw = Number(detail.taxable_amount) || 0
     const totRaw = Number(detail.total_amount) || 0
     const tx = taxNum
+    // Taxable total must be compared to tax-exclusive line sums, not invoice-inclusive amounts.
+    // If tax-exclusive is missing in the file, we fall back to using invoice-inclusive lines.
+    const hasTexOnLines = Math.abs(sumLineTaxableExcl) > 0.01
+    const linesComparable = hasTexOnLines ? sumLineTaxableExcl : sumLineInvoiceIncl
     const inclusiveLinePayable =
-      lines.length > 0 && Math.abs(sumLineInvoice - subRaw) < 1.5 && Math.abs(sumLineInvoice) > 0.01
+      lines.length > 0 && Math.abs(linesComparable - subRaw) < 1.5 && Math.abs(linesComparable) > 0.01
     const builtAsExclusivePlusTax =
       tx > 0.01 &&
       subRaw > 0 &&
       Math.abs(subRaw + tx - totRaw) < 0.08 &&
-      totRaw > sumLineInvoice + 0.5
+      totRaw > sumLineInvoiceIncl + 0.5
     if (inclusiveLinePayable && builtAsExclusivePlusTax) {
       let r: number | null = null
       for (const li of lines) {
@@ -2080,7 +2087,8 @@ function SalesInvoiceBcDetailPanel({
     detail.taxable_amount,
     detail.total_amount,
     lines,
-    sumLineInvoice,
+    sumLineInvoiceIncl,
+    sumLineTaxableExcl,
     taxNum,
   ])
 
@@ -2136,14 +2144,16 @@ function SalesInvoiceBcDetailPanel({
             <tbody>
               {lines.map((li, i) => {
                 const qty = Number(li.quantity ?? li.Quantity ?? 0)
-                const tex = Number(li.tax_exclusive_gross ?? li.tax_exclusive_amount ?? li.invoice_amount ?? li.Invoice_Amount ?? 0)
+                const tex = Number(li.tax_exclusive_gross ?? li.tax_exclusive_amount ?? 0)
                 const invAmt = Number(li.invoice_amount ?? li.Invoice_Amount ?? 0)
                 const cg = Number(li.cgst ?? li.CGST ?? 0)
                 const sg = Number(li.sgst ?? li.SGST ?? 0)
                 const ig = Number(li.igst ?? li.IGST ?? 0)
                 const tt = Number(li.total_tax_amount ?? li.total_tax ?? 0) || cg + sg + ig
                 const base = Math.abs(tex) > 1e-9 ? tex : invAmt
-                const lineTot = base + (Number.isFinite(tt) ? tt : 0)
+                const naiveTot = base + (Number.isFinite(tt) ? tt : 0)
+                const lineTot =
+                  Number.isFinite(invAmt) && Number.isFinite(tt) && Math.abs(invAmt - naiveTot) < 0.5 ? invAmt : naiveTot
                 const shipFrom = liStr(li, 'ship_from_state', 'Ship_From_State', 'bill_from_state', 'Bill_From_State')
                 const loc = liStr(li, 'location', 'Location_Line')
                 const party = liStr(li, 'party_name', 'Party_Name', 'customer_name', 'Customer_Name')
@@ -2208,11 +2218,13 @@ function SalesInvoiceBcDetailPanel({
             </tbody>
           </table>
         </div>
-        <div className="px-3 py-2 border-t border-slate-200 bg-slate-50/90 text-[11px] text-slate-600 grid grid-cols-2 sm:grid-cols-4 gap-2">
-          <div><span className="text-slate-500">Subtotal excl. tax</span><div className="font-semibold text-slate-900">₹{fmtDec(subExcl)}</div></div>
+        <div className="px-3 py-2 border-t border-slate-200 bg-slate-50/90 text-[11px] text-slate-600 grid grid-cols-2 sm:grid-cols-6 gap-2">
+          <div><span className="text-slate-500">Header taxable (excl. tax)</span><div className="font-semibold text-slate-900">₹{fmtDec(subExcl)}</div></div>
+          <div><span className="text-slate-500">Lines taxable (excl. tax)</span><div className="font-semibold text-slate-900">₹{fmtDec(sumLineTaxableExcl)}</div></div>
+          <div><span className="text-slate-500">Lines invoice (incl. tax)</span><div className="font-semibold text-slate-700">₹{fmtDec(sumLineInvoiceIncl)}</div></div>
           <div><span className="text-slate-500">Total tax</span><div className="font-semibold text-slate-900">₹{fmtDec(taxNumDisp)}</div></div>
-          <div><span className="text-slate-500">Total excl. tax</span><div className="font-semibold text-slate-900">₹{fmtDec(subExcl)}</div></div>
-          <div><span className="text-slate-500">Total incl. tax</span><div className="font-semibold text-[#002B5B]">₹{fmtDec(totalIncl)}</div></div>
+          <div><span className="text-slate-500">Header total incl. tax</span><div className="font-semibold text-[#002B5B]">₹{fmtDec(totalIncl)}</div></div>
+          <div><span className="text-slate-500">Effective tax %</span><div className="font-semibold text-slate-700">{effRate > 0 ? `${effRate.toFixed(2)}%` : '—'}</div></div>
         </div>
       </div>
       <aside className="w-full xl:w-[300px] shrink-0 border border-slate-200 rounded-sm bg-white p-3 space-y-4">

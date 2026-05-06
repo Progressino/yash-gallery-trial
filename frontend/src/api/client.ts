@@ -56,6 +56,7 @@ export interface CoverageResponse {
 
 /** Tier-1 multi-year ZIPs can take several minutes to parse; align with nginx proxy_read_timeout (e.g. 900s). */
 const UPLOAD_TIMEOUT_MS = 900_000
+const CACHE_TIMEOUT_MS = 20_000
 
 function _errMessage(e: unknown, fallback: string): string {
   if (axios.isAxiosError(e)) {
@@ -162,7 +163,7 @@ export async function clearPlatform(platform: string): Promise<{ ok: boolean; me
 // ── Coverage ──────────────────────────────────────────────────
 
 export async function getCoverage(): Promise<CoverageResponse> {
-  const { data } = await api.get<CoverageResponse>('/data/coverage')
+  const { data } = await api.get<CoverageResponse>('/data/coverage', { timeout: CACHE_TIMEOUT_MS })
   return data
 }
 
@@ -289,15 +290,15 @@ export const deleteDailyUpload = (id: number)                => api.delete(`/dat
 // ── Cache ─────────────────────────────────────────────────────
 
 export async function cacheStatus() {
-  const { data } = await api.get('/cache/status')
+  const { data } = await api.get('/cache/status', { timeout: CACHE_TIMEOUT_MS })
   return data
 }
 export async function cacheSave() {
-  const { data } = await api.post('/cache/save')
+  const { data } = await api.post('/cache/save', undefined, { timeout: CACHE_TIMEOUT_MS })
   return data
 }
 export async function cacheLoad() {
-  const { data } = await api.post('/cache/load')
+  const { data } = await api.post('/cache/load', undefined, { timeout: CACHE_TIMEOUT_MS })
   return data
 }
 

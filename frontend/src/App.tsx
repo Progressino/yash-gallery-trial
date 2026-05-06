@@ -51,7 +51,8 @@ function ProtectedRoute() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
-      const { data } = await api.get('/auth/me')
+      // Avoid indefinite hang if backend/proxy is down.
+      const { data } = await api.get('/auth/me', { timeout: 8_000 })
       return data
     },
     retry: false,
