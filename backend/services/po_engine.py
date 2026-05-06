@@ -963,11 +963,13 @@ def calculate_po_base(
     po_qty = (np.ceil(net_po / 10) * 10)
     # Lead-time cap: do not release PO beyond SKU lead-time coverage.
     lead_cap_raw = (po_df["ADS"] * lt_vec) - (inv_days_left + po_df["PO_Pipeline_Total"])
-    lead_cap_raw = np.maximum(lead_cap_raw, 0.0)
+    lead_cap_raw = np.maximum(pd.to_numeric(lead_cap_raw, errors="coerce").fillna(0.0), 0.0)
     # Round DOWN to pack size so capped qty never exceeds lead-time cover.
     lead_cap_qty = (np.floor(lead_cap_raw / 10.0) * 10.0)
-    po_qty_capped = np.minimum(po_qty, lead_cap_qty)
-    po_df["PO_Qty"] = po_qty_capped.astype(int)
+    po_qty_num = pd.to_numeric(po_qty, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    lead_cap_num = pd.to_numeric(lead_cap_qty, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    po_qty_capped = np.minimum(po_qty_num, lead_cap_num)
+    po_df["PO_Qty"] = np.floor(np.maximum(po_qty_capped, 0.0)).astype(int)
     capped_mask = po_qty > po_qty_capped
     if capped_mask.any():
         br = po_df.loc[capped_mask, "PO_Block_Reason"].astype(str).str.strip()
