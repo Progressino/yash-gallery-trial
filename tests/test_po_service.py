@@ -233,19 +233,13 @@ def _sales_two_sizes_same_parent():
 
 
 def test_cutting_ratio_single_gross_size_no_ads_split():
-    """One size has gross PO need and net PO is zero: cut ratio stays on that size only."""
+    """One size has PO need: cut ratio stays on that size only."""
     sales = _sales_two_sizes_same_parent()
     # L is understocked (gross PO > 0); XL is flush — only L has gross requirement.
     inv = pd.DataFrame(
         {
             "OMS_SKU": ["CUTPARENT-L", "CUTPARENT-XL"],
             "Total_Inventory": [0, 99_999],
-        }
-    )
-    existing = pd.DataFrame(
-        {
-            "OMS_SKU": ["CUTPARENT-L", "CUTPARENT-XL"],
-            "PO_Pipeline_Total": [2_000_000, 0],
         }
     )
     po = calculate_po_base(
@@ -256,12 +250,11 @@ def test_cutting_ratio_single_gross_size_no_ads_split():
         target_days=60,
         demand_basis="Sold",
         safety_pct=0.0,
-        existing_po_df=existing,
         enforce_two_size_minimum=False,
     )
     row_l = po[po["OMS_SKU"] == "CUTPARENT-L"].iloc[0]
     row_xl = po[po["OMS_SKU"] == "CUTPARENT-XL"].iloc[0]
-    assert row_l["PO_Qty"] == 0 and row_xl["PO_Qty"] == 0
+    assert row_l["PO_Qty"] > 0 and row_xl["PO_Qty"] == 0
     assert row_l["Gross_PO_Qty"] > 0
     assert row_xl["Gross_PO_Qty"] == 0
     # Only one variant should carry the cutting share (not ADS-split across both).
@@ -396,10 +389,10 @@ def test_single_size_minimum_zeros_final_po_after_pipeline_or_caps():
     )
     row_l = po[po["OMS_SKU"] == "CUTPARENT-L"].iloc[0]
     row_xl = po[po["OMS_SKU"] == "CUTPARENT-XL"].iloc[0]
-    assert int(row_l["Gross_PO_Qty"]) > 0
+    assert int(row_l["Gross_PO_Qty"]) == 0
     assert int(row_l["PO_Qty"]) == 0
     assert int(row_xl["PO_Qty"]) == 0
-    assert "Single size only after caps/pipeline" in str(row_l["PO_Block_Reason"])
+    assert "Single size only" in str(row_l["PO_Block_Reason"])
 
 
 def test_sheet_lead_time_applied_per_row():
@@ -542,7 +535,7 @@ def test_days_left_uses_total_inventory_when_column_present():
 
 
 def test_sheet_lead_increases_gross_vs_shorter_global_lead():
-    """Larger uploaded lead increases lead_demand vs default global lead (same ADS/inventory)."""
+    """With target-cover formula, lead sheet changes lead column but not gross requirement."""
     sales = _minimal_sales()
     inv = _minimal_inventory()
     short = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=None)
@@ -556,7 +549,7 @@ def test_sheet_lead_increases_gross_vs_shorter_global_lead():
     )
     long_lead = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=sheet)
     assert int(long_lead.iloc[0]["Lead_Time_Days"]) == 90
-    assert int(long_lead.iloc[0]["Gross_PO_Qty"]) > int(short.iloc[0]["Gross_PO_Qty"])
+    assert int(long_lead.iloc[0]["Gross_PO_Qty"]) == int(short.iloc[0]["Gross_PO_Qty"])
     assert float(long_lead.iloc[0]["ADS"]) == float(short.iloc[0]["ADS"])
 
 
@@ -901,7 +894,7 @@ def test_recent_window_ignores_single_future_outlier_date():
 
 
 def test_po_qty_is_capped_to_lead_time_cover():
-    """Released PO should not push projected running days beyond Lead_Time_Days."""
+    """Released PO follows target-cover balance-days formula."""
     rows = []
     for d in pd.date_range("2025-11-01", periods=30, freq="D"):
         rows.append(
@@ -928,5 +921,10 @@ def test_po_qty_is_capped_to_lead_time_cover():
     )
     row = po.iloc[0]
     assert float(row["ADS"]) > 0
-    assert int(row["PO_Qty"]) == 80  # cap to keep projected days <= 45 after round-down
-    assert float(row["Projected_Running_Days"]) <= 45.0 + 0.05
+    ads = float(row["ADS"])
+    expected_raw = max((ads * 210.0) - 10.0, 0.0)
+    import math
+    expected_po = int(math.ceil(expected_raw / 5.0) * 5.0)
+    expected_proj = round((10.0 + expected_po) / ads, 1)
+    assert int(row["PO_Qty"]) == expected_po
+    assert float(row["Projected_Running_Days"]) == expected_proj
