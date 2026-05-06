@@ -960,6 +960,18 @@ def calculate_po_base(
     po_qty_round = np.ceil(np.maximum(raw_po, 0.0) / _pack) * _pack
     po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
+    # Release gate: only raise PO when current projected cover is below lead time.
+    lt_gate = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(float(lead_time)).clip(lower=1)
+    gate_block = (pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0) & (projected_days_now >= lt_gate)
+    if gate_block.any():
+        po_df.loc[gate_block, "PO_Qty"] = 0
+        br = po_df.loc[gate_block, "PO_Block_Reason"].astype(str).str.strip()
+        add = "Projected days already cover lead time"
+        po_df.loc[gate_block, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"),
+            add,
+            br + "; " + add,
+        )
 
     if enforce_two_size_minimum:
         _par_key = po_df["OMS_SKU"].apply(get_parent_sku)

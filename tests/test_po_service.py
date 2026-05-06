@@ -476,6 +476,34 @@ def test_po_release_uses_target_cover_balance_days_formula():
     assert float(row["Projected_Running_Days"]) == expected_proj
 
 
+def test_po_release_blocked_when_projected_cover_meets_or_exceeds_lead_time():
+    sales = _minimal_sales()
+    inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [80]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["TEST-SKU-1"],
+            "SKU_Sheet_Status": ["Open"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [30.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=30,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        sku_status_df=sheet,
+    )
+    row = po.iloc[0]
+    assert float(row["Projected_Running_Days"]) >= float(row["Lead_Time_Days"])
+    assert int(row["Gross_PO_Qty"]) > 0
+    assert int(row["PO_Qty"]) == 0
+    assert "Projected days already cover lead time" in str(row["PO_Block_Reason"])
+
+
 def test_sheet_without_positive_lead_matches_no_sheet_po():
     """Status-only row (no numeric lead) keeps global lead_time → same PO as no upload."""
     sales = _minimal_sales()
