@@ -960,7 +960,23 @@ def calculate_po_base(
             po_df = pd.concat([po_df, ghost[po_df.columns]], ignore_index=True)
 
     net_po = (po_df["Gross_PO_Qty"] - po_df["PO_Pipeline_Total"]).clip(lower=0)
-    po_df["PO_Qty"] = (np.ceil(net_po / 10) * 10).astype(int)
+    po_qty = (np.ceil(net_po / 10) * 10)
+    # Lead-time cap: do not release PO beyond SKU lead-time coverage.
+    lead_cap_raw = (po_df["ADS"] * lt_vec) - (inv_days_left + po_df["PO_Pipeline_Total"])
+    lead_cap_raw = np.maximum(lead_cap_raw, 0.0)
+    # Round DOWN to pack size so capped qty never exceeds lead-time cover.
+    lead_cap_qty = (np.floor(lead_cap_raw / 10.0) * 10.0)
+    po_qty_capped = np.minimum(po_qty, lead_cap_qty)
+    po_df["PO_Qty"] = po_qty_capped.astype(int)
+    capped_mask = po_qty > po_qty_capped
+    if capped_mask.any():
+        br = po_df.loc[capped_mask, "PO_Block_Reason"].astype(str).str.strip()
+        add = "PO capped to lead-time cover"
+        po_df.loc[capped_mask, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"),
+            add,
+            br + "; " + add,
+        )
 
     inv_for_metrics = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
 
@@ -1012,10 +1028,10 @@ def calculate_po_base(
         ),
     ).round(4)
 
-    # Projected Running Days includes current inventory + pipeline.
+    # Projected Running Days AFTER releasing PO (capped by lead-time cover above).
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
-        ((inv_days_left + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
+        ((inv_days_left + po_df["PO_Pipeline_Total"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
         999.0,
     )
 

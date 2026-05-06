@@ -535,12 +535,14 @@ def test_sheet_lead_from_style_code_applies_to_color_size_variant():
     assert int(row["Lead_Time_Days"]) == 55
     ads = float(row["ADS"])
     assert ads > 0
-    assert float(row["Projected_Running_Days"]) == pytest.approx(round(21 / ads, 1), abs=0.05)
-    assert float(row["Days_Left"]) == pytest.approx(float(row["Projected_Running_Days"]), abs=0.01)
+    expected_days_left = round(float(row["Total_Inventory"]) / ads, 1)
+    expected_projected = round((float(row["Total_Inventory"]) + float(row["PO_Pipeline_Total"]) + float(row["PO_Qty"])) / ads, 1)
+    assert float(row["Days_Left"]) == pytest.approx(expected_days_left, abs=0.05)
+    assert float(row["Projected_Running_Days"]) == pytest.approx(expected_projected, abs=0.05)
 
 
-def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
-    """Sheet formula: (PO_Pipeline_Total + Total_Inventory) / ADS."""
+def test_projected_running_days_includes_released_po_over_ads():
+    """Projected days should include Total_Inventory + Pipeline + released PO qty."""
     sales = _minimal_sales()
     inv = pd.DataFrame(
         {
@@ -554,12 +556,12 @@ def test_projected_running_days_is_total_inventory_plus_pipeline_over_ads():
     row = po.iloc[0]
     ads = float(row["ADS"])
     assert ads > 0
-    expected = round((40 + 20) / ads, 1)
+    expected = round((40 + 20 + float(row["PO_Qty"])) / ads, 1)
     expected_days_left = round(40 / ads, 1)
     assert float(row["Projected_Running_Days"]) == pytest.approx(expected, abs=0.05)
     assert float(row["Days_Left"]) == pytest.approx(expected_days_left, abs=0.05)
     # Uses Total_Inventory (40) in numerator, not OMS_Inventory (10) alone.
-    assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20) / ads, 1), abs=0.05)
+    assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20 + float(row["PO_Qty"])) / ads, 1), abs=0.05)
 
 
 def test_ads_equals_sales_over_effective_days():
@@ -828,3 +830,35 @@ def test_recent_window_ignores_single_future_outlier_date():
     r = po[po["OMS_SKU"] == "DATE-ANCHOR-SKU-1"].iloc[0]
     assert int(r["Sold_Units"]) == 20
     assert float(r["Recent_ADS"]) > 0
+
+
+def test_po_qty_is_capped_to_lead_time_cover():
+    """Released PO should not push projected running days beyond Lead_Time_Days."""
+    rows = []
+    for d in pd.date_range("2025-11-01", periods=30, freq="D"):
+        rows.append(
+            {
+                "Sku": "LEAD-CAP-SKU-1",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["LEAD-CAP-SKU-1"], "Total_Inventory": [10]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=210,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+    )
+    row = po.iloc[0]
+    assert float(row["ADS"]) > 0
+    assert int(row["PO_Qty"]) == 80  # cap to keep projected days <= 45 after round-down
+    assert float(row["Projected_Running_Days"]) <= 45.0 + 0.05
