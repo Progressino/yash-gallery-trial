@@ -395,6 +395,37 @@ def test_single_size_minimum_zeros_final_po_after_pipeline_or_caps():
     assert "Single size only" in str(row_l["PO_Block_Reason"])
 
 
+def test_two_size_minimum_allows_multiple_sizes_with_trailing_color_tokens():
+    sales = pd.DataFrame(
+        {
+            "Sku": ["PARENT-3XL-RED", "PARENT-4XL-RED"],
+            "TxnDate": [pd.Timestamp("2025-01-30"), pd.Timestamp("2025-01-30")],
+            "Quantity": [30, 25],
+            "Units_Effective": [30, 25],
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Source": ["Amazon", "Amazon"],
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["PARENT-3XL-RED", "PARENT-4XL-RED"],
+            "Total_Inventory": [0, 0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=30,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        enforce_two_size_minimum=True,
+    )
+    assert int(po[po["OMS_SKU"] == "PARENT-3XL-RED"].iloc[0]["PO_Qty"]) > 0
+    assert int(po[po["OMS_SKU"] == "PARENT-4XL-RED"].iloc[0]["PO_Qty"]) > 0
+
+
 def test_sheet_lead_time_applied_per_row():
     sales = _minimal_sales()
     inv = _minimal_inventory()

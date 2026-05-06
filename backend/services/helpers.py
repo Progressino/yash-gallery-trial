@@ -403,10 +403,9 @@ def get_parent_sku(oms_sku) -> str:
     if "-" in s:
         parts = s.split("-")
         if len(parts) >= 2:
-            last = parts[-1].upper()
             # Two-part SKUs like ``AK-139`` or ``STYLE-1657``: trailing token is a numeric
             # style id, not a size — do not strip (``139``.isdigit() used to collapse to ``AK``).
-            if len(parts) == 2 and last.isdigit() and len(last) >= 3:
+            if len(parts) == 2 and parts[-1].isdigit() and len(parts[-1]) >= 3:
                 return s
             size_patterns = {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL"}
             common_colors = {
@@ -414,11 +413,26 @@ def get_parent_sku(oms_sku) -> str:
                 "ORANGE", "BROWN", "GREY", "GRAY", "NAVY", "MAROON", "BEIGE", "CREAM",
                 "GOLD", "SILVER", "TAN", "KHAKI", "OLIVE", "TEAL", "CORAL", "PEACH",
             }
-            is_size  = (last in size_patterns or last.endswith("XL") or last.isdigit()
-                        or (len(last) <= 4 and any(c in last for c in ["S", "M", "L", "X"])))
-            is_color = (last in common_colors) or any(c in last for c in common_colors)
-            if is_size or is_color:
-                s = "-".join(parts[:-1])
+
+            def _is_size_or_color(tok: str) -> bool:
+                t = str(tok or "").upper()
+                if not t:
+                    return False
+                is_size = (
+                    t in size_patterns
+                    or t.endswith("XL")
+                    or (t.isdigit() and len(t) <= 2)
+                    or (len(t) <= 4 and any(c in t for c in ["S", "M", "L", "X"]))
+                )
+                # Keep this strict to avoid stripping style tokens that merely contain
+                # color text (e.g. ``1394BROWN`` in ``AK-1394BROWN-L``).
+                is_color = t in common_colors
+                return bool(is_size or is_color)
+
+            # Some channels emit ``STYLE-SIZE-COLOR``. Strip trailing color+size chain.
+            while len(parts) > 1 and _is_size_or_color(parts[-1]):
+                parts = parts[:-1]
+            s = "-".join(parts)
     return s
 
 
