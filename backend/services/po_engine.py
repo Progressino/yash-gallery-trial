@@ -1040,16 +1040,23 @@ def calculate_po_base(
         ),
     ).round(4)
 
-    # Projected Running Days AFTER releasing PO (capped by lead-time cover above).
+    # Formula-sheet aligned:
+    # Projected_Running_Days = current cover before new release.
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
-        ((inv_days_left + po_df["PO_Pipeline_Total"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
+        ((inv_days_left + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
         999.0,
     )
-    # Post-PO cover should reflect the same formula-sheet output (actual post-release cover).
-    po_df["Post_PO_Cover_Days_Capped"] = pd.to_numeric(
-        po_df["Projected_Running_Days"], errors="coerce"
-    ).fillna(999.0).round(1)
+    # Post-PO cover after adding new release quantity.
+    _post_cover = pd.Series(
+        np.where(
+            po_df["ADS"] > 0,
+            ((inv_days_left + po_df["PO_Pipeline_Total"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
+            999.0,
+        ),
+        index=po_df.index,
+    )
+    po_df["Post_PO_Cover_Days_Capped"] = pd.to_numeric(_post_cover, errors="coerce").fillna(999.0).round(1)
 
     po_df["Suggest_Close_SKU"] = ""
 
