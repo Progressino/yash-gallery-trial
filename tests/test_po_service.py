@@ -438,7 +438,7 @@ def test_po_release_uses_target_cover_balance_days_formula():
     expected_raw = max((ads * target_cover) - inv, 0.0)
     import math
     expected_po = int(math.ceil(expected_raw / 5.0) * 5.0)
-    expected_proj = round((inv + expected_po) / ads, 1) if ads > 0 else 999.0
+    expected_proj = round(inv / ads, 1) if ads > 0 else 999.0
     assert int(row["Gross_PO_Qty"]) == expected_po
     assert int(row["PO_Qty"]) == expected_po
     assert float(row["Projected_Running_Days"]) == expected_proj
@@ -597,13 +597,13 @@ def test_sheet_lead_from_style_code_applies_to_color_size_variant():
     ads = float(row["ADS"])
     assert ads > 0
     expected_days_left = round(float(row["Total_Inventory"]) / ads, 1)
-    expected_projected = round((float(row["Total_Inventory"]) + float(row["PO_Pipeline_Total"]) + float(row["PO_Qty"])) / ads, 1)
+    expected_projected = round((float(row["Total_Inventory"]) + float(row["PO_Pipeline_Total"])) / ads, 1)
     assert float(row["Days_Left"]) == pytest.approx(expected_days_left, abs=0.05)
     assert float(row["Projected_Running_Days"]) == pytest.approx(expected_projected, abs=0.05)
 
 
-def test_projected_running_days_includes_released_po_over_ads():
-    """Projected days should include Total_Inventory + Pipeline + released PO qty."""
+def test_projected_running_days_uses_inventory_plus_pipeline_over_ads():
+    """Projected days should include Total_Inventory + Pipeline (before new PO release)."""
     sales = _minimal_sales()
     inv = pd.DataFrame(
         {
@@ -617,12 +617,12 @@ def test_projected_running_days_includes_released_po_over_ads():
     row = po.iloc[0]
     ads = float(row["ADS"])
     assert ads > 0
-    expected = round((40 + 20 + float(row["PO_Qty"])) / ads, 1)
+    expected = round((40 + 20) / ads, 1)
     expected_days_left = round(40 / ads, 1)
     assert float(row["Projected_Running_Days"]) == pytest.approx(expected, abs=0.05)
     assert float(row["Days_Left"]) == pytest.approx(expected_days_left, abs=0.05)
     # Uses Total_Inventory (40) in numerator, not OMS_Inventory (10) alone.
-    assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20 + float(row["PO_Qty"])) / ads, 1), abs=0.05)
+    assert float(row["Projected_Running_Days"]) != pytest.approx(round((10 + 20) / ads, 1), abs=0.05)
 
 
 def test_ads_equals_sales_over_effective_days():
@@ -893,7 +893,7 @@ def test_recent_window_ignores_single_future_outlier_date():
     assert float(r["Recent_ADS"]) > 0
 
 
-def test_po_qty_is_capped_to_lead_time_cover():
+def test_po_qty_is_target_cover_balance_days_based():
     """Released PO follows target-cover balance-days formula."""
     rows = []
     for d in pd.date_range("2025-11-01", periods=30, freq="D"):
@@ -925,6 +925,6 @@ def test_po_qty_is_capped_to_lead_time_cover():
     expected_raw = max((ads * 210.0) - 10.0, 0.0)
     import math
     expected_po = int(math.ceil(expected_raw / 5.0) * 5.0)
-    expected_proj = round((10.0 + expected_po) / ads, 1)
+    expected_proj = round(10.0 / ads, 1)
     assert int(row["PO_Qty"]) == expected_po
     assert float(row["Projected_Running_Days"]) == expected_proj
