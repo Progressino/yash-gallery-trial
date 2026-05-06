@@ -1046,10 +1046,10 @@ def calculate_po_base(
         ((inv_days_left + po_df["PO_Pipeline_Total"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
         999.0,
     )
-    po_df["Post_PO_Cover_Days_Capped"] = np.minimum(
-        pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0),
-        pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(float(lead_time)),
-    ).round(1)
+    # Post-PO cover should reflect the same formula-sheet output (actual post-release cover).
+    po_df["Post_PO_Cover_Days_Capped"] = pd.to_numeric(
+        po_df["Projected_Running_Days"], errors="coerce"
+    ).fillna(999.0).round(1)
 
     po_df["Suggest_Close_SKU"] = ""
 
