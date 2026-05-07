@@ -66,6 +66,57 @@ _GSTIN_COMPANY_MAP = {
 }
 
 
+def _sanitize_marketplace_buyer_gstin(buyer_gstin: str, seller_gstin: str) -> str:
+    """Strip seller / own-company GSTIN accidentally pasted into buyer columns (common CSV alignment issues)."""
+    g = str(buyer_gstin or "").replace(" ", "").strip().upper()
+    if not g or g in ("NAN", "NONE"):
+        return ""
+    sg = str(seller_gstin or "").replace(" ", "").strip().upper()
+    if sg and g == sg:
+        return ""
+    if g in _GSTIN_COMPANY_MAP:
+        return ""
+    return g
+
+
+def _first_nonempty_cell(values) -> str:
+    for v in values:
+        s = str(v or "").strip()
+        if s and s.lower() not in ("nan", "none"):
+            return s
+    return ""
+
+
+def _amazon_invoice_group_key(r) -> str:
+    """
+    Prefer shipment-level identity so unrelated marketplace rows are not merged into one invoice.
+
+    Order of precedence: Shipment_Id → Invoice_Number+Order_Id → Invoice_Number → Order_Id.
+    """
+    ship_raw = ""
+    if "Shipment_Id" in r.index:
+        ship_raw = str(r.get("Shipment_Id") or "").strip()
+    if ship_raw.lower() in ("nan", "none", ""):
+        ship_raw = ""
+    if ship_raw:
+        return f"SHIP:{ship_raw}"
+
+    inv = str(r.get("_inv") or "").strip()
+    if inv.lower() in ("nan", "none", ""):
+        inv = ""
+    oid = str(r.get("_oid") or "").strip()
+    if oid.lower() in ("nan", "none", ""):
+        oid = ""
+
+    if inv:
+        if oid:
+            return f"INV:{inv}|OID:{oid}"
+        return inv
+    if oid:
+        return f"OID:{oid}"
+    return ""
+
+
 def _format_ship_location(city: str, state: str) -> str:
     """Exact ship-to display: city + state from the sales file when both exist."""
     c = (city or "").strip()
@@ -666,6 +717,8 @@ class SalesInvoicePatch(BaseModel):
     net_payable: Optional[float] = None
     # BC / D365-style default dimensions on the document (stored in sales_invoice_edits JSON).
     dimension_assignments: Optional[List[dict[str, Any]]] = None
+    # User overrides for parsed line items (HSN, SKU, product description, etc.). Replaces stored line list when provided.
+    line_items: Optional[List[dict[str, Any]]] = None
 
 
 @router.patch("/sales-invoices/{voucher_id}")
@@ -1278,11 +1331,21 @@ def _persist_amazon_finance_sales_entries(
         if "Buyer_Name" in work.columns
         else pd.Series("", index=work.index, dtype=str)
     )
+    if "Customer_Name_Alt" in work.columns:
+        alt = work["Customer_Name_Alt"].astype(str).str.strip()
+        bn = work["_buyer"].astype(str).str.strip()
+        miss = bn.str.lower().isin(["", "nan", "none"])
+        work.loc[miss, "_buyer"] = alt[miss].astype(str).str.strip()
     work["_ship_st"] = (
         work["Ship_To_State"].astype(str).str.strip().str.upper()
         if "Ship_To_State" in work.columns
         else pd.Series("", index=work.index, dtype=str)
     )
+    if "Place_Of_Supply" in work.columns:
+        pos = work["Place_Of_Supply"].astype(str).str.strip().str.upper()
+        st = work["_ship_st"].astype(str).str.strip().str.upper()
+        miss_st = st.eq("") | st.str.lower().isin(["nan", "none"])
+        work.loc[miss_st, "_ship_st"] = pos[miss_st].astype(str).str.strip().str.upper()
     work["_amt"] = pd.to_numeric(work["Invoice_Amount"], errors="coerce").fillna(0.0)
     work["_ttax"] = pd.to_numeric(work.get("Total_Tax", 0), errors="coerce").fillna(0.0)
     work["_cgst"] = pd.to_numeric(work.get("CGST", 0), errors="coerce").fillna(0.0)
@@ -1293,16 +1356,7 @@ def _persist_amazon_finance_sales_entries(
     else:
         work["_tex"] = 0.0
 
-    def _row_key(r) -> str:
-        inv = str(r["_inv"]).strip()
-        if inv and inv.lower() not in ("nan", "none", ""):
-            return inv
-        oid = str(r["_oid"]).strip()
-        if oid and oid.lower() not in ("nan", "none", ""):
-            return f"OID:{oid}"
-        return ""
-
-    work["_inv_key"] = work.apply(_row_key, axis=1)
+    work["_inv_key"] = work.apply(_amazon_invoice_group_key, axis=1)
 
     entries: list[dict] = []
     for txn_type, sign in (("Shipment", 1), ("Refund", -1), ("Return", -1)):
@@ -1318,17 +1372,15 @@ def _persist_amazon_finance_sales_entries(
             first = g2.iloc[0]
             vdt = first["_dt"]
             vdate = vdt.date().isoformat() if pd.notna(vdt) else f"{str(period or '')[:7]}-01"
-            buyer = str(first["_buyer"] or "").strip()
-            if buyer.lower() in ("nan", "none"):
-                buyer = ""
-            ship_st = str(first["_ship_st"] or "").strip()
+            buyer = _first_nonempty_cell(g2["_buyer"].tolist())
+            ship_st = _first_nonempty_cell(g2["_ship_st"].tolist())
             if ship_st.lower() in ("nan", "none"):
                 ship_st = ""
+            ship_st = ship_st.upper() if ship_st else ""
             buyer_gst = ""
             if "Buyer_GSTIN" in g2.columns:
-                buyer_gst = str(first.get("Buyer_GSTIN", "") or "").strip().upper()
-            if buyer_gst.lower() in ("nan", "none", ""):
-                buyer_gst = ""
+                buyer_gst = _first_nonempty_cell(g2["Buyer_GSTIN"].tolist()).upper().replace(" ", "")
+            buyer_gst = _sanitize_marketplace_buyer_gstin(buyer_gst, seller_gstin)
             ship_city = ""
             if "Ship_To_City" in g2.columns:
                 ship_city = str(first.get("Ship_To_City", "") or "").strip()
@@ -1339,9 +1391,19 @@ def _persist_amazon_finance_sales_entries(
             oid_disp = ", ".join(oids[:3])
             if len(oids) > 3:
                 oid_disp += f" (+{len(oids) - 3} more)"
-            inv_disp = str(inv_key)
-            if inv_disp.startswith("OID:"):
-                inv_disp = ""
+            inv_disp = ""
+            if "Invoice_Number" in g2.columns:
+                inv_disp = _first_nonempty_cell(g2["Invoice_Number"].astype(str).str.strip().tolist())
+            if not inv_disp:
+                ik = str(inv_key)
+                if ik.startswith("INV:") and "|OID:" in ik:
+                    inv_disp = ik.split("|OID:", 1)[0][4:].strip()
+                elif ik.startswith("OID:"):
+                    inv_disp = ""
+                elif ik.startswith(("SHIP:", "ROW_")):
+                    inv_disp = ""
+                else:
+                    inv_disp = ik
 
             inv_sum_pre = float(sign * g2["_amt"].sum())
             tex_sum = float(sign * g2["_tex"].sum())
@@ -1476,9 +1538,10 @@ def _persist_amazon_finance_sales_entries(
                     party_ln = ""
                 if not party_ln and "Customer_Name_Alt" in g2.columns:
                     party_ln = str(rr.get("Customer_Name_Alt", "") or "").strip()
-                cust_gst_ln = str(rr.get("Buyer_GSTIN", "") or "").strip().upper() if "Buyer_GSTIN" in g2.columns else ""
+                cust_gst_ln = str(rr.get("Buyer_GSTIN", "") or "").strip().upper().replace(" ", "") if "Buyer_GSTIN" in g2.columns else ""
                 if cust_gst_ln.lower() in ("nan", "none"):
                     cust_gst_ln = ""
+                cust_gst_ln = _sanitize_marketplace_buyer_gstin(cust_gst_ln, seller_gstin)
                 inv_no_row = str(rr.get("Invoice_Number", "") or "").strip() if "Invoice_Number" in g2.columns else ""
                 oid_row = str(rr.get("Order_Id", "") or "").strip() if "Order_Id" in g2.columns else ""
                 ship_to_raw = str(rr.get("Ship_To_State", "") or "").strip() if "Ship_To_State" in g2.columns else ""

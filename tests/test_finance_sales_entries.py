@@ -214,6 +214,83 @@ def test_create_finance_sales_entries_dedupes_duplicate_rows_within_same_save(fi
     assert len(sue_rows) == 1
 
 
+def test_sales_invoice_line_items_patch_overrides_voucher_lines(fin_db):
+    uid = fdb.create_finance_sales_upload(
+        {
+            "platform": "Amazon",
+            "period": "2026-04",
+            "filename": "mtr.csv",
+            "total_revenue": 100.0,
+            "total_orders": 1,
+            "total_returns": 0.0,
+            "net_revenue": 100.0,
+            "uploaded_by": "",
+            "upload_notes": "",
+        }
+    )
+    fdb.create_finance_sales_entries(
+        uid,
+        [
+            {
+                "platform": "Amazon",
+                "period": "2026-04",
+                "voucher_date": "2026-04-15",
+                "invoice_no": "INV-1",
+                "order_id": "O-1",
+                "party_name": "Buyer",
+                "party_gstin": "",
+                "party_state": "TN",
+                "ship_to_state": "TN",
+                "taxable_amount": 100.0,
+                "cgst_amount": 0.0,
+                "sgst_amount": 0.0,
+                "igst_amount": 5.0,
+                "total_amount": 105.0,
+                "net_payable": 105.0,
+                "narration": "n",
+                "source_filename": "mtr.csv",
+                "line_items": json.dumps(
+                    [
+                        {
+                            "sku": "OLD-SKU",
+                            "product_name": "OLD",
+                            "quantity": 1,
+                            "invoice_amount": 100.0,
+                            "hsn_sac": "0000",
+                        }
+                    ]
+                ),
+            }
+        ],
+    )
+    day = fdb.get_voucher_summary_by_date("2026-04-15")
+    sue_id = next(int(v["id"]) for v in day if str(v["voucher_no"]).startswith("SUE-"))
+
+    edited = [
+        {
+            "sku": "NEW-SKU",
+            "product_name": "Updated Product",
+            "quantity": 2,
+            "invoice_amount": 100.0,
+            "hsn_sac": "6204",
+        }
+    ]
+    fdb.upsert_sales_invoice_edit_patch(sue_id, {"line_items": edited})
+
+    detail = fdb.get_sales_entry_voucher(sue_id)
+    assert detail is not None
+    items = detail["meta"]["line_items"]
+    assert len(items) == 1
+    assert items[0]["sku"] == "NEW-SKU"
+    assert items[0]["hsn_sac"] == "6204"
+    assert items[0]["product_name"] == "Updated Product"
+    assert detail["lines"][0]["expense_head"] == "NEW-SKU"
+
+    listed = fdb.list_sales_invoices()
+    sue_listed = [r for r in listed if r["voucher_no"] == f"SUE-{sue_id - 2_000_000}"][0]
+    assert "NEW-SKU" in (sue_listed.get("line_items") or "")
+
+
 def test_chart_of_accounts_has_groups(fin_db):
     tree = fdb.get_chart_of_accounts()
     assert "groups" in tree

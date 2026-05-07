@@ -1293,6 +1293,11 @@ def _apply_sales_invoice_row_patch(row: dict, patch: dict) -> dict:
         r["narration"] = str(patch["narration"])
     if patch.get("dimension_assignments") is not None:
         r["dimension_assignments"] = patch["dimension_assignments"]
+    if patch.get("line_items") is not None:
+        try:
+            r["line_items"] = json.dumps(patch["line_items"])
+        except (TypeError, ValueError):
+            pass
     for nk in _NUM_PATCH_KEYS:
         if nk in patch and patch[nk] is not None:
             try:
@@ -1340,6 +1345,33 @@ def _apply_sales_invoice_patch_to_voucher(v: dict, patch: dict) -> dict:
         out["supply_type"] = str(patch["supply_type"])
     if patch.get("dimension_assignments") is not None:
         meta["dimension_assignments"] = patch["dimension_assignments"]
+    if patch.get("line_items") is not None and isinstance(patch.get("line_items"), list):
+        edited_items = patch["line_items"]
+        meta["line_items"] = edited_items
+        rebuilt_lines: list[dict] = []
+        for i, li in enumerate(edited_items):
+            sku = str(li.get("sku") or li.get("SKU") or "").strip() or "Item"
+            qty = li.get("quantity") or li.get("Quantity") or ""
+            prod = str(li.get("product_name") or li.get("Product_Name") or "").strip()
+            desc_parts = [sku]
+            if prod:
+                desc_parts.append(prod[:120] + ("…" if len(prod) > 120 else ""))
+            if qty != "":
+                desc_parts.append(f"Qty {qty}")
+            description = " — ".join(desc_parts)
+            try:
+                amt = float(li.get("invoice_amount") or li.get("Invoice_Amount") or 0.0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            rebuilt_lines.append({
+                "id": i + 1,
+                "expense_head": sku,
+                "description": description,
+                "amount": amt,
+                "cost_centre": str(li.get("ship_to_state") or li.get("Ship_To_State") or ""),
+                "is_debit": 1,
+            })
+        out["lines"] = rebuilt_lines
     for nk in _NUM_PATCH_KEYS:
         if nk in patch and patch[nk] is not None:
             try:

@@ -1999,11 +1999,17 @@ function fmtGstRatePct(li: Record<string, unknown>): string {
 function SalesInvoiceBcDetailPanel({
   detail,
   lineItemsShowSourceInv,
+  editable = false,
+  linesOverride,
+  onLineChange,
 }: {
   detail: DaybookVoucher
   lineItemsShowSourceInv: boolean
+  editable?: boolean
+  linesOverride?: Record<string, unknown>[]
+  onLineChange?: (idx: number, key: string, value: string) => void
 }) {
-  const lines = (detail.meta?.line_items ?? []) as Record<string, unknown>[]
+  const lines = (linesOverride ?? (detail.meta?.line_items ?? [])) as Record<string, unknown>[]
   const taxNum = detail.cgst_amount + detail.sgst_amount + detail.igst_amount
   const { sumLineInvoiceIncl, sumLineTaxableExcl } = useMemo(() => {
     let inv = 0
@@ -2175,6 +2181,24 @@ function SalesInvoiceBcDetailPanel({
                 const custGst = liStr(li, 'customer_gst_no', 'Customer_Gst_No', 'customer_gstin')
                 const irnH = liStr(li, 'irn_hash', 'IRN_Hash')
                 const ack = liStr(li, 'acknowledgement_date', 'Acknowledgement_Date')
+                const gstRateNum = Number(li.gst_rate ?? li.GST_Rate ?? 0)
+                const editText = (key: string, current: string, opts: { mono?: boolean; align?: 'left' | 'right'; width?: string } = {}) => (
+                  <input
+                    type="text"
+                    value={current}
+                    onChange={e => onLineChange?.(i, key, e.target.value)}
+                    className={`w-full bg-transparent border border-transparent focus:border-slate-300 focus:bg-white px-1 py-0.5 rounded text-[10px] ${opts.mono ? 'font-mono' : ''} ${opts.align === 'right' ? 'text-right tabular-nums' : ''} ${opts.width ?? ''}`}
+                  />
+                )
+                const editNum = (key: string, current: number) => (
+                  <input
+                    type="number"
+                    step="any"
+                    value={Number.isFinite(current) ? current : ''}
+                    onChange={e => onLineChange?.(i, key, e.target.value)}
+                    className="w-full bg-transparent border border-transparent focus:border-slate-300 focus:bg-white px-1 py-0.5 rounded text-[10px] text-right tabular-nums"
+                  />
+                )
                 return (
                   <tr key={i} className="border-t border-slate-100 hover:bg-slate-50/80">
                     {lineItemsShowSourceInv ? (
@@ -2184,19 +2208,41 @@ function SalesInvoiceBcDetailPanel({
                     ) : null}
                     <td className="px-1.5 py-1.5 text-slate-800 max-w-[5rem] truncate" title={shipFrom}>{shipFrom || '—'}</td>
                     <td className="px-1.5 py-1.5 text-slate-700 max-w-[7rem] truncate" title={loc}>{loc || '—'}</td>
-                    <td className="px-1.5 py-1.5 text-slate-800 max-w-[7rem] truncate" title={party}>{party || '—'}</td>
-                    <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={invNo}>{invNo || '—'}</td>
-                    <td className="px-1.5 py-1.5 font-mono text-slate-700 whitespace-nowrap">{invDt || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-800 max-w-[7rem] truncate" title={party}>
+                      {editable ? editText('party_name', party) : (party || '—')}
+                    </td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={invNo}>
+                      {editable ? editText('invoice_number', invNo, { mono: true }) : (invNo || '—')}
+                    </td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-700 whitespace-nowrap">
+                      {editable ? editText('invoice_date', invDt, { mono: true }) : (invDt || '—')}
+                    </td>
                     <td className="px-1.5 py-1.5 text-slate-700 max-w-[5rem] truncate" title={txn}>{txn || '—'}</td>
-                    <td className="px-1.5 py-1.5 text-slate-700 max-w-[14rem] truncate" title={prodDesc}>{prodDesc || '—'}</td>
-                    <td className="px-1.5 py-1.5 text-right tabular-nums">{qty}</td>
-                    <td className="px-1.5 py-1.5 font-mono text-slate-700">{hsn || '—'}</td>
-                    <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={itemNo}>{itemNo || '—'}</td>
+                    <td className="px-1.5 py-1.5 text-slate-700 max-w-[14rem] truncate" title={prodDesc}>
+                      {editable ? editText('product_name', prodDesc) : (prodDesc || '—')}
+                    </td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">
+                      {editable ? editNum('quantity', qty) : qty}
+                    </td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-700">
+                      {editable ? editText('hsn_sac', hsn, { mono: true }) : (hsn || '—')}
+                    </td>
+                    <td className="px-1.5 py-1.5 font-mono text-slate-800 max-w-[6rem] truncate" title={itemNo}>
+                      {editable ? editText('sku', itemNo, { mono: true }) : (itemNo || '—')}
+                    </td>
                     <td className="px-1.5 py-1.5 text-slate-700 max-w-[5rem] truncate" title={shipTo}>{shipTo || '—'}</td>
-                    <td className="px-1.5 py-1.5 text-right tabular-nums">{fmtDec(invAmt)}</td>
-                    <td className="px-1.5 py-1.5 text-right tabular-nums">{fmtDec(tex)}</td>
-                    <td className="px-1.5 py-1.5 text-right tabular-nums">{fmtDec(tt)}</td>
-                    <td className="px-1.5 py-1.5 text-right font-mono text-slate-800">{fmtGstRatePct(li)}</td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">
+                      {editable ? editNum('invoice_amount', invAmt) : fmtDec(invAmt)}
+                    </td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">
+                      {editable ? editNum('tax_exclusive_gross', tex) : fmtDec(tex)}
+                    </td>
+                    <td className="px-1.5 py-1.5 text-right tabular-nums">
+                      {editable ? editNum('total_tax', tt) : fmtDec(tt)}
+                    </td>
+                    <td className="px-1.5 py-1.5 text-right font-mono text-slate-800">
+                      {editable ? editNum('gst_rate', gstRateNum) : fmtGstRatePct(li)}
+                    </td>
                     <td className="px-1.5 py-1.5 font-mono text-slate-700 max-w-[6rem] truncate" title={oid}>{oid || '—'}</td>
                     <td className="px-1.5 py-1.5 font-mono text-slate-600 max-w-[7rem] truncate text-[9px]" title={shipAmazonId}>{shipAmazonId || '—'}</td>
                     <td className="px-1.5 py-1.5 font-mono text-slate-600 max-w-[6rem] truncate text-[9px]" title={shipItemId}>{shipItemId || '—'}</td>
@@ -2345,9 +2391,6 @@ function SalesInvoicesTab({
   const [cardOpen, setCardOpen] = useState(false)
   const [cardTab, setCardTab] = useState<'general' | 'lines' | 'inventory' | 'location'>('general')
   const [draft, setDraft] = useState<Record<string, string>>({})
-  const [dimRows, setDimRows] = useState<Array<{ attribute_name: string; value_code: string; value_description: string }>>([
-    { attribute_name: '', value_code: '', value_description: '' },
-  ])
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
   const [includeUploadSummaries, setIncludeUploadSummaries] = useState(true)
 
@@ -2408,18 +2451,9 @@ function SalesInvoicesTab({
       total_amount: String(detail.total_amount ?? ''),
       net_payable: String(detail.net_payable ?? ''),
     })
-    const rawDims = detail.meta?.dimension_assignments
-    if (Array.isArray(rawDims) && rawDims.length > 0) {
-      setDimRows(
-        rawDims.map((x: Record<string, unknown>) => ({
-          attribute_name: String(x.attribute_name ?? x.attribute ?? ''),
-          value_code: String(x.value_code ?? x.code ?? ''),
-          value_description: String(x.value_description ?? x.description ?? x.financial_tag ?? ''),
-        })),
-      )
-    } else {
-      setDimRows([{ attribute_name: '', value_code: '', value_description: '' }])
-    }
+    const baseLines = (detail.meta?.line_items ?? []) as Record<string, unknown>[]
+    setLinesDraft(baseLines.map(li => ({ ...li })))
+    setLinesDirty(false)
     setSaveMsg(null)
   }, [detail, cardOpen, selectedId])
 
@@ -2479,13 +2513,9 @@ function SalesInvoicesTab({
       const n = Number(raw)
       if (!Number.isNaN(n)) body[k] = n
     }
-    body.dimension_assignments = dimRows
-      .map(d => ({
-        attribute_name: d.attribute_name.trim(),
-        value_code: d.value_code.trim(),
-        value_description: d.value_description.trim(),
-      }))
-      .filter(d => d.attribute_name || d.value_code || d.value_description)
+    if (linesDirty && linesDraft) {
+      body.line_items = linesDraft
+    }
     saveMutation.mutate(body)
   }
 
@@ -2870,72 +2900,6 @@ function SalesInvoicesTab({
                       className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full"
                     />
                   </div>
-                  <p className="text-[11px] font-semibold text-slate-500 uppercase mt-5 mb-1">Default dimensions (D365-style)</p>
-                  <p className="text-[10px] text-slate-500 mb-2 leading-snug">
-                    Attribute (category name) → Value code → Description (friendly tag). Stored on this document and returned with the voucher.
-                  </p>
-                  <div className="space-y-2 mb-4">
-                    {dimRows.map((dr, idx) => (
-                      <div
-                        key={`dim-${idx}`}
-                        className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end rounded border border-slate-200 bg-slate-50/80 p-2"
-                      >
-                        <div>
-                          <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-0.5">Attribute</label>
-                          <input
-                            type="text"
-                            value={dr.attribute_name}
-                            onChange={e => {
-                              const v = e.target.value
-                              setDimRows(prev => prev.map((row, i) => (i === idx ? { ...row, attribute_name: v } : row)))
-                            }}
-                            className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full bg-white"
-                            placeholder="e.g. Department"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-0.5">Value code</label>
-                          <input
-                            type="text"
-                            value={dr.value_code}
-                            onChange={e => {
-                              const v = e.target.value
-                              setDimRows(prev => prev.map((row, i) => (i === idx ? { ...row, value_code: v } : row)))
-                            }}
-                            className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full bg-white"
-                            placeholder="e.g. 100"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-semibold text-slate-500 uppercase mb-0.5">Description</label>
-                          <input
-                            type="text"
-                            value={dr.value_description}
-                            onChange={e => {
-                              const v = e.target.value
-                              setDimRows(prev => prev.map((row, i) => (i === idx ? { ...row, value_description: v } : row)))
-                            }}
-                            className="text-sm border border-slate-300 rounded px-2 py-1.5 w-full bg-white"
-                            placeholder="e.g. Sales Department"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          className="text-[11px] font-semibold px-2 py-1.5 rounded border border-slate-300 text-slate-700 hover:bg-slate-100 whitespace-nowrap"
-                          onClick={() => setDimRows(prev => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)))}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      className="text-[11px] font-semibold text-teal-800 hover:underline"
-                      onClick={() => setDimRows(prev => [...prev, { attribute_name: '', value_code: '', value_description: '' }])}
-                    >
-                      + Add dimension row
-                    </button>
-                  </div>
                   <p className="text-[11px] font-semibold text-slate-500 uppercase mt-6 mb-3">Amounts</p>
                   <SiFormField label="Taxable" value={draft.taxable_amount ?? ''} onChange={v => setD('taxable_amount', v)} />
                   <SiFormField label="CGST" value={draft.cgst_amount ?? ''} onChange={v => setD('cgst_amount', v)} />
@@ -2952,7 +2916,25 @@ function SalesInvoicesTab({
                     </p>
                   ) : null}
                   {detail?.meta?.line_items && detail.meta.line_items.length > 0 ? (
-                    <SalesInvoiceBcDetailPanel detail={detail} lineItemsShowSourceInv={lineItemsShowSourceInv} />
+                    <>
+                      <p className="text-[11px] text-slate-600 bg-amber-50 border border-amber-200 rounded px-3 py-2 leading-snug">
+                        Click any cell (HSN, SKU, product, qty, amounts) to edit. Changes are saved when you press <strong>Save</strong>.
+                      </p>
+                      <SalesInvoiceBcDetailPanel
+                        detail={detail}
+                        lineItemsShowSourceInv={lineItemsShowSourceInv}
+                        editable
+                        linesOverride={linesDraft ?? undefined}
+                        onLineChange={(idx, key, value) => {
+                          setLinesDraft(prev => {
+                            const base = prev ?? ((detail.meta?.line_items ?? []) as Record<string, unknown>[]).map(li => ({ ...li }))
+                            const next = base.map((li, i) => (i === idx ? { ...li, [key]: value } : li))
+                            return next
+                          })
+                          setLinesDirty(true)
+                        }}
+                      />
+                    </>
                   ) : (
                     <div className="bg-white border border-slate-200 rounded-sm p-4 shadow-sm">
                       <p className="text-sm text-slate-600 mb-2">No SKU line items are stored for this document yet.</p>
