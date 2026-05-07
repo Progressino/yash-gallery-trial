@@ -43,6 +43,9 @@ class SOIn(BaseModel):
     payment_terms: Optional[str] = ''
     status: Optional[str] = 'Draft'
     notes: Optional[str] = ''
+    dispatch_date: Optional[str] = ''  
+    ref_number: Optional[str] = ''  
+    ref_date: Optional[str] = ''
     lines: List[SOLineIn] = []
 
 class StatusUpdate(BaseModel):

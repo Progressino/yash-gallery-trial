@@ -1,4 +1,4 @@
-"""Purchase Module router — Suppliers, Processors, PR, PO, JWO, GRN"""
+"""Purchase Module router — Suppliers, Processors, PR, PO, JWO, GRN,list_mins, create_min, update_min_status, get_min_by_number, create_gate_pass, list_gate_passes, get_gate_pass_by_number,"""
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
@@ -7,8 +7,10 @@ from ..db.purchase_db import (
     list_processors, create_processor,
     list_prs, create_pr, approve_pr, reject_pr, update_pr_status, create_pos_from_pr, mark_pr_lines_ordered,
     list_pos, create_po, update_po_status, update_po,
-    list_jwos, create_jwo, update_jwo_status,
+    list_jwos, create_jwo, update_jwo_status, update_jwo, get_po_by_number, get_jwo_by_number,
     list_grns, create_grn, update_grn_status,
+    list_mins, create_min, update_min_status, get_min_by_number,
+    list_gate_passes, create_gate_pass, get_gate_pass_by_number,
     get_purchase_stats
 )
 
@@ -126,6 +128,17 @@ class JWOIn(BaseModel):
     remarks: Optional[str] = ''
     issued_by: Optional[str] = ''
     lines: List[JWOLineIn] = []
+
+# ── NEW: JWO Update model (same as JWOIn but all optional) ────────────────────
+class JWOUpdateIn(BaseModel):
+    processor_id: Optional[int] = None
+    processor_name: Optional[str] = None
+    pr_reference: Optional[str] = None
+    so_reference: Optional[str] = None
+    expected_return_date: Optional[str] = None
+    remarks: Optional[str] = None
+    issued_by: Optional[str] = None
+    lines: Optional[List[JWOLineIn]] = None
 
 class GRNLineIn(BaseModel):
     material_code: str
@@ -271,6 +284,75 @@ def patch_jwo_status(jwoid: int, body: StatusUpdate):
     update_jwo_status(jwoid, body.status)
     return {"ok": True}
 
+# ── NEW: Update JWO (header + lines) — mirrors PATCH /po/{poid} ──────────────
+@router.patch("/jwo/{jwoid}")
+def patch_jwo(jwoid: int, body: JWOUpdateIn):
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "lines" in data:
+        # Compute amount for each line before saving
+        for ln in data["lines"]:
+            if ln.get("amount") is None:
+                ln["amount"] = ln.get("output_qty", 0) * ln.get("rate", 0)
+    update_jwo(jwoid, data)
+    return {"ok": True}
+# ── Material Issue Notes (MIN) ────────────────────────────────────────────────
+class MINLineIn(BaseModel):
+    material_code: str
+    material_name: Optional[str] = ''
+    material_type: Optional[str] = 'GF'
+    issue_qty: float = 0
+    unit: Optional[str] = 'MTR'
+    rate: Optional[float] = 0
+    remarks: Optional[str] = ''
+
+class MINIn(BaseModel):
+    min_date: Optional[str] = None
+    jwo_reference: Optional[str] = ''
+    so_reference: Optional[str] = ''
+    from_location: Optional[str] = 'Grey Warehouse'
+    to_location: Optional[str] = ''
+    to_vendor: Optional[str] = ''
+    issued_by: Optional[str] = ''
+    remarks: Optional[str] = ''
+    lines: List[MINLineIn] = []
+
+@router.get("/min")
+def get_mins(status: Optional[str] = None):
+    return list_mins(status)
+
+@router.post("/min")
+def post_min(body: MINIn):
+    num = create_min(body.model_dump())
+    return {"min_number": num}
+
+@router.patch("/min/{minid}/status")
+def patch_min_status(minid: int, body: StatusUpdate):
+    update_min_status(minid, body.status)
+    return {"ok": True}
+
+@router.get("/min/by-number/{min_number}")
+def get_min_by_num(min_number: str):
+    doc = get_min_by_number(min_number)
+    if not doc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="MIN not found")
+    return doc
+# ── GRN Auto-fill helpers ─────────────────────────────────────────────────────
+@router.get("/po/by-number/{po_number}")
+def get_po_by_num(po_number: str):
+    doc = get_po_by_number(po_number)
+    if not doc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="PO not found")
+    return doc
+
+@router.get("/jwo/by-number/{jwo_number}")
+def get_jwo_by_num(jwo_number: str):
+    doc = get_jwo_by_number(jwo_number)
+    if not doc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="JWO not found")
+    return doc
 # ── GRN ───────────────────────────────────────────────────────────────────────
 @router.get("/grn")
 def get_grns(status: Optional[str] = None):
@@ -285,3 +367,41 @@ def post_grn(body: GRNIn):
 def patch_grn_verify(grnid: int, body: GRNVerify):
     update_grn_status(grnid, body.status, body.qc_checked_by or '')
     return {"ok": True}
+# ── Gate Pass ──────────────────────────────────────────────────────────────
+class GPLineIn(BaseModel):
+    material_code: str
+    material_name: Optional[str] = ''
+    qty: float = 0
+    unit: Optional[str] = 'MTR'
+    remarks: Optional[str] = ''
+
+class GatePassIn(BaseModel):
+    gp_date: Optional[str] = None
+    min_reference: Optional[str] = ''
+    jwo_reference: Optional[str] = ''
+    from_location: Optional[str] = 'Factory'
+    to_location: Optional[str] = ''
+    party_name: Optional[str] = ''
+    vehicle_no: Optional[str] = ''
+    driver_name: Optional[str] = ''
+    material_desc: Optional[str] = ''
+    unit: Optional[str] = 'MTR'
+    purpose: Optional[str] = 'Job Work'
+    remarks: Optional[str] = ''
+    lines: List[GPLineIn] = []
+
+@router.get("/gate-pass")
+def get_gate_passes():
+    return list_gate_passes()
+
+@router.post("/gate-pass")
+def post_gate_pass(body: GatePassIn):
+    num = create_gate_pass(body.model_dump())
+    return {"gp_number": num}
+
+@router.get("/gate-pass/by-number/{gp_number}")
+def get_gp_by_number(gp_number: str):
+    doc = get_gate_pass_by_number(gp_number)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Gate pass not found")
+    return doc

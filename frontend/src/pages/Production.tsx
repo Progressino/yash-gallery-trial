@@ -1,1072 +1,1073 @@
-import { useState, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+type ModalType = 'issue-fabric' | 'return-fabric' | 'receive' | 'issue-pieces' | 'add-cost' | 'new-jo' | null
 
-type MainTab = 'dashboard' | 'run-mrp' | 'requirements' | 'reservations' | 'reports' | 'orders'
-
-interface ProdStats {
-  total_jos: number; open_jos: number; in_progress: number
-  completed_today: number; soft_reservations: number
+interface JOLine {
+  id: number
+  so_number: string
+  sku: string
+  sku_name: string
+  style: string
+  planned_qty: number
+  issued_qty: number
+  received_qty: number
+  rejected_qty: number
+  balance_qty: number
+  vendor_rate: number
+  process_cost: number
+  remarks: string
 }
 
-interface JobOrder {
-  id: number; jo_number: string; jo_date: string; so_number: string
-  sku: string; sku_name: string; process: string; exec_type: string
-  vendor_name: string; so_qty: number; planned_qty: number; output_qty: number
-  status: string; expected_completion: string; issued_to: string
+interface JO {
+  id: number
+  jo_number: string
+  jo_date: string
+  so_number: string
+  sku: string
+  sku_name: string
+  process: string
+  exec_type: string
+  vendor_name: string
+  vendor_rate: number
+  so_qty: number
+  planned_qty: number
+  issued_qty: number
+  received_qty: number
+  rejected_qty: number
+  balance_qty: number
+  output_qty: number
+  status: string
+  expected_completion: string
+  fabric_code: string
+  fabric_qty: number
+  fabric_unit: string
+  fabric_issued_qty: number
+  fabric_received_qty: number
+  fabric_consumption: number
+  process_cost: number
+  total_cost: number
+  parent_jo_id: number | null
+  next_stage_jo_id: number | null
+  remarks: string
+  lines: JOLine[]
+  fabric_issues: any[]
+  fabric_returns: any[]
+  cost_entries: any[]
+  routing: string[]
+  next_process: string | null
+  process_stocks: Record<string, { available: number; in: number; out: number }>
 }
 
-interface OpenSO {
-  so_number: string; so_date: string; buyer: string; delivery_date: string
-  status: string; total_qty: number; pending_qty: number; line_count: number; skus: string[]
+const STATUS_COLORS: Record<string, string> = {
+  Created: 'bg-gray-100 text-gray-600',
+  'In Progress': 'bg-amber-100 text-amber-700',
+  Completed: 'bg-green-100 text-green-700',
+  Closed: 'bg-gray-200 text-gray-500',
+  Cancelled: 'bg-red-100 text-red-600',
 }
 
-interface MRPBreakdown {
-  so_no: string; sku: string; qty_req: number; source: string
+const PROCESS_COLORS: Record<string, string> = {
+  Cutting: 'bg-blue-100 text-blue-700',
+  Printing: 'bg-pink-100 text-pink-700',
+  Embroidery: 'bg-rose-100 text-rose-700',
+  Stitching: 'bg-purple-100 text-purple-700',
+  Finishing: 'bg-green-100 text-green-700',
+  Packing: 'bg-teal-100 text-teal-700',
+  'Kajh Button': 'bg-orange-100 text-orange-700',
 }
 
-interface MRPMaterial {
-  name: string; type: string; unit: string
-  total_req: number; stock: number; reserved: number; available: number
-  soft_reserved: number; net_available: number; net_req: number; net_req_with_soft: number
-  breakdown: MRPBreakdown[]; level: number
+const PROCESS_ICONS: Record<string, string> = {
+  Cutting: '✂️', Printing: '🖨️', Embroidery: '🧶',
+  Stitching: '🧵', Finishing: '✨', Packing: '📦',
+  'Kajh Button': '🔘',
 }
 
-interface MRPResult {
-  run_time: string | null; so_numbers: string[]
-  result: Record<string, MRPMaterial>
+const fmt = (n: number) => Math.round(n || 0).toLocaleString('en-IN')
+const fmtR = (n: number) => '₹' + Math.round(n || 0).toLocaleString('en-IN')
+
+// ── Print JO ──────────────────────────────────────────────────────────────────
+const printJO = (jo: JO) => {
+  const totalCost = jo.lines.reduce((s, l) => s + (l.planned_qty * l.vendor_rate), 0)
+  const win = window.open('', '_blank', 'width=900,height=700')
+  if (!win) { alert('Allow popups to print'); return }
+  win.document.write(`<!DOCTYPE html><html><head><title>JO - ${jo.jo_number}</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Segoe UI',sans-serif;font-size:12px;color:#1a1a1a;padding:24px}
+    .header{display:flex;justify-content:space-between;border-bottom:2px solid #002B5B;padding-bottom:12px;margin-bottom:16px}
+    .company{font-size:20px;font-weight:700;color:#002B5B}
+    .doc-title{font-size:16px;font-weight:600;color:#002B5B;text-align:right}
+    .doc-num{font-size:22px;font-weight:800;color:#002B5B;text-align:right}
+    .info-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
+    .info-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px}
+    .info-label{font-size:10px;text-transform:uppercase;color:#64748b;font-weight:600;margin-bottom:4px}
+    .info-value{font-size:13px;font-weight:600;color:#1e293b}
+    table{width:100%;border-collapse:collapse;margin-bottom:16px}
+    th{background:#002B5B;color:white;padding:7px 10px;text-align:left;font-size:11px}
+    th.r,td.r{text-align:right}
+    td{padding:6px 10px;border-bottom:1px solid #e2e8f0;font-size:12px}
+    tr:nth-child(even) td{background:#f8fafc}
+    .total-row{display:flex;justify-content:flex-end}
+    .totals{width:260px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
+    .tr{display:flex;justify-content:space-between;padding:7px 12px;border-bottom:1px solid #e2e8f0;font-size:12px}
+    .tr.grand{background:#002B5B;color:white;font-weight:700;font-size:14px}
+    .routing-bar{display:flex;gap:4px;margin-bottom:16px;align-items:center}
+    .step{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;background:#e2e8f0;color:#475569}
+    .step.active{background:#002B5B;color:white}
+    .arrow{color:#94a3b8;font-size:10px}
+    .footer{margin-top:32px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;border-top:1px solid #e2e8f0;padding-top:16px}
+    .sign-box{text-align:center}
+    .sign-line{border-top:1px solid #64748b;margin-top:32px;padding-top:6px;font-size:10px;color:#64748b}
+    @media print{body{padding:12px}}
+  </style></head><body>
+  <div class="header">
+    <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b">Production Department</div></div>
+    <div><div class="doc-title">JOB ORDER</div><div class="doc-num">${jo.jo_number}</div></div>
+  </div>
+  <div class="routing-bar">
+    ${(jo.routing || []).map(p => `<span class="step ${p === jo.process ? 'active' : ''}">${PROCESS_ICONS[p] || ''} ${p}</span>${p !== jo.routing[jo.routing.length-1] ? '<span class="arrow">→</span>' : ''}`).join('')}
+  </div>
+  <div class="info-grid">
+    <div class="info-box"><div class="info-label">Process</div><div class="info-value">${jo.process}</div>
+      <div class="info-label" style="margin-top:8px">Exec Type</div><div class="info-value">${jo.exec_type}</div></div>
+    <div class="info-box"><div class="info-label">Vendor / Party</div><div class="info-value">${jo.vendor_name || '—'}</div>
+      <div class="info-label" style="margin-top:8px">SO Number</div><div class="info-value">${jo.so_number || '—'}</div></div>
+    <div class="info-box"><div class="info-label">JO Date</div><div class="info-value">${jo.jo_date}</div>
+      <div class="info-label" style="margin-top:8px">Expected Completion</div><div class="info-value">${jo.expected_completion || '—'}</div></div>
+    ${jo.process === 'Cutting' && jo.fabric_code ? `
+    <div class="info-box"><div class="info-label">Fabric Code</div><div class="info-value">${jo.fabric_code}</div>
+      <div class="info-label" style="margin-top:8px">Fabric Qty</div><div class="info-value">${jo.fabric_qty} ${jo.fabric_unit}</div></div>` : ''}
+  </div>
+  <table>
+    <thead><tr>
+      <th>#</th><th>SKU</th><th>Style / Description</th>
+      <th class="r">Planned Qty</th><th class="r">Rate (₹)</th><th class="r">Amount (₹)</th><th>Remarks</th>
+    </tr></thead>
+    <tbody>
+      ${jo.lines.map((l, i) => `<tr>
+        <td>${i+1}</td>
+        <td><strong>${l.sku}</strong></td>
+        <td>${l.sku_name}${l.style ? ' — ' + l.style : ''}</td>
+        <td class="r">${fmt(l.planned_qty)}</td>
+        <td class="r">${fmtR(l.vendor_rate)}</td>
+        <td class="r"><strong>${fmtR(l.planned_qty * l.vendor_rate)}</strong></td>
+        <td>${l.remarks || '—'}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+  <div class="total-row"><div class="totals">
+    <div class="tr"><span>Total Pieces</span><span>${fmt(jo.planned_qty)}</span></div>
+    <div class="tr grand"><span>Total Amount</span><span>${fmtR(totalCost)}</span></div>
+  </div></div>
+  ${jo.remarks ? `<div style="background:#fef9c3;border:1px solid #fde047;border-radius:6px;padding:10px;margin-top:16px;font-size:11px"><strong>Remarks:</strong> ${jo.remarks}</div>` : ''}
+  <div class="footer">
+    <div class="sign-box"><div class="sign-line">Prepared By</div></div>
+    <div class="sign-box"><div class="sign-line">Authorized By</div></div>
+    <div class="sign-box"><div class="sign-line">${jo.exec_type === 'Outsource' ? 'Vendor Acknowledgement' : 'Received By'}</div></div>
+  </div>
+  <script>window.onload=()=>window.print()<\/script>
+  </body></html>`)
+  win.document.close()
 }
-
-interface SoftReservationV2 {
-  id: number; material_code: string; material_name: string; unit: string
-  so_no: string; sku: string; qty: number; status: string; created_at: string
-}
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const PROCESSES = ['Cutting', 'Stitching', 'Finishing', 'Embroidery', 'Dyeing', 'Kaja Button', 'Packing', 'Quality Check', 'Other']
-const JO_STATUSES = ['Created', 'Material Issued', 'In Progress', 'Partially Completed', 'Completed', 'Closed', 'Cancelled']
-
-const statusColor = (s: string) => {
-  if (['Completed', 'Closed'].includes(s)) return 'bg-green-100 text-green-700'
-  if (s === 'In Progress') return 'bg-blue-100 text-blue-700'
-  if (s === 'Material Issued') return 'bg-purple-100 text-purple-700'
-  if (s === 'Cancelled') return 'bg-red-100 text-red-700'
-  return 'bg-yellow-50 text-yellow-700'
-}
-
-const matStatusBadge = (mat: MRPMaterial) => {
-  if (mat.net_req_with_soft <= 0) return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">OK</span>
-  if (mat.net_req > 0) return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">Short</span>
-  return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-700">Partial</span>
-}
-
-function exportCSV(data: Array<Record<string, unknown>>, filename: string) {
-  if (!data.length) return
-  const headers = Object.keys(data[0])
-  const rows = data.map(r => headers.map(h => JSON.stringify(r[h] ?? '')).join(','))
-  const csv = [headers.join(','), ...rows].join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a'); a.href = url; a.download = filename; a.click()
-  URL.revokeObjectURL(url)
-}
-
-// ── Main Component ────────────────────────────────────────────────────────────
 
 export default function Production() {
   const qc = useQueryClient()
-  const [tab, setTab] = useState<MainTab>('dashboard')
-
-  // Job Orders state
-  const [showJOForm, setShowJOForm] = useState(false)
+  const [activeProcess, setActiveProcess] = useState('Cutting')
+  const [tab, setTab] = useState<'process' | 'tracker' | 'reports' | 'mrp'>('process')
+  const [expanded, setExpanded] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')
-  const [joForm, setJOForm] = useState({
-    so_number: '', sku: '', sku_name: '', process: 'Cutting', exec_type: 'Inhouse',
-    vendor_name: '', so_qty: 0, planned_qty: 0, expected_completion: '', issued_to: '', remarks: ''
+  const [modal, setModal] = useState<ModalType>(null)
+  const [activeJO, setActiveJO] = useState<JO | null>(null)
+  const [activeLineId, setActiveLineId] = useState<number | null>(null)
+
+  // New JO form
+  const [newForm, setNewForm] = useState({
+    so_number: '', sku: '', sku_name: '', process: 'Cutting',
+    exec_type: 'Inhouse', vendor_name: '', vendor_rate: 0,
+    planned_qty: 0, so_qty: 0, fabric_code: '', fabric_qty: 0,
+    fabric_unit: 'MTR', expected_completion: '', remarks: '',
   })
+  const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string }[]>([])
 
-  // Run MRP state
-  const [selectedSOs, setSelectedSOs] = useState<string[]>([])
-  const [filterBuyer, setFilterBuyer] = useState('')
+  // Modal forms
+  const [fabricIssueForm, setFabricIssueForm] = useState({ fabric_code: '', fabric_name: '', issued_qty: 0, unit: 'MTR', issued_by: '', remarks: '' })
+  const [fabricReturnForm, setFabricReturnForm] = useState({ fabric_code: '', returned_qty: 0, unit: 'MTR', returned_by: '', remarks: '' })
+  const [receiveForm, setReceiveForm] = useState({ received_qty: 0, rejected_qty: 0, received_by: '', remarks: '' })
+  const [issuePiecesForm, setIssuePiecesForm] = useState({ issued_qty: 0, to_process: '', issued_by: '', remarks: '' })
+  const [costForm, setCostForm] = useState({ cost_type: 'Labour', amount: 0, description: '' })
 
-  // Requirements state
-  const [reqTypeFilter, setReqTypeFilter] = useState('')
-  const [reqSearch, setReqSearch] = useState('')
-  const [shortageOnly, setShortageOnly] = useState(false)
-  const [selectedMaterial, setSelectedMaterial] = useState<string | null>(null)
-
-  // Reservations state
-  const [resSubTab, setResSubTab] = useState<'material' | 'so' | 'release'>('material')
-
-  // Reports state
-  const [reportType, setReportType] = useState<'all' | 'fabric' | 'accessories' | 'packaging' | 'buyer'>('all')
-
-  // PR from MRP state
-  const [showPRModal, setShowPRModal] = useState(false)
-  const [prLines, setPRLines] = useState<Array<{
-    selected: boolean; material_code: string; material_name: string
-    material_type: string; required_qty: number; unit: string
-  }>>([])
-  const [prForm, setPRForm] = useState({
-    requested_by: '', priority: 'High', required_by_date: '', so_reference: '', notes: ''
-  })
+  // URL params auto-fill
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search)
+    const fabric = p.get('fabric'), qty = p.get('qty'), so = p.get('so'), sku = p.get('sku')
+    if (fabric) {
+      setNewForm(f => ({ ...f, fabric_code: fabric, fabric_qty: parseFloat(qty||'0'), so_number: so||'', sku: sku||'', process: 'Cutting' }))
+      setActiveProcess('Cutting')
+      setTab('process')
+      setModal('new-jo')
+    }
+  }, [])
 
   // ── Queries ──────────────────────────────────────────────────────────────────
-
-  const { data: stats } = useQuery<ProdStats>({
+  const { data: processes = [] } = useQuery<string[]>({
+    queryKey: ['processes'],
+    queryFn: () => api.get('/production/processes').then(r => r.data),
+  })
+  const { data: stats } = useQuery({
     queryKey: ['prod-stats'],
-    queryFn: () => api.get('/production/stats').then(r => r.data)
+    queryFn: () => api.get('/production/stats').then(r => r.data),
+  })
+  const { data: processJOs = [] } = useQuery<JO[]>({
+    queryKey: ['jos-process', activeProcess, filterStatus],
+    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}`).then(r => r.data),
+    enabled: tab === 'process',
+  })
+  const { data: allJOs = [] } = useQuery<JO[]>({
+    queryKey: ['jos-all', filterStatus],
+    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}`).then(r => r.data),
+    enabled: tab === 'tracker',
+  })
+  const { data: readyLines = [] } = useQuery({
+    queryKey: ['ready-to-process', activeProcess],
+    queryFn: () => api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}`).then(r => r.data),
+    enabled: tab === 'process',
+  })
+  const { data: processReport = [] } = useQuery({
+    queryKey: ['process-report'],
+    queryFn: () => api.get('/production/process-report').then(r => r.data),
+    enabled: tab === 'reports',
+  })
+  const { data: soList = [] } = useQuery({
+    queryKey: ['so-list'],
+    queryFn: () => api.get('/sales/orders').then(r => r.data || []),
+  })
+  const { data: soLines = [] } = useQuery({
+    queryKey: ['so-lines', newForm.so_number],
+    queryFn: () => api.get('/sales/orders').then(r => {
+      const so = (r.data || []).find((s: any) => s.so_number === newForm.so_number)
+      return so?.lines || []
+    }),
+    enabled: !!newForm.so_number,
+  })
+  const { data: itemRouting } = useQuery({
+    queryKey: ['item-routing', newForm.sku],
+    queryFn: () => api.get(`/production/item-routing/${encodeURIComponent(newForm.sku)}`).then(r => r.data),
+    enabled: !!newForm.sku,
+  })
+  const { data: joValidation } = useQuery({
+    queryKey: ['jo-validate', newForm.process, newForm.so_number, newForm.sku, newForm.planned_qty],
+    queryFn: () => api.get(`/production/orders/validate?process=${newForm.process}&so_number=${newForm.so_number}&sku=${newForm.sku}&planned_qty=${newForm.planned_qty}`).then(r => r.data),
+    enabled: !!newForm.so_number && !!newForm.sku && newForm.process !== 'Cutting',
   })
 
-  const { data: jos = [] } = useQuery<JobOrder[]>({
-    queryKey: ['jos', filterStatus],
-    queryFn: () => api.get('/production/orders' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data),
-    enabled: tab === 'orders' || tab === 'dashboard'
-  })
-
-  const { data: openSOs = [] } = useQuery<OpenSO[]>({
-    queryKey: ['mrp-open-sos'],
-    queryFn: () => api.get('/production/mrp/open-sos').then(r => r.data),
-    enabled: tab === 'run-mrp' || tab === 'dashboard'
-  })
-
-  const { data: lastMRP, isLoading: lastMRPLoading } = useQuery<MRPResult>({
-    queryKey: ['mrp-last'],
-    queryFn: () => api.get('/production/mrp/last').then(r => r.data),
-    enabled: tab === 'requirements' || tab === 'reservations' || tab === 'reports'
-  })
-
-  const { data: softReservations = [] } = useQuery<SoftReservationV2[]>({
-    queryKey: ['mrp-soft-res'],
-    queryFn: () => api.get('/production/mrp/soft-reservations').then(r => r.data),
-    enabled: tab === 'reservations'
-  })
+  const invalidateAll = () => {
+    qc.invalidateQueries({ queryKey: ['prod-stats'] })
+    qc.invalidateQueries({ queryKey: ['jos-process'] })
+    qc.invalidateQueries({ queryKey: ['jos-all'] })
+    qc.invalidateQueries({ queryKey: ['ready-to-process'] })
+    qc.invalidateQueries({ queryKey: ['process-report'] })
+  }
 
   // ── Mutations ─────────────────────────────────────────────────────────────────
-
   const createJOMut = useMutation({
     mutationFn: (b: object) => api.post('/production/orders', b),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['jos'] })
-      qc.invalidateQueries({ queryKey: ['prod-stats'] })
-      setShowJOForm(false)
-    }
+    onSuccess: () => { invalidateAll(); setModal(null); setNewLines([]) },
+    onError: (e: any) => alert(e.response?.data?.detail || 'Error creating JO'),
   })
-
   const updateJOMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/production/orders/${id}`, data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['jos'] })
+    onSuccess: () => invalidateAll(),
+  })
+  const issueFabricMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-fabric`, data),
+    onSuccess: () => { invalidateAll(); setModal(null) },
+    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
+  })
+  const returnFabricMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/return-fabric`, data),
+    onSuccess: () => { invalidateAll(); setModal(null) },
+  })
+  const receiveMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/receive-pieces`, data),
+    onSuccess: () => { invalidateAll(); setModal(null) },
+    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
+  })
+  const issuePiecesMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-pieces`, data),
+    onSuccess: () => { invalidateAll(); setModal(null) },
+    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
+  })
+  const addCostMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/add-cost`, data),
+    onSuccess: () => { invalidateAll(); setModal(null) },
+  })
+  const nextProcessMut = useMutation({
+    mutationFn: (id: number) => api.post(`/production/orders/${id}/next-process`, {}),
+    onSuccess: (res) => { invalidateAll(); alert(`✅ Next process JO created: ${res.data.jo_number} — ${res.data.process}`) },
+    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
   })
 
-  const runMRPMut = useMutation({
-    mutationFn: (body: { so_numbers: string[] }) => api.post('/production/mrp/run', body).then(r => r.data),
-    onSuccess: (data: MRPResult) => {
-      qc.setQueryData(['mrp-last'], data)
-      setTab('requirements')
+  const openModal = (type: ModalType, jo: JO, lineId?: number) => {
+    setActiveJO(jo)
+    setActiveLineId(lineId || null)
+    setModal(type)
+    if (type === 'issue-fabric') setFabricIssueForm(f => ({ ...f, fabric_code: jo.fabric_code || '', issued_qty: jo.fabric_qty || 0 }))
+    if (type === 'return-fabric') setFabricReturnForm(f => ({ ...f, fabric_code: jo.fabric_code || '' }))
+    if (type === 'receive') {
+      const line = jo.lines.find(l => l.id === lineId)
+      setReceiveForm(f => ({ ...f, received_qty: line ? line.planned_qty - line.received_qty : jo.planned_qty - jo.received_qty }))
     }
-  })
-
-  const softReserveAllMut = useMutation({
-    mutationFn: () => api.post('/production/mrp/soft-reserve-all').then(r => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['mrp-soft-res'] })
-      qc.invalidateQueries({ queryKey: ['mrp-last'] })
+    if (type === 'issue-pieces') {
+      const line = jo.lines.find(l => l.id === lineId)
+      setIssuePiecesForm(f => ({ ...f, to_process: jo.next_process || '', issued_qty: line ? line.received_qty : jo.received_qty }))
     }
-  })
-
-  const releaseSOResMut = useMutation({
-    mutationFn: (so_no: string) => api.delete(`/production/mrp/soft-reservations/${so_no}`).then(r => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['mrp-soft-res'] })
-      qc.invalidateQueries({ queryKey: ['mrp-last'] })
-    }
-  })
-
-  const createPRMut = useMutation({
-    mutationFn: (body: object) => api.post('/purchase/pr', body).then(r => r.data),
-    onSuccess: (data: { pr_number: string }) => {
-      alert(`PR created: ${data.pr_number}`)
-      setShowPRModal(false)
-    }
-  })
-
-  const openPRModal = () => {
-    const shortage = mrpMaterials
-      .filter(([, mat]) => mat.net_req_with_soft > 0)
-      .map(([code, mat]) => ({
-        selected: true,
-        material_code: code,
-        material_name: mat.name,
-        material_type: mat.type,
-        required_qty: parseFloat(mat.net_req_with_soft.toFixed(3)),
-        unit: mat.unit,
-      }))
-    setPRLines(shortage)
-    setPRForm({
-      requested_by: '', priority: 'High',
-      required_by_date: '',
-      so_reference: lastMRP?.so_numbers?.join(', ') ?? '',
-      notes: `Auto-generated from MRP run: ${lastMRP?.run_time ?? ''}`,
-    })
-    setShowPRModal(true)
+    if (type === 'add-cost') setCostForm({ cost_type: 'Labour', amount: 0, description: '' })
   }
 
-  const submitPR = () => {
-    const lines = prLines.filter(l => l.selected && l.required_qty > 0)
-    if (!lines.length) { alert('No lines selected'); return }
-    createPRMut.mutate({
-      pr_date: new Date().toISOString().split('T')[0],
-      requested_by: prForm.requested_by,
-      department: 'Production',
-      priority: prForm.priority,
-      so_reference: prForm.so_reference,
-      notes: prForm.notes,
-      lines: lines.map(l => ({
-        material_code: l.material_code,
-        material_name: l.material_name,
-        material_type: l.material_type,
-        required_qty: l.required_qty,
-        unit: l.unit,
-        required_by_date: prForm.required_by_date,
-        purpose: 'MRP Requirement',
-      }))
-    })
+  // ── Add SO lines to new JO ─────────────────────────────────────────────────
+  const addSOLineToJO = (line: any) => {
+    if (newLines.find(l => l.sku === line.sku)) return
+    setNewLines(ls => [...ls, {
+      so_number: newForm.so_number,
+      sku: line.sku || '',
+      sku_name: line.sku_name || line.item_name || '',
+      style: '',
+      planned_qty: line.qty || 0,
+      vendor_rate: 0,
+      remarks: '',
+    }])
   }
 
-  // ── Derived Data ─────────────────────────────────────────────────────────────
+  const allProcesses = processes.length > 0 ? processes : ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Finishing', 'Packing']
 
-  const mrpResult = lastMRP?.result ?? {}
-  const mrpMaterials = Object.entries(mrpResult) as [string, MRPMaterial][]
+  const renderJOCard = (jo: JO) => {
+    const isExpanded = expanded === jo.id
+    const totalPlanned = jo.lines.reduce((s, l) => s + l.planned_qty, 0) || jo.planned_qty
+    const totalReceived = jo.lines.reduce((s, l) => s + l.received_qty, 0) || jo.received_qty
+    const totalBalance = totalPlanned - totalReceived
+    const pct = totalPlanned > 0 ? Math.min(100, (totalReceived / totalPlanned) * 100) : 0
 
-  const filteredMaterials = useMemo(() => {
-    return mrpMaterials.filter(([code, mat]) => {
-      if (reqTypeFilter && mat.type !== reqTypeFilter) return false
-      if (shortageOnly && mat.net_req_with_soft <= 0) return false
-      if (reqSearch) {
-        const s = reqSearch.toLowerCase()
-        if (!code.toLowerCase().includes(s) && !mat.name.toLowerCase().includes(s)) return false
-      }
-      return true
-    })
-  }, [mrpMaterials, reqTypeFilter, shortageOnly, reqSearch])
+    return (
+      <div key={jo.id} className="bg-white rounded-xl border shadow-sm overflow-hidden">
+        {/* Header */}
+        <div className="flex items-start justify-between p-4 cursor-pointer" onClick={() => setExpanded(isExpanded ? null : jo.id)}>
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2 mb-1">
+              <span className="font-bold text-[#002B5B] text-sm">{jo.jo_number}</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${PROCESS_COLORS[jo.process] || 'bg-gray-100 text-gray-600'}`}>
+                {PROCESS_ICONS[jo.process] || ''} {jo.process}
+              </span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[jo.status] || ''}`}>{jo.status}</span>
+              {jo.exec_type === 'Outsource' && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">🏭 {jo.vendor_name}</span>}
+            </div>
+            <p className="text-sm text-gray-600">SO: <b>{jo.so_number || '—'}</b> · SKU: <b>{jo.sku}</b> {jo.sku_name ? `— ${jo.sku_name}` : ''}</p>
+            {/* Routing bar */}
+            {jo.routing && jo.routing.length > 0 && (
+              <div className="flex items-center gap-1 mt-1 flex-wrap">
+                {jo.routing.map((p, i) => (
+                  <span key={p}>
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${p === jo.process ? 'bg-[#002B5B] text-white' : 'bg-gray-100 text-gray-500'}`}>
+                      {PROCESS_ICONS[p] || ''} {p}
+                    </span>
+                    {i < jo.routing.length - 1 && <span className="text-gray-300 text-xs mx-0.5">→</span>}
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* Progress */}
+            <div className="flex items-center gap-2 mt-2">
+              <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div className="h-full bg-green-400 rounded-full" style={{ width: `${pct}%` }} />
+              </div>
+              <span className="text-xs text-gray-500 shrink-0">{fmt(totalReceived)}/{fmt(totalPlanned)} pcs</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 ml-2 shrink-0">
+            <button onClick={e => { e.stopPropagation(); printJO(jo) }} className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50">🖨️</button>
+            <span className="text-gray-400 text-xs">{isExpanded ? '▲' : '▼'}</span>
+          </div>
+        </div>
 
-  const buyers = useMemo(() => [...new Set(openSOs.map(s => s.buyer).filter(Boolean))], [openSOs])
-  const filteredSOs = filterBuyer ? openSOs.filter(s => s.buyer === filterBuyer) : openSOs
+        {/* Expanded */}
+        {isExpanded && (
+          <div className="border-t bg-gray-50 px-4 pb-4 space-y-4">
+            {/* Stats row */}
+            <div className="grid grid-cols-3 md:grid-cols-6 gap-2 pt-3">
+              {[
+                ['Planned', fmt(totalPlanned), 'text-gray-700'],
+                ['Issued', fmt(jo.issued_qty || 0), 'text-blue-600'],
+                ['Received', fmt(totalReceived), 'text-green-600'],
+                ['Rejected', fmt(jo.rejected_qty || 0), 'text-red-500'],
+                ['Balance', fmt(totalBalance), 'text-amber-600'],
+                ['Cost', fmtR(jo.process_cost || 0), 'text-purple-600'],
+              ].map(([l, v, c]) => (
+                <div key={l} className="bg-white rounded-lg p-2 border text-center">
+                  <p className={`font-bold text-sm ${c}`}>{v}</p>
+                  <p className="text-xs text-gray-400">{l}</p>
+                </div>
+              ))}
+            </div>
 
-  const matTypes = useMemo(() => [...new Set(mrpMaterials.map(([, m]) => m.type).filter(Boolean))], [mrpMaterials])
+            {/* Process stock visibility */}
+            {jo.process_stocks && Object.keys(jo.process_stocks).length > 0 && (
+              <div className="bg-white rounded-lg border p-3">
+                <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Process Stock — {jo.sku}</p>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(jo.process_stocks).map(([proc, stock]) => (
+                    <div key={proc} className={`text-xs px-3 py-1.5 rounded-lg font-medium border ${proc === jo.process ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'bg-gray-50 text-gray-700 border-gray-200'}`}>
+                      {PROCESS_ICONS[proc] || ''} {proc}: <b>{stock.available}</b> pcs
+                      <span className="opacity-60 ml-1">(in:{stock.in} out:{stock.out})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
-  // Group soft reservations by material
-  const resByMaterial = useMemo(() => {
-    const grouped: Record<string, { total: number; unit: string; sos: string[] }> = {}
-    for (const r of softReservations) {
-      if (!grouped[r.material_code]) {
-        grouped[r.material_code] = { total: 0, unit: r.unit, sos: [] }
-      }
-      grouped[r.material_code].total += r.qty
-      if (!grouped[r.material_code].sos.includes(r.so_no)) {
-        grouped[r.material_code].sos.push(r.so_no)
-      }
-    }
-    return grouped
-  }, [softReservations])
+            {/* Lines table */}
+            {jo.lines.length > 0 && (
+              <div className="bg-white rounded-lg border overflow-hidden">
+                <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600 flex justify-between">
+                  <span>Lines — Issue / Receive per SKU</span>
+                  <span className="text-gray-400">{jo.lines.length} lines</span>
+                </div>
+                <table className="w-full text-xs">
+                  <thead><tr className="text-gray-400 border-b uppercase">
+                    <th className="text-left px-3 py-2">SKU</th>
+                    <th className="text-left px-3 py-2">Style</th>
+                    <th className="text-right px-3 py-2">Planned</th>
+                    <th className="text-right px-3 py-2">Received</th>
+                    <th className="text-right px-3 py-2">Rejected</th>
+                    <th className="text-right px-3 py-2">Balance</th>
+                    <th className="text-right px-3 py-2">Rate</th>
+                    <th className="text-right px-3 py-2">Amount</th>
+                    <th className="text-center px-3 py-2">Actions</th>
+                  </tr></thead>
+                  <tbody>
+                    {jo.lines.map(line => (
+                      <tr key={line.id} className="border-t border-gray-50 hover:bg-gray-50">
+                        <td className="px-3 py-2 font-mono font-semibold text-[#002B5B]">{line.sku}</td>
+                        <td className="px-3 py-2 text-gray-500">{line.style || '—'}</td>
+                        <td className="px-3 py-2 text-right">{fmt(line.planned_qty)}</td>
+                        <td className="px-3 py-2 text-right text-green-600 font-semibold">{fmt(line.received_qty)}</td>
+                        <td className="px-3 py-2 text-right text-red-500">{fmt(line.rejected_qty)}</td>
+                        <td className={`px-3 py-2 text-right font-semibold ${line.balance_qty > 0 ? 'text-amber-600' : 'text-green-600'}`}>{fmt(line.balance_qty)}</td>
+                        <td className="px-3 py-2 text-right">{fmtR(line.vendor_rate)}</td>
+                        <td className="px-3 py-2 text-right font-semibold">{fmtR(line.planned_qty * line.vendor_rate)}</td>
+                        <td className="px-3 py-2 text-center">
+                          <div className="flex gap-1 justify-center">
+                            <button onClick={() => openModal('receive', jo, line.id)}
+                              className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">✅ Rec</button>
+                            {jo.next_process && (
+                              <button onClick={() => openModal('issue-pieces', jo, line.id)}
+                                className="px-2 py-0.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700">
+                                → {jo.next_process}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
-  // Group soft reservations by SO
-  const resBySO = useMemo(() => {
-    const grouped: Record<string, { mats: number; total_qty: number }> = {}
-    for (const r of softReservations) {
-      if (!grouped[r.so_no]) grouped[r.so_no] = { mats: 0, total_qty: 0 }
-      grouped[r.so_no].mats += 1
-      grouped[r.so_no].total_qty += r.qty
-    }
-    return grouped
-  }, [softReservations])
+            {/* Fabric issues (Cutting only) */}
+            {jo.process === 'Cutting' && (
+              <div className="bg-white rounded-lg border p-3">
+                <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Fabric</p>
+                <div className="flex flex-wrap gap-3 text-xs">
+                  <span>Code: <b className="font-mono">{jo.fabric_code || '—'}</b></span>
+                  <span>Planned: <b>{jo.fabric_qty} {jo.fabric_unit}</b></span>
+                  <span className="text-blue-600">Issued: <b>{jo.fabric_issued_qty || 0}</b></span>
+                  <span className="text-amber-600">Returned: <b>{jo.fabric_received_qty || 0}</b></span>
+                  <span className="text-red-600">Consumed: <b>{(jo.fabric_issued_qty || 0) - (jo.fabric_received_qty || 0)}</b></span>
+                </div>
+                {jo.fabric_issues && jo.fabric_issues.length > 0 && (
+                  <table className="w-full text-xs mt-2">
+                    <thead><tr className="text-gray-400 border-b"><th className="text-left pb-1">Date</th><th className="text-left pb-1">Code</th><th className="text-right pb-1">Issued</th><th className="text-left pb-1">By</th></tr></thead>
+                    <tbody>{jo.fabric_issues.map((f: any) => (
+                      <tr key={f.id} className="border-t border-gray-50">
+                        <td className="py-1">{f.issue_date}</td><td className="py-1 font-mono">{f.fabric_code}</td>
+                        <td className="py-1 text-right text-blue-600 font-semibold">{f.issued_qty} {f.unit}</td>
+                        <td className="py-1 text-gray-500">{f.issued_by || '—'}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                )}
+              </div>
+            )}
 
-  // Report filtering
-  const reportMaterials = useMemo(() => {
-    const TYPE_MAP: Record<string, string[]> = {
-      fabric: ['GF', 'RM'],
-      accessories: ['ACC'],
-      packaging: ['PKG'],
-    }
-    return mrpMaterials.filter(([, mat]) => {
-      if (reportType === 'all') return true
-      if (reportType === 'buyer') return true
-      const types = TYPE_MAP[reportType] ?? []
-      return types.includes(mat.type)
-    })
-  }, [mrpMaterials, reportType])
+            {/* Action buttons */}
+            <div className="flex flex-wrap gap-2">
+              {jo.process === 'Cutting' && (
+                <>
+                  <button onClick={() => openModal('issue-fabric', jo)} className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">📦 Issue Fabric</button>
+                  <button onClick={() => openModal('return-fabric', jo)} className="px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded-lg font-medium">↩️ Return Fabric</button>
+                </>
+              )}
+              <button onClick={() => openModal('receive', jo)} className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">✅ Receive (JO level)</button>
+              {jo.next_process && (
+                <button onClick={() => openModal('issue-pieces', jo)} className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700">
+                  ➡️ Issue to {jo.next_process}
+                </button>
+              )}
+              <button onClick={() => openModal('add-cost', jo)} className="px-3 py-1.5 text-xs bg-amber-600 text-white rounded-lg font-medium">💰 Add Cost</button>
+              <select value={jo.status} onChange={e => updateJOMut.mutate({ id: jo.id, data: { status: e.target.value } })}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs">
+                {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
+              </select>
+              {jo.status === 'Completed' && !jo.next_stage_jo_id && jo.next_process && (
+                <button onClick={() => nextProcessMut.mutate(jo.id)} disabled={nextProcessMut.isPending}
+                  className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg font-medium hover:bg-blue-800 disabled:opacity-50">
+                  🔄 Create {jo.next_process} JO →
+                </button>
+              )}
+              {jo.next_stage_jo_id && (
+                <span className="px-3 py-1.5 text-xs bg-green-50 text-green-700 rounded-lg border border-green-200">✅ {jo.next_process} JO linked</span>
+              )}
+              <button onClick={() => printJO(jo)} className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50">🖨️ Print JO</button>
+            </div>
 
-  const TABS: [MainTab, string][] = [
-    ['dashboard', 'Dashboard'],
-    ['run-mrp', 'Run MRP'],
-    ['requirements', 'Material Requirements'],
-    ['reservations', 'Reservations'],
-    ['reports', 'MRP Reports'],
-    ['orders', 'Job Orders'],
-  ]
-
-  // ── Render ────────────────────────────────────────────────────────────────────
+            {/* Cost log */}
+            {jo.cost_entries && jo.cost_entries.length > 0 && (
+              <div className="bg-white rounded-lg border p-3">
+                <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Cost Log — Total: {fmtR(jo.total_cost || 0)}</p>
+                <table className="w-full text-xs">
+                  <thead><tr className="text-gray-400 border-b"><th className="text-left pb-1">Date</th><th className="text-left pb-1">Type</th><th className="text-right pb-1">Amount</th><th className="text-left pb-1">Desc</th></tr></thead>
+                  <tbody>{jo.cost_entries.map((c: any) => (
+                    <tr key={c.id} className="border-t border-gray-50">
+                      <td className="py-1">{c.cost_date}</td><td className="py-1">{c.cost_type}</td>
+                      <td className="py-1 text-right font-semibold text-amber-700">{fmtR(c.amount)}</td>
+                      <td className="py-1 text-gray-500">{c.description || '—'}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
-    <>
     <div className="space-y-4">
       <div>
-        <h1 className="text-xl font-bold text-gray-800">Production &amp; MRP</h1>
-        <p className="text-sm text-gray-500">Material Requirement Planning, Job Orders, Reservations</p>
+        <h1 className="text-xl font-bold text-gray-800">Production</h1>
+        <p className="text-sm text-gray-500">Dynamic routing — {allProcesses.join(' → ')}</p>
       </div>
 
-      <div className="flex gap-1 bg-gray-100 p-1 rounded-lg flex-wrap">
-        {TABS.map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+      {/* Main tabs */}
+      <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
+        {([['process','⚙️ Process'], ['tracker','📋 All JOs'], ['reports','📊 Reports'], ['mrp','🔢 MRP']] as const).map(([key, label]) => (
+          <button key={key} onClick={() => { setTab(key); setExpanded(null) }}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
           </button>
         ))}
       </div>
 
-      {/* ── DASHBOARD ── */}
-      {tab === 'dashboard' && (
+      {/* Stats cards */}
+      {stats && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            ['Total JOs', stats.total_jos, 'text-gray-700'],
+            ['Open', stats.open_jos, 'text-amber-600'],
+            ['In Progress', stats.in_progress, 'text-blue-600'],
+            ['Done Today', stats.completed_today, 'text-green-600'],
+          ].map(([l, v, c]) => (
+            <div key={l as string} className="bg-white rounded-xl p-3 border shadow-sm">
+              <p className={`text-xl font-bold ${c}`}>{v}</p>
+              <p className="text-xs text-gray-500 mt-1 font-semibold">{l}</p>
+            </div>
+          ))}
+          {stats.process_counts && Object.entries(stats.process_counts as Record<string, number>).map(([p, cnt]) => (
+            <div key={p} className="bg-white rounded-xl p-3 border shadow-sm">
+              <p className="text-xl font-bold text-gray-700">{cnt}</p>
+              <p className="text-xs text-gray-500 mt-1 font-semibold">{PROCESS_ICONS[p] || ''} {p}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* PROCESS TAB */}
+      {tab === 'process' && (
         <div className="space-y-4">
-          {stats && (
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              {[
-                { label: 'TOTAL JOs', value: stats.total_jos, color: 'text-gray-700' },
-                { label: 'OPEN JOs', value: stats.open_jos, color: 'text-yellow-600' },
-                { label: 'IN PROGRESS', value: stats.in_progress, color: 'text-blue-600' },
-                { label: 'COMPLETED TODAY', value: stats.completed_today, color: 'text-green-600' },
-                { label: 'OPEN SOs', value: openSOs.length, color: 'text-purple-600' },
-              ].map(({ label, value, color }) => (
-                <div key={label} className="bg-white rounded-xl p-4 border border-gray-100 shadow-sm">
-                  <p className={`text-2xl font-bold ${color}`}>{value}</p>
-                  <p className="text-xs text-gray-500 mt-1 font-semibold tracking-wide">{label}</p>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Open SOs with BOM status */}
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
-            <div className="flex justify-between items-center mb-3">
-              <h3 className="font-semibold text-gray-700 text-sm">Open Sales Orders</h3>
-              <button onClick={() => setTab('run-mrp')}
-                className="text-xs px-3 py-1.5 bg-[#002B5B] text-white rounded-lg hover:bg-blue-800">
-                Run MRP
+          {/* Process selector */}
+          <div className="flex flex-wrap gap-1 bg-gray-100 p-1 rounded-lg w-fit">
+            {allProcesses.map(p => (
+              <button key={p} onClick={() => { setActiveProcess(p); setExpanded(null) }}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${activeProcess === p ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                {PROCESS_ICONS[p] || ''} {p}
               </button>
-            </div>
-            <table className="w-full text-sm">
-              <thead className="text-gray-400 text-xs uppercase">
-                <tr>{['SO #', 'Buyer', 'Delivery Date', 'Status', 'Pending Qty', 'SKUs'].map(h =>
-                  <th key={h} className="text-left px-3 py-2">{h}</th>)}</tr>
-              </thead>
-              <tbody>
-                {openSOs.slice(0, 10).map(so => (
-                  <tr key={so.so_number} className="border-t border-gray-50 hover:bg-gray-50">
-                    <td className="px-3 py-2 font-medium text-gray-700">{so.so_number}</td>
-                    <td className="px-3 py-2 text-gray-600">{so.buyer || '—'}</td>
-                    <td className="px-3 py-2 text-gray-500">{so.delivery_date || '—'}</td>
-                    <td className="px-3 py-2">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(so.status)}`}>{so.status}</span>
-                    </td>
-                    <td className="px-3 py-2 font-semibold text-blue-600">{so.pending_qty.toLocaleString()}</td>
-                    <td className="px-3 py-2 text-xs text-gray-400">{so.skus.slice(0, 3).join(', ')}{so.skus.length > 3 ? ` +${so.skus.length - 3}` : ''}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {openSOs.length === 0 && <p className="text-center text-gray-400 py-4 text-sm">No open sales orders</p>}
-          </div>
-
-          {/* Recent JOs */}
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
-            <h3 className="font-semibold text-gray-700 mb-3 text-sm">Recent Job Orders</h3>
-            {jos.slice(0, 8).map(jo => (
-              <div key={jo.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
-                <div>
-                  <p className="text-sm font-medium text-gray-700">{jo.jo_number} · {jo.process}</p>
-                  <p className="text-xs text-gray-400">{jo.sku_name || jo.sku} · SO: {jo.so_number || '—'}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">{jo.output_qty}/{jo.planned_qty}</span>
-                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(jo.status)}`}>{jo.status}</span>
-                </div>
-              </div>
             ))}
-            {jos.length === 0 && <p className="text-xs text-gray-400">No job orders yet</p>}
-          </div>
-        </div>
-      )}
-
-      {/* ── RUN MRP ── */}
-      {tab === 'run-mrp' && (
-        <div className="space-y-4">
-          <div className="bg-white rounded-xl border p-4 space-y-4">
-            <div>
-              <h3 className="font-semibold text-gray-700">Run MRP</h3>
-              <p className="text-xs text-gray-500 mt-1">Select Sales Orders to explode through BOMs and calculate material requirements.</p>
-            </div>
-
-            <div className="flex gap-3 items-end flex-wrap">
-              <div>
-                <label className="text-xs text-gray-500">Filter by Buyer</label>
-                <select value={filterBuyer} onChange={e => setFilterBuyer(e.target.value)}
-                  className="block border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 min-w-[140px]">
-                  <option value="">All Buyers</option>
-                  {buyers.map(b => <option key={b}>{b}</option>)}
-                </select>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={() => setSelectedSOs(filteredSOs.map(s => s.so_number))}
-                  className="px-3 py-1.5 border border-gray-200 rounded text-sm text-gray-600 hover:bg-gray-50">
-                  Select All
-                </button>
-                <button onClick={() => setSelectedSOs([])}
-                  className="px-3 py-1.5 border border-gray-200 rounded text-sm text-gray-600 hover:bg-gray-50">
-                  Clear
-                </button>
-              </div>
-            </div>
-
-            {/* SO selection table */}
-            <div className="border border-gray-100 rounded-lg overflow-hidden max-h-80 overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 text-gray-400 text-xs uppercase sticky top-0">
-                  <tr>
-                    <th className="px-3 py-2 w-8"></th>
-                    {['SO #', 'Buyer', 'Delivery', 'Status', 'Pending Qty', 'Lines'].map(h =>
-                      <th key={h} className="text-left px-3 py-2">{h}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredSOs.map(so => (
-                    <tr key={so.so_number} className={`border-t border-gray-50 hover:bg-blue-50 cursor-pointer ${selectedSOs.includes(so.so_number) ? 'bg-blue-50' : ''}`}
-                      onClick={() => setSelectedSOs(prev =>
-                        prev.includes(so.so_number) ? prev.filter(x => x !== so.so_number) : [...prev, so.so_number]
-                      )}>
-                      <td className="px-3 py-2">
-                        <input type="checkbox" checked={selectedSOs.includes(so.so_number)} readOnly
-                          className="rounded" />
-                      </td>
-                      <td className="px-3 py-2 font-medium text-gray-700">{so.so_number}</td>
-                      <td className="px-3 py-2 text-gray-600">{so.buyer || '—'}</td>
-                      <td className="px-3 py-2 text-gray-500">{so.delivery_date || '—'}</td>
-                      <td className="px-3 py-2">
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(so.status)}`}>{so.status}</span>
-                      </td>
-                      <td className="px-3 py-2 font-semibold text-blue-600">{so.pending_qty.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-gray-500">{so.line_count}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {filteredSOs.length === 0 && <p className="text-center text-gray-400 py-6 text-sm">No open sales orders</p>}
-            </div>
-
-            {/* Selected summary */}
-            {selectedSOs.length > 0 && (
-              <div className="bg-blue-50 rounded-lg p-3">
-                <p className="text-sm font-medium text-blue-700">{selectedSOs.length} SO(s) selected</p>
-                <p className="text-xs text-blue-500 mt-1">{selectedSOs.join(', ')}</p>
-              </div>
-            )}
-
-            <button
-              onClick={() => runMRPMut.mutate({ so_numbers: selectedSOs })}
-              disabled={selectedSOs.length === 0 || runMRPMut.isPending}
-              className="px-6 py-2.5 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed">
-              {runMRPMut.isPending ? 'Running MRP...' : 'Run MRP Now'}
-            </button>
           </div>
 
-          {/* Last run summary */}
-          {lastMRP && lastMRP.run_time && (
-            <div className="bg-white rounded-xl border p-4">
-              <p className="text-xs text-gray-500">Last run: <span className="font-medium text-gray-700">{lastMRP.run_time}</span> · {lastMRP.so_numbers.length} SOs · {Object.keys(lastMRP.result).length} materials</p>
-              <button onClick={() => setTab('requirements')} className="mt-2 text-xs text-[#002B5B] hover:underline">View Requirements →</button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── MATERIAL REQUIREMENTS ── */}
-      {tab === 'requirements' && (
-        <div className="space-y-4">
-          {lastMRPLoading && <p className="text-sm text-gray-400">Loading MRP results...</p>}
-
-          {!lastMRPLoading && (!lastMRP || !lastMRP.run_time) && (
-            <div className="bg-white rounded-xl border p-8 text-center">
-              <p className="text-gray-400 text-sm">No MRP results yet.</p>
-              <button onClick={() => setTab('run-mrp')} className="mt-3 px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">
-                Run MRP First
-              </button>
-            </div>
-          )}
-
-          {lastMRP && lastMRP.run_time && (
-            <>
-              {/* Info bar */}
-              <div className="bg-blue-50 rounded-lg p-3 flex items-center justify-between flex-wrap gap-2">
-                <div>
-                  <p className="text-sm font-medium text-blue-700">MRP Result — {Object.keys(mrpResult).length} Materials</p>
-                  <p className="text-xs text-blue-500">Run: {lastMRP.run_time} · SOs: {lastMRP.so_numbers.join(', ')}</p>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => exportCSV(
-                      filteredMaterials.map(([code, m]) => ({
-                        material_code: code, name: m.name, type: m.type, unit: m.unit,
-                        total_req: m.total_req, stock: m.stock, available: m.available,
-                        soft_reserved: m.soft_reserved, net_req_with_soft: m.net_req_with_soft
-                      })),
-                      'mrp_requirements.csv'
-                    )}
-                    className="text-xs px-3 py-1.5 border border-blue-200 text-blue-700 rounded-lg hover:bg-blue-100">
-                    Export CSV
-                  </button>
-                  <button
-                    onClick={openPRModal}
-                    disabled={!mrpMaterials.some(([, m]) => m.net_req_with_soft > 0)}
-                    className="text-xs px-3 py-1.5 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-40 font-medium">
-                    + Create PR from MRP
-                  </button>
-                </div>
-              </div>
-
-              {/* Filters */}
-              <div className="flex gap-3 flex-wrap items-end">
-                <div>
-                  <label className="text-xs text-gray-500">Type</label>
-                  <select value={reqTypeFilter} onChange={e => setReqTypeFilter(e.target.value)}
-                    className="block border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="">All Types</option>
-                    {matTypes.map(t => <option key={t}>{t}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">Search</label>
-                  <input value={reqSearch} onChange={e => setReqSearch(e.target.value)}
-                    placeholder="Code or name..." className="block border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 w-48" />
-                </div>
-                <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer mt-4">
-                  <input type="checkbox" checked={shortageOnly} onChange={e => setShortageOnly(e.target.checked)} className="rounded" />
-                  Shortage Only
-                </label>
-                <p className="text-xs text-gray-400 self-end pb-2">{filteredMaterials.length} of {mrpMaterials.length} materials</p>
-              </div>
-
-              {/* Materials table */}
-              <div className="bg-white rounded-xl border overflow-hidden">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50 text-gray-400 text-xs uppercase">
-                    <tr>
-                      {['Code', 'Name', 'Type', 'Unit', 'Total Req', 'In Stock', 'Available', 'Soft Res', 'Net Req (w/ Soft)', 'Status'].map(h =>
-                        <th key={h} className="text-left px-3 py-2">{h}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredMaterials.map(([code, mat]) => (
-                      <>
-                        <tr key={code}
-                          onClick={() => setSelectedMaterial(selectedMaterial === code ? null : code)}
-                          className={`border-t border-gray-50 hover:bg-gray-50 cursor-pointer ${selectedMaterial === code ? 'bg-blue-50' : ''}`}>
-                          <td className="px-3 py-2 font-medium text-gray-700">{code}</td>
-                          <td className="px-3 py-2 text-gray-600">{mat.name}</td>
-                          <td className="px-3 py-2"><span className="text-xs px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded">{mat.type}</span></td>
-                          <td className="px-3 py-2 text-gray-500">{mat.unit}</td>
-                          <td className="px-3 py-2 font-medium text-gray-700">{mat.total_req.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-green-600">{mat.stock.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-blue-600">{mat.available.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-purple-600">{mat.soft_reserved.toFixed(2)}</td>
-                          <td className={`px-3 py-2 font-bold ${mat.net_req_with_soft > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                            {mat.net_req_with_soft.toFixed(2)}
-                          </td>
-                          <td className="px-3 py-2">{matStatusBadge(mat)}</td>
-                        </tr>
-                        {selectedMaterial === code && (
-                          <tr key={`${code}-breakdown`} className="bg-blue-50">
-                            <td colSpan={10} className="px-6 py-3">
-                              <p className="text-xs font-semibold text-blue-700 mb-2">SO/SKU Breakdown for {code}</p>
-                              <table className="w-full text-xs">
-                                <thead>
-                                  <tr className="text-gray-500">
-                                    {['SO Number', 'SKU', 'Qty Required', 'Source'].map(h =>
-                                      <th key={h} className="text-left pr-4 pb-1">{h}</th>)}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {mat.breakdown.map((bd, i) => (
-                                    <tr key={i} className="border-t border-blue-100">
-                                      <td className="pr-4 py-1 font-medium text-gray-700">{bd.so_no}</td>
-                                      <td className="pr-4 py-1 text-gray-600">{bd.sku}</td>
-                                      <td className="pr-4 py-1 text-gray-700">{bd.qty_req.toFixed(3)}</td>
-                                      <td className="pr-4 py-1 text-gray-400">{bd.source}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </td>
-                          </tr>
-                        )}
-                      </>
-                    ))}
-                  </tbody>
-                </table>
-                {filteredMaterials.length === 0 && (
-                  <p className="text-center text-gray-400 py-8 text-sm">No materials match the current filters.</p>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* ── RESERVATIONS ── */}
-      {tab === 'reservations' && (
-        <div className="space-y-4">
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
-              {([['material', 'Material-wise'], ['so', 'SO-wise'], ['release', 'Release']] as [typeof resSubTab, string][]).map(([key, label]) => (
-                <button key={key} onClick={() => setResSubTab(key)}
-                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${resSubTab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            <button
-              onClick={() => softReserveAllMut.mutate()}
-              disabled={softReserveAllMut.isPending || !lastMRP?.run_time}
-              className="px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:opacity-50">
-              {softReserveAllMut.isPending ? 'Reserving...' : 'Soft Reserve All (from last MRP)'}
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
+              <option value="">All Statuses</option>
+              {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
+            </select>
+            <button onClick={() => { setNewForm(f => ({ ...f, process: activeProcess })); setModal('new-jo') }}
+              className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">
+              + New {activeProcess} JO
             </button>
           </div>
 
-          {resSubTab === 'material' && (
-            <div className="bg-white rounded-xl border overflow-hidden">
-              <div className="px-4 py-3 border-b bg-gray-50">
-                <p className="text-sm font-semibold text-gray-700">{Object.keys(resByMaterial).length} materials with active reservations</p>
-              </div>
-              <table className="w-full text-sm">
-                <thead className="text-gray-400 text-xs uppercase">
-                  <tr>{['Material Code', 'Total Reserved', 'Unit', 'SOs'].map(h =>
-                    <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {Object.entries(resByMaterial).map(([code, info]) => (
-                    <tr key={code} className="border-t border-gray-50 hover:bg-gray-50">
-                      <td className="px-4 py-2 font-medium text-gray-700">{code}</td>
-                      <td className="px-4 py-2 font-semibold text-purple-700">{info.total.toFixed(3)}</td>
-                      <td className="px-4 py-2 text-gray-500">{info.unit}</td>
-                      <td className="px-4 py-2 text-xs text-gray-400">{info.sos.join(', ')}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {Object.keys(resByMaterial).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No active reservations</p>}
-            </div>
-          )}
-
-          {resSubTab === 'so' && (
-            <div className="bg-white rounded-xl border overflow-hidden">
-              <div className="px-4 py-3 border-b bg-gray-50">
-                <p className="text-sm font-semibold text-gray-700">{Object.keys(resBySO).length} SOs with active reservations</p>
-              </div>
-              <table className="w-full text-sm">
-                <thead className="text-gray-400 text-xs uppercase">
-                  <tr>{['SO Number', 'Materials Reserved', 'Total Qty'].map(h =>
-                    <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {Object.entries(resBySO).map(([so_no, info]) => (
-                    <tr key={so_no} className="border-t border-gray-50 hover:bg-gray-50">
-                      <td className="px-4 py-2 font-medium text-gray-700">{so_no}</td>
-                      <td className="px-4 py-2 text-gray-600">{info.mats}</td>
-                      <td className="px-4 py-2 font-semibold text-purple-700">{info.total_qty.toFixed(3)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {Object.keys(resBySO).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No active reservations</p>}
-            </div>
-          )}
-
-          {resSubTab === 'release' && (
-            <div className="bg-white rounded-xl border overflow-hidden">
-              <div className="px-4 py-3 border-b bg-gray-50">
-                <p className="text-sm font-semibold text-gray-700">Release Reservations by SO</p>
-                <p className="text-xs text-gray-400 mt-1">This will mark all MRP soft reservations for an SO as Released.</p>
-              </div>
-              <table className="w-full text-sm">
-                <thead className="text-gray-400 text-xs uppercase">
-                  <tr>{['SO Number', 'Materials', 'Total Qty', 'Action'].map(h =>
-                    <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {Object.entries(resBySO).map(([so_no, info]) => (
-                    <tr key={so_no} className="border-t border-gray-50 hover:bg-gray-50">
-                      <td className="px-4 py-2 font-medium text-gray-700">{so_no}</td>
-                      <td className="px-4 py-2 text-gray-600">{info.mats}</td>
-                      <td className="px-4 py-2 text-purple-700">{info.total_qty.toFixed(3)}</td>
-                      <td className="px-4 py-2">
-                        <button
-                          onClick={() => releaseSOResMut.mutate(so_no)}
-                          disabled={releaseSOResMut.isPending}
-                          className="text-xs px-3 py-1 bg-red-50 text-red-600 rounded hover:bg-red-100">
-                          Release
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {Object.keys(resBySO).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No active reservations to release</p>}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── MRP REPORTS ── */}
-      {tab === 'reports' && (
-        <div className="space-y-4">
-          <div className="flex gap-1 bg-gray-100 p-1 rounded-lg flex-wrap">
-            {([
-              ['all', 'All Materials'],
-              ['fabric', 'Fabric'],
-              ['accessories', 'Accessories'],
-              ['packaging', 'Packaging'],
-              ['buyer', 'Buyer-wise'],
-            ] as [typeof reportType, string][]).map(([key, label]) => (
-              <button key={key} onClick={() => setReportType(key)}
-                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${reportType === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {(!lastMRP || !lastMRP.run_time) && (
-            <div className="bg-white rounded-xl border p-8 text-center">
-              <p className="text-gray-400 text-sm">No MRP results yet.</p>
-              <button onClick={() => setTab('run-mrp')} className="mt-3 px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">
-                Run MRP First
-              </button>
-            </div>
-          )}
-
-          {lastMRP && lastMRP.run_time && (
-            <>
-              <div className="flex justify-between items-center">
-                <p className="text-sm text-gray-500">{reportMaterials.length} materials</p>
-                <button
-                  onClick={() => exportCSV(
-                    reportMaterials.map(([code, m]) => ({
-                      material_code: code, name: m.name, type: m.type, unit: m.unit,
-                      total_req: m.total_req, stock: m.stock, available: m.available,
-                      soft_reserved: m.soft_reserved, net_req: m.net_req, net_req_with_soft: m.net_req_with_soft,
-                    })),
-                    `mrp_report_${reportType}.csv`
-                  )}
-                  className="text-xs px-3 py-1.5 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50">
-                  Export CSV
-                </button>
-              </div>
-
-              {reportType === 'buyer' ? (
-                // Buyer-wise: group breakdown by buyer via SO
-                (() => {
-                  // Build buyer -> material map from breakdowns
-                  const soToBuyer: Record<string, string> = {}
-                  openSOs.forEach(s => { soToBuyer[s.so_number] = s.buyer || 'Unknown' })
-
-                  const buyerData: Record<string, Record<string, { total_req: number; unit: string }>> = {}
-                  mrpMaterials.forEach(([code, mat]) => {
-                    mat.breakdown.forEach(bd => {
-                      const buyer = soToBuyer[bd.so_no] || 'Unknown'
-                      if (!buyerData[buyer]) buyerData[buyer] = {}
-                      if (!buyerData[buyer][code]) buyerData[buyer][code] = { total_req: 0, unit: mat.unit }
-                      buyerData[buyer][code].total_req += bd.qty_req
-                    })
-                  })
-
-                  return (
-                    <div className="space-y-4">
-                      {Object.entries(buyerData).map(([buyer, mats]) => (
-                        <div key={buyer} className="bg-white rounded-xl border overflow-hidden">
-                          <div className="px-4 py-3 border-b bg-gray-50">
-                            <p className="font-semibold text-gray-700 text-sm">{buyer}</p>
-                            <p className="text-xs text-gray-400">{Object.keys(mats).length} materials</p>
-                          </div>
-                          <table className="w-full text-sm">
-                            <thead className="text-gray-400 text-xs uppercase">
-                              <tr>{['Material', 'Qty Required', 'Unit'].map(h =>
-                                <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
-                            </thead>
-                            <tbody>
-                              {Object.entries(mats).map(([code, info]) => (
-                                <tr key={code} className="border-t border-gray-50">
-                                  <td className="px-4 py-2 text-gray-700">{code}</td>
-                                  <td className="px-4 py-2 font-medium text-gray-700">{info.total_req.toFixed(3)}</td>
-                                  <td className="px-4 py-2 text-gray-500">{info.unit}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ))}
+          {/* Ready to process */}
+          {readyLines.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+              <p className="text-sm font-semibold text-amber-800 mb-2">
+                ⚡ Ready for {activeProcess} — {readyLines.length} line(s)
+              </p>
+              <div className="space-y-2">
+                {(readyLines as any[]).map((r: any, i: number) => (
+                  <div key={i} className="bg-white rounded-lg border border-amber-200 px-3 py-2 flex items-center justify-between">
+                    <div className="text-xs">
+                      <span className="font-semibold text-[#002B5B]">SO: {r.so_number}</span>
+                      <span className="mx-2 text-gray-400">·</span>
+                      <span className="font-mono">{r.sku}</span>
+                      {r.fabric_code && <span className="mx-2 text-gray-400">· Fabric: <b>{r.fabric_code}</b></span>}
+                      <span className="mx-2 text-gray-400">·</span>
+                      <span className="text-green-700 font-semibold">
+                        {r.available_qty || r.reserved_qty} pcs available
+                      </span>
+                      {r.already_planned > 0 && (
+                        <span className="ml-2 text-gray-400 italic">(Total: {r.reserved_qty}, JO mein: {r.already_planned})</span>
+                      )}
                     </div>
-                  )
-                })()
-              ) : (
-                <div className="bg-white rounded-xl border overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 text-gray-400 text-xs uppercase">
-                      <tr>
-                        {['Code', 'Name', 'Type', 'Unit', 'Total Req', 'Stock', 'Available', 'Net Req (w/ Soft)', 'Status'].map(h =>
-                          <th key={h} className="text-left px-3 py-2">{h}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reportMaterials.map(([code, mat]) => (
-                        <tr key={code} className="border-t border-gray-50 hover:bg-gray-50">
-                          <td className="px-3 py-2 font-medium text-gray-700">{code}</td>
-                          <td className="px-3 py-2 text-gray-600">{mat.name}</td>
-                          <td className="px-3 py-2"><span className="text-xs px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded">{mat.type}</span></td>
-                          <td className="px-3 py-2 text-gray-500">{mat.unit}</td>
-                          <td className="px-3 py-2 font-medium text-gray-700">{mat.total_req.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-green-600">{mat.stock.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-blue-600">{mat.available.toFixed(2)}</td>
-                          <td className={`px-3 py-2 font-bold ${mat.net_req_with_soft > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                            {mat.net_req_with_soft.toFixed(2)}
-                          </td>
-                          <td className="px-3 py-2">{matStatusBadge(mat)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {reportMaterials.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No materials for this report type.</p>}
-                </div>
-              )}
-            </>
+                    <button onClick={() => {
+                      setNewForm(f => ({
+                        ...f, so_number: r.so_number, sku: r.sku || '', fabric_code: r.fabric_code || '',
+                        fabric_qty: r.reserved_qty || 0, process: activeProcess,
+                        planned_qty: r.available_qty || r.reserved_qty || 0,
+                      }))
+                      setModal('new-jo')
+                    }} className="text-xs px-2 py-1 bg-[#002B5B] text-white rounded hover:bg-blue-800 shrink-0">
+                      Create JO →
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
+
+          {/* JO list */}
+          <div className="space-y-3">
+            {processJOs.map(renderJOCard)}
+            {processJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No {activeProcess} job orders.</p>}
+          </div>
         </div>
       )}
 
-      {/* ── JOB ORDERS ── */}
-      {tab === 'orders' && (
-        <div className="space-y-4">
+      {/* TRACKER TAB */}
+      {tab === 'tracker' && (
+        <div className="space-y-3">
           <div className="flex items-center justify-between">
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
               <option value="">All Statuses</option>
-              {JO_STATUSES.map(s => <option key={s}>{s}</option>)}
+              {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
             </select>
-            <button onClick={() => setShowJOForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ New JO</button>
+            <p className="text-sm text-gray-500">{allJOs.length} job orders</p>
           </div>
+          {allJOs.map(renderJOCard)}
+          {allJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No job orders found.</p>}
+        </div>
+      )}
 
-          {showJOForm && (
-            <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">New Job Order</h3>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {([['so_number', 'SO Number'], ['sku', 'SKU Code'], ['sku_name', 'SKU Name'], ['issued_to', 'Issued To'], ['remarks', 'Remarks']] as [string, string][]).map(([k, l]) => (
-                  <div key={k}><label className="text-xs text-gray-500">{l}</label>
-                    <input value={(joForm as Record<string, string | number>)[k] as string}
-                      onChange={e => setJOForm(f => ({ ...f, [k]: e.target.value }))}
-                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
-                  </div>
-                ))}
-                <div><label className="text-xs text-gray-500">Process</label>
-                  <select value={joForm.process} onChange={e => setJOForm(f => ({ ...f, process: e.target.value }))}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
-                    {PROCESSES.map(p => <option key={p}>{p}</option>)}
-                  </select>
+      {/* REPORTS TAB */}
+      {tab === 'reports' && (
+        <div className="space-y-4">
+          <h3 className="font-semibold text-gray-700">Process-wise Issue / Receive / Balance Report</h3>
+          {allProcesses.map(proc => {
+            const procRows = (processReport as any[]).filter(r => r.process === proc)
+            if (procRows.length === 0) return null
+            return (
+              <div key={proc} className="bg-white rounded-xl border overflow-hidden">
+                <div className={`px-4 py-2 text-sm font-semibold ${PROCESS_COLORS[proc] || 'bg-gray-100 text-gray-700'}`}>
+                  {PROCESS_ICONS[proc] || ''} {proc}
                 </div>
-                <div><label className="text-xs text-gray-500">Exec Type</label>
-                  <select value={joForm.exec_type} onChange={e => setJOForm(f => ({ ...f, exec_type: e.target.value }))}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
-                    <option>Inhouse</option><option>Outsource</option>
-                  </select>
-                </div>
-                {joForm.exec_type === 'Outsource' && (
-                  <div><label className="text-xs text-gray-500">Vendor Name</label>
-                    <input value={joForm.vendor_name} onChange={e => setJOForm(f => ({ ...f, vendor_name: e.target.value }))}
-                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
-                  </div>
-                )}
-                <div><label className="text-xs text-gray-500">SO Qty</label>
-                  <input type="number" value={joForm.so_qty} onChange={e => setJOForm(f => ({ ...f, so_qty: +e.target.value }))}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
-                </div>
-                <div><label className="text-xs text-gray-500">Planned Qty</label>
-                  <input type="number" value={joForm.planned_qty} onChange={e => setJOForm(f => ({ ...f, planned_qty: +e.target.value }))}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
-                </div>
-                <div><label className="text-xs text-gray-500">Expected Completion</label>
-                  <input type="date" value={joForm.expected_completion} onChange={e => setJOForm(f => ({ ...f, expected_completion: e.target.value }))}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
-                </div>
+                <table className="w-full text-sm">
+                  <thead className="text-gray-400 text-xs uppercase bg-gray-50">
+                    <tr>
+                      <th className="text-left px-4 py-2">SO</th>
+                      <th className="text-left px-4 py-2">SKU</th>
+                      <th className="text-right px-4 py-2">Planned</th>
+                      <th className="text-right px-4 py-2">Issued</th>
+                      <th className="text-right px-4 py-2">Received</th>
+                      <th className="text-right px-4 py-2">Rejected</th>
+                      <th className="text-right px-4 py-2">Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {procRows.map((r: any, i: number) => (
+                      <tr key={i} className="border-t border-gray-50">
+                        <td className="px-4 py-2 font-semibold text-[#002B5B]">{r.so_number}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{r.sku}</td>
+                        <td className="px-4 py-2 text-right">{fmt(r.planned)}</td>
+                        <td className="px-4 py-2 text-right text-blue-600">{fmt(r.issued)}</td>
+                        <td className="px-4 py-2 text-right text-green-600 font-semibold">{fmt(r.received)}</td>
+                        <td className="px-4 py-2 text-right text-red-500">{fmt(r.rejected)}</td>
+                        <td className={`px-4 py-2 text-right font-bold ${(r.balance || 0) > 0 ? 'text-amber-600' : 'text-green-600'}`}>{fmt(r.balance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              <div className="flex gap-2">
-                <button onClick={() => createJOMut.mutate(joForm)} disabled={createJOMut.isPending}
-                  className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
-                  {createJOMut.isPending ? 'Saving…' : 'Create JO'}
-                </button>
-                <button onClick={() => setShowJOForm(false)} className="px-4 py-2 border rounded-lg text-sm text-gray-600">Cancel</button>
-              </div>
+            )
+          })}
+          {processReport.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No data yet.</p>}
+        </div>
+      )}
+
+      {/* MRP TAB */}
+      {tab === 'mrp' && (
+        <div className="bg-white rounded-xl border p-6 text-center">
+          <p className="text-lg font-semibold text-gray-700 mb-2">🔢 MRP</p>
+          <p className="text-sm text-gray-500">Use Purchase module → PR → From MRP to run MRP and generate requisitions.</p>
+        </div>
+      )}
+
+      {/* ── NEW JO MODAL ─────────────────────────────────────────────────────── */}
+      {modal === 'new-jo' && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl p-6 space-y-4 my-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700 text-lg">
+                {PROCESS_ICONS[newForm.process] || ''} New {newForm.process} Job Order
+              </h3>
+              <button onClick={() => setModal(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
             </div>
-          )}
 
-          <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-gray-400 text-xs uppercase">
-                <tr>{['JO #', 'Process', 'SKU', 'SO #', 'Planned', 'Output', 'Exec', 'Status', 'Action'].map(h =>
-                  <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
-              </thead>
-              <tbody>
-                {jos.map(jo => (
-                  <tr key={jo.id} className="border-t border-gray-50 hover:bg-gray-50">
-                    <td className="px-4 py-2 font-medium text-gray-700">{jo.jo_number}</td>
-                    <td className="px-4 py-2 text-gray-700">{jo.process}</td>
-                    <td className="px-4 py-2 text-gray-600">{jo.sku_name || jo.sku}</td>
-                    <td className="px-4 py-2 text-gray-500">{jo.so_number || '—'}</td>
-                    <td className="px-4 py-2 text-gray-700">{jo.planned_qty.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-blue-600 font-medium">{jo.output_qty.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-gray-500">{jo.exec_type}</td>
-                    <td className="px-4 py-2">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(jo.status)}`}>{jo.status}</span>
-                    </td>
-                    <td className="px-4 py-2">
-                      <select value={jo.status} onChange={e => updateJOMut.mutate({ id: jo.id, data: { status: e.target.value } })}
-                        className="border border-gray-200 rounded px-2 py-1 text-xs">
-                        {JO_STATUSES.map(s => <option key={s}>{s}</option>)}
-                      </select>
-                    </td>
-                  </tr>
+            {/* Routing preview */}
+            {itemRouting?.routing && (
+              <div className="flex items-center gap-1 flex-wrap">
+                {(itemRouting.routing as string[]).map((p, i) => (
+                  <span key={p}>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${p === newForm.process ? 'bg-[#002B5B] text-white' : 'bg-gray-100 text-gray-500'}`}>
+                      {PROCESS_ICONS[p] || ''} {p}
+                    </span>
+                    {i < itemRouting.routing.length - 1 && <span className="text-gray-300 text-xs mx-1">→</span>}
+                  </span>
                 ))}
-              </tbody>
-            </table>
-            {jos.length === 0 && <p className="text-center text-gray-400 py-6 text-sm">No job orders found.</p>}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {/* SO */}
+              <div><label className="text-xs text-gray-500">SO Number *</label>
+                <select value={newForm.so_number} onChange={e => setNewForm(f => ({ ...f, so_number: e.target.value, sku: '', sku_name: '' }))}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                  <option value="">Select SO</option>
+                  {(soList as any[]).map((s: any) => <option key={s.so_number} value={s.so_number}>{s.so_number} — {s.buyer || ''}</option>)}
+                </select>
+              </div>
+              {/* Process */}
+              <div><label className="text-xs text-gray-500">Process *</label>
+                <select value={newForm.process} onChange={e => setNewForm(f => ({ ...f, process: e.target.value }))}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                  {allProcesses.map(p => <option key={p}>{p}</option>)}
+                </select>
+              </div>
+              {/* Exec type */}
+              <div><label className="text-xs text-gray-500">Exec Type</label>
+                <select value={newForm.exec_type} onChange={e => setNewForm(f => ({ ...f, exec_type: e.target.value }))}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                  {['Inhouse','Outsource'].map(t => <option key={t}>{t}</option>)}
+                </select>
+              </div>
+              {newForm.exec_type === 'Outsource' && (
+                <>
+                  <div><label className="text-xs text-gray-500">Vendor Name</label>
+                    <input value={newForm.vendor_name} onChange={e => setNewForm(f => ({ ...f, vendor_name: e.target.value }))}
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
+                </>
+              )}
+              {[['expected_completion','Expected Date'],['remarks','Remarks']].map(([k,l]) => (
+                <div key={k}><label className="text-xs text-gray-500">{l}</label>
+                  <input value={(newForm as any)[k]} onChange={e => setNewForm(f => ({ ...f, [k]: e.target.value }))}
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
+              ))}
+              {newForm.process === 'Cutting' && (
+                <>
+                  <div><label className="text-xs text-gray-500">Fabric Code</label>
+                    <input value={newForm.fabric_code} onChange={e => setNewForm(f => ({ ...f, fabric_code: e.target.value }))}
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 font-mono" /></div>
+                  <div><label className="text-xs text-gray-500">Fabric Qty (MTR)</label>
+                    <input type="number" value={newForm.fabric_qty} onChange={e => setNewForm(f => ({ ...f, fabric_qty: +e.target.value }))}
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
+                </>
+              )}
+            </div>
+
+            {/* Validation message */}
+            {newForm.process !== 'Cutting' && newForm.so_number && newForm.sku && joValidation && (
+              <div className={`rounded-lg px-3 py-2 text-xs ${joValidation.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                {joValidation.ok ? `✅ ${joValidation.available} pieces available` : `❌ ${joValidation.message}`}
+              </div>
+            )}
+
+            {/* SO Lines — add to JO */}
+            {newForm.so_number && soLines.length > 0 && (
+              <div className="border rounded-xl overflow-hidden">
+                <div className="px-3 py-2 bg-blue-50 text-xs font-semibold text-blue-700 flex justify-between">
+                  <span>SO Lines — Click to add to JO</span>
+                  <button onClick={() => (soLines as any[]).forEach(addSOLineToJO)} className="text-blue-600 hover:underline">Add all</button>
+                </div>
+                <table className="w-full text-xs">
+                  <thead><tr className="text-gray-400 border-b bg-gray-50">
+                    <th className="text-left px-3 py-1.5">SKU</th><th className="text-left px-3 py-1.5">Name</th>
+                    <th className="text-right px-3 py-1.5">SO Qty</th><th className="px-3 py-1.5"></th>
+                  </tr></thead>
+                  <tbody>
+                    {(soLines as any[]).map((l: any) => {
+                      const added = newLines.some(nl => nl.sku === l.sku)
+                      return (
+                        <tr key={l.sku} className="border-t hover:bg-gray-50">
+                          <td className="px-3 py-1.5 font-mono font-semibold">{l.sku}</td>
+                          <td className="px-3 py-1.5 text-gray-600">{l.sku_name || l.item_name || '—'}</td>
+                          <td className="px-3 py-1.5 text-right">{l.qty}</td>
+                          <td className="px-3 py-1.5">
+                            <button onClick={() => added ? setNewLines(ls => ls.filter(nl => nl.sku !== l.sku)) : addSOLineToJO(l)}
+                              className={`px-2 py-0.5 rounded text-xs font-medium ${added ? 'bg-green-100 text-green-700' : 'bg-[#002B5B] text-white hover:bg-blue-800'}`}>
+                              {added ? '✓ Added' : '+ Add'}
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* JO Lines */}
+            {newLines.length > 0 && (
+              <div className="border rounded-xl overflow-hidden">
+                <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600">JO Lines ({newLines.length})</div>
+                <table className="w-full text-xs">
+                  <thead><tr className="text-gray-400 border-b">
+                    <th className="text-left px-3 py-1.5">SKU</th><th className="text-left px-3 py-1.5">Style</th>
+                    <th className="text-right px-3 py-1.5">Planned Qty</th>
+                    <th className="text-right px-3 py-1.5">Rate (₹)</th>
+                    <th className="text-right px-3 py-1.5">Amount</th>
+                    <th className="px-3 py-1.5"></th>
+                  </tr></thead>
+                  <tbody>
+                    {newLines.map((ln, i) => (
+                      <tr key={i} className="border-t">
+                        <td className="px-3 py-1 font-mono font-semibold text-[#002B5B]">{ln.sku}</td>
+                        <td className="px-3 py-1"><input value={ln.style} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, style: e.target.value} : x))}
+                          placeholder="Style/desc" className="border rounded px-1.5 py-0.5 text-xs w-full" /></td>
+                        <td className="px-3 py-1"><input type="number" value={ln.planned_qty} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, planned_qty: +e.target.value} : x))}
+                          className="border rounded px-1.5 py-0.5 text-xs w-20 text-right" /></td>
+                        <td className="px-3 py-1"><input type="number" value={ln.vendor_rate} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, vendor_rate: +e.target.value} : x))}
+                          className="border rounded px-1.5 py-0.5 text-xs w-20 text-right" /></td>
+                        <td className="px-3 py-1 text-right font-semibold">{fmtR(ln.planned_qty * ln.vendor_rate)}</td>
+                        <td className="px-3 py-1"><button onClick={() => setNewLines(ls => ls.filter((_,j) => j!==i))} className="text-red-400 hover:text-red-600">✕</button></td>
+                      </tr>
+                    ))}
+                    <tr className="border-t bg-gray-50 font-semibold">
+                      <td colSpan={4} className="px-3 py-1.5 text-right text-xs text-gray-600">Total:</td>
+                      <td className="px-3 py-1.5 text-right text-xs">{fmtR(newLines.reduce((s,l) => s + l.planned_qty * l.vendor_rate, 0))}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-2">
+              <button onClick={() => createJOMut.mutate({
+                ...newForm,
+                planned_qty: newLines.reduce((s,l) => s+l.planned_qty, 0) || newForm.planned_qty,
+                lines: newLines,
+              })}
+                disabled={createJOMut.isPending || !newForm.so_number || (newForm.process !== 'Cutting' && joValidation && !joValidation?.ok)}
+                className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
+                {createJOMut.isPending ? 'Creating…' : `Create ${newForm.process} JO`}
+              </button>
+              <button onClick={() => { setModal(null); setNewLines([]) }} className="px-4 border rounded-lg text-sm text-gray-600">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── ISSUE FABRIC MODAL ───────────────────────────────────────────────── */}
+      {modal === 'issue-fabric' && activeJO && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700">📦 Issue Fabric — {activeJO.jo_number}</h3>
+              <button onClick={() => setModal(null)} className="text-gray-400 text-xl">✕</button>
+            </div>
+            <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
+              Fabric: <b>{activeJO.fabric_code}</b> · Planned: <b>{activeJO.fabric_qty} {activeJO.fabric_unit}</b> · Already issued: <b>{activeJO.fabric_issued_qty || 0}</b>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              {([['fabric_code','Fabric Code'],['fabric_name','Fabric Name'],['issued_by','Issued By'],['remarks','Remarks']] as const).map(([k,l]) => (
+                <div key={k}><label className="text-xs text-gray-500">{l}</label>
+                  <input value={(fabricIssueForm as any)[k]} onChange={e => setFabricIssueForm(f => ({ ...f, [k]: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+              ))}
+              <div><label className="text-xs text-gray-500">Issue Qty (MTR) *</label>
+                <input type="number" value={fabricIssueForm.issued_qty} onChange={e => setFabricIssueForm(f => ({ ...f, issued_qty: +e.target.value }))}
+                  className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm mt-1 bg-blue-50 font-semibold" /></div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => issueFabricMut.mutate({ id: activeJO.id, data: fabricIssueForm })}
+                disabled={issueFabricMut.isPending || !fabricIssueForm.issued_qty}
+                className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
+                {issueFabricMut.isPending ? 'Saving…' : '📦 Issue Fabric'}
+              </button>
+              <button onClick={() => setModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── RETURN FABRIC MODAL ──────────────────────────────────────────────── */}
+      {modal === 'return-fabric' && activeJO && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700">↩️ Return Fabric — {activeJO.jo_number}</h3>
+              <button onClick={() => setModal(null)} className="text-gray-400 text-xl">✕</button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              {([['fabric_code','Fabric Code'],['returned_by','Returned By'],['remarks','Remarks']] as const).map(([k,l]) => (
+                <div key={k}><label className="text-xs text-gray-500">{l}</label>
+                  <input value={(fabricReturnForm as any)[k]} onChange={e => setFabricReturnForm(f => ({ ...f, [k]: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+              ))}
+              <div><label className="text-xs text-gray-500">Returned Qty (MTR) *</label>
+                <input type="number" value={fabricReturnForm.returned_qty} onChange={e => setFabricReturnForm(f => ({ ...f, returned_qty: +e.target.value }))}
+                  className="w-full border border-amber-200 rounded px-2 py-1.5 text-sm mt-1 bg-amber-50 font-semibold" /></div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => returnFabricMut.mutate({ id: activeJO.id, data: fabricReturnForm })}
+                disabled={returnFabricMut.isPending} className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
+                {returnFabricMut.isPending ? 'Saving…' : '↩️ Return'}
+              </button>
+              <button onClick={() => setModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── RECEIVE MODAL ────────────────────────────────────────────────────── */}
+      {modal === 'receive' && activeJO && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700">✅ Receive — {activeJO.jo_number}</h3>
+              <button onClick={() => setModal(null)} className="text-gray-400 text-xl">✕</button>
+            </div>
+            <div className="bg-green-50 rounded-lg p-3 text-xs text-green-700">
+              Process: <b>{activeJO.process}</b> · Planned: <b>{activeJO.planned_qty} pcs</b> · Received so far: <b>{activeJO.received_qty} pcs</b>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="text-xs text-gray-500">Received Qty (pcs) *</label>
+                <input type="number" value={receiveForm.received_qty} onChange={e => setReceiveForm(f => ({ ...f, received_qty: +e.target.value }))}
+                  className="w-full border border-green-200 rounded px-2 py-1.5 text-sm mt-1 bg-green-50 font-semibold" /></div>
+              <div><label className="text-xs text-gray-500">Rejected Qty</label>
+                <input type="number" value={receiveForm.rejected_qty} onChange={e => setReceiveForm(f => ({ ...f, rejected_qty: +e.target.value }))}
+                  className="w-full border border-red-200 rounded px-2 py-1.5 text-sm mt-1 bg-red-50" /></div>
+              {([['received_by','Received By'],['remarks','Remarks']] as const).map(([k,l]) => (
+                <div key={k}><label className="text-xs text-gray-500">{l}</label>
+                  <input value={(receiveForm as any)[k]} onChange={e => setReceiveForm(f => ({ ...f, [k]: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => receiveMut.mutate({ id: activeJO.id, data: { ...receiveForm, process: activeJO.process, sku: activeJO.sku, jo_line_id: activeLineId } })}
+                disabled={receiveMut.isPending || !receiveForm.received_qty}
+                className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
+                {receiveMut.isPending ? 'Saving…' : '✅ Confirm Receipt'}
+              </button>
+              <button onClick={() => setModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── ISSUE PIECES MODAL ───────────────────────────────────────────────── */}
+      {modal === 'issue-pieces' && activeJO && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700">➡️ Issue to Next Process — {activeJO.jo_number}</h3>
+              <button onClick={() => setModal(null)} className="text-gray-400 text-xl">✕</button>
+            </div>
+            <div className="bg-purple-50 rounded-lg p-3 text-xs text-purple-700">
+              From: <b>{activeJO.process}</b> → To: <b>{activeJO.next_process || 'Next'}</b>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="text-xs text-gray-500">To Process</label>
+                <select value={issuePiecesForm.to_process} onChange={e => setIssuePiecesForm(f => ({ ...f, to_process: e.target.value }))}
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                  <option value="">Select</option>
+                  {allProcesses.filter(p => p !== activeJO.process).map(p => <option key={p}>{p}</option>)}
+                </select>
+              </div>
+              <div><label className="text-xs text-gray-500">Issue Qty (pcs) *</label>
+                <input type="number" value={issuePiecesForm.issued_qty} onChange={e => setIssuePiecesForm(f => ({ ...f, issued_qty: +e.target.value }))}
+                  className="w-full border border-purple-200 rounded px-2 py-1.5 text-sm mt-1 bg-purple-50 font-semibold" /></div>
+              {([['issued_by','Issued By'],['remarks','Remarks']] as const).map(([k,l]) => (
+                <div key={k}><label className="text-xs text-gray-500">{l}</label>
+                  <input value={(issuePiecesForm as any)[k]} onChange={e => setIssuePiecesForm(f => ({ ...f, [k]: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => issuePiecesMut.mutate({ id: activeJO.id, data: { ...issuePiecesForm, from_process: activeJO.process, sku: activeJO.sku, jo_line_id: activeLineId } })}
+                disabled={issuePiecesMut.isPending || !issuePiecesForm.issued_qty || !issuePiecesForm.to_process}
+                className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
+                {issuePiecesMut.isPending ? 'Saving…' : '➡️ Issue Pieces'}
+              </button>
+              <button onClick={() => setModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── ADD COST MODAL ───────────────────────────────────────────────────── */}
+      {modal === 'add-cost' && activeJO && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold text-gray-700">💰 Add Cost — {activeJO.jo_number}</h3>
+              <button onClick={() => setModal(null)} className="text-gray-400 text-xl">✕</button>
+            </div>
+            <div className="bg-amber-50 rounded-lg p-3 text-xs text-amber-700">Current total: <b>₹{fmt(activeJO.total_cost || 0)}</b></div>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="text-xs text-gray-500">Cost Type</label>
+                <select value={costForm.cost_type} onChange={e => setCostForm(f => ({ ...f, cost_type: e.target.value }))}
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                  {['Labour','Machine','Material','Overhead','Other'].map(t => <option key={t}>{t}</option>)}
+                </select>
+              </div>
+              <div><label className="text-xs text-gray-500">Amount (₹) *</label>
+                <input type="number" value={costForm.amount} onChange={e => setCostForm(f => ({ ...f, amount: +e.target.value }))}
+                  className="w-full border border-amber-200 rounded px-2 py-1.5 text-sm mt-1 bg-amber-50 font-semibold" /></div>
+              <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
+                <input value={costForm.description} onChange={e => setCostForm(f => ({ ...f, description: e.target.value }))}
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => addCostMut.mutate({ id: activeJO.id, data: { ...costForm, process: activeJO.process } })}
+                disabled={addCostMut.isPending || !costForm.amount}
+                className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
+                {addCostMut.isPending ? 'Saving…' : '💰 Add Cost'}
+              </button>
+              <button onClick={() => setModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
           </div>
         </div>
       )}
     </div>
-
-    {/* ── PR from MRP Modal ────────────────────────────────────────────────── */}
-    {showPRModal && (
-      <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
-          {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b">
-            <div>
-              <h2 className="text-lg font-bold text-gray-800">Create Purchase Requisition from MRP</h2>
-              <p className="text-xs text-gray-500 mt-0.5">Pre-filled with shortage materials from last MRP run · {lastMRP?.run_time}</p>
-            </div>
-            <button onClick={() => setShowPRModal(false)} className="text-gray-400 hover:text-gray-700 text-2xl leading-none">×</button>
-          </div>
-
-          {/* PR Header Fields */}
-          <div className="px-6 py-4 border-b bg-gray-50 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Requested By</label>
-              <input value={prForm.requested_by} onChange={e => setPRForm(f => ({ ...f, requested_by: e.target.value }))}
-                placeholder="Name"
-                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Priority</label>
-              <select value={prForm.priority} onChange={e => setPRForm(f => ({ ...f, priority: e.target.value }))}
-                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400">
-                {['Normal', 'High', 'Urgent'].map(p => <option key={p}>{p}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Required By Date</label>
-              <input type="date" value={prForm.required_by_date} onChange={e => setPRForm(f => ({ ...f, required_by_date: e.target.value }))}
-                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">SO Reference</label>
-              <input value={prForm.so_reference} onChange={e => setPRForm(f => ({ ...f, so_reference: e.target.value }))}
-                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
-            </div>
-            <div className="col-span-2 sm:col-span-4">
-              <label className="block text-xs font-medium text-gray-600 mb-1">Notes</label>
-              <input value={prForm.notes} onChange={e => setPRForm(f => ({ ...f, notes: e.target.value }))}
-                className="w-full border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400" />
-            </div>
-          </div>
-
-          {/* Lines table */}
-          <div className="flex-1 overflow-y-auto px-6 py-3">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                Shortage Materials — {prLines.filter(l => l.selected).length} selected
-              </p>
-              <div className="flex gap-2">
-                <button onClick={() => setPRLines(ls => ls.map(l => ({ ...l, selected: true })))}
-                  className="text-xs text-blue-600 hover:underline">Select All</button>
-                <span className="text-gray-300">|</span>
-                <button onClick={() => setPRLines(ls => ls.map(l => ({ ...l, selected: false })))}
-                  className="text-xs text-gray-500 hover:underline">Clear All</button>
-              </div>
-            </div>
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
-                <tr>
-                  <th className="px-2 py-2 text-left w-8"></th>
-                  <th className="px-2 py-2 text-left">Material Code</th>
-                  <th className="px-2 py-2 text-left">Material Name</th>
-                  <th className="px-2 py-2 text-left">Type</th>
-                  <th className="px-2 py-2 text-right">Net Shortage</th>
-                  <th className="px-2 py-2 text-right">PR Qty</th>
-                  <th className="px-2 py-2 text-left">Unit</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {prLines.map((line, i) => (
-                  <tr key={line.material_code} className={`hover:bg-gray-50 ${!line.selected ? 'opacity-40' : ''}`}>
-                    <td className="px-2 py-1.5">
-                      <input type="checkbox" checked={line.selected}
-                        onChange={e => setPRLines(ls => ls.map((l, j) => j === i ? { ...l, selected: e.target.checked } : l))}
-                        className="rounded" />
-                    </td>
-                    <td className="px-2 py-1.5 font-mono text-blue-700 font-medium">{line.material_code}</td>
-                    <td className="px-2 py-1.5 text-gray-700">{line.material_name}</td>
-                    <td className="px-2 py-1.5"><span className="text-xs bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">{line.material_type}</span></td>
-                    <td className="px-2 py-1.5 text-right text-red-600 font-medium">{line.required_qty}</td>
-                    <td className="px-2 py-1.5 text-right">
-                      <input type="number" min="0" step="0.001"
-                        value={line.required_qty}
-                        onChange={e => setPRLines(ls => ls.map((l, j) => j === i ? { ...l, required_qty: parseFloat(e.target.value) || 0 } : l))}
-                        className="w-20 border rounded px-1.5 py-1 text-right text-sm focus:outline-none focus:ring-1 focus:ring-orange-400" />
-                    </td>
-                    <td className="px-2 py-1.5 text-gray-500">{line.unit}</td>
-                  </tr>
-                ))}
-                {prLines.length === 0 && (
-                  <tr><td colSpan={7} className="text-center py-8 text-gray-400 text-sm">No shortage materials in current MRP run.</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Footer */}
-          <div className="px-6 py-4 border-t flex items-center justify-between gap-3 bg-gray-50">
-            <p className="text-xs text-gray-500">{prLines.filter(l => l.selected).length} materials selected</p>
-            <div className="flex gap-2">
-              <button onClick={() => setShowPRModal(false)}
-                className="px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-100">
-                Cancel
-              </button>
-              <button
-                onClick={submitPR}
-                disabled={createPRMut.isPending || prLines.filter(l => l.selected).length === 0}
-                className="px-5 py-2 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 disabled:opacity-50">
-                {createPRMut.isPending ? 'Creating PR...' : `Create PR (${prLines.filter(l => l.selected).length} lines)`}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    )}
-    </>
   )
 }

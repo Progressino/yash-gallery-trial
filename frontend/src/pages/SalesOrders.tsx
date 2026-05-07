@@ -21,7 +21,8 @@ interface DemandLine { id: number; sku: string; sku_name: string; demand_qty: nu
 interface SalesOrder {
   id: number; so_number: string; so_date: string; buyer: string
   warehouse: string; delivery_date: string; status: string; notes: string
-  source_type: string; ref_demand: string; sales_team: string; payment_terms: string
+  source_type: string; ref_demand: string; sales_team: string; payment_terms: string 
+dispatch_date: string; ref_number: string; ref_date: string
   lines: SOLine[]
 }
 interface SOLine {
@@ -228,7 +229,7 @@ export default function SalesOrders() {
   // SO form
   const [soForm, setSOForm] = useState({
     buyer: '', warehouse: '', sales_team: '', source_type: 'Sales Team Demand',
-    ref_demand: '', delivery_date: '', payment_terms: '', notes: ''
+    ref_demand: '', delivery_date: '', payment_terms: '', notes: '', dispatch_date: '', ref_number: '', ref_date: ''
   })
   const [soLines, setSOLines] = useState<{
     sku: string; sku_name: string; qty: number; unit: string; rate: number; remarks: string
@@ -270,7 +271,7 @@ export default function SalesOrders() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sales-orders'] }); qc.invalidateQueries({ queryKey: ['sales-orders-all'] })
       setShowNewSO(false); setSOLines([])
-      setSOForm({ buyer: '', warehouse: '', sales_team: '', source_type: 'Sales Team Demand', ref_demand: '', delivery_date: '', payment_terms: '', notes: '' })
+      setSOForm({ buyer: '', warehouse: '', sales_team: '', source_type: 'Sales Team Demand', ref_demand: '', delivery_date: '', payment_terms: '', notes: '', dispatch_date: '', ref_number: '', ref_date: '' })
     }
   })
   const updateDemandMut = useMutation({
@@ -678,6 +679,25 @@ export default function SalesOrders() {
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
                 </div>
                 <div>
+  <label className="text-xs text-gray-500">Planned Dispatch Date</label>
+  <input type="date" value={soForm.dispatch_date}
+    onChange={e => setSOForm(f => ({ ...f, dispatch_date: e.target.value }))}
+    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
+</div>
+<div>
+  <label className="text-xs text-gray-500">Buyer PO / Ref Number</label>
+  <input value={soForm.ref_number}
+    onChange={e => setSOForm(f => ({ ...f, ref_number: e.target.value }))}
+    placeholder="e.g. BPO/2024/001"
+    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
+</div>
+<div>
+  <label className="text-xs text-gray-500">Ref Date</label>
+  <input type="date" value={soForm.ref_date}
+    onChange={e => setSOForm(f => ({ ...f, ref_date: e.target.value }))}
+    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
+</div>
+                <div>
                   <label className="text-xs text-gray-500">Source Type</label>
                   <select value={soForm.source_type} onChange={e => setSOForm(f => ({ ...f, source_type: e.target.value }))}
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
@@ -844,6 +864,7 @@ export default function SalesOrders() {
                           className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm" />
                       </div>
                     </div>
+                    
 
                     {/* Line total */}
                     {(ln.qty > 0 && ln.rate > 0) && (
@@ -921,6 +942,8 @@ export default function SalesOrders() {
                   <div className="border-t border-gray-50 px-4 pb-4">
                     <div className="flex gap-4 text-xs text-gray-400 mt-2 mb-3">
                       {o.ref_demand && <span>Demand: <span className="text-blue-600 font-medium">{o.ref_demand}</span></span>}
+                      {o.dispatch_date && <span>Dispatch: {o.dispatch_date}</span>}
+{o.ref_number && <span>Ref: <span className="font-medium text-gray-600">{o.ref_number}</span></span>}
                       {o.warehouse && <span>WH: {o.warehouse}</span>}
                       {o.payment_terms && <span>Terms: {o.payment_terms}</span>}
                       {o.sales_team && <span>Team: {o.sales_team}</span>}

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 
@@ -273,6 +273,8 @@ export default function ItemMaster() {
   const [showNewBOM,    setShowNewBOM]    = useState(false)
   const [newBOMName,    setNewBOMName]    = useState('')
   const [newBOMApply,   setNewBOMApply]   = useState('all')
+  // The "Create new BOM" form keeps these for future inputs; clear them so unused locals don't break the build.
+  void newBOMName; void setNewBOMApply
   const [showCopyBOM,   setShowCopyBOM]   = useState(false)
   const [copyTargetSearch, setCopyTargetSearch] = useState('')
   const [copyTargetId,  setCopyTargetId]  = useState<number | null>(null)
@@ -427,12 +429,17 @@ export default function ItemMaster() {
   })
 
   const matLines = useMemo(() => (bomDetail?.lines ?? []).filter(l => l.component_type !== 'SVC'), [bomDetail])
-  const svcLines = useMemo(() => (bomDetail?.lines ?? []).filter(l => l.component_type === 'SVC'), [bomDetail])
+  const [svcLines, setSvcLines] = useState<any[]>([])
 
-  const totalCost = useMemo(() =>
-    (bomDetail?.lines ?? []).reduce((s, l) => s + lineAmt(l), 0), [bomDetail])
+useEffect(() => {
+  setSvcLines((bomDetail?.lines ?? []).filter((l: any) => l.component_type === 'SVC'))
+}, [bomDetail])
+const totalCost = useMemo(() =>
+  (bomDetail?.lines ?? []).reduce((s: number, l: any) => s + lineAmt(l), 0),
+  [bomDetail]
+)
 
-  const grandTotal = useMemo(() =>
+    const grandTotal = useMemo(() =>
     totalCost + (parseFloat(bomCmtCost) || 0) + (parseFloat(bomOtherCost) || 0), [totalCost, bomCmtCost, bomOtherCost])
 
   const costByType = useMemo(() => {
@@ -762,7 +769,7 @@ export default function ItemMaster() {
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {items.map(item => (
-                        <React.Fragment key={item.id}>
+                        <>
                           <tr
                             className="hover:bg-gray-50 cursor-pointer transition-colors"
                             onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}>
@@ -850,7 +857,7 @@ export default function ItemMaster() {
                               </td>
                             </tr>
                           )}
-                        </React.Fragment>
+                        </>
                       ))}
                     </tbody>
                   </table>
@@ -1284,19 +1291,31 @@ export default function ItemMaster() {
                         <div className="flex gap-3 flex-wrap">
                           <div className="flex-1 space-y-1">
                             <label className="text-xs font-medium text-gray-600">BOM Name</label>
-                            <input type="text" placeholder='e.g. BOM-1 (56" Fabric)' value={newBOMName}
-                              onChange={e => setNewBOMName(e.target.value)}
-                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                            <input
+  type="text"
+  value={`BOM-${bomItemName?.split(' — ')[0] || 'ITEM'}-${Date.now()}`}
+  readOnly
+  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-gray-50 text-gray-500"
+/>
                           </div>
                           <div className="w-48 space-y-1">
-                            <label className="text-xs font-medium text-gray-600">Applies To</label>
-                            <input type="text" placeholder="all   or   XL,XXL,3XL" value={newBOMApply}
-                              onChange={e => setNewBOMApply(e.target.value)}
-                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                            <label className="text-xs font-medium text-gray-600">BOM Name</label>
+<input
+  type="text"
+  value={`BOM-${bomItemName?.split(' — ')[0] || 'ITEM'}-${Date.now()}`}
+  readOnly
+  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-gray-50 text-gray-500"
+/>
                           </div>
                         </div>
                         <div className="flex gap-2">
-                          <button onClick={() => createBOMMut.mutate({ bom_name: newBOMName || 'Default', applies_to: newBOMApply || 'all' })}
+                          <button
+  onClick={() =>
+    createBOMMut.mutate({
+      bom_name: `BOM-${bomItemName?.split(' — ')[0] || 'ITEM'}-${Date.now()}`,
+      applies_to: newBOMApply || 'all',
+    })
+  }
                             className="bg-[#002B5B] text-white text-xs px-4 py-2 rounded-lg hover:bg-[#003d80] transition-colors">
                             Create BOM
                           </button>
@@ -1581,9 +1600,33 @@ export default function ItemMaster() {
                                     {svcLines.map(l => (
                                       <tr key={l.id} className="hover:bg-gray-50">
                                         <td className="px-3 py-2 font-medium text-gray-800">{l.component_name}</td>
-                                        <td className="px-3 py-2 tabular-nums">{l.quantity}</td>
+                                        <td className="px-3 py-2">
+  <input
+    type="number"
+    value={l.quantity}
+    onChange={(e) => {
+      const updated = svcLines.map(x =>
+        x.id === l.id ? { ...x, quantity: Number(e.target.value) } : x
+      )
+      setSvcLines(updated)
+    }}
+    className="w-16 border border-gray-300 rounded px-2 py-1 text-xs"
+  />
+</td>
                                         <td className="px-3 py-2 text-gray-500">{l.unit}</td>
-                                        <td className="px-3 py-2 tabular-nums">{l.rate}</td>
+                                        <td className="px-3 py-2">
+  <input
+    type="number"
+    value={l.rate}
+    onChange={(e) => {
+      const updated = svcLines.map(x =>
+        x.id === l.id ? { ...x, rate: Number(e.target.value) } : x
+      )
+      setSvcLines(updated)
+    }}
+    className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
+  />
+</td>
                                         <td className="px-3 py-2 tabular-nums font-medium">{fmt(lineAmt(l))}</td>
                                         <td className="px-3 py-2 text-gray-400">{l.remarks || '—'}</td>
                                         <td className="px-3 py-2">
