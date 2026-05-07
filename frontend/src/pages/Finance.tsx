@@ -2391,8 +2391,10 @@ function SalesInvoicesTab({
   const [cardOpen, setCardOpen] = useState(false)
   const [cardTab, setCardTab] = useState<'general' | 'lines' | 'inventory' | 'location'>('general')
   const [draft, setDraft] = useState<Record<string, string>>({})
+  const [linesDraft, setLinesDraft] = useState<Record<string, unknown>[] | null>(null)
+  const [linesDirty, setLinesDirty] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
-  const [includeUploadSummaries, setIncludeUploadSummaries] = useState(true)
+  const [includeUploadSummaries, setIncludeUploadSummaries] = useState(false)
 
   const q = useMemo(() => {
     const p = new URLSearchParams()
@@ -2927,9 +2929,9 @@ function SalesInvoicesTab({
                         linesOverride={linesDraft ?? undefined}
                         onLineChange={(idx, key, value) => {
                           setLinesDraft(prev => {
-                            const base = prev ?? ((detail.meta?.line_items ?? []) as Record<string, unknown>[]).map(li => ({ ...li }))
-                            const next = base.map((li, i) => (i === idx ? { ...li, [key]: value } : li))
-                            return next
+                            const fallback = (detail.meta?.line_items ?? []) as Record<string, unknown>[]
+                            const base: Record<string, unknown>[] = prev ?? fallback.map(li => ({ ...li }))
+                            return base.map((li, i) => (i === idx ? { ...li, [key]: value } : li))
                           })
                           setLinesDirty(true)
                         }}
