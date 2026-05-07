@@ -2046,21 +2046,32 @@ function SalesInvoiceBcDetailPanel({
       subRaw > 0 &&
       Math.abs(subRaw + tx - totRaw) < 0.08 &&
       totRaw > sumLineInvoiceIncl + 0.5
-    if (inclusiveLinePayable && builtAsExclusivePlusTax) {
-      let r: number | null = null
+    // Some legacy / partially reconciled MTR rows store `taxable_amount` already including tax
+    // (Amazon CSVs sometimes ship Tax_Exclusive_Gross blank). In that case the header total
+    // either equals the taxable or is missing. Treat the saved taxable as inclusive so the
+    // effective tax rate matches the GST rate from the line (e.g. 5%, not 30.42 / 639 ≈ 4.76%).
+    const exclusiveBalanced =
+      tx > 0.01 && subRaw > 0 && totRaw > 0 && Math.abs(subRaw + tx - totRaw) < 0.5
+    const headerLooksInclusive =
+      tx > 0.01 &&
+      subRaw > 0 &&
+      !exclusiveBalanced &&
+      (totRaw === 0 || Math.abs(totRaw - subRaw) < 0.5 || totRaw < subRaw + 0.5)
+
+    const pickLineRate = (): number | null => {
       for (const li of lines) {
         const gr = Number(li.gst_rate ?? li.GST_Rate ?? 0)
         if (gr > 0 && Number.isFinite(gr)) {
           const dec = gr <= 1 && gr > 0 ? gr : gr / 100
-          if (dec > 0.005 && dec < 0.28) {
-            r = dec
-            break
-          }
+          if (dec > 0.005 && dec < 0.28) return dec
         }
       }
-      if (r == null) {
-        r = tx / subRaw
-      }
+      return null
+    }
+
+    if (inclusiveLinePayable && builtAsExclusivePlusTax) {
+      let r: number | null = pickLineRate()
+      if (r == null) r = tx / subRaw
       if (r > 0.005 && r < 0.28) {
         const subE = subRaw / (1 + r)
         const taxD = subRaw - subE
@@ -2076,6 +2087,41 @@ function SalesInvoiceBcDetailPanel({
         }
       }
     }
+
+    if (headerLooksInclusive) {
+      // When the saved taxable already includes tax, derive r from the actual amounts
+      // (tax / taxable_excl). This avoids re-using a stale `gst_rate` that was computed
+      // against the inclusive base (e.g. 4.76% instead of 5%). Snap to the nearest standard
+      // GST slab when within 0.3% so the displayed rate matches the invoice rate exactly.
+      const denom = subRaw - tx
+      let r = denom > 0 ? tx / denom : null
+      if (r != null) {
+        const slabs = [0.005, 0.03, 0.05, 0.12, 0.18, 0.28]
+        for (const s of slabs) {
+          if (Math.abs(r - s) <= 0.003) {
+            r = s
+            break
+          }
+        }
+      } else {
+        r = pickLineRate()
+      }
+      if (r != null && r > 0.005 && r < 0.28) {
+        const subE = subRaw / (1 + r)
+        const taxD = subRaw - subE
+        const sc = tx > 1e-9 ? taxD / tx : 1
+        return {
+          subExcl: subE,
+          taxNumDisp: taxD,
+          totalIncl: subRaw,
+          hdrTaxableBase: Math.max(0.001, subE),
+          dispCgst: detail.cgst_amount * sc,
+          dispSgst: detail.sgst_amount * sc,
+          dispIgst: detail.igst_amount * sc,
+        }
+      }
+    }
+
     const hdr = Math.max(0.001, subRaw)
     return {
       subExcl: subRaw,
