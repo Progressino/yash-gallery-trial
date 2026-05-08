@@ -1,8 +1,8 @@
 """
 Parse SKU Status & Lead Time master (Excel/CSV) for PO Engine.
 
-Expected columns (flexible names): SKU, Status, Lead time (days).
-Status is stored for display; values that look like "closed SKU" set SKU_Sheet_Closed in the PO table only (PO quantities use the same engine rules as without a sheet, except per-SKU lead overrides).
+Expected columns (flexible names): SKU, Lead time (days). Status is optional — when omitted,
+SKU_Sheet_Status is left blank and SKU_Sheet_Closed is derived only when status text indicates closure.
 """
 from __future__ import annotations
 
@@ -37,6 +37,48 @@ def _pick_column(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
     return None
 
 
+def _pick_lead_column(df: pd.DataFrame) -> Optional[str]:
+    """Resolve lead-time column; tolerant of export quirks (LT, merged headers, etc.)."""
+    lead_col = _pick_column(
+        df,
+        [
+            "lead time (days)",
+            "lead time days",
+            "leadtimedays",
+            "lead_time_days",
+            "lead time",
+            "leadtime",
+            "lead_time",
+            "manufacturing lead",
+            "factory lead",
+            "supplier lead",
+            "po lead",
+            "lead days",
+            "days to ship",
+            "production lead time",
+            "productionleadtime",
+            "manufacturing lead time",
+            "total lead time",
+            "totallt",
+            "lt days",
+            "lt",
+            "mlt",
+        ],
+    )
+    if lead_col:
+        return lead_col
+    norm_map = {_norm_col(c): c for c in df.columns}
+    # Prefer a column whose header clearly mentions lead + days/time.
+    for nk, orig in norm_map.items():
+        if "lead" in nk and ("day" in nk or "time" in nk or nk.endswith("days")):
+            return orig
+    if "lt" in norm_map:
+        return norm_map["lt"]
+    if "mlt" in norm_map:
+        return norm_map["mlt"]
+    return None
+
+
 def is_closed_sku_status(status) -> bool:
     """True when user marked SKU closed (e.g. 'Closed SKU', not generic 'closed order' notes)."""
     if status is None or (isinstance(status, float) and pd.isna(status)):
@@ -62,32 +104,15 @@ def parse_sku_status_lead_dataframe(
         return pd.DataFrame(columns=["OMS_SKU", "SKU_Sheet_Status", "Lead_Time_From_Sheet", "SKU_Sheet_Closed"])
 
     sku_col = _pick_column(df, ["sku", "oms_sku", "oms sku", "seller sku", "style sku"])
-    status_col = _pick_column(df, ["status", "sku status", "state"])
-    lead_col = _pick_column(
-        df,
-        [
-            "lead time (days)",
-            "lead time days",
-            "leadtimedays",
-            "lead_time_days",
-            "lead time",
-            "leadtime",
-            "lead_time",
-            "manufacturing lead",
-            "factory lead",
-            "supplier lead",
-            "po lead",
-            "lead days",
-            "days to ship",
-        ],
-    )
+    status_col = _pick_column(df, ["status", "sku status", "sku sheet status", "state"])
+    lead_col = _pick_lead_column(df)
 
     if not sku_col:
         raise ValueError("Could not find a SKU column (expected names like SKU, OMS_SKU).")
-    if not status_col:
-        raise ValueError("Could not find a Status column.")
     if not lead_col:
-        raise ValueError("Could not find a Lead time column (e.g. Lead Time, Lead days).")
+        raise ValueError(
+            "Could not find a Lead time column (e.g. Lead Time (days), Lead_Time_Days, LT)."
+        )
 
     _map = sku_mapping if sku_mapping is not None else {}
 
@@ -101,8 +126,11 @@ def parse_sku_status_lead_dataframe(
         if not s:
             continue
         s = _strip_pl_sku(s, _map)
-        st = row.get(status_col)
-        st_str = "" if pd.isna(st) else str(st).strip()
+        if status_col:
+            st = row.get(status_col)
+            st_str = "" if pd.isna(st) else str(st).strip()
+        else:
+            st_str = ""
         ld = pd.to_numeric(row.get(lead_col), errors="coerce")
         out_rows.append(
             {

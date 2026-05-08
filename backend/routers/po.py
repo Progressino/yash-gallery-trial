@@ -29,7 +29,7 @@ class PORequest(BaseModel):
 
 @router.post("/sku-status-lead")
 async def po_upload_sku_status_lead(request: Request, file: UploadFile = File(...)):
-    """Upload 'Sku Status & Lead Time' style sheet: SKU, Status, Lead time (days)."""
+    """Upload optional SKU status & per-SKU lead overrides (Excel/CSV): SKU + Lead time columns required; Status optional."""
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
@@ -47,7 +47,7 @@ async def po_upload_sku_status_lead(request: Request, file: UploadFile = File(..
     except Exception as e:
         return {"ok": False, "message": f"Parse error: {e}"}
     if df.empty:
-        return {"ok": False, "message": "No valid SKU rows found (need SKU, Status, and Lead time columns)."}
+        return {"ok": False, "message": "No valid SKU rows found (need SKU and Lead time columns; Status is optional)."}
     sess.sku_status_lead_df = df
     sess._quarterly_cache.clear()
     return {"ok": True, "rows": int(len(df)), "message": f"Loaded {len(df)} SKU rows (status + lead time) for PO."}

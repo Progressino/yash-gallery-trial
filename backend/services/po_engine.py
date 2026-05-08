@@ -561,112 +561,12 @@ def calculate_po_base(
     )
     po_df["Ship_Units_150d"] = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0).astype(int)
 
-    # ── SKU Status / Lead sheet (optional) ────────────────────────────────
-    # Upload only changes per-SKU lead days for the PO formula. Status / closed flags
-    # are merged for display in the UI; they do not change Gross_PO_Qty or ADS.
+    # Defaults until SKU Status / Lead merge — applied later after pipeline ghost rows are appended,
+    # so pipeline-only SKUs still inherit per-sheet lead times.
     po_df["Lead_Time_Days"] = int(max(1, int(lead_time)))
     po_df["PO_Block_Reason"] = ""
-    if sku_status_df is not None and not sku_status_df.empty:
-        m = sku_status_df.copy()
-        _uniq_ss = m["OMS_SKU"].unique()
-        _ss_canon = {s: _canonical_oms_key(s) for s in _uniq_ss}
-        m["OMS_SKU"] = m["OMS_SKU"].map(_ss_canon).fillna("")
-        m = m[m["OMS_SKU"].str.len() > 0]
-
-        def _max_positive_lead(series: pd.Series) -> float:
-            v = pd.to_numeric(series, errors="coerce")
-            v = v[v > 0]
-            return float(v.max()) if len(v) else float("nan")
-
-        # Max lead per parent style — used when sheet lists parent SKU only, inventory is per-size.
-        m["_par_key"] = m["OMS_SKU"].map(get_parent_sku)
-        lead_by_parent = m.groupby("_par_key")["Lead_Time_From_Sheet"].apply(_max_positive_lead).to_dict()
-        _sorted_lead_parent_keys = sorted(
-            (str(sk).strip() for sk in lead_by_parent if str(sk).strip()),
-            key=len,
-            reverse=True,
-        )
-
-        # Sheet may use numeric style only (e.g. ``1657``/``1394``) while inventory is
-        # ``1657YK…-SIZE`` or ``AK-1394BROWN-L``.
-        lead_by_digit_token: dict[str, float] = {}
-        for _, rw in m.iterrows():
-            lt_one = float(pd.to_numeric(rw.get("Lead_Time_From_Sheet"), errors="coerce"))
-            if not np.isfinite(lt_one) or lt_one <= 0:
-                continue
-            oms = str(rw.get("OMS_SKU") or "")
-            par = str(rw.get("_par_key") or "")
-            for tok in {_style_digit_token(oms), _style_digit_token(par)}:
-                if not tok:
-                    continue
-                prev = lead_by_digit_token.get(tok, float("nan"))
-                if not np.isfinite(prev) or lt_one > prev:
-                    lead_by_digit_token[tok] = float(lt_one)
-
-        if group_by_parent:
-            m = (
-                m.groupby("_par_key", as_index=False)
-                .agg(
-                    Lead_Time_From_Sheet=("Lead_Time_From_Sheet", _max_positive_lead),
-                    SKU_Sheet_Status=("SKU_Sheet_Status", "first"),
-                    SKU_Sheet_Closed=("SKU_Sheet_Closed", "max"),
-                )
-                .rename(columns={"_par_key": "OMS_SKU"})
-            )
-        else:
-            m = m.drop(columns=["_par_key"], errors="ignore")
-
-        keep = [c for c in ["OMS_SKU", "SKU_Sheet_Status", "SKU_Sheet_Closed", "Lead_Time_From_Sheet"] if c in m.columns]
-        m = m[keep].drop_duplicates(subset=["OMS_SKU"], keep="last")
-        po_df = po_df.merge(m, on="OMS_SKU", how="left")
-        po_df["SKU_Sheet_Status"] = po_df["SKU_Sheet_Status"].fillna("").astype(str)
-        po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"].fillna(False).astype(bool)
-        if "Lead_Time_From_Sheet" in po_df.columns:
-            lt_vals = pd.to_numeric(po_df["Lead_Time_From_Sheet"], errors="coerce")
-            bad = lt_vals.isna() | (lt_vals <= 0)
-            if bad.any() and lead_by_parent:
-                pk = po_df["OMS_SKU"].astype(str).map(get_parent_sku)
-                fill_s = pd.to_numeric(pk.map(lead_by_parent), errors="coerce")
-                use = bad & (fill_s > 0)
-                lt_vals = lt_vals.where(~use, fill_s)
-                bad = lt_vals.isna() | (lt_vals <= 0)
-                # Sheet lists ``AK-139`` while inventory rows are ``AK-139BROWN-L`` → parent
-                # ``AK-139BROWN`` must inherit lead from longest matching sheet parent key.
-                if bad.any():
-                    # Only unique inventory parents still missing lead — avoids calling
-                    # prefix matching once per row (was freezing PO with 10k+ rows × 1k+ keys).
-                    s_pk = pk.fillna("").astype(str).str.strip()
-                    uniq_bad = pd.unique(s_pk[bad].to_numpy())
-                    pfx_map: dict[str, float] = {}
-                    for p in uniq_bad:
-                        if not p or p.lower() == "nan":
-                            continue
-                        pfx_map[p] = _longest_prefix_lead(
-                            p, lead_by_parent, _sorted_lead_parent_keys
-                        )
-                    fill_pfx = pd.to_numeric(s_pk.map(pfx_map), errors="coerce")
-                    use2 = bad & (fill_pfx > 0)
-                    lt_vals = lt_vals.where(~use2, fill_pfx)
-            bad = lt_vals.isna() | (lt_vals <= 0)
-            if bad.any() and lead_by_digit_token:
-                pk2 = po_df["OMS_SKU"].astype(str).map(get_parent_sku)
-                dig = pk2.map(_style_digit_token)
-                fill2 = pd.to_numeric(dig.map(lead_by_digit_token), errors="coerce")
-                use2 = bad & (fill2 > 0)
-                lt_vals = lt_vals.where(~use2, fill2)
-            repl = lt_vals.where(lt_vals > 0)
-            po_df["Lead_Time_Days"] = (
-                pd.to_numeric(repl, errors="coerce")
-                .fillna(po_df["Lead_Time_Days"])
-                .clip(lower=1, upper=730)
-                .round()
-                .astype(int)
-            )
-            po_df.drop(columns=["Lead_Time_From_Sheet"], inplace=True, errors="ignore")
-    else:
-        po_df["SKU_Sheet_Status"] = ""
-        po_df["SKU_Sheet_Closed"] = False
-    po_df["Lead_Time_Days"] = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1, upper=730).astype(int)
+    po_df["SKU_Sheet_Status"] = ""
+    po_df["SKU_Sheet_Closed"] = False
 
     # ADS starts from period_days-window Recent_ADS / LY blend, is floored by
     # seasonal same-month+next-month history, and by Flat30_ADS (Req.xlsx FREQ).
@@ -865,9 +765,6 @@ def calculate_po_base(
     else:
         inv_days_left = inv_vals
 
-    # PO calculation — per-SKU lead from sheet when uploaded, else global lead_time
-    lt_vec = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1)
-    lead_demand  = po_df["ADS"] * lt_vec
     # Gross/Net PO is finalised after pipeline merge below (sheet-style balance-days formula).
     po_df["Gross_PO_Qty"] = 0
 
@@ -902,13 +799,16 @@ def calculate_po_base(
     # (e.g. out of stock, removed from listing), add it as a ghost row so it
     # still shows up as "🔄 In Pipeline" and isn't invisible to the user.
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
-        missing_mask = (
-            ~existing_po_df["OMS_SKU"].isin(po_df["OMS_SKU"])
-            & (existing_po_df["PO_Pipeline_Total"] > 0)
+        _po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
+        _pipe_canon = existing_po_df["OMS_SKU"].map(_canonical_oms_key).astype(str).str.strip()
+        missing_mask = ~_pipe_canon.isin(_po_keys) & (
+            pd.to_numeric(existing_po_df["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
         )
         missing_po = existing_po_df[missing_mask].copy()
         if not missing_po.empty:
-            ghost = pd.DataFrame({"OMS_SKU": missing_po["OMS_SKU"].values})
+            ghost = pd.DataFrame(
+                {"OMS_SKU": [_canonical_oms_key(x) for x in missing_po["OMS_SKU"].values]},
+            )
             ghost["Total_Inventory"] = 0
             ghost["Sold_Units"]      = 0
             ghost["Return_Units"]    = 0
@@ -940,6 +840,105 @@ def calculate_po_base(
                 else:
                     ghost[c] = 0
             po_df = pd.concat([po_df, ghost[po_df.columns]], ignore_index=True)
+
+    # ── SKU Status / Lead sheet (optional, after pipeline ghost rows) ────────────
+    # Upload overrides lead days per SKU / parent style. Without this pass, every row
+    # keeps the global ``lead_time`` default — operators often mistake that for “missing”.
+    if sku_status_df is not None and not sku_status_df.empty:
+        po_df.drop(columns=["SKU_Sheet_Status", "SKU_Sheet_Closed"], inplace=True, errors="ignore")
+        m = sku_status_df.copy()
+        _uniq_ss = m["OMS_SKU"].unique()
+        _ss_canon = {s: _canonical_oms_key(s) for s in _uniq_ss}
+        m["OMS_SKU"] = m["OMS_SKU"].map(_ss_canon).fillna("")
+        m = m[m["OMS_SKU"].str.len() > 0]
+
+        def _max_positive_lead(series: pd.Series) -> float:
+            v = pd.to_numeric(series, errors="coerce")
+            v = v[v > 0]
+            return float(v.max()) if len(v) else float("nan")
+
+        m["_par_key"] = m["OMS_SKU"].map(get_parent_sku)
+        lead_by_parent = m.groupby("_par_key")["Lead_Time_From_Sheet"].apply(_max_positive_lead).to_dict()
+        _sorted_lead_parent_keys = sorted(
+            (str(sk).strip() for sk in lead_by_parent if str(sk).strip()),
+            key=len,
+            reverse=True,
+        )
+
+        lead_by_digit_token: dict[str, float] = {}
+        for _, rw in m.iterrows():
+            lt_one = float(pd.to_numeric(rw.get("Lead_Time_From_Sheet"), errors="coerce"))
+            if not np.isfinite(lt_one) or lt_one <= 0:
+                continue
+            oms = str(rw.get("OMS_SKU") or "")
+            par = str(rw.get("_par_key") or "")
+            for tok in {_style_digit_token(oms), _style_digit_token(par)}:
+                if not tok:
+                    continue
+                prev = lead_by_digit_token.get(tok, float("nan"))
+                if not np.isfinite(prev) or lt_one > prev:
+                    lead_by_digit_token[tok] = float(lt_one)
+
+        if group_by_parent:
+            m = (
+                m.groupby("_par_key", as_index=False)
+                .agg(
+                    Lead_Time_From_Sheet=("Lead_Time_From_Sheet", _max_positive_lead),
+                    SKU_Sheet_Status=("SKU_Sheet_Status", "first"),
+                    SKU_Sheet_Closed=("SKU_Sheet_Closed", "max"),
+                )
+                .rename(columns={"_par_key": "OMS_SKU"})
+            )
+        else:
+            m = m.drop(columns=["_par_key"], errors="ignore")
+
+        keep = [c for c in ["OMS_SKU", "SKU_Sheet_Status", "SKU_Sheet_Closed", "Lead_Time_From_Sheet"] if c in m.columns]
+        m = m[keep].drop_duplicates(subset=["OMS_SKU"], keep="last")
+        po_df = po_df.merge(m, on="OMS_SKU", how="left")
+        po_df["SKU_Sheet_Status"] = po_df["SKU_Sheet_Status"].fillna("").astype(str)
+        po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"].fillna(False).astype(bool)
+        if "Lead_Time_From_Sheet" in po_df.columns:
+            lt_vals = pd.to_numeric(po_df["Lead_Time_From_Sheet"], errors="coerce")
+            bad = lt_vals.isna() | (lt_vals <= 0)
+            # Always attempt parent / longest-prefix fill when the sheet merge missed —
+            # ``if lead_by_parent`` was accidentally skipping fallbacks whenever the dict was empty.
+            if bad.any():
+                pk = po_df["OMS_SKU"].astype(str).map(get_parent_sku)
+                fill_s = pd.to_numeric(pk.map(lead_by_parent), errors="coerce")
+                use = bad & (fill_s > 0)
+                lt_vals = lt_vals.where(~use, fill_s)
+                bad = lt_vals.isna() | (lt_vals <= 0)
+                if bad.any():
+                    s_pk = pk.fillna("").astype(str).str.strip()
+                    uniq_bad = pd.unique(s_pk[bad].to_numpy())
+                    pfx_map: dict[str, float] = {}
+                    for p in uniq_bad:
+                        if not p or p.lower() == "nan":
+                            continue
+                        pfx_map[p] = _longest_prefix_lead(
+                            p, lead_by_parent, _sorted_lead_parent_keys
+                        )
+                    fill_pfx = pd.to_numeric(s_pk.map(pfx_map), errors="coerce")
+                    use2 = bad & (fill_pfx > 0)
+                    lt_vals = lt_vals.where(~use2, fill_pfx)
+            bad = lt_vals.isna() | (lt_vals <= 0)
+            if bad.any() and lead_by_digit_token:
+                pk2 = po_df["OMS_SKU"].astype(str).map(get_parent_sku)
+                dig = pk2.map(_style_digit_token)
+                fill2 = pd.to_numeric(dig.map(lead_by_digit_token), errors="coerce")
+                use2 = bad & (fill2 > 0)
+                lt_vals = lt_vals.where(~use2, fill2)
+            repl = lt_vals.where(lt_vals > 0)
+            po_df["Lead_Time_Days"] = (
+                pd.to_numeric(repl, errors="coerce")
+                .fillna(po_df["Lead_Time_Days"])
+                .clip(lower=1, upper=730)
+                .round()
+                .astype(int)
+            )
+            po_df.drop(columns=["Lead_Time_From_Sheet"], inplace=True, errors="ignore")
+
+    po_df["Lead_Time_Days"] = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1, upper=730).astype(int)
 
     # Sheet formula:
     # projected_days_now = (Total_Inventory + PO_Pipeline_Total) / ADS

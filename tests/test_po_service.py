@@ -302,6 +302,62 @@ def test_sku_status_pick_lead_time_days_column_name():
     assert int(out.iloc[0]["Lead_Time_From_Sheet"]) == 33
 
 
+def test_sku_status_optional_status_column_defaults_empty():
+    from backend.services.sku_status_lead import parse_sku_status_lead_dataframe
+
+    raw = pd.DataFrame({"SKU": ["Z-9"], "Lead_Time_Days": [44]})
+    out = parse_sku_status_lead_dataframe(raw, None)
+    assert out.iloc[0]["SKU_Sheet_Status"] == ""
+    assert int(out.iloc[0]["Lead_Time_From_Sheet"]) == 44
+
+
+def test_sku_status_detects_lt_column_alias():
+    from backend.services.sku_status_lead import parse_sku_status_lead_dataframe
+
+    raw = pd.DataFrame({"SKU": ["LT-A"], "LT": [51], "Status": ["Open"]})
+    out = parse_sku_status_lead_dataframe(raw, None)
+    assert int(out.iloc[0]["Lead_Time_From_Sheet"]) == 51
+
+
+def test_po_pipeline_ghost_row_inherits_sheet_lead_not_global_default():
+    """Pipeline-only SKUs were merged before the status sheet; they kept global lead_time."""
+    days = pd.date_range("2025-11-01", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["GHOSTBASE"] * 30,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 30,
+            "Quantity": [2] * 30,
+            "Units_Effective": [2] * 30,
+            "Source": ["Amazon"] * 30,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["GHOSTBASE"], "Total_Inventory": [100]})
+    existing_po = pd.DataFrame({"OMS_SKU": ["PIPELINE-ONLY-SKU"], "PO_Pipeline_Total": [40]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["PIPELINE-ONLY-SKU"],
+            "SKU_Sheet_Status": ["Open"],
+            "Lead_Time_From_Sheet": [63.0],
+            "SKU_Sheet_Closed": [False],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=1,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        sku_status_df=sheet,
+    )
+    ghost_row = po[po["OMS_SKU"] == "PIPELINE-ONLY-SKU"]
+    assert len(ghost_row) == 1
+    assert int(ghost_row.iloc[0]["Lead_Time_Days"]) == 63
+
+
 def test_sku_status_parse_detects_closed_and_lead():
     from backend.services.sku_status_lead import parse_sku_status_lead_dataframe
 
