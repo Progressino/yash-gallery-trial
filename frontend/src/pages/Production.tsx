@@ -172,6 +172,144 @@ const printJO = (jo: JO) => {
   win.document.close()
 }
 
+function MRPTab() {
+  const qc = useQueryClient()
+  const [selectedSOs, setSelectedSOs] = useState<string[]>([])
+  const [mrpResult, setMrpResult] = useState<any>(null)
+  const [running, setRunning] = useState(false)
+  const [expandedMat, setExpandedMat] = useState<string | null>(null)
+
+  const { data: openSOs = [] } = useQuery({
+    queryKey: ['mrp-open-sos'],
+    queryFn: () => api.get('/production/mrp/open-sos').then(r => r.data),
+  })
+  const { data: lastMRP } = useQuery({
+    queryKey: ['mrp-last'],
+    queryFn: () => api.get('/production/mrp/last').then(r => r.data),
+  })
+
+  const runMRP = async () => {
+    if (!selectedSOs.length) { alert('Select at least one SO'); return }
+    setRunning(true)
+    try {
+      const res = await api.post('/production/mrp/run', { so_numbers: selectedSOs })
+      setMrpResult(res.data)
+      qc.invalidateQueries({ queryKey: ['mrp-last'] })
+    } catch (e) { alert('MRP run failed') }
+    setRunning(false)
+  }
+
+  const toggleSO = (so: string) => setSelectedSOs(s => s.includes(so) ? s.filter(x => x !== so) : [...s, so])
+
+  const result = mrpResult?.result || lastMRP?.result || {}
+  const materials = Object.entries(result) as [string, any][]
+
+  return (
+    <div className="space-y-4">
+      {/* SO Selection */}
+      <div className="bg-white rounded-xl border p-4">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="font-semibold text-gray-700">🔢 MRP — Material Requirement Planning</h3>
+          <button onClick={runMRP} disabled={running || !selectedSOs.length}
+            className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
+            {running ? '⏳ Running…' : '▶️ Run MRP'}
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-3">Select SOs for MRP calculation:</p>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+          {(openSOs as any[]).map((so: any) => (
+            <button key={so.so_number} onClick={() => toggleSO(so.so_number)}
+              className={`text-left border rounded-lg px-3 py-2 text-xs transition-colors ${selectedSOs.includes(so.so_number) ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'bg-white hover:bg-gray-50'}`}>
+              <p className="font-semibold">{so.so_number}</p>
+              <p className={selectedSOs.includes(so.so_number) ? 'text-blue-200' : 'text-gray-400'}>
+                {so.buyer} · {so.pending_qty} pcs pending
+              </p>
+            </button>
+          ))}
+          {(openSOs as any[]).length === 0 && <p className="text-gray-400 text-sm col-span-3">No open SOs</p>}
+        </div>
+        {lastMRP?.run_time && !mrpResult && (
+          <p className="text-xs text-gray-400 mt-2">Last run: {lastMRP.run_time} · SOs: {lastMRP.so_numbers?.join(', ')}</p>
+        )}
+      </div>
+
+      {/* MRP Results */}
+      {materials.length > 0 && (
+        <div className="bg-white rounded-xl border overflow-hidden">
+          <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between items-center">
+            <span className="font-semibold">MRP Results — {materials.length} materials</span>
+            <span className="text-blue-200 text-xs">{mrpResult?.run_time || lastMRP?.run_time}</span>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-gray-400 text-xs uppercase bg-gray-50">
+              <tr>
+                <th className="text-left px-4 py-2">Material</th>
+                <th className="text-right px-4 py-2">Total Req</th>
+                <th className="text-right px-4 py-2">Stock</th>
+                <th className="text-right px-4 py-2">Available</th>
+                <th className="text-right px-4 py-2">Net Req</th>
+                <th className="text-left px-4 py-2">Unit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {materials.sort((a,b) => (b[1].net_req||0) - (a[1].net_req||0)).map(([code, mat]) => (
+                <>
+                  <tr key={code} className="border-t hover:bg-gray-50 cursor-pointer" onClick={() => setExpandedMat(expandedMat === code ? null : code)}>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-400 text-xs">{expandedMat === code ? '▼' : '▶'}</span>
+                        <div>
+                          <p className="font-mono font-semibold text-xs text-[#002B5B]">{code}</p>
+                          <p className="text-xs text-gray-500">{mat.name}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-2 text-right font-semibold">{mat.total_req}</td>
+                    <td className="px-4 py-2 text-right">{mat.stock || 0}</td>
+                    <td className="px-4 py-2 text-right text-green-600">{mat.available || 0}</td>
+                    <td className={`px-4 py-2 text-right font-bold ${(mat.net_req||0) > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                      {mat.net_req || 0}
+                    </td>
+                    <td className="px-4 py-2 text-gray-500 text-xs">{mat.unit}</td>
+                  </tr>
+                  {/* Breakdown rows */}
+                  {expandedMat === code && mat.breakdown && (
+                    <tr key={`${code}-breakdown`}>
+                      <td colSpan={6} className="px-4 py-0 bg-blue-50">
+                        <div className="py-2 space-y-1">
+                          <p className="text-xs font-semibold text-gray-500 uppercase mb-1">Breakdown — Kahan lag raha hai:</p>
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-gray-400">
+                                <th className="text-left py-1 pr-4">SO Number</th>
+                                <th className="text-left py-1 pr-4">SKU / FG</th>
+                                <th className="text-right py-1">Qty Required</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {mat.breakdown.map((b: any, i: number) => (
+                                <tr key={i} className="border-t border-blue-100">
+                                  <td className="py-1 pr-4 font-semibold text-[#002B5B]">{b.so_no}</td>
+                                  <td className="py-1 pr-4 font-mono text-gray-600">{b.sku}</td>
+                                  <td className="py-1 text-right font-semibold">{b.qty_req} {mat.unit}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Production() {
   const qc = useQueryClient()
   const [activeProcess, setActiveProcess] = useState('Cutting')
@@ -725,10 +863,7 @@ export default function Production() {
 
       {/* MRP TAB */}
       {tab === 'mrp' && (
-        <div className="bg-white rounded-xl border p-6 text-center">
-          <p className="text-lg font-semibold text-gray-700 mb-2">🔢 MRP</p>
-          <p className="text-sm text-gray-500">Use Purchase module → PR → From MRP to run MRP and generate requisitions.</p>
-        </div>
+        <MRPTab />
       )}
 
       {/* ── NEW JO MODAL ─────────────────────────────────────────────────────── */}
