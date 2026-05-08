@@ -6,6 +6,7 @@ POST /api/po/sku-status-lead → upload SKU status & lead time (Excel/CSV) for P
 """
 from io import BytesIO
 
+import pandas as pd
 from fastapi import APIRouter, File, Request, UploadFile
 from pydantic import BaseModel
 from typing import Optional
@@ -69,6 +70,79 @@ def po_get_sku_status_lead(request: Request):
     }
 
 
+@router.post("/daily-inventory-history")
+async def po_upload_daily_inventory_history(request: Request, file: UploadFile = File(...)):
+    """Upload Daily Inventory History (wide-format Excel: SKU rows × date columns)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    from ..services.daily_inventory_history import parse_daily_inventory_history_upload
+
+    raw = await file.read()
+    if not raw:
+        return {"ok": False, "message": "Empty file."}
+    try:
+        df = parse_daily_inventory_history_upload(
+            BytesIO(raw),
+            file.filename or "daily_inventory_history.xlsx",
+            sku_mapping=sess.sku_mapping or None,
+        )
+    except Exception as e:
+        return {"ok": False, "message": f"Parse error: {e}"}
+    if df.empty:
+        return {
+            "ok": False,
+            "message": "No usable rows. Need a wide-format sheet: column 1 = SKU, "
+            "column 2 = parent (optional), then daily snapshot columns whose first row is the date.",
+        }
+    sess.daily_inventory_history_df = df
+    sess._quarterly_cache.clear()
+    skus = int(df["OMS_SKU"].nunique())
+    days = int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique())
+    return {
+        "ok": True,
+        "rows": int(len(df)),
+        "skus": skus,
+        "days": days,
+        "message": f"Loaded {len(df):,} SKU-day rows ({skus:,} SKUs × {days:,} days) for effective-days math.",
+    }
+
+
+@router.get("/daily-inventory-history")
+def po_get_daily_inventory_history(request: Request):
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "loaded": False}
+    df = sess.daily_inventory_history_df
+    if df is None or df.empty:
+        return {"ok": True, "loaded": False, "rows": 0, "skus": 0, "days": 0}
+    return {
+        "ok": True,
+        "loaded": True,
+        "rows": int(len(df)),
+        "skus": int(df["OMS_SKU"].nunique()),
+        "days": int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique()),
+        "min_date": str(pd.to_datetime(df["Date"], errors="coerce").min().date())
+        if len(df)
+        else "",
+        "max_date": str(pd.to_datetime(df["Date"], errors="coerce").max().date())
+        if len(df)
+        else "",
+    }
+
+
+@router.delete("/daily-inventory-history")
+def po_clear_daily_inventory_history(request: Request):
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    import pandas as _pd
+
+    sess.daily_inventory_history_df = _pd.DataFrame()
+    sess._quarterly_cache.clear()
+    return {"ok": True, "message": "Daily inventory history cleared."}
+
+
 @router.post("/calculate")
 def po_calculate(request: Request, body: PORequest):
     sess = request.state.session
@@ -101,6 +175,11 @@ def po_calculate(request: Request, body: PORequest):
             existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
             sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
             enforce_two_size_minimum=body.enforce_two_size_minimum,
+            inventory_history_df=(
+                sess.daily_inventory_history_df
+                if not sess.daily_inventory_history_df.empty
+                else None
+            ),
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

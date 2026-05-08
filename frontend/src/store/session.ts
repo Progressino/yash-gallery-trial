@@ -21,6 +21,7 @@ const empty: CoverageResponse = {
   daily_orders: false,
   existing_po: false,
   sku_status_lead: false,
+  daily_inventory_history: false,
   mtr_rows: 0,
   sales_rows: 0,
   myntra_rows: 0,
@@ -28,6 +29,8 @@ const empty: CoverageResponse = {
   flipkart_rows: 0,
   snapdeal_rows: 0,
   sku_status_lead_rows: 0,
+  daily_inventory_history_rows: 0,
+  daily_inventory_history_skus: 0,
   pause_auto_data_restore: false,
 }
 

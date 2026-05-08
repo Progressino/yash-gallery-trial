@@ -212,6 +212,7 @@ def get_coverage(request: Request):
         daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
         existing_po=not sess.existing_po_df.empty,
         sku_status_lead=not sess.sku_status_lead_df.empty,
+        daily_inventory_history=not sess.daily_inventory_history_df.empty,
         mtr_rows=len(sess.mtr_df),
         sales_rows=len(sess.sales_df),
         myntra_rows=len(sess.myntra_df),
@@ -219,6 +220,12 @@ def get_coverage(request: Request):
         flipkart_rows=len(sess.flipkart_df),
         snapdeal_rows=len(sess.snapdeal_df),
         sku_status_lead_rows=int(len(sess.sku_status_lead_df)),
+        daily_inventory_history_rows=int(len(sess.daily_inventory_history_df)),
+        daily_inventory_history_skus=(
+            int(sess.daily_inventory_history_df["OMS_SKU"].nunique())
+            if not sess.daily_inventory_history_df.empty
+            else 0
+        ),
         pause_auto_data_restore=paused,
     )
 

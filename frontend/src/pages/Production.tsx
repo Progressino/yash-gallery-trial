@@ -203,6 +203,9 @@ function MRPTab() {
 
   const result = mrpResult?.result || lastMRP?.result || {}
   const materials = Object.entries(result) as [string, any][]
+  const warnings: string[] = (mrpResult?.warnings || lastMRP?.warnings || []) as string[]
+  const matchedSOs: string[] = (mrpResult?.matched_sos || lastMRP?.matched_sos || []) as string[]
+  const showWarnings = warnings.length > 0 && (mrpResult || lastMRP?.run_time)
 
   return (
     <div className="space-y-4">
@@ -232,6 +235,25 @@ function MRPTab() {
           <p className="text-xs text-gray-400 mt-2">Last run: {lastMRP.run_time} · SOs: {lastMRP.so_numbers?.join(', ')}</p>
         )}
       </div>
+
+      {/* Warnings — show when SOs/SKUs couldn't be exploded so the user knows what to fix. */}
+      {showWarnings && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <p className="text-sm font-semibold text-amber-900 mb-2">⚠️ MRP could not generate rows for some lines</p>
+          {matchedSOs.length > 0 && (
+            <p className="text-xs text-amber-800 mb-2">
+              Materials below cover SOs: <span className="font-mono">{matchedSOs.join(', ')}</span>.
+            </p>
+          )}
+          <ul className="list-disc list-inside text-xs text-amber-900 space-y-0.5">
+            {warnings.slice(0, 12).map((w, i) => <li key={i}>{w}</li>)}
+            {warnings.length > 12 && <li className="text-amber-700">…and {warnings.length - 12} more</li>}
+          </ul>
+          <p className="text-xs text-amber-800 mt-2">
+            Add the missing SKU/parent style in <strong>Item Master</strong> with a default <strong>BOM</strong>, then re-run MRP.
+          </p>
+        </div>
+      )}
 
       {/* MRP Results */}
       {materials.length > 0 && (

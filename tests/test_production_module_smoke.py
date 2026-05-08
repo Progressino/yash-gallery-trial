@@ -35,6 +35,12 @@ def isolated_module_dbs(tmp_path, monkeypatch):
     monkeypatch.setattr(grey_db, "_DB", paths["GREY_DB_PATH"])
     monkeypatch.setattr(item_db, "DB_PATH", paths["ITEM_DB_PATH"])
 
+    # The MRP router opens its own connection via ``_ITEM_DB_PATH`` — point that at
+    # the same file so MRP HTTP tests share the seeded item master.
+    from backend.routers import production as production_router
+
+    monkeypatch.setattr(production_router, "_ITEM_DB_PATH", paths["ITEM_DB_PATH"])
+
     sales_db.init_db()
     purchase_db.init_db()
     production_db.init_db()
@@ -221,6 +227,123 @@ def test_production_basic_endpoints(isolated_module_dbs, client):
     open_sos = client.get("/api/production/mrp/open-sos")
     assert open_sos.status_code == 200
     assert isinstance(open_sos.json(), list)
+
+
+def _seed_parent_with_bom(item_db_path: str, parent_code: str = "STYLE-1"):
+    """Insert a parent item with a single-RM default BOM. Returns the parent id."""
+    import sqlite3
+
+    conn = sqlite3.connect(item_db_path)
+    conn.row_factory = sqlite3.Row
+    type_id = conn.execute(
+        "SELECT id FROM item_types WHERE code='FG' OR name LIKE 'Finished%' LIMIT 1"
+    ).fetchone()
+    if type_id is None:
+        cur = conn.execute("INSERT INTO item_types (name, code) VALUES (?, ?)", ("Finished Good", "FG"))
+        type_id = cur.lastrowid
+    else:
+        type_id = type_id[0]
+
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        (parent_code, f"{parent_code} parent", type_id),
+    )
+    parent_id = cur.lastrowid
+
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        ("FAB-CTN", "Cotton Fabric", type_id),
+    )
+    fab_id = cur.lastrowid
+
+    cur = conn.execute(
+        "INSERT INTO bom_headers (item_id, bom_name, applies_to, is_default) VALUES (?, 'Default', 'all', 1)",
+        (parent_id,),
+    )
+    bom_id = cur.lastrowid
+
+    conn.execute(
+        """INSERT INTO bom_lines
+           (bom_id, component_item_id, component_name, component_type, quantity, unit)
+           VALUES (?, ?, 'Cotton Fabric', 'RM', 1.5, 'MTR')""",
+        (bom_id, fab_id),
+    )
+    conn.commit()
+    conn.close()
+    return parent_id
+
+
+def _create_so_with_sku(client, sku: str, qty: int = 5):
+    r = client.post(
+        "/api/sales/orders",
+        json={
+            "so_date": "2026-05-07",
+            "buyer": "Acme",
+            "warehouse": "Main",
+            "lines": [{"sku": sku, "sku_name": sku, "qty": qty, "unit": "PCS"}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["so_number"]
+
+
+def test_mrp_run_falls_back_to_parent_style_for_variant_sku(isolated_module_dbs, client):
+    """SKU-1-XL is not in items, but parent STYLE-1 has a BOM — MRP should still produce rows."""
+    _seed_parent_with_bom(isolated_module_dbs["ITEM_DB_PATH"], parent_code="STYLE-1")
+    so = _create_so_with_sku(client, "STYLE-1-XL", qty=10)
+
+    r = client.post("/api/production/mrp/run", json={"so_numbers": [so]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["result"], f"MRP returned no materials, warnings: {body.get('warnings')}"
+    assert "FAB-CTN" in body["result"]
+    assert body["result"]["FAB-CTN"]["total_req"] == 15.0  # 10 pcs * 1.5 MTR
+    assert so in body.get("matched_sos", [])
+
+
+def test_mrp_run_emits_warning_for_unknown_sku(isolated_module_dbs, client):
+    """SKU not in Item Master at all — MRP must surface an actionable warning."""
+    so = _create_so_with_sku(client, "UNKNOWN-SKU-9999", qty=5)
+    r = client.post("/api/production/mrp/run", json={"so_numbers": [so]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result"] == {}
+    warnings = body.get("warnings", [])
+    assert warnings, "Expected a warning when SKU is not in Item Master"
+    joined = " | ".join(warnings)
+    assert "UNKNOWN-SKU-9999" in joined
+    assert so in joined
+    assert so not in body.get("matched_sos", [])
+
+
+def test_mrp_legacy_payload_still_renders_via_last(isolated_module_dbs, client):
+    """``mrp_last_run`` may already hold an old flat-dict result — `/mrp/last` must still serve it."""
+    from backend.db.production_db import save_mrp_result
+
+    legacy_payload = {
+        "MAT-LEGACY": {
+            "name": "Legacy material",
+            "type": "RM",
+            "unit": "PCS",
+            "total_req": 10,
+            "stock": 3,
+            "reserved": 0,
+            "available": 3,
+            "soft_reserved": 0,
+            "net_available": 3,
+            "net_req": 7,
+            "net_req_with_soft": 7,
+            "breakdown": [{"so_no": "SO-OLD", "sku": "X", "qty_req": 10}],
+            "level": 0,
+        }
+    }
+    save_mrp_result(["SO-OLD"], legacy_payload)
+
+    r = client.get("/api/production/mrp/last")
+    assert r.status_code == 200
+    body = r.json()
+    assert "MAT-LEGACY" in body["result"]
+    assert body["warnings"] == []
 
 
 # ── /api/items ────────────────────────────────────────────────────────────────

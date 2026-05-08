@@ -137,11 +137,17 @@ export default function POEngine() {
   const setCoverage = useSession(s => s.setCoverage)
   const skuStatusLoaded = useSession(s => s.sku_status_lead ?? false)
   const skuStatusRows = useSession(s => s.sku_status_lead_rows ?? 0)
+  const dailyInvLoaded = useSession(s => s.daily_inventory_history ?? false)
+  const dailyInvRows = useSession(s => s.daily_inventory_history_rows ?? 0)
+  const dailyInvSkus = useSession(s => s.daily_inventory_history_skus ?? 0)
   const skuFileRef = useRef<HTMLInputElement>(null)
+  const dailyInvFileRef = useRef<HTMLInputElement>(null)
   /** Bumps on each Calculate / quarterly load so stale async responses are ignored. */
   const poRunSeqRef = useRef(0)
   const [skuUploadBusy, setSkuUploadBusy] = useState(false)
   const [skuUploadMsg, setSkuUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const [dailyInvBusy, setDailyInvBusy] = useState(false)
+  const [dailyInvMsg, setDailyInvMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
   const {
     activeTab, setActiveTab,
@@ -246,6 +252,44 @@ export default function POEngine() {
     } finally {
       setSkuUploadBusy(false)
       if (skuFileRef.current) skuFileRef.current.value = ''
+    }
+  }
+
+  const onDailyInvFile = async (files: FileList | null) => {
+    const f = files?.[0]
+    if (!f) return
+    setDailyInvBusy(true)
+    setDailyInvMsg(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', f)
+      const { data } = await api.post<{
+        ok: boolean
+        message?: string
+        rows?: number
+        skus?: number
+        days?: number
+      }>('/po/daily-inventory-history', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 900_000,
+      })
+      if (data.ok) {
+        setDailyInvMsg({
+          type: 'ok',
+          text:
+            data.message ||
+            `Loaded ${data.rows ?? 0} rows (${data.skus ?? 0} SKUs × ${data.days ?? 0} days).`,
+        })
+        const c = await getCoverage()
+        setCoverage(c)
+      } else {
+        setDailyInvMsg({ type: 'err', text: data.message || 'Upload failed' })
+      }
+    } catch (e: unknown) {
+      setDailyInvMsg({ type: 'err', text: e instanceof Error ? e.message : 'Upload failed' })
+    } finally {
+      setDailyInvBusy(false)
+      if (dailyInvFileRef.current) dailyInvFileRef.current.value = ''
     }
   }
 
@@ -642,6 +686,49 @@ export default function POEngine() {
               {skuUploadMsg && (
                 <p className={`mt-2 text-xs rounded px-2 py-1 ${skuUploadMsg.type === 'ok' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}>
                   {skuUploadMsg.text}
+                </p>
+              )}
+            </div>
+
+            <div className="mt-4 p-4 rounded-lg border border-dashed border-gray-300 bg-gray-50/80">
+              <h4 className="text-sm font-semibold text-gray-700 mb-1">Daily Inventory History (effective days)</h4>
+              <p className="text-xs text-gray-500 mb-3">
+                Upload a wide-format Excel where rows are <strong>SKUs</strong> and columns are <strong>daily snapshots</strong>
+                (column header = total inventory; first row = the date). Two sheets are recognised: <code>OMS</code> and{' '}
+                <code>Amazon Inventory</code>. PO will count only the days a SKU actually had stock when computing ADS,
+                so out-of-stock days don&apos;t lowball the daily run rate.
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <input
+                  ref={dailyInvFileRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={e => void onDailyInvFile(e.target.files)}
+                />
+                <button
+                  type="button"
+                  disabled={dailyInvBusy}
+                  onClick={() => dailyInvFileRef.current?.click()}
+                  className="text-xs px-4 py-2 rounded-lg border border-[#002B5B] text-[#002B5B] font-semibold hover:bg-blue-50 disabled:opacity-50"
+                >
+                  {dailyInvBusy ? 'Uploading…' : '📤 Upload daily inventory history'}
+                </button>
+                <span className="text-xs text-gray-600">
+                  {dailyInvLoaded ? (
+                    <span className="text-green-700 font-medium">
+                      ✓ {dailyInvRows.toLocaleString()} rows · {dailyInvSkus.toLocaleString()} SKUs loaded
+                    </span>
+                  ) : (
+                    <span>No sheet loaded (optional)</span>
+                  )}
+                </span>
+              </div>
+              {dailyInvMsg && (
+                <p
+                  className={`mt-2 text-xs rounded px-2 py-1 ${dailyInvMsg.type === 'ok' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}
+                >
+                  {dailyInvMsg.text}
                 </p>
               )}
             </div>

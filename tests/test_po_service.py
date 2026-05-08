@@ -1045,3 +1045,141 @@ def test_po_qty_is_target_cover_balance_days_based():
     expected_proj = round(10.0 / ads, 1)
     assert int(row["PO_Qty"]) == expected_po
     assert float(row["Projected_Running_Days"]) == expected_proj
+
+
+# ── Daily Inventory History parser + PO override ─────────────────────────────
+
+
+def _wide_inv_history_workbook():
+    """Build a 2-sheet wide-format Excel matching the production export layout."""
+    import io
+    import pandas as pd
+
+    dates = pd.date_range("2025-12-08", periods=30, freq="D")
+    cols = ["Total Inv.", "Total"] + list(range(len(dates)))
+
+    oms_rows = [
+        ["Item SkuCode", "Item"] + [d for d in dates],
+        ["INV-VAR-1", "INV-PARENT"] + [(0 if i < 10 else 5) for i in range(len(dates))],
+        ["INV-VAR-2", "INV-PARENT"] + [3 for _ in dates],
+    ]
+    oms_df = pd.DataFrame(oms_rows, columns=cols)
+
+    amz_rows = [
+        ["Item SkuCode", "Item SkuCode"] + [d for d in dates],
+        ["INV-PLVAR-1", "INV-PLPARENT"] + [0 for _ in dates],
+    ]
+    amz_df = pd.DataFrame(amz_rows, columns=["Total Inv.", "SKU"] + list(range(len(dates))))
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        oms_df.to_excel(w, sheet_name="OMS", index=False)
+        amz_df.to_excel(w, sheet_name="Amazon Inventory", index=False)
+    buf.seek(0)
+    return buf
+
+
+def test_daily_inventory_history_parser_picks_variant_columns():
+    from backend.services.daily_inventory_history import parse_daily_inventory_history_upload
+
+    buf = _wide_inv_history_workbook()
+    df = parse_daily_inventory_history_upload(buf, "Daily Inventory History.xlsx")
+    assert not df.empty
+    skus = set(df["OMS_SKU"].unique())
+    assert "INV-VAR-1" in skus
+    assert "INV-VAR-2" in skus
+    assert df["Qty"].min() >= 0
+
+
+def test_effective_days_from_history_counts_in_stock_days():
+    from backend.services.daily_inventory_history import (
+        effective_days_from_history,
+        parse_daily_inventory_history_upload,
+    )
+
+    buf = _wide_inv_history_workbook()
+    df = parse_daily_inventory_history_upload(buf, "x.xlsx")
+    end = pd.Timestamp(df["Date"].max()).normalize()
+    start = end - pd.Timedelta(days=29)
+    eff = effective_days_from_history(df, start, end)
+    by_sku = {r["OMS_SKU"]: int(r["Eff_Days_Inventory"]) for _, r in eff.iterrows()}
+    assert by_sku["INV-VAR-1"] == 20  # 30-day window, OOS first 10 days
+    assert by_sku["INV-VAR-2"] == 30
+    assert by_sku["INV-PLVAR-1"] == 0
+
+
+def test_po_uses_inventory_history_eff_days_to_lift_ads():
+    """ADS denominator should drop to in-stock days, lifting Recent_ADS."""
+    sales_dates = pd.date_range("2025-12-18", periods=20, freq="D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "INV-OVR",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+            for d in sales_dates
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["INV-OVR"], "Total_Inventory": [10]})
+
+    po_plain = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+    )
+    plain = po_plain.iloc[0]
+    assert int(plain["Eff_Days"]) == 20
+
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["INV-OVR"] * 30,
+            "Date": pd.date_range("2025-12-08", periods=30, freq="D"),
+            "Qty": [0] * 10 + [5] * 20,
+        }
+    )
+    po_hist = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist,
+    )
+    hist = po_hist.iloc[0]
+    assert int(hist["Eff_Days_Inventory"]) == 20
+    assert int(hist["Eff_Days"]) == 20
+
+    inv_hist_short = pd.DataFrame(
+        {
+            "OMS_SKU": ["INV-OVR"] * 30,
+            "Date": pd.date_range("2025-12-08", periods=30, freq="D"),
+            "Qty": [0] * 25 + [5] * 5,
+        }
+    )
+    po_short = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist_short,
+    )
+    short = po_short.iloc[0]
+    assert int(short["Eff_Days_Inventory"]) == 5
+    assert int(short["Eff_Days"]) == 5
+    assert float(short["Recent_ADS"]) > float(plain["Recent_ADS"])

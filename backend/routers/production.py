@@ -17,6 +17,7 @@ from ..db.production_db import (
     list_reservations, create_reservation, release_reservation, get_reserved_qty,
 )
 from ..db.sales_db import get_open_orders, list_orders
+from ..services.helpers import get_parent_sku
 
 router = APIRouter()
 
@@ -24,12 +25,21 @@ _ITEM_DB_PATH = os.environ.get("ITEM_DB_PATH",
     os.path.join(os.path.dirname(__file__), "..", "..", "items_dev.db"))
 
 def _item_connect():
-    path = _ITEM_DB_PATH
-    if not os.path.exists(path):
-        path = os.path.join(os.path.dirname(__file__), "..", "items_dev.db")
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Open Item Master DB. Falls back to a local dev path only if it actually exists.
+
+    Previously, ``sqlite3.connect`` on a missing path silently created an empty
+    DB and MRP returned ``{}`` for every SO. Now we surface that misconfig.
+    """
+    candidates = [_ITEM_DB_PATH, os.path.join(os.path.dirname(__file__), "..", "items_dev.db")]
+    for path in candidates:
+        if path and os.path.exists(path):
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            return conn
+    raise RuntimeError(
+        f"Item Master DB not found at any of: {candidates}. "
+        "Set ITEM_DB_PATH (e.g. /data/items.db) and ensure the file is mounted."
+    )
 
 def _get_item_by_code(conn, code):
     row = conn.execute(
@@ -55,24 +65,105 @@ def _get_bom_lines(conn, bom_id):
 
 # ── MRP Engine ─────────────────────────────────────────────────────────────────
 
+def _parent_candidates(sku: str) -> list[str]:
+    """Build progressively-broader parent-style candidates for an MRP fallback.
+
+    Returns ordered, deduped list. Strategy:
+      1. Iteratively strip one ``-suffix`` at a time (handles ``STYLE-1-XL`` → ``STYLE-1``
+         where ``get_parent_sku`` would over-strip the numeric ``1``).
+      2. Append ``get_parent_sku`` as the last resort.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(c: str) -> None:
+        c = (c or "").strip()
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+
+    cur = (sku or "").strip()
+    while "-" in cur:
+        cur = cur.rsplit("-", 1)[0]
+        _add(cur)
+    try:
+        _add(get_parent_sku(sku))
+    except Exception:
+        pass
+    return out
+
+
+def _resolve_bom_anchor(conn, sku: str):
+    """Find an Item Master row whose default BOM should drive MRP for ``sku``.
+
+    Order of attempts:
+        1. Exact code match (with its ``parent_id`` if its own BOM is missing).
+        2. Hyphen-suffix strip cascade (``STYLE-1-XL`` → ``STYLE-1`` → ``STYLE``).
+        3. ``get_parent_sku`` heuristic (handles tokens without hyphens).
+
+    Returns ``(bom_code, item_row, reason)`` — ``reason`` is empty on success.
+    """
+    if not sku:
+        return None, None, "Empty SKU"
+
+    item = _get_item_by_code(conn, sku)
+    if item:
+        if item.get("parent_id"):
+            parent = _get_item_by_id(conn, item["parent_id"])
+            if parent and _get_default_bom(conn, parent["id"]):
+                return parent["item_code"], parent, ""
+        if _get_default_bom(conn, item["id"]):
+            return item["item_code"], item, ""
+
+    for candidate in _parent_candidates(sku):
+        if candidate == sku:
+            continue
+        parent = _get_item_by_code(conn, candidate)
+        if parent and _get_default_bom(conn, parent["id"]):
+            return parent["item_code"], parent, ""
+
+    if item:
+        return sku, item, f"No BOM defined for SKU '{sku}' (or its parent style)"
+    return None, None, f"SKU '{sku}' is not in Item Master"
+
+
 def calculate_mrp(so_numbers):
+    """
+    Returns ``{"materials": {...}, "warnings": [...]}``.
+
+    Warnings surface every SKU that couldn't be exploded so newly created SOs
+    don't fail silently when their items / BOMs are missing on the server.
+    """
     open_orders = get_open_orders()
-    selected = [l for l in open_orders if l['so_number'] in so_numbers]
-    result = {}
+    requested = set(so_numbers or [])
+    selected = [l for l in open_orders if l.get('so_number') in requested]
+    materials: dict = {}
+    warnings: list[str] = []
+    matched_sos: set[str] = set()
+
+    missing_sos = sorted(requested - {l.get('so_number') for l in selected})
+    for so in missing_sos:
+        warnings.append(f"{so}: not found among open SOs (it may be Closed/Cancelled or have no lines).")
+
     try:
         conn = _item_connect()
-    except:
-        return result
+    except Exception as e:
+        warnings.append(f"Item Master DB unreachable: {e}. Verify ITEM_DB_PATH on the server.")
+        return {"materials": materials, "warnings": warnings, "matched_sos": [], "missing_sos": missing_sos}
 
     def explode(item_code, qty, so_no, sku, depth=0):
-        if depth > 10 or qty <= 0: return
+        if depth > 10 or qty <= 0:
+            return
         item = _get_item_by_code(conn, item_code)
-        if not item: return
+        if not item:
+            return
         bom = _get_default_bom(conn, item['id'])
-        if not bom: return
+        if not bom:
+            return
         for line in _get_bom_lines(conn, bom['id']):
             ctype = (line.get('component_type') or 'RM').upper()
-            if ctype in ('SVC','SERVICE','PROCESS'): continue
+            if ctype in ('SVC', 'SERVICE', 'PROCESS'):
+                continue
             comp = _get_item_by_id(conn, line['component_item_id']) if line.get('component_item_id') else None
             if comp:
                 code = comp['item_code']
@@ -80,33 +171,54 @@ def calculate_mrp(so_numbers):
                 raw = line.get('component_name') or ''
                 code = raw.split(' — ')[0].strip() if ' — ' in raw else raw
                 comp = _get_item_by_code(conn, code) if code else None
-            if not code: continue
-            adj_qty = float(line.get('quantity') or 0) * (1 + float(line.get('shrinkage_pct') or 0)/100 + float(line.get('wastage_pct') or 0)/100)
+            if not code:
+                continue
+            adj_qty = float(line.get('quantity') or 0) * (
+                1 + float(line.get('shrinkage_pct') or 0) / 100 + float(line.get('wastage_pct') or 0) / 100
+            )
             total = round(adj_qty * qty, 3)
-            if code not in result:
-                result[code] = {'name': comp.get('item_name', code) if comp else code, 'type': ctype,
-                                'unit': line.get('unit','PCS'), 'total_req': 0., 'stock': float(comp.get('stock') or 0) if comp else 0.,
-                                'reserved': 0., 'breakdown': [], 'level': depth}
-            result[code]['total_req'] = round(result[code]['total_req'] + total, 3)
-            result[code]['breakdown'].append({'so_no': so_no, 'sku': sku, 'qty_req': total})
+            if code not in materials:
+                materials[code] = {
+                    'name': comp.get('item_name', code) if comp else code,
+                    'type': ctype,
+                    'unit': line.get('unit', 'PCS'),
+                    'total_req': 0.,
+                    'stock': float(comp.get('stock') or 0) if comp else 0.,
+                    'reserved': 0.,
+                    'breakdown': [],
+                    'level': depth,
+                }
+            materials[code]['total_req'] = round(materials[code]['total_req'] + total, 3)
+            materials[code]['breakdown'].append({'so_no': so_no, 'sku': sku, 'qty_req': total})
             if comp:
                 sub = _get_default_bom(conn, comp['id'])
-                if sub and [l for l in _get_bom_lines(conn, sub['id']) if (l.get('component_type') or 'RM').upper() not in ('SVC','SERVICE','PROCESS')]:
-                    explode(comp['item_code'], total, so_no, sku, depth+1)
+                if sub and [
+                    l for l in _get_bom_lines(conn, sub['id'])
+                    if (l.get('component_type') or 'RM').upper() not in ('SVC', 'SERVICE', 'PROCESS')
+                ]:
+                    explode(comp['item_code'], total, so_no, sku, depth + 1)
 
     for line in selected:
-        sku = line.get('sku','')
+        so_no = line.get('so_number', '') or ''
+        sku = line.get('sku', '') or ''
         qty = (line.get('qty') or 0) - (line.get('produced_qty') or 0)
-        if qty <= 0 or not sku: continue
-        item = _get_item_by_code(conn, sku)
-        bom_code = sku
-        if item and item.get('parent_id'):
-            parent = _get_item_by_id(conn, item['parent_id'])
-            if parent: bom_code = parent['item_code']
-        explode(bom_code, qty, line.get('so_number',''), sku)
+        if not sku:
+            warnings.append(f"{so_no}: line has no SKU — can't compute MRP.")
+            continue
+        if qty <= 0:
+            continue
+        bom_code, anchor, reason = _resolve_bom_anchor(conn, sku)
+        if reason:
+            warnings.append(f"{so_no} · {sku}: {reason}.")
+        if not bom_code or not anchor:
+            continue
+        before = len(materials)
+        explode(bom_code, qty, so_no, sku)
+        if len(materials) > before:
+            matched_sos.add(so_no)
 
     conn.close()
-    for code, mat in result.items():
+    for code, mat in materials.items():
         soft = get_soft_reserved_by_material(code)
         avail = max(0., mat['stock'] - mat['reserved'])
         mat['available'] = avail
@@ -114,7 +226,13 @@ def calculate_mrp(so_numbers):
         mat['net_available'] = max(0., avail - soft)
         mat['net_req'] = max(0., round(mat['total_req'] - avail, 3))
         mat['net_req_with_soft'] = max(0., round(mat['total_req'] - mat['net_available'], 3))
-    return result
+
+    return {
+        "materials": materials,
+        "warnings": warnings,
+        "matched_sos": sorted(matched_sos),
+        "missing_sos": missing_sos,
+    }
 
 
 # ── Pydantic Models ────────────────────────────────────────────────────────────
@@ -396,25 +514,68 @@ def get_open_sos():
         })
     return result
 
+def _normalize_mrp_payload(payload):
+    """Accept both new (``{materials, warnings, ...}``) and legacy (flat dict) shapes."""
+    if isinstance(payload, dict) and "materials" in payload:
+        return {
+            "materials": payload.get("materials") or {},
+            "warnings": payload.get("warnings") or [],
+            "matched_sos": payload.get("matched_sos") or [],
+            "missing_sos": payload.get("missing_sos") or [],
+        }
+    return {
+        "materials": payload or {},
+        "warnings": [],
+        "matched_sos": [],
+        "missing_sos": [],
+    }
+
+
 @router.post("/mrp/run")
 def run_mrp_full(body: MRPRunBody):
     if not body.so_numbers:
-        return {'run_time': datetime.now().isoformat(), 'so_numbers': [], 'result': {}}
-    result = calculate_mrp(body.so_numbers)
-    save_mrp_result(body.so_numbers, result)
-    return {'run_time': datetime.now().isoformat(), 'so_numbers': body.so_numbers, 'result': result}
+        return {
+            'run_time': datetime.now().isoformat(),
+            'so_numbers': [],
+            'result': {},
+            'warnings': ['Select at least one SO before running MRP.'],
+            'matched_sos': [],
+            'missing_sos': [],
+        }
+    payload = calculate_mrp(body.so_numbers)
+    save_mrp_result(body.so_numbers, payload)
+    norm = _normalize_mrp_payload(payload)
+    return {
+        'run_time': datetime.now().isoformat(),
+        'so_numbers': body.so_numbers,
+        'result': norm['materials'],
+        'warnings': norm['warnings'],
+        'matched_sos': norm['matched_sos'],
+        'missing_sos': norm['missing_sos'],
+    }
 
 @router.get("/mrp/last")
 def get_last_mrp():
     data = get_last_mrp_result()
-    return data or {'run_time': None, 'so_numbers': [], 'result': {}}
+    if not data:
+        return {'run_time': None, 'so_numbers': [], 'result': {}, 'warnings': [], 'matched_sos': [], 'missing_sos': []}
+    norm = _normalize_mrp_payload(data.get('result'))
+    return {
+        'run_time': data.get('run_time'),
+        'so_numbers': data.get('so_numbers', []),
+        'result': norm['materials'],
+        'warnings': norm['warnings'],
+        'matched_sos': norm['matched_sos'],
+        'missing_sos': norm['missing_sos'],
+    }
 
 @router.get("/mrp/lines-for-so")
 def get_mrp_lines_for_so(so_number: str = ''):
     data = get_last_mrp_result()
     if not data:
         return {'purchase_items': [], 'sfg_items': [], 'error': 'No MRP result. Run MRP first.'}
-    result = data.get('result', {})
+    norm = _normalize_mrp_payload(data.get('result'))
+    result = norm['materials']
     so_numbers = data.get('so_numbers', [])
     if so_number and so_number not in so_numbers:
         return {'purchase_items': [], 'sfg_items': [], 'warning': f'{so_number} not in last MRP run'}
@@ -435,12 +596,13 @@ def mrp_soft_reserve_all():
     data = get_last_mrp_result()
     if not data:
         return {'ok': False, 'message': 'No MRP result. Run MRP first.'}
+    norm = _normalize_mrp_payload(data.get('result'))
     reservations = []
-    for mat_code, mat in data.get('result',{}).items():
-        for bd in mat.get('breakdown',[]):
-            reservations.append({'material_code': mat_code, 'material_name': mat.get('name',mat_code),
-                                 'unit': mat.get('unit','PCS'), 'so_no': bd['so_no'],
-                                 'sku': bd.get('sku',''), 'qty': bd.get('qty_req',0)})
+    for mat_code, mat in norm['materials'].items():
+        for bd in mat.get('breakdown', []):
+            reservations.append({'material_code': mat_code, 'material_name': mat.get('name', mat_code),
+                                 'unit': mat.get('unit', 'PCS'), 'so_no': bd['so_no'],
+                                 'sku': bd.get('sku', ''), 'qty': bd.get('qty_req', 0)})
     soft_reserve_all(reservations)
     return {'ok': True, 'reserved': len(reservations)}
 
