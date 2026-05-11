@@ -296,6 +296,41 @@ def test_sync_grey_trackers_backfills_existing_pos(isolated_module_dbs, client):
     assert again["trackers_created"] == 0
 
 
+def test_po_line_typed_RM_but_item_master_is_grey_fabric_still_creates_tracker(isolated_module_dbs, client):
+    """Reported case: user adds a grey-fabric item as a BOM component, the
+    derived PR/PO line carries material_type='RM'. The auto-create must STILL
+    fire because the item is catalogued as Grey Fabric in the Item Master."""
+    import sqlite3
+
+    iconn = sqlite3.connect(isolated_module_dbs["ITEM_DB_PATH"])
+    gf_type_id = iconn.execute(
+        "SELECT id FROM item_types WHERE code='GF' OR name='Grey Fabric' LIMIT 1"
+    ).fetchone()[0]
+    iconn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id, uom) VALUES (?, ?, ?, ?)",
+        ("ZZZ-PLAIN-CODE", "Cotton roll 60s", gf_type_id, "MTR"),
+    )
+    iconn.commit()
+    iconn.close()
+
+    po_num = _create_po_with_lines(
+        client,
+        [{
+            "material_code": "ZZZ-PLAIN-CODE",
+            "material_name": "Cotton roll 60s",  # no 'grey' / 'fabric' in name
+            "material_type": "RM",                # user picked RM in the dropdown
+            "po_qty": 250,
+            "unit": "MTR",
+            "rate": 80,
+            "gst_pct": 5,
+        }],
+    )
+    trackers = client.get("/api/grey").json()
+    assert any(t.get("po_number") == po_num and t.get("material_code") == "ZZZ-PLAIN-CODE" for t in trackers), (
+        f"Expected grey tracker for PO line whose Item Master type is Grey Fabric. Got: {trackers}"
+    )
+
+
 def test_non_grey_lines_do_not_create_tracker(isolated_module_dbs, client):
     """A pure RM PO (no fabric hints) must NOT spawn a grey tracker."""
     po_num = _create_po_with_lines(

@@ -53,7 +53,7 @@ interface BOMLine {
 interface BOMDetail extends BOMHeader { lines: BOMLine[]; cmt_cost: number; other_cost: number }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const COMPONENT_TYPES = ['FG', 'SFG', 'RM', 'ACC', 'PKG', 'FUEL', 'SVC', 'CMT']
+const COMPONENT_TYPES = ['FG', 'SFG', 'RM', 'GF', 'ACC', 'PKG', 'FUEL', 'SVC', 'CMT']
 const UNITS = ['PCS', 'MTR', 'KG', 'LTR', 'SET', 'PAIR', 'BOX', 'ROLL']
 const fmt  = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
 const fmtN = (n: number, d = 2) => +n.toFixed(d)
@@ -1493,7 +1493,7 @@ const totalCost = useMemo(() =>
                                               ...p,
                                               component_item_id: it.id,
                                               component_name: it.item_code + ' — ' + it.item_name,
-                                              component_type: it.item_type_code,
+                                              component_type: (it.item_type_code || 'RM').toUpperCase(),
                                             }))
                                             setCompSearch('')
                                           }}

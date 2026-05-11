@@ -23,19 +23,60 @@ def _grey_db_path() -> str:
     )
 
 
+def _item_db_path() -> str:
+    return os.environ.get(
+        "ITEM_DB_PATH",
+        os.path.join(os.path.dirname(__file__), "..", "items.db"),
+    )
+
+
 _GREY_HINT_TOKENS = ("grey", "gray", "greige", "fabric", "knit", "woven")
+_GREY_ITEM_TYPE_NAMES = {"grey fabric", "greige", "greige fabric"}
+_GREY_ITEM_TYPE_CODES = {"GF", "GREY", "GREIGE"}
+
+
+def _item_master_is_grey(material_code: str) -> bool:
+    """Look up the material in Item Master; True iff its item_type is ``Grey Fabric``.
+
+    This is the authoritative signal — operators sometimes pick ``RM`` in the PR/PO
+    dropdown for items that are catalogued as grey fabric in the Item Master.
+    """
+    code = (material_code or "").strip()
+    if not code:
+        return False
+    path = _item_db_path()
+    if not os.path.exists(path):
+        return False
+    try:
+        ic = sqlite3.connect(path)
+        ic.row_factory = sqlite3.Row
+        row = ic.execute(
+            "SELECT t.name AS type_name, t.code AS type_code "
+            "FROM items i JOIN item_types t ON t.id = i.item_type_id "
+            "WHERE i.item_code = ? LIMIT 1",
+            (code,),
+        ).fetchone()
+        ic.close()
+    except Exception:
+        return False
+    if not row:
+        return False
+    type_name = str(row["type_name"] or "").strip().lower()
+    type_code = str(row["type_code"] or "").strip().upper()
+    return type_name in _GREY_ITEM_TYPE_NAMES or type_code in _GREY_ITEM_TYPE_CODES
 
 
 def _is_grey_line(line: dict) -> bool:
-    """Detect grey-fabric PO lines even when the user forgot to pick ``GF`` in the dropdown.
+    """Detect grey-fabric PO lines, even when the dropdown was left as ``RM``.
 
-    Triggers on:
-      * ``material_type`` containing 'GF' / 'GREY' / 'GREIGE' (case-insensitive).
-      * ``unit`` of MTR / METER / METRES.
-      * Material code prefix ``GF-`` / ``GREY-`` / ``FAB-`` etc.
-      * Material name containing any of ``grey``, ``gray``, ``greige``, ``fabric``,
-        ``knit``, ``woven`` — keeps the rule conservative but covers the common
-        names operators type for grey rolls.
+    Order of checks (cheapest → strongest):
+      1. ``material_type`` containing GF / GREY / GREIGE.
+      2. material code prefix ``GF-`` / ``GREY-`` / ``FAB-`` etc.
+      3. ``material_name`` mentioning grey/gray/greige/fabric/knit/woven, optionally
+         in combination with a MTR-style unit.
+      4. **Authoritative**: Item Master lookup — when the material's item type in
+         the items DB is ``Grey Fabric`` the PO line IS a grey-fabric line,
+         regardless of what the PR/PO dropdown said.
     """
     if not isinstance(line, dict):
         return False
@@ -44,17 +85,21 @@ def _is_grey_line(line: dict) -> bool:
         return True
     if mt.startswith("GF") or "GREY" in mt or "GREIGE" in mt:
         return True
+
     code = str(line.get("material_code") or "").strip().upper()
     if code.startswith(("GF-", "GREY-", "GREIGE-", "FAB-")):
         return True
-    unit = str(line.get("unit") or "").strip().upper()
-    if unit in {"MTR", "METER", "METRE", "METERS", "METRES"}:
-        # MTR units alone aren't proof, but combined with a fabric-y name they are.
-        name = str(line.get("material_name") or "").lower()
-        if any(tok in name for tok in _GREY_HINT_TOKENS):
-            return True
+
     name = str(line.get("material_name") or "").lower()
     if any(tok in name for tok in _GREY_HINT_TOKENS):
+        return True
+    unit = str(line.get("unit") or "").strip().upper()
+    if unit in {"MTR", "METER", "METRE", "METERS", "METRES"} and any(
+        tok in name for tok in _GREY_HINT_TOKENS
+    ):
+        return True
+
+    if _item_master_is_grey(line.get("material_code") or ""):
         return True
     return False
 
