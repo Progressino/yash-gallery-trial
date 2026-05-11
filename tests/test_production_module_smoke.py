@@ -207,6 +207,113 @@ def test_purchase_pr_to_po_flow(isolated_module_dbs, client):
         assert isinstance(pos, list)
 
 
+def _create_po_with_lines(client, lines):
+    sup = client.post("/api/purchase/suppliers",
+                      json={"supplier_name": "Fabric Mills", "supplier_type": "Fabric Supplier"}).json()
+    assert sup.get("ok") is True
+    body = {
+        "supplier_name": "Fabric Mills",
+        "po_date": "2026-05-11",
+        "delivery_date": "2026-06-01",
+        "delivery_location": "Grey Warehouse",
+        "so_reference": "SO-1",
+        "lines": lines,
+    }
+    r = client.post("/api/purchase/po", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()["po_number"]
+
+
+def test_create_po_with_GF_line_auto_creates_grey_tracker(isolated_module_dbs, client):
+    po_num = _create_po_with_lines(
+        client,
+        [{
+            "material_code": "GF-CTN-60",
+            "material_name": "Grey Fabric Cotton 60s",
+            "material_type": "GF",
+            "po_qty": 500,
+            "unit": "MTR",
+            "rate": 75,
+            "gst_pct": 5,
+        }],
+    )
+    trackers = client.get("/api/grey").json()
+    assert any(t.get("po_number") == po_num and t.get("material_code") == "GF-CTN-60" for t in trackers)
+
+
+def test_create_po_with_grey_name_but_wrong_type_still_creates_tracker(isolated_module_dbs, client):
+    """User picks RM by mistake — name hints 'grey' / unit MTR should still trigger."""
+    po_num = _create_po_with_lines(
+        client,
+        [{
+            "material_code": "FAB-001",
+            "material_name": "Grey knit fabric",
+            "material_type": "RM",
+            "po_qty": 300,
+            "unit": "MTR",
+            "rate": 60,
+            "gst_pct": 5,
+        }],
+    )
+    trackers = client.get("/api/grey").json()
+    assert any(t.get("po_number") == po_num for t in trackers), trackers
+
+
+def test_sync_grey_trackers_backfills_existing_pos(isolated_module_dbs, client):
+    """The sync endpoint must create a tracker for legacy POs that have grey-fabric lines."""
+    po_num = _create_po_with_lines(
+        client,
+        [{
+            "material_code": "GF-VISCOSE-1",
+            "material_name": "Greige viscose",
+            "material_type": "GF",
+            "po_qty": 200,
+            "unit": "MTR",
+            "rate": 90,
+            "gst_pct": 5,
+        }],
+    )
+    # Manually wipe the tracker that the auto-create made, simulating a legacy PO.
+    import sqlite3
+    gconn = sqlite3.connect(isolated_module_dbs["GREY_DB_PATH"])
+    gconn.execute("DELETE FROM grey_tracker WHERE po_number=?", (po_num,))
+    gconn.commit()
+    gconn.close()
+
+    assert client.get("/api/grey").json() == []
+
+    sync = client.post("/api/purchase/po/sync-grey-trackers")
+    assert sync.status_code == 200, sync.text
+    body = sync.json()
+    assert body["pos_scanned"] >= 1
+    assert body["trackers_created"] == 1
+
+    trackers = client.get("/api/grey").json()
+    assert any(t.get("po_number") == po_num for t in trackers)
+
+    # Idempotent — running again creates nothing new.
+    again = client.post("/api/purchase/po/sync-grey-trackers").json()
+    assert again["trackers_created"] == 0
+
+
+def test_non_grey_lines_do_not_create_tracker(isolated_module_dbs, client):
+    """A pure RM PO (no fabric hints) must NOT spawn a grey tracker."""
+    po_num = _create_po_with_lines(
+        client,
+        [{
+            "material_code": "ZIPPER-001",
+            "material_name": "Brass zipper 8 inch",
+            "material_type": "ACC",
+            "po_qty": 1000,
+            "unit": "PCS",
+            "rate": 12,
+            "gst_pct": 18,
+        }],
+    )
+    trackers = client.get("/api/grey").json()
+    assert not any(t.get("po_number") == po_num for t in trackers)
+
+
 # ── /api/production ──────────────────────────────────────────────────────────
 
 

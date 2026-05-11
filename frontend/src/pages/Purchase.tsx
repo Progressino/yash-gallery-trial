@@ -24,6 +24,14 @@ const SUP_TYPES = ['Fabric Supplier', 'Accessories Supplier', 'Job Work', 'Other
 const PROC_TYPES = ['Printing Unit', 'Dyeing Unit', 'Embroidery', 'Others']
 const DEPTS = ['Production', 'Stores', 'Others']
 const MAT_TYPES = ['RM', 'ACC', 'PKG', 'SFG', 'FG', 'GF']
+const MAT_TYPE_LABELS: Record<string, string> = {
+  RM: 'RM — Raw Material',
+  ACC: 'ACC — Accessories',
+  PKG: 'PKG — Packaging',
+  SFG: 'SFG — Semi-Finished',
+  FG: 'FG — Finished Goods',
+  GF: 'GF — Grey Fabric (Tracker)',
+}
 const PROC_TYPES2 = ['Printing', 'Dyeing', 'Embroidery', 'Other']
 const GRN_TYPES = ['PO Receipt', 'JWO Receipt']
 const PAYMENT_TERMS = ['Immediate', 'Net 15', 'Net 30', 'Net 45', 'Net 60']
@@ -1000,7 +1008,7 @@ export default function Purchase() {
                     <input placeholder="Material Code" value={ln.material_code} onChange={e => setPRLines(l => l.map((x, j) => j === i ? { ...x, material_code: e.target.value } : x))} className="border border-gray-200 rounded px-2 py-1.5 text-sm col-span-1" />
                     <input placeholder="Material Name" value={ln.material_name} onChange={e => setPRLines(l => l.map((x, j) => j === i ? { ...x, material_name: e.target.value } : x))} className="border border-gray-200 rounded px-2 py-1.5 text-sm col-span-2" />
                     <select value={ln.material_type} onChange={e => setPRLines(l => l.map((x, j) => j === i ? { ...x, material_type: e.target.value } : x))} className="border border-gray-200 rounded px-2 py-1.5 text-sm">
-                      {MAT_TYPES.map(t => <option key={t}>{t}</option>)}
+                      {MAT_TYPES.map(t => <option key={t} value={t}>{MAT_TYPE_LABELS[t] || t}</option>)}
                     </select>
                     <input type="number" placeholder="Qty" value={ln.required_qty} onChange={e => setPRLines(l => l.map((x, j) => j === i ? { ...x, required_qty: +e.target.value } : x))} className="border border-gray-200 rounded px-2 py-1.5 text-sm" />
                     <button onClick={() => setPRLines(l => l.filter((_, j) => j !== i))} className="text-red-400 text-sm">✕</button>
@@ -1133,12 +1141,28 @@ export default function Purchase() {
       {/* ── Purchase Orders ─────────────────────────────────────────────────── */}
       {tab === 'po' && (
         <div className="space-y-4">
-          <div className="flex justify-between items-center">
+          <div className="flex justify-between items-center gap-3 flex-wrap">
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
               <option value="">All</option>
               {['Draft','Sent to Supplier','Confirmed','Partial Received','Received','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
             </select>
-            <button onClick={() => setShowPOForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ New PO</button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  try {
+                    const { data } = await api.post('/purchase/po/sync-grey-trackers')
+                    qc.invalidateQueries({ queryKey: ['grey'] })
+                    alert(`Synced ${data?.pos_scanned ?? 0} POs · ${data?.trackers_created ?? 0} new grey tracker rows.`)
+                  } catch (e) {
+                    alert('Sync failed: ' + (e as Error).message)
+                  }
+                }}
+                title="Scan all POs and create missing Grey Tracker rows for grey-fabric lines"
+                className="px-3 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50">
+                🧵 Sync grey trackers
+              </button>
+              <button onClick={() => setShowPOForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ New PO</button>
+            </div>
           </div>
           {showPOForm && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
@@ -1245,7 +1269,7 @@ export default function Purchase() {
                                 <tr key={i} className="border-t border-gray-50">
                                   <td className="py-1"><input value={ln.material_code} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_code: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" /></td>
                                   <td className="py-1"><input value={ln.material_name} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_name: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" /></td>
-                                  <td className="py-1"><select value={ln.material_type} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_type: e.target.value } : x))} className="w-full border rounded px-1.5 py-1">{MAT_TYPES.map(t => <option key={t}>{t}</option>)}</select></td>
+                                  <td className="py-1"><select value={ln.material_type} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_type: e.target.value } : x))} className="w-full border rounded px-1.5 py-1">{MAT_TYPES.map(t => <option key={t} value={t}>{MAT_TYPE_LABELS[t] || t}</option>)}</select></td>
                                   <td className="py-1"><input type="number" value={ln.po_qty} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, po_qty: +e.target.value } : x))} className="w-16 border rounded px-1.5 py-1 text-right" /></td>
                                   <td className="py-1"><input type="number" value={ln.rate} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="w-20 border rounded px-1.5 py-1 text-right" /></td>
                                   <td className="py-1"><select value={ln.gst_pct} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, gst_pct: +e.target.value } : x))} className="w-full border rounded px-1.5 py-1">{GST_RATES.map(g => <option key={g} value={g}>{g}%</option>)}</select></td>

@@ -1,14 +1,150 @@
 """Purchase Module DB — Suppliers, Processors, PR, PO, JWO, GRN"""
-import sqlite3, os
+import logging
+import os
+import sqlite3
 from datetime import datetime
 
 _DB = os.environ.get("PURCHASE_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "purchase.db"))
+
+_log = logging.getLogger(__name__)
+
 
 def _connect():
     conn = sqlite3.connect(_DB)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _grey_db_path() -> str:
+    return os.environ.get(
+        "GREY_DB_PATH",
+        os.path.join(os.path.dirname(__file__), "..", "grey.db"),
+    )
+
+
+_GREY_HINT_TOKENS = ("grey", "gray", "greige", "fabric", "knit", "woven")
+
+
+def _is_grey_line(line: dict) -> bool:
+    """Detect grey-fabric PO lines even when the user forgot to pick ``GF`` in the dropdown.
+
+    Triggers on:
+      * ``material_type`` containing 'GF' / 'GREY' / 'GREIGE' (case-insensitive).
+      * ``unit`` of MTR / METER / METRES.
+      * Material code prefix ``GF-`` / ``GREY-`` / ``FAB-`` etc.
+      * Material name containing any of ``grey``, ``gray``, ``greige``, ``fabric``,
+        ``knit``, ``woven`` — keeps the rule conservative but covers the common
+        names operators type for grey rolls.
+    """
+    if not isinstance(line, dict):
+        return False
+    mt = str(line.get("material_type") or "").strip().upper()
+    if mt in {"GF", "GREY", "GREIGE", "GREY FABRIC"}:
+        return True
+    if mt.startswith("GF") or "GREY" in mt or "GREIGE" in mt:
+        return True
+    code = str(line.get("material_code") or "").strip().upper()
+    if code.startswith(("GF-", "GREY-", "GREIGE-", "FAB-")):
+        return True
+    unit = str(line.get("unit") or "").strip().upper()
+    if unit in {"MTR", "METER", "METRE", "METERS", "METRES"}:
+        # MTR units alone aren't proof, but combined with a fabric-y name they are.
+        name = str(line.get("material_name") or "").lower()
+        if any(tok in name for tok in _GREY_HINT_TOKENS):
+            return True
+    name = str(line.get("material_name") or "").lower()
+    if any(tok in name for tok in _GREY_HINT_TOKENS):
+        return True
+    return False
+
+
+def _ensure_grey_trackers(po_number: str, lines: list, supplier_name: str = "",
+                          so_reference: str = "", delivery_location: str = "") -> int:
+    """Create grey_tracker rows for every grey-fabric line on a PO. Idempotent.
+
+    Returns the number of new tracker rows actually inserted.
+    """
+    grey_lines = [ln for ln in (lines or []) if _is_grey_line(ln)]
+    if not grey_lines:
+        return 0
+    path = _grey_db_path()
+    if not os.path.exists(path):
+        _log.warning("grey.db not found at %s — skipping tracker auto-create for PO %s", path, po_number)
+        return 0
+    created = 0
+    try:
+        gconn = sqlite3.connect(path)
+        gconn.row_factory = sqlite3.Row
+        for ln in grey_lines:
+            mat_code = str(ln.get("material_code") or "")
+            existing = gconn.execute(
+                "SELECT id FROM grey_tracker WHERE po_number=? AND material_code=?",
+                (po_number, mat_code),
+            ).fetchone()
+            if existing:
+                continue
+            cnt = gconn.execute("SELECT COUNT(*) FROM grey_tracker").fetchone()[0]
+            gt_key = f"GT-{int(cnt) + 1:04d}"
+            qty = float(ln.get("po_qty") or ln.get("qty") or 0)
+            rate = float(ln.get("rate") or 0)
+            gconn.execute(
+                """INSERT INTO grey_tracker(tracker_key,po_number,material_code,
+                   material_name,supplier,so_reference,ordered_qty,rate,delivery_location,status)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (gt_key, po_number, mat_code, ln.get("material_name", ""),
+                 supplier_name or "", so_reference or "", qty, rate,
+                 delivery_location or "", "PO Created"),
+            )
+            tid = gconn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            gconn.execute(
+                """INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
+                   material_name,transaction_type,qty,unit,from_location,
+                   to_location,reference_no,remarks)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (datetime.now().strftime("%Y-%m-%d"), tid, mat_code,
+                 ln.get("material_name", ""), "PO Created", qty,
+                 ln.get("unit", "MTR"), "", "Ordered", po_number, "Auto from PO"),
+            )
+            created += 1
+        gconn.commit()
+        gconn.close()
+    except Exception as e:
+        _log.exception("Failed to sync grey tracker for PO %s: %s", po_number, e)
+        return created
+    return created
+
+
+def sync_grey_trackers_from_existing_pos() -> dict:
+    """Backfill: walk every PO + line and create missing grey trackers.
+
+    Use after the auto-create rule broadens — covers POs that were saved before
+    operators began picking the right material_type. Idempotent; returns counts.
+    """
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT h.po_number, h.supplier_name, h.so_reference, h.delivery_location,
+                  l.material_code, l.material_name, l.material_type, l.po_qty,
+                  l.unit, l.rate
+             FROM po_headers h JOIN po_lines l ON l.po_id = h.id
+            WHERE h.status NOT IN ('Cancelled')""",
+    ).fetchall()
+    conn.close()
+
+    by_po: dict[tuple, dict] = {}
+    for r in rows:
+        d = dict(r)
+        key = (d["po_number"], d.get("supplier_name") or "",
+               d.get("so_reference") or "", d.get("delivery_location") or "")
+        by_po.setdefault(key, {"lines": []})["lines"].append(d)
+
+    pos_scanned = len(by_po)
+    trackers_created = 0
+    for (po_number, supplier_name, so_reference, delivery_location), data in by_po.items():
+        trackers_created += _ensure_grey_trackers(
+            po_number, data["lines"], supplier_name, so_reference, delivery_location,
+        )
+    return {"pos_scanned": pos_scanned, "trackers_created": trackers_created}
 
 def init_db():
     conn = _connect()
@@ -350,30 +486,12 @@ def create_pos_from_pr(pr_id: int, lines_data: list, delivery_date: str = '', pa
             conn.execute("UPDATE pr_lines SET po_qty = po_qty + ? WHERE pr_id=? AND material_code=?",
                 (qty, pr_id, ln['material_code']))
         po_numbers.append(num)
-        gf_lines = [l for l in lines if l.get('material_type','').upper() == 'GF']
-        if gf_lines:
-            try:
-                import os as _os
-                _grey_db = _os.environ.get("GREY_DB_PATH",
-                    _os.path.join(_os.path.dirname(__file__), "..", "grey.db"))
-                gconn = sqlite3.connect(_grey_db)
-                gconn.row_factory = sqlite3.Row
-                for ln in gf_lines:
-                    mat_code = ln.get('material_code','')
-                    existing = gconn.execute(
-                        "SELECT id FROM grey_tracker WHERE po_number=? AND material_code=?",
-                        (num, mat_code)).fetchone()
-                    if not existing:
-                        cnt = gconn.execute("SELECT COUNT(*) FROM grey_tracker").fetchone()[0]
-                        gt_key = f"GT-{cnt+1:04d}"
-                        gconn.execute("""INSERT INTO grey_tracker(tracker_key,po_number,
-                            material_code,material_name,supplier,so_reference,ordered_qty,rate,status)
-                            VALUES(?,?,?,?,?,?,?,?,?)""",
-                            (gt_key, num, mat_code, ln.get('material_name',''),
-                            pr.get('supplier_name',''), pr.get('so_reference',''),
-                            float(ln.get('qty',0)), float(ln.get('rate',0)), 'PO Created'))
-                gconn.commit(); gconn.close()
-            except Exception: pass
+        _ensure_grey_trackers(
+            num, lines,
+            supplier_name=sup_name or pr.get("supplier_name", ""),
+            so_reference=pr.get("so_reference", "") or "",
+            delivery_location=pr.get("delivery_location", "") or "",
+        )
     all_lines = conn.execute("SELECT required_qty, po_qty FROM pr_lines WHERE pr_id=?", (pr_id,)).fetchall()
     all_covered = all((l['po_qty'] or 0) >= (l['required_qty'] or 0) for l in all_lines)
     conn.execute("UPDATE pr_headers SET status=? WHERE id=?", ('PO Created' if all_covered else 'Partial PO', pr_id))
@@ -396,8 +514,15 @@ def create_po(data: dict):
     conn = _connect()
     num = _next_num(conn, 'po_headers', 'po_number', 'PO')
     lines = data.get('lines', [])
-    subtotal = sum(l.get('amount', l.get('po_qty',0)*l.get('rate',0)) for l in lines)
-    gst = sum(l.get('amount',0) * l.get('gst_pct',0) / 100 for l in lines)
+
+    def _line_amount(l: dict) -> float:
+        amt = l.get('amount')
+        if amt in (None, '', 0, 0.0):
+            return float(l.get('po_qty') or 0) * float(l.get('rate') or 0)
+        return float(amt)
+
+    subtotal = sum(_line_amount(l) for l in lines)
+    gst = sum(_line_amount(l) * float(l.get('gst_pct') or 0) / 100 for l in lines)
     conn.execute("""INSERT INTO po_headers(po_number,po_date,supplier_id,supplier_name,currency,payment_terms,
         delivery_location,delivery_date,pr_reference,so_reference,status,subtotal,gst_amount,total,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -409,42 +534,17 @@ def create_po(data: dict):
         'Draft', subtotal, gst, subtotal+gst, data.get('remarks') or ''))
     poid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in lines:
-        amt = ln.get('amount', ln.get('po_qty',0)*ln.get('rate',0))
+        amt = _line_amount(ln)
         conn.execute("""INSERT INTO po_lines(po_id,material_code,material_name,material_type,po_qty,unit,rate,gst_pct,amount,remarks)
             VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (poid, ln['material_code'], ln.get('material_name',''), ln.get('material_type','RM'),
             ln.get('po_qty',0), ln.get('unit','PCS'), ln.get('rate',0), ln.get('gst_pct',0), amt, ln.get('remarks','')))
-    gf_lines = [ln for ln in lines if ln.get('material_type','').upper() == 'GF']
-    if gf_lines:
-        try:
-            import os as _os
-            _grey_db = _os.environ.get("GREY_DB_PATH",
-                _os.path.join(_os.path.dirname(__file__), "..", "grey.db"))
-            gconn = sqlite3.connect(_grey_db)
-            gconn.row_factory = sqlite3.Row
-            for ln in gf_lines:
-                mat_code = ln.get('material_code','')
-                existing = gconn.execute(
-                    "SELECT id FROM grey_tracker WHERE po_number=? AND material_code=?",
-                    (num, mat_code)).fetchone()
-                if not existing:
-                    cnt = gconn.execute("SELECT COUNT(*) FROM grey_tracker").fetchone()[0]
-                    gt_key = f"GT-{cnt+1:04d}"
-                    gconn.execute("""INSERT INTO grey_tracker(tracker_key,po_number,material_code,
-                        material_name,supplier,so_reference,ordered_qty,rate,delivery_location,status)
-                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (gt_key, num, mat_code, ln.get('material_name',''),
-                        data.get('supplier_name',''), data.get('so_reference',''),
-                        float(ln.get('po_qty',0)), float(ln.get('rate',0)),
-                        data.get('delivery_location',''), 'PO Created'))
-                    tid = gconn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    gconn.execute("""INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
-                        material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                        (datetime.now().strftime('%Y-%m-%d'), tid, mat_code, ln.get('material_name',''),
-                        'PO Created', float(ln.get('po_qty',0)), 'MTR','','Ordered', num, 'Auto from PO'))
-            gconn.commit(); gconn.close()
-        except Exception: pass
+    _ensure_grey_trackers(
+        num, lines,
+        supplier_name=data.get("supplier_name", "") or "",
+        so_reference=data.get("so_reference", "") or "",
+        delivery_location=data.get("delivery_location", "") or "",
+    )
     conn.commit(); conn.close(); return num
 
 def update_po_status(poid: int, status: str):

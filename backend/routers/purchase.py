@@ -11,7 +11,8 @@ from ..db.purchase_db import (
     list_grns, create_grn, update_grn_status,
     list_mins, create_min, update_min_status, get_min_by_number,
     list_gate_passes, create_gate_pass, get_gate_pass_by_number,
-    get_purchase_stats
+    get_purchase_stats,
+    sync_grey_trackers_from_existing_pos,
 )
 
 router = APIRouter()
@@ -268,6 +269,14 @@ def patch_po_status(poid: int, body: StatusUpdate):
 def patch_po(poid: int, body: dict):
     update_po(poid, body)
     return {"ok": True}
+
+
+@router.post("/po/sync-grey-trackers")
+def sync_grey_trackers():
+    """Backfill: create missing grey_tracker rows for every existing PO line that
+    looks like grey fabric (by material_type / code / name). Idempotent."""
+    return sync_grey_trackers_from_existing_pos()
+
 
 # ── Job Work Orders ───────────────────────────────────────────────────────────
 @router.get("/jwo")
