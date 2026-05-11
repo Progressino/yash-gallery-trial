@@ -85,6 +85,7 @@ const blankBOMLine = () => ({
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function ItemMaster() {
   const qc = useQueryClient()
+  const [stockItem, setStockItem] = useState<{code:string,name:string}|null>(null)
   const [activeTab, setActiveTab] = useState<'dashboard' | 'items' | 'bom' | 'routing' | 'import' | 'merchants' | 'packaging'>('items')
 
   // ── Meta query ────────────────────────────────────────────────────────────
@@ -273,8 +274,10 @@ export default function ItemMaster() {
   const [showNewBOM,    setShowNewBOM]    = useState(false)
   const [newBOMName,    setNewBOMName]    = useState('')
   const [newBOMApply,   setNewBOMApply]   = useState('all')
-  // The "Create new BOM" form keeps these for future inputs; clear them so unused locals don't break the build.
-  void newBOMName; void setNewBOMApply
+  // Some scaffolding wired through later helpers — keep the setters reachable so
+  // strict ``noUnusedLocals`` doesn't choke this file in CI.
+  void newBOMName
+  void setNewBOMApply
   const [showCopyBOM,   setShowCopyBOM]   = useState(false)
   const [copyTargetSearch, setCopyTargetSearch] = useState('')
   const [copyTargetId,  setCopyTargetId]  = useState<number | null>(null)
@@ -791,6 +794,7 @@ const totalCost = useMemo(() =>
                             <td className="px-4 py-3 text-right text-gray-700">{item.purchase_price > 0 ? fmt(item.purchase_price) : '—'}</td>
                             <td className="px-4 py-3 text-center">
                               <div className="flex items-center justify-center gap-1">
+                                 <button onClick={e=>{e.stopPropagation();setStockItem({code:item.item_code,name:item.item_name})}} className="text-purple-500 hover:text-purple-700 text-xs px-2 py-1 rounded hover:bg-purple-50">📊 Stock</button>
                                 <button
                                   onClick={e => { e.stopPropagation(); setEditItem({ id: item.id, item_code: item.item_code, item_name: item.item_name, item_type_id: item.item_type_id, hsn_code: item.hsn_code, season: item.season, merchant_code: item.merchant_code, selling_price: String(item.selling_price), purchase_price: String(item.purchase_price), launch_date: item.launch_date, uom: item.uom || 'PCS', procurement_type: item.procurement_type ?? '' }); setShowEditItem(true); setEditItemErr('') }}
                                   className="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 rounded hover:bg-blue-50 transition-colors">
@@ -2242,6 +2246,171 @@ const totalCost = useMemo(() =>
 
         </div>
       </div>
-    </div>
+    
+      {stockItem && (
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.4)',zIndex:50,display:'flex',alignItems:'center',justifyContent:'center',padding:'16px'}}>
+          <div style={{background:'white',borderRadius:'16px',width:'100%',maxWidth:'900px',maxHeight:'90vh',overflowY:'auto',padding:'24px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px'}}>
+              <div>
+                <h3 style={{fontSize:'18px',fontWeight:'bold',color:'#1a1a1a'}}>Stock Tracking</h3>
+                <p style={{fontSize:'13px',color:'#666',fontFamily:'monospace'}}>{stockItem.code} — {stockItem.name}</p>
+              </div>
+              <button onClick={()=>setStockItem(null)} style={{fontSize:'20px',color:'#999',cursor:'pointer',border:'none',background:'none'}}>x</button>
+            </div>
+            <StockLedgerView itemCode={stockItem.code} />
+          </div>
+        </div>
+      )}
+</div>
   )
+}
+
+
+
+
+
+
+interface StockTxn {
+  date: string
+  direction: 'IN' | 'OUT'
+  txn_type: string
+  doc_number: string
+  doc_ref?: string
+  party: string
+  item_code: string
+  item_name: string
+  qty: number
+  unit: string
+  rate: number
+  amount: number
+  so_ref?: string
+  balance: number
+}
+
+interface StockLedgerResponse {
+  item_code: string
+  total_in: number
+  total_out: number
+  current_stock: number
+  transactions: StockTxn[]
+}
+
+function StockLedgerView({ itemCode }: { itemCode: string }) {
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [data, setData] = useState<StockLedgerResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    const q = (from || to) ? '?from_date=' + from + '&to_date=' + to : '';
+    fetch('/api/items/' + encodeURIComponent(itemCode) + '/tracking' + q)
+      .then(r => r.json())
+      .then(d => { setData(d as StockLedgerResponse); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [itemCode, from, to]);
+
+  const fmtD = (n: number | string | undefined) => (Number(n) || 0).toFixed(2);
+
+  const txns: StockTxn[] = data?.transactions || [];
+  const sizes = [...new Set(txns.map((t) => t.item_code))];
+  const [activeSize, setActiveSize] = useState<string>('ALL');
+  const displayTxns = activeSize === 'ALL' ? txns : txns.filter((t) => t.item_code === activeSize);
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+      {/* Summary */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px'}}>
+        {[
+          ['Total IN', fmtD(data?.total_in||0), '#16a34a'],
+          ['Total OUT', fmtD(data?.total_out||0), '#dc2626'],
+          ['Current Stock', fmtD(data?.current_stock||0), '#1d4ed8'],
+        ].map(([l,v,col]) => (
+          <div key={l} style={{background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:'8px',padding:'12px',textAlign:'center'}}>
+            <p style={{fontWeight:'bold',color:col,fontSize:'18px'}}>{v}</p>
+            <p style={{fontSize:'11px',color:'#9ca3af',marginTop:'4px'}}>{l}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Size filter */}
+      {sizes.length > 1 && (
+        <div style={{display:'flex',gap:'6px',flexWrap:'wrap'}}>
+          {['ALL',...sizes].map(s => (
+            <button key={s} onClick={() => setActiveSize(s)}
+              style={{padding:'4px 10px',borderRadius:'20px',fontSize:'11px',fontWeight:'600',cursor:'pointer',
+                border:'1px solid '+(activeSize===s?'#002B5B':'#d1d5db'),
+                background:activeSize===s?'#002B5B':'white',
+                color:activeSize===s?'white':'#374151'}}>
+              {s === 'ALL' ? 'All' : s.replace(itemCode+'-','')}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Date filter */}
+      <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
+        <input type="date" value={from} onChange={e=>setFrom(e.target.value)}
+          style={{border:'1px solid #d1d5db',borderRadius:'6px',padding:'6px 10px',fontSize:'13px'}} />
+        <span style={{color:'#9ca3af'}}>to</span>
+        <input type="date" value={to} onChange={e=>setTo(e.target.value)}
+          style={{border:'1px solid #d1d5db',borderRadius:'6px',padding:'6px 10px',fontSize:'13px'}} />
+      </div>
+
+      {loading && <p style={{textAlign:'center',color:'#9ca3af',padding:'16px'}}>Loading...</p>}
+
+      {!loading && (
+        <div style={{overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:'12px'}}>
+            <thead style={{background:'#f9fafb'}}>
+              <tr>
+                {['Date','Item/Size','Type','Document','Party / Process','IN','OUT','Balance','SO Ref'].map(h => (
+                  <th key={h} style={{textAlign:['IN','OUT','Balance'].includes(h)?'right':'left',
+                    padding:'8px 10px',color:'#9ca3af',fontWeight:'600',fontSize:'11px',
+                    textTransform:'uppercase',borderBottom:'2px solid #e5e7eb',whiteSpace:'nowrap'}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {displayTxns.map((t, i) => (
+                <tr key={i} style={{borderBottom:'1px solid #f3f4f6',background:i%2===0?'white':'#fafafa'}}>
+                  <td style={{padding:'8px 10px',whiteSpace:'nowrap'}}>{t.date}</td>
+                  <td style={{padding:'8px 10px',fontFamily:'monospace',fontSize:'11px',color:'#1d4ed8',fontWeight:'600'}}>
+                    {t.item_code}
+                  </td>
+                  <td style={{padding:'8px 10px'}}>
+                    <span style={{padding:'2px 6px',borderRadius:'4px',fontSize:'10px',fontWeight:'700',
+                      background:t.direction==='IN'?'#dcfce7':'#fee2e2',
+                      color:t.direction==='IN'?'#16a34a':'#dc2626',marginRight:'6px'}}>{t.direction}</span>
+                    {t.txn_type}
+                  </td>
+                  <td style={{padding:'8px 10px',fontWeight:'600',color:'#1d4ed8',whiteSpace:'nowrap'}}>
+                    {t.doc_number}
+                    {t.doc_ref && <span style={{color:'#9ca3af',fontWeight:'400',marginLeft:'4px'}}>({t.doc_ref})</span>}
+                  </td>
+                  <td style={{padding:'8px 10px',color:'#6b7280',maxWidth:'140px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.party||'—'}</td>
+                  <td style={{padding:'8px 10px',textAlign:'right',color:'#16a34a',fontWeight:'700'}}>
+                    {t.direction==='IN'?fmtD(t.qty):'—'}
+                  </td>
+                  <td style={{padding:'8px 10px',textAlign:'right',color:'#dc2626',fontWeight:'700'}}>
+                    {t.direction==='OUT'?fmtD(t.qty):'—'}
+                  </td>
+                  <td style={{padding:'8px 10px',textAlign:'right',fontWeight:'800',fontSize:'13px',
+                    color:t.balance>0?'#1d4ed8':t.balance<0?'#dc2626':'#9ca3af'}}>
+                    {fmtD(t.balance)}
+                  </td>
+                  <td style={{padding:'8px 10px',color:'#9ca3af',fontSize:'11px'}}>{t.so_ref||'—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {displayTxns.length===0 && (
+            <p style={{textAlign:'center',color:'#9ca3af',padding:'32px',fontSize:'13px'}}>
+              No transactions found for this item.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }

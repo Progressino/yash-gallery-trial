@@ -486,3 +486,179 @@ async def import_confirm(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=str(e))
     result = bulk_create_items(rows)
     return {"ok": True, **result}
+
+
+# ── Item Stock Tracking ────────────────────────────────────────────────────────
+#
+# Aggregates inbound (GRN, production receipts) and outbound (MIN, JWO issues,
+# fabric issues) movements across the purchase + production SQLite files for a
+# single item code. Tolerant of missing DBs (returns whatever it could read).
+
+import os
+import re
+import sqlite3
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _safe_date(value):
+    """Accept only ISO ``YYYY-MM-DD`` strings; everything else is dropped."""
+    if isinstance(value, str) and _DATE_RE.match(value):
+        return value
+    return None
+
+
+def _purchase_db_path() -> str:
+    return os.environ.get(
+        "PURCHASE_DB_PATH",
+        os.path.join(os.path.dirname(__file__), "..", "purchase.db"),
+    )
+
+
+def _production_db_path() -> str:
+    return os.environ.get(
+        "PRODUCTION_DB_PATH",
+        os.path.join(os.path.dirname(__file__), "..", "production.db"),
+    )
+
+
+def _date_clause(column: str, frm, to):
+    """Return ``(sql_fragment, params)`` for an optional ``column BETWEEN`` filter."""
+    parts: List[str] = []
+    bind: List[str] = []
+    if frm:
+        parts.append(f" AND {column} >= ?")
+        bind.append(frm)
+    if to:
+        parts.append(f" AND {column} <= ?")
+        bind.append(to)
+    return "".join(parts), bind
+
+
+@router.get("/{item_code_str}/tracking")
+def get_item_tracking(
+    item_code_str: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    frm = _safe_date(from_date)
+    to = _safe_date(to_date)
+    like = f"%{item_code_str}%"
+    results: list[dict] = []
+
+    purchase_db = _purchase_db_path()
+    if os.path.exists(purchase_db):
+        try:
+            pc = sqlite3.connect(purchase_db)
+            pc.row_factory = sqlite3.Row
+
+            grn_filter, grn_bind = _date_clause("h.grn_date", frm, to)
+            for r in pc.execute(
+                "SELECT h.grn_number,h.grn_date,h.party_name,l.material_code,l.material_name,"
+                "l.accepted_qty as qty,l.unit,l.rate,l.amount,h.challan_no,h.so_reference "
+                "FROM grn_lines l JOIN grn_headers h ON h.id=l.grn_id "
+                "WHERE l.material_code LIKE ? AND h.status!='Cancelled'" + grn_filter +
+                " ORDER BY h.grn_date DESC",
+                [like, *grn_bind],
+            ).fetchall():
+                results.append({'date': r['grn_date'], 'direction': 'IN', 'txn_type': 'GRN',
+                                'doc_number': r['grn_number'], 'doc_ref': r['challan_no'] or '',
+                                'party': r['party_name'], 'item_code': r['material_code'],
+                                'item_name': r['material_name'], 'qty': float(r['qty'] or 0),
+                                'unit': r['unit'], 'rate': float(r['rate'] or 0),
+                                'amount': float(r['amount'] or 0), 'so_ref': r['so_reference'] or ''})
+
+            jwo_filter, jwo_bind = _date_clause("h.jwo_date", frm, to)
+            for r in pc.execute(
+                "SELECT h.jwo_number,h.jwo_date,h.processor_name,l.material_code,l.material_name,"
+                "l.quantity as qty,l.unit,l.rate,l.amount "
+                "FROM jwo_lines l JOIN jwo_headers h ON h.id=l.jwo_id "
+                "WHERE l.material_code LIKE ?" + jwo_filter +
+                " ORDER BY h.jwo_date DESC",
+                [like, *jwo_bind],
+            ).fetchall():
+                results.append({'date': r['jwo_date'], 'direction': 'OUT', 'txn_type': 'JWO Issue',
+                                'doc_number': r['jwo_number'], 'doc_ref': '',
+                                'party': r['processor_name'], 'item_code': r['material_code'],
+                                'item_name': r['material_name'], 'qty': float(r['qty'] or 0),
+                                'unit': r['unit'], 'rate': float(r['rate'] or 0),
+                                'amount': float(r['amount'] or 0), 'so_ref': ''})
+
+            min_filter, min_bind = _date_clause("h.min_date", frm, to)
+            for r in pc.execute(
+                "SELECT h.min_number,h.min_date,h.issued_to,l.material_code,l.material_name,"
+                "l.qty,l.unit,l.rate "
+                "FROM min_lines l JOIN material_issue_notes h ON h.id=l.min_id "
+                "WHERE l.material_code LIKE ?" + min_filter +
+                " ORDER BY h.min_date DESC",
+                [like, *min_bind],
+            ).fetchall():
+                results.append({'date': r['min_date'], 'direction': 'OUT', 'txn_type': 'MIN',
+                                'doc_number': r['min_number'], 'doc_ref': '',
+                                'party': r['issued_to'] or '', 'item_code': r['material_code'],
+                                'item_name': r['material_name'], 'qty': float(r['qty'] or 0),
+                                'unit': r['unit'], 'rate': float(r['rate'] or 0),
+                                'amount': float(r['qty'] or 0) * float(r['rate'] or 0), 'so_ref': ''})
+            pc.close()
+        except Exception:
+            pass
+
+    production_db = _production_db_path()
+    if os.path.exists(production_db):
+        try:
+            pr = sqlite3.connect(production_db)
+            pr.row_factory = sqlite3.Row
+
+            fi_filter, fi_bind = _date_clause("fi.issue_date", frm, to)
+            for r in pr.execute(
+                "SELECT fi.issue_date,fi.fabric_code,fi.fabric_name,fi.issued_qty as qty,"
+                "fi.unit,j.jo_number,j.so_number,j.process "
+                "FROM jo_fabric_issues fi JOIN job_orders j ON j.id=fi.jo_id "
+                "WHERE fi.fabric_code LIKE ?" + fi_filter +
+                " ORDER BY fi.issue_date DESC",
+                [like, *fi_bind],
+            ).fetchall():
+                results.append({'date': r['issue_date'], 'direction': 'OUT',
+                                'txn_type': 'Production Fabric Issue', 'doc_number': r['jo_number'],
+                                'doc_ref': r['so_number'] or '', 'party': 'Process: ' + str(r['process']),
+                                'item_code': r['fabric_code'], 'item_name': r['fabric_name'],
+                                'qty': float(r['qty'] or 0), 'unit': r['unit'], 'rate': 0, 'amount': 0,
+                                'so_ref': r['so_number'] or ''})
+
+            rc_filter, rc_bind = _date_clause("pr.receipt_date", frm, to)
+            for r in pr.execute(
+                "SELECT pr.receipt_date,pr.sku,pr.received_qty as qty,pr.process,pr.so_number,"
+                "j.jo_number "
+                "FROM jo_piece_receipts pr JOIN job_orders j ON j.id=pr.jo_id "
+                "WHERE pr.sku LIKE ?" + rc_filter +
+                " ORDER BY pr.receipt_date DESC",
+                [like, *rc_bind],
+            ).fetchall():
+                results.append({'date': r['receipt_date'], 'direction': 'IN',
+                                'txn_type': 'Production Receipt (' + str(r['process']) + ')',
+                                'doc_number': r['jo_number'], 'doc_ref': r['so_number'] or '',
+                                'party': 'Process: ' + str(r['process']), 'item_code': r['sku'],
+                                'item_name': r['sku'], 'qty': float(r['qty'] or 0), 'unit': 'PCS',
+                                'rate': 0, 'amount': 0, 'so_ref': r['so_number'] or ''})
+            pr.close()
+        except Exception:
+            pass
+
+    results.sort(key=lambda x: x.get('date') or '', reverse=True)
+    bal = 0.0
+    for r in reversed(results):
+        if r['direction'] == 'IN':
+            bal += r['qty']
+        else:
+            bal -= r['qty']
+        r['balance'] = round(bal, 3)
+    results.reverse()
+    in_qty = sum(r['qty'] for r in results if r['direction'] == 'IN')
+    out_qty = sum(r['qty'] for r in results if r['direction'] == 'OUT')
+    return {
+        'item_code': item_code_str,
+        'total_in': round(in_qty, 3),
+        'total_out': round(out_qty, 3),
+        'current_stock': round(in_qty - out_qty, 3),
+        'transactions': results,
+    }
