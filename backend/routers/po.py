@@ -131,6 +131,85 @@ def po_get_daily_inventory_history(request: Request):
     }
 
 
+@router.get("/daily-inventory-history/sku")
+def po_get_daily_inventory_history_for_sku(
+    request: Request,
+    sku: str,
+    window_days: int = 30,
+    end_date: Optional[str] = None,
+):
+    """Return the day-by-day on-hand timeline for a single SKU.
+
+    UI uses this to let the user verify "Eff_Days" — i.e. how many days the
+    item was actually in stock within the ADS window. Without a window, the
+    last ``window_days`` days from the latest record are returned.
+    """
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    df = sess.daily_inventory_history_df
+    if df is None or df.empty:
+        return {"ok": True, "loaded": False, "sku": sku, "rows": []}
+    from ..services.po_engine import canonical_oms_key
+    from ..services.helpers import get_parent_sku
+
+    sku_map = sess.sku_mapping or None
+    canon = lambda v: canonical_oms_key(v, sku_map)  # noqa: E731
+    target = canon(sku)
+    work = df.copy()
+    work["OMS_SKU"] = work["OMS_SKU"].astype(str).map(canon)
+    sub = work[work["OMS_SKU"] == target].copy()
+    parent_used = False
+    if sub.empty:
+        parent_key = get_parent_sku(target)
+        if parent_key and parent_key != target:
+            sub = work[work["OMS_SKU"].map(get_parent_sku) == parent_key].copy()
+            if not sub.empty:
+                parent_used = True
+
+    if sub.empty:
+        return {"ok": True, "loaded": True, "sku": sku, "rows": [], "in_stock_days": 0,
+                "window_days": int(window_days), "parent_used": False}
+
+    sub["Date"] = pd.to_datetime(sub["Date"], errors="coerce")
+    sub = sub.dropna(subset=["Date"])
+    sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    if parent_used:
+        sub = sub.groupby("Date", as_index=False)["Qty"].max()
+    else:
+        sub = sub.groupby("Date", as_index=False)["Qty"].max()
+
+    sub = sub.sort_values("Date")
+    if end_date:
+        try:
+            end_ts = pd.Timestamp(end_date).normalize()
+        except Exception:
+            end_ts = sub["Date"].max().normalize()
+    else:
+        end_ts = sub["Date"].max().normalize()
+    start_ts = end_ts - pd.Timedelta(days=max(0, int(window_days) - 1))
+    win = sub[(sub["Date"] >= start_ts) & (sub["Date"] <= end_ts)].copy()
+    in_stock_days = int((win["Qty"] >= 1.0).sum())
+
+    rows = [
+        {"date": str(r["Date"].date()), "qty": float(r["Qty"]), "in_stock": bool(r["Qty"] >= 1.0)}
+        for _, r in win.iterrows()
+    ]
+    return {
+        "ok": True,
+        "loaded": True,
+        "sku": sku,
+        "canonical_sku": target,
+        "parent_used": parent_used,
+        "window_days": int(window_days),
+        "window_start": str(start_ts.date()),
+        "window_end": str(end_ts.date()),
+        "in_stock_days": in_stock_days,
+        "out_of_stock_days": int(len(rows) - in_stock_days),
+        "rows": rows,
+    }
+
+
 @router.delete("/daily-inventory-history")
 def po_clear_daily_inventory_history(request: Request):
     sess = request.state.session

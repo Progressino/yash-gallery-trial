@@ -73,7 +73,8 @@ interface QuarterlyResult {
 
 const PO_DISPLAY_COLS = [
   'Priority', 'OMS_SKU', 'SKU_Sheet_Status', 'Lead_Time_Days', 'Total_Inventory', 'Days_Left',
-  'Sold_Units', 'Ship_Units_150d', 'Eff_Days', 'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
+  'Sold_Units', 'Ship_Units_150d', 'Eff_Days', 'Eff_Days_Inventory',
+  'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
   'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
   'PO_Pipeline_Total', 'Projected_Running_Days', 'Post_PO_Cover_Days_Capped', 'PO_Qty',
@@ -83,6 +84,7 @@ const PO_DISPLAY_COLS = [
 const COL_LABEL: Record<string, string> = {
   'Sold_Units':               '📦 Sold Units',
   'Eff_Days':                 '📅 Eff. Days (active)',
+  'Eff_Days_Inventory':       '📦 In-stock days (history)',
   'Recent_ADS':               '📉 Recent ADS',
   'LY_ADS':                   '📈 LY ADS',
   'Seasonal_Month_ADS':       '🌗 Season ADS (mo+1)',
@@ -148,6 +150,37 @@ export default function POEngine() {
   const [skuUploadMsg, setSkuUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [dailyInvBusy, setDailyInvBusy] = useState(false)
   const [dailyInvMsg, setDailyInvMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  // Per-SKU inventory history drill-down (lets the user verify the "Eff Days" math).
+  const [effInvSku, setEffInvSku] = useState<string | null>(null)
+  const [effInvLoading, setEffInvLoading] = useState(false)
+  const [effInvData, setEffInvData] = useState<{
+    sku: string
+    canonical_sku?: string
+    parent_used?: boolean
+    window_days: number
+    window_start: string
+    window_end: string
+    in_stock_days: number
+    out_of_stock_days: number
+    rows: { date: string; qty: number; in_stock: boolean }[]
+  } | null>(null)
+
+  const openEffInvDrawer = async (sku: string, windowDays: number) => {
+    setEffInvSku(sku)
+    setEffInvLoading(true)
+    setEffInvData(null)
+    try {
+      const { data } = await api.get('/po/daily-inventory-history/sku', {
+        params: { sku, window_days: Math.max(7, Math.min(365, windowDays || 30)) },
+      })
+      if (data?.ok) setEffInvData(data)
+    } catch {
+      setEffInvData(null)
+    } finally {
+      setEffInvLoading(false)
+    }
+  }
+  const closeEffInvDrawer = () => { setEffInvSku(null); setEffInvData(null) }
 
   const {
     activeTab, setActiveTab,
@@ -1005,6 +1038,27 @@ export default function POEngine() {
                                               />
                                             : col === 'Days_Left'
                                               ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
+                                            : (col === 'Eff_Days_Inventory' || col === 'Eff_Days')
+                                              ? (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => openEffInvDrawer(sku, Math.max(7, Math.round(Number(row['Eff_Days'] ?? 30))))}
+                                                    title="Click to see the daily inventory history used for this Effective-Days calculation"
+                                                    className={
+                                                      'text-xs font-semibold px-2 py-0.5 rounded border ' +
+                                                      (col === 'Eff_Days_Inventory'
+                                                        ? (dailyInvLoaded
+                                                            ? 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
+                                                            : 'text-gray-400 bg-gray-50 border-gray-200 hover:bg-gray-100')
+                                                        : 'text-slate-700 bg-slate-50 border-slate-200 hover:bg-slate-100')
+                                                    }
+                                                  >
+                                                    {typeof row[col] === 'number'
+                                                      ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 1 })
+                                                      : (row[col] ?? '—')}
+                                                    <span className="ml-1 opacity-60">🔍</span>
+                                                  </button>
+                                                )
                                               : typeof row[col] === 'number'
                                                 ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
                                                 : row[col] ?? '—'
@@ -1738,6 +1792,77 @@ export default function POEngine() {
                   ⬇ Export & Confirm PO
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Eff-Days inventory-history drill-down */}
+      {effInvSku && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={closeEffInvDrawer}>
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">📅 In-stock days · {effInvSku}</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Day-by-day inventory snapshots used by the engine to compute <code className="font-mono">Eff_Days</code>.
+                  Only days with quantity ≥ 1 count toward effective days.
+                </p>
+              </div>
+              <button onClick={closeEffInvDrawer} className="text-gray-400 hover:text-gray-700 text-xl leading-none">×</button>
+            </div>
+
+            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50 text-xs text-gray-700 flex flex-wrap gap-x-6 gap-y-1">
+              {effInvLoading ? (
+                <span>Loading…</span>
+              ) : !effInvData ? (
+                <span className="text-amber-700">
+                  No daily inventory history uploaded for this SKU. Upload the “Daily Inventory History” sheet on the PO Engine page to enable verification.
+                </span>
+              ) : (
+                <>
+                  <span><strong>Window:</strong> {effInvData.window_start} → {effInvData.window_end} ({effInvData.window_days}d)</span>
+                  <span><strong>In-stock:</strong> <span className="text-emerald-700 font-semibold">{effInvData.in_stock_days}d</span></span>
+                  <span><strong>Out-of-stock:</strong> <span className="text-rose-700 font-semibold">{effInvData.out_of_stock_days}d</span></span>
+                  {effInvData.parent_used && (
+                    <span className="text-amber-700">⚠ Showing parent-rollup (no exact-variant history found)</span>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-auto">
+              {effInvData && effInvData.rows.length > 0 ? (
+                <table className="w-full text-xs">
+                  <thead className="bg-white sticky top-0 border-b border-gray-200">
+                    <tr>
+                      <th className="text-left px-4 py-2 font-semibold text-gray-600">Date</th>
+                      <th className="text-right px-4 py-2 font-semibold text-gray-600">On-hand qty</th>
+                      <th className="text-left px-4 py-2 font-semibold text-gray-600">Counted as in-stock?</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {effInvData.rows.map(r => (
+                      <tr key={r.date} className={r.in_stock ? '' : 'bg-rose-50/40'}>
+                        <td className="px-4 py-1.5 font-mono text-gray-700">{r.date}</td>
+                        <td className="px-4 py-1.5 text-right font-mono">{r.qty.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                        <td className="px-4 py-1.5">
+                          {r.in_stock
+                            ? <span className="text-emerald-700 font-semibold">✓ yes</span>
+                            : <span className="text-rose-700 font-semibold">✗ OOS</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (!effInvLoading && (
+                <div className="p-8 text-center text-sm text-gray-500">
+                  No daily snapshots available for this SKU within the selected window.
+                </div>
+              ))}
             </div>
           </div>
         </div>

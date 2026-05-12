@@ -21,6 +21,21 @@ _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
 _SIZE_SUFFIX_RE = re.compile(r"(?:-|_)?(XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL|6XL)$", re.I)
 
 
+def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
+    """Module-level twin of the nested ``_canonical_oms_key`` used in ``calculate_po_base``.
+
+    Exposed so other endpoints (e.g. the per-SKU inventory-history drill-down)
+    can produce the exact same canonical key the engine uses to join everything.
+    """
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return ""
+    t = normalize_id_token_for_mapping(str(raw).strip())
+    t = clean_sku(t or raw)
+    if not t:
+        t = str(raw).strip().upper()
+    return _strip_pl(str(t).strip(), sku_mapping or {})
+
+
 def _strip_pl(sku: str, mapping: Dict[str, str]) -> str:
     """Map an Amazon seller SKU to OMS SKU, stripping PL infix if needed."""
     raw = str(sku).strip().upper()
