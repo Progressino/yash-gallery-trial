@@ -1261,6 +1261,92 @@ def test_po_extrapolates_eff_days_when_sheet_covers_less_than_window():
     )
 
 
+def test_blank_inventory_cells_are_missing_not_oos():
+    """Real-world bug: warehouse skips snapshots on Sundays. Blank cells were
+    being read as Qty=0 → counted as OOS days, dragging Eff_Days down by 2.
+
+    Blanks must be treated as "no snapshot taken" and dropped, so the global
+    sheet coverage (28 days when 2 Sundays are missing) drives the scaling.
+    """
+    import io
+    from openpyxl import Workbook
+    from backend.services.daily_inventory_history import (
+        coverage_days_within,
+        effective_days_from_history,
+        parse_daily_inventory_history_upload,
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "OMS"
+    dates = pd.date_range("2026-04-13", "2026-05-12", freq="D")
+    sundays = {pd.Timestamp("2026-05-03"), pd.Timestamp("2026-05-10")}
+    # Header row 1: column-total placeholder values
+    ws.cell(row=1, column=1, value="Total Inv.")
+    ws.cell(row=1, column=2, value="Total")
+    for i, _ in enumerate(dates, start=3):
+        ws.cell(row=1, column=i, value=100)
+    # Header row 2: SKU columns + dates
+    ws.cell(row=2, column=1, value="Item SkuCode")
+    ws.cell(row=2, column=2, value="Item")
+    for i, d in enumerate(dates, start=3):
+        ws.cell(row=2, column=i, value=d.to_pydatetime())
+    # SKU row — non-blank every weekday, blank every Sunday in window.
+    ws.cell(row=3, column=1, value="SUN-SKIP-L")
+    ws.cell(row=3, column=2, value="SUN-SKIP")
+    for i, d in enumerate(dates, start=3):
+        if pd.Timestamp(d) in sundays:
+            continue  # blank cell — no snapshot
+        ws.cell(row=3, column=i, value=58)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    df = parse_daily_inventory_history_upload(buf, "blanks.xlsx")
+    sub = df[df["OMS_SKU"] == "SUN-SKIP-L"]
+    assert len(sub) == 28, f"Sundays must be dropped, not zero-filled (got {len(sub)})"
+
+    start = pd.Timestamp("2026-04-13")
+    end = pd.Timestamp("2026-05-12")
+    assert coverage_days_within(df, start, end) == 28
+    eff = effective_days_from_history(df, start, end)
+    assert int(eff.iloc[0]["Eff_Days_Inventory"]) == 28
+
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "SUN-SKIP-L",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+            for d in pd.date_range("2026-04-13", "2026-05-12", freq="D")
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["SUN-SKIP-L"], "Total_Inventory": [38]})
+    out = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=df,
+    )
+    row = out.iloc[0]
+    assert int(row["Eff_Days_Inventory"]) == 28
+    assert int(row["Inv_Coverage_Days"]) == 28
+    assert int(row["Eff_Days"]) == 30, (
+        f"28 in-stock / 28 covered should extrapolate to full 30-day window; "
+        f"got Eff_Days={row['Eff_Days']}"
+    )
+
+
 def test_po_inv_window_anchors_at_latest_data_not_stale_sales_max():
     """User intent: 'today is May 12, eff days must be calc'd for the days before May 12.'
 

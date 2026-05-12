@@ -207,10 +207,19 @@ def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> p
 
     tall["OMS_SKU"] = tall["_raw_sku"].map(_canon)
     tall = tall[tall["OMS_SKU"].astype(str).str.len() > 0]
-    tall["Qty"] = pd.to_numeric(tall["Qty"], errors="coerce").fillna(0.0)
+    tall["Qty"] = pd.to_numeric(tall["Qty"], errors="coerce")
     # Excel/pandas sometimes round-trips integer NA as ``iinfo(int64).min`` — those
-    # show up as huge negatives. Treat anything < 0 as "no stock for that day".
-    tall["Qty"] = tall["Qty"].clip(lower=0.0)
+    # show up as huge negatives. Coerce those back to NaN so they're treated as
+    # "no snapshot for that day", not "zero stock".
+    tall.loc[tall["Qty"] < -1.0, "Qty"] = pd.NA
+    # Blank cells (= no snapshot was taken on that day, e.g. Sundays in many
+    # warehouses) must NOT count as out-of-stock. Drop them so coverage_days
+    # naturally reflects only the days actually sampled; the engine then
+    # extrapolates Eff_Days from in-stock-rate × ADS_WINDOW.
+    tall = tall.dropna(subset=["Qty"])
+    if tall.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
+    tall["Qty"] = tall["Qty"].astype(float).clip(lower=0.0)
     return tall[_TALL_COLS].reset_index(drop=True)
 
 
@@ -287,7 +296,11 @@ def effective_days_from_history(
     sub = df.loc[mask].copy()
     if sub.empty:
         return pd.DataFrame(columns=["OMS_SKU", "Eff_Days_Inventory"])
-    sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0.0)
+    sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce")
+    # Drop "no snapshot" rows so we never count blank cells as out-of-stock days.
+    sub = sub.dropna(subset=["Qty"])
+    if sub.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Eff_Days_Inventory"])
     sub["_has_stock"] = (sub["Qty"] >= float(min_qty)).astype(int)
     out = (
         sub.groupby("OMS_SKU", as_index=False)["_has_stock"]
