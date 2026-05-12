@@ -180,13 +180,16 @@ def po_get_daily_inventory_history_for_sku(
         sub = sub.groupby("Date", as_index=False)["Qty"].max()
 
     sub = sub.sort_values("Date")
+    # Anchor at today so the drawer reflects the engine's "last N days" intent.
+    # Caller can override with end_date if they want a specific reference.
+    today_norm = pd.Timestamp.now().normalize()
     if end_date:
         try:
             end_ts = pd.Timestamp(end_date).normalize()
         except Exception:
-            end_ts = sub["Date"].max().normalize()
+            end_ts = today_norm
     else:
-        end_ts = sub["Date"].max().normalize()
+        end_ts = today_norm
     start_ts = end_ts - pd.Timedelta(days=max(0, int(window_days) - 1))
     win = sub[(sub["Date"] >= start_ts) & (sub["Date"] <= end_ts)].copy()
     in_stock_days = int((win["Qty"] >= 1.0).sum())

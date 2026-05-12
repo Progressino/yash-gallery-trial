@@ -680,8 +680,19 @@ def calculate_po_base(
                 ih = (
                     ih.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"].max()
                 )
-            eff_inv = effective_days_from_history(ih, ads_cutoff, max_date)
-            coverage_days = coverage_days_within(ih, ads_cutoff, max_date)
+            # Anchor at the most recent date we actually have data for — i.e.
+            # max(sales max, inventory sheet max). With fresh daily uploads this
+            # is "today", which matches user intent: "today is May 12, eff days
+            # must be calculated for the days before May 12." Stale sales no
+            # longer pull the window backward and starve it of recent snapshots.
+            inv_window_end = pd.Timestamp(max_date).normalize()
+            if not ih.empty:
+                _ihmax = pd.to_datetime(ih["Date"], errors="coerce").max()
+                if pd.notna(_ihmax):
+                    inv_window_end = max(inv_window_end, pd.Timestamp(_ihmax).normalize())
+            inv_window_start = inv_window_end - timedelta(days=int(ADS_WINDOW) - 1)
+            eff_inv = effective_days_from_history(ih, inv_window_start, inv_window_end)
+            coverage_days = coverage_days_within(ih, inv_window_start, inv_window_end)
             if not eff_inv.empty and coverage_days > 0:
                 po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
                 inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")

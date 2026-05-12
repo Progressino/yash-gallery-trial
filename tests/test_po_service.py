@@ -1259,3 +1259,56 @@ def test_po_extrapolates_eff_days_when_sheet_covers_less_than_window():
     assert int(half["Eff_Days"]) == 15, (
         f"12 in-stock / 24 covered should scale to 15 (= 50% of 30); got {half['Eff_Days']}"
     )
+
+
+def test_po_inv_window_anchors_at_latest_data_not_stale_sales_max():
+    """User intent: 'today is May 12, eff days must be calc'd for the days before May 12.'
+
+    If sales is stale but the daily inventory sheet is fresh, the engine must
+    anchor the inv-effective-days window at the *latest* date in the data
+    (max(sales_max, inv_sheet_max)) — not at the older sales_max. Otherwise the
+    most recent snapshot days would silently fall outside the window.
+    """
+    stale_sales_max = pd.Timestamp("2026-04-30")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "WIN-ANCHOR",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+            for d in pd.date_range(end=stale_sales_max, periods=20, freq="D")
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["WIN-ANCHOR"], "Total_Inventory": [10]})
+
+    # Inventory sheet runs 12 days past sales_max: 2026-04-30 .. 2026-05-12.
+    fresh_inv_max = pd.Timestamp("2026-05-12")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["WIN-ANCHOR"] * 30,
+            "Date": pd.date_range(end=fresh_inv_max, periods=30, freq="D"),
+            "Qty": [5] * 30,
+        }
+    )
+
+    out = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist,
+    )
+    row = out.iloc[0]
+    assert int(row["Eff_Days_Inventory"]) == 30, (
+        "Sheet should anchor at 2026-05-12 (latest snapshot), counting all 30 in-stock days"
+    )
+    assert int(row["Inv_Coverage_Days"]) == 30
+    assert int(row["Eff_Days"]) == 30
