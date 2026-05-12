@@ -534,3 +534,179 @@ def test_grey_dashboard_endpoints(isolated_module_dbs, client):
     trackers = client.get("/api/grey")
     assert trackers.status_code == 200
     assert isinstance(trackers.json(), list)
+
+
+# ── /api/grey — full workflow lifecycle ──────────────────────────────────────
+
+
+def _seed_grey_tracker(client, qty=500.0, material_code="GF-CTN-60"):
+    """Create a PO with a grey-fabric line and return its auto-created tracker."""
+    po_num = _create_po_with_lines(
+        client,
+        [{
+            "material_code": material_code,
+            "material_name": "Grey Fabric Cotton 60s",
+            "material_type": "GF",
+            "po_qty": qty,
+            "unit": "MTR",
+            "rate": 75,
+            "gst_pct": 5,
+        }],
+    )
+    trackers = client.get("/api/grey").json()
+    tracker = next(t for t in trackers if t["po_number"] == po_num and t["material_code"] == material_code)
+    return tracker, po_num
+
+
+def test_grey_workflow_vendor_dispatch_accepts_blank_dispatch_date(isolated_module_dbs, client):
+    """User-reported scenario: filled bilty + qty but left dispatch_date blank.
+
+    Backend must accept an empty dispatch_date string (the field is optional)
+    and transition the tracker to "In Transit". The frontend can pre-fill today
+    for UX, but missing date should never block the API call.
+    """
+    tracker, _ = _seed_grey_tracker(client, qty=500.0)
+    r = client.post(
+        f"/api/grey/{tracker['id']}/vendor-dispatch",
+        json={
+            "bilty_no": "9837",
+            "transporter": "SHREE RAM ROADWAYS",
+            "dispatch_date": "",          # ← user left this blank
+            "expected_arrival": "",
+            "dispatched_qty": 120,
+            "vehicle_no": "RJ14BU9023",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "In Transit"
+
+    after = next(t for t in client.get("/api/grey").json() if t["id"] == tracker["id"])
+    assert after["status"] == "In Transit"
+    assert float(after["in_transit_qty"]) == 120.0
+    assert after["bilty_no"] == "9837"
+    assert after["transporter"] == "SHREE RAM ROADWAYS"
+
+
+def test_grey_workflow_end_to_end(isolated_module_dbs, client):
+    """Walk every status transition: PO Created → In Transit → Arrived →
+    Factory / Printer → QC → Issue to printer → Receive printed.
+
+    Catches regressions in any of the 7 status-changing endpoints used by the
+    Grey Fabric Tracker UI.
+    """
+    tracker, _ = _seed_grey_tracker(client, qty=500.0)
+    tid = tracker["id"]
+
+    # 1. Vendor dispatch (qty 500)
+    r = client.post(f"/api/grey/{tid}/vendor-dispatch", json={
+        "bilty_no": "BILTY-001",
+        "transporter": "SHREE RAM ROADWAYS",
+        "dispatch_date": "2026-05-12",
+        "expected_arrival": "2026-05-14",
+        "dispatched_qty": 500,
+        "vehicle_no": "RJ14BU9023",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "In Transit"
+
+    # 2. Arrive at transport (all 500 MTR)
+    r = client.post(f"/api/grey/{tid}/arrive-transport", json={"qty": 500})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "At Transport Location"
+
+    snap = next(t for t in client.get("/api/grey").json() if t["id"] == tid)
+    assert float(snap["transport_qty"]) == 500.0
+    assert float(snap["in_transit_qty"]) == 0.0
+
+    # 3. Transfer 200 MTR to factory
+    r = client.post(f"/api/grey/{tid}/transfer", json={"to_location": "factory", "qty": 200})
+    assert r.status_code == 200, r.text
+    snap = next(t for t in client.get("/api/grey").json() if t["id"] == tid)
+    assert float(snap["factory_qty"]) == 200.0
+    assert float(snap["transport_qty"]) == 300.0
+
+    # 4. QC the factory stock
+    r = client.post(f"/api/grey/{tid}/qc", json={
+        "received_qty": 200,
+        "checked_qty": 200,
+        "passed_qty": 190,
+        "rejected_qty": 10,
+        "rework_qty": 0,
+        "outcome": "Partial Pass",
+        "qc_remarks": "10m rejected — dye streak",
+        "qc_by": "QC-Team",
+        "qc_date": "2026-05-14",
+    })
+    assert r.status_code == 200, r.text
+
+    # 5. Issue 300 MTR to a printer (from the remaining transport stock)
+    r = client.post("/api/grey/printer-issue", json={
+        "tracker_id": tid,
+        "material_code": "GF-CTN-60",
+        "job_order_no": "JO-001",
+        "issue_qty": 300,
+        "from_location": "Transport Location",
+        "to_vendor": "Sunshine Printers",
+        "issue_date": "2026-05-15",
+        "challan_no": "CH-100",
+        "gate_pass": "GP-100",
+        "remarks": "Floral print",
+    })
+    assert r.status_code == 200, r.text
+    issue = r.json()
+    issue_id = issue.get("id") or issue.get("issue_id")
+    assert issue_id, f"printer-issue response missing id: {issue}"
+
+    # Confirm issue is listed by tracker id
+    issues = client.get(f"/api/grey/printer-issue/list?tracker_id={tid}").json()
+    assert isinstance(issues, list)
+    assert any((i.get("id") if isinstance(i, dict) else None) == issue_id for i in issues), issues
+
+    # 6. Receive printed fabric back (output 290 + wastage 10)
+    r = client.post(f"/api/grey/printer-issue/{issue_id}/receive-printed", json={
+        "received_back_qty": 300,
+        "grey_input_mtr": 300,
+        "printed_item_code": "PF-FLORAL-A1",
+        "printed_output_mtr": 290,
+        "wastage_mtr": 10,
+        "conversion_date": "2026-05-18",
+        "remarks": "Floral A1 done",
+    })
+    assert r.status_code == 200, r.text
+
+    # 7. Reports / ledger endpoints still respond
+    for url in (
+        "/api/grey/reports/transit",
+        "/api/grey/reports/stock-locations",
+        "/api/grey/reports/qc",
+        "/api/grey/reports/printer-issues",
+        "/api/grey/printed-fabric/unchecked",
+    ):
+        r = client.get(url)
+        assert r.status_code == 200, f"{url} → {r.status_code} {r.text}"
+
+
+def test_grey_workflow_arrive_transport_default_uses_in_transit_qty(isolated_module_dbs, client):
+    """If qty is omitted, arrive-transport should consume the in_transit balance."""
+    tracker, _ = _seed_grey_tracker(client, qty=500.0)
+    tid = tracker["id"]
+    client.post(f"/api/grey/{tid}/vendor-dispatch", json={
+        "bilty_no": "B-2", "transporter": "X", "dispatch_date": "2026-05-12",
+        "expected_arrival": "", "dispatched_qty": 250, "vehicle_no": "",
+    })
+    r = client.post(f"/api/grey/{tid}/arrive-transport", json={})
+    assert r.status_code == 200, r.text
+    snap = next(t for t in client.get("/api/grey").json() if t["id"] == tid)
+    assert float(snap["transport_qty"]) == 250.0
+    assert float(snap["in_transit_qty"]) == 0.0
+
+
+def test_grey_workflow_qc_invalid_tracker_returns_error(isolated_module_dbs, client):
+    r = client.post("/api/grey/999999/qc", json={
+        "received_qty": 10, "checked_qty": 10, "passed_qty": 10,
+        "rejected_qty": 0, "rework_qty": 0, "outcome": "Pass",
+        "qc_remarks": "", "qc_by": "", "qc_date": "2026-05-12",
+    })
+    assert r.status_code in (400, 404), r.text

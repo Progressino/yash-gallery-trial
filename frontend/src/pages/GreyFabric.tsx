@@ -227,6 +227,7 @@ export default function GreyFabric() {
   const dispatchMut = useMutation({
     mutationFn: ({ id, body }: { id: number; body: object }) => api.post(`/grey/${id}/vendor-dispatch`, body),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); qc.invalidateQueries({ queryKey: ['grey-stats'] }); setDispatchModal(null) },
+    onError: (err: unknown) => { console.error('vendor-dispatch failed', err) },
   })
   const arriveMut = useMutation({
     mutationFn: ({ id, qty }: { id: number; qty?: number }) => api.post(`/grey/${id}/arrive-transport`, { qty }),
@@ -488,7 +489,18 @@ export default function GreyFabric() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <button onClick={() => updateMut.mutate({ id: editEntry.id, data: editData })} disabled={updateMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">Save</button>
-                <button onClick={() => { setDispatchModal(editEntry); setDispatchForm({ bilty_no: editEntry.bilty_no || '', transporter: editEntry.transporter || '', dispatch_date: editEntry.dispatch_date || '', expected_arrival: editEntry.expected_arrival || '', dispatched_qty: editEntry.dispatched_qty || editEntry.ordered_qty || 0, vehicle_no: editEntry.vehicle_no || '' }) }} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-medium">Vendor dispatch → In transit</button>
+                <button onClick={() => {
+                  const todayIso = new Date().toISOString().slice(0, 10)
+                  setDispatchModal(editEntry)
+                  setDispatchForm({
+                    bilty_no: editEntry.bilty_no || '',
+                    transporter: editEntry.transporter || '',
+                    dispatch_date: editEntry.dispatch_date || todayIso,
+                    expected_arrival: editEntry.expected_arrival || '',
+                    dispatched_qty: editEntry.dispatched_qty || editEntry.ordered_qty || 0,
+                    vehicle_no: editEntry.vehicle_no || '',
+                  })
+                }} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-medium">Vendor dispatch → In transit</button>
                 <button onClick={() => arriveMut.mutate({ id: editEntry.id })} className="px-3 py-2 bg-cyan-600 text-white rounded-lg text-xs font-medium">Arrive transport hub</button>
                 <button onClick={() => { setTransferModal(editEntry); setTransferForm({ to_location: 'factory', qty: editEntry.transport_qty || 0 }) }} className="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs font-medium">Transfer from transport…</button>
                 <button onClick={() => { setQcModal(editEntry); setQcForm(f => ({ ...f, received_qty: editEntry.received_qty || editEntry.ordered_qty || 0, checked_qty: editEntry.checked_qty || 0, passed_qty: editEntry.passed_qty ?? 0, rejected_qty: editEntry.rejected_qty || 0, rework_qty: editEntry.rework_qty || 0 })) }} className="px-3 py-2 bg-amber-600 text-white rounded-lg text-xs font-medium">Record QC</button>
@@ -500,23 +512,109 @@ export default function GreyFabric() {
           )}
 
           {/* Dispatch Modal */}
-          {dispatchModal && (
+          {dispatchModal && (() => {
+            const bilty = dispatchForm.bilty_no.trim()
+            const qty = Number(dispatchForm.dispatched_qty) || 0
+            const disabledReason =
+              !bilty ? 'Bilty / LR number is required'
+              : qty <= 0 ? 'Dispatched quantity must be greater than 0'
+              : null
+            const errMsg = (() => {
+              const e = dispatchMut.error as { response?: { data?: { detail?: string } }; message?: string } | null
+              if (!e) return ''
+              return e?.response?.data?.detail || e?.message || 'Dispatch failed — try again'
+            })()
+            return (
             <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
               <div className="bg-white rounded-xl max-w-md w-full p-5 space-y-3 shadow-xl">
-                <h3 className="font-semibold text-gray-800">Vendor dispatch (bilty)</h3>
-                {(['bilty_no','transporter','dispatch_date','expected_arrival','vehicle_no'] as const).map(f => (
-                  <div key={f}><label className="text-xs text-gray-500">{f.replace(/_/g, ' ')}</label>
-                    <input className="w-full border rounded px-2 py-1.5 text-sm mt-0.5" value={(dispatchForm as any)[f]} onChange={e => setDispatchForm(x => ({ ...x, [f]: e.target.value }))} /></div>
-                ))}
-                <div><label className="text-xs text-gray-500">Dispatched Qty (MTR)</label>
-                  <input type="number" className="w-full border rounded px-2 py-1.5 text-sm mt-0.5" value={dispatchForm.dispatched_qty} onChange={e => setDispatchForm(x => ({ ...x, dispatched_qty: +e.target.value }))} /></div>
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h3 className="font-semibold text-gray-800">Vendor dispatch → In transit</h3>
+                    <p className="text-xs text-gray-500 mt-0.5">{dispatchModal.po_number} · {dispatchModal.material_code}</p>
+                  </div>
+                  <button onClick={() => setDispatchModal(null)} className="text-gray-400 hover:text-gray-700 text-xl leading-none">×</button>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-500">Bilty / LR no <span className="text-rose-600">*</span></label>
+                  <input
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                    value={dispatchForm.bilty_no}
+                    onChange={e => setDispatchForm(x => ({ ...x, bilty_no: e.target.value }))}
+                    placeholder="e.g. 9837"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Transporter</label>
+                  <input
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                    value={dispatchForm.transporter}
+                    onChange={e => setDispatchForm(x => ({ ...x, transporter: e.target.value }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-gray-500">Dispatch date</label>
+                    <input
+                      type="date"
+                      className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                      value={dispatchForm.dispatch_date}
+                      onChange={e => setDispatchForm(x => ({ ...x, dispatch_date: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500">Expected arrival</label>
+                    <input
+                      type="date"
+                      className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                      value={dispatchForm.expected_arrival}
+                      onChange={e => setDispatchForm(x => ({ ...x, expected_arrival: e.target.value }))}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Vehicle no</label>
+                  <input
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                    value={dispatchForm.vehicle_no}
+                    onChange={e => setDispatchForm(x => ({ ...x, vehicle_no: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Dispatched Qty (MTR) <span className="text-rose-600">*</span></label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                    value={dispatchForm.dispatched_qty}
+                    onChange={e => setDispatchForm(x => ({ ...x, dispatched_qty: +e.target.value }))}
+                  />
+                </div>
+
+                {errMsg && (
+                  <div className="px-3 py-2 bg-rose-50 border border-rose-200 rounded text-xs text-rose-700">
+                    {errMsg}
+                  </div>
+                )}
+                {disabledReason && (
+                  <div className="text-xs text-amber-700">⚠ {disabledReason}</div>
+                )}
+
                 <div className="flex gap-2 pt-2">
-                  <button onClick={() => dispatchMut.mutate({ id: dispatchModal.id, body: dispatchForm })} disabled={dispatchMut.isPending || !dispatchForm.bilty_no} className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">Confirm dispatch</button>
+                  <button
+                    onClick={() => dispatchMut.mutate({ id: dispatchModal.id, body: dispatchForm })}
+                    disabled={dispatchMut.isPending || !!disabledReason}
+                    className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-semibold hover:bg-[#003a78] disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {dispatchMut.isPending ? 'Confirming…' : 'Confirm dispatch'}
+                  </button>
                   <button onClick={() => setDispatchModal(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
                 </div>
               </div>
             </div>
-          )}
+            )
+          })()}
 
           {/* Transfer Modal */}
           {transferModal && (
