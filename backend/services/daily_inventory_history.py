@@ -298,10 +298,41 @@ def effective_days_from_history(
     return out
 
 
+def coverage_days_within(
+    inv_history: pd.DataFrame,
+    cutoff_start: pd.Timestamp,
+    cutoff_end: pd.Timestamp,
+) -> int:
+    """Number of distinct snapshot dates the history sheet provides within ``[cs, ce]``.
+
+    Used by the PO engine to decide whether the sheet covers the full ADS window
+    or only a sub-range — partial-coverage SKUs must be *extrapolated*, not
+    capped at the sheet's day count (otherwise a sheet with 24 days collapses
+    every SKU's Eff_Days to 24 even when the SKU was in-stock all 30 days).
+    """
+    if inv_history is None or inv_history.empty:
+        return 0
+    df = inv_history.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+    if df.empty:
+        return 0
+    cs = pd.Timestamp(cutoff_start).normalize()
+    ce = pd.Timestamp(cutoff_end).normalize()
+    if cs > ce:
+        return 0
+    mask = (df["Date"] >= cs) & (df["Date"] <= ce)
+    sub = df.loc[mask]
+    if sub.empty:
+        return 0
+    return int(sub["Date"].dt.normalize().nunique())
+
+
 __all__ = [
     "parse_daily_inventory_history_dataframes",
     "parse_daily_inventory_history_upload",
     "effective_days_from_history",
+    "coverage_days_within",
 ]
 
 

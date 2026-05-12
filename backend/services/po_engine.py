@@ -667,7 +667,10 @@ def calculate_po_base(
     # OOS shouldn't pad the ADS denominator and lowball ADS.
     if inventory_history_df is not None and not inventory_history_df.empty:
         try:
-            from .daily_inventory_history import effective_days_from_history
+            from .daily_inventory_history import (
+                coverage_days_within,
+                effective_days_from_history,
+            )
 
             ih = inventory_history_df.copy()
             ih["OMS_SKU"] = ih["OMS_SKU"].astype(str).map(_canonical_oms_key)
@@ -678,26 +681,34 @@ def calculate_po_base(
                     ih.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"].max()
                 )
             eff_inv = effective_days_from_history(ih, ads_cutoff, max_date)
-            if not eff_inv.empty:
+            coverage_days = coverage_days_within(ih, ads_cutoff, max_date)
+            if not eff_inv.empty and coverage_days > 0:
                 po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
                 inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
-                # Where we have history, override Eff_Days with the in-stock day count.
-                # Floor at 1.0 (avoid div-by-zero); cap at window length.
+                # When the sheet covers fewer days than the ADS window, extrapolate:
+                # a SKU in-stock every covered day is assumed in-stock the full window.
+                # Otherwise an N-day sheet would collapse every SKU's Eff_Days to ≤N.
+                scale = float(ADS_WINDOW) / float(coverage_days) if coverage_days else 1.0
                 use_inv = inv_days.notna() & (inv_days > 0)
-                inv_clipped = inv_days.clip(lower=1.0, upper=float(ADS_WINDOW))
+                inv_eff = (inv_days * scale).round()
+                inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
                 po_df["Eff_Days"] = np.where(
                     use_inv,
                     inv_clipped.fillna(po_df["Eff_Days"]),
                     po_df["Eff_Days"],
                 )
                 po_df["Eff_Days_Inventory"] = inv_days.fillna(0).astype(int)
+                po_df["Inv_Coverage_Days"] = int(coverage_days)
             else:
                 po_df["Eff_Days_Inventory"] = 0
+                po_df["Inv_Coverage_Days"] = int(coverage_days)
         except Exception:
             # Inventory-history override is best-effort — never fail PO calc on its account.
             po_df["Eff_Days_Inventory"] = 0
+            po_df["Inv_Coverage_Days"] = 0
     else:
         po_df["Eff_Days_Inventory"] = 0
+        po_df["Inv_Coverage_Days"] = 0
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = (ads_demand / po_df["Eff_Days"]).fillna(0)
 

@@ -1183,3 +1183,79 @@ def test_po_uses_inventory_history_eff_days_to_lift_ads():
     assert int(short["Eff_Days_Inventory"]) == 5
     assert int(short["Eff_Days"]) == 5
     assert float(short["Recent_ADS"]) > float(plain["Recent_ADS"])
+
+
+def test_po_extrapolates_eff_days_when_sheet_covers_less_than_window():
+    """Real-world bug: daily-inventory sheet had only 24 of 30 snapshot dates.
+
+    Every SKU in-stock for all 24 snapshot days was getting Eff_Days = 24 (the
+    sheet's day count), which dropped ADS uniformly. The engine must extrapolate
+    in-stock rate over the full ADS window so SKUs in stock 24/24 snapshot days
+    land at Eff_Days ≈ 30, not 24.
+    """
+    sales_dates = pd.date_range("2025-12-18", periods=20, freq="D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "INV-COV",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+            for d in sales_dates
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["INV-COV"], "Total_Inventory": [10]})
+
+    sheet_end = pd.Timestamp("2026-01-06")
+    inv_hist_partial = pd.DataFrame(
+        {
+            "OMS_SKU": ["INV-COV"] * 24,
+            "Date": pd.date_range(end=sheet_end, periods=24, freq="D"),
+            "Qty": [5] * 24,
+        }
+    )
+
+    po_partial = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist_partial,
+    )
+    row = po_partial.iloc[0]
+    assert int(row["Eff_Days_Inventory"]) == 24
+    assert int(row["Inv_Coverage_Days"]) == 24
+    assert int(row["Eff_Days"]) == 30, (
+        f"24 in-stock / 24 covered days should extrapolate to full 30-day window; got {row['Eff_Days']}"
+    )
+
+    inv_hist_half = pd.DataFrame(
+        {
+            "OMS_SKU": ["INV-COV"] * 24,
+            "Date": pd.date_range(end=sheet_end, periods=24, freq="D"),
+            "Qty": [5] * 12 + [0] * 12,
+        }
+    )
+    po_half = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist_half,
+    )
+    half = po_half.iloc[0]
+    assert int(half["Eff_Days_Inventory"]) == 12
+    assert int(half["Eff_Days"]) == 15, (
+        f"12 in-stock / 24 covered should scale to 15 (= 50% of 30); got {half['Eff_Days']}"
+    )

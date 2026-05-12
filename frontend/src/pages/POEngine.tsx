@@ -160,6 +160,7 @@ export default function POEngine() {
     window_days: number
     window_start: string
     window_end: string
+    covered_days?: number
     in_stock_days: number
     out_of_stock_days: number
     rows: { date: string; qty: number; in_stock: boolean }[]
@@ -1825,8 +1826,16 @@ export default function POEngine() {
               ) : (
                 <>
                   <span><strong>Window:</strong> {effInvData.window_start} → {effInvData.window_end} ({effInvData.window_days}d)</span>
+                  <span><strong>Sheet coverage:</strong> {effInvData.covered_days ?? effInvData.rows.length}d</span>
                   <span><strong>In-stock:</strong> <span className="text-emerald-700 font-semibold">{effInvData.in_stock_days}d</span></span>
                   <span><strong>Out-of-stock:</strong> <span className="text-rose-700 font-semibold">{effInvData.out_of_stock_days}d</span></span>
+                  {(effInvData.covered_days ?? 0) < effInvData.window_days && (effInvData.covered_days ?? 0) > 0 && (
+                    <span className="text-amber-700 w-full">
+                      ⚠ Sheet only covers {effInvData.covered_days} of {effInvData.window_days} days. Engine extrapolates:
+                      Eff_Days ≈ <strong>{Math.min(effInvData.window_days, Math.round(effInvData.in_stock_days * effInvData.window_days / Math.max(1, effInvData.covered_days ?? 1)))}</strong>
+                      &nbsp;(in-stock rate × window).
+                    </span>
+                  )}
                   {effInvData.parent_used && (
                     <span className="text-amber-700">⚠ Showing parent-rollup (no exact-variant history found)</span>
                   )}

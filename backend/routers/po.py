@@ -204,6 +204,7 @@ def po_get_daily_inventory_history_for_sku(
         "window_days": int(window_days),
         "window_start": str(start_ts.date()),
         "window_end": str(end_ts.date()),
+        "covered_days": int(len(rows)),
         "in_stock_days": in_stock_days,
         "out_of_stock_days": int(len(rows) - in_stock_days),
         "rows": rows,
