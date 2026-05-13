@@ -1823,8 +1823,8 @@ export default function POEngine() {
                 <h3 className="text-lg font-bold text-gray-900">📅 In-stock days · {effInvSku}</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
                   Day-by-day inventory snapshots used by the engine to compute <code className="font-mono">Eff_Days</code>.
-                  Only days with on-hand qty ≥ <strong>{effInvData?.in_stock_min_qty ?? 2}</strong> count toward
-                  effective days — a single remaining piece is treated as &ldquo;not really sellable&rdquo;.
+                  Days with on-hand qty ≥ <strong>{effInvData?.in_stock_min_qty ?? 1}</strong> count toward effective
+                  days.
                 </p>
               </div>
               <button onClick={closeEffInvDrawer} className="text-gray-400 hover:text-gray-700 text-xl leading-none">×</button>

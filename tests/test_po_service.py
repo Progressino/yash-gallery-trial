@@ -1414,10 +1414,9 @@ def test_blank_inventory_cells_are_missing_not_oos():
     )
 
 
-def test_effective_days_treats_single_piece_as_not_in_stock():
-    """A day with only 1 piece remaining is NOT counted toward Eff_Days —
-    a single unit is operationally treated as unsellable (locked / sample /
-    miscount), per ops policy."""
+def test_effective_days_counts_single_piece_as_in_stock():
+    """A day with at least 1 piece on-hand counts toward Eff_Days. Only
+    zero / negative on-hand is excluded."""
     from backend.services.daily_inventory_history import effective_days_from_history
 
     history = pd.DataFrame(
@@ -1432,18 +1431,18 @@ def test_effective_days_treats_single_piece_as_not_in_stock():
         cutoff_start=pd.Timestamp("2026-05-08"),
         cutoff_end=pd.Timestamp("2026-05-12"),
     )
-    # Days 1 (qty 10), 2 (qty 2), 5 (qty 5) count → 3. Days 3 and 4 (qty 1) don't.
-    assert int(out["Eff_Days_Inventory"].iloc[0]) == 3
+    # All 5 days are >= 1 → all in-stock.
+    assert int(out["Eff_Days_Inventory"].iloc[0]) == 5
 
 
-def test_effective_days_threshold_is_two_by_default():
-    """Default min_qty is the IN_STOCK_MIN_QTY constant (= 2)."""
+def test_effective_days_default_threshold_is_one():
+    """Default min_qty is the IN_STOCK_MIN_QTY constant (= 1)."""
     from backend.services.daily_inventory_history import (
         IN_STOCK_MIN_QTY,
         effective_days_from_history,
     )
 
-    assert IN_STOCK_MIN_QTY == 2.0
+    assert IN_STOCK_MIN_QTY == 1.0
     history = pd.DataFrame(
         {
             "OMS_SKU": ["T"] * 3,
@@ -1456,7 +1455,7 @@ def test_effective_days_threshold_is_two_by_default():
         cutoff_start=pd.Timestamp("2026-05-10"),
         cutoff_end=pd.Timestamp("2026-05-12"),
     )
-    assert int(out["Eff_Days_Inventory"].iloc[0]) == 1  # only day 1 (qty 2)
+    assert int(out["Eff_Days_Inventory"].iloc[0]) == 2  # day 1 (qty 2) + day 2 (qty 1)
 
 
 def test_two_size_minimum_emits_actionable_recommendation():
