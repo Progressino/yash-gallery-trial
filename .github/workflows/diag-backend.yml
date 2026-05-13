@@ -1,0 +1,61 @@
+name: Diagnose backend
+
+# Read-only diagnostic when the FastAPI process stops responding. Dumps
+# container status, recent logs, memory, and any traceback the process
+# logged. Run with `gh workflow run diag-backend.yml`. No restart.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
+    steps:
+      - name: Container status
+        run: |
+          set +e
+          if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+          $DC -f docker-compose.prod.yml ps
+          echo
+          echo '── docker stats (snapshot) ──'
+          docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}' || true
+          echo
+          echo '── host free memory ──'
+          free -h || true
+          echo
+          echo '── host load / uptime ──'
+          uptime || true
+          echo
+          echo '── kernel OOMs in last 5 min ──'
+          (dmesg -T 2>/dev/null || dmesg 2>/dev/null) | tail -200 | grep -iE 'oom|killed' || echo 'none'
+
+      - name: Backend logs (tail 400)
+        run: |
+          set +e
+          if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+          $DC -f docker-compose.prod.yml logs --tail=400 --timestamps backend 2>&1 || true
+
+      - name: Probe /api/health from inside the docker network
+        run: |
+          set +e
+          if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+          $DC -f docker-compose.prod.yml exec -T backend python3 - <<'PY' || true
+          import socket, time, urllib.request
+          urls = [
+              "http://127.0.0.1:8000/api/health",
+              "http://localhost:8000/api/health",
+          ]
+          for u in urls:
+              try:
+                  t0 = time.time()
+                  with urllib.request.urlopen(u, timeout=5) as r:
+                      body = r.read(200)
+                  print(f"OK {u} {r.status} {time.time()-t0:.2f}s body={body!r}")
+              except Exception as e:
+                  print(f"FAIL {u} after {time.time()-t0:.2f}s: {type(e).__name__}: {e}")
+          PY
+          echo '── backend listen sockets ──'
+          $DC -f docker-compose.prod.yml exec -T backend sh -c "ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true"
