@@ -1,0 +1,136 @@
+"""In-app ledger of PO quantities confirmed via PO Engine (Export & Confirm).
+
+These rows are merged into PO math as extra pipeline so the next day's
+recommendation does not repeat the same SKU/order before inventory / sheet
+pipeline catches up.
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+
+from .helpers import get_parent_sku
+from .po_engine import canonical_oms_key
+
+
+def _norm_date_series(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce").dt.normalize()
+
+
+def append_raise_confirm_rows(
+    ledger: pd.DataFrame,
+    rows: List[Tuple[str, int]],
+    raised_date: pd.Timestamp,
+    sku_mapping: Optional[Dict[str, str]] = None,
+    group_by_parent: bool = False,
+) -> pd.DataFrame:
+    """Append or accumulate (OMS_SKU, Raised_Date) rows into the ledger."""
+    rd = pd.Timestamp(raised_date).normalize()
+    if not rows:
+        return ledger if ledger is not None else pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+
+    recs = []
+    for raw_sku, qty in rows:
+        q = int(qty) if qty is not None else 0
+        if q <= 0:
+            continue
+        key = canonical_oms_key(raw_sku, sku_mapping)
+        if not key:
+            continue
+        if group_by_parent:
+            key = str(get_parent_sku(key) or key).strip().upper()
+        recs.append({"OMS_SKU": key, "Raised_Qty": q, "Raised_Date": rd})
+
+    if not recs:
+        return ledger if ledger is not None else pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+
+    chunk = pd.DataFrame.from_records(recs)
+    base = ledger if ledger is not None and not ledger.empty else pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+    out = pd.concat([base, chunk], ignore_index=True)
+    out["Raised_Date"] = _norm_date_series(out["Raised_Date"])
+    out["Raised_Qty"] = pd.to_numeric(out["Raised_Qty"], errors="coerce").fillna(0).astype(int)
+    out = out[out["Raised_Qty"] > 0]
+    if out.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+    out = (
+        out.groupby(["OMS_SKU", "Raised_Date"], as_index=False)["Raised_Qty"]
+        .sum()
+        .sort_values(["Raised_Date", "OMS_SKU"])
+    )
+    return out.reset_index(drop=True)
+
+
+def aggregate_raise_ledger_for_po(
+    ledger_df: Optional[pd.DataFrame],
+    sku_mapping: Optional[Dict[str, str]],
+    as_of: pd.Timestamp,
+    lookback_days: int = 14,
+    group_by_parent: bool = False,
+) -> pd.DataFrame:
+    """
+    Per-SKU aggregates for PO math / display.
+
+    Returns columns: OMS_SKU, PO_Confirmed_Raise_Pipeline, PO_Raised_Yesterday,
+    PO_Raised_Today (today = ``as_of`` calendar day, normalized).
+    """
+    empty = pd.DataFrame(
+        columns=[
+            "OMS_SKU",
+            "PO_Confirmed_Raise_Pipeline",
+            "PO_Raised_Yesterday",
+            "PO_Raised_Today",
+        ]
+    )
+    if ledger_df is None or ledger_df.empty:
+        return empty
+
+    need = {"OMS_SKU", "Raised_Qty", "Raised_Date"}
+    norm_cols = {str(c).strip() for c in ledger_df.columns}
+    if not need.issubset(norm_cols):
+        return empty
+
+    df = ledger_df.copy()
+    df["OMS_SKU"] = df["OMS_SKU"].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+    df = df[df["OMS_SKU"].str.len() > 0]
+    if group_by_parent:
+        df["OMS_SKU"] = df["OMS_SKU"].map(lambda s: str(get_parent_sku(s) or s).strip().upper())
+    df["Raised_Date"] = _norm_date_series(df["Raised_Date"])
+    df["Raised_Qty"] = pd.to_numeric(df["Raised_Qty"], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["Raised_Date"])
+    df = df[df["Raised_Qty"] > 0]
+    if df.empty:
+        return empty
+
+    as_of = pd.Timestamp(as_of).normalize()
+    yesterday = as_of - timedelta(days=1)
+    lb = max(1, int(lookback_days))
+    window_start = as_of - timedelta(days=lb - 1)
+
+    win = df[(df["Raised_Date"] >= window_start) & (df["Raised_Date"] <= as_of)].copy()
+    if win.empty:
+        return empty
+
+    win["_day"] = win["Raised_Date"].dt.normalize().dt.date
+    yday = yesterday.date()
+    tday = as_of.date()
+
+    pipe = win.groupby("OMS_SKU", as_index=False)["Raised_Qty"].sum().rename(
+        columns={"Raised_Qty": "PO_Confirmed_Raise_Pipeline"}
+    )
+    yest = (
+        win[win["_day"] == yday]
+        .groupby("OMS_SKU", as_index=False)["Raised_Qty"]
+        .sum()
+        .rename(columns={"Raised_Qty": "PO_Raised_Yesterday"})
+    )
+    tod = (
+        win[win["_day"] == tday]
+        .groupby("OMS_SKU", as_index=False)["Raised_Qty"]
+        .sum()
+        .rename(columns={"Raised_Qty": "PO_Raised_Today"})
+    )
+    out = pipe.merge(yest, on="OMS_SKU", how="left").merge(tod, on="OMS_SKU", how="left")
+    out[["PO_Raised_Yesterday", "PO_Raised_Today"]] = out[["PO_Raised_Yesterday", "PO_Raised_Today"]].fillna(0).astype(int)
+    return out

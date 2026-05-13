@@ -36,7 +36,6 @@ from .db.tna_db import init_db as init_tna_db
 from .db.production_db import init_db as init_production_db
 from .db.grey_db import init_db as init_grey_db
 from .db.users_db import init_db as init_users_db
-from .db.po_raised_db import init_db as init_po_raised_db
 from .db.forecast_session_pg import init_db as init_forecast_session_pg
 
 init_db()
@@ -48,7 +47,6 @@ init_tna_db()
 init_production_db()
 init_grey_db()
 init_users_db()
-init_po_raised_db()
 init_forecast_session_pg()
 
 log = logging.getLogger("erp.cache_warmer")

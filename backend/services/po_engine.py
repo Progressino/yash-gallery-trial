@@ -431,7 +431,9 @@ def calculate_po_base(
     enforce_two_size_minimum: bool = False,
     enforce_lead_time_release_gate: bool = False,
     inventory_history_df: Optional[pd.DataFrame] = None,
-    raised_recently_df: Optional[pd.DataFrame] = None,
+    po_raise_ledger_df: Optional[pd.DataFrame] = None,
+    planning_date: Optional[str] = None,
+    raise_ledger_lookback_days: int = 14,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -880,61 +882,6 @@ def calculate_po_base(
     else:
         po_df["PO_Pipeline_Total"] = 0
 
-    # Daily "Raised PO" ledger. Anything the team raised through the app
-    # (and confirmed) goes here and is treated as pipeline so the same SKU
-    # isn't recommended again on subsequent calculations. Independent from
-    # the external Existing-PO sheet; the user can clear the internal
-    # ledger once a fresh external sheet absorbs these raises.
-    po_df["Raised_Recently_Units"] = 0
-    po_df["Raised_Recently_Last_Date"] = ""
-    if raised_recently_df is not None and not raised_recently_df.empty:
-        rr = raised_recently_df.copy()
-        rr.columns = [str(c) for c in rr.columns]
-        if "OMS_SKU" in rr.columns:
-            rr["OMS_SKU"] = rr["OMS_SKU"].astype(str).map(_canonical_oms_key)
-            qty_col = next(
-                (c for c in ("qty", "Qty", "Raised_Recently_Units") if c in rr.columns),
-                None,
-            )
-            date_col = next(
-                (
-                    c for c in (
-                        "last_raised_date",
-                        "Last_Raised_Date",
-                        "raised_date",
-                    ) if c in rr.columns
-                ),
-                None,
-            )
-            if qty_col:
-                rr[qty_col] = pd.to_numeric(rr[qty_col], errors="coerce").fillna(0.0)
-                rr = rr[rr["OMS_SKU"].str.len() > 0]
-                rr_agg = rr.groupby("OMS_SKU", as_index=False).agg(
-                    **{"_rr_qty": (qty_col, "sum")},
-                    **({"_rr_last": (date_col, "max")} if date_col else {}),
-                )
-                if group_by_parent:
-                    rr_agg["OMS_SKU"] = rr_agg["OMS_SKU"].map(get_parent_sku)
-                    agg_spec = {"_rr_qty": "sum"}
-                    if "_rr_last" in rr_agg.columns:
-                        agg_spec["_rr_last"] = "max"
-                    rr_agg = rr_agg.groupby("OMS_SKU", as_index=False).agg(agg_spec)
-                po_df = pd.merge(po_df, rr_agg, on="OMS_SKU", how="left")
-                rr_qty = pd.to_numeric(po_df["_rr_qty"], errors="coerce").fillna(0.0)
-                po_df["Raised_Recently_Units"] = rr_qty.astype(int)
-                # Layer raised qty into pipeline so the formula self-zeroes
-                # any SKU already covered by yesterday's raise.
-                po_df["PO_Pipeline_Total"] = (
-                    pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0)
-                    + rr_qty
-                ).astype(int)
-                if "_rr_last" in po_df.columns:
-                    po_df["Raised_Recently_Last_Date"] = (
-                        po_df["_rr_last"].fillna("").astype(str)
-                    )
-                po_df.drop(columns=[c for c in ("_rr_qty", "_rr_last") if c in po_df.columns],
-                           inplace=True, errors="ignore")
-
     # Days of stock remaining = current inventory cover only (no pipeline).
     po_df["Days_Left"] = np.where(
         po_df["ADS"] > 0,
@@ -1088,8 +1035,43 @@ def calculate_po_base(
 
     po_df["Lead_Time_Days"] = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1, upper=730).astype(int)
 
+    # ── In-app confirmed PO raises (Export & Confirm) ───────────────────────────
+    # Merged into effective pipeline so tomorrow's run does not re-recommend the
+    # same release for a SKU before sheet pipeline / inventory reflect it.
+    try:
+        _as_of_plan = (
+            pd.Timestamp(pd.to_datetime(planning_date).normalize())
+            if planning_date
+            else pd.Timestamp.now().normalize()
+        )
+    except Exception:
+        _as_of_plan = pd.Timestamp.now().normalize()
+
+    lag = pd.DataFrame()
+    if po_raise_ledger_df is not None and not po_raise_ledger_df.empty:
+        from .po_raise_ledger import aggregate_raise_ledger_for_po
+
+        lag = aggregate_raise_ledger_for_po(
+            po_raise_ledger_df,
+            _map,
+            _as_of_plan,
+            int(max(1, raise_ledger_lookback_days)),
+            group_by_parent,
+        )
+    if lag is not None and not lag.empty:
+        po_df = po_df.merge(lag, on="OMS_SKU", how="left")
+    for c in ("PO_Confirmed_Raise_Pipeline", "PO_Raised_Yesterday", "PO_Raised_Today"):
+        if c not in po_df.columns:
+            po_df[c] = 0
+        po_df[c] = pd.to_numeric(po_df[c], errors="coerce").fillna(0).astype(int)
+
+    po_df["PO_Pipeline_Effective"] = (
+        pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0).astype(int)
+        + pd.to_numeric(po_df["PO_Confirmed_Raise_Pipeline"], errors="coerce").fillna(0).astype(int)
+    )
+
     # Sheet formula:
-    # projected_days_now = (Total_Inventory + PO_Pipeline_Total) / ADS
+    # projected_days_now = (Total_Inventory + effective pipeline) / ADS
     # balance_days       = target_cover_days - projected_days_now
     # po_qty_raw         = ADS * balance_days
     # po_qty_round       = ceil(max(po_qty_raw, 0) / pack) * pack
@@ -1099,7 +1081,7 @@ def calculate_po_base(
     else:
         inv_for_cover = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0.0)
     ads_num = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
-    pipe_num = pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0.0)
+    pipe_num = pd.to_numeric(po_df["PO_Pipeline_Effective"], errors="coerce").fillna(0.0)
     projected_days_now = np.where(ads_num > 0, (inv_for_cover + pipe_num) / ads_num, 999.0)
     balance_days = target_cover_days - projected_days_now
     raw_po = ads_num * balance_days
@@ -1181,7 +1163,7 @@ def calculate_po_base(
         (po_df["Days_Left"] < lt_arr) & (po_df["PO_Qty"] > 0),
         (po_df["Days_Left"] < (lt_arr + float(grace_days))) & (po_df["PO_Qty"] > 0),
         po_df["PO_Qty"] > 0,
-        po_df["PO_Pipeline_Total"] > 0,
+        po_df["PO_Pipeline_Effective"] > 0,
     ]
     choices = ["🔴 URGENT", "🟡 HIGH", "🟢 MEDIUM", "🔄 In Pipeline"]
     po_df["Priority"] = np.select(conditions, choices, default="⚪ OK")
@@ -1222,14 +1204,14 @@ def calculate_po_base(
     # Projected_Running_Days = current cover before new release.
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
-        ((inv_days_left + po_df["PO_Pipeline_Total"]) / po_df["ADS"]).round(1),
+        ((inv_days_left + po_df["PO_Pipeline_Effective"]) / po_df["ADS"]).round(1),
         999.0,
     )
     # Post-PO cover after adding new release quantity.
     _post_cover = pd.Series(
         np.where(
             po_df["ADS"] > 0,
-            ((inv_days_left + po_df["PO_Pipeline_Total"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
+            ((inv_days_left + po_df["PO_Pipeline_Effective"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
             999.0,
         ),
         index=po_df.index,

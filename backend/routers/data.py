@@ -200,6 +200,8 @@ def get_coverage(request: Request):
     from ..services.daily_store import get_summary
 
     tier3_any = bool(get_summary())
+    _po_ledger = getattr(sess, "po_raise_ledger_df", None)
+    _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=not sess.mtr_df.empty,
@@ -213,6 +215,7 @@ def get_coverage(request: Request):
         existing_po=not sess.existing_po_df.empty,
         sku_status_lead=not sess.sku_status_lead_df.empty,
         daily_inventory_history=not sess.daily_inventory_history_df.empty,
+        po_raise_ledger=bool(_po_ledger_ok),
         mtr_rows=len(sess.mtr_df),
         sales_rows=len(sess.sales_df),
         myntra_rows=len(sess.myntra_df),
@@ -226,6 +229,7 @@ def get_coverage(request: Request):
             if not sess.daily_inventory_history_df.empty
             else 0
         ),
+        po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
         pause_auto_data_restore=paused,
     )
 

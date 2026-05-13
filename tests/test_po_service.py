@@ -1724,3 +1724,49 @@ def test_po_inv_window_anchors_at_latest_data_not_stale_sales_max():
     )
     assert int(row["Inv_Coverage_Days"]) == 30
     assert int(row["Eff_Days"]) == 30
+
+
+def test_po_raise_ledger_feeds_effective_pipeline_and_drops_repeat_po():
+    """Confirmed raises (yesterday) add to effective pipeline so the next run
+    does not re-recommend the same full PO for the same SKU."""
+    sales = _minimal_sales()
+    inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [50]})
+    planning = "2026-01-15"
+    po_base = calculate_po_base(
+        sales,
+        inv,
+        30,
+        30,
+        90,
+        safety_pct=0.0,
+        planning_date=planning,
+    )
+    assert not po_base.empty
+    qty_first = int(po_base.iloc[0]["PO_Qty"])
+    assert qty_first > 0
+    assert int(po_base.iloc[0].get("PO_Confirmed_Raise_Pipeline", 0)) == 0
+
+    ledger = pd.DataFrame(
+        {
+            "OMS_SKU": ["TEST-SKU-1"],
+            "Raised_Qty": [qty_first],
+            "Raised_Date": [pd.Timestamp("2026-01-14")],
+        }
+    )
+    po2 = calculate_po_base(
+        sales,
+        inv,
+        30,
+        30,
+        90,
+        safety_pct=0.0,
+        planning_date=planning,
+        po_raise_ledger_df=ledger,
+        raise_ledger_lookback_days=14,
+    )
+    row = po2.iloc[0]
+    assert int(row["PO_Raised_Yesterday"]) == qty_first
+    assert int(row["PO_Confirmed_Raise_Pipeline"]) == qty_first
+    assert int(row["PO_Pipeline_Effective"]) == int(row["PO_Pipeline_Total"]) + qty_first
+    assert int(row["PO_Qty"]) < qty_first
+

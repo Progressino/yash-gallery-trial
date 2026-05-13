@@ -33,6 +33,7 @@ class CoverageResponse(BaseModel):
     existing_po: bool = False
     sku_status_lead: bool = False
     daily_inventory_history: bool = False
+    po_raise_ledger: bool = False
     # row counts for loaded datasets
     mtr_rows: int = 0
     sales_rows: int = 0
@@ -43,6 +44,7 @@ class CoverageResponse(BaseModel):
     sku_status_lead_rows: int = 0
     daily_inventory_history_rows: int = 0
     daily_inventory_history_skus: int = 0
+    po_raise_ledger_rows: int = 0
     # After full wipe: True until user uploads or clicks Load Cache (blocks auto-restore)
     pause_auto_data_restore: bool = False
 

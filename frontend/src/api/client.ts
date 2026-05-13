@@ -42,6 +42,7 @@ export interface CoverageResponse {
   existing_po: boolean
   sku_status_lead?: boolean
   daily_inventory_history?: boolean
+  po_raise_ledger?: boolean
   mtr_rows: number
   sales_rows: number
   myntra_rows: number
@@ -51,6 +52,7 @@ export interface CoverageResponse {
   sku_status_lead_rows?: number
   daily_inventory_history_rows?: number
   daily_inventory_history_skus?: number
+  po_raise_ledger_rows?: number
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
 }

@@ -5,38 +5,11 @@ GET  /api/po/quarterly  → quarterly history pivot
 POST /api/po/sku-status-lead → upload SKU status & lead time (Excel/CSV) for PO rules
 """
 from io import BytesIO
-
-import pandas as pd
-from fastapi import APIRouter, File, Query, Request, UploadFile
-from pydantic import BaseModel
 from typing import List, Optional
 
-from ..db import po_raised_db
-
-
-def _load_raised_recently_df(default_lead_time: int = 60) -> Optional[pd.DataFrame]:
-    """Build a DataFrame of active raised POs for the engine to absorb.
-
-    Returns ``None`` if the ledger is empty so the engine skips its merge.
-    """
-    try:
-        summary = po_raised_db.summary_by_sku(
-            only_active=True, default_lead_time=int(max(1, default_lead_time))
-        )
-    except Exception:
-        return None
-    if not summary:
-        return None
-    return pd.DataFrame(
-        [
-            {
-                "OMS_SKU": s["oms_sku"],
-                "qty": float(s["qty"]),
-                "last_raised_date": str(s.get("last_raised_date") or ""),
-            }
-            for s in summary
-        ]
-    )
+import pandas as pd
+from fastapi import APIRouter, File, Request, UploadFile
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -57,6 +30,22 @@ class PORequest(BaseModel):
     # time. Default OFF — formula already self-zeroes when projection meets
     # target cover. Ops can flip on if they want stricter release control.
     enforce_lead_time_release_gate: bool = False
+    # Calendar day for PO raise-ledger "yesterday / today" columns (YYYY-MM-DD).
+    # Defaults to server date if omitted; browser should send local date for daily PO.
+    planning_date: Optional[str] = None
+    # How many calendar days of confirmed raises (ending at planning_date) add to effective pipeline.
+    raise_ledger_lookback_days: int = 14
+
+
+class RaiseConfirmItem(BaseModel):
+    oms_sku: str
+    qty: int
+
+
+class RaiseConfirmBody(BaseModel):
+    rows: List[RaiseConfirmItem]
+    raised_date: Optional[str] = None
+    group_by_parent: bool = False
 
 
 @router.post("/sku-status-lead")
@@ -288,6 +277,97 @@ def po_clear_daily_inventory_history(request: Request):
     return {"ok": True, "message": "Daily inventory history cleared."}
 
 
+@router.post("/raise-confirm")
+def po_raise_confirm(request: Request, body: RaiseConfirmBody):
+    """Record SKUs/qty confirmed via PO Engine (Export & Confirm) into the session ledger.
+
+    Next PO runs treat these units as extra pipeline (within ``raise_ledger_lookback_days``)
+    so the same SKU is not re-recommended at full quantity day after day.
+    """
+    import logging
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    if not body.rows:
+        return {"ok": False, "message": "No rows to record."}
+
+    from ..services.po_raise_ledger import append_raise_confirm_rows
+
+    try:
+        as_dt = (
+            pd.Timestamp(pd.to_datetime(body.raised_date).normalize())
+            if body.raised_date
+            else pd.Timestamp.now().normalize()
+        )
+    except Exception:
+        as_dt = pd.Timestamp.now().normalize()
+
+    tuples = [(r.oms_sku, int(r.qty)) for r in body.rows]
+    sess.po_raise_ledger_df = append_raise_confirm_rows(
+        getattr(sess, "po_raise_ledger_df", pd.DataFrame()),
+        tuples,
+        as_dt,
+        sku_mapping=sess.sku_mapping or None,
+        group_by_parent=bool(body.group_by_parent),
+    )
+    sess._quarterly_cache.clear()
+
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
+    if sid:
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle
+
+            if persist_session_bundle(sid, sess):
+                logging.getLogger(__name__).info("PostgreSQL session saved after PO raise-confirm (%s…)", sid[:8])
+        except Exception:
+            logging.getLogger(__name__).exception("PostgreSQL session persist after raise-confirm failed")
+
+    n = int(len(sess.po_raise_ledger_df))
+    return {
+        "ok": True,
+        "ledger_rows": n,
+        "message": f"Recorded {len(body.rows)} SKU line(s); ledger now has {n} SKU-day row(s).",
+    }
+
+
+@router.get("/raise-ledger")
+def po_get_raise_ledger(request: Request):
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "loaded": False}
+    df = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
+    if df is None or df.empty:
+        return {"ok": True, "loaded": False, "rows": [], "columns": []}
+    return {
+        "ok": True,
+        "loaded": True,
+        "columns": list(df.columns),
+        "rows": df.fillna("").to_dict("records"),
+    }
+
+
+@router.delete("/raise-ledger")
+def po_clear_raise_ledger(request: Request):
+    import logging
+    import pandas as _pd
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    sess.po_raise_ledger_df = _pd.DataFrame()
+    sess._quarterly_cache.clear()
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
+    if sid:
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle
+
+            persist_session_bundle(sid, sess)
+        except Exception:
+            logging.getLogger(__name__).exception("PostgreSQL session persist after raise-ledger clear failed")
+    return {"ok": True, "message": "PO raise ledger cleared."}
+
+
 @router.post("/calculate")
 def po_calculate(request: Request, body: PORequest):
     sess = request.state.session
@@ -302,6 +382,7 @@ def po_calculate(request: Request, body: PORequest):
 
     inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
 
+    _ledger = getattr(sess, "po_raise_ledger_df", None)
     try:
         po_df = calculate_po_base(
             sales_df=sess.sales_df,
@@ -326,7 +407,9 @@ def po_calculate(request: Request, body: PORequest):
                 if not sess.daily_inventory_history_df.empty
                 else None
             ),
-            raised_recently_df=_load_raised_recently_df(default_lead_time=body.lead_time),
+            po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
+            planning_date=body.planning_date,
+            raise_ledger_lookback_days=body.raise_ledger_lookback_days,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
@@ -361,91 +444,6 @@ def po_calculate(request: Request, body: PORequest):
         "rows":    rows,
         "columns": list(po_df.columns),
     }
-
-
-class PODashboardRequest(PORequest):
-    """Same knobs as PO calculate, plus short-horizon sales windows for the dashboard."""
-
-    recent_days: int = 7
-    prev_days: int = 7
-    spike_ratio: float = 1.35
-    min_recent_units: int = 5
-    low_run_days: float = 40.0
-    max_rows_per_section: int = 80
-
-
-@router.post("/dashboard")
-def po_dashboard(request: Request, body: PODashboardRequest):
-    """One-shot PO dashboard: runs the same engine as ``/calculate`` and adds
-    sections for pipeline, open recommendations, demand spikes, and tight cover."""
-    sess = request.state.session
-    if sess is None:
-        return {"ok": False, "message": "No session"}
-    if sess.sales_df.empty:
-        return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
-    if sess.inventory_df_variant.empty:
-        return {"ok": False, "message": "Upload Inventory first."}
-
-    from ..services.po_dashboard import build_dashboard_payload
-    from ..services.po_engine import calculate_po_base
-
-    inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
-
-    try:
-        po_df = calculate_po_base(
-            sales_df=sess.sales_df,
-            inv_df=inv_df,
-            period_days=body.period_days,
-            lead_time=body.lead_time,
-            target_days=body.target_days,
-            demand_basis=body.demand_basis,
-            min_denominator=body.min_denominator,
-            grace_days=body.grace_days,
-            safety_pct=body.safety_pct,
-            use_seasonality=body.use_seasonality,
-            seasonal_weight=body.seasonal_weight,
-            sku_mapping=sess.sku_mapping or None,
-            group_by_parent=body.group_by_parent,
-            existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
-            sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
-            enforce_two_size_minimum=body.enforce_two_size_minimum,
-            enforce_lead_time_release_gate=body.enforce_lead_time_release_gate,
-            inventory_history_df=(
-                sess.daily_inventory_history_df
-                if not sess.daily_inventory_history_df.empty
-                else None
-            ),
-            raised_recently_df=_load_raised_recently_df(default_lead_time=body.lead_time),
-        )
-    except Exception as e:
-        return {"ok": False, "message": f"PO dashboard error: {e}"}
-
-    if po_df.empty:
-        return {"ok": False, "message": "PO result is empty."}
-
-    dash = build_dashboard_payload(
-        po_df,
-        sess.sales_df,
-        sku_mapping=sess.sku_mapping or None,
-        group_by_parent=body.group_by_parent,
-        recent_days=body.recent_days,
-        prev_days=body.prev_days,
-        spike_ratio=body.spike_ratio,
-        min_recent_units=body.min_recent_units,
-        low_run_days=body.low_run_days,
-        max_rows_per_section=body.max_rows_per_section,
-        lead_time_default=body.lead_time,
-    )
-    try:
-        raised = po_raised_db.summary_by_sku(
-            only_active=True, default_lead_time=int(max(1, body.lead_time))
-        )
-    except Exception:
-        raised = []
-    dash["raised_ledger_active"] = raised
-    dash["raised_ledger_skus"] = len(raised)
-    dash["raised_ledger_units"] = int(sum(float(x.get("qty") or 0) for x in raised))
-    return dash
 
 
 @router.get("/quarterly-debug")
@@ -534,62 +532,3 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
         }
     sess._quarterly_cache[cache_key] = result
     return result
-
-
-# ─────────────────────────── Raised PO Ledger ────────────────────────────
-# Records every "Export & Confirm PO" the team raises so subsequent days'
-# calculations can suppress the same SKU until the raised qty either ages
-# past its lead time or the user explicitly clears / consolidates it.
-
-class RaisedPOItem(BaseModel):
-    oms_sku: str
-    qty: float
-    lead_time: Optional[int] = None
-    note: Optional[str] = None
-
-
-class RaisedPOBatch(BaseModel):
-    items: List[RaisedPOItem]
-
-
-@router.post("/raised")
-def po_raised_record(body: RaisedPOBatch):
-    """Record a batch of raised POs.
-
-    The frontend POSTs this from the "Export & Confirm PO" modal just
-    before downloading the CSV. Subsequent PO calculations will treat
-    these as in-pipeline so the same SKU isn't recommended again.
-    """
-    if not body or not body.items:
-        return {"ok": False, "saved": 0, "message": "No items provided."}
-    saved = po_raised_db.record_raises([it.dict() for it in body.items])
-    return {"ok": True, "saved": saved}
-
-
-@router.get("/raised")
-def po_raised_list(
-    start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    sku: Optional[str] = None,
-    limit: int = 5000,
-):
-    """List raised PO ledger entries (newest first)."""
-    rows = po_raised_db.list_raises(start_date=start_date, end_date=end_date, sku=sku, limit=limit)
-    summary = po_raised_db.summary_by_sku(only_active=True)
-    return {
-        "ok": True,
-        "rows": rows,
-        "active_summary": summary,
-        "active_skus": len(summary),
-        "active_units": int(sum(s["qty"] for s in summary)),
-    }
-
-
-@router.delete("/raised")
-def po_raised_clear(older_than_days: Optional[int] = Query(None, ge=0)):
-    """Clear the ledger. Pass ``older_than_days`` to keep recent rows."""
-    if older_than_days is not None:
-        n = po_raised_db.clear_older_than_days(older_than_days)
-    else:
-        n = po_raised_db.clear_all()
-    return {"ok": True, "deleted": n}

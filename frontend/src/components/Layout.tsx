@@ -31,7 +31,6 @@ const NAV_GROUPS = [
       { to: '/production', label: '⚙️ Production' },
       { to: '/grey',       label: '🧵 Grey Fabric' },
       { to: '/inventory',  label: '📦 Inventory' },
-      { to: '/po-dashboard', label: '📋 PO Dashboard' },
       { to: '/po',         label: '🎯 PO Engine' },
       { to: '/admin',      label: '🔐 Admin' },
       { to: '/marketplace-connections', label: '🔗 Marketplace API' },

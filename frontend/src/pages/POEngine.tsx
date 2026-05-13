@@ -1,5 +1,4 @@
 import { useState, useMemo, useCallback, memo, useRef } from 'react'
-import { Link } from 'react-router-dom'
 import { api, getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore } from '../store/po'
@@ -78,7 +77,8 @@ const PO_DISPLAY_COLS = [
   'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
   'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
-  'PO_Pipeline_Total', 'Projected_Running_Days', 'Post_PO_Cover_Days_Capped', 'PO_Qty',
+  'PO_Pipeline_Total', 'PO_Raised_Yesterday', 'PO_Raised_Today', 'PO_Confirmed_Raise_Pipeline', 'PO_Pipeline_Effective',
+  'Projected_Running_Days', 'Post_PO_Cover_Days_Capped', 'PO_Qty',
   'PO_Block_Reason', 'Suggest_Close_SKU',
 ]
 
@@ -92,6 +92,10 @@ const COL_LABEL: Record<string, string> = {
   'Flat30_ADS':               '📅 Sheet FREQ (÷30)',
   'ADS':                      '⚡ ADS (Used)',
   'PO_Pipeline_Total':        '🏭 Total Pipeline',
+  'PO_Raised_Yesterday':     '📌 Raised qty (yesterday)',
+  'PO_Raised_Today':         '📌 Raised qty (today)',
+  'PO_Confirmed_Raise_Pipeline': '📌 Confirmed raises (window)',
+  'PO_Pipeline_Effective':   '🏭 Eff. pipeline (sheet + raises)',
   'PO_Qty_Ordered':           '📋 PO Ordered',
   'Pending_Cutting':          '✂️ Pend. Cutting',
   'Balance_to_Dispatch':      '📦 Bal. Dispatch',
@@ -143,6 +147,7 @@ export default function POEngine() {
   const dailyInvLoaded = useSession(s => s.daily_inventory_history ?? false)
   const dailyInvRows = useSession(s => s.daily_inventory_history_rows ?? 0)
   const dailyInvSkus = useSession(s => s.daily_inventory_history_skus ?? 0)
+  const raiseLedgerRows = useSession(s => s.po_raise_ledger_rows ?? 0)
   const skuFileRef = useRef<HTMLInputElement>(null)
   const dailyInvFileRef = useRef<HTMLInputElement>(null)
   /** Bumps on each Calculate / quarterly load so stale async responses are ignored. */
@@ -211,6 +216,8 @@ export default function POEngine() {
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [shipLoading, setShipLoading] = useState(false)
   const [raiseModal, setRaiseModal] = useState(false)
+  const [raiseConfirmBusy, setRaiseConfirmBusy] = useState(false)
+  const [raiseConfirmErr, setRaiseConfirmErr] = useState<string | null>(null)
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
   const [shipment, setShipment] = useState<POResult | null>(null)
   const [shipSearch, setShipSearch] = useState('')
@@ -338,7 +345,14 @@ export default function POEngine() {
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
-      const res = await api.post<POResult>('/po/calculate', params)
+      const d = new Date()
+      const p = (n: number) => String(n).padStart(2, '0')
+      const planning_date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+      const res = await api.post<POResult>('/po/calculate', {
+        ...params,
+        planning_date,
+        raise_ledger_lookback_days: 14,
+      })
       if (seq !== poRunSeqRef.current) return
       poRes = res.data
       setResult(poRes)
@@ -352,6 +366,45 @@ export default function POEngine() {
 
     if (seq !== poRunSeqRef.current || !poRes?.ok) return
     void loadQuarterlyForRun(seq)
+  }
+
+  const confirmRaiseAndExport = async (rows: Array<PORow & { Final_PO_Qty: number }>) => {
+    setRaiseConfirmErr(null)
+    setRaiseConfirmBusy(true)
+    exportRaisePO(rows)
+    const payloadRows = rows
+      .map(r => ({
+        oms_sku: String(r['OMS_SKU'] ?? ''),
+        qty: Math.max(0, Math.floor(Number(r.Final_PO_Qty ?? 0))),
+      }))
+      .filter(r => r.oms_sku.length > 0 && r.qty > 0)
+    if (payloadRows.length === 0) {
+      setRaiseConfirmBusy(false)
+      setRaiseConfirmErr('No positive quantities to record.')
+      return
+    }
+    try {
+      const d = new Date()
+      const p = (n: number) => String(n).padStart(2, '0')
+      const raised_date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+      const { data } = await api.post<{ ok?: boolean; message?: string }>('/po/raise-confirm', {
+        rows: payloadRows,
+        raised_date,
+        group_by_parent: params.group_by_parent,
+      })
+      if (!data?.ok) {
+        setRaiseConfirmErr(data?.message || 'Could not save raise ledger.')
+        return
+      }
+      setRaiseModal(false)
+      const c = await getCoverage()
+      setCoverage(c)
+      await run()
+    } catch (e: unknown) {
+      setRaiseConfirmErr(e instanceof Error ? e.message : 'Raise ledger save failed')
+    } finally {
+      setRaiseConfirmBusy(false)
+    }
   }
 
   const runShipment = async () => {
@@ -620,12 +673,6 @@ export default function POEngine() {
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">🎯 PO Engine</h2>
         <p className="text-gray-400 text-sm mt-1">Calculate purchase orders with quarterly history inline.</p>
-        <p className="text-sm mt-1">
-          <Link to="/po-dashboard" className="text-blue-700 hover:underline font-medium">
-            Open PO Dashboard
-          </Link>
-          <span className="text-gray-400"> — pipeline, spikes, and tight cover at a glance.</span>
-        </p>
       </div>
 
       {/* Tabs */}
@@ -882,7 +929,7 @@ export default function POEngine() {
                 <div className="ml-auto flex gap-2">
                   {someSelected && (
                     <button
-                      onClick={() => setRaiseModal(true)}
+                      onClick={() => { setRaiseConfirmErr(null); setRaiseModal(true) }}
                       className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 shadow-sm"
                     >
                       🚀 Raise PO ({selected.size} SKU{selected.size > 1 ? 's' : ''}, {totalRaiseUnits.toLocaleString()} units)
@@ -923,6 +970,7 @@ export default function POEngine() {
                   <strong className="text-blue-700">🏭 In Production</strong> = units already ordered (from your PO sheet). {' '}
                   <strong>Gross PO Qty</strong> − <strong>In Production</strong> = <strong className="text-orange-600">PO Qty</strong> (net new order). {' '}
                   Edit <strong className="text-orange-600">PO Qty</strong> cells directly, then select SKUs and click <strong className="text-green-700">Raise PO</strong>.
+                  {' '}<strong className="text-sky-800">Raise ledger:</strong> {raiseLedgerRows.toLocaleString()} SKU-day row(s) on file — yesterday/today confirmed qty feeds <strong>eff. pipeline</strong> so the same SKU is not re-released at full strength every day.
                 </span>
               </div>
 
@@ -1756,6 +1804,10 @@ export default function POEngine() {
                 <p className="text-sm text-gray-500 mt-0.5">
                   {selectedRows.length} SKU{selectedRows.length !== 1 ? 's' : ''} · {totalRaiseUnits.toLocaleString()} total units
                 </p>
+                <p className="text-[11px] text-sky-900 bg-sky-50 border border-sky-200 rounded px-2 py-1.5 mt-2 leading-snug">
+                  <strong>Export &amp; Confirm</strong> downloads the CSV and records these quantities in the session <strong>raise ledger</strong>.
+                  The next <strong>Calculate PO</strong> adds them to <strong>effective pipeline</strong> (14-day lookback, with <strong>Raised yesterday</strong> / <strong>Raised today</strong> columns for visibility) so recommendations step down instead of repeating the same release daily.
+                </p>
               </div>
               <button onClick={() => setRaiseModal(false)} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
             </div>
@@ -1798,6 +1850,12 @@ export default function POEngine() {
               )}
             </div>
 
+            {raiseConfirmErr && (
+              <div className="px-4 py-2 mx-4 mb-0 text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded">
+                {raiseConfirmErr}
+              </div>
+            )}
+
             <div className="p-4 border-t border-gray-200 flex gap-3 justify-end">
               <button
                 onClick={() => setRaiseModal(false)}
@@ -1807,10 +1865,12 @@ export default function POEngine() {
               </button>
               {selectedRows.length > 0 && (
                 <button
-                  onClick={() => { exportRaisePO(selectedRows); setRaiseModal(false) }}
-                  className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700"
+                  type="button"
+                  onClick={() => void confirmRaiseAndExport(selectedRows)}
+                  disabled={raiseConfirmBusy}
+                  className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  ⬇ Export & Confirm PO
+                  {raiseConfirmBusy ? 'Saving…' : '⬇ Export & Confirm PO'}
                 </button>
               )}
             </div>
