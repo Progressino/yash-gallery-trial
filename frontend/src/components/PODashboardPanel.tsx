@@ -98,21 +98,36 @@ export function PODashboardPanel({ embedded = false, isActive }: PODashboardPane
 
   const mut = useMutation({
     mutationFn: async () => {
-      const { data } = await api.post<DashboardPayload>('/po/dashboard', {
-        ...params,
-        min_denominator: 7,
-        ...tuning,
-      })
+      // 60s timeout: dashboard runs the full PO engine, large catalogs can take 10-20s.
+      const { data } = await api.post<DashboardPayload>(
+        '/po/dashboard',
+        { ...params, min_denominator: 7, ...tuning },
+        { timeout: 60_000 },
+      )
       return data
     },
     onSuccess: d => setData(d),
   })
 
-  const load = useCallback(() => void mut.mutate(), [mut])
+  // useMutation's `mutate` is referentially stable in v5; depending on the whole
+  // `mut` object causes an effect-rerun-per-render loop (the panel previously
+  // fired requests in a tight loop on first activation).
+  const mutate = mut.mutate
+  const load = useCallback(() => void mutate(), [mutate])
 
   useEffect(() => {
-    if (isActive) void mut.mutate()
-  }, [isActive, mut])
+    if (isActive) void mutate()
+  }, [isActive, mutate])
+
+  const errorMsg = (() => {
+    if (!mut.isError) return null
+    const e = mut.error as { code?: string; message?: string; response?: { status?: number; data?: { message?: string } } } | null
+    if (!e) return 'Request failed.'
+    if (e.code === 'ECONNABORTED' || /timeout/i.test(e.message || '')) return 'Dashboard request timed out (the server is busy).'
+    if (e.response?.data?.message) return e.response.data.message
+    if (!e.response) return 'Cannot reach the server. Check your connection and try again.'
+    return `Request failed (status ${e.response.status}).`
+  })()
 
   const summary = data?.summary
   const win = data?.windows
@@ -224,9 +239,9 @@ export function PODashboardPanel({ embedded = false, isActive }: PODashboardPane
         </p>
       </div>
 
-      {mut.isError && (
+      {errorMsg && (
         <div className="rounded-lg bg-rose-50 text-rose-800 text-sm px-4 py-3 border border-rose-200">
-          Could not load dashboard. Check sales + inventory uploads, then try again.
+          {errorMsg}
         </div>
       )}
 

@@ -368,6 +368,116 @@ def po_clear_raise_ledger(request: Request):
     return {"ok": True, "message": "PO raise ledger cleared."}
 
 
+class PODashboardRequest(PORequest):
+    """Same knobs as PO calculate, plus short-horizon sales windows for the dashboard."""
+
+    recent_days: int = 7
+    prev_days: int = 7
+    spike_ratio: float = 1.35
+    min_recent_units: int = 5
+    low_run_days: float = 40.0
+    max_rows_per_section: int = 80
+
+
+@router.post("/dashboard")
+def po_dashboard(request: Request, body: PODashboardRequest):
+    """One-shot PO dashboard: runs the same engine as ``/calculate`` and adds
+    sections for pipeline, open recommendations, demand spikes, and tight cover.
+    Uses the session-based raise ledger (``sess.po_raise_ledger_df``)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    if sess.sales_df.empty:
+        return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
+    if sess.inventory_df_variant.empty:
+        return {"ok": False, "message": "Upload Inventory first."}
+
+    from ..services.po_dashboard import build_dashboard_payload
+    from ..services.po_engine import calculate_po_base
+
+    inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
+    _ledger = getattr(sess, "po_raise_ledger_df", None)
+
+    try:
+        po_df = calculate_po_base(
+            sales_df=sess.sales_df,
+            inv_df=inv_df,
+            period_days=body.period_days,
+            lead_time=body.lead_time,
+            target_days=body.target_days,
+            demand_basis=body.demand_basis,
+            min_denominator=body.min_denominator,
+            grace_days=body.grace_days,
+            safety_pct=body.safety_pct,
+            use_seasonality=body.use_seasonality,
+            seasonal_weight=body.seasonal_weight,
+            sku_mapping=sess.sku_mapping or None,
+            group_by_parent=body.group_by_parent,
+            existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
+            sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
+            enforce_two_size_minimum=body.enforce_two_size_minimum,
+            enforce_lead_time_release_gate=body.enforce_lead_time_release_gate,
+            inventory_history_df=(
+                sess.daily_inventory_history_df
+                if not sess.daily_inventory_history_df.empty
+                else None
+            ),
+            po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
+            planning_date=body.planning_date,
+            raise_ledger_lookback_days=body.raise_ledger_lookback_days,
+        )
+    except Exception as e:
+        return {"ok": False, "message": f"PO calculation error: {e}"}
+
+    if po_df is None or po_df.empty:
+        return {"ok": False, "message": "PO result is empty."}
+
+    payload = build_dashboard_payload(
+        po_df,
+        sess.sales_df,
+        sku_mapping=sess.sku_mapping or None,
+        group_by_parent=body.group_by_parent,
+        recent_days=body.recent_days,
+        prev_days=body.prev_days,
+        spike_ratio=body.spike_ratio,
+        min_recent_units=body.min_recent_units,
+        low_run_days=body.low_run_days,
+        max_rows_per_section=body.max_rows_per_section,
+        lead_time_default=body.lead_time,
+    )
+
+    # Active raise-ledger summary (same source as the engine's "Raised_Recently_*" merge).
+    raised_active: list = []
+    raised_skus = 0
+    raised_units = 0
+    if _ledger is not None and not _ledger.empty:
+        try:
+            df = _ledger.copy()
+            df["OMS_SKU"] = df.get("OMS_SKU", "").astype(str)
+            df["qty"] = pd.to_numeric(df.get("qty", 0), errors="coerce").fillna(0).astype(int)
+            df = df[df["qty"] > 0]
+            if "raised_date" in df.columns:
+                df["raised_date"] = df["raised_date"].astype(str)
+                grp = (
+                    df.groupby("OMS_SKU", as_index=False)
+                      .agg(qty=("qty", "sum"), last_raised_date=("raised_date", "max"))
+                )
+            else:
+                grp = df.groupby("OMS_SKU", as_index=False).agg(qty=("qty", "sum"))
+                grp["last_raised_date"] = ""
+            grp = grp.sort_values("qty", ascending=False).head(int(max(10, min(500, body.max_rows_per_section))))
+            raised_active = grp.to_dict("records")
+            raised_skus = int(grp["OMS_SKU"].nunique())
+            raised_units = int(grp["qty"].sum())
+        except Exception:
+            raised_active, raised_skus, raised_units = [], 0, 0
+
+    payload["raised_ledger_active"] = raised_active
+    payload["raised_ledger_skus"] = raised_skus
+    payload["raised_ledger_units"] = raised_units
+    return payload
+
+
 @router.post("/calculate")
 def po_calculate(request: Request, body: PORequest):
     sess = request.state.session
