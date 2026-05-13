@@ -218,6 +218,7 @@ export default function POEngine() {
   const [raiseModal, setRaiseModal] = useState(false)
   const [raiseConfirmBusy, setRaiseConfirmBusy] = useState(false)
   const [raiseConfirmErr, setRaiseConfirmErr] = useState<string | null>(null)
+  const [clearLedgerBusy, setClearLedgerBusy] = useState(false)
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
   const [shipment, setShipment] = useState<POResult | null>(null)
   const [shipSearch, setShipSearch] = useState('')
@@ -404,6 +405,27 @@ export default function POEngine() {
       setRaiseConfirmErr(e instanceof Error ? e.message : 'Raise ledger save failed')
     } finally {
       setRaiseConfirmBusy(false)
+    }
+  }
+
+  const clearRaiseLedger = async () => {
+    if (clearLedgerBusy) return
+    const ok = window.confirm(
+      `Clear the PO raise ledger (${raiseLedgerRows.toLocaleString()} SKU-day row${raiseLedgerRows === 1 ? '' : 's'})?\n\n` +
+      'This removes the in-app record of recently confirmed POs. The next Calculate PO ' +
+      'will no longer treat those quantities as extra pipeline and may re-recommend them.',
+    )
+    if (!ok) return
+    setClearLedgerBusy(true)
+    try {
+      await api.delete('/po/raise-ledger')
+      const c = await getCoverage()
+      setCoverage(c)
+      if (result?.ok) await run()
+    } catch (e: unknown) {
+      console.warn('[PO] clear raise ledger failed:', e)
+    } finally {
+      setClearLedgerBusy(false)
     }
   }
 
@@ -941,6 +963,19 @@ export default function POEngine() {
                   >
                     ⬇ Export CSV
                   </button>
+                  {raiseLedgerRows > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void clearRaiseLedger()}
+                      disabled={clearLedgerBusy}
+                      title="Remove the in-app record of confirmed PO raises so the next Calculate PO does not treat them as extra pipeline."
+                      className="text-xs px-3 py-1.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {clearLedgerBusy
+                        ? 'Clearing…'
+                        : `🧹 Clear raise ledger (${raiseLedgerRows.toLocaleString()})`}
+                    </button>
+                  )}
                   {riskReviewRows.length > 0 && (
                     <button
                       onClick={() => exportRiskReviewCsv(riskReviewRows)}
