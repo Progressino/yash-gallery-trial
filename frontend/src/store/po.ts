@@ -24,7 +24,7 @@ interface QuarterlyResult {
   rows?: QuarterlyRow[]
 }
 
-type Tab = 'po' | 'quarterly' | 'shipment'
+export type Tab = 'po' | 'dashboard' | 'quarterly' | 'shipment'
 
 interface POParams {
   period_days: number

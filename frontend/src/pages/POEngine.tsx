@@ -1,7 +1,9 @@
-import { useState, useMemo, useCallback, memo, useRef } from 'react'
+import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, getCoverage } from '../api/client'
 import { useSession } from '../store/session'
-import { usePOStore } from '../store/po'
+import { usePOStore, type Tab } from '../store/po'
+import { PODashboardPanel } from '../components/PODashboardPanel'
 
 interface PORow {
   OMS_SKU: string
@@ -120,7 +122,8 @@ const STATUS_COLORS: Record<string, string> = {
   'Not Moving':   'text-red-600 bg-red-50',
 }
 
-type Tab = 'po' | 'quarterly' | 'shipment'
+const TAB_ORDER: Tab[] = ['po', 'dashboard', 'quarterly', 'shipment']
+
 const QUARTER_COL_RE = /^(Apr[-–]Jun|Jul[-–]Sep|Oct[-–]Dec|Jan[-–]Mar)\s+\d{4}$/i
 type Marketplace = 'amazon' | 'flipkart' | 'myntra' | 'meesho'
 
@@ -205,6 +208,37 @@ export default function POEngine() {
     groupedView, setGroupedView,
     collapsedParents, setCollapsedParents,
   } = usePOStore()
+
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  const syncTabFromUrl = useCallback(() => {
+    const tab = searchParams.get('tab')
+    if (tab === 'dashboard' || tab === 'quarterly' || tab === 'shipment') {
+      setActiveTab(tab)
+    }
+  }, [searchParams, setActiveTab])
+
+  useLayoutEffect(() => {
+    syncTabFromUrl()
+  }, [syncTabFromUrl])
+
+  useEffect(() => {
+    return usePOStore.persist.onFinishHydration(() => {
+      syncTabFromUrl()
+    })
+  }, [syncTabFromUrl])
+
+  const selectTab = useCallback(
+    (t: Tab) => {
+      setActiveTab(t)
+      if (t === 'po') {
+        setSearchParams({}, { replace: true })
+      } else {
+        setSearchParams({ tab: t }, { replace: true })
+      }
+    },
+    [setActiveTab, setSearchParams]
+  )
 
   // Cast to local interfaces so downstream code keeps its named-field types
   const result   = _storeResult   as POResult | null
@@ -698,17 +732,24 @@ export default function POEngine() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-gray-200">
-        {(['po', 'quarterly', 'shipment'] as Tab[]).map(t => (
+      <div className="flex gap-1 border-b border-gray-200 overflow-x-auto flex-wrap sm:flex-nowrap">
+        {TAB_ORDER.map(t => (
           <button
             key={t}
-            onClick={() => setActiveTab(t)}
-            className={`px-5 py-2.5 text-sm font-semibold rounded-t-lg border-b-2 transition-colors
+            type="button"
+            onClick={() => selectTab(t)}
+            className={`px-5 py-2.5 text-sm font-semibold rounded-t-lg border-b-2 transition-colors shrink-0
               ${activeTab === t
                 ? 'border-[#002B5B] text-[#002B5B] bg-white'
                 : 'border-transparent text-gray-500 hover:text-gray-700'}`}
           >
-            {t === 'po' ? '🎯 PO Recommendation' : t === 'quarterly' ? '📊 Quarterly History' : '🚚 Shipment Engine'}
+            {t === 'po'
+              ? '🎯 PO Recommendation'
+              : t === 'dashboard'
+                ? '📋 PO Dashboard'
+                : t === 'quarterly'
+                  ? '📊 Quarterly History'
+                  : '🚚 Shipment Engine'}
           </button>
         ))}
       </div>
@@ -1525,6 +1566,11 @@ export default function POEngine() {
             </>
           )}
         </>
+      )}
+
+      {/* ── PO Dashboard Tab ── */}
+      {activeTab === 'dashboard' && (
+        <PODashboardPanel embedded isActive />
       )}
 
       {/* ── Quarterly History Tab ── */}

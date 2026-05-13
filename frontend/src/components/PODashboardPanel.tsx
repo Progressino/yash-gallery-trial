@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
 import api from '../api/client'
 import { usePOStore } from '../store/po'
@@ -78,7 +77,14 @@ function SectionTable({
   )
 }
 
-export default function PODashboard() {
+export interface PODashboardPanelProps {
+  /** When true, omit standalone page chrome (used inside PO Engine). */
+  embedded?: boolean
+  /** When this tab is visible, dashboard data is (re)loaded. */
+  isActive: boolean
+}
+
+export function PODashboardPanel({ embedded = false, isActive }: PODashboardPanelProps) {
   const params = usePOStore(s => s.params)
   const [tuning, setTuning] = useState({
     recent_days: 7,
@@ -105,33 +111,37 @@ export default function PODashboard() {
   const load = useCallback(() => void mut.mutate(), [mut])
 
   useEffect(() => {
-    void mut.mutate()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- initial load only
+    if (isActive) void mut.mutate()
+  }, [isActive, mut])
 
   const summary = data?.summary
   const win = data?.windows
 
+  const rootCls = embedded
+    ? 'space-y-6 max-w-[1600px]'
+    : 'p-4 md:p-6 max-w-[1600px] mx-auto space-y-6'
+
   return (
-    <div className="p-4 md:p-6 max-w-[1600px] mx-auto space-y-6">
+    <div className={rootCls}>
       <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-[#002B5B]">PO Dashboard</h1>
-          <p className="text-sm text-gray-600 mt-1 max-w-2xl">
+          {embedded ? (
+            <h3 className="text-lg font-bold text-[#002B5B]">📋 PO Dashboard</h3>
+          ) : (
+            <h1 className="text-2xl font-bold text-[#002B5B]">PO Dashboard</h1>
+          )}
+          <p className="text-sm text-gray-600 mt-1 max-w-3xl">
             Pipeline vs open recommendations, short-horizon sell-through vs the prior week, and SKUs that are spiking or
-            running tight on cover. Uses the same PO engine rules as{' '}
-            <Link to="/po" className="text-blue-700 underline font-medium">
-              PO Engine
-            </Link>
-            .
+            running tight on cover. Uses the same PO engine parameters as the{' '}
+            {embedded ? (
+              <strong className="text-gray-800">PO Recommendation</strong>
+            ) : (
+              <span className="text-gray-800 font-medium">PO Engine</span>
+            )}{' '}
+            tab.
           </p>
         </div>
         <div className="flex flex-wrap gap-2 items-center">
-          <Link
-            to="/po"
-            className="text-sm px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 font-medium"
-          >
-            ← PO Engine
-          </Link>
           <button
             type="button"
             onClick={load}
@@ -209,7 +219,8 @@ export default function PODashboard() {
           />
         </label>
         <p className="sm:col-span-2 lg:col-span-3 text-gray-500">
-          PO parameters (period, lead, target, two-size rule, etc.) follow your saved settings from the PO Engine page.
+          PO parameters (period, lead, target, two-size rule, etc.) follow your saved settings from the{' '}
+          <strong>PO Recommendation</strong> tab{embedded ? '' : ' in PO Engine'}.
         </p>
       </div>
 
