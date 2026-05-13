@@ -431,6 +431,7 @@ def calculate_po_base(
     enforce_two_size_minimum: bool = False,
     enforce_lead_time_release_gate: bool = False,
     inventory_history_df: Optional[pd.DataFrame] = None,
+    raised_recently_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -878,6 +879,61 @@ def calculate_po_base(
             po_df[_bc] = pd.to_numeric(po_df[_bc], errors="coerce").fillna(0).astype(int)
     else:
         po_df["PO_Pipeline_Total"] = 0
+
+    # Daily "Raised PO" ledger. Anything the team raised through the app
+    # (and confirmed) goes here and is treated as pipeline so the same SKU
+    # isn't recommended again on subsequent calculations. Independent from
+    # the external Existing-PO sheet; the user can clear the internal
+    # ledger once a fresh external sheet absorbs these raises.
+    po_df["Raised_Recently_Units"] = 0
+    po_df["Raised_Recently_Last_Date"] = ""
+    if raised_recently_df is not None and not raised_recently_df.empty:
+        rr = raised_recently_df.copy()
+        rr.columns = [str(c) for c in rr.columns]
+        if "OMS_SKU" in rr.columns:
+            rr["OMS_SKU"] = rr["OMS_SKU"].astype(str).map(_canonical_oms_key)
+            qty_col = next(
+                (c for c in ("qty", "Qty", "Raised_Recently_Units") if c in rr.columns),
+                None,
+            )
+            date_col = next(
+                (
+                    c for c in (
+                        "last_raised_date",
+                        "Last_Raised_Date",
+                        "raised_date",
+                    ) if c in rr.columns
+                ),
+                None,
+            )
+            if qty_col:
+                rr[qty_col] = pd.to_numeric(rr[qty_col], errors="coerce").fillna(0.0)
+                rr = rr[rr["OMS_SKU"].str.len() > 0]
+                rr_agg = rr.groupby("OMS_SKU", as_index=False).agg(
+                    **{"_rr_qty": (qty_col, "sum")},
+                    **({"_rr_last": (date_col, "max")} if date_col else {}),
+                )
+                if group_by_parent:
+                    rr_agg["OMS_SKU"] = rr_agg["OMS_SKU"].map(get_parent_sku)
+                    agg_spec = {"_rr_qty": "sum"}
+                    if "_rr_last" in rr_agg.columns:
+                        agg_spec["_rr_last"] = "max"
+                    rr_agg = rr_agg.groupby("OMS_SKU", as_index=False).agg(agg_spec)
+                po_df = pd.merge(po_df, rr_agg, on="OMS_SKU", how="left")
+                rr_qty = pd.to_numeric(po_df["_rr_qty"], errors="coerce").fillna(0.0)
+                po_df["Raised_Recently_Units"] = rr_qty.astype(int)
+                # Layer raised qty into pipeline so the formula self-zeroes
+                # any SKU already covered by yesterday's raise.
+                po_df["PO_Pipeline_Total"] = (
+                    pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0)
+                    + rr_qty
+                ).astype(int)
+                if "_rr_last" in po_df.columns:
+                    po_df["Raised_Recently_Last_Date"] = (
+                        po_df["_rr_last"].fillna("").astype(str)
+                    )
+                po_df.drop(columns=[c for c in ("_rr_qty", "_rr_last") if c in po_df.columns],
+                           inplace=True, errors="ignore")
 
     # Days of stock remaining = current inventory cover only (no pipeline).
     po_df["Days_Left"] = np.where(

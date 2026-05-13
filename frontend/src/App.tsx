@@ -14,6 +14,7 @@ const Meesho      = lazy(() => import('./pages/Meesho'))
 const Flipkart    = lazy(() => import('./pages/Flipkart'))
 const Inventory   = lazy(() => import('./pages/Inventory'))
 const POEngine    = lazy(() => import('./pages/POEngine'))
+const PODashboard = lazy(() => import('./pages/PODashboard'))
 const Forecast    = lazy(() => import('./pages/Forecast'))
 const Finance     = lazy(() => import('./pages/Finance'))
 const ItemMaster  = lazy(() => import('./pages/ItemMaster'))
@@ -127,6 +128,7 @@ export default function App() {
               <Route path="flipkart"  element={<Flipkart />} />
               <Route path="inventory" element={<Inventory />} />
               <Route path="po"        element={<POEngine />} />
+              <Route path="po-dashboard" element={<PODashboard />} />
               <Route path="forecast"  element={<Forecast />} />
               <Route path="finance"   element={<Finance />} />
               <Route path="items"      element={<ItemMaster />} />

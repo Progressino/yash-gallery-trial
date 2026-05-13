@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, memo, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { api, getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore } from '../store/po'
@@ -619,6 +620,12 @@ export default function POEngine() {
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">🎯 PO Engine</h2>
         <p className="text-gray-400 text-sm mt-1">Calculate purchase orders with quarterly history inline.</p>
+        <p className="text-sm mt-1">
+          <Link to="/po-dashboard" className="text-blue-700 hover:underline font-medium">
+            Open PO Dashboard
+          </Link>
+          <span className="text-gray-400"> — pipeline, spikes, and tight cover at a glance.</span>
+        </p>
       </div>
 
       {/* Tabs */}
