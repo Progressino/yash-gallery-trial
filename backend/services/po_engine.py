@@ -670,6 +670,7 @@ def calculate_po_base(
             from .daily_inventory_history import (
                 coverage_days_within,
                 effective_days_from_history,
+                extend_history_with_sales,
             )
 
             ih = inventory_history_df.copy()
@@ -691,6 +692,19 @@ def calculate_po_base(
                 if pd.notna(_ihmax):
                     inv_window_end = max(inv_window_end, pd.Timestamp(_ihmax).normalize())
             inv_window_start = inv_window_end - timedelta(days=int(ADS_WINDOW) - 1)
+
+            # Auto-roll-forward: derive synthetic snapshots from sales for any
+            # day after the uploaded sheet's max date up to inv_window_end.
+            # User uploads the baseline ONCE; from then on the engine fills in
+            # subsequent days from daily sales activity.
+            ih_full = extend_history_with_sales(
+                ih,
+                sales_df=df,
+                cap_date=inv_window_end,
+            )
+            if ih_full is not None and not ih_full.empty:
+                ih = ih_full[["OMS_SKU", "Date", "Qty"]].copy()
+
             eff_inv = effective_days_from_history(ih, inv_window_start, inv_window_end)
             coverage_days = coverage_days_within(ih, inv_window_start, inv_window_end)
             if not eff_inv.empty and coverage_days > 0:

@@ -311,6 +311,122 @@ def effective_days_from_history(
     return out
 
 
+def extend_history_with_sales(
+    inv_history: pd.DataFrame,
+    sales_df: Optional[pd.DataFrame],
+    cap_date: Optional[pd.Timestamp] = None,
+) -> pd.DataFrame:
+    """Roll the uploaded baseline inventory forward using daily sales activity.
+
+    User intent: upload the Daily Inventory History sheet *once*. From there,
+    each day's sales upload should let the engine work out which SKUs were
+    in stock without another inventory upload.
+
+    For every SKU present in ``inv_history``, derive a synthetic snapshot
+    for each day from ``(sheet_max_date + 1)`` up to ``cap_date`` (default:
+    today, normalised). New on-hand is::
+
+        new_qty = max(0, prev_qty - Σ Units_Effective for that day)
+
+    Shipments are positive and pull stock down; refunds/cancellations are
+    negative and push it back up. Stock is floored at 0 (we never report
+    negative on-hand).
+
+    SKUs without a baseline snapshot are skipped — we have no starting
+    on-hand to roll forward.
+
+    Returns the union of baseline + derived rows, with an extra ``Source``
+    column (``"uploaded"`` vs ``"derived"``). Callers that only need the
+    three core columns can drop ``Source`` after the merge.
+    """
+    if inv_history is None or inv_history.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Date", "Qty", "Source"])
+
+    base = inv_history.copy()
+    base["Date"] = pd.to_datetime(base["Date"], errors="coerce").dt.normalize()
+    base["Qty"] = pd.to_numeric(base["Qty"], errors="coerce")
+    base = base.dropna(subset=["Date", "Qty", "OMS_SKU"])
+    base = base[base["OMS_SKU"].astype(str).str.len() > 0]
+    if base.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Date", "Qty", "Source"])
+    base["Qty"] = base["Qty"].astype(float).clip(lower=0.0)
+    if "Source" not in base.columns:
+        base["Source"] = "uploaded"
+
+    sheet_max = base["Date"].max()
+    if cap_date is None:
+        cap_date = pd.Timestamp.now().normalize()
+    cap_date = pd.Timestamp(cap_date).normalize()
+
+    out_cols = ["OMS_SKU", "Date", "Qty", "Source"]
+    if sheet_max >= cap_date:
+        return base[out_cols].reset_index(drop=True)
+
+    days = pd.date_range(sheet_max + pd.Timedelta(days=1), cap_date, freq="D")
+    if len(days) == 0:
+        return base[out_cols].reset_index(drop=True)
+
+    # Last seen snapshot per SKU = starting point for the roll-forward.
+    last_snap = (
+        base.sort_values(["OMS_SKU", "Date"])
+        .groupby("OMS_SKU", as_index=False)
+        .tail(1)
+        .set_index("OMS_SKU")["Qty"]
+    )
+    sku_list = last_snap.index.to_numpy()
+
+    # Aggregate net sales (signed Units_Effective) per (SKU, day) within window.
+    sales_net = None
+    if sales_df is not None and not sales_df.empty:
+        s = sales_df.copy()
+        sku_col = "Sku" if "Sku" in s.columns else "OMS_SKU"
+        date_col = "TxnDate" if "TxnDate" in s.columns else "Date"
+        eff_col = "Units_Effective" if "Units_Effective" in s.columns else "Quantity"
+        if sku_col in s.columns and date_col in s.columns and eff_col in s.columns:
+            s = s[[sku_col, date_col, eff_col]].copy()
+            s.columns = ["OMS_SKU", "Date", "Net_Units"]
+            s["Date"] = pd.to_datetime(s["Date"], errors="coerce").dt.normalize()
+            s["Net_Units"] = pd.to_numeric(s["Net_Units"], errors="coerce").fillna(0.0)
+            s = s.dropna(subset=["Date"])
+            s = s[(s["Date"] > sheet_max) & (s["Date"] <= cap_date)]
+            if not s.empty:
+                sales_net = (
+                    s.groupby(["OMS_SKU", "Date"], as_index=False)["Net_Units"].sum()
+                )
+
+    if sales_net is not None and not sales_net.empty:
+        pivot = (
+            sales_net.set_index(["OMS_SKU", "Date"])["Net_Units"]
+            .unstack(fill_value=0.0)
+            .reindex(index=sku_list, columns=days, fill_value=0.0)
+        )
+        net_matrix = pivot.to_numpy(dtype=float)  # shape: (n_sku, n_days)
+    else:
+        net_matrix = np.zeros((len(sku_list), len(days)), dtype=float)
+
+    # Iterate days (small N — usually a handful) but vectorise across SKUs.
+    prev_qty = last_snap.reindex(sku_list).fillna(0.0).to_numpy(dtype=float)
+    derived_rows: list[pd.DataFrame] = []
+    for di, d in enumerate(days):
+        net_d = net_matrix[:, di]
+        new_qty = np.maximum(0.0, prev_qty - net_d)
+        derived_rows.append(
+            pd.DataFrame(
+                {
+                    "OMS_SKU": sku_list,
+                    "Date": pd.Timestamp(d),
+                    "Qty": new_qty,
+                    "Source": "derived",
+                }
+            )
+        )
+        prev_qty = new_qty
+
+    derived = pd.concat(derived_rows, ignore_index=True)
+    full = pd.concat([base[out_cols], derived[out_cols]], ignore_index=True)
+    return full.reset_index(drop=True)
+
+
 def coverage_days_within(
     inv_history: pd.DataFrame,
     cutoff_start: pd.Timestamp,
@@ -346,6 +462,7 @@ __all__ = [
     "parse_daily_inventory_history_upload",
     "effective_days_from_history",
     "coverage_days_within",
+    "extend_history_with_sales",
 ]
 
 

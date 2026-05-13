@@ -1347,6 +1347,183 @@ def test_blank_inventory_cells_are_missing_not_oos():
     )
 
 
+def test_extend_history_rolls_forward_using_sales_units_effective():
+    """Baseline inventory + sales activity → derived snapshots after sheet_max."""
+    from backend.services.daily_inventory_history import extend_history_with_sales
+
+    baseline = pd.DataFrame(
+        {
+            "OMS_SKU": ["AUTO-A", "AUTO-A", "AUTO-A", "AUTO-B"],
+            "Date": pd.to_datetime(
+                ["2026-05-08", "2026-05-09", "2026-05-10", "2026-05-10"]
+            ),
+            "Qty": [50, 48, 45, 100],
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            # 2026-05-11: 3 shipped of A, 0 of B
+            *(
+                {"Sku": "AUTO-A", "TxnDate": pd.Timestamp("2026-05-11"),
+                 "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1}
+                for _ in range(3)
+            ),
+            # 2026-05-12: 2 shipped of A, 5 refunded of A (net -3)
+            *(
+                {"Sku": "AUTO-A", "TxnDate": pd.Timestamp("2026-05-12"),
+                 "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1}
+                for _ in range(2)
+            ),
+            *(
+                {"Sku": "AUTO-A", "TxnDate": pd.Timestamp("2026-05-12"),
+                 "Transaction Type": "Refund", "Quantity": 1, "Units_Effective": -1}
+                for _ in range(5)
+            ),
+            # 2026-05-12: 4 shipped of B
+            *(
+                {"Sku": "AUTO-B", "TxnDate": pd.Timestamp("2026-05-12"),
+                 "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1}
+                for _ in range(4)
+            ),
+        ]
+    )
+
+    out = extend_history_with_sales(baseline, sales, cap_date=pd.Timestamp("2026-05-12"))
+    out["Date"] = pd.to_datetime(out["Date"])
+    a = out[out["OMS_SKU"] == "AUTO-A"].sort_values("Date")
+    b = out[out["OMS_SKU"] == "AUTO-B"].sort_values("Date")
+
+    a_qty = dict(zip(a["Date"].dt.strftime("%Y-%m-%d"), a["Qty"]))
+    b_qty = dict(zip(b["Date"].dt.strftime("%Y-%m-%d"), b["Qty"]))
+
+    # Uploaded rows untouched
+    assert a_qty["2026-05-10"] == 45
+    assert b_qty["2026-05-10"] == 100
+    # 2026-05-11: A had 3 shipped → 45 - 3 = 42; B had no activity → carry-forward 100
+    assert a_qty["2026-05-11"] == 42
+    assert b_qty["2026-05-11"] == 100
+    # 2026-05-12: A net = 2-5 = -3 (refunds) → 42 - (-3) = 45; B 100 - 4 = 96
+    assert a_qty["2026-05-12"] == 45
+    assert b_qty["2026-05-12"] == 96
+
+    # Derived rows are tagged
+    derived = a[a["Date"] >= pd.Timestamp("2026-05-11")]
+    assert (derived["Source"] == "derived").all()
+
+
+def test_extend_history_floors_at_zero_when_over_sold():
+    """Stock can't go negative — derived snapshot floors at 0."""
+    from backend.services.daily_inventory_history import extend_history_with_sales
+
+    baseline = pd.DataFrame(
+        {"OMS_SKU": ["TINY"], "Date": [pd.Timestamp("2026-05-10")], "Qty": [3]}
+    )
+    sales = pd.DataFrame(
+        [
+            {"Sku": "TINY", "TxnDate": pd.Timestamp("2026-05-11"),
+             "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1}
+            for _ in range(10)
+        ]
+    )
+    out = extend_history_with_sales(baseline, sales, cap_date=pd.Timestamp("2026-05-11"))
+    qty = float(out[(out["OMS_SKU"] == "TINY") & (out["Date"] == pd.Timestamp("2026-05-11"))]["Qty"].iloc[0])
+    assert qty == 0.0
+
+
+def test_extend_history_no_sales_carries_last_qty_forward():
+    """No sales activity means the SKU stayed at its last known qty."""
+    from backend.services.daily_inventory_history import extend_history_with_sales
+
+    baseline = pd.DataFrame(
+        {"OMS_SKU": ["IDLE"], "Date": [pd.Timestamp("2026-05-10")], "Qty": [12]}
+    )
+    out = extend_history_with_sales(
+        baseline,
+        sales_df=pd.DataFrame(columns=["Sku", "TxnDate", "Units_Effective"]),
+        cap_date=pd.Timestamp("2026-05-13"),
+    )
+    out["Date"] = pd.to_datetime(out["Date"])
+    derived = out[(out["OMS_SKU"] == "IDLE") & (out["Source"] == "derived")]
+    assert len(derived) == 3
+    assert set(derived["Qty"].unique()) == {12.0}
+
+
+def test_extend_history_skips_skus_without_baseline():
+    """Sales for SKUs with no baseline snapshot are ignored — we can't infer
+    a starting on-hand from sales alone."""
+    from backend.services.daily_inventory_history import extend_history_with_sales
+
+    baseline = pd.DataFrame(
+        {"OMS_SKU": ["KNOWN"], "Date": [pd.Timestamp("2026-05-10")], "Qty": [10]}
+    )
+    sales = pd.DataFrame(
+        [
+            {"Sku": "UNKNOWN", "TxnDate": pd.Timestamp("2026-05-11"),
+             "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1},
+            {"Sku": "KNOWN", "TxnDate": pd.Timestamp("2026-05-11"),
+             "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1},
+        ]
+    )
+    out = extend_history_with_sales(baseline, sales, cap_date=pd.Timestamp("2026-05-11"))
+    assert "UNKNOWN" not in set(out["OMS_SKU"].unique())
+    assert int(out[(out["OMS_SKU"] == "KNOWN") & (out["Date"] == pd.Timestamp("2026-05-11"))]["Qty"].iloc[0]) == 9
+
+
+def test_po_auto_extends_inventory_history_so_user_uploads_baseline_once():
+    """End-to-end: baseline inventory ends a week before sales max date.
+
+    User intent: upload Daily Inventory History once → going forward the
+    engine auto-derives day-by-day inventory from sales so Eff_Days stays
+    accurate without re-uploading.
+    """
+    # Baseline: 10-day window of full stock, ending May 5.
+    baseline_dates = pd.date_range("2026-04-26", "2026-05-05", freq="D")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["AUTO-EFF"] * len(baseline_dates),
+            "Date": baseline_dates,
+            "Qty": [40] * len(baseline_dates),
+        }
+    )
+    # Sales: 5 ships per day from May 6 to May 12 → stock will run dry on
+    # May 13 (40 - 5*8 = 0). For 30-day window ending May 12, in-stock days
+    # = 10 (uploaded) + 7 (derived but still positive) = 17.
+    sales_dates = pd.date_range("2026-05-06", "2026-05-12", freq="D")
+    sales = pd.DataFrame(
+        [
+            {"Sku": "AUTO-EFF", "TxnDate": d,
+             "Transaction Type": "Shipment", "Quantity": 5, "Units_Effective": 5,
+             "Source": "Amazon"}
+            for d in sales_dates
+            for _ in range(1)  # one row per day, qty=5
+        ]
+    )
+    # also add a non-stock-changing reference sale on the same range to be
+    # the "max_date" anchor.
+    inv = pd.DataFrame({"OMS_SKU": ["AUTO-EFF"], "Total_Inventory": [5]})
+
+    out = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist,
+    )
+    row = out.iloc[0]
+    # Coverage spans baseline (10d) + derived (7d) = 17 days within the window.
+    # The other 13 days have no data (sheet started May 5 - 10d = Apr 26), so
+    # they're not covered. coverage_days_within counts unique dates → 17.
+    assert int(row["Inv_Coverage_Days"]) == 17
+    # Stock stays > 0 throughout the 17 covered days, so in_stock = 17.
+    assert int(row["Eff_Days_Inventory"]) == 17
+    # Scaling: 17 in-stock / 17 covered = full coverage → Eff_Days = 30.
+    assert int(row["Eff_Days"]) == 30
+
+
 def test_po_inv_window_anchors_at_latest_data_not_stale_sales_max():
     """User intent: 'today is May 12, eff days must be calc'd for the days before May 12.'
 

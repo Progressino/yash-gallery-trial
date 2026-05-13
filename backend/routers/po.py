@@ -152,12 +152,23 @@ def po_get_daily_inventory_history_for_sku(
         return {"ok": True, "loaded": False, "sku": sku, "rows": []}
     from ..services.po_engine import canonical_oms_key
     from ..services.helpers import get_parent_sku
+    from ..services.daily_inventory_history import extend_history_with_sales
 
     sku_map = sess.sku_mapping or None
     canon = lambda v: canonical_oms_key(v, sku_map)  # noqa: E731
     target = canon(sku)
     work = df.copy()
     work["OMS_SKU"] = work["OMS_SKU"].astype(str).map(canon)
+    # Auto-extend with sales-derived snapshots so the drawer shows the same
+    # data the engine used to compute Eff_Days (including days after baseline).
+    sales_for_ext = sess.sales_df if hasattr(sess, "sales_df") else None
+    cap_now = pd.Timestamp.now().normalize()
+    try:
+        work_ext = extend_history_with_sales(work, sales_df=sales_for_ext, cap_date=cap_now)
+        if work_ext is not None and not work_ext.empty:
+            work = work_ext
+    except Exception:
+        pass  # fall back to the raw upload
     sub = work[work["OMS_SKU"] == target].copy()
     parent_used = False
     if sub.empty:
@@ -174,10 +185,17 @@ def po_get_daily_inventory_history_for_sku(
     sub["Date"] = pd.to_datetime(sub["Date"], errors="coerce")
     sub = sub.dropna(subset=["Date"])
     sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
-    if parent_used:
-        sub = sub.groupby("Date", as_index=False)["Qty"].max()
-    else:
-        sub = sub.groupby("Date", as_index=False)["Qty"].max()
+    if "Source" not in sub.columns:
+        sub["Source"] = "uploaded"
+    # Collapse duplicates (parent rollup can dup days); prefer uploaded source
+    # over derived when both exist on the same date so the user sees the
+    # actual baseline snapshot when available.
+    sub["_src_rank"] = sub["Source"].map(lambda x: 0 if str(x) == "uploaded" else 1)
+    sub = (
+        sub.sort_values(["Date", "_src_rank"])
+        .groupby("Date", as_index=False)
+        .agg({"Qty": "max", "Source": "first"})
+    )
 
     sub = sub.sort_values("Date")
     # Anchor at today so the drawer reflects the engine's "last N days" intent.
@@ -195,9 +213,16 @@ def po_get_daily_inventory_history_for_sku(
     in_stock_days = int((win["Qty"] >= 1.0).sum())
 
     rows = [
-        {"date": str(r["Date"].date()), "qty": float(r["Qty"]), "in_stock": bool(r["Qty"] >= 1.0)}
+        {
+            "date": str(r["Date"].date()),
+            "qty": float(r["Qty"]),
+            "in_stock": bool(r["Qty"] >= 1.0),
+            "source": str(r.get("Source", "uploaded") or "uploaded"),
+        }
         for _, r in win.iterrows()
     ]
+    derived_days = sum(1 for r in rows if r["source"] == "derived")
+    uploaded_days = len(rows) - derived_days
     return {
         "ok": True,
         "loaded": True,
@@ -208,6 +233,8 @@ def po_get_daily_inventory_history_for_sku(
         "window_start": str(start_ts.date()),
         "window_end": str(end_ts.date()),
         "covered_days": int(len(rows)),
+        "uploaded_days": uploaded_days,
+        "derived_days": derived_days,
         "in_stock_days": in_stock_days,
         "out_of_stock_days": int(len(rows) - in_stock_days),
         "rows": rows,

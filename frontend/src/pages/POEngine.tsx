@@ -161,9 +161,11 @@ export default function POEngine() {
     window_start: string
     window_end: string
     covered_days?: number
+    uploaded_days?: number
+    derived_days?: number
     in_stock_days: number
     out_of_stock_days: number
-    rows: { date: string; qty: number; in_stock: boolean }[]
+    rows: { date: string; qty: number; in_stock: boolean; source?: string }[]
   } | null>(null)
 
   const openEffInvDrawer = async (sku: string, windowDays: number) => {
@@ -731,6 +733,11 @@ export default function POEngine() {
                 (column header = total inventory; first row = the date). Two sheets are recognised: <code>OMS</code> and{' '}
                 <code>Amazon Inventory</code>. PO will count only the days a SKU actually had stock when computing ADS,
                 so out-of-stock days don&apos;t lowball the daily run rate.
+              </p>
+              <p className="text-xs text-sky-800 bg-sky-50 border border-sky-200 rounded px-2 py-1 mb-3">
+                <strong>You only need to upload this once.</strong> Going forward, each daily sales upload auto-rolls
+                inventory forward (shipments reduce on-hand, refunds add it back). Re-upload only when you want a fresh
+                ground-truth baseline.
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <input
@@ -1829,9 +1836,14 @@ export default function POEngine() {
                   <span><strong>Sheet coverage:</strong> {effInvData.covered_days ?? effInvData.rows.length}d</span>
                   <span><strong>In-stock:</strong> <span className="text-emerald-700 font-semibold">{effInvData.in_stock_days}d</span></span>
                   <span><strong>Out-of-stock:</strong> <span className="text-rose-700 font-semibold">{effInvData.out_of_stock_days}d</span></span>
+                  {(effInvData.derived_days ?? 0) > 0 && (
+                    <span className="w-full text-sky-800 bg-sky-50 border border-sky-200 rounded px-2 py-1">
+                      ℹ {effInvData.uploaded_days ?? 0} days from uploaded sheet, <strong>{effInvData.derived_days}</strong> days auto-derived from daily sales activity (shipments down, refunds back up). Upload the baseline inventory sheet once — subsequent days roll forward automatically as sales come in.
+                    </span>
+                  )}
                   {(effInvData.covered_days ?? 0) < effInvData.window_days && (effInvData.covered_days ?? 0) > 0 && (
                     <span className="text-amber-700 w-full">
-                      ⚠ Sheet only covers {effInvData.covered_days} of {effInvData.window_days} days. Engine extrapolates:
+                      ⚠ Coverage only spans {effInvData.covered_days} of {effInvData.window_days} days. Engine extrapolates:
                       Eff_Days ≈ <strong>{Math.min(effInvData.window_days, Math.round(effInvData.in_stock_days * effInvData.window_days / Math.max(1, effInvData.covered_days ?? 1)))}</strong>
                       &nbsp;(in-stock rate × window).
                     </span>
@@ -1850,6 +1862,7 @@ export default function POEngine() {
                     <tr>
                       <th className="text-left px-4 py-2 font-semibold text-gray-600">Date</th>
                       <th className="text-right px-4 py-2 font-semibold text-gray-600">On-hand qty</th>
+                      <th className="text-left px-4 py-2 font-semibold text-gray-600">Source</th>
                       <th className="text-left px-4 py-2 font-semibold text-gray-600">Counted as in-stock?</th>
                     </tr>
                   </thead>
@@ -1858,6 +1871,11 @@ export default function POEngine() {
                       <tr key={r.date} className={r.in_stock ? '' : 'bg-rose-50/40'}>
                         <td className="px-4 py-1.5 font-mono text-gray-700">{r.date}</td>
                         <td className="px-4 py-1.5 text-right font-mono">{r.qty.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                        <td className="px-4 py-1.5">
+                          {r.source === 'derived'
+                            ? <span className="inline-flex items-center gap-1 text-sky-700 bg-sky-50 border border-sky-200 rounded px-1.5 py-0.5 text-[10px] font-semibold">auto · from sales</span>
+                            : <span className="inline-flex items-center gap-1 text-gray-600 bg-gray-50 border border-gray-200 rounded px-1.5 py-0.5 text-[10px] font-semibold">uploaded</span>}
+                        </td>
                         <td className="px-4 py-1.5">
                           {r.in_stock
                             ? <span className="text-emerald-700 font-semibold">✓ yes</span>
