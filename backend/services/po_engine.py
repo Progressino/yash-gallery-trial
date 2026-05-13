@@ -1050,19 +1050,22 @@ def calculate_po_base(
     po_qty_round = np.ceil(np.maximum(raw_po, 0.0) / _pack) * _pack
     po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
-    # Release gate: only raise PO when current projected cover is below lead time.
-    lt_gate = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(float(lead_time)).clip(lower=1)
-    gate_block = (pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0) & (projected_days_now >= lt_gate)
-    if gate_block.any():
-        po_df.loc[gate_block, "PO_Qty"] = 0
-        br = po_df.loc[gate_block, "PO_Block_Reason"].astype(str).str.strip()
-        add = "Projected days already cover lead time"
-        po_df.loc[gate_block, "PO_Block_Reason"] = np.where(
-            br.eq("") | br.eq("nan"),
-            add,
-            br + "; " + add,
-        )
+    # NOTE: Earlier we zeroed PO_Qty when projected_days_now >= lead time.
+    # That gate was removed per ops: the formula (ADS × balance_days, where
+    # balance_days = target_cover − projected_days_now) already self-zeroes
+    # any size whose projection exceeds the target cover, so a separate
+    # lead-time release gate was just suppressing legitimate top-up POs.
 
+    # Two-size minimum rule. Only one size in a parent SKU having demand is
+    # almost always a data / sizing-mix problem, not a real demand signal —
+    # production won't cut a single size economically, and the operator
+    # usually wants to alter the SKU to redistribute the demand. We block
+    # the PO and surface an actionable recommendation instead of a raw
+    # "single size only" reason.
+    _RECOMMEND_MSG = (
+        "Only 1 size in parent SKU has demand — recommend altering this SKU "
+        "to another size before raising PO"
+    )
     if enforce_two_size_minimum:
         _par_key = po_df["OMS_SKU"].apply(get_parent_sku)
         has_g = pd.to_numeric(po_df["Gross_PO_Qty"], errors="coerce").fillna(0) > 0
@@ -1071,11 +1074,10 @@ def calculate_po_base(
         po_df.loc[single_only, "Gross_PO_Qty"] = 0
         po_df.loc[single_only, "PO_Qty"] = 0
         br = po_df.loc[single_only, "PO_Block_Reason"].astype(str).str.strip()
-        add = "Single size only (need ≥2 sizes with demand)"
         po_df.loc[single_only, "PO_Block_Reason"] = np.where(
             br.eq("") | br.eq("nan"),
-            add,
-            br + "; " + add,
+            _RECOMMEND_MSG,
+            br + "; " + _RECOMMEND_MSG,
         )
 
     if enforce_two_size_minimum:
@@ -1085,11 +1087,10 @@ def calculate_po_base(
         single_only_final = has_final_po & (n_sizes_final == 1)
         po_df.loc[single_only_final, "PO_Qty"] = 0
         br = po_df.loc[single_only_final, "PO_Block_Reason"].astype(str).str.strip()
-        add = "Single size only after caps/pipeline (need ≥2 sizes with demand)"
         po_df.loc[single_only_final, "PO_Block_Reason"] = np.where(
             br.eq("") | br.eq("nan"),
-            add,
-            br + "; " + add,
+            _RECOMMEND_MSG,
+            br + "; " + _RECOMMEND_MSG,
         )
 
     inv_for_metrics = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)

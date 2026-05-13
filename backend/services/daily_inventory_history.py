@@ -270,14 +270,24 @@ def parse_daily_inventory_history_upload(
     return parse_daily_inventory_history_dataframes(sheets, sku_mapping=sku_mapping)
 
 
+#: Operational threshold: a single remaining unit (Qty == 1) is treated as
+#: "not really sellable" (could be locked, reserved, mis-counted, or a
+#: damaged sample), so we exclude such days from Eff_Days. Days only count
+#: as in-stock when on-hand >= IN_STOCK_MIN_QTY.
+IN_STOCK_MIN_QTY: float = 2.0
+
+
 def effective_days_from_history(
     inv_history: pd.DataFrame,
     cutoff_start: pd.Timestamp,
     cutoff_end: pd.Timestamp,
-    min_qty: float = 1.0,
+    min_qty: float = IN_STOCK_MIN_QTY,
 ) -> pd.DataFrame:
     """
     Count days within ``[cutoff_start, cutoff_end]`` where each SKU had ``Qty >= min_qty``.
+
+    By default ``min_qty == IN_STOCK_MIN_QTY`` (2.0), meaning days with only
+    a single piece left do NOT count as in-stock toward Eff_Days.
 
     Returns: ``OMS_SKU``, ``Eff_Days_Inventory`` (int).
     """

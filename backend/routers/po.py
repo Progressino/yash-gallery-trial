@@ -152,7 +152,10 @@ def po_get_daily_inventory_history_for_sku(
         return {"ok": True, "loaded": False, "sku": sku, "rows": []}
     from ..services.po_engine import canonical_oms_key
     from ..services.helpers import get_parent_sku
-    from ..services.daily_inventory_history import extend_history_with_sales
+    from ..services.daily_inventory_history import (
+        IN_STOCK_MIN_QTY,
+        extend_history_with_sales,
+    )
 
     sku_map = sess.sku_mapping or None
     canon = lambda v: canonical_oms_key(v, sku_map)  # noqa: E731
@@ -210,13 +213,13 @@ def po_get_daily_inventory_history_for_sku(
         end_ts = today_norm
     start_ts = end_ts - pd.Timedelta(days=max(0, int(window_days) - 1))
     win = sub[(sub["Date"] >= start_ts) & (sub["Date"] <= end_ts)].copy()
-    in_stock_days = int((win["Qty"] >= 1.0).sum())
+    in_stock_days = int((win["Qty"] >= IN_STOCK_MIN_QTY).sum())
 
     rows = [
         {
             "date": str(r["Date"].date()),
             "qty": float(r["Qty"]),
-            "in_stock": bool(r["Qty"] >= 1.0),
+            "in_stock": bool(r["Qty"] >= IN_STOCK_MIN_QTY),
             "source": str(r.get("Source", "uploaded") or "uploaded"),
         }
         for _, r in win.iterrows()
@@ -237,6 +240,7 @@ def po_get_daily_inventory_history_for_sku(
         "derived_days": derived_days,
         "in_stock_days": in_stock_days,
         "out_of_stock_days": int(len(rows) - in_stock_days),
+        "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
         "rows": rows,
     }
 

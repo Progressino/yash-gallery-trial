@@ -79,7 +79,7 @@ export const usePOStore = create<POState>()(
     group_by_parent: false,
     grace_days: 0,
     safety_pct: 0,
-    enforce_two_size_minimum: false,
+    enforce_two_size_minimum: true,
   },
   result: null,
   quarterly: null,

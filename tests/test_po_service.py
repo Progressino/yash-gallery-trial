@@ -414,7 +414,8 @@ def test_single_size_minimum_zeros_gross_when_only_one_variant_needs_stock():
     )
     row_l = po[po["OMS_SKU"] == "CUTPARENT-L"].iloc[0]
     assert int(row_l["Gross_PO_Qty"]) == 0
-    assert "Single size" in str(row_l["PO_Block_Reason"])
+    reason = str(row_l["PO_Block_Reason"]).lower()
+    assert "only 1 size" in reason and "alter" in reason
 
 
 def test_single_size_minimum_zeros_final_po_after_pipeline_or_caps():
@@ -448,7 +449,8 @@ def test_single_size_minimum_zeros_final_po_after_pipeline_or_caps():
     assert int(row_l["Gross_PO_Qty"]) == 0
     assert int(row_l["PO_Qty"]) == 0
     assert int(row_xl["PO_Qty"]) == 0
-    assert "Single size only" in str(row_l["PO_Block_Reason"])
+    reason = str(row_l["PO_Block_Reason"]).lower()
+    assert "only 1 size" in reason and "alter" in reason
 
 
 def test_two_size_minimum_allows_multiple_sizes_with_trailing_color_tokens():
@@ -532,8 +534,11 @@ def test_po_release_uses_target_cover_balance_days_formula():
     assert float(row["Projected_Running_Days"]) == expected_proj
 
 
-def test_po_release_blocked_when_projected_cover_meets_or_exceeds_lead_time():
-    sales = _minimal_sales()
+def test_po_release_not_blocked_just_because_projected_cover_exceeds_lead_time():
+    """The lead-time release gate was removed. As long as projected cover is
+    below target cover the formula should still raise a top-up PO, even if
+    projected cover already meets / exceeds lead time."""
+    sales = _minimal_sales()  # ADS ≈ 2/day
     inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [80]})
     sheet = pd.DataFrame(
         {
@@ -554,10 +559,31 @@ def test_po_release_blocked_when_projected_cover_meets_or_exceeds_lead_time():
         sku_status_df=sheet,
     )
     row = po.iloc[0]
+    # Projected cover (≈ 40d) exceeds Lead_Time (30d) but is below target (90d).
     assert float(row["Projected_Running_Days"]) >= float(row["Lead_Time_Days"])
     assert int(row["Gross_PO_Qty"]) > 0
+    assert int(row["PO_Qty"]) > 0
+    assert "Projected days already cover lead time" not in str(row["PO_Block_Reason"])
+
+
+def test_po_zero_when_projected_cover_already_meets_target_cover():
+    """When projected_days >= target_cover, the formula self-zeroes PO (no
+    separate gate needed)."""
+    sales = _minimal_sales()  # ADS ≈ 2/day
+    # 200 units of stock @ ADS 2 ⇒ 100d projected ≥ 90d target ⇒ no PO needed.
+    inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [200]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=30,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+    )
+    row = po.iloc[0]
+    assert int(row["Gross_PO_Qty"]) == 0
     assert int(row["PO_Qty"]) == 0
-    assert "Projected days already cover lead time" in str(row["PO_Block_Reason"])
 
 
 def test_sheet_without_positive_lead_matches_no_sheet_po():
@@ -1345,6 +1371,89 @@ def test_blank_inventory_cells_are_missing_not_oos():
         f"28 in-stock / 28 covered should extrapolate to full 30-day window; "
         f"got Eff_Days={row['Eff_Days']}"
     )
+
+
+def test_effective_days_treats_single_piece_as_not_in_stock():
+    """A day with only 1 piece remaining is NOT counted toward Eff_Days —
+    a single unit is operationally treated as unsellable (locked / sample /
+    miscount), per ops policy."""
+    from backend.services.daily_inventory_history import effective_days_from_history
+
+    history = pd.DataFrame(
+        {
+            "OMS_SKU": ["SINGLEPIECE"] * 5,
+            "Date": pd.date_range("2026-05-08", periods=5, freq="D"),
+            "Qty": [10, 2, 1, 1, 5],
+        }
+    )
+    out = effective_days_from_history(
+        history,
+        cutoff_start=pd.Timestamp("2026-05-08"),
+        cutoff_end=pd.Timestamp("2026-05-12"),
+    )
+    # Days 1 (qty 10), 2 (qty 2), 5 (qty 5) count → 3. Days 3 and 4 (qty 1) don't.
+    assert int(out["Eff_Days_Inventory"].iloc[0]) == 3
+
+
+def test_effective_days_threshold_is_two_by_default():
+    """Default min_qty is the IN_STOCK_MIN_QTY constant (= 2)."""
+    from backend.services.daily_inventory_history import (
+        IN_STOCK_MIN_QTY,
+        effective_days_from_history,
+    )
+
+    assert IN_STOCK_MIN_QTY == 2.0
+    history = pd.DataFrame(
+        {
+            "OMS_SKU": ["T"] * 3,
+            "Date": pd.date_range("2026-05-10", periods=3, freq="D"),
+            "Qty": [2, 1, 0],
+        }
+    )
+    out = effective_days_from_history(
+        history,
+        cutoff_start=pd.Timestamp("2026-05-10"),
+        cutoff_end=pd.Timestamp("2026-05-12"),
+    )
+    assert int(out["Eff_Days_Inventory"].iloc[0]) == 1  # only day 1 (qty 2)
+
+
+def test_two_size_minimum_emits_actionable_recommendation():
+    """When only one size in a parent has demand, block the PO and surface
+    a recommendation to alter the SKU rather than a raw 'single size' tag."""
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SHIRT-L"] * 30,
+            "TxnDate": pd.date_range("2026-04-01", periods=30, freq="D"),
+            "Quantity": [3] * 30,
+            "Units_Effective": [3] * 30,
+            "Transaction Type": ["Shipment"] * 30,
+            "Source": ["Amazon"] * 30,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["SHIRT-L", "SHIRT-XL", "SHIRT-M"],
+            "Total_Inventory": [0, 9_999, 9_999],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        enforce_two_size_minimum=True,
+    )
+    row_l = po[po["OMS_SKU"] == "SHIRT-L"].iloc[0]
+    assert int(row_l["PO_Qty"]) == 0
+    reason = str(row_l["PO_Block_Reason"]).lower()
+    assert "only 1 size" in reason
+    assert "alter" in reason
+    # User-friendly wording — not a developer-style "single size only" tag.
+    assert "single size only" not in reason
 
 
 def test_extend_history_rolls_forward_using_sales_units_effective():
