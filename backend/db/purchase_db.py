@@ -640,11 +640,148 @@ def list_jwos(status=None):
         result.append(d)
     conn.close(); return result
 
+
+# ── BOM resolver for JWO input materials ──────────────────────────────────────
+def _resolve_jwo_input_from_bom(output_material: str, output_qty: float) -> dict | None:
+    """Look up the default BOM for ``output_material`` (an SFG/finished item)
+    and return the primary issuable input the processor receives.
+
+    Used inside ``create_jwo`` / ``update_jwo`` whenever the UI submits a line
+    with ``input_material`` empty or equal to ``output_material`` — the legacy
+    "From MRP/PR" wizard set both to the SFG code because at the PR stage we
+    only know the output. The correct issuable is the grey fabric / RM that
+    feeds the SFG, which is recorded on the BOM.
+
+    Preference order for inputs:
+      1. Component item with ``item_type`` mapped to Grey Fabric (GF / Greige).
+      2. First non-service BOM line (``RM`` / fabric / accessory).
+
+    Returns a dict ``{input_material, input_qty, input_unit}`` or ``None`` when
+    no BOM exists. ``input_qty`` is the BOM ratio (× shrinkage/wastage) scaled
+    by ``output_qty`` so the processor receives the right quantity.
+    """
+    code = (output_material or "").strip()
+    if not code:
+        return None
+    path = _item_db_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        ic = sqlite3.connect(path)
+        ic.row_factory = sqlite3.Row
+        row = ic.execute(
+            "SELECT id FROM items WHERE item_code=? LIMIT 1", (code,)
+        ).fetchone()
+        if not row:
+            ic.close()
+            return None
+        item_id = int(row["id"])
+        bom = ic.execute(
+            "SELECT id FROM bom_headers WHERE item_id=? AND is_default=1 LIMIT 1",
+            (item_id,),
+        ).fetchone() or ic.execute(
+            "SELECT id FROM bom_headers WHERE item_id=? LIMIT 1", (item_id,)
+        ).fetchone()
+        if not bom:
+            ic.close()
+            return None
+        lines = ic.execute(
+            "SELECT * FROM bom_lines WHERE bom_id=?", (int(bom["id"]),)
+        ).fetchall()
+        # Resolve each BOM line's component item info so we can prefer GF.
+        candidates: list[dict] = []
+        for ln in lines:
+            ld = dict(ln)
+            ctype = str(ld.get("component_type") or "RM").upper()
+            if ctype in ("SVC", "SERVICE", "PROCESS"):
+                continue
+            comp_id = ld.get("component_item_id")
+            comp_code = ""
+            comp_unit = ld.get("unit") or "MTR"
+            comp_type_name = ""
+            comp_type_code = ""
+            if comp_id:
+                cr = ic.execute(
+                    "SELECT i.item_code, i.uom AS unit, t.name AS type_name, t.code AS type_code "
+                    "FROM items i JOIN item_types t ON t.id = i.item_type_id WHERE i.id=?",
+                    (int(comp_id),),
+                ).fetchone()
+                if cr:
+                    comp_code = cr["item_code"] or ""
+                    comp_unit = cr["unit"] or comp_unit
+                    comp_type_name = str(cr["type_name"] or "").strip().lower()
+                    comp_type_code = str(cr["type_code"] or "").strip().upper()
+            if not comp_code:
+                raw = str(ld.get("component_name") or "")
+                comp_code = raw.split(" — ")[0].strip() if " — " in raw else raw
+            if not comp_code or comp_code == code:
+                continue
+            bom_qty = float(ld.get("quantity") or 0)
+            shrink = float(ld.get("shrinkage_pct") or 0) / 100.0
+            waste = float(ld.get("wastage_pct") or 0) / 100.0
+            try:
+                out_qty = float(output_qty or 0)
+            except (TypeError, ValueError):
+                out_qty = 0.0
+            adj_qty = round(bom_qty * (1.0 + shrink + waste) * out_qty, 3)
+            candidates.append({
+                "input_material": comp_code,
+                "input_qty": adj_qty,
+                "input_unit": comp_unit or "MTR",
+                "_grey": comp_type_name in _GREY_ITEM_TYPE_NAMES
+                        or comp_type_code in _GREY_ITEM_TYPE_CODES
+                        or ctype in {"GF", "GREY", "GREIGE", "GREY FABRIC"},
+                "_qty_sort": adj_qty,
+            })
+        ic.close()
+    except Exception:
+        return None
+    if not candidates:
+        return None
+    # Prefer grey-fabric input (the issuable to the printer); else largest qty.
+    candidates.sort(key=lambda c: (not c["_grey"], -c["_qty_sort"]))
+    pick = candidates[0]
+    return {
+        "input_material": pick["input_material"],
+        "input_qty": pick["input_qty"],
+        "input_unit": pick["input_unit"],
+    }
+
+
+def _patch_jwo_line_with_bom(line: dict) -> dict:
+    """If a JWO line has the legacy ``input == output`` placeholder (or no
+    input), fill ``input_material`` / ``input_qty`` / ``input_unit`` from the
+    default BOM of ``output_material``. Returns the same dict for chaining.
+    """
+    if not isinstance(line, dict):
+        return line
+    inp = str(line.get("input_material") or "").strip()
+    out = str(line.get("output_material") or "").strip()
+    if not out:
+        return line
+    needs_resolve = (not inp) or (inp == out)
+    if not needs_resolve:
+        return line
+    out_qty = line.get("output_qty", 0) or 0
+    resolved = _resolve_jwo_input_from_bom(out, float(out_qty))
+    if not resolved:
+        return line
+    line["input_material"] = resolved["input_material"]
+    # Preserve a non-default input_qty (e.g. operator wanted to issue more grey
+    # to absorb shrinkage manually); otherwise fall back to the BOM-derived qty.
+    cur_qty = float(line.get("input_qty") or 0)
+    if cur_qty <= 0 or abs(cur_qty - float(out_qty)) < 1e-6:
+        line["input_qty"] = resolved["input_qty"]
+    if not line.get("input_unit"):
+        line["input_unit"] = resolved["input_unit"]
+    return line
+
+
 def create_jwo(data: dict):
     conn = _connect()
     num = _next_num(conn, 'jwo_headers', 'jwo_number', 'JWO')
     lines = data.get('lines', [])
-    total = sum(l.get('amount', l.get('output_qty',0)*l.get('rate',0)) for l in lines)
+    total = sum((l.get('amount') if l.get('amount') is not None else l.get('output_qty',0)*l.get('rate',0)) for l in lines)
     conn.execute("""INSERT INTO jwo_headers(jwo_number,jwo_date,processor_id,processor_name,pr_reference,so_reference,
         expected_return_date,status,total,remarks,issued_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (num, data.get('jwo_date') or datetime.now().strftime('%Y-%m-%d'),
@@ -654,7 +791,8 @@ def create_jwo(data: dict):
         data.get('remarks') or '', data.get('issued_by') or ''))
     jwoid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in lines:
-        amt = ln.get('amount', ln.get('output_qty',0)*ln.get('rate',0))
+        _patch_jwo_line_with_bom(ln)
+        amt = ln.get('amount') if ln.get('amount') is not None else ln.get('output_qty',0)*ln.get('rate',0)
         conn.execute("""INSERT INTO jwo_lines(jwo_id,input_material,input_qty,input_unit,output_material,output_qty,output_unit,process_type,rate,amount,remarks)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (jwoid, ln['input_material'], ln.get('input_qty',0), ln.get('input_unit','MTR'),
@@ -705,8 +843,10 @@ def update_jwo(jwoid: int, data: dict):
         conn.execute("DELETE FROM jwo_lines WHERE jwo_id=?", (jwoid,))
         total = 0
         for ln in data['lines']:
+            _patch_jwo_line_with_bom(ln)
             out_qty = ln.get('output_qty', 0); rate = ln.get('rate', 0)
-            amt = ln.get('amount', out_qty * rate); total += amt
+            amt = ln.get('amount') if ln.get('amount') is not None else out_qty * rate
+            total += amt
             conn.execute("""INSERT INTO jwo_lines(jwo_id,input_material,input_qty,input_unit,
                 output_material,output_qty,output_unit,process_type,rate,amount,remarks)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""",

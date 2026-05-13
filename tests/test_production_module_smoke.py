@@ -710,3 +710,144 @@ def test_grey_workflow_qc_invalid_tracker_returns_error(isolated_module_dbs, cli
         "qc_remarks": "", "qc_by": "", "qc_date": "2026-05-12",
     })
     assert r.status_code in (400, 404), r.text
+
+
+# ── JWO BOM input resolution (SFG output → grey-fabric input) ────────────────
+
+
+def _seed_sfg_bom(item_db_path: str, *, sfg_code: str, grey_code: str, bom_qty: float = 1.05) -> None:
+    """Item Master fixture for the JWO input-resolution tests.
+
+    Inserts a grey-fabric component, a semi-finished output, and a default
+    BOM linking SFG to grey fabric at ``bom_qty`` MTR per unit of output.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(item_db_path)
+    conn.row_factory = sqlite3.Row
+    gf_type_id = conn.execute(
+        "SELECT id FROM item_types WHERE code='GF' OR name='Grey Fabric' LIMIT 1"
+    ).fetchone()[0]
+
+    sfg_type_id_row = conn.execute(
+        "SELECT id FROM item_types WHERE code='SFG' OR name LIKE 'Semi%' LIMIT 1"
+    ).fetchone()
+    if sfg_type_id_row is None:
+        cur = conn.execute("INSERT INTO item_types (name, code) VALUES (?, ?)", ("Semi Finished", "SFG"))
+        sfg_type_id = cur.lastrowid
+    else:
+        sfg_type_id = sfg_type_id_row[0]
+
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id, uom) VALUES (?, ?, ?, ?)",
+        (grey_code, "Grey Cotton 60s", gf_type_id, "MTR"),
+    )
+    grey_id = cur.lastrowid
+
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id, uom) VALUES (?, ?, ?, ?)",
+        (sfg_code, "Printed Cotton Floral", sfg_type_id, "MTR"),
+    )
+    sfg_id = cur.lastrowid
+
+    cur = conn.execute(
+        "INSERT INTO bom_headers (item_id, bom_name, applies_to, is_default) VALUES (?, 'Default', 'all', 1)",
+        (sfg_id,),
+    )
+    bom_id = cur.lastrowid
+
+    conn.execute(
+        """INSERT INTO bom_lines
+           (bom_id, component_item_id, component_name, component_type, quantity, unit)
+           VALUES (?, ?, 'Grey Cotton 60s', 'GF', ?, 'MTR')""",
+        (bom_id, grey_id, float(bom_qty)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_jwo_create_auto_resolves_grey_fabric_input_from_bom(isolated_module_dbs, client):
+    """Bug fix: when the From-PR wizard set both input_material and
+    output_material to the SFG code, the backend should auto-fill the input
+    from the SFG default BOM so the JWO line shows the grey fabric being
+    issued to the printer."""
+    _seed_sfg_bom(
+        isolated_module_dbs["ITEM_DB_PATH"],
+        sfg_code="PF-FLORAL-A1",
+        grey_code="GF-CTN-60",
+        bom_qty=1.05,
+    )
+    proc = client.post(
+        "/api/purchase/processors",
+        json={"processor_name": "Sunshine Printers", "processor_type": "Printing Unit"},
+    ).json()
+    assert proc.get("ok") is True
+
+    body = {
+        "processor_name": "Sunshine Printers",
+        "expected_return_date": "2026-06-10",
+        "lines": [
+            {
+                "input_material": "PF-FLORAL-A1",   # legacy bug: same as output
+                "input_qty": 100,
+                "input_unit": "MTR",
+                "output_material": "PF-FLORAL-A1",
+                "output_qty": 100,
+                "output_unit": "MTR",
+                "process_type": "Printing",
+                "rate": 12,
+            }
+        ],
+    }
+    r = client.post("/api/purchase/jwo", json=body)
+    assert r.status_code == 200, r.text
+    jwo_no = r.json()["jwo_number"]
+
+    jwos = client.get("/api/purchase/jwo").json()
+    j = next(j for j in jwos if j["jwo_number"] == jwo_no)
+    assert len(j["lines"]) == 1
+    line = j["lines"][0]
+    assert line["output_material"] == "PF-FLORAL-A1"
+    assert line["input_material"] == "GF-CTN-60", (
+        f"BOM-driven input was not applied; got input={line['input_material']}"
+    )
+    # 100 MTR × 1.05 ratio = 105 MTR of grey fabric to issue.
+    assert abs(float(line["input_qty"]) - 105.0) < 1e-3
+
+
+def test_jwo_create_keeps_explicit_input_when_distinct_from_output(isolated_module_dbs, client):
+    """If the operator typed a real input on the manual JWO screen, do NOT
+    overwrite it from the BOM — only the legacy ``input == output`` case
+    should be patched."""
+    _seed_sfg_bom(
+        isolated_module_dbs["ITEM_DB_PATH"],
+        sfg_code="PF-FLORAL-A2",
+        grey_code="GF-RAYON-1",
+        bom_qty=1.10,
+    )
+    client.post(
+        "/api/purchase/processors",
+        json={"processor_name": "Dye House", "processor_type": "Dyeing Unit"},
+    )
+    body = {
+        "processor_name": "Dye House",
+        "lines": [
+            {
+                "input_material": "GF-RAYON-OPERATOR-PICK",  # explicit, different code
+                "input_qty": 220,
+                "input_unit": "MTR",
+                "output_material": "PF-FLORAL-A2",
+                "output_qty": 200,
+                "output_unit": "MTR",
+                "process_type": "Dyeing",
+                "rate": 18,
+            }
+        ],
+    }
+    r = client.post("/api/purchase/jwo", json=body)
+    assert r.status_code == 200, r.text
+    jwo_no = r.json()["jwo_number"]
+    j = next(j for j in client.get("/api/purchase/jwo").json() if j["jwo_number"] == jwo_no)
+    line = j["lines"][0]
+    assert line["input_material"] == "GF-RAYON-OPERATOR-PICK"
+    assert float(line["input_qty"]) == 220.0

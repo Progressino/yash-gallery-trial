@@ -542,6 +542,38 @@ export default function Purchase() {
     setPoFromPRLines(prev => ({ ...prev, [key]: { ...prev[key], [field]: value } }))
   }
 
+  /**
+   * Resolve the BOM input (grey fabric / RM) that the processor will receive
+   * for an SFG output. Returns the SFG code itself as a safe fallback so we
+   * never block JWO creation when the Item Master / BOM is missing; the
+   * backend ``_patch_jwo_line_with_bom`` will fix legacy rows on insert.
+   */
+  const resolveJWOInputForSFG = async (
+    outputMaterial: string,
+    outputQty: number,
+    outputUnit: string,
+  ): Promise<{ input_material: string; input_qty: number; input_unit: string }> => {
+    try {
+      const r = await api.get(`/production/bom-inputs/${encodeURIComponent(outputMaterial)}`, { params: { qty: outputQty } })
+      const inputs = (r.data?.inputs ?? []) as { material_code: string; material_type?: string; adj_qty?: number; bom_qty?: number; unit?: string }[]
+      const issuable = inputs.filter(i => {
+        const mt = String(i.material_type || '').toUpperCase()
+        return i.material_code && mt !== 'SVC' && mt !== 'SERVICE' && mt !== 'PROCESS'
+      })
+      const grey = issuable.find(i => /^(GF|GREY|GREIGE)/.test(String(i.material_type || '').toUpperCase()))
+      const pick = grey || issuable[0]
+      if (!pick) return { input_material: outputMaterial, input_qty: outputQty, input_unit: outputUnit }
+      const qty = Number(pick.adj_qty ?? (pick.bom_qty ?? 0) * outputQty)
+      return {
+        input_material: pick.material_code,
+        input_qty: Number.isFinite(qty) && qty > 0 ? qty : outputQty,
+        input_unit: pick.unit || outputUnit,
+      }
+    } catch {
+      return { input_material: outputMaterial, input_qty: outputQty, input_unit: outputUnit }
+    }
+  }
+
   const submitPOFromPR = async (pr: PR) => {
     const pendingLines = pr.lines.filter(l => (l.required_qty - (l.po_qty || 0)) > 0)
     const poLinesList: object[] = []
@@ -556,7 +588,19 @@ export default function Purchase() {
         if (!ld.processor_id && !ld.processor_name) continue
         const procKey = `${ld.processor_id}-${ld.processor_name}`
         if (!jwoByProcessor[procKey]) jwoByProcessor[procKey] = { processor_id: ld.processor_id, processor_name: ld.processor_name || '', lines: [] }
-        jwoByProcessor[procKey].lines.push({ input_material: l.material_code, input_qty: ld.qty, input_unit: l.unit, output_material: l.material_code, output_qty: ld.qty, output_unit: l.unit, process_type: 'Processing', rate: ld.rate, amount: ld.qty * ld.rate })
+        // Issue grey fabric (BOM input) → receive printed/processed SFG back.
+        const input = await resolveJWOInputForSFG(l.material_code, ld.qty, l.unit)
+        jwoByProcessor[procKey].lines.push({
+          input_material: input.input_material,
+          input_qty: input.input_qty,
+          input_unit: input.input_unit,
+          output_material: l.material_code,
+          output_qty: ld.qty,
+          output_unit: l.unit,
+          process_type: 'Processing',
+          rate: ld.rate,
+          amount: ld.qty * ld.rate,
+        })
       } else {
         if (!ld.supplier_id && !ld.supplier_name) continue
         const sup = suppliers.find(s => s.id === ld.supplier_id)
