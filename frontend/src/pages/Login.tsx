@@ -17,14 +17,20 @@ export default function Login() {
     setLoading(true)
     try {
       setLoadStep('Signing in…')
-      await api.post('/auth/login', { username, password })
+      // Hard timeout so the user doesn't get stuck on "Signing in…" when the backend is unreachable.
+      await api.post('/auth/login', { username, password }, { timeout: 20_000 })
       nav('/', { replace: true })
     } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status
+      const e = err as { response?: { status?: number }; code?: string; message?: string }
+      const status = e?.response?.status
       if (status === 401) {
         setError('Invalid username or password')
+      } else if (e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')) {
+        setError('Server is taking too long to respond. Please try again in a moment.')
+      } else if (!e?.response) {
+        setError('Cannot reach the server. Check your connection and try again.')
       } else {
-        nav('/', { replace: true })
+        setError('Sign-in failed. Please try again.')
       }
     } finally {
       setLoading(false)

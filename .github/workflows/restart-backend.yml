@@ -1,0 +1,56 @@
+name: Restart backend
+
+# Manually restart the backend container on the VPS when the FastAPI process
+# stops responding (e.g. it deadlocked or its memory ballooned) but the host
+# itself is healthy. Trigger via `gh workflow run restart-backend.yml`.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  restart:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
+    steps:
+      - name: Detect docker compose binary
+        id: dc
+        run: |
+          set -eu
+          if docker compose version >/dev/null 2>&1; then
+            echo "cmd=docker compose" >> "$GITHUB_OUTPUT"
+          elif command -v docker-compose >/dev/null 2>&1; then
+            echo "cmd=docker-compose" >> "$GITHUB_OUTPUT"
+          else
+            echo "ERROR: neither 'docker compose' nor docker-compose found." >&2
+            exit 1
+          fi
+
+      - name: Pre-restart status
+        run: |
+          set +e
+          ${{ steps.dc.outputs.cmd }} -f docker-compose.prod.yml ps
+          echo "── last 30 backend log lines (pre-restart) ──"
+          ${{ steps.dc.outputs.cmd }} -f docker-compose.prod.yml logs --tail=30 backend 2>&1 || true
+
+      - name: Restart backend
+        run: |
+          set -eu
+          ${{ steps.dc.outputs.cmd }} -f docker-compose.prod.yml restart backend
+
+      - name: Health check
+        run: |
+          set -eu
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health; then
+              echo ""
+              echo "OK: backend healthy on attempt $i"
+              exit 0
+            fi
+            echo "… waiting for /api/health (127.0.0.1:8000) attempt $i/12"
+            sleep 5
+          done
+          echo "ERROR: backend still not healthy after restart" >&2
+          ${{ steps.dc.outputs.cmd }} -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
+          exit 1
