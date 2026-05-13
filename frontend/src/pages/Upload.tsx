@@ -102,7 +102,19 @@ export default function Upload() {
 
   const setL = (key: string, v: boolean) => setLoading(prev => ({ ...prev, [key]: v }))
 
-  const refresh = async () => { const c = await getCoverage(); setCoverage(c); qc.invalidateQueries() }
+  // Refresh coverage after an upload. We intentionally swallow errors so a
+  // slow /data/coverage (queued behind a big upload) doesn't replace the
+  // success toast with "timeout of 20000ms exceeded". The polling useQuery
+  // below will pick up the fresh coverage on the next 5s tick.
+  const refresh = async () => {
+    try {
+      const c = await getCoverage()
+      setCoverage(c)
+    } catch (err) {
+      console.warn('Post-upload coverage refresh failed; polling will retry.', err)
+    }
+    qc.invalidateQueries()
+  }
 
   const handle = (key: string, fn: (file: File) => Promise<UploadResponse>) => async (file: File) => {
     setL(key, true)

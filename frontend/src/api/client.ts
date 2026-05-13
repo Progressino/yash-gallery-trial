@@ -61,7 +61,10 @@ export interface CoverageResponse {
 
 /** Tier-1 multi-year ZIPs can take several minutes to parse; align with nginx proxy_read_timeout (e.g. 900s). */
 const UPLOAD_TIMEOUT_MS = 900_000
-const CACHE_TIMEOUT_MS = 20_000
+// Coverage/cache calls are GETs/POSTs that may queue behind a heavy upload
+// or warm-cache restore. The previous 20s budget surfaced ugly
+// "timeout of 20000ms exceeded" toasts after big uploads — bump to 60s.
+const CACHE_TIMEOUT_MS = 60_000
 
 function _errMessage(e: unknown, fallback: string): string {
   if (axios.isAxiosError(e)) {
@@ -168,8 +171,12 @@ export async function clearPlatform(platform: string): Promise<{ ok: boolean; me
 // ── Coverage ──────────────────────────────────────────────────
 
 export async function getCoverage(): Promise<CoverageResponse> {
-  const { data } = await api.get<CoverageResponse>('/data/coverage', { timeout: CACHE_TIMEOUT_MS })
-  return data
+  try {
+    const { data } = await api.get<CoverageResponse>('/data/coverage', { timeout: CACHE_TIMEOUT_MS })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Coverage refresh failed'))
+  }
 }
 
 /** YG vs Akiko monthly comparison CSV (uses same date params as dashboard summary). */
@@ -295,16 +302,28 @@ export const deleteDailyUpload = (id: number)                => api.delete(`/dat
 // ── Cache ─────────────────────────────────────────────────────
 
 export async function cacheStatus() {
-  const { data } = await api.get('/cache/status', { timeout: CACHE_TIMEOUT_MS })
-  return data
+  try {
+    const { data } = await api.get('/cache/status', { timeout: CACHE_TIMEOUT_MS })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Cache status request failed'))
+  }
 }
 export async function cacheSave() {
-  const { data } = await api.post('/cache/save', undefined, { timeout: CACHE_TIMEOUT_MS })
-  return data
+  try {
+    const { data } = await api.post('/cache/save', undefined, { timeout: CACHE_TIMEOUT_MS })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Cache save failed'))
+  }
 }
 export async function cacheLoad() {
-  const { data } = await api.post('/cache/load', undefined, { timeout: CACHE_TIMEOUT_MS })
-  return data
+  try {
+    const { data } = await api.post('/cache/load', undefined, { timeout: CACHE_TIMEOUT_MS })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Cache load failed'))
+  }
 }
 
 /** Clear warm + session, re-download GitHub cache, merge Tier-3 SQLite, rebuild sales, re-save GitHub (background). */
