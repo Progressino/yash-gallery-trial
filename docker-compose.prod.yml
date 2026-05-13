@@ -63,8 +63,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    mem_limit: 7g
-    memswap_limit: 8g   # keep headroom to avoid OOM during first large session restore
+    mem_limit: 7.5g
+    memswap_limit: 9g   # raised from 7g/8g: kernel OOM-killed uvicorn at ~7.3 GB RSS during warm-cache phase 2 + first session copy (2026-05-13). Host has 7.8 GiB RAM + 2 GiB swap; postgres ~0.5 GiB so this leaves ~0.3 GiB physical + 1.5 GiB swap headroom.
     restart: unless-stopped
 
   # ── React frontend + nginx reverse proxy ────────────────────
