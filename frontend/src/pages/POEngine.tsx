@@ -697,6 +697,11 @@ export default function POEngine() {
                 checked={params.enforce_two_size_minimum}
                 onChange={v => setParams({ ...params, enforce_two_size_minimum: v })}
               />
+              <Toggle
+                label="Block PO when projected cover ≥ lead time"
+                checked={params.enforce_lead_time_release_gate}
+                onChange={v => setParams({ ...params, enforce_lead_time_release_gate: v })}
+              />
             </div>
 
             <div className="mt-5 p-4 rounded-lg border border-dashed border-gray-300 bg-gray-50/80">

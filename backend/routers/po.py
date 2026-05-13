@@ -26,6 +26,10 @@ class PORequest(BaseModel):
     grace_days:       int   = 0
     safety_pct:       float = 0.0
     enforce_two_size_minimum: bool = False
+    # Optional: zero PO when projected cover already meets or exceeds lead
+    # time. Default OFF — formula already self-zeroes when projection meets
+    # target cover. Ops can flip on if they want stricter release control.
+    enforce_lead_time_release_gate: bool = False
 
 
 @router.post("/sku-status-lead")
@@ -289,6 +293,7 @@ def po_calculate(request: Request, body: PORequest):
             existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
             sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
             enforce_two_size_minimum=body.enforce_two_size_minimum,
+            enforce_lead_time_release_gate=body.enforce_lead_time_release_gate,
             inventory_history_df=(
                 sess.daily_inventory_history_df
                 if not sess.daily_inventory_history_df.empty
