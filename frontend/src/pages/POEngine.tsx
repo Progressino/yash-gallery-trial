@@ -505,7 +505,10 @@ export default function POEngine() {
       const { data } = await api.post<{ ok?: boolean; message?: string }>(
         '/po/raise-ledger/import-csv',
         fd,
-        { timeout: 120_000 },
+        {
+          timeout: 120_000,
+          headers: { 'Content-Type': 'multipart/form-data' },
+        },
       )
       if (data?.ok) {
         setLedgerImportMsg({ type: 'ok', text: data.message || 'Imported into raise ledger.' })

@@ -432,7 +432,15 @@ async def po_raise_ledger_import_csv(
     )
     qty_col = _pick_csv_column(
         fieldnames,
-        ("po_qty", "final_po_qty", "po qty", "net_po_qty", "recommended_po_qty"),
+        (
+            "po_qty",
+            "final_po_qty",
+            "po qty",
+            "net_po_qty",
+            "recommended_po_qty",
+            "raised_qty",
+            "confirmed_qty",
+        ),
     )
     if not sku_col or not qty_col:
         return {

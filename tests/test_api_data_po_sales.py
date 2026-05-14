@@ -206,3 +206,60 @@ def test_sales_export_blanks_oms_for_note_like_sku(client, session_for_client):
     assert r.status_code == 200
     out = pd.read_csv(io.StringIO(r.text))
     assert str(out["OMS_Sku"].iloc[0]) in ("", "nan") or pd.isna(out["OMS_Sku"].iloc[0])
+
+
+def test_po_raise_ledger_import_csv(client, session_for_client):
+    import io
+
+    from backend.session import wipe_app_session
+
+    _, sess = session_for_client
+    wipe_app_session(sess)
+    csv_content = "OMS_SKU,PO_Qty\nSKU-A,10\nSKU-B,5\n"
+    files = {"file": ("po_recommendation.csv", io.BytesIO(csv_content.encode("utf-8")), "text/csv")}
+    data = {"raised_date": "2026-05-13", "group_by_parent": "false", "replace_day": "true"}
+    r = client.post("/api/po/raise-ledger/import-csv", files=files, data=data)
+    assert r.status_code == 200
+    j = r.json()
+    assert j.get("ok") is True
+    assert j.get("imported_skus") == 2
+    assert j.get("total_units") == 15
+    assert j.get("raised_date") == "2026-05-13"
+    df = sess.po_raise_ledger_df
+    assert df is not None and not df.empty
+
+
+def test_po_raise_ledger_import_accepts_raise_export_final_po_qty_header(client, session_for_client):
+    """Raise PO modal CSV uses Final_PO_Qty — re-import must recognise it."""
+    import io
+
+    from backend.session import wipe_app_session
+
+    _, sess = session_for_client
+    wipe_app_session(sess)
+    csv_content = "OMS_SKU,Priority,Final_PO_Qty\nSKU-A,OK,12\n"
+    files = {"file": ("raise_po_2026-05-14.csv", io.BytesIO(csv_content.encode("utf-8")), "text/csv")}
+    data = {"raised_date": "2026-05-14", "group_by_parent": "false", "replace_day": "true"}
+    r = client.post("/api/po/raise-ledger/import-csv", files=files, data=data)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j.get("ok") is True
+    assert j.get("imported_skus") == 1
+    assert j.get("total_units") == 12
+
+
+def test_po_raise_ledger_import_accepts_ledger_dump_raised_qty(client, session_for_client):
+    import io
+
+    from backend.session import wipe_app_session
+
+    _, sess = session_for_client
+    wipe_app_session(sess)
+    csv_content = "OMS_SKU,Raised_Qty,Raised_Date\nSKU-X,7,2026-05-01\n"
+    files = {"file": ("ledger_dump.csv", io.BytesIO(csv_content.encode("utf-8")), "text/csv")}
+    data = {"raised_date": "2026-05-14", "group_by_parent": "false", "replace_day": "true"}
+    r = client.post("/api/po/raise-ledger/import-csv", files=files, data=data)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j.get("ok") is True
+    assert j.get("total_units") == 7
