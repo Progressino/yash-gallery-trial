@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import api from '../api/client'
 import { usePOStore } from '../store/po'
+
+/** Full PO-engine run; nginx `/api` allows up to 900s — keep client in sync so axios does not abort first. */
+const PO_DASHBOARD_TIMEOUT_MS = 300_000
+const PO_DASHBOARD_TIMEOUT_MIN = PO_DASHBOARD_TIMEOUT_MS / 60_000
 
 type DashRow = Record<string, string | number>
 
@@ -80,11 +84,9 @@ function SectionTable({
 export interface PODashboardPanelProps {
   /** When true, omit standalone page chrome (used inside PO Engine). */
   embedded?: boolean
-  /** When this tab is visible, dashboard data is (re)loaded. */
-  isActive: boolean
 }
 
-export function PODashboardPanel({ embedded = false, isActive }: PODashboardPanelProps) {
+export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
   const params = usePOStore(s => s.params)
   const [tuning, setTuning] = useState({
     recent_days: 7,
@@ -98,11 +100,10 @@ export function PODashboardPanel({ embedded = false, isActive }: PODashboardPane
 
   const mut = useMutation({
     mutationFn: async () => {
-      // 60s timeout: dashboard runs the full PO engine, large catalogs can take 10-20s.
       const { data } = await api.post<DashboardPayload>(
         '/po/dashboard',
         { ...params, min_denominator: 7, ...tuning },
-        { timeout: 60_000 },
+        { timeout: PO_DASHBOARD_TIMEOUT_MS },
       )
       return data
     },
@@ -115,15 +116,13 @@ export function PODashboardPanel({ embedded = false, isActive }: PODashboardPane
   const mutate = mut.mutate
   const load = useCallback(() => void mutate(), [mutate])
 
-  useEffect(() => {
-    if (isActive) void mutate()
-  }, [isActive, mutate])
-
   const errorMsg = (() => {
     if (!mut.isError) return null
     const e = mut.error as { code?: string; message?: string; response?: { status?: number; data?: { message?: string } } } | null
     if (!e) return 'Request failed.'
-    if (e.code === 'ECONNABORTED' || /timeout/i.test(e.message || '')) return 'Dashboard request timed out (the server is busy).'
+    if (e.code === 'ECONNABORTED' || /timeout/i.test(e.message || '')) {
+      return `Dashboard request timed out after ${PO_DASHBOARD_TIMEOUT_MIN} minutes. The catalog run can be very heavy — try again in a moment, or ask an admin if this keeps happening.`
+    }
     if (e.response?.data?.message) return e.response.data.message
     if (!e.response) return 'Cannot reach the server. Check your connection and try again.'
     return `Request failed (status ${e.response.status}).`
@@ -163,7 +162,7 @@ export function PODashboardPanel({ embedded = false, isActive }: PODashboardPane
             disabled={mut.isPending}
             className="text-sm px-5 py-2 rounded-lg bg-[#002B5B] text-white font-semibold hover:bg-blue-900 disabled:opacity-50"
           >
-            {mut.isPending ? 'Loading…' : 'Refresh dashboard'}
+            {mut.isPending ? 'Loading…' : data ? 'Refresh dashboard' : 'Load dashboard'}
           </button>
         </div>
       </div>
@@ -238,6 +237,12 @@ export function PODashboardPanel({ embedded = false, isActive }: PODashboardPane
           <strong>PO Recommendation</strong> tab{embedded ? '' : ' in PO Engine'}.
         </p>
       </div>
+
+      {!data && !mut.isPending && !mut.isError && (
+        <p className="text-sm text-gray-600 rounded-lg border border-slate-200 bg-slate-50/80 px-4 py-3">
+          Nothing is fetched until you choose <strong className="text-[#002B5B]">Load dashboard</strong> — tune the windows above if needed, then run when you are ready (large catalogs can take several minutes; the browser waits up to {PO_DASHBOARD_TIMEOUT_MIN} minutes before timing out).
+        </p>
+      )}
 
       {errorMsg && (
         <div className="rounded-lg bg-rose-50 text-rose-800 text-sm px-4 py-3 border border-rose-200">

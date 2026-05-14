@@ -1679,7 +1679,7 @@ export default function POEngine() {
 
       {/* ── PO Dashboard Tab ── */}
       {activeTab === 'dashboard' && (
-        <PODashboardPanel embedded isActive />
+        <PODashboardPanel embedded />
       )}
 
       {/* ── Quarterly History Tab ── */}
