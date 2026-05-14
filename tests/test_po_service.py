@@ -431,7 +431,8 @@ def test_digit_token_only_lead_does_not_enable_sheet_po_gate():
         sku_status_df=sheet,
     )
     row = po.loc[po["OMS_SKU"] == sku].iloc[0]
-    assert int(row["Lead_Time_Days"]) == 55
+    # Digit-only borrow is not an approved sheet lead — PO blocked and lead shown as 0.
+    assert int(row["Lead_Time_Days"]) == 0
     assert not bool(row["Lead_Time_From_Status_Sheet"])
     assert int(row["PO_Qty"]) == 0
     assert "no lead time resolved" in str(row["PO_Block_Reason"]).lower()
