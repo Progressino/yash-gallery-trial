@@ -396,6 +396,45 @@ def test_closed_sku_sheet_zeros_po_qty():
     assert int(po_none.iloc[0]["PO_Qty"]) >= int(po_sheet.iloc[0]["PO_Qty"])
 
 
+def test_size_variant_inherits_parent_row_sheet_status_and_close_hint():
+    """Size-level inventory rows must inherit status from a style/parent row on the sheet."""
+    days = pd.date_range("2025-11-01", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["STY123-M"] * 30,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 30,
+            "Quantity": [2] * 30,
+            "Units_Effective": [2] * 30,
+            "Source": ["Amazon"] * 30,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["STY123-M"], "Total_Inventory": [100]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["STY123"],
+            "SKU_Sheet_Status": ["Closed Discontinued"],
+            "SKU_Sheet_Closed": [True],
+            "Lead_Time_From_Sheet": [30.0],
+        }
+    )
+    po = calculate_po_base(
+        sales,
+        inv,
+        30,
+        45,
+        90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=False,
+    )
+    row = po.iloc[0]
+    assert "closed" in str(row["SKU_Sheet_Status"]).lower()
+    assert bool(row["SKU_Sheet_Closed"]) is True
+    assert "closed on sheet" in str(row["Suggest_Close_SKU"]).lower()
+
+
 def test_digit_token_only_lead_does_not_enable_sheet_po_gate():
     """Digit-token fill can set ``Lead_Time_Days`` but must not satisfy the sheet PO gate."""
     sku = "FOOBAR4002BAZ-XL"

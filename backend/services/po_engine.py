@@ -382,6 +382,42 @@ def _longest_prefix_lead(
     return float("nan")
 
 
+def _longest_prefix_sheet_meta(
+    pk: str,
+    meta: dict[str, tuple[str, bool]],
+    sorted_sheet_keys: Optional[list] = None,
+) -> tuple[str, bool]:
+    """
+    Best (status, closed) when inventory parent extends a shorter sheet style key,
+    mirroring ``_longest_prefix_lead`` so size variants inherit style-level status rows.
+    """
+    pk = str(pk or "").strip()
+    if not pk or not meta:
+        return "", False
+    direct = meta.get(pk)
+    if direct is not None:
+        st_d, cl_d = str(direct[0] or ""), bool(direct[1])
+        if st_d or cl_d:
+            return st_d, cl_d
+    keys_iter = (
+        sorted_sheet_keys
+        if sorted_sheet_keys is not None
+        else sorted((str(k).strip() for k in meta if str(k).strip()), key=len, reverse=True)
+    )
+    for sks in keys_iter:
+        if not sks:
+            continue
+        row = meta.get(sks)
+        if not row:
+            continue
+        st, cl = str(row[0] or ""), bool(row[1])
+        if not st and not cl:
+            continue
+        if _inv_parent_extends_sheet_style(pk, sks):
+            return st, cl
+    return "", False
+
+
 def _style_digit_token(oms_sku: str) -> str:
     """Extract style digits token from SKU/parent (e.g. 1657YK..., AK-1394BROWN -> 1657/1394)."""
     if oms_sku is None or (isinstance(oms_sku, float) and pd.isna(oms_sku)):
@@ -965,6 +1001,31 @@ def calculate_po_base(
             reverse=True,
         )
 
+        try:
+            from .sku_status_lead import is_closed_sku_status as _is_closed_st
+        except Exception:  # pragma: no cover
+            def _is_closed_st(_x: object) -> bool:
+                return False
+
+        par_status_candidates: dict[str, list[tuple[str, bool]]] = defaultdict(list)
+        for _, rw in m.iterrows():
+            par = str(rw.get("_par_key") or "").strip()
+            if not par:
+                continue
+            st = str(rw.get("SKU_Sheet_Status") or "").strip()
+            cl_row = bool(rw.get("SKU_Sheet_Closed", False)) or (bool(st) and _is_closed_st(st))
+            par_status_candidates[par].append((st, cl_row))
+        status_by_parent: dict[str, str] = {}
+        closed_by_parent: dict[str, bool] = {}
+        for par, lst in par_status_candidates.items():
+            closed_by_parent[par] = any(x[1] for x in lst)
+            closed_statuses = [x[0] for x in lst if x[1] and x[0]]
+            if closed_statuses:
+                status_by_parent[par] = closed_statuses[0]
+            else:
+                nonempty = [x[0] for x in lst if x[0]]
+                status_by_parent[par] = nonempty[-1] if nonempty else ""
+
         lead_by_digit_token: dict[str, float] = {}
         for _, rw in m.iterrows():
             lt_one = float(pd.to_numeric(rw.get("Lead_Time_From_Sheet"), errors="coerce"))
@@ -984,10 +1045,14 @@ def calculate_po_base(
         # This is **not** the same as ``lead_by_digit_token`` (which keys off any substring
         # token from keys like ``PREFIX-4002`` and must not satisfy the sheet PO gate alone).
         lead_by_pure_digit_style: dict[str, float] = {}
+        status_by_pure_digit_style: dict[str, tuple[str, bool]] = {}
         for _, rw in m.iterrows():
             oms_c = str(rw.get("OMS_SKU") or "").strip()
             if not oms_c or not re.fullmatch(r"\d{3,}", oms_c):
                 continue
+            st_one = str(rw.get("SKU_Sheet_Status") or "").strip()
+            cl_one = bool(rw.get("SKU_Sheet_Closed", False)) or (bool(st_one) and _is_closed_st(st_one))
+            status_by_pure_digit_style[oms_c] = (st_one, cl_one)
             lt_one = float(pd.to_numeric(rw.get("Lead_Time_From_Sheet"), errors="coerce"))
             if not np.isfinite(lt_one) or lt_one <= 0:
                 continue
@@ -1010,15 +1075,70 @@ def calculate_po_base(
 
         keep = [c for c in ["OMS_SKU", "SKU_Sheet_Status", "SKU_Sheet_Closed", "Lead_Time_From_Sheet"] if c in m.columns]
         m = m[keep].drop_duplicates(subset=["OMS_SKU"], keep="last")
+        sheet_key_meta: dict[str, tuple[str, bool]] = {}
+        for _, rw in m.iterrows():
+            k = str(rw["OMS_SKU"]).strip()
+            stc = str(rw.get("SKU_Sheet_Status") or "").strip()
+            clc = bool(rw.get("SKU_Sheet_Closed", False)) or (bool(stc) and _is_closed_st(stc))
+            if k:
+                sheet_key_meta[k] = (stc, clc)
+        _sorted_sheet_keys_for_status = sorted((x for x in sheet_key_meta if x), key=len, reverse=True)
+
         po_df = po_df.merge(m, on="OMS_SKU", how="left")
         po_df["SKU_Sheet_Status"] = po_df["SKU_Sheet_Status"].fillna("").astype(str)
         po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"].fillna(False).astype(bool)
-        # Some exports carry closure only in free-text status while the bool column is wrong/stale.
-        try:
-            from .sku_status_lead import is_closed_sku_status
-        except Exception:  # pragma: no cover
-            is_closed_sku_status = lambda _x: False  # type: ignore[misc, assignment]
-        po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"] | po_df["SKU_Sheet_Status"].map(is_closed_sku_status)
+
+        _pk_all = po_df["OMS_SKU"].astype(str).map(get_parent_sku).str.strip()
+        _st_empty_m = po_df["SKU_Sheet_Status"].astype(str).str.strip().eq("")
+        _fill_st_par = _pk_all.map(status_by_parent).fillna("").astype(str)
+        _upd_par = _st_empty_m & _fill_st_par.str.len().gt(0)
+        if _upd_par.any():
+            po_df.loc[_upd_par, "SKU_Sheet_Status"] = _fill_st_par.loc[_upd_par]
+            _cl_par = _pk_all.map(closed_by_parent).fillna(False)
+            po_df.loc[_upd_par, "SKU_Sheet_Closed"] = (
+                po_df.loc[_upd_par, "SKU_Sheet_Closed"].astype(bool).to_numpy()
+                | _cl_par.loc[_upd_par].astype(bool).to_numpy()
+            )
+
+        _st_empty_p = po_df["SKU_Sheet_Status"].astype(str).str.strip().eq("")
+        if bool(_st_empty_p.any()) and sheet_key_meta:
+
+            def _pfx_meta(o: str) -> tuple[str, bool]:
+                pk_here = str(get_parent_sku(o)).strip()
+                return _longest_prefix_sheet_meta(pk_here, sheet_key_meta, _sorted_sheet_keys_for_status)
+
+            _pairs = po_df["OMS_SKU"].astype(str).map(_pfx_meta)
+            _st_part = _pairs.map(lambda t: t[0] if isinstance(t, tuple) else "")
+            _cl_part = _pairs.map(lambda t: bool(t[1]) if isinstance(t, tuple) else False)
+            _use_pfx = _st_empty_p & _st_part.astype(str).str.len().gt(0)
+            if _use_pfx.any():
+                po_df.loc[_use_pfx, "SKU_Sheet_Status"] = _st_part.loc[_use_pfx]
+                po_df.loc[_use_pfx, "SKU_Sheet_Closed"] = (
+                    po_df.loc[_use_pfx, "SKU_Sheet_Closed"].astype(bool).to_numpy()
+                    | _cl_part.loc[_use_pfx].astype(bool).to_numpy()
+                )
+
+        _st_empty_d = po_df["SKU_Sheet_Status"].astype(str).str.strip().eq("")
+        if bool(_st_empty_d.any()) and status_by_pure_digit_style:
+            _tok_d = po_df["OMS_SKU"].astype(str).map(get_parent_sku).map(_style_digit_token)
+
+            def _dig_status(tok: str) -> tuple[str, bool]:
+                if not tok:
+                    return "", False
+                return status_by_pure_digit_style.get(tok, ("", False))
+
+            _dig_pairs = _tok_d.map(_dig_status)
+            _dst = _dig_pairs.map(lambda t: t[0] if isinstance(t, tuple) else "")
+            _dcl = _dig_pairs.map(lambda t: bool(t[1]) if isinstance(t, tuple) else False)
+            _use_dig = _st_empty_d & _dst.astype(str).str.len().gt(0)
+            if _use_dig.any():
+                po_df.loc[_use_dig, "SKU_Sheet_Status"] = _dst.loc[_use_dig]
+                po_df.loc[_use_dig, "SKU_Sheet_Closed"] = (
+                    po_df.loc[_use_dig, "SKU_Sheet_Closed"].astype(bool).to_numpy()
+                    | _dcl.loc[_use_dig].astype(bool).to_numpy()
+                )
+
+        po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"] | po_df["SKU_Sheet_Status"].map(_is_closed_st)
         if "Lead_Time_From_Sheet" in po_df.columns:
             lt_vals = pd.to_numeric(po_df["Lead_Time_From_Sheet"], errors="coerce")
             bad = lt_vals.isna() | (lt_vals <= 0)
@@ -1323,7 +1443,46 @@ def calculate_po_base(
     )
     po_df["Post_PO_Cover_Days_Capped"] = pd.to_numeric(_post_cover, errors="coerce").fillna(999.0).round(1)
 
-    po_df["Suggest_Close_SKU"] = ""
+    try:
+        from .sku_status_lead import is_closed_sku_status as _ics_hint
+    except Exception:  # pragma: no cover
+        def _ics_hint(_x: object) -> bool:
+            return False
+
+    _par_col = po_df["Parent_SKU"]
+    ads_col = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
+    sold_c = pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0.0)
+    ship_col = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0.0)
+    parent_ads = ads_col.groupby(_par_col).transform("sum")
+    parent_sold = sold_c.groupby(_par_col).transform("sum")
+    n_sib = po_df.groupby(_par_col)["OMS_SKU"].transform("count")
+    share = np.where(parent_ads > 1e-9, ads_col / parent_ads, 0.0)
+    rk_dense = ads_col.groupby(_par_col).rank(method="dense", ascending=False)
+    row_closed = po_df["SKU_Sheet_Closed"] | po_df["SKU_Sheet_Status"].astype(str).map(_ics_hint)
+
+    suggest = pd.Series("", index=po_df.index, dtype=str)
+    suggest.loc[row_closed] = "Closed on sheet — run down stock (no new PO)."
+    strong = (~row_closed) & (n_sib >= 2) & (rk_dense == 1) & (share >= 0.35) & (parent_ads >= 0.25)
+    suggest.loc[strong] = "Strong seller vs other sizes — keep in depth."
+    weak = (
+        (~row_closed)
+        & (n_sib >= 2)
+        & (sold_c == 0)
+        & (ship_col == 0)
+        & (parent_sold > 10)
+        & ~strong
+    )
+    suggest.loc[weak] = "Low movement vs siblings — consider closing."
+    deep_stock = (
+        (~row_closed)
+        & ~strong
+        & ~weak
+        & (pd.to_numeric(po_df["Days_Left"], errors="coerce").fillna(0.0) > 120.0)
+        & (sold_c == 0)
+        & (ship_col == 0)
+    )
+    suggest.loc[deep_stock] = "High stock cover, no recent sales — review listing."
+    po_df["Suggest_Close_SKU"] = suggest.fillna("").astype(str)
 
     # Drop intermediate calc columns (datetime/float cols that break router serialisation)
     po_df.drop(
