@@ -527,6 +527,9 @@ def po_calculate(request: Request, body: PORequest):
     if po_df.empty:
         return {"ok": False, "message": "PO result is empty."}
 
+    import numpy as np
+    import pandas as pd
+
     def _dedupe_column_names(df: pd.DataFrame) -> pd.DataFrame:
         """Pandas allows duplicate column labels; ``to_dict('records')`` keeps only one key
         per name which shuffles values into wrong headers (e.g. ``fds``, ``sdaf``) in CSV/UI."""
@@ -545,9 +548,6 @@ def po_calculate(request: Request, body: PORequest):
         return df
 
     # Serialize — keep string hints; round numerics only
-    import numpy as np
-    import pandas as pd
-
     po_df = po_df.copy()
     po_df = _dedupe_column_names(po_df)
     for c in ["Suggest_Close_SKU", "PO_Block_Reason", "SKU_Sheet_Status"]:
