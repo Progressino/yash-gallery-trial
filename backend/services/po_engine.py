@@ -429,7 +429,12 @@ def calculate_po_base(
     existing_po_df: Optional[pd.DataFrame] = None,
     sku_status_df: Optional[pd.DataFrame] = None,
     enforce_two_size_minimum: bool = False,
-    enforce_lead_time_release_gate: bool = False,  # deprecated: ignored (was wrongly vs lead not target)
+    # When True (default): for rows with **sheet-resolved** factory lead only, do not
+    # recommend a release while projected cover ``(Tot inv + eff. pipeline) / ADS`` is
+    # **strictly greater** than ``Lead_Time_Days``. Without a status sheet (or when lead
+    # is not sheet-resolved), this rule does not apply. Set False for legacy target-only
+    # mode (top up toward target even when cover still exceeds sheet lead).
+    enforce_lead_time_release_gate: bool = True,
     inventory_history_df: Optional[pd.DataFrame] = None,
     po_raise_ledger_df: Optional[pd.DataFrame] = None,
     planning_date: Optional[str] = None,
@@ -1136,10 +1141,43 @@ def calculate_po_base(
     po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
 
-    # ``enforce_lead_time_release_gate`` was removed: comparing projected cover
-    # to *lead time* incorrectly zeroed POs for SKUs that were still below
-    # *target* cover (e.g. 45d cover vs 90d target when lead=45d). The balance
-    # formula above already caps recommendations to ``target_days + grace``.
+    # Lead-time release (sheet-resolved lead only): no fresh PO while projected cover
+    # (inv + eff. pipeline) is still *above* sheet ``Lead_Time_Days`` — then top up
+    # toward ``target_days`` using the balance formula above.
+    _msg_lead_window = (
+        "Projected cover exceeds factory lead time — no PO until cover is within lead days"
+    )
+    if enforce_lead_time_release_gate:
+        _from_sheet = po_df.get("Lead_Time_From_Status_Sheet")
+        if _from_sheet is not None:
+            _from_sheet_ok = _from_sheet.fillna(False).astype(bool).to_numpy()
+        else:
+            _from_sheet_ok = np.zeros(len(po_df), dtype=bool)
+        _lt_gate = (
+            pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce")
+            .fillna(float(max(1, int(lead_time))))
+            .clip(lower=1.0, upper=730.0)
+            .to_numpy(dtype=float)
+        )
+        _proj_gate = np.asarray(projected_days_now, dtype=float)
+        _ads_gate = ads_num.to_numpy(dtype=float)
+        _po_gate = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0).to_numpy(dtype=int)
+        _block_lead_win = (
+            _from_sheet_ok
+            & (_po_gate > 0)
+            & (_ads_gate > 0)
+            & (_proj_gate > _lt_gate)
+        )
+        if bool(np.any(_block_lead_win)):
+            _idx_bw = po_df.index[_block_lead_win]
+            po_df.loc[_idx_bw, "PO_Qty"] = 0
+            po_df.loc[_idx_bw, "Gross_PO_Qty"] = 0
+            br_bw = po_df.loc[_idx_bw, "PO_Block_Reason"].astype(str).str.strip()
+            po_df.loc[_idx_bw, "PO_Block_Reason"] = np.where(
+                br_bw.eq("") | br_bw.eq("nan"),
+                _msg_lead_window,
+                br_bw + "; " + _msg_lead_window,
+            )
 
     # Two-size minimum rule. Only one size in a parent SKU having demand is
     # almost always a data / sizing-mix problem, not a real demand signal —

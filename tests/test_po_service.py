@@ -614,10 +614,8 @@ def test_po_release_uses_target_cover_balance_days_formula():
     assert float(row["Projected_Running_Days"]) == expected_proj
 
 
-def test_lead_time_release_gate_deprecated_is_ignored():
-    """Legacy ``enforce_lead_time_release_gate`` no longer blocks: it compared
-    projected cover to *lead time*, which wrongly suppressed POs for SKUs still
-    below *target* cover (e.g. 45d vs 90d target when lead=45d)."""
+def test_lead_time_release_gate_blocks_when_projected_cover_exceeds_lead():
+    """No PO while projected (inv + pipeline) / ADS is above factory lead; disable gate for legacy target-only."""
     sales = _minimal_sales()  # ADS ≈ 2/day
     inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [80]})
     sheet = pd.DataFrame(
@@ -639,15 +637,56 @@ def test_lead_time_release_gate_deprecated_is_ignored():
         sku_status_df=sheet,
     )
 
-    po_off = calculate_po_base(**common, enforce_lead_time_release_gate=False)
     po_on = calculate_po_base(**common, enforce_lead_time_release_gate=True)
-    assert int(po_on.iloc[0]["PO_Qty"]) == int(po_off.iloc[0]["PO_Qty"]) > 0
-    assert "Projected days already cover lead time" not in str(po_on.iloc[0]["PO_Block_Reason"])
+    po_off = calculate_po_base(**common, enforce_lead_time_release_gate=False)
+    # 80 / 2 = 40d projected > 30d lead → gate on ⇒ no release.
+    assert int(po_on.iloc[0]["PO_Qty"]) == 0
+    assert "lead time" in str(po_on.iloc[0]["PO_Block_Reason"]).lower()
+    assert int(po_off.iloc[0]["PO_Qty"]) > 0
 
 
-def test_below_target_cover_gets_po_when_projected_exceeds_lead_time_only():
-    """Regression: projected (inv+pipe)/ADS can exceed *lead* days but still be
-    below *target* cover — recommendations must follow ``target_days``."""
+def test_sheet_lead_window_blocks_po_when_projected_cover_gt_lead_days():
+    """Operator rule: e.g. 49d projected cover vs 45d sheet lead → no PO yet (strict >)."""
+    days = pd.date_range("2025-11-01", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1001YKBEIGE-XXL"] * 30,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 30,
+            "Quantity": [1] * 30,
+            "Units_Effective": [1] * 30,
+            "Source": ["Amazon"] * 30,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["1001YKBEIGE-XXL"], "Total_Inventory": [49]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["1001YKBEIGE-XXL"],
+            "SKU_Sheet_Status": ["Open"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [45.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=93,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+    )
+    row = po.iloc[0]
+    assert float(row["Projected_Running_Days"]) == 49.0
+    assert int(row["Lead_Time_Days"]) == 45
+    assert int(row["PO_Qty"]) == 0
+    assert "lead time" in str(row["PO_Block_Reason"]).lower()
+
+
+def test_below_target_cover_gets_po_when_projected_within_lead_window():
+    """When projected cover equals lead days, lead-window gate allows top-up toward target."""
     days = pd.date_range("2025-11-01", periods=30, freq="D")
     sales = pd.DataFrame(
         {
@@ -687,13 +726,11 @@ def test_below_target_cover_gets_po_when_projected_exceeds_lead_time_only():
     assert float(row["Projected_Running_Days"]) == 45.0
     assert int(row["Lead_Time_Days"]) == 45
     assert int(row["PO_Qty"]) > 0
-    assert "Projected days already cover lead time" not in str(row["PO_Block_Reason"])
 
 
 def test_po_release_not_blocked_just_because_projected_cover_exceeds_lead_time():
-    """The lead-time release gate was removed. As long as projected cover is
-    below target cover the formula should still raise a top-up PO, even if
-    projected cover already meets / exceeds lead time."""
+    """With ``enforce_lead_time_release_gate=False``, target-only mode still tops up
+    when projected cover is below target even if it already exceeds lead time."""
     sales = _minimal_sales()  # ADS ≈ 2/day
     inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [80]})
     sheet = pd.DataFrame(
@@ -713,13 +750,13 @@ def test_po_release_not_blocked_just_because_projected_cover_exceeds_lead_time()
         demand_basis="Sold",
         safety_pct=0.0,
         sku_status_df=sheet,
+        enforce_lead_time_release_gate=False,
     )
     row = po.iloc[0]
     # Projected cover (≈ 40d) exceeds Lead_Time (30d) but is below target (90d).
     assert float(row["Projected_Running_Days"]) >= float(row["Lead_Time_Days"])
     assert int(row["Gross_PO_Qty"]) > 0
     assert int(row["PO_Qty"]) > 0
-    assert "Projected days already cover lead time" not in str(row["PO_Block_Reason"])
 
 
 def test_po_zero_when_projected_cover_already_meets_target_cover():
