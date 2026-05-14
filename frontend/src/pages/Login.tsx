@@ -17,8 +17,9 @@ export default function Login() {
     setLoading(true)
     try {
       setLoadStep('Signing in…')
-      // Hard timeout so the user doesn't get stuck on "Signing in…" when the backend is unreachable.
-      await api.post('/auth/login', { username, password }, { timeout: 20_000 })
+      // Allow queueing behind a long Tier-3 upload (same worker used to unblock via threadpool;
+      // 60s still fails fast if the host is actually down).
+      await api.post('/auth/login', { username, password }, { timeout: 60_000 })
       nav('/', { replace: true })
     } catch (err: unknown) {
       const e = err as { response?: { status?: number }; code?: string; message?: string }
