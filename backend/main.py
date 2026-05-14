@@ -80,6 +80,10 @@ _WARM_CACHE_KEYS = (
     "inventory_df_variant",
     "inventory_df_parent",
     "existing_po_df",
+    # Optional PO inputs — must survive restarts / warm-cache copy so the UI does not
+    # show "upload daily inventory again" and SKU-status merges stay in effect.
+    "daily_inventory_history_df",
+    "sku_status_lead_df",
 )
 
 

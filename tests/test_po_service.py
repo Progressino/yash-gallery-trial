@@ -375,8 +375,8 @@ def test_sku_status_parse_detects_closed_and_lead():
     assert int(r["Lead_Time_From_Sheet"]) == 22
 
 
-def test_closed_sku_sheet_does_not_change_po_only_lead_time_matters():
-    """Sheet 'closed' is informational; PO qty matches the engine without sheet (same global lead)."""
+def test_closed_sku_sheet_zeros_po_qty():
+    """Closed SKUs must not receive fresh PO recommendations when the status sheet marks them closed."""
     sales = _minimal_sales()
     inv = _minimal_inventory()
     sheet = pd.DataFrame(
@@ -384,14 +384,16 @@ def test_closed_sku_sheet_does_not_change_po_only_lead_time_matters():
             "OMS_SKU": ["TEST-SKU-1"],
             "SKU_Sheet_Status": ["Closed SKU"],
             "SKU_Sheet_Closed": [True],
-            "Lead_Time_From_Sheet": [float("nan")],
+            "Lead_Time_From_Sheet": [45.0],
         }
     )
     po_sheet = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=sheet)
     po_none = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=None)
-    assert int(po_sheet.iloc[0]["Gross_PO_Qty"]) == int(po_none.iloc[0]["Gross_PO_Qty"])
-    assert int(po_sheet.iloc[0]["PO_Qty"]) == int(po_none.iloc[0]["PO_Qty"])
+    assert int(po_sheet.iloc[0]["PO_Qty"]) == 0
+    assert "closed" in str(po_sheet.iloc[0]["PO_Block_Reason"]).lower()
     assert bool(po_sheet.iloc[0]["SKU_Sheet_Closed"]) is True
+    # Without a status sheet the same demand math may still suggest a PO.
+    assert int(po_none.iloc[0]["PO_Qty"]) >= int(po_sheet.iloc[0]["PO_Qty"])
 
 
 def test_single_size_minimum_zeros_gross_when_only_one_variant_needs_stock():
@@ -627,8 +629,8 @@ def test_po_zero_when_projected_cover_already_meets_target_cover():
     assert int(row["PO_Qty"]) == 0
 
 
-def test_sheet_without_positive_lead_matches_no_sheet_po():
-    """Status-only row (no numeric lead) keeps global lead_time → same PO as no upload."""
+def test_sheet_without_positive_lead_blocks_po_when_status_sheet_loaded():
+    """If a SKU status row has no resolvable lead, do not recommend PO using only the global default."""
     sales = _minimal_sales()
     inv = _minimal_inventory()
     sheet = pd.DataFrame(
@@ -641,7 +643,9 @@ def test_sheet_without_positive_lead_matches_no_sheet_po():
     )
     po_sheet = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=sheet)
     po_none = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=None)
-    assert int(po_sheet.iloc[0]["Gross_PO_Qty"]) == int(po_none.iloc[0]["Gross_PO_Qty"])
+    assert int(po_sheet.iloc[0]["PO_Qty"]) == 0
+    assert "lead" in str(po_sheet.iloc[0]["PO_Block_Reason"]).lower()
+    assert int(po_none.iloc[0]["PO_Qty"]) > 0
     assert float(po_sheet.iloc[0]["ADS"]) == float(po_none.iloc[0]["ADS"])
 
 

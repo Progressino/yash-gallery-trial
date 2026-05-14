@@ -187,6 +187,22 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             except Exception:
                 pass
 
+        # Same story for optional PO sheets: they are not rebuilt from SQLite Tier-1/2 data.
+        # Without restoring from warm cache, every new session shows "No sheet loaded" until
+        # the user re-uploads even though ``extend_history_with_sales`` already rolls forward
+        # from the baseline in memory on the shared cache.
+        try:
+            import backend.main as _main
+            if _main._warm_cache:
+                for key in ("daily_inventory_history_df", "sku_status_lead_df"):
+                    if getattr(sess, key, None) is not None and not getattr(sess, key).empty:
+                        continue
+                    val = _main._warm_cache.get(key)
+                    if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                        setattr(sess, key, val)
+        except Exception:
+            pass
+
         sess.daily_restored = True
 
 

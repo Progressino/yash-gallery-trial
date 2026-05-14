@@ -228,6 +228,14 @@ export default function POEngine() {
     })
   }, [syncTabFromUrl])
 
+  useEffect(() => {
+    void getCoverage()
+      .then(c => setCoverage(c))
+      .catch(() => {
+        /* ignore — polling elsewhere will retry */
+      })
+  }, [setCoverage])
+
   const selectTab = useCallback(
     (t: Tab) => {
       setActiveTab(t)
@@ -825,8 +833,8 @@ export default function POEngine() {
               <h4 className="text-sm font-semibold text-gray-700 mb-1">SKU status &amp; lead time (for PO)</h4>
               <p className="text-xs text-gray-500 mb-3">
                 Upload Excel/CSV with <strong>SKU</strong>, <strong>Status</strong>, and <strong>Lead time</strong> columns.
-                Status (including closed) is shown in the PO table for reference only; it does not change PO quantities.
-                A positive <strong>Lead time</strong> per SKU overrides the default lead above for that SKU&apos;s PO math only.
+                <strong> Closed</strong> SKUs (status text such as &quot;Closed SKU&quot;) get <strong>zero PO quantity</strong> — they are excluded from recommendations.
+                A positive <strong>Lead time</strong> per SKU (or a resolvable parent / style rollup from the sheet) overrides the default lead above; if the sheet is loaded but no lead can be resolved for a SKU, <strong>PO is blocked</strong> for that row so we do not silently fall back to the global default only.
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <input ref={skuFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e => void onSkuStatusFile(e.target.files)} />
@@ -860,7 +868,9 @@ export default function POEngine() {
               <p className="text-xs text-sky-800 bg-sky-50 border border-sky-200 rounded px-2 py-1 mb-3">
                 <strong>You only need to upload this once.</strong> Going forward, each daily sales upload auto-rolls
                 inventory forward (shipments reduce on-hand, refunds add it back). Re-upload only when you want a fresh
-                ground-truth baseline.
+                ground-truth baseline. The baseline is saved in the server warm cache (and in your cloud session when
+                enabled), so it should reappear after restart — if this line briefly shows &quot;No sheet&quot;, wait for
+                the app to finish loading data or open Upload → Load Cache, then refresh.
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <input

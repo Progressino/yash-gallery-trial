@@ -42,6 +42,7 @@ _PARQUET_KEYS = (
     "existing_po_df",
     "po_raise_ledger_df",
     "sku_status_lead_df",
+    "daily_inventory_history_df",
     "transfer_df",
     "cogs_df",
 )

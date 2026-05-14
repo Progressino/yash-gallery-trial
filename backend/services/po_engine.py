@@ -1023,6 +1023,11 @@ def calculate_po_base(
                 fill2 = pd.to_numeric(dig.map(lead_by_digit_token), errors="coerce")
                 use2 = bad & (fill2 > 0)
                 lt_vals = lt_vals.where(~use2, fill2)
+            # True when we resolved a positive lead from the status sheet (row, parent,
+            # prefix, or digit-token rollup). Used to block POs that would otherwise
+            # inherit only the global default ``lead_time`` while the sheet has no lead.
+            lt_num = pd.to_numeric(lt_vals, errors="coerce")
+            po_df["Lead_Time_From_Status_Sheet"] = (lt_num > 0) & lt_num.notna()
             repl = lt_vals.where(lt_vals > 0)
             po_df["Lead_Time_Days"] = (
                 pd.to_numeric(repl, errors="coerce")
@@ -1032,6 +1037,8 @@ def calculate_po_base(
                 .astype(int)
             )
             po_df.drop(columns=["Lead_Time_From_Sheet"], inplace=True, errors="ignore")
+        else:
+            po_df["Lead_Time_From_Status_Sheet"] = False
 
     po_df["Lead_Time_Days"] = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1, upper=730).astype(int)
 
@@ -1149,6 +1156,39 @@ def calculate_po_base(
             _RECOMMEND_MSG,
             br + "; " + _RECOMMEND_MSG,
         )
+
+    # SKU Status sheet rules (after every automated PO_Qty adjustment):
+    # • Rows marked CLOSED must never receive a fresh PO release.
+    # • When a status sheet IS loaded, a positive lead must have been resolvable
+    #   from that sheet (direct row, parent, prefix, or digit-token rollup) — not
+    #   merely the global default filled in for display math.
+    _closed = po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
+    _hot = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
+    _msg_closed = "SKU marked closed on status sheet"
+    _msg_nolead = "No lead time resolved from SKU status sheet for this SKU"
+    block_closed = _closed & _hot
+    if block_closed.any():
+        po_df.loc[block_closed, "PO_Qty"] = 0
+        po_df.loc[block_closed, "Gross_PO_Qty"] = 0
+        br = po_df.loc[block_closed, "PO_Block_Reason"].astype(str).str.strip()
+        po_df.loc[block_closed, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"),
+            _msg_closed,
+            br + "; " + _msg_closed,
+        )
+    if "Lead_Time_From_Status_Sheet" in po_df.columns:
+        _sheet_ok = po_df["Lead_Time_From_Status_Sheet"].fillna(False).astype(bool)
+        _hot2 = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
+        block_lt = (~_sheet_ok) & _hot2
+        if block_lt.any():
+            po_df.loc[block_lt, "PO_Qty"] = 0
+            po_df.loc[block_lt, "Gross_PO_Qty"] = 0
+            br = po_df.loc[block_lt, "PO_Block_Reason"].astype(str).str.strip()
+            po_df.loc[block_lt, "PO_Block_Reason"] = np.where(
+                br.eq("") | br.eq("nan"),
+                _msg_nolead,
+                br + "; " + _msg_nolead,
+            )
 
     inv_for_metrics = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
 
