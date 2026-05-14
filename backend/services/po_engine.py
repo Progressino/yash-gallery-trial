@@ -992,6 +992,12 @@ def calculate_po_base(
         po_df = po_df.merge(m, on="OMS_SKU", how="left")
         po_df["SKU_Sheet_Status"] = po_df["SKU_Sheet_Status"].fillna("").astype(str)
         po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"].fillna(False).astype(bool)
+        # Some exports carry closure only in free-text status while the bool column is wrong/stale.
+        try:
+            from .sku_status_lead import is_closed_sku_status
+        except Exception:  # pragma: no cover
+            is_closed_sku_status = lambda _x: False  # type: ignore[misc, assignment]
+        po_df["SKU_Sheet_Closed"] = po_df["SKU_Sheet_Closed"] | po_df["SKU_Sheet_Status"].map(is_closed_sku_status)
         if "Lead_Time_From_Sheet" in po_df.columns:
             lt_vals = pd.to_numeric(po_df["Lead_Time_From_Sheet"], errors="coerce")
             bad = lt_vals.isna() | (lt_vals <= 0)
@@ -1017,17 +1023,21 @@ def calculate_po_base(
                     use2 = bad & (fill_pfx > 0)
                     lt_vals = lt_vals.where(~use2, fill_pfx)
             bad = lt_vals.isna() | (lt_vals <= 0)
+            # Snapshot before digit-token fill: digit borrow can attach an unrelated style's
+            # factory lead to this SKU for *display* math, but it must not satisfy the
+            # "status sheet supplied a lead for this SKU" PO release gate.
+            lt_vals_for_gate = lt_vals.copy()
             if bad.any() and lead_by_digit_token:
                 pk2 = po_df["OMS_SKU"].astype(str).map(get_parent_sku)
                 dig = pk2.map(_style_digit_token)
                 fill2 = pd.to_numeric(dig.map(lead_by_digit_token), errors="coerce")
                 use2 = bad & (fill2 > 0)
                 lt_vals = lt_vals.where(~use2, fill2)
-            # True when we resolved a positive lead from the status sheet (row, parent,
-            # prefix, or digit-token rollup). Used to block POs that would otherwise
-            # inherit only the global default ``lead_time`` while the sheet has no lead.
+            # True when we resolved a positive lead from the status sheet via a direct row,
+            # parent rollup, or longest-prefix match — **not** digit-token inference alone.
+            lt_num_gate = pd.to_numeric(lt_vals_for_gate, errors="coerce")
+            po_df["Lead_Time_From_Status_Sheet"] = (lt_num_gate > 0) & lt_num_gate.notna()
             lt_num = pd.to_numeric(lt_vals, errors="coerce")
-            po_df["Lead_Time_From_Status_Sheet"] = (lt_num > 0) & lt_num.notna()
             repl = lt_vals.where(lt_vals > 0)
             po_df["Lead_Time_Days"] = (
                 pd.to_numeric(repl, errors="coerce")
@@ -1159,9 +1169,9 @@ def calculate_po_base(
 
     # SKU Status sheet rules (after every automated PO_Qty adjustment):
     # • Rows marked CLOSED must never receive a fresh PO release.
-    # • When a status sheet IS loaded, a positive lead must have been resolvable
-    #   from that sheet (direct row, parent, prefix, or digit-token rollup) — not
-    #   merely the global default filled in for display math.
+    # • When a status sheet IS loaded, a positive lead must have been resolvable from that
+    #   sheet (direct row, parent rollup, or longest-prefix match) — not merely the global
+    #   default, and not digit-token-only inference (which can borrow an unrelated style).
     _closed = po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
     _hot = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
     _msg_closed = "SKU marked closed on status sheet"

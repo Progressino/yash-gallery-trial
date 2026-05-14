@@ -396,6 +396,83 @@ def test_closed_sku_sheet_zeros_po_qty():
     assert int(po_none.iloc[0]["PO_Qty"]) >= int(po_sheet.iloc[0]["PO_Qty"])
 
 
+def test_digit_token_only_lead_does_not_enable_sheet_po_gate():
+    """Digit-token fill can set ``Lead_Time_Days`` but must not satisfy the sheet PO gate."""
+    sku = "FOOBAR4002BAZ-XL"
+    days = pd.date_range("2025-11-01", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": [sku] * 30,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 30,
+            "Quantity": [5] * 30,
+            "Units_Effective": [5] * 30,
+            "Source": ["Amazon"] * 30,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [0]})
+    # Sheet row shares the digit token ``4002`` but not parent/prefix alignment with ``sku``.
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["PREFIX-4002"],
+            "SKU_Sheet_Status": ["Open"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [55.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=120,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        sku_status_df=sheet,
+    )
+    row = po.loc[po["OMS_SKU"] == sku].iloc[0]
+    assert int(row["Lead_Time_Days"]) == 55
+    assert not bool(row["Lead_Time_From_Status_Sheet"])
+    assert int(row["PO_Qty"]) == 0
+    assert "no lead time resolved" in str(row["PO_Block_Reason"]).lower()
+
+
+def test_parse_sku_status_fuzzy_column_detects_status_without_header_name():
+    from backend.services.sku_status_lead import parse_sku_status_lead_dataframe
+
+    raw = pd.DataFrame(
+        {
+            "SKU": ["A-1", "B-1"],
+            "LeadTime": [10, 12],
+            "ColX": ["Open", "Closed SKU"],
+        }
+    )
+    out = parse_sku_status_lead_dataframe(raw, None)
+    assert bool(out.set_index("OMS_SKU").loc["B-1"]["SKU_Sheet_Closed"]) is True
+
+
+def test_merge_po_optional_sheets_into_warm_cache():
+    import backend.main as main_mod
+    from backend.session import AppSession
+
+    main_mod.clear_warm_cache()
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        {"OMS_SKU": ["Z-1"], "Date": [pd.Timestamp("2025-01-01")], "Qty": [3.0]}
+    )
+    sess.sku_status_lead_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["Z-1"],
+            "SKU_Sheet_Status": ["Open"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [10.0],
+        }
+    )
+    main_mod.merge_po_optional_sheets_into_warm_cache(sess)
+    assert not main_mod._warm_cache["daily_inventory_history_df"].empty
+    assert not main_mod._warm_cache["sku_status_lead_df"].empty
+
+
 def test_single_size_minimum_zeros_gross_when_only_one_variant_needs_stock():
     sales = _sales_two_sizes_same_parent()
     inv = pd.DataFrame(

@@ -4,14 +4,79 @@ POST /api/po/calculate  → run PO calculation, return table
 GET  /api/po/quarterly  → quarterly history pivot
 POST /api/po/sku-status-lead → upload SKU status & lead time (Excel/CSV) for PO rules
 """
-from io import BytesIO
+import csv
+import logging
+from datetime import datetime, timedelta
+from io import BytesIO, StringIO
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from pydantic import BaseModel
 
 router = APIRouter()
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _sync_po_sidecars_to_durable_storage(request: Request, sess) -> None:
+    """Mirror PO-only uploads into warm cache + PostgreSQL session bundle.
+
+    Without this, daily inventory / SKU status lived only in the current process
+    until a full cache save — new logins or ``/api/data/coverage`` looked empty
+    even though sales roll-forward was already implemented server-side.
+    """
+    try:
+        import backend.main as _main
+
+        _main.merge_po_optional_sheets_into_warm_cache(sess)
+    except Exception:
+        logging.getLogger(__name__).exception("merge_po_optional_sheets_into_warm_cache failed")
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
+    if not sid:
+        return
+    try:
+        from ..db.forecast_session_pg import persist_session_bundle
+
+        persist_session_bundle(sid, sess)
+    except Exception:
+        logging.getLogger(__name__).exception("PostgreSQL persist after PO sidecar upload failed")
+
+
+def _ledger_rows_for_date(ledger: pd.DataFrame, day: pd.Timestamp) -> pd.DataFrame:
+    """Drop all ledger rows on ``day`` (calendar-normalized) so a CSV re-import can replace that day."""
+    if ledger is None or getattr(ledger, "empty", True):
+        return pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+    d = pd.Timestamp(day).normalize()
+    ld = pd.to_datetime(ledger["Raised_Date"], errors="coerce").dt.normalize()
+    out = ledger[ld != d].copy()
+    if out.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+    return out.reset_index(drop=True)
+
+
+def _pick_csv_column(fieldnames: list, candidates: tuple[str, ...]) -> str | None:
+    if not fieldnames:
+        return None
+    norm_map = {}
+    for f in fieldnames:
+        if f is None:
+            continue
+        key = str(f).replace("\ufeff", "").strip().lower().replace(" ", "_")
+        norm_map[key] = f
+    for cand in candidates:
+        k = cand.strip().lower().replace(" ", "_")
+        if k in norm_map:
+            return norm_map[k]
+    for f in fieldnames:
+        if f is None:
+            continue
+        fl = str(f).replace("\ufeff", "").strip().lower()
+        for cand in candidates:
+            if cand.lower() in fl:
+                return f
+    return None
 
 
 class PORequest(BaseModel):
@@ -71,6 +136,7 @@ async def po_upload_sku_status_lead(request: Request, file: UploadFile = File(..
         return {"ok": False, "message": "No valid SKU rows found (need SKU and Lead time columns; Status is optional)."}
     sess.sku_status_lead_df = df
     sess._quarterly_cache.clear()
+    _sync_po_sidecars_to_durable_storage(request, sess)
     return {"ok": True, "rows": int(len(df)), "message": f"Loaded {len(df)} SKU rows (status + lead time) for PO."}
 
 
@@ -117,6 +183,7 @@ async def po_upload_daily_inventory_history(request: Request, file: UploadFile =
         }
     sess.daily_inventory_history_df = df
     sess._quarterly_cache.clear()
+    _sync_po_sidecars_to_durable_storage(request, sess)
     skus = int(df["OMS_SKU"].nunique())
     days = int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique())
     return {
@@ -274,6 +341,7 @@ def po_clear_daily_inventory_history(request: Request):
 
     sess.daily_inventory_history_df = _pd.DataFrame()
     sess._quarterly_cache.clear()
+    _sync_po_sidecars_to_durable_storage(request, sess)
     return {"ok": True, "message": "Daily inventory history cleared."}
 
 
@@ -328,6 +396,115 @@ def po_raise_confirm(request: Request, body: RaiseConfirmBody):
         "ok": True,
         "ledger_rows": n,
         "message": f"Recorded {len(body.rows)} SKU line(s); ledger now has {n} SKU-day row(s).",
+    }
+
+
+@router.post("/raise-ledger/import-csv")
+async def po_raise_ledger_import_csv(
+    request: Request,
+    file: UploadFile = File(...),
+    raised_date: str = Form(""),
+    group_by_parent: str = Form("false"),
+    replace_day: str = Form("true"),
+):
+    """Record quantities from a ``po_recommendation*.csv`` export into the raise ledger.
+
+    Use this when operators saved a PO CSV **without** clicking **Export & Confirm** in
+    the Raise PO modal (plain **Export CSV** does not write the ledger). After import,
+    run **Calculate PO** (or open the PO Dashboard tab) so ``PO_Raised_*`` / effective
+    pipeline columns refresh.
+    """
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    raw = await file.read()
+    if not raw:
+        return {"ok": False, "message": "Empty file."}
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+
+    reader = csv.DictReader(StringIO(text))
+    fieldnames = list(reader.fieldnames or [])
+    sku_col = _pick_csv_column(
+        fieldnames,
+        ("oms_sku", "sku", "oms sku", "item_sku", "item sku", "variant_sku"),
+    )
+    qty_col = _pick_csv_column(
+        fieldnames,
+        ("po_qty", "final_po_qty", "po qty", "net_po_qty", "recommended_po_qty"),
+    )
+    if not sku_col or not qty_col:
+        return {
+            "ok": False,
+            "message": f"Need OMS_SKU (or SKU) and PO_Qty columns. Found: {fieldnames[:40]}",
+        }
+
+    accum: dict[str, int] = {}
+    for row in reader:
+        sku = str(row.get(sku_col) or "").strip()
+        if not sku:
+            continue
+        qraw = row.get(qty_col)
+        try:
+            q = int(float(str(qraw).replace(",", "").strip() or 0))
+        except (TypeError, ValueError):
+            q = 0
+        if q <= 0:
+            continue
+        accum[sku] = accum.get(sku, 0) + q
+
+    if not accum:
+        return {"ok": False, "message": "No positive PO_Qty rows found in CSV."}
+
+    try:
+        if raised_date and str(raised_date).strip():
+            as_dt = pd.Timestamp(pd.to_datetime(str(raised_date).strip()).normalize())
+        else:
+            as_dt = pd.Timestamp((datetime.now(_IST) - timedelta(days=1)).date())
+    except Exception:
+        return {"ok": False, "message": "Invalid raised_date; use YYYY-MM-DD."}
+
+    rep = str(replace_day).strip().lower() in ("1", "true", "yes", "on")
+    gbp = str(group_by_parent).strip().lower() in ("1", "true", "yes", "on")
+
+    from ..services.po_raise_ledger import append_raise_confirm_rows
+
+    base = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
+    if rep:
+        base = _ledger_rows_for_date(base if base is not None else pd.DataFrame(), as_dt)
+    tuples = list(accum.items())
+    sess.po_raise_ledger_df = append_raise_confirm_rows(
+        base,
+        tuples,
+        as_dt,
+        sku_mapping=sess.sku_mapping or None,
+        group_by_parent=gbp,
+    )
+    sess._quarterly_cache.clear()
+
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
+    if sid:
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle
+
+            persist_session_bundle(sid, sess)
+        except Exception:
+            logging.getLogger(__name__).exception("PostgreSQL session persist after raise-ledger CSV import failed")
+
+    n = int(len(sess.po_raise_ledger_df))
+    tot_units = int(sum(accum.values()))
+    return {
+        "ok": True,
+        "ledger_rows": n,
+        "imported_skus": len(accum),
+        "total_units": tot_units,
+        "raised_date": str(as_dt.date()),
+        "message": (
+            f"Recorded {len(accum):,} SKU(s) / {tot_units:,} units for {as_dt.date()} "
+            f"— ledger now {n:,} SKU-day row(s). Run Calculate PO to refresh columns."
+        ),
     }
 
 
