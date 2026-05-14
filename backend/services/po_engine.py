@@ -429,7 +429,7 @@ def calculate_po_base(
     existing_po_df: Optional[pd.DataFrame] = None,
     sku_status_df: Optional[pd.DataFrame] = None,
     enforce_two_size_minimum: bool = False,
-    enforce_lead_time_release_gate: bool = False,
+    enforce_lead_time_release_gate: bool = False,  # deprecated: ignored (was wrongly vs lead not target)
     inventory_history_df: Optional[pd.DataFrame] = None,
     po_raise_ledger_df: Optional[pd.DataFrame] = None,
     planning_date: Optional[str] = None,
@@ -1107,28 +1107,10 @@ def calculate_po_base(
     po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
 
-    # Optional release gate: zero PO when projected cover already meets or
-    # exceeds lead time. Off by default — the formula above already
-    # self-zeroes when projection meets target cover, which is usually what
-    # ops wants. Flip on for stricter release control.
-    if enforce_lead_time_release_gate:
-        lt_gate = (
-            pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce")
-            .fillna(float(lead_time))
-            .clip(lower=1)
-        )
-        gate_block = (
-            pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
-        ) & (projected_days_now >= lt_gate)
-        if gate_block.any():
-            po_df.loc[gate_block, "PO_Qty"] = 0
-            br = po_df.loc[gate_block, "PO_Block_Reason"].astype(str).str.strip()
-            add = "Projected days already cover lead time"
-            po_df.loc[gate_block, "PO_Block_Reason"] = np.where(
-                br.eq("") | br.eq("nan"),
-                add,
-                br + "; " + add,
-            )
+    # ``enforce_lead_time_release_gate`` was removed: comparing projected cover
+    # to *lead time* incorrectly zeroed POs for SKUs that were still below
+    # *target* cover (e.g. 45d cover vs 90d target when lead=45d). The balance
+    # formula above already caps recommendations to ``target_days + grace``.
 
     # Two-size minimum rule. Only one size in a parent SKU having demand is
     # almost always a data / sizing-mix problem, not a real demand signal —

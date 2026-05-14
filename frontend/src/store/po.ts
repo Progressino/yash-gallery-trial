@@ -37,7 +37,6 @@ interface POParams {
   grace_days: number
   safety_pct: number
   enforce_two_size_minimum: boolean
-  enforce_lead_time_release_gate: boolean
 }
 
 interface POState {
@@ -81,7 +80,6 @@ export const usePOStore = create<POState>()(
     grace_days: 0,
     safety_pct: 0,
     enforce_two_size_minimum: true,
-    enforce_lead_time_release_gate: false,
   },
   result: null,
   quarterly: null,
@@ -107,6 +105,15 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
+      version: 2,
+      migrate: (persisted) => {
+        const p = persisted as { params?: Record<string, unknown> } | undefined
+        if (p?.params && typeof p.params === 'object') {
+          const { enforce_lead_time_release_gate: _, ...rest } = p.params
+          p.params = rest
+        }
+        return persisted as POState
+      },
       // Persist only user preferences/params; never persist large results or Sets.
       partialize: (s) => ({
         activeTab: s.activeTab,

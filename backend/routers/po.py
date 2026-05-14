@@ -91,9 +91,8 @@ class PORequest(BaseModel):
     grace_days:       int   = 0
     safety_pct:       float = 0.0
     enforce_two_size_minimum: bool = False
-    # Optional: zero PO when projected cover already meets or exceeds lead
-    # time. Default OFF — formula already self-zeroes when projection meets
-    # target cover. Ops can flip on if they want stricter release control.
+    # Deprecated — ignored by the engine. Was meant to block PO when projected
+    # cover ≥ lead time; that wrongly suppressed lines still below *target* cover.
     enforce_lead_time_release_gate: bool = False
     # Calendar day for PO raise-ledger "yesterday / today" columns (YYYY-MM-DD).
     # Defaults to server date if omitted; browser should send local date for daily PO.

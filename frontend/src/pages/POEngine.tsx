@@ -32,6 +32,7 @@ interface ParentGroup {
   totalInventory: number
   worstDaysLeft: number
   worstProjectedDays: number
+  worstPostPoCover: number
   totalSoldUnits: number
   totalADS: number
   totalGrossQty: number
@@ -143,6 +144,17 @@ interface ShipmentParams {
   cap_to_oms_inventory: boolean
 }
 
+/** Match backend ``(Total_Inventory + PO_Pipeline_Effective + PO_Qty) / ADS`` (1 dp). */
+function postPoCoverDays(row: PORow, finalPoQty: number): number {
+  const ads = Number(row['ADS'] ?? 0)
+  if (!Number.isFinite(ads) || ads <= 0) return 999
+  const inv = Number(row['Total_Inventory'] ?? 0)
+  const pipeEff = Number(row['PO_Pipeline_Effective'] ?? row['PO_Pipeline_Total'] ?? 0)
+  const q = Math.max(0, Math.floor(finalPoQty))
+  const v = (inv + pipeEff + q) / ads
+  return Math.round(v * 10) / 10
+}
+
 export default function POEngine() {
   const setCoverage = useSession(s => s.setCoverage)
   const skuStatusLoaded = useSession(s => s.sku_status_lead ?? false)
@@ -153,6 +165,7 @@ export default function POEngine() {
   const raiseLedgerRows = useSession(s => s.po_raise_ledger_rows ?? 0)
   const skuFileRef = useRef<HTMLInputElement>(null)
   const dailyInvFileRef = useRef<HTMLInputElement>(null)
+  const ledgerCsvRef = useRef<HTMLInputElement>(null)
   /** Bumps on each Calculate / quarterly load so stale async responses are ignored. */
   const poRunSeqRef = useRef(0)
   const [skuUploadBusy, setSkuUploadBusy] = useState(false)
@@ -261,6 +274,13 @@ export default function POEngine() {
   const [raiseConfirmBusy, setRaiseConfirmBusy] = useState(false)
   const [raiseConfirmErr, setRaiseConfirmErr] = useState<string | null>(null)
   const [clearLedgerBusy, setClearLedgerBusy] = useState(false)
+  const [ledgerImportBusy, setLedgerImportBusy] = useState(false)
+  const [ledgerImportMsg, setLedgerImportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const [ledgerImportDate, setLedgerImportDate] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 1)
+    return d.toISOString().slice(0, 10)
+  })
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
   const [shipment, setShipment] = useState<POResult | null>(null)
   const [shipSearch, setShipSearch] = useState('')
@@ -471,6 +491,41 @@ export default function POEngine() {
     }
   }
 
+  const onLedgerCsvImport = async (files: FileList | null) => {
+    const f = files?.[0]
+    if (!f) return
+    setLedgerImportBusy(true)
+    setLedgerImportMsg(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', f)
+      fd.append('raised_date', ledgerImportDate)
+      fd.append('group_by_parent', params.group_by_parent ? 'true' : 'false')
+      fd.append('replace_day', 'true')
+      const { data } = await api.post<{ ok?: boolean; message?: string }>(
+        '/po/raise-ledger/import-csv',
+        fd,
+        { timeout: 120_000 },
+      )
+      if (data?.ok) {
+        setLedgerImportMsg({ type: 'ok', text: data.message || 'Imported into raise ledger.' })
+        const c = await getCoverage()
+        setCoverage(c)
+        await run()
+      } else {
+        setLedgerImportMsg({ type: 'err', text: data?.message || 'Import failed.' })
+      }
+    } catch (e: unknown) {
+      setLedgerImportMsg({
+        type: 'err',
+        text: e instanceof Error ? e.message : 'Import failed.',
+      })
+    } finally {
+      setLedgerImportBusy(false)
+      if (ledgerCsvRef.current) ledgerCsvRef.current.value = ''
+    }
+  }
+
   const runShipment = async () => {
     setShipLoading(true)
     try {
@@ -642,6 +697,7 @@ export default function POEngine() {
         groupMap.set(parentSku, {
           parentSku, variants: [],
           worstPriority: '⚪ OK', totalInventory: 0, worstDaysLeft: 999, worstProjectedDays: 999,
+          worstPostPoCover: 999,
           totalSoldUnits: 0, totalADS: 0, totalGrossQty: 0,
           totalPOOrdered: 0, totalPendingCutting: 0, totalBalanceDispatch: 0,
           totalPipeline: 0, totalFinalQty: 0, quarterTotals: {}, avgMonthly: 0, worstStatus: '',
@@ -652,6 +708,7 @@ export default function POEngine() {
       g.totalInventory      += Number(row['Total_Inventory'] ?? 0)
       g.worstDaysLeft        = Math.min(g.worstDaysLeft, Number(row['Days_Left'] ?? 999))
       g.worstProjectedDays   = Math.min(g.worstProjectedDays, Number(row['Projected_Running_Days'] ?? 999))
+      g.worstPostPoCover     = Math.min(g.worstPostPoCover, postPoCoverDays(row, finalQty))
       g.totalSoldUnits      += Number(row['Sold_Units'] ?? 0)
       g.totalADS            += Number(row['ADS'] ?? 0)
       g.totalGrossQty       += Number(row['Gross_PO_Qty'] ?? 0)
@@ -821,11 +878,6 @@ export default function POEngine() {
                 label="Require ≥2 sizes to place PO"
                 checked={params.enforce_two_size_minimum}
                 onChange={v => setParams({ ...params, enforce_two_size_minimum: v })}
-              />
-              <Toggle
-                label="Block PO when projected cover ≥ lead time"
-                checked={params.enforce_lead_time_release_gate}
-                onChange={v => setParams({ ...params, enforce_lead_time_release_gate: v })}
               />
             </div>
 
@@ -1008,6 +1060,31 @@ export default function POEngine() {
                       🚀 Raise PO ({selected.size} SKU{selected.size > 1 ? 's' : ''}, {totalRaiseUnits.toLocaleString()} units)
                     </button>
                   )}
+                  <input
+                    ref={ledgerCsvRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={e => void onLedgerCsvImport(e.target.files)}
+                  />
+                  <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                    <span className="whitespace-nowrap">Raise date</span>
+                    <input
+                      type="date"
+                      value={ledgerImportDate}
+                      onChange={e => setLedgerImportDate(e.target.value)}
+                      className="border border-gray-300 rounded px-2 py-1 text-xs w-[9.5rem]"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={ledgerImportBusy}
+                    onClick={() => ledgerCsvRef.current?.click()}
+                    title="Record SKUs from a saved po_recommendation CSV. Plain Export CSV does not write the ledger; use this or Export & Confirm in Raise PO."
+                    className="text-xs px-3 py-1.5 rounded border border-sky-300 text-sky-800 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {ledgerImportBusy ? '…' : '📥 Import raises (CSV)'}
+                  </button>
                   <button
                     onClick={() => exportPOCsv(rows, editedQty, quarterCols, quarterMap)}
                     className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
@@ -1038,6 +1115,18 @@ export default function POEngine() {
                 </div>
               </div>
 
+              {ledgerImportMsg && (
+                <div
+                  className={`text-xs rounded-lg px-3 py-2 border ${
+                    ledgerImportMsg.type === 'ok'
+                      ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                      : 'bg-red-50 text-red-800 border-red-200'
+                  }`}
+                >
+                  {ledgerImportMsg.text}
+                </div>
+              )}
+
               {/* Diagnostic panel */}
               {debugInfo && (
                 <div className="text-xs bg-yellow-50 border border-yellow-200 rounded-lg p-3 font-mono overflow-auto max-h-64">
@@ -1055,8 +1144,9 @@ export default function POEngine() {
                 <span>
                   <strong className="text-blue-700">🏭 In Production</strong> = units already ordered (from your PO sheet). {' '}
                   <strong>Gross PO Qty</strong> − <strong>In Production</strong> = <strong className="text-orange-600">PO Qty</strong> (net new order). {' '}
-                  Edit <strong className="text-orange-600">PO Qty</strong> cells directly, then select SKUs and click <strong className="text-green-700">Raise PO</strong>.
-                  {' '}<strong className="text-sky-800">Raise ledger:</strong> {raiseLedgerRows.toLocaleString()} SKU-day row(s) on file — yesterday/today confirmed qty feeds <strong>eff. pipeline</strong> so the same SKU is not re-released at full strength every day.
+                  Edit <strong className="text-orange-600">PO Qty</strong> cells directly; <strong className="text-sky-800">Post-PO cover</strong> updates with your edited qty. Select SKUs and use <strong className="text-green-700">Raise PO</strong> → <strong>Export & Confirm</strong> to record raises in the ledger.
+                  {' '}Plain <strong>Export CSV</strong> does not — use <strong>Import raises (CSV)</strong> for an older file.{' '}
+                  <strong className="text-sky-800">Raise ledger:</strong> {raiseLedgerRows.toLocaleString()} SKU-day row(s) — confirmed qty feeds <strong>eff. pipeline</strong> and the PO Dashboard so SKUs are not double-released.
                 </span>
               </div>
 
@@ -1184,6 +1274,8 @@ export default function POEngine() {
                                               : <span className="text-gray-300">—</span>
                                           : col === 'Projected_Running_Days'
                                             ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
+                                          : col === 'Post_PO_Cover_Days_Capped'
+                                            ? <DaysLeftBadge days={postPoCoverDays(row, finalQty)} />
                                           : col === 'PO_Qty'
                                             ? <QtyInput
                                                 value={finalQty}
@@ -1370,6 +1462,8 @@ export default function POEngine() {
                                       : <span className="text-gray-300">—</span>
                                   : c === 'Projected_Running_Days'
                                     ? <DaysLeftBadge days={group.worstProjectedDays} />
+                                  : c === 'Post_PO_Cover_Days_Capped'
+                                    ? <DaysLeftBadge days={group.worstPostPoCover} />
                                   : c === 'PO_Qty'
                                     ? <span className={`font-bold text-base ${group.totalFinalQty > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
                                         {group.totalFinalQty.toLocaleString()}
@@ -1496,6 +1590,8 @@ export default function POEngine() {
                                       : <span className="text-gray-300">—</span>
                                   : col === 'Projected_Running_Days'
                                     ? <DaysLeftBadge days={Number(variant[col] ?? 999)} />
+                                  : col === 'Post_PO_Cover_Days_Capped'
+                                    ? <DaysLeftBadge days={postPoCoverDays(variant, finalQty)} />
                                   : col === 'PO_Qty'
                                     ? <QtyInput value={finalQty} computed={computedQty}
                                         onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
