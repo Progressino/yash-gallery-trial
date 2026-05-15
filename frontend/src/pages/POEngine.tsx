@@ -6,6 +6,7 @@ import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
+import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
 
 interface PORow {
   OMS_SKU: string
@@ -487,15 +488,19 @@ export default function POEngine() {
     }
   }
 
-  const onLedgerCsvImport = async (files: FileList | null) => {
-    const f = files?.[0]
-    if (!f) return
+  const importLedgerCsvFile = async (file: File, raisedDate: string) => {
     setLedgerImportBusy(true)
     setLedgerImportMsg(null)
     try {
+      if (!looksLikePoExportCsv(file.name)) {
+        const ok = window.confirm(
+          `"${file.name}" does not look like a PO export CSV (expected e.g. po_recommendation.csv). Import anyway?`,
+        )
+        if (!ok) return
+      }
       const fd = new FormData()
-      fd.append('file', f)
-      fd.append('raised_date', ledgerImportDate)
+      fd.append('file', file)
+      fd.append('raised_date', raisedDate)
       fd.append('group_by_parent', params.group_by_parent ? 'true' : 'false')
       fd.append('replace_day', 'true')
       const { data } = await api.post<{ ok?: boolean; message?: string }>(
@@ -522,6 +527,35 @@ export default function POEngine() {
     } finally {
       setLedgerImportBusy(false)
       if (ledgerCsvRef.current) ledgerCsvRef.current.value = ''
+    }
+  }
+
+  const onLedgerCsvImport = async (files: FileList | null) => {
+    const f = files?.[0]
+    if (!f) return
+    await importLedgerCsvFile(f, ledgerImportDate)
+  }
+
+  /** Opens Downloads (Chrome/Edge) or file picker with raise date = yesterday (IST). */
+  const importYesterdayExportFromDownloads = async () => {
+    const yday = yesterdayIST()
+    setLedgerImportDate(yday)
+    try {
+      const picked = await pickPoExportCsvFromDownloads()
+      if (picked) {
+        await importLedgerCsvFile(picked, yday)
+        return
+      }
+      setLedgerImportMsg({
+        type: 'ok',
+        text: `Raise date set to ${yday}. Choose yesterday's po_recommendation.csv (usually in Downloads).`,
+      })
+      ledgerCsvRef.current?.click()
+    } catch (e: unknown) {
+      setLedgerImportMsg({
+        type: 'err',
+        text: e instanceof Error ? e.message : 'Could not open file picker.',
+      })
     }
   }
 
@@ -1113,6 +1147,15 @@ export default function POEngine() {
                   <button
                     type="button"
                     disabled={ledgerImportBusy}
+                    onClick={() => void importYesterdayExportFromDownloads()}
+                    title="Sets raise date to yesterday (IST), opens your Downloads folder when the browser allows, then imports po_recommendation.csv into the raise ledger and recalculates PO."
+                    className="text-xs px-3 py-1.5 rounded border border-violet-400 bg-violet-50 text-violet-900 font-semibold hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {ledgerImportBusy ? '…' : `📂 Import yesterday (${yesterdayIST()})`}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={ledgerImportBusy}
                     onClick={() => ledgerCsvRef.current?.click()}
                     title="Record SKUs from a saved po_recommendation CSV. Plain Export CSV does not write the ledger; use this or Export & Confirm in Raise PO."
                     className="text-xs px-3 py-1.5 rounded border border-sky-300 text-sky-800 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1187,8 +1230,9 @@ export default function POEngine() {
               {result?.ok && raiseLedgerRows === 0 && (
                 <p className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-lg px-4 py-2">
                   <strong>Raise ledger is empty.</strong> Yesterday&apos;s raises are not applied until you use{' '}
-                  <strong>Export &amp; Confirm</strong> in Raise PO, or <strong>Import raises (CSV)</strong> with raise date{' '}
-                  <strong>{ledgerImportDate}</strong>. Plain Export CSV does not update the ledger.
+                  <strong>Export &amp; Confirm</strong> in Raise PO, or{' '}
+                  <strong>Import yesterday ({yesterdayIST()})</strong> to pick{' '}
+                  <code className="text-[11px]">po_recommendation.csv</code> from Downloads. Plain Export CSV alone does not update the ledger.
                 </p>
               )}
 
