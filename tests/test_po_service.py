@@ -2019,6 +2019,36 @@ def test_po_raise_archive_auto_import_on_calculate_day(tmp_path, monkeypatch):
     assert again is None
 
 
+def test_summarize_raise_ledger_for_dashboard():
+    from backend.services.po_raise_ledger import summarize_raise_ledger_for_dashboard
+
+    ledger = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A", "SKU-B", "SKU-A"],
+            "Raised_Qty": [10, 5, 3],
+            "Raised_Date": [
+                pd.Timestamp("2026-05-14"),
+                pd.Timestamp("2026-05-14"),
+                pd.Timestamp("2026-05-13"),
+            ],
+        }
+    )
+    out = summarize_raise_ledger_for_dashboard(
+        ledger, lookback_days=30, planning_date="2026-05-15", max_skus_per_day=100
+    )
+    assert out["ledger_loaded"] is True
+    assert out["total_units"] == 18
+    assert out["total_skus"] == 2
+    daily = {d["raised_date"]: d for d in out["daily_totals"]}
+    assert daily["2026-05-14"]["sku_count"] == 2
+    assert daily["2026-05-14"]["total_units"] == 15
+    assert daily["2026-05-13"]["total_units"] == 3
+    assert "2026-05-14" in out["by_day"]
+    assert len(out["by_day"]["2026-05-14"]) == 2
+    assert out["active_by_sku"][0]["oms_sku"] == "SKU-A"
+    assert out["active_by_sku"][0]["qty"] == 13
+
+
 def test_merge_po_optional_sheets_includes_raise_ledger():
     """Raise ledger must land in warm cache so new sessions inherit yesterday's raises."""
     import backend.main as main_mod

@@ -134,3 +134,109 @@ def aggregate_raise_ledger_for_po(
     out = pipe.merge(yest, on="OMS_SKU", how="left").merge(tod, on="OMS_SKU", how="left")
     out[["PO_Raised_Yesterday", "PO_Raised_Today"]] = out[["PO_Raised_Yesterday", "PO_Raised_Today"]].fillna(0).astype(int)
     return out
+
+
+def summarize_raise_ledger_for_dashboard(
+    ledger_df: Optional[pd.DataFrame],
+    *,
+    lookback_days: int = 30,
+    planning_date: Optional[str] = None,
+    max_skus_per_day: int = 500,
+) -> dict:
+    """
+    Daily totals + per-day SKU lines for the PO Dashboard raise-history panel.
+    """
+    empty = {
+        "ledger_loaded": False,
+        "daily_totals": [],
+        "by_day": {},
+        "active_by_sku": [],
+        "total_skus": 0,
+        "total_units": 0,
+        "lookback_days": int(lookback_days),
+        "planning_date": None,
+    }
+    if ledger_df is None or ledger_df.empty:
+        return empty
+
+    need = {"OMS_SKU", "Raised_Qty", "Raised_Date"}
+    if not need.issubset({str(c).strip() for c in ledger_df.columns}):
+        return empty
+
+    df = ledger_df.copy()
+    df["OMS_SKU"] = df["OMS_SKU"].astype(str).str.strip()
+    df["Raised_Date"] = _norm_date_series(df["Raised_Date"])
+    df["Raised_Qty"] = pd.to_numeric(df["Raised_Qty"], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["Raised_Date"])
+    df = df[(df["OMS_SKU"].str.len() > 0) & (df["Raised_Qty"] > 0)]
+    if df.empty:
+        return empty
+
+    try:
+        as_of = (
+            pd.Timestamp(pd.to_datetime(planning_date).normalize())
+            if planning_date and str(planning_date).strip()
+            else pd.Timestamp.now().normalize()
+        )
+    except Exception:
+        as_of = pd.Timestamp.now().normalize()
+
+    lb = max(1, int(lookback_days))
+    window_start = as_of - timedelta(days=lb - 1)
+    win = df[(df["Raised_Date"] >= window_start) & (df["Raised_Date"] <= as_of)].copy()
+    if win.empty:
+        out = dict(empty)
+        out["ledger_loaded"] = True
+        out["planning_date"] = str(as_of.date())
+        return out
+
+    cap = int(max(10, min(2000, max_skus_per_day)))
+
+    daily_grp = (
+        win.groupby("Raised_Date", as_index=False)
+        .agg(sku_count=("OMS_SKU", "nunique"), total_units=("Raised_Qty", "sum"))
+        .sort_values("Raised_Date", ascending=False)
+    )
+    daily_totals = [
+        {
+            "raised_date": str(pd.Timestamp(r["Raised_Date"]).date()),
+            "sku_count": int(r["sku_count"]),
+            "total_units": int(r["total_units"]),
+        }
+        for _, r in daily_grp.iterrows()
+    ]
+
+    by_day: dict[str, list] = {}
+    for day_val, sub in win.groupby("Raised_Date"):
+        day_str = str(pd.Timestamp(day_val).date())
+        sub = sub.sort_values(["Raised_Qty", "OMS_SKU"], ascending=[False, True]).head(cap)
+        by_day[day_str] = [
+            {"oms_sku": str(r["OMS_SKU"]), "raised_qty": int(r["Raised_Qty"])}
+            for _, r in sub.iterrows()
+        ]
+
+    active = (
+        win.groupby("OMS_SKU", as_index=False)
+        .agg(raised_qty=("Raised_Qty", "sum"), last_raised_date=("Raised_Date", "max"))
+        .sort_values("raised_qty", ascending=False)
+        .head(cap)
+    )
+    active_by_sku = [
+        {
+            "oms_sku": str(r["OMS_SKU"]),
+            "qty": int(r["raised_qty"]),
+            "last_raised_date": str(pd.Timestamp(r["last_raised_date"]).date()),
+        }
+        for _, r in active.iterrows()
+    ]
+
+    return {
+        "ledger_loaded": True,
+        "daily_totals": daily_totals,
+        "by_day": by_day,
+        "active_by_sku": active_by_sku,
+        "total_skus": int(win["OMS_SKU"].nunique()),
+        "total_units": int(win["Raised_Qty"].sum()),
+        "lookback_days": lb,
+        "planning_date": str(as_of.date()),
+    }

@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { usePOStore } from '../store/po'
 import { PageLoadingStripe } from './LoadingProgressBar'
+import { RaiseLedgerDailyHistory, type RaiseLedgerSummary } from './RaiseLedgerDailyHistory'
 import { calendarDateIST } from '../lib/dates'
 
 /** Full PO-engine run; nginx `/api` allows up to 900s — keep client in sync so axios does not abort first. */
@@ -23,6 +24,9 @@ interface DashboardPayload {
   raised_ledger_active?: { oms_sku: string; qty: number; last_raised_date?: string }[]
   raised_ledger_skus?: number
   raised_ledger_units?: number
+  raised_ledger_summary?: RaiseLedgerSummary
+  raised_ledger_daily?: RaiseLedgerSummary['daily_totals']
+  raised_ledger_by_day?: RaiseLedgerSummary['by_day']
 }
 
 function SectionTable({
@@ -99,6 +103,40 @@ export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
     max_rows_per_section: 80,
   })
   const [data, setData] = useState<DashboardPayload | null>(null)
+  const queryClient = useQueryClient()
+
+  const ledgerQ = useQuery({
+    queryKey: ['po-raise-ledger-summary', calendarDateIST()],
+    queryFn: async () => {
+      const { data } = await api.get<{ ok: boolean } & RaiseLedgerSummary>('/po/raise-ledger/summary', {
+        params: {
+          lookback_days: 30,
+          planning_date: calendarDateIST(),
+          max_skus_per_day: 500,
+        },
+      })
+      return data
+    },
+    staleTime: 60_000,
+  })
+
+  const ledgerSummary = useMemo((): RaiseLedgerSummary | null => {
+    if (data?.ok && data.raised_ledger_summary) return data.raised_ledger_summary
+    if (data?.ok && (data.raised_ledger_daily?.length ?? 0) > 0) {
+      return {
+        ledger_loaded: true,
+        daily_totals: data.raised_ledger_daily,
+        by_day: data.raised_ledger_by_day,
+        total_skus: data.raised_ledger_skus,
+        total_units: data.raised_ledger_units,
+        planning_date: calendarDateIST(),
+      }
+    }
+    const q = ledgerQ.data
+    if (!q?.ok) return null
+    const { ok: _ok, ...rest } = q
+    return rest
+  }, [data, ledgerQ.data])
 
   const mut = useMutation({
     mutationFn: async () => {
@@ -115,7 +153,10 @@ export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
       )
       return data
     },
-    onSuccess: d => setData(d),
+    onSuccess: d => {
+      setData(d)
+      if (d.ok) void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-summary'] })
+    },
   })
 
   // useMutation's `mutate` is referentially stable in v5; depending on the whole
@@ -179,6 +220,16 @@ export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
           </button>
         </div>
       </div>
+
+      <RaiseLedgerDailyHistory summary={ledgerSummary} />
+      {ledgerQ.isFetching && !ledgerSummary?.ledger_loaded ? (
+        <p className="text-xs text-gray-500 -mt-4">Loading raise history…</p>
+      ) : null}
+      {ledgerQ.isError ? (
+        <p className="text-xs text-rose-600 -mt-4">
+          Could not load raise history (dashboard tables still work after you load).
+        </p>
+      ) : null}
 
       <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50/80 p-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
         <label className="flex flex-col gap-1">
@@ -333,22 +384,6 @@ export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
         </div>
       )}
 
-      {data?.ok && (data.raised_ledger_active?.length ?? 0) > 0 && (
-        <section className="rounded-xl border border-sky-200 bg-sky-50/50 p-4">
-          <h3 className="text-sm font-bold text-sky-900">Active raised PO ledger (app)</h3>
-          <p className="text-xs text-sky-800 mt-1 mb-3">
-            {data.raised_ledger_skus} SKUs · {data.raised_ledger_units?.toLocaleString()} units — cleared automatically after
-            lead time or from PO Engine / API.
-          </p>
-          <ul className="text-xs grid sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-40 overflow-y-auto">
-            {(data.raised_ledger_active ?? []).map((r, i) => (
-              <li key={i} className="font-mono bg-white/80 rounded px-2 py-1 border border-sky-100">
-                {r.oms_sku} · {r.qty} · {r.last_raised_date ?? ''}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
     </div>
   )
 }

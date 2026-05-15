@@ -462,6 +462,29 @@ async def po_raise_ledger_import_csv(
     return out
 
 
+@router.get("/raise-ledger/summary")
+def po_raise_ledger_summary(
+    request: Request,
+    lookback_days: int = 30,
+    planning_date: str = "",
+    max_skus_per_day: int = 500,
+):
+    """Daily raise totals + per-day SKU lines (lightweight — no full PO engine run)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    from ..services.po_raise_ledger import summarize_raise_ledger_for_dashboard
+
+    _ledger = getattr(sess, "po_raise_ledger_df", None)
+    summary = summarize_raise_ledger_for_dashboard(
+        _ledger,
+        lookback_days=lookback_days,
+        planning_date=planning_date or None,
+        max_skus_per_day=max_skus_per_day,
+    )
+    return {"ok": True, **summary}
+
+
 @router.get("/raise-ledger")
 def po_get_raise_ledger(request: Request):
     sess = request.state.session
@@ -570,35 +593,20 @@ def po_dashboard(request: Request, body: PODashboardRequest):
         lead_time_default=body.lead_time,
     )
 
-    # Active raise-ledger summary (same source as the engine's "Raised_Recently_*" merge).
-    raised_active: list = []
-    raised_skus = 0
-    raised_units = 0
-    if _ledger is not None and not _ledger.empty:
-        try:
-            df = _ledger.copy()
-            df["OMS_SKU"] = df.get("OMS_SKU", "").astype(str)
-            df["qty"] = pd.to_numeric(df.get("qty", 0), errors="coerce").fillna(0).astype(int)
-            df = df[df["qty"] > 0]
-            if "raised_date" in df.columns:
-                df["raised_date"] = df["raised_date"].astype(str)
-                grp = (
-                    df.groupby("OMS_SKU", as_index=False)
-                      .agg(qty=("qty", "sum"), last_raised_date=("raised_date", "max"))
-                )
-            else:
-                grp = df.groupby("OMS_SKU", as_index=False).agg(qty=("qty", "sum"))
-                grp["last_raised_date"] = ""
-            grp = grp.sort_values("qty", ascending=False).head(int(max(10, min(500, body.max_rows_per_section))))
-            raised_active = grp.to_dict("records")
-            raised_skus = int(grp["OMS_SKU"].nunique())
-            raised_units = int(grp["qty"].sum())
-        except Exception:
-            raised_active, raised_skus, raised_units = [], 0, 0
+    from ..services.po_raise_ledger import summarize_raise_ledger_for_dashboard
 
-    payload["raised_ledger_active"] = raised_active
-    payload["raised_ledger_skus"] = raised_skus
-    payload["raised_ledger_units"] = raised_units
+    ledger_summary = summarize_raise_ledger_for_dashboard(
+        _ledger,
+        lookback_days=max(body.raise_ledger_lookback_days, 30),
+        planning_date=body.planning_date,
+        max_skus_per_day=body.max_rows_per_section,
+    )
+    payload["raised_ledger_summary"] = ledger_summary
+    payload["raised_ledger_active"] = ledger_summary.get("active_by_sku") or []
+    payload["raised_ledger_skus"] = ledger_summary.get("total_skus", 0)
+    payload["raised_ledger_units"] = ledger_summary.get("total_units", 0)
+    payload["raised_ledger_daily"] = ledger_summary.get("daily_totals") or []
+    payload["raised_ledger_by_day"] = ledger_summary.get("by_day") or {}
     return payload
 
 
