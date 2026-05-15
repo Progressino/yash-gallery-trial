@@ -400,6 +400,20 @@ async def po_raise_ledger_archive_export(
     }
 
 
+@router.post("/raise-ledger/import-file")
+async def po_raise_ledger_import_file(
+    request: Request,
+    file: UploadFile = File(...),
+    raised_date: str = Form(""),
+    group_by_parent: str = Form("false"),
+    replace_day: str = Form("true"),
+):
+    """Same as import-csv but accepts Excel (.xlsx) PO recommendation exports."""
+    return await po_raise_ledger_import_csv(
+        request, file, raised_date, group_by_parent, replace_day
+    )
+
+
 @router.post("/raise-ledger/import-csv")
 async def po_raise_ledger_import_csv(
     request: Request,
@@ -415,8 +429,7 @@ async def po_raise_ledger_import_csv(
     run **Calculate PO** (or open the PO Dashboard tab) so ``PO_Raised_*`` / effective
     pipeline columns refresh.
     """
-    from ..services.po_raise_archive import decode_csv_bytes
-    from ..services.po_raise_import import apply_ledger_import, parse_ledger_csv_text
+    from ..services.po_raise_import import apply_ledger_import, parse_ledger_upload_bytes
 
     sess = request.state.session
     if sess is None:
@@ -424,8 +437,7 @@ async def po_raise_ledger_import_csv(
     raw = await file.read()
     if not raw:
         return {"ok": False, "message": "Empty file."}
-    text = decode_csv_bytes(raw)
-    accum, err = parse_ledger_csv_text(text)
+    accum, err = parse_ledger_upload_bytes(raw, file.filename or "")
     if err:
         return {"ok": False, "message": err}
 

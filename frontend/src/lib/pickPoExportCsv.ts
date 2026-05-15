@@ -51,5 +51,6 @@ export async function pickPoExportCsvFromDownloads(): Promise<File | null> {
 
 export function looksLikePoExportCsv(name: string): boolean {
   const n = name.toLowerCase()
-  return n.endsWith('.csv') && (n.includes('po') || n.includes('recommendation') || n.includes('raise'))
+  const ok_ext = n.endsWith('.csv') || n.endsWith('.xlsx') || n.endsWith('.xls')
+  return ok_ext && (n.includes('po') || n.includes('recommendation') || n.includes('raise') || n.includes('requ'))
 }

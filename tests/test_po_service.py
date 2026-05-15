@@ -1963,6 +1963,29 @@ def test_po_raise_ledger_feeds_effective_pipeline_and_drops_repeat_po():
     assert int(row["PO_Qty"]) < qty_first
 
 
+def test_parse_ledger_excel_export():
+    import io
+
+    from backend.services.po_raise_import import parse_ledger_dataframe, parse_ledger_upload_bytes
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A", "SKU-B"],
+            "PO_Qty": [10, 25],
+            "Gross_PO_Qty": [10, 25],
+        }
+    )
+    accum, err = parse_ledger_dataframe(df)
+    assert err is None
+    assert accum == {"SKU-A": 10, "SKU-B": 25}
+
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    accum2, err2 = parse_ledger_upload_bytes(buf.getvalue(), "po_recommendation.xlsx")
+    assert err2 is None
+    assert accum2 == accum
+
+
 def test_po_raise_archive_auto_import_on_calculate_day(tmp_path, monkeypatch):
     """Archived export for yesterday is pulled into the ledger automatically."""
     import backend.services.po_raise_archive as arch

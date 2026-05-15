@@ -510,7 +510,7 @@ export default function POEngine() {
       fd.append('group_by_parent', params.group_by_parent ? 'true' : 'false')
       fd.append('replace_day', 'true')
       const { data } = await api.post<{ ok?: boolean; message?: string }>(
-        '/po/raise-ledger/import-csv',
+        '/po/raise-ledger/import-file',
         fd,
         {
           timeout: 120_000,
@@ -1137,7 +1137,7 @@ export default function POEngine() {
                   <input
                     ref={ledgerCsvRef}
                     type="file"
-                    accept=".csv,text/csv"
+                    accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     className="hidden"
                     onChange={e => void onLedgerCsvImport(e.target.files)}
                   />
@@ -1163,10 +1163,10 @@ export default function POEngine() {
                     type="button"
                     disabled={ledgerImportBusy}
                     onClick={() => ledgerCsvRef.current?.click()}
-                    title="Record SKUs from a saved po_recommendation CSV. Plain Export CSV does not write the ledger; use this or Export & Confirm in Raise PO."
+                    title="Record SKUs from a saved PO export (CSV or Excel). Plain Export CSV does not write the ledger; use this or Export & Confirm in Raise PO."
                     className="text-xs px-3 py-1.5 rounded border border-sky-300 text-sky-800 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {ledgerImportBusy ? '…' : '📥 Import raises (CSV)'}
+                    {ledgerImportBusy ? '…' : '📥 Import raises (CSV / Excel)'}
                   </button>
                   <button
                     onClick={() => exportPOCsv(rows, editedQty, quarterCols, quarterMap)}
@@ -1235,9 +1235,10 @@ export default function POEngine() {
 
               {result?.ok && raiseLedgerRows === 0 && (
                 <p className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-lg px-4 py-2">
-                  <strong>Raise ledger is empty.</strong> Use <strong>Export &amp; Confirm</strong> in Raise PO (best), or{' '}
-                  <strong>Export CSV</strong> once — the server archives it and <strong>Calculate PO</strong> auto-imports
-                  yesterday&apos;s archive the next day. Manual: <strong>Import yesterday ({yesterdayIST()})</strong>.
+                  <strong>Raise ledger is empty.</strong> Import yesterday&apos;s PO file (e.g.{' '}
+                  <strong>Po Requirement 14-May-26.xlsx</strong>) via{' '}
+                  <strong>Import raises (CSV / Excel)</strong> with raise date <strong>{yesterdayIST()}</strong>, then{' '}
+                  <strong>Calculate PO</strong>. Or use <strong>Export &amp; Confirm</strong> when raising in-app.
                 </p>
               )}
 

@@ -1,8 +1,8 @@
-"""Parse PO recommendation CSV exports into raise-ledger rows."""
+"""Parse PO recommendation CSV / Excel exports into raise-ledger rows."""
 from __future__ import annotations
 
 import csv
-from io import StringIO
+from io import BytesIO, StringIO
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
@@ -33,26 +33,58 @@ def pick_csv_column(fieldnames: list, candidates: tuple[str, ...]) -> str | None
     return None
 
 
+_SKU_CANDS = ("oms_sku", "sku", "oms sku", "item_sku", "item sku", "variant_sku")
+_QTY_CANDS = (
+    "po_qty",
+    "final_po_qty",
+    "gross_po_qty",
+    "po qty",
+    "net_po_qty",
+    "recommended_po_qty",
+    "raised_qty",
+    "confirmed_qty",
+)
+
+
+def _accum_from_columns(df: pd.DataFrame, sku_col: str, qty_col: str) -> Dict[str, int]:
+    accum: dict[str, int] = {}
+    for _, row in df.iterrows():
+        sku = str(row.get(sku_col) or "").strip()
+        if not sku or sku.lower() in ("nan", "none"):
+            continue
+        try:
+            q = int(float(pd.to_numeric(row.get(qty_col), errors="coerce") or 0))
+        except (TypeError, ValueError):
+            q = 0
+        if q <= 0:
+            continue
+        accum[sku] = accum.get(sku, 0) + q
+    return accum
+
+
+def parse_ledger_dataframe(df: pd.DataFrame) -> Tuple[Dict[str, int], Optional[str]]:
+    """Return SKU→qty map from a PO recommendation table (CSV or Excel)."""
+    if df is None or df.empty:
+        return {}, "No rows in file."
+    work = df.copy()
+    work.columns = [str(c).strip() for c in work.columns]
+    fieldnames = list(work.columns)
+    sku_col = pick_csv_column(fieldnames, _SKU_CANDS)
+    qty_col = pick_csv_column(fieldnames, _QTY_CANDS)
+    if not sku_col or not qty_col:
+        return {}, f"Need OMS_SKU (or SKU) and PO_Qty columns. Found: {fieldnames[:40]}"
+    accum = _accum_from_columns(work, sku_col, qty_col)
+    if not accum:
+        return {}, "No positive PO_Qty rows found (check PO_Qty / Final_PO_Qty column)."
+    return accum, None
+
+
 def parse_ledger_csv_text(text: str) -> Tuple[Dict[str, int], Optional[str]]:
     """Return SKU→qty map or error message."""
     reader = csv.DictReader(StringIO(text))
     fieldnames = list(reader.fieldnames or [])
-    sku_col = pick_csv_column(
-        fieldnames,
-        ("oms_sku", "sku", "oms sku", "item_sku", "item sku", "variant_sku"),
-    )
-    qty_col = pick_csv_column(
-        fieldnames,
-        (
-            "po_qty",
-            "final_po_qty",
-            "po qty",
-            "net_po_qty",
-            "recommended_po_qty",
-            "raised_qty",
-            "confirmed_qty",
-        ),
-    )
+    sku_col = pick_csv_column(fieldnames, _SKU_CANDS)
+    qty_col = pick_csv_column(fieldnames, _QTY_CANDS)
     if not sku_col or not qty_col:
         return {}, f"Need OMS_SKU (or SKU) and PO_Qty columns. Found: {fieldnames[:40]}"
 
@@ -73,6 +105,22 @@ def parse_ledger_csv_text(text: str) -> Tuple[Dict[str, int], Optional[str]]:
     if not accum:
         return {}, "No positive PO_Qty rows found in CSV."
     return accum, None
+
+
+def parse_ledger_upload_bytes(raw: bytes, filename: str = "") -> Tuple[Dict[str, int], Optional[str]]:
+    """Parse CSV or Excel (.xlsx / .xls) PO recommendation export."""
+    name = (filename or "").lower()
+    if name.endswith((".xlsx", ".xls", ".xlsm")):
+        try:
+            df = pd.read_excel(BytesIO(raw))
+        except Exception as e:
+            return {}, f"Excel parse error: {e}"
+        return parse_ledger_dataframe(df)
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    return parse_ledger_csv_text(text)
 
 
 def ledger_rows_for_date(ledger: pd.DataFrame, day: pd.Timestamp) -> pd.DataFrame:
