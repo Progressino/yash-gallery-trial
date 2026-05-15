@@ -6,6 +6,7 @@ import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
+import { archivePoExportOnServer } from '../lib/archivePoExport'
 import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
 
 interface PORow {
@@ -57,6 +58,7 @@ interface POResult {
   sales_through?: string
   planning_date?: string
   raise_ledger_rows?: number
+  ledger_auto_import?: string | null
 }
 interface PORiskRow extends PORow {
   risk_reasons: string
@@ -425,6 +427,10 @@ export default function POEngine() {
       }
     } finally {
       if (seq === poRunSeqRef.current) setLoading(false)
+    }
+
+    if (seq === poRunSeqRef.current && poRes?.ledger_auto_import) {
+      setLedgerImportMsg({ type: 'ok', text: poRes.ledger_auto_import })
     }
 
     if (seq !== poRunSeqRef.current || !poRes?.ok) return
@@ -1229,10 +1235,9 @@ export default function POEngine() {
 
               {result?.ok && raiseLedgerRows === 0 && (
                 <p className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-lg px-4 py-2">
-                  <strong>Raise ledger is empty.</strong> Yesterday&apos;s raises are not applied until you use{' '}
-                  <strong>Export &amp; Confirm</strong> in Raise PO, or{' '}
-                  <strong>Import yesterday ({yesterdayIST()})</strong> to pick{' '}
-                  <code className="text-[11px]">po_recommendation.csv</code> from Downloads. Plain Export CSV alone does not update the ledger.
+                  <strong>Raise ledger is empty.</strong> Use <strong>Export &amp; Confirm</strong> in Raise PO (best), or{' '}
+                  <strong>Export CSV</strong> once — the server archives it and <strong>Calculate PO</strong> auto-imports
+                  yesterday&apos;s archive the next day. Manual: <strong>Import yesterday ({yesterdayIST()})</strong>.
                 </p>
               )}
 
@@ -2366,14 +2371,19 @@ function exportPOCsv(
       return JSON.stringify(r[c] ?? '')
     }).join(',')
   }).join('\n')
-  trigger(header + '\n' + body, 'po_recommendation.csv')
+  const csv = header + '\n' + body
+  trigger(csv, 'po_recommendation.csv')
+  void archivePoExportOnServer(csv, calendarDateIST())
 }
 
 function exportRaisePO(rows: Array<PORow & { Final_PO_Qty: number }>) {
   const cols  = ['OMS_SKU', 'Priority', 'Days_Left', 'ADS', 'Gross_PO_Qty', 'PO_Pipeline_Total', 'Final_PO_Qty']
   const header = cols.join(',')
   const body = rows.map(r => cols.map(c => JSON.stringify(r[c as keyof typeof r] ?? '')).join(',')).join('\n')
-  trigger(header + '\n' + body, 'raise_po_' + new Date().toISOString().slice(0, 10) + '.csv')
+  const csv = header + '\n' + body
+  const fname = 'raise_po_' + calendarDateIST() + '.csv'
+  trigger(csv, fname)
+  void archivePoExportOnServer(csv, calendarDateIST())
 }
 
 function downloadQCsv(rows: QuarterlyRow[], columns: string[]) {
