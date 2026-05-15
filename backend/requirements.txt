@@ -14,3 +14,6 @@ bcrypt==4.2.1
 rarfile==4.2
 pyxlsb==1.0.10
 psycopg[binary]==3.2.4
+gspread==6.1.4
+gspread-dataframe==4.0.0
+google-auth==2.36.0

@@ -30,6 +30,7 @@ const NAV_GROUPS = [
       { to: '/purchase',   label: '🛒 Purchase' },
       { to: '/tna',        label: '📅 TNA Calendar' },
       { to: '/production', label: '⚙️ Production' },
+      { to: '/stitching-costing', label: '🧵 Stitching Costing' },
       { to: '/grey',       label: '🧵 Grey Fabric' },
       { to: '/inventory',  label: '📦 Inventory' },
       { to: '/po', label: '🎯 PO Engine' },
