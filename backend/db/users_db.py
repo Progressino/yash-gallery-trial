@@ -16,6 +16,7 @@ DEFAULT_ROLES = [
     ('Executive', 'Create documents; view reports'),
     ('Clerk',     'Data entry only; limited view'),
     ('Viewer',    'Read-only access to reports'),
+    ('Karigar',   'Stitching production entry only (mobile floor users)'),
 ]
 
 DEPARTMENTS = ['Sales', 'Merchandising', 'Stores', 'Production', 'Quality', 'Logistics', 'Finance', 'Admin']
@@ -57,6 +58,13 @@ def init_db():
         try:
             conn.execute("INSERT OR IGNORE INTO roles(role_name,description) VALUES(?,?)", (name, desc))
         except: pass
+    for table, col, decl in [
+        ("erp_users", "karigar_id", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        except Exception:
+            pass
     conn.commit(); conn.close()
 
 # ── Roles ──────────────────────────────────────────────────────────────────────
@@ -89,14 +97,15 @@ def create_user(data: dict):
     conn = _connect()
     pw = data.get('password', 'changeme123')
     hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-    conn.execute("""INSERT INTO erp_users(username,email,password_hash,full_name,role_id,department,active)
-        VALUES(?,?,?,?,?,?,?)""",
+    conn.execute("""INSERT INTO erp_users(username,email,password_hash,full_name,role_id,department,karigar_id,active)
+        VALUES(?,?,?,?,?,?,?,?)""",
         (data['username'], data.get('email',''), hashed,
-         data.get('full_name',''), data.get('role_id'), data.get('department',''), 1))
+         data.get('full_name',''), data.get('role_id'), data.get('department',''),
+         data.get('karigar_id', '') or '', 1))
     conn.commit(); conn.close()
 
 def update_user(uid: int, data: dict):
-    allowed = ['email','full_name','role_id','department','active']
+    allowed = ['email','full_name','role_id','department','active','karigar_id']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
     if 'password' in data:
@@ -117,12 +126,35 @@ def deactivate_user(uid: int):
 
 def verify_erp_user(username: str, password: str):
     conn = _connect()
-    row = conn.execute("SELECT * FROM erp_users WHERE username=? AND active=1", (username,)).fetchone()
+    row = conn.execute(
+        """SELECT u.*, r.role_name FROM erp_users u
+           LEFT JOIN roles r ON r.id = u.role_id
+           WHERE u.username=? AND u.active=1""",
+        (username,),
+    ).fetchone()
     conn.close()
-    if not row: return None
+    if not row:
+        return None
     if bcrypt.checkpw(password.encode(), row['password_hash'].encode()):
-        d = dict(row); d.pop('password_hash'); return d
+        d = dict(row)
+        d.pop('password_hash', None)
+        return d
     return None
+
+
+def get_user_auth_profile(username: str) -> dict | None:
+    """Load user + role for /auth/me (no password)."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT u.id, u.username, u.email, u.full_name, u.role_id, u.department,
+                  u.karigar_id, u.active, r.role_name
+           FROM erp_users u
+           LEFT JOIN roles r ON r.id = u.role_id
+           WHERE u.username=? AND u.active=1""",
+        (username,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 # ── Activity Log ───────────────────────────────────────────────────────────────
 def log_activity(username: str, action: str, doc_type: str, doc_no: str, details: str = ''):

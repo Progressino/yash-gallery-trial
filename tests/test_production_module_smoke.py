@@ -41,6 +41,11 @@ def isolated_module_dbs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(production_router, "_ITEM_DB_PATH", paths["ITEM_DB_PATH"])
 
+    from backend.services import jo_issue_notes
+
+    monkeypatch.setattr(jo_issue_notes, "_PROD_DB", paths["PRODUCTION_DB_PATH"])
+    monkeypatch.setattr(jo_issue_notes, "_ITEM_DB", paths["ITEM_DB_PATH"])
+
     sales_db.init_db()
     purchase_db.init_db()
     production_db.init_db()
@@ -369,6 +374,43 @@ def test_production_basic_endpoints(isolated_module_dbs, client):
     open_sos = client.get("/api/production/mrp/open-sos")
     assert open_sos.status_code == 200
     assert isinstance(open_sos.json(), list)
+
+
+def test_jo_auto_creates_bom_issue_note(isolated_module_dbs, client):
+    """Creating a JO should auto-generate an issue note with BOM-scaled material lines."""
+    _seed_parent_with_bom(isolated_module_dbs["ITEM_DB_PATH"], parent_code="PRINTED-1")
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-05-15",
+            "sku": "PRINTED-1",
+            "sku_name": "Printed shirt",
+            "process": "Cutting",
+            "planned_qty": 100,
+            "fabric_code": "FAB-CTN",
+            "fabric_qty": 100,
+            "fabric_unit": "MTR",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["jo_number"].startswith("PJO-")
+    assert body.get("issue_note") is not None
+
+    orders = client.get("/api/production/orders").json()
+    jo = next(o for o in orders if o["jo_number"] == body["jo_number"])
+    note = client.get(f"/api/production/orders/{jo['id']}/issue-note").json()
+    assert note["jo_number"] == body["jo_number"]
+    assert note["finished_item_code"] == "PRINTED-1"
+    assert note["planned_qty"] == 100
+
+    fab = next(l for l in note["lines"] if l["material_code"] == "FAB-CTN")
+    assert fab["finished_item_code"] == "PRINTED-1"
+    assert fab["required_qty"] == pytest.approx(150.0)  # 100 pcs × 1.5 MTR per unit BOM
+
+    listed = client.get("/api/production/issue-notes").json()
+    assert any(n["in_number"] == note["in_number"] for n in listed)
 
 
 def _seed_parent_with_bom(item_db_path: str, parent_code: str = "STYLE-1"):

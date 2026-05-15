@@ -528,6 +528,11 @@ def get_jo(joid: int):
     # These open their own connections separately - safe after main is closed
     jo['routing'] = get_item_routing(jo.get('sku', ''))
     jo['next_process'] = get_next_process(jo.get('sku', ''), jo.get('process', ''))
+    try:
+        from ..services.jo_issue_notes import get_issue_note_by_jo_id
+        jo['issue_note'] = get_issue_note_by_jo_id(jo['id'])
+    except Exception:
+        jo['issue_note'] = None
     return jo
 
 
@@ -584,8 +589,26 @@ def create_jo(data: dict) -> str:
              ln.get('style',''), pq, pq,
              float(ln.get('vendor_rate') or 0),
              ln.get('remarks','')))
+    jo_snapshot = {
+        "jo_date": data.get("jo_date") or datetime.now().strftime("%Y-%m-%d"),
+        "so_number": data.get("so_number", ""),
+        "sku": data.get("sku", ""),
+        "sku_name": data.get("sku_name", ""),
+        "process": process,
+        "planned_qty": planned,
+        "fabric_code": data.get("fabric_code", ""),
+        "fabric_qty": float(data.get("fabric_qty") or 0),
+        "fabric_unit": data.get("fabric_unit", "MTR"),
+    }
+    line_snapshots = list(data.get("lines") or [])
     conn.commit()
     conn.close()
+    try:
+        from ..services.jo_issue_notes import create_issue_note_for_jo
+
+        create_issue_note_for_jo(joid, num, jo_snapshot, line_snapshots)
+    except Exception:
+        pass
     return num
 
 
@@ -810,6 +833,14 @@ def create_next_process_jo(parent_joid: int) -> dict:
                  (new_joid, parent_joid))
     conn.commit()
     conn.close()
+    try:
+        from ..services.jo_issue_notes import create_issue_note_for_jo
+
+        child = get_jo(new_joid)
+        if child:
+            create_issue_note_for_jo(new_joid, num, child, child.get("lines") or [])
+    except Exception:
+        pass
     return {'ok': True, 'jo_number': num, 'process': next_process, 'planned_qty': available}
 
 

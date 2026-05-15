@@ -12,7 +12,14 @@ def _disable_dashboard_upload_day_gate_by_default(monkeypatch):
 
 @pytest.fixture
 def auth_token(monkeypatch):
-    monkeypatch.setattr("backend.main.verify_token", lambda t: "tester" if t else None)
+    def _decode(token: str | None):
+        if token == "test-token":
+            return {"sub": "tester", "role": "Admin", "permissions": []}
+        return None
+
+    monkeypatch.setattr("backend.main.decode_token", _decode)
+    monkeypatch.setattr("backend.routers.auth.decode_token", _decode)
+    monkeypatch.setattr("backend.routers.auth.verify_token", lambda t: "tester" if t == "test-token" else None)
 
 
 @pytest.fixture

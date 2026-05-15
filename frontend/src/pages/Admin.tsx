@@ -5,7 +5,7 @@ import api from '../api/client'
 type Tab = 'dashboard' | 'users' | 'roles' | 'activity'
 
 interface AdminStats { total_users: number; total_roles: number; recent_activity: number; by_role: { role_name: string; cnt: number }[] }
-interface ERPUser { id: number; username: string; email: string; full_name: string; role_id: number; role_name: string; department: string; active: number; created_at: string }
+interface ERPUser { id: number; username: string; email: string; full_name: string; role_id: number; role_name: string; department: string; karigar_id?: string; active: number; created_at: string }
 interface Role { id: number; role_name: string; description: string; created_at: string }
 interface ActivityLog { id: number; username: string; action: string; document_type: string; document_no: string; details: string; created_at: string }
 
@@ -27,7 +27,7 @@ export default function Admin() {
   const [editUser, setEditUser] = useState<ERPUser | null>(null)
   const [editData, setEditData] = useState<Record<string, string | number>>({})
 
-  const [userForm, setUserForm] = useState({ username: '', email: '', password: 'changeme123', full_name: '', role_id: 1, department: 'Production' })
+  const [userForm, setUserForm] = useState({ username: '', email: '', password: 'changeme123', full_name: '', role_id: 1, department: 'Production', karigar_id: '' })
   const [roleForm, setRoleForm] = useState({ role_name: '', description: '' })
 
   const { data: stats } = useQuery<AdminStats>({ queryKey: ['admin-stats'], queryFn: () => api.get('/erp-admin/stats').then(r => r.data) })
@@ -37,7 +37,7 @@ export default function Admin() {
 
   const createUserMut = useMutation({
     mutationFn: (b: object) => api.post('/erp-admin/users', b),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['erp-users'] }); qc.invalidateQueries({ queryKey: ['admin-stats'] }); setShowUserForm(false); setUserForm({ username: '', email: '', password: 'changeme123', full_name: '', role_id: 1, department: 'Production' }) }
+      onSuccess: () => { qc.invalidateQueries({ queryKey: ['erp-users'] }); qc.invalidateQueries({ queryKey: ['admin-stats'] }); setShowUserForm(false); setUserForm({ username: '', email: '', password: 'changeme123', full_name: '', role_id: 1, department: 'Production', karigar_id: '' }) }
   })
   const updateUserMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/erp-admin/users/${id}`, data),
@@ -53,6 +53,24 @@ export default function Admin() {
   })
 
   const TABS: [Tab, string][] = [['dashboard', '📊 Dashboard'], ['users', '👤 Users'], ['roles', '🔑 Roles'], ['activity', '📜 Activity Log']]
+
+  const newUserRole = roles.find(r => r.id === userForm.role_id)?.role_name
+  const editRoleId = editData.role_id !== undefined ? Number(editData.role_id) : editUser?.role_id
+  const editUserRole = roles.find(r => r.id === editRoleId)?.role_name
+
+  const openNewUserForm = () => {
+    const karigarRole = roles.find(r => r.role_name === 'Karigar')
+    setUserForm({
+      username: '',
+      email: '',
+      password: 'changeme123',
+      full_name: '',
+      role_id: karigarRole?.id ?? 1,
+      department: 'Production',
+      karigar_id: '',
+    })
+    setShowUserForm(true)
+  }
 
   return (
     <div className="space-y-4">
@@ -109,7 +127,7 @@ export default function Admin() {
             </div>
           </div>
           <div className="flex gap-3">
-            <button onClick={() => { setTab('users'); setShowUserForm(true) }}
+            <button onClick={() => { setTab('users'); openNewUserForm() }}
               className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ Add User</button>
             <button onClick={() => setTab('activity')}
               className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium hover:bg-gray-50">View Activity Log</button>
@@ -122,7 +140,7 @@ export default function Admin() {
         <div className="space-y-4">
           <div className="flex justify-between">
             <p className="text-sm text-gray-500">{users.length} users</p>
-            <button onClick={() => setShowUserForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ Add User</button>
+            <button onClick={openNewUserForm} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ Add User</button>
           </div>
 
           {showUserForm && (
@@ -149,6 +167,14 @@ export default function Admin() {
                     {DEPARTMENTS.map(d => <option key={d}>{d}</option>)}
                   </select>
                 </div>
+                {newUserRole === 'Karigar' && (
+                  <div><label className="text-xs text-gray-500">Karigar ID (master)</label>
+                    <input value={userForm.karigar_id} placeholder="e.g. K001"
+                      onChange={e => setUserForm(f => ({ ...f, karigar_id: e.target.value }))}
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 font-mono" />
+                    <p className="text-[10px] text-gray-400 mt-0.5">Must match karigar_master (e.g. K001)</p>
+                  </div>
+                )}
               </div>
               <div className="flex gap-2">
                 <button onClick={() => createUserMut.mutate(userForm)} disabled={createUserMut.isPending || !userForm.username}
@@ -198,6 +224,13 @@ export default function Admin() {
                     onChange={e => setEditData(d => ({ ...d, password: e.target.value }))}
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
                 </div>
+                {editUserRole === 'Karigar' && (
+                  <div><label className="text-xs text-gray-500">Karigar ID (master)</label>
+                    <input value={(editData.karigar_id as string) ?? editUser.karigar_id ?? ''} placeholder="e.g. K001"
+                      onChange={e => setEditData(d => ({ ...d, karigar_id: e.target.value }))}
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 font-mono" />
+                  </div>
+                )}
               </div>
               <div className="flex gap-2">
                 <button onClick={() => updateUserMut.mutate({ id: editUser.id, data: editData })} disabled={updateUserMut.isPending}
@@ -212,7 +245,7 @@ export default function Admin() {
           <div className="bg-white rounded-xl border overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-gray-400 text-xs uppercase">
-                <tr>{['Username','Full Name','Role','Department','Email','Status','Actions'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
+                <tr>{['Username','Full Name','Role','Karigar ID','Department','Email','Status','Actions'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
               </thead>
               <tbody>
                 {users.map(u => (
@@ -222,6 +255,7 @@ export default function Admin() {
                     <td className="px-4 py-2">
                       <span className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">{u.role_name}</span>
                     </td>
+                    <td className="px-4 py-2 font-mono text-xs text-gray-600">{u.karigar_id || '—'}</td>
                     <td className="px-4 py-2 text-gray-500">{u.department}</td>
                     <td className="px-4 py-2 text-gray-400">{u.email || '—'}</td>
                     <td className="px-4 py-2">

@@ -95,3 +95,21 @@ def test_stitching_style_costing_report():
     rep = svc.style_costing_report(month="All", style="All", party="All")
     assert "summary" in rep
     assert "rows" in rep
+
+
+def test_stitching_production_entry_reports():
+    svc.save_production_entry(
+        date_str="2026-05-15",
+        karigar_id="K001",
+        karigar_name="Ramesh Kumar",
+        challan_no="10220-2526",
+        style="1894YKDGREEN",
+        hour_entries=[
+            {"hour_col": "H_09_10", "operation": "Cutting", "pieces": 12},
+            {"hour_col": "H_10_11", "operation": "Cutting", "pieces": 8},
+        ],
+    )
+    rep = svc.production_entry_reports("2026-05-15", "K001")
+    assert len(rep["history"]) >= 1
+    assert len(rep["report1"]) >= 1
+    assert rep["report1"][0]["Total_Pieces"] >= 20

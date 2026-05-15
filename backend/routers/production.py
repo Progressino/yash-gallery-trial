@@ -18,6 +18,7 @@ from ..db.production_db import (
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
+from ..services import jo_issue_notes
 
 router = APIRouter()
 
@@ -412,7 +413,9 @@ def post_jo(body: JOIn):
         if not v['ok']:
             raise HTTPException(400, v['message'])
     num = create_jo(data)
-    return {"jo_number": num, "ok": True}
+    jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
+    issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
+    return {"jo_number": num, "ok": True, "issue_note": issue_note}
 
 @router.patch("/orders/{joid}")
 def patch_jo(joid: int, body: JOUpdate):
@@ -459,6 +462,32 @@ def post_next_process(joid: int):
     if not result.get('ok'):
         raise HTTPException(400, result.get('message','Cannot create next process JO'))
     return result
+
+
+# ── Material issue notes (JO-linked, BOM-driven) ─────────────────────────────
+
+@router.get("/issue-notes")
+def get_production_issue_notes(jo_number: Optional[str] = None, status: Optional[str] = None):
+    return jo_issue_notes.list_issue_notes(jo_number=jo_number, status=status)
+
+
+@router.get("/orders/{joid}/issue-note")
+def get_production_issue_note(joid: int):
+    note = jo_issue_notes.get_issue_note_by_jo_id(joid)
+    if not note:
+        raise HTTPException(404, "Issue note not found for this job order")
+    return note
+
+
+@router.post("/orders/{joid}/regenerate-issue-note")
+def regenerate_production_issue_note(joid: int):
+    jo = get_jo(joid)
+    if not jo:
+        raise HTTPException(404, "Job order not found")
+    note = jo_issue_notes.create_issue_note_for_jo(
+        joid, jo["jo_number"], jo, jo.get("lines") or []
+    )
+    return {"ok": True, "issue_note": note}
 
 
 # ── BOM Inputs ────────────────────────────────────────────────────────────────

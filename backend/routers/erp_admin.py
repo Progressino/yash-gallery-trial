@@ -21,6 +21,7 @@ class UserIn(BaseModel):
     full_name: Optional[str] = ''
     role_id: Optional[int] = None
     department: Optional[str] = ''
+    karigar_id: Optional[str] = ''
 
 class UserUpdate(BaseModel):
     email: Optional[str] = None
@@ -29,6 +30,7 @@ class UserUpdate(BaseModel):
     department: Optional[str] = None
     active: Optional[int] = None
     password: Optional[str] = None
+    karigar_id: Optional[str] = None
 
 class ActivityIn(BaseModel):
     username: str

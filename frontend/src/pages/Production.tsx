@@ -58,6 +58,41 @@ interface JO {
   routing: string[]
   next_process: string | null
   process_stocks: Record<string, { available: number; in: number; out: number }>
+  issue_note?: IssueNote | null
+}
+
+interface IssueNoteLine {
+  id: number
+  line_no: number
+  finished_item_code: string
+  finished_item_name: string
+  finished_planned_qty: number
+  material_code: string
+  material_name: string
+  material_type: string
+  bom_qty_per_unit: number
+  required_qty: number
+  unit: string
+  issued_qty: number
+  remarks: string
+}
+
+interface IssueNote {
+  id: number
+  in_number: string
+  in_date: string
+  jo_id: number
+  jo_number: string
+  jo_date: string
+  so_number: string
+  process: string
+  finished_item_code: string
+  finished_item_name: string
+  planned_qty: number
+  status: string
+  remarks: string
+  lines: IssueNoteLine[]
+  line_count?: number
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -66,6 +101,93 @@ const STATUS_COLORS: Record<string, string> = {
   Completed: 'bg-green-100 text-green-700',
   Closed: 'bg-gray-200 text-gray-500',
   Cancelled: 'bg-red-100 text-red-600',
+}
+
+function JOIssueNotePanel({ joId, joNumber }: { joId: number; joNumber: string }) {
+  const qc = useQueryClient()
+  const { data: note, isLoading, isError } = useQuery<IssueNote>({
+    queryKey: ['jo-issue-note', joId],
+    queryFn: () => api.get(`/production/orders/${joId}/issue-note`).then(r => r.data),
+  })
+  const regenMut = useMutation({
+    mutationFn: () => api.post(`/production/orders/${joId}/regenerate-issue-note`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['jo-issue-note', joId] })
+      qc.invalidateQueries({ queryKey: ['prod-issue-notes'] })
+    },
+    onError: (e: any) => alert(e.response?.data?.detail || 'Could not regenerate issue note'),
+  })
+
+  if (isLoading) return <p className="text-xs text-gray-400 py-2">Loading issue note…</p>
+  if (isError || !note) {
+    return (
+      <div className="bg-white rounded-lg border border-dashed border-gray-200 p-3 flex items-center justify-between gap-2">
+        <p className="text-xs text-gray-500">No material issue note for {joNumber}.</p>
+        <button onClick={() => regenMut.mutate()} disabled={regenMut.isPending}
+          className="text-xs px-2 py-1 bg-[#002B5B] text-white rounded hover:bg-blue-800 disabled:opacity-50">
+          Generate from BOM
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-white rounded-lg border border-indigo-100 overflow-hidden">
+      <div className="px-3 py-2 bg-indigo-50 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold text-indigo-800">
+            📋 Material Issue Note — <span className="font-mono">{note.in_number}</span>
+          </p>
+          <p className="text-xs text-indigo-600 mt-0.5">
+            JO <b>{note.jo_number}</b> · {note.in_date} · For: <b>{note.finished_item_code}</b>
+            {note.finished_item_name ? ` — ${note.finished_item_name}` : ''} · Qty <b>{note.planned_qty}</b>
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs px-2 py-0.5 rounded-full bg-white text-indigo-700 border border-indigo-200">{note.status}</span>
+          <button onClick={() => regenMut.mutate()} disabled={regenMut.isPending}
+            className="text-xs px-2 py-1 border border-indigo-200 rounded text-indigo-700 hover:bg-white disabled:opacity-50">
+            ↻ Refresh BOM
+          </button>
+        </div>
+      </div>
+      {note.lines.length === 0 ? (
+        <p className="text-xs text-gray-400 p-3">{note.remarks || 'No BOM lines found.'}</p>
+      ) : (
+        <table className="w-full text-xs">
+          <thead className="text-gray-400 uppercase bg-gray-50 border-b">
+            <tr>
+              <th className="text-left px-3 py-2">For (finished item)</th>
+              <th className="text-left px-3 py-2">Material</th>
+              <th className="text-right px-3 py-2">BOM / unit</th>
+              <th className="text-right px-3 py-2">Required</th>
+              <th className="text-left px-3 py-2">Unit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {note.lines.map(ln => (
+              <tr key={ln.id} className="border-t border-gray-50 hover:bg-indigo-50/30">
+                <td className="px-3 py-2">
+                  <span className="font-mono font-semibold text-[#002B5B]">{ln.finished_item_code}</span>
+                  {ln.finished_item_name && <span className="text-gray-500 ml-1">({ln.finished_item_name})</span>}
+                  <span className="text-gray-400 ml-1">× {ln.finished_planned_qty}</span>
+                </td>
+                <td className="px-3 py-2">
+                  <span className="font-mono font-semibold">{ln.material_code}</span>
+                  {ln.material_name && ln.material_name !== ln.material_code && (
+                    <span className="text-gray-500 ml-1">— {ln.material_name}</span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right text-gray-600">{ln.bom_qty_per_unit}</td>
+                <td className="px-3 py-2 text-right font-bold text-indigo-700">{ln.required_qty}</td>
+                <td className="px-3 py-2 text-gray-500">{ln.unit}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
 }
 
 const PROCESS_COLORS: Record<string, string> = {
@@ -335,7 +457,8 @@ function MRPTab() {
 export default function Production() {
   const qc = useQueryClient()
   const [activeProcess, setActiveProcess] = useState('Cutting')
-  const [tab, setTab] = useState<'process' | 'tracker' | 'reports' | 'mrp'>('process')
+  const [tab, setTab] = useState<'process' | 'tracker' | 'issue-notes' | 'reports' | 'mrp'>('process')
+  const [expandedIssueNote, setExpandedIssueNote] = useState<number | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')
   const [modal, setModal] = useState<ModalType>(null)
@@ -399,6 +522,11 @@ export default function Production() {
     queryFn: () => api.get('/production/process-report').then(r => r.data),
     enabled: tab === 'reports',
   })
+  const { data: issueNotes = [] } = useQuery<IssueNote[]>({
+    queryKey: ['prod-issue-notes'],
+    queryFn: () => api.get('/production/issue-notes').then(r => r.data),
+    enabled: tab === 'issue-notes',
+  })
   const { data: soList = [] } = useQuery({
     queryKey: ['so-list'],
     queryFn: () => api.get('/sales/orders').then(r => r.data || []),
@@ -428,12 +556,23 @@ export default function Production() {
     qc.invalidateQueries({ queryKey: ['jos-all'] })
     qc.invalidateQueries({ queryKey: ['ready-to-process'] })
     qc.invalidateQueries({ queryKey: ['process-report'] })
+    qc.invalidateQueries({ queryKey: ['prod-issue-notes'] })
+    qc.invalidateQueries({ queryKey: ['jo-issue-note'] })
   }
 
   // ── Mutations ─────────────────────────────────────────────────────────────────
   const createJOMut = useMutation({
     mutationFn: (b: object) => api.post('/production/orders', b),
-    onSuccess: () => { invalidateAll(); setModal(null); setNewLines([]) },
+    onSuccess: (res) => {
+      invalidateAll()
+      setModal(null)
+      setNewLines([])
+      const inNum = res?.data?.issue_note?.in_number
+      if (inNum) {
+        setTab('issue-notes')
+        alert(`Job order created. Material issue note ${inNum} generated from BOM.`)
+      }
+    },
     onError: (e: any) => alert(e.response?.data?.detail || 'Error creating JO'),
   })
   const updateJOMut = useMutation({
@@ -634,6 +773,8 @@ export default function Production() {
               </div>
             )}
 
+            <JOIssueNotePanel joId={jo.id} joNumber={jo.jo_number} />
+
             {/* Fabric issues (Cutting only) */}
             {jo.process === 'Cutting' && (
               <div className="bg-white rounded-lg border p-3">
@@ -722,7 +863,7 @@ export default function Production() {
 
       {/* Main tabs */}
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
-        {([['process','⚙️ Process'], ['tracker','📋 All JOs'], ['reports','📊 Reports'], ['mrp','🔢 MRP']] as const).map(([key, label]) => (
+        {([['process','⚙️ Process'], ['tracker','📋 All JOs'], ['issue-notes','📋 Issue Notes'], ['reports','📊 Reports'], ['mrp','🔢 MRP']] as const).map(([key, label]) => (
           <button key={key} onClick={() => { setTab(key); setExpanded(null) }}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
@@ -835,6 +976,80 @@ export default function Production() {
           </div>
           {allJOs.map(renderJOCard)}
           {allJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No job orders found.</p>}
+        </div>
+      )}
+
+      {/* ISSUE NOTES TAB */}
+      {tab === 'issue-notes' && (
+        <div className="space-y-3">
+          <p className="text-sm text-gray-500">
+            Material issue notes auto-created from Job Orders and Item Master BOM. Quantities scale with JO planned qty.
+          </p>
+          {issueNotes.length === 0 && (
+            <p className="text-center text-gray-400 py-12 text-sm">No issue notes yet. Create a Job Order to generate one.</p>
+          )}
+          {issueNotes.map(note => {
+            const open = expandedIssueNote === note.id
+            return (
+              <div key={note.id} className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                <button type="button" onClick={() => setExpandedIssueNote(open ? null : note.id)}
+                  className="w-full text-left px-4 py-3 flex flex-wrap items-center justify-between gap-2 hover:bg-gray-50">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-indigo-800 font-mono">{note.in_number}</span>
+                      <span className="text-xs text-gray-400">·</span>
+                      <span className="text-sm font-semibold text-[#002B5B]">{note.jo_number}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${PROCESS_COLORS[note.process] || 'bg-gray-100 text-gray-600'}`}>
+                        {note.process}
+                      </span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{note.status}</span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Date {note.in_date} · SO {note.so_number || '—'} · For <b className="text-[#002B5B]">{note.finished_item_code}</b>
+                      {note.finished_item_name ? ` — ${note.finished_item_name}` : ''} · JO qty <b>{note.planned_qty}</b>
+                      · {note.line_count ?? note.lines?.length ?? 0} material line(s)
+                    </p>
+                  </div>
+                  <span className="text-gray-400 text-xs">{open ? '▲' : '▼'}</span>
+                </button>
+                {open && note.lines && note.lines.length > 0 && (
+                  <table className="w-full text-xs border-t">
+                    <thead className="text-gray-400 uppercase bg-gray-50">
+                      <tr>
+                        <th className="text-left px-4 py-2">For (finished item)</th>
+                        <th className="text-left px-4 py-2">Material to issue</th>
+                        <th className="text-right px-4 py-2">BOM / unit</th>
+                        <th className="text-right px-4 py-2">Required qty</th>
+                        <th className="text-left px-4 py-2">Unit</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {note.lines.map(ln => (
+                        <tr key={ln.id} className="border-t border-gray-50">
+                          <td className="px-4 py-2">
+                            <span className="font-mono font-semibold text-[#002B5B]">{ln.finished_item_code}</span>
+                            <span className="text-gray-400 ml-1">× {ln.finished_planned_qty}</span>
+                          </td>
+                          <td className="px-4 py-2">
+                            <span className="font-mono font-semibold">{ln.material_code}</span>
+                            {ln.material_name && ln.material_name !== ln.material_code && (
+                              <span className="text-gray-500 ml-1">— {ln.material_name}</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-right text-gray-600">{ln.bom_qty_per_unit}</td>
+                          <td className="px-4 py-2 text-right font-bold text-indigo-700">{ln.required_qty}</td>
+                          <td className="px-4 py-2 text-gray-500">{ln.unit}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {open && (!note.lines || note.lines.length === 0) && (
+                  <p className="text-xs text-gray-400 px-4 py-3 border-t">{note.remarks || 'No BOM lines.'}</p>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 

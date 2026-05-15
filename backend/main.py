@@ -17,7 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
-from .routers.auth import verify_token
+from .routers.auth import verify_token, decode_token
+from .services.permissions import karigar_may_access_api, may_access_erp_admin, KARIGAR_ROLE
 from .routers.finance import router as finance_router
 from .routers.item import router as item_router
 from .routers.sales import router as sales_router
@@ -586,9 +587,23 @@ async def auth_middleware(request: Request, call_next):
     if request.url.path in _AUTH_EXEMPT or not request.url.path.startswith("/api/"):
         return await call_next(request)
     token = request.cookies.get("auth_token")
-    if not token or not verify_token(token):
+    payload = decode_token(token) if token else None
+    if not payload or not payload.get("sub"):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+    request.state.auth = payload
+    role = payload.get("role", "Admin")
+    path = request.url.path
+
+    if role == KARIGAR_ROLE and not karigar_may_access_api(path, request.method):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=403, content={"detail": "Access denied for karigar role"})
+
+    if path.startswith("/api/erp-admin") and not may_access_erp_admin(role):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+
     return await call_next(request)
 
 

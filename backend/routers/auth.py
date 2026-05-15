@@ -1,9 +1,9 @@
 """
 Authentication router.
 
-POST /api/auth/login   → verify credentials, set httpOnly JWT cookie
+POST /api/auth/login   → ERP users (users.db) or legacy env admin
 POST /api/auth/logout  → clear cookie
-GET  /api/auth/me      → return current username or 401
+GET  /api/auth/me      → current user profile + role
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -13,11 +13,13 @@ from fastapi import APIRouter, Request, Response, HTTPException
 from jose import jwt, JWTError
 from pydantic import BaseModel
 
+from ..db.users_db import verify_erp_user, get_user_auth_profile
+from ..services.permissions import permissions_for_role, KARIGAR_ROLE
+
 router = APIRouter()
 
 
 def _cookie_secure(request: Request) -> bool:
-    """True when the client connection is HTTPS (TLS at nginx or X-Forwarded-Proto from Cloudflare)."""
     xf = request.headers.get("x-forwarded-proto")
     if xf:
         return xf.split(",")[0].strip().lower() == "https"
@@ -25,46 +27,45 @@ def _cookie_secure(request: Request) -> bool:
 
 
 _SECRET = os.environ.get("JWT_SECRET", "change-me-set-jwt-secret-in-env")
-_ALGO   = "HS256"
-_TTL_H  = 24
+_ALGO = "HS256"
+_TTL_H = int(os.environ.get("JWT_TTL_HOURS", "24"))
 
 
-# ── Token helpers (also used by auth middleware in main.py) ───────────────────
-
-def create_token(username: str) -> str:
+def create_token(
+    username: str,
+    *,
+    role: str = "Admin",
+    user_id: int | None = None,
+    full_name: str = "",
+    karigar_id: str = "",
+) -> str:
+    perms = permissions_for_role(role)
     exp = datetime.now(tz=timezone.utc) + timedelta(hours=_TTL_H)
-    return jwt.encode({"sub": username, "exp": exp}, _SECRET, algorithm=_ALGO)
+    payload = {
+        "sub": username,
+        "role": role,
+        "user_id": user_id,
+        "full_name": full_name,
+        "karigar_id": karigar_id or "",
+        "permissions": perms,
+        "exp": exp,
+    }
+    return jwt.encode(payload, _SECRET, algorithm=_ALGO)
 
 
-def verify_token(token: str) -> str | None:
-    """Return username if valid, None otherwise."""
+def decode_token(token: str) -> dict | None:
     try:
-        payload = jwt.decode(token, _SECRET, algorithms=[_ALGO])
-        return payload.get("sub")
+        return jwt.decode(token, _SECRET, algorithms=[_ALGO])
     except JWTError:
         return None
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+def verify_token(token: str) -> str | None:
+    payload = decode_token(token)
+    return payload.get("sub") if payload else None
 
 
-@router.post("/login")
-def login(body: LoginRequest, request: Request, response: Response):
-    expected_user = os.environ.get("AUTH_USERNAME", "")
-    expected_hash = os.environ.get("AUTH_PASSWORD_HASH", "").encode()
-
-    if not expected_user or not expected_hash:
-        raise HTTPException(status_code=500, detail="Auth not configured on server")
-
-    password_ok = bcrypt.checkpw(body.password.encode(), expected_hash)
-    if body.username != expected_user or not password_ok:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    token = create_token(body.username)
+def _set_auth_cookie(request: Request, response: Response, token: str) -> None:
     sec = _cookie_secure(request)
     response.set_cookie(
         key="auth_token",
@@ -74,12 +75,61 @@ def login(body: LoginRequest, request: Request, response: Response):
         secure=sec,
         max_age=_TTL_H * 3600,
     )
-    return {"ok": True, "username": body.username}
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/login")
+def login(body: LoginRequest, request: Request, response: Response):
+    username = body.username.strip()
+    password = body.password
+
+    user = verify_erp_user(username, password)
+    if user:
+        role = user.get("role_name") or "Clerk"
+        token = create_token(
+            username,
+            role=role,
+            user_id=user.get("id"),
+            full_name=user.get("full_name") or "",
+            karigar_id=str(user.get("karigar_id") or ""),
+        )
+        _set_auth_cookie(request, response, token)
+        return {
+            "ok": True,
+            "username": username,
+            "role": role,
+            "full_name": user.get("full_name") or "",
+            "karigar_id": user.get("karigar_id") or "",
+            "permissions": permissions_for_role(role),
+            "redirect": "/production-entry" if role == KARIGAR_ROLE else "/",
+        }
+
+    expected_user = os.environ.get("AUTH_USERNAME", "")
+    expected_hash = os.environ.get("AUTH_PASSWORD_HASH", "").encode()
+    if expected_user and expected_hash:
+        password_ok = bcrypt.checkpw(password.encode(), expected_hash)
+        if username == expected_user and password_ok:
+            token = create_token(username, role="Admin", full_name="Administrator")
+            _set_auth_cookie(request, response, token)
+            return {
+                "ok": True,
+                "username": username,
+                "role": "Admin",
+                "full_name": "Administrator",
+                "karigar_id": "",
+                "permissions": permissions_for_role("Admin"),
+                "redirect": "/",
+            }
+
+    raise HTTPException(status_code=401, detail="Invalid username or password")
 
 
 @router.post("/logout")
 def logout(request: Request, response: Response):
-    # Destroy the server-side session so next login starts with clean state
     sid = request.cookies.get("session_id")
     if sid:
         try:
@@ -90,6 +140,7 @@ def logout(request: Request, response: Response):
         except Exception:
             pass
         from ..session import store as _store
+
         _store.delete(sid)
     sec = _cookie_secure(request)
     response.delete_cookie("auth_token", path="/", secure=sec, httponly=True, samesite="lax")
@@ -102,7 +153,34 @@ def me(request: Request):
     token = request.cookies.get("auth_token")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    username = verify_token(token)
-    if not username:
+    payload = decode_token(token)
+    if not payload:
         raise HTTPException(status_code=401, detail="Token expired or invalid")
-    return {"username": username}
+
+    username = payload.get("sub")
+    role = payload.get("role", "Admin")
+    profile = get_user_auth_profile(username) if username else None
+
+    if profile:
+        role = profile.get("role_name") or role
+        return {
+            "username": username,
+            "role": role,
+            "full_name": profile.get("full_name") or payload.get("full_name", ""),
+            "karigar_id": profile.get("karigar_id") or "",
+            "user_id": profile.get("id"),
+            "department": profile.get("department") or "",
+            "permissions": permissions_for_role(role),
+            "is_karigar": role == KARIGAR_ROLE,
+        }
+
+    return {
+        "username": username,
+        "role": role,
+        "full_name": payload.get("full_name", ""),
+        "karigar_id": payload.get("karigar_id", ""),
+        "user_id": payload.get("user_id"),
+        "department": "",
+        "permissions": payload.get("permissions") or permissions_for_role(role),
+        "is_karigar": role == KARIGAR_ROLE,
+    }

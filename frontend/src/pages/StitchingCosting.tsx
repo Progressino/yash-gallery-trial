@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useStitchingAdmin } from '../lib/stitchingAdmin'
+import { useAuth } from '../store/auth'
 
 type TabId =
   | 'dashboard'
@@ -53,10 +54,12 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10)
 }
 
-export default function StitchingCosting() {
+export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?: boolean }) {
   const qc = useQueryClient()
   const admin = useStitchingAdmin()
-  const [tab, setTab] = useState<TabId>('dashboard')
+  const authUser = useAuth(s => s.user)
+  const lockedKarigarId = karigarOnly ? authUser?.karigar_id || '' : ''
+  const [tab, setTab] = useState<TabId>(karigarOnly ? 'production' : 'dashboard')
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
   const { data: status } = useQuery({
@@ -83,15 +86,19 @@ export default function StitchingCosting() {
     onSuccess: r => flash(r.data.ok ? 'ok' : 'err', r.data.ok ? 'Saved to Google Sheets' : r.data.message || 'Sync failed'),
   })
 
+  const visibleTabs = karigarOnly ? TABS.filter(t => t.id === 'production') : TABS
+
   return (
-    <div className="space-y-4 max-w-[1600px]">
+    <div className={`space-y-4 ${karigarOnly ? '' : 'max-w-[1600px]'}`}>
+      {!karigarOnly && (
       <div className="rounded-xl bg-gradient-to-br from-[#1a3a5c] via-[#2c5aa0] to-[#1e7ed4] text-white p-5 shadow-md">
         <h1 className="text-xl font-bold">🧵 Stitching Costing — Yash Gallery</h1>
         <p className="text-sm opacity-90 mt-1">
           Karigar tracking · Challan management · Style costing · Payroll
           {status?.gsheet?.available ? ' · Google Sheets connected' : ' · Local database'}
         </p>
-      </div>
+        </div>
+      )}
 
       {msg && (
         <div
@@ -103,19 +110,24 @@ export default function StitchingCosting() {
         </div>
       )}
 
-      <BackupRestoreBar
-        gsheetAvailable={!!status?.gsheet?.available}
-        syncFromPending={syncFrom.isPending}
-        syncToPending={syncTo.isPending}
-        onPull={() => syncFrom.mutate()}
-        onPush={() => syncTo.mutate()}
-        onFlash={flash}
-        onRestored={() => qc.invalidateQueries({ queryKey: ['stitching'] })}
-      />
-      <AdminUnlockPanel admin={admin} onFlash={flash} />
+      {!karigarOnly && (
+        <>
+          <BackupRestoreBar
+            gsheetAvailable={!!status?.gsheet?.available}
+            syncFromPending={syncFrom.isPending}
+            syncToPending={syncTo.isPending}
+            onPull={() => syncFrom.mutate()}
+            onPush={() => syncTo.mutate()}
+            onFlash={flash}
+            onRestored={() => qc.invalidateQueries({ queryKey: ['stitching'] })}
+          />
+          <AdminUnlockPanel admin={admin} onFlash={flash} />
+        </>
+      )}
 
+      {!karigarOnly && visibleTabs.length > 1 && (
       <div className="flex flex-wrap gap-1 border-b border-gray-200 pb-1">
-        {TABS.map(t => (
+        {visibleTabs.map(t => (
           <button
             key={t.id}
             type="button"
@@ -128,23 +140,26 @@ export default function StitchingCosting() {
           </button>
         ))}
       </div>
+      )}
 
-      {tab === 'dashboard' && <DashboardTab />}
+      {tab === 'dashboard' && !karigarOnly && <DashboardTab />}
       {tab === 'production' && (
         <ProductionTab
           hours={status?.hours ?? []}
           admin={admin}
+          karigarOnly={karigarOnly}
+          lockedKarigarId={lockedKarigarId}
           onSaved={() => qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })}
         />
       )}
-      {tab === 'challan' && <ChallanTab />}
-      {tab === 'style' && <StyleCostingTab />}
-      {tab === 'efficiency' && <EfficiencyTab />}
-      {tab === 'payroll' && <PayrollTab />}
-      {tab === 'attendance' && <AttendanceTab type="karigar" />}
-      {tab === 'operating' && <AttendanceTab type="operating" />}
-      {tab === 'performance' && <PerformanceTab />}
-      {tab === 'master' && <MasterTab admin={admin} />}
+      {!karigarOnly && tab === 'challan' && <ChallanTab />}
+      {!karigarOnly && tab === 'style' && <StyleCostingTab />}
+      {!karigarOnly && tab === 'efficiency' && <EfficiencyTab />}
+      {!karigarOnly && tab === 'payroll' && <PayrollTab />}
+      {!karigarOnly && tab === 'attendance' && <AttendanceTab type="karigar" />}
+      {!karigarOnly && tab === 'operating' && <AttendanceTab type="operating" />}
+      {!karigarOnly && tab === 'performance' && <PerformanceTab />}
+      {!karigarOnly && tab === 'master' && <MasterTab admin={admin} />}
     </div>
   )
 }
@@ -200,20 +215,244 @@ function DashboardTab() {
 
 type AdminApi = ReturnType<typeof useStitchingAdmin>
 
+type KarigarRow = { Karigar_ID: string; Name: string; Skill?: string; Daily_Rate_Rs?: number }
+
+type SearchSelectOption = {
+  value: string
+  primary: string
+  secondary?: string
+  haystack: string
+}
+
+function SearchSelect({
+  label,
+  placeholder,
+  value,
+  onChange,
+  options,
+  disabled,
+  emptyMessage = 'No matches',
+  hint,
+}: {
+  label: string
+  placeholder: string
+  value: string
+  onChange: (v: string) => void
+  options: SearchSelectOption[]
+  disabled?: boolean
+  emptyMessage?: string
+  hint?: string
+}) {
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  const selected = options.find(o => o.value === value)
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return options.slice(0, 80)
+    return options.filter(o => o.haystack.includes(q)).slice(0, 80)
+  }, [options, search])
+
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  const displayValue = open
+    ? search
+    : selected
+      ? selected.secondary
+        ? `${selected.primary} — ${selected.secondary}`
+        : selected.primary
+      : search
+
+  return (
+    <div ref={wrapRef} className={`relative ${disabled ? 'opacity-60' : ''}`}>
+      <span className="font-semibold text-gray-700 text-xs">{label}</span>
+      {hint && !disabled && <p className="text-[10px] text-gray-400 mt-0.5">{hint}</p>}
+      <input
+        type="search"
+        disabled={disabled}
+        placeholder={placeholder}
+        className="mt-1 w-full border rounded-lg px-3 py-2.5 text-sm touch-manipulation disabled:bg-gray-50"
+        value={displayValue}
+        onChange={e => {
+          setSearch(e.target.value)
+          setOpen(true)
+          if (!e.target.value) onChange('')
+        }}
+        onFocus={() => {
+          if (disabled) return
+          setOpen(true)
+          setSearch('')
+        }}
+      />
+      {open && !disabled && (
+        <ul className="absolute z-30 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border rounded-lg shadow-lg">
+          {filtered.length === 0 ? (
+            <li className="px-3 py-3 text-sm text-gray-400">{emptyMessage}</li>
+          ) : (
+            filtered.map(o => (
+              <li key={o.value}>
+                <button
+                  type="button"
+                  className="w-full text-left px-3 py-3 text-sm hover:bg-blue-50 active:bg-blue-100 border-b border-gray-50 last:border-0 touch-manipulation min-h-[44px]"
+                  onClick={() => {
+                    onChange(o.value)
+                    setSearch('')
+                    setOpen(false)
+                  }}
+                >
+                  <span className="font-mono font-semibold text-[#002B5B]">{o.primary}</span>
+                  {o.secondary && <span className="text-gray-500 text-xs block mt-0.5 sm:inline sm:ml-2 sm:mt-0">{o.secondary}</span>}
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function KarigarSearchSelect({
+  karigars,
+  value,
+  onChange,
+}: {
+  karigars: KarigarRow[]
+  value: string
+  onChange: (id: string) => void
+}) {
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return karigars
+    return karigars.filter(
+      k =>
+        String(k.Karigar_ID).toLowerCase().includes(q) ||
+        String(k.Name).toLowerCase().includes(q),
+    )
+  }, [karigars, search])
+
+  const selected = karigars.find(k => String(k.Karigar_ID) === value)
+
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <span className="font-semibold text-gray-700 text-xs">Karigar</span>
+      <input
+        type="search"
+        placeholder="Search name or ID…"
+        className="mt-1 w-full border rounded-lg px-3 py-2.5 text-sm touch-manipulation"
+        value={open ? search : selected ? `${selected.Karigar_ID} — ${selected.Name}` : search}
+        onChange={e => {
+          setSearch(e.target.value)
+          setOpen(true)
+          if (!e.target.value) onChange('')
+        }}
+        onFocus={() => {
+          setOpen(true)
+          setSearch('')
+        }}
+      />
+      {open && (
+        <ul className="absolute z-30 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border rounded-lg shadow-lg">
+          {filtered.length === 0 ? (
+            <li className="px-3 py-3 text-sm text-gray-400">No karigar found</li>
+          ) : (
+            filtered.map(k => (
+              <li key={k.Karigar_ID}>
+                <button
+                  type="button"
+                  className="w-full text-left px-3 py-3 text-sm hover:bg-blue-50 active:bg-blue-100 border-b border-gray-50 last:border-0 touch-manipulation min-h-[44px]"
+                  onClick={() => {
+                    onChange(String(k.Karigar_ID))
+                    setSearch('')
+                    setOpen(false)
+                  }}
+                >
+                  <span className="font-mono font-semibold text-[#002B5B]">{k.Karigar_ID}</span>
+                  <span className="text-gray-600 ml-2">{k.Name}</span>
+                  {k.Skill && <span className="text-gray-400 text-xs ml-1">· {k.Skill}</span>}
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function computeEntrySummary(
+  hourState: Record<string, { operation: string; pieces: number }>,
+  hours: HourDef[],
+  operations: { op: string; target: number; rate: number }[],
+) {
+  const opTotals: Record<string, { pieces: number; value: number }> = {}
+  let totalPcs = 0
+  for (const h of hours) {
+    if (h.col === 'H_13_14') continue
+    const st = hourState[h.col]
+    if (!st?.operation || !st.pieces) continue
+    const meta = operations.find(o => o.op === st.operation)
+    if (!meta) continue
+    totalPcs += st.pieces
+    if (!opTotals[st.operation]) opTotals[st.operation] = { pieces: 0, value: 0 }
+    opTotals[st.operation].pieces += st.pieces
+    opTotals[st.operation].value += st.pieces * meta.rate
+  }
+  const totalValue = Object.values(opTotals).reduce((s, d) => s + d.value, 0)
+  const totalBudget = Object.entries(opTotals).reduce((s, [op]) => {
+    const meta = operations.find(o => o.op === op)
+    return s + (meta ? meta.rate * meta.target : 0)
+  }, 0)
+  return { totalPcs, totalValue, totalBudget, pl: totalValue - totalBudget, opTotals }
+}
+
 function ProductionTab({
   hours,
   admin,
   onSaved,
+  karigarOnly = false,
+  lockedKarigarId = '',
 }: {
   hours: HourDef[]
   admin: AdminApi
   onSaved: () => void
+  karigarOnly?: boolean
+  lockedKarigarId?: string
 }) {
   const [entryDate, setEntryDate] = useState(todayStr())
-  const [karigarId, setKarigarId] = useState('')
+  const [karigarId, setKarigarId] = useState(lockedKarigarId || '')
   const [style, setStyle] = useState('')
   const [challanNo, setChallanNo] = useState('')
   const [hourState, setHourState] = useState<Record<string, { operation: string; pieces: number }>>({})
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [saveMessage, setSaveMessage] = useState('')
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(true)
+  const skipAutoSaveRef = useRef(false)
+  const qc = useQueryClient()
+
+  useEffect(() => {
+    if (lockedKarigarId) setKarigarId(lockedKarigarId)
+  }, [lockedKarigarId])
 
   const { data: karigarSheet } = useQuery({
     queryKey: ['stitching-sheet', 'karigar_master'],
@@ -229,7 +468,7 @@ function ProductionTab({
     queryFn: () => api.get('/stitching/sheets/challan_master').then(r => r.data),
   })
 
-  const karigars = (karigarSheet?.rows ?? []) as { Karigar_ID: string; Name: string }[]
+  const karigars = (karigarSheet?.rows ?? []) as KarigarRow[]
   const styles = useMemo(() => {
     const s = new Set<string>()
     for (const r of (styleSheet?.rows ?? []) as { Style: string }[]) {
@@ -237,11 +476,53 @@ function ProductionTab({
     }
     return [...s]
   }, [styleSheet])
-  const challans = useMemo(() => {
-    return ((challanSheet?.rows ?? []) as { Challan_No: string; Style: string; Party?: string }[]).filter(
-      c => !style || c.Style === style,
-    )
-  }, [challanSheet, style])
+  type ChallanRow = {
+    Challan_No: string
+    Style: string
+    Party?: string
+    Total_Qty?: number
+    Received_Qty?: number
+  }
+
+  const allChallans = useMemo(
+    () => (challanSheet?.rows ?? []) as ChallanRow[],
+    [challanSheet],
+  )
+
+  const challansForStyle = useMemo(
+    () => allChallans.filter(c => style && String(c.Style) === style),
+    [allChallans, style],
+  )
+
+  const styleOptions = useMemo<SearchSelectOption[]>(
+    () =>
+      styles
+        .slice()
+        .sort((a, b) => a.localeCompare(b))
+        .map(s => ({
+          value: s,
+          primary: s,
+          haystack: s.toLowerCase(),
+        })),
+    [styles],
+  )
+
+  const challanOptions = useMemo<SearchSelectOption[]>(
+    () =>
+      challansForStyle.map(c => {
+        const qty = Number(c.Total_Qty) || 0
+        const recv = Number(c.Received_Qty) || 0
+        const no = String(c.Challan_No)
+        const party = String(c.Party || '')
+        return {
+          value: no,
+          primary: no,
+          secondary: `${party || '—'} · Qty ${qty} · Recv ${recv}`,
+          haystack: `${no} ${party} ${c.Style}`.toLowerCase(),
+        }
+      }),
+    [challansForStyle],
+  )
 
   const operations = useMemo(() => {
     return ((styleSheet?.rows ?? []) as { Style: string; Operation: string; Target: number; Rate_Rs: number }[])
@@ -292,6 +573,7 @@ function ProductionTab({
       const e = data.hours?.[h.col] ?? { operation: '', pieces: 0 }
       next[h.col] = { operation: e.operation || '', pieces: Number(e.pieces) || 0 }
     }
+    skipAutoSaveRef.current = true
     setHourState(next)
   }, [entryDate, karigarId, challanNo, style, hours])
 
@@ -299,29 +581,91 @@ function ProductionTab({
     void loadEntry()
   }, [loadEntry])
 
-  const saveMut = useMutation({
-    mutationFn: () => {
-      const k = karigars.find(x => String(x.Karigar_ID) === karigarId)
-      const hour_entries = hours
+  const { data: entryReports, refetch: refetchReports } = useQuery({
+    queryKey: ['stitching-pe-reports', entryDate, karigarId],
+    queryFn: () =>
+      api
+        .get('/stitching/production-entry/reports', {
+          params: { date: entryDate, karigar_id: karigarId || undefined },
+        })
+        .then(r => r.data),
+    enabled: !!entryDate,
+  })
+
+  const liveSummary = useMemo(
+    () => computeEntrySummary(hourState, hours, operations),
+    [hourState, hours, operations],
+  )
+
+  const buildHourEntries = useCallback(
+    () =>
+      hours
         .filter(h => h.col !== 'H_13_14')
         .map(h => ({
           hour_col: h.col,
           operation: hourState[h.col]?.operation || '',
           pieces: hourState[h.col]?.pieces || 0,
-        }))
-      return api.post('/stitching/production-entry', {
-        date: entryDate,
-        karigar_id: karigarId,
-        karigar_name: k?.Name ?? karigarId,
-        challan_no: challanNo,
-        style,
-        hour_entries,
-      })
+        })),
+    [hours, hourState],
+  )
+
+  const doSave = useCallback(
+    async (silent: boolean) => {
+      if (!karigarId || !challanNo || !style) return
+      if (liveSummary.totalPcs <= 0) return
+      const k = karigars.find(x => String(x.Karigar_ID) === karigarId)
+      setSaveStatus('saving')
+      try {
+        const r = await api.post('/stitching/production-entry', {
+          date: entryDate,
+          karigar_id: karigarId,
+          karigar_name: k?.Name ?? karigarId,
+          challan_no: challanNo,
+          style,
+          hour_entries: buildHourEntries(),
+        })
+        if (r.data.ok) {
+          setSaveStatus('saved')
+          setSaveMessage(r.data.message || 'Saved')
+          onSaved()
+          refetchReports()
+          qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })
+          if (!silent) alert(r.data.message || 'Saved')
+        } else {
+          setSaveStatus('error')
+          if (!silent) alert(r.data.message || 'Save failed')
+        }
+      } catch {
+        setSaveStatus('error')
+        if (!silent) alert('Save failed')
+      }
     },
-    onSuccess: r => {
-      if (r.data.ok) onSaved()
-      alert(r.data.message || (r.data.ok ? 'Saved' : 'Failed'))
-    },
+    [
+      karigarId,
+      challanNo,
+      style,
+      liveSummary.totalPcs,
+      karigars,
+      entryDate,
+      buildHourEntries,
+      onSaved,
+      refetchReports,
+      qc,
+    ],
+  )
+
+  useEffect(() => {
+    if (!autoSaveEnabled || skipAutoSaveRef.current) {
+      skipAutoSaveRef.current = false
+      return
+    }
+    if (!karigarId || !challanNo || !style || liveSummary.totalPcs <= 0) return
+    const t = setTimeout(() => void doSave(true), 2000)
+    return () => clearTimeout(t)
+  }, [hourState, entryDate, karigarId, challanNo, style, autoSaveEnabled, liveSummary.totalPcs, doSave])
+
+  const saveMut = useMutation({
+    mutationFn: () => doSave(false),
   })
 
   const setHour = (col: string, patch: Partial<{ operation: string; pieces: number }>) => {
@@ -335,42 +679,52 @@ function ProductionTab({
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-white p-4 rounded-xl border">
         <label className="text-xs">
           <span className="font-semibold text-gray-700">Date</span>
-          <input type="date" className="mt-1 w-full border rounded px-2 py-1.5 text-sm" value={entryDate} onChange={e => setEntryDate(e.target.value)} />
+          <input type="date" className="mt-1 w-full border rounded-lg px-3 py-2.5 text-sm touch-manipulation" value={entryDate} onChange={e => setEntryDate(e.target.value)} />
         </label>
-        <label className="text-xs">
-          <span className="font-semibold text-gray-700">Karigar</span>
-          <select className="mt-1 w-full border rounded px-2 py-1.5 text-sm" value={karigarId} onChange={e => setKarigarId(e.target.value)}>
-            <option value="">Select…</option>
-            {karigars.map(k => (
-              <option key={k.Karigar_ID} value={String(k.Karigar_ID)}>
-                {k.Karigar_ID} — {k.Name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-xs">
-          <span className="font-semibold text-gray-700">Style</span>
-          <select className="mt-1 w-full border rounded px-2 py-1.5 text-sm" value={style} onChange={e => { setStyle(e.target.value); setChallanNo('') }}>
-            <option value="">Select…</option>
-            {styles.map(s => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
-        </label>
-        <label className="text-xs">
-          <span className="font-semibold text-gray-700">Challan</span>
-          <select className="mt-1 w-full border rounded px-2 py-1.5 text-sm" value={challanNo} onChange={e => setChallanNo(e.target.value)}>
-            <option value="">Select…</option>
-            {challans.map(c => (
-              <option key={c.Challan_No} value={String(c.Challan_No)}>
-                {c.Challan_No} {c.Party ? `| ${c.Party}` : ''}
-              </option>
-            ))}
-          </select>
-        </label>
+        {lockedKarigarId ? (
+          <label className="text-xs block">
+            <span className="font-semibold text-gray-700">Karigar</span>
+            <div className="mt-1 w-full border rounded-lg px-3 py-2.5 text-sm bg-gray-50 font-mono text-[#002B5B]">
+              {karigars.find(k => String(k.Karigar_ID) === lockedKarigarId)?.Name || lockedKarigarId}
+              <span className="text-gray-500 font-normal ml-1">({lockedKarigarId})</span>
+            </div>
+          </label>
+        ) : (
+          <KarigarSearchSelect karigars={karigars} value={karigarId} onChange={setKarigarId} />
+        )}
+        <SearchSelect
+          label="Style / SKU"
+          placeholder="Type to search SKU, e.g. 1065YKBLUE…"
+          value={style}
+          onChange={v => {
+            setStyle(v)
+            setChallanNo('')
+          }}
+          options={styleOptions}
+          emptyMessage="No style found — check Master Data"
+        />
+        <SearchSelect
+          label="Challan"
+          placeholder={style ? 'Search challan no. or party…' : 'Select style first'}
+          value={challanNo}
+          onChange={setChallanNo}
+          options={challanOptions}
+          disabled={!style}
+          emptyMessage={style ? 'No challan for this style — add in Challans tab' : 'Select a style first'}
+          hint={style ? `${challansForStyle.length} challan(s) for ${style}` : undefined}
+        />
       </div>
 
-      {style && operations.length > 0 && (
+      {karigarId && karigars.find(k => String(k.Karigar_ID) === karigarId) && (
+        <div className="text-xs bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 text-blue-900">
+          👤 <b>{karigars.find(k => String(k.Karigar_ID) === karigarId)?.Name}</b>
+          {karigars.find(k => String(k.Karigar_ID) === karigarId)?.Skill
+            ? ` · ${karigars.find(k => String(k.Karigar_ID) === karigarId)?.Skill}`
+            : ''}
+        </div>
+      )}
+
+      {style && operations.length > 0 && !karigarOnly && (
         <Section title="Style operations — targets & rates">
           {!admin.unlocked ? (
             <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -452,7 +806,64 @@ function ProductionTab({
       )}
 
       <Section title="Hour-wise entry">
-        <div className="overflow-x-auto">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <label className="flex items-center gap-2 text-xs text-gray-600 touch-manipulation">
+            <input type="checkbox" checked={autoSaveEnabled} onChange={e => setAutoSaveEnabled(e.target.checked)} />
+            Auto-save (2 sec)
+          </label>
+          {saveStatus === 'saving' && <span className="text-xs text-amber-600 font-medium">Saving…</span>}
+          {saveStatus === 'saved' && <span className="text-xs text-green-600 font-medium">✓ {saveMessage}</span>}
+          {saveStatus === 'error' && <span className="text-xs text-red-600">Save failed</span>}
+        </div>
+
+        <div className="space-y-2 md:hidden mb-3">
+          {hours.map(h => {
+            if (h.col === 'H_13_14') {
+              return (
+                <div key={h.col} className="rounded-lg bg-gray-50 border border-dashed px-3 py-2 text-xs text-gray-400 italic text-center">
+                  {h.label} — Lunch
+                </div>
+              )
+            }
+            const st = hourState[h.col] ?? { operation: '', pieces: 0 }
+            const opMeta = operations.find(o => o.op === st.operation)
+            const eff = opMeta && st.pieces > 0 ? Math.round((st.pieces / Math.max(opMeta.target, 1)) * 100) : null
+            return (
+              <div key={h.col} className="rounded-xl border bg-white p-3 shadow-sm">
+                <div className="flex justify-between mb-2">
+                  <span className="font-bold text-[#2c5aa0]">{h.label}</span>
+                  {eff != null && (
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${eff >= 100 ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {eff}%
+                    </span>
+                  )}
+                </div>
+                <select
+                  className="w-full border rounded-lg px-3 py-2.5 text-sm mb-2 touch-manipulation"
+                  value={st.operation}
+                  onChange={e => setHour(h.col, { operation: e.target.value })}
+                >
+                  {opOptions.map(o => (
+                    <option key={o || '_'} value={o}>{o || '— Operation —'}</option>
+                  ))}
+                </select>
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    className="flex-1 border rounded-lg px-3 py-3 text-lg font-semibold touch-manipulation"
+                    value={st.pieces || ''}
+                    onChange={e => setHour(h.col, { pieces: +e.target.value || 0 })}
+                  />
+                  <span className="text-xs text-gray-400 shrink-0">tgt {opMeta?.target ?? '—'}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="overflow-x-auto hidden md:block">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-[#1a3a5c] text-white">
@@ -507,15 +918,88 @@ function ProductionTab({
             </tbody>
           </table>
         </div>
+        {liveSummary.totalPcs > 0 && (
+          <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div className="bg-white border rounded-lg p-3 text-center">
+              <p className="text-[10px] uppercase text-gray-500">Pieces</p>
+              <p className="text-lg font-bold text-[#2c5aa0]">{liveSummary.totalPcs}</p>
+            </div>
+            <div className="bg-white border rounded-lg p-3 text-center">
+              <p className="text-[10px] uppercase text-gray-500">Actual ₹</p>
+              <p className="text-lg font-bold text-green-700">₹{liveSummary.totalValue.toFixed(2)}</p>
+            </div>
+            <div className="bg-white border rounded-lg p-3 text-center col-span-2 sm:col-span-1">
+              <p className="text-[10px] uppercase text-gray-500">P&amp;L</p>
+              <p className={`text-lg font-bold ${liveSummary.pl >= 0 ? 'text-amber-700' : 'text-green-700'}`}>
+                ₹{liveSummary.pl.toFixed(2)}
+              </p>
+            </div>
+          </div>
+        )}
+
         <button
           type="button"
           onClick={() => saveMut.mutate()}
-          disabled={saveMut.isPending || !karigarId || !challanNo || !style}
-          className="mt-4 w-full py-2.5 rounded-lg bg-[#002B5B] text-white font-semibold text-sm disabled:opacity-50"
+          disabled={saveMut.isPending || !karigarId || !challanNo || !style || liveSummary.totalPcs <= 0}
+          className="mt-4 w-full py-3.5 rounded-xl bg-[#002B5B] text-white font-semibold text-sm disabled:opacity-50 touch-manipulation shadow-md"
         >
-          {saveMut.isPending ? 'Saving…' : '💾 Save production entry'}
+          {saveMut.isPending ? 'Saving…' : '💾 Save now'}
         </button>
       </Section>
+
+      {(entryReports?.recent_saves?.length > 0 || entryReports?.history?.length > 0) && (
+        <Section title={karigarId ? "Today's saves — this karigar" : "Today's saves"}>
+          <div className="space-y-2">
+            {(entryReports.recent_saves?.length ? entryReports.recent_saves : entryReports.history)
+              .slice(0, 8)
+              .map((row: Record<string, unknown>, i: number) => (
+                <div key={i} className="text-xs bg-blue-50 border-l-4 border-[#2c5aa0] rounded-r-lg px-3 py-2.5">
+                  {String(row.Save_Time || '—')} · <b>{String(row.Karigar_Name)}</b> · {String(row.Challan_No)} /{' '}
+                  {String(row.Operation)} · <b>{String(row.Total_Pieces)} pcs</b>
+                </div>
+              ))}
+          </div>
+        </Section>
+      )}
+
+      {entryReports?.report1?.length > 0 && (
+        <Section title="Report 1 — Production summary">
+          <DataTable
+            rows={entryReports.report1}
+            cols={['Karigar_Name', 'Challan_No', 'Operation', 'Working_Hours', 'Total_Pieces', 'Efficiency_%', 'PL_Rs']}
+          />
+        </Section>
+      )}
+
+      {entryReports?.report2_summary?.length > 0 && (
+        <Section title="Report 2 — Salary vs piece value">
+          <DataTable
+            rows={entryReports.report2_summary}
+            cols={['Karigar', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']}
+          />
+          {entryReports.grand_total && (
+            <p className="mt-2 text-xs rounded-lg px-3 py-2 bg-gray-50 border text-gray-700">
+              Grand net P&amp;L: ₹{entryReports.grand_total.total_net_pl}
+            </p>
+          )}
+        </Section>
+      )}
+
+      {entryReports?.report2_hourly?.length > 0 && (
+        <Section title="Report 2 — Hour-wise detail">
+          <details className="text-xs">
+            <summary className="cursor-pointer py-3 font-medium text-[#2c5aa0] touch-manipulation min-h-[44px]">
+              Show hour-wise rows ({entryReports.report2_hourly.length})
+            </summary>
+            <div className="mt-2 max-h-64 overflow-auto">
+              <DataTable
+                rows={entryReports.report2_hourly}
+                cols={['Karigar', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']}
+              />
+            </div>
+          </details>
+        </Section>
+      )}
     </div>
   )
 }

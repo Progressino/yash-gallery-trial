@@ -19,8 +19,9 @@ export default function Login() {
       setLoadStep('Signing in…')
       // Allow queueing behind a long Tier-3 upload (same worker used to unblock via threadpool;
       // 60s still fails fast if the host is actually down).
-      await api.post('/auth/login', { username, password }, { timeout: 60_000 })
-      nav('/', { replace: true })
+      const { data } = await api.post('/auth/login', { username, password }, { timeout: 60_000 })
+      const dest = data?.redirect || (data?.role === 'Karigar' ? '/production-entry' : '/')
+      nav(dest, { replace: true })
     } catch (err: unknown) {
       const e = err as { response?: { status?: number }; code?: string; message?: string }
       const status = e?.response?.status

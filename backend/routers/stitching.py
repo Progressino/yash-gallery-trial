@@ -156,6 +156,11 @@ def load_entry(date: str, karigar_id: str, challan_no: str, style: str):
     return svc.load_production_entry(date, karigar_id, challan_no, style)
 
 
+@router.get("/production-entry/reports")
+def production_entry_reports(date: str, karigar_id: str = ""):
+    return svc.production_entry_reports(date, karigar_id or None)
+
+
 @router.post("/production-entry")
 def save_entry(body: ProductionEntryBody):
     return svc.save_production_entry(

@@ -2,9 +2,12 @@ import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import Layout from './components/Layout'
+import KarigarLayout from './components/KarigarLayout'
+import { KarigarGate, StaffGate } from './components/RouteGuards'
 import Login from './pages/Login'
 import api, { cacheLoad, getCoverage } from './api/client'
 import { useSession } from './store/session'
+import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
 
 const Dashboard   = lazy(() => import('./pages/Dashboard'))
 const Upload      = lazy(() => import('./pages/Upload'))
@@ -48,21 +51,21 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 function ProtectedRoute() {
   const setCoverage = useSession(s => s.setCoverage)
+  const setUser = useAuth(s => s.setUser)
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
-      // Avoid indefinite hang if backend/proxy is down.
-      const { data } = await api.get('/auth/me', { timeout: 8_000 })
-      return data
+      const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 8_000 })
+      setUser(me)
+      return me
     },
     retry: false,
     staleTime: 5 * 60 * 1000,
   })
 
-  // Auto-restore session data after server restart or session expiry.
-  // Runs in the background — the app renders immediately and shows a banner
-  // while restoring so the user isn't stuck on the login screen.
+  const isKarigar = isKarigarUser(data)
+
   const { isFetching: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
@@ -73,7 +76,6 @@ function ProtectedRoute() {
           const refreshed = await getCoverage()
           setCoverage(refreshed)
         } catch {
-          // Don't block app boot forever if cache restore is slow/unavailable.
           setCoverage(coverage)
         }
       } else {
@@ -81,9 +83,9 @@ function ProtectedRoute() {
       }
       return true
     },
-    enabled: !!data,   // only run once authenticated
+    enabled: !!data && !isKarigar,
     retry: false,
-    staleTime: Infinity,  // run once per app load, not on every navigation
+    staleTime: Infinity,
   })
 
   if (isLoading) {
@@ -96,7 +98,7 @@ function ProtectedRoute() {
   if (isError || !data) return <Navigate to="/login" replace />
   return (
     <>
-      {isRestoring && (
+      {isRestoring && !isKarigar && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -119,6 +121,13 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route element={<ProtectedRoute />}>
+            <Route element={<KarigarGate />}>
+              <Route element={<KarigarLayout />}>
+                <Route path="/production-entry" element={<StitchingCosting karigarOnly />} />
+                <Route path="*" element={<Navigate to="/production-entry" replace />} />
+              </Route>
+            </Route>
+            <Route element={<StaffGate />}>
             <Route path="/" element={<Layout />}>
               <Route index element={<Dashboard />} />
               <Route path="upload"    element={<Upload />} />
@@ -142,6 +151,7 @@ export default function App() {
               <Route path="admin"       element={<Admin />} />
               <Route path="marketplace-connections" element={<MarketplaceConnections />} />
               <Route path="sku-deepdive" element={<SKUDeepDive />} />
+            </Route>
             </Route>
           </Route>
         </Routes>

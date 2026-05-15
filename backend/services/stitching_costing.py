@@ -476,6 +476,220 @@ def hour_labels() -> list[dict]:
     return [{"col": c, "label": l} for c, l in zip(HOUR_COLS, HOUR_LBLS)]
 
 
+def _get_daily_salary(karigar_id: str) -> float:
+    kid = str(karigar_id)
+    em = get_sheet_df("employee_master")
+    if not em.empty and "E_Code" in em.columns:
+        row = em[em["E_Code"].astype(str) == kid]
+        if not row.empty:
+            return float(safe_num(row["Daily_Rate_Rs"]).iloc[0])
+    km = get_sheet_df("karigar_master")
+    if not km.empty:
+        row = km[km["Karigar_ID"].astype(str) == kid]
+        if not row.empty and "Daily_Rate_Rs" in row.columns:
+            return float(safe_num(row["Daily_Rate_Rs"]).iloc[0])
+    return 0.0
+
+
+def production_entry_reports(date_str: str, karigar_id: str | None = None) -> dict:
+    """Day reports + save history (Streamlit Production Entry bottom section)."""
+    pl = get_sheet_df("production_log")
+    empty = {
+        "date": date_str,
+        "karigar_id": karigar_id or "",
+        "history": [],
+        "recent_saves": [],
+        "report1": [],
+        "report2_hourly": [],
+        "report2_summary": [],
+        "grand_total": None,
+    }
+    if pl.empty:
+        return empty
+
+    day_pl = pl[pl["Date"].apply(clean_key) == clean_key(date_str)].copy()
+    if karigar_id:
+        day_pl = day_pl[day_pl["Karigar_ID"].apply(clean_key) == clean_key(karigar_id)]
+
+    if day_pl.empty:
+        return empty
+
+    for c in [
+        "Total_Pieces",
+        "Target",
+        "Rate_Rs",
+        "Efficiency_%",
+        "Piece_Value_Rs",
+        "Budgeted_Expense_Rs",
+        "Actual_Expense_Rs",
+        "PL_Rs",
+    ]:
+        if c in day_pl.columns:
+            day_pl[c] = safe_num(day_pl[c])
+
+    hist_cols = [
+        c
+        for c in [
+            "Save_Time",
+            "Saved_By_Name",
+            "Karigar_Name",
+            "Karigar_ID",
+            "Challan_No",
+            "Style",
+            "Operation",
+            "Total_Pieces",
+            "Actual_Expense_Rs",
+            "PL_Rs",
+            "Efficiency_%",
+        ]
+        if c in day_pl.columns
+    ]
+    history = day_pl.copy()
+    if "Save_Time" in history.columns:
+        history = history.sort_values("Save_Time", ascending=False)
+    history_rows = history[hist_cols].fillna("").to_dict(orient="records") if hist_cols else []
+
+    recent = history_rows[:5] if history_rows else []
+
+    orig_hour_cols = [h for h in HOUR_COLS if h != "H_13_14" and h in day_pl.columns]
+
+    def working_hours(row) -> int:
+        return sum(1 for h in orig_hour_cols if safe_num(pd.Series([row.get(h, 0)])).iloc[0] > 0)
+
+    report1_rows = []
+    for _, row in day_pl.iterrows():
+        wh = working_hours(row)
+        hourly_target = float(row.get("Target") or 0)
+        rate = float(row.get("Rate_Rs") or 0)
+        kid = str(row.get("Karigar_ID", ""))
+        daily_salary = _get_daily_salary(kid)
+        hourly_salary = round(daily_salary / 8, 2)
+        adj_target = round(hourly_target * wh, 0)
+        budgeted_exp = round(rate * hourly_target * wh, 2)
+        actual_exp = round(hourly_salary * wh, 2)
+        pl_val = round(budgeted_exp - actual_exp, 2)
+        total_pcs = float(row.get("Total_Pieces") or 0)
+        efficiency = round(total_pcs / adj_target * 100, 1) if adj_target > 0 else 0.0
+
+        hour_vals = {}
+        for hcol, hlbl in zip(HOUR_COLS, HOUR_LBLS):
+            if hcol in row.index and hcol != "H_13_14":
+                v = int(safe_num(pd.Series([row.get(hcol, 0)])).iloc[0])
+                if v > 0:
+                    hour_vals[hlbl] = v
+
+        report1_rows.append(
+            {
+                "Karigar_Name": row.get("Karigar_Name", ""),
+                "Karigar_ID": kid,
+                "Challan_No": row.get("Challan_No", ""),
+                "Style": row.get("Style", ""),
+                "Operation": row.get("Operation", ""),
+                "hours": hour_vals,
+                "Working_Hours": wh,
+                "Total_Pieces": int(total_pcs),
+                "Adj_Target": int(adj_target),
+                "Efficiency_%": efficiency,
+                "Budgeted_Expense_Rs": budgeted_exp,
+                "Actual_Expense_Rs": actual_exp,
+                "PL_Rs": pl_val,
+                "Saved_By_Name": row.get("Saved_By_Name", ""),
+                "Save_Time": row.get("Save_Time", ""),
+            }
+        )
+
+    em = get_sheet_df("employee_master")
+    report2_rows = []
+    for _, row in day_pl.iterrows():
+        kid = str(row.get("Karigar_ID", ""))
+        kar_name = str(row.get("Karigar_Name", ""))
+        op_name = str(row.get("Operation", ""))
+        rate_rs = float(row.get("Rate_Rs") or 0)
+        hourly_target = float(row.get("Target") or 0)
+
+        em_row = em[em["E_Code"].astype(str) == kid] if not em.empty and "E_Code" in em.columns else pd.DataFrame()
+        if not em_row.empty:
+            daily_rate = float(safe_num(em_row["Daily_Rate_Rs"]).iloc[0])
+        else:
+            daily_rate = _get_daily_salary(kid)
+        hourly_sal = round(daily_rate / 8, 2)
+
+        for hcol, hlbl in zip(HOUR_COLS, HOUR_LBLS):
+            if hcol == "H_13_14" or hcol not in row.index:
+                continue
+            pcs = int(safe_num(pd.Series([row.get(hcol, 0)])).iloc[0])
+            if pcs <= 0:
+                continue
+            actual_piece_val = round(pcs * rate_rs, 2)
+            target_piece_val = round(hourly_target * rate_rs, 2)
+            net_pl = round(actual_piece_val - hourly_sal, 2)
+            report2_rows.append(
+                {
+                    "Karigar": kar_name,
+                    "Challan_No": str(row.get("Challan_No", "")),
+                    "Style": str(row.get("Style", "")),
+                    "Hour": hlbl,
+                    "Operation": op_name,
+                    "Hourly_Salary_Rs": hourly_sal,
+                    "Pieces_Done": pcs,
+                    "Hourly_Target_Pcs": int(hourly_target),
+                    "Actual_Piece_Val_Rs": actual_piece_val,
+                    "Target_Piece_Val_Rs": target_piece_val,
+                    "Net_PL_Rs": net_pl,
+                    "Status": "Profit" if net_pl >= 0 else "Loss",
+                }
+            )
+
+    report2_summary = []
+    grand_total = None
+    if report2_rows:
+        r2_df = pd.DataFrame(report2_rows)
+        r2_sum = (
+            r2_df.groupby(["Karigar", "Operation"])
+            .agg(
+                Challan_No=("Challan_No", "first"),
+                Style=("Style", "first"),
+                Hours_Worked=("Hour", "count"),
+                Total_Pieces=("Pieces_Done", "sum"),
+                Hourly_Target_Pcs=("Hourly_Target_Pcs", "first"),
+                Total_Salary_Cost=("Hourly_Salary_Rs", "sum"),
+                Total_Actual_Val=("Actual_Piece_Val_Rs", "sum"),
+                Total_Target_Val=("Target_Piece_Val_Rs", "sum"),
+                Total_Net_PL=("Net_PL_Rs", "sum"),
+            )
+            .round(2)
+            .reset_index()
+        )
+        r2_sum["Avg_Pieces_Per_Hr"] = (
+            r2_sum["Total_Pieces"] / r2_sum["Hours_Worked"].replace(0, 1)
+        ).round(1)
+        r2_sum["Efficiency_%"] = (
+            r2_sum["Total_Pieces"]
+            / (r2_sum["Hourly_Target_Pcs"] * r2_sum["Hours_Worked"]).replace(0, 1)
+            * 100
+        ).round(1)
+        r2_sum["Result"] = r2_sum["Total_Net_PL"].apply(lambda x: "Profit" if x >= 0 else "Loss")
+        report2_summary = r2_sum.fillna("").to_dict(orient="records")
+        grand_total = {
+            "total_salary_cost": round(float(r2_sum["Total_Salary_Cost"].sum()), 2),
+            "total_actual_val": round(float(r2_sum["Total_Actual_Val"].sum()), 2),
+            "total_target_val": round(float(r2_sum["Total_Target_Val"].sum()), 2),
+            "total_net_pl": round(float(r2_sum["Total_Net_PL"].sum()), 2),
+            "overall_profit": float(r2_sum["Total_Net_PL"].sum()) >= 0,
+        }
+
+    return {
+        "date": date_str,
+        "karigar_id": karigar_id or "",
+        "history": history_rows,
+        "recent_saves": recent,
+        "report1": report1_rows,
+        "report2_hourly": report2_rows,
+        "report2_summary": report2_summary,
+        "grand_total": grand_total,
+    }
+
+
 def performance_report(date_from: str, date_to: str) -> dict:
     """Piece value vs salary — karigar performance (Streamlit Performance tab)."""
     pl = get_sheet_df("production_log")
