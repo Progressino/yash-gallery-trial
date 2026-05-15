@@ -1,6 +1,7 @@
 """Stitching Costing — sheet-backed store (mirrors Google Sheets tabs)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -194,6 +195,31 @@ def get_meta(key: str, default: str = "") -> str:
     row = conn.execute("SELECT meta_value FROM stitching_meta WHERE meta_key=?", (key,)).fetchone()
     conn.close()
     return row["meta_value"] if row else default
+
+
+DEFAULT_ADMIN_PW_HASH = hashlib.sha256(b"admin123").hexdigest()
+
+
+def hash_password(pw: str) -> str:
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+
+def get_admin_pw_hash() -> str:
+    h = get_meta("admin_pw_hash", "")
+    return h or DEFAULT_ADMIN_PW_HASH
+
+
+def verify_admin_password(password: str) -> bool:
+    return hash_password(password) == get_admin_pw_hash()
+
+
+def change_admin_password(current: str, new_password: str) -> dict:
+    if not verify_admin_password(current):
+        return {"ok": False, "message": "Wrong current password"}
+    if len(new_password) < 4:
+        return {"ok": False, "message": "Min 4 characters"}
+    set_meta("admin_pw_hash", hash_password(new_password))
+    return {"ok": True, "message": "Password changed"}
 
 
 def set_meta(key: str, value: str) -> None:

@@ -1,6 +1,7 @@
 """Stitching Costing business logic (ported from Streamlit v4.3)."""
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -312,7 +313,7 @@ def style_costing_report(
     else:
         cm_sc["Target_Labour_Rate_Pc"] = 0
 
-    if not pl.empty and "Piece_Value_Rs" in pl.columns:
+    if not pl.empty and "Piece_Value_Rs" in pl.columns and "Challan_No" in pl.columns:
         pl_sc = pl.copy()
         pl_sc["Piece_Value_Rs"] = safe_num(pl_sc["Piece_Value_Rs"])
         actual_exp = pl_sc.groupby("Challan_No")["Piece_Value_Rs"].sum().reset_index()
@@ -461,7 +462,10 @@ def import_zip_bytes(zb: bytes) -> dict:
 
     with zipfile.ZipFile(io.BytesIO(zb)) as zf:
         for nm in zf.namelist():
-            k = nm.replace(".csv", "").strip("/")
+            base = os.path.basename(nm)
+            if not base.lower().endswith(".csv"):
+                continue
+            k = base[:-4]
             if k in DATA_KEYS:
                 df = pd.read_csv(io.StringIO(zf.read(nm).decode()))
                 save_sheet_df(k, df)
@@ -470,3 +474,102 @@ def import_zip_bytes(zb: bytes) -> dict:
 
 def hour_labels() -> list[dict]:
     return [{"col": c, "label": l} for c, l in zip(HOUR_COLS, HOUR_LBLS)]
+
+
+def performance_report(date_from: str, date_to: str) -> dict:
+    """Piece value vs salary — karigar performance (Streamlit Performance tab)."""
+    pl = get_sheet_df("production_log")
+    att = get_sheet_df("karigar_attendance")
+    if pl.empty or att.empty:
+        return {
+            "ok": False,
+            "message": "Need both production entries and attendance records.",
+            "rows": [],
+            "summary": {},
+        }
+
+    pl3 = pl.copy()
+    for c in ["Total_Pieces", "Piece_Value_Rs", "Efficiency_%"]:
+        if c in pl3.columns:
+            pl3[c] = safe_num(pl3[c])
+    pl3["Date_dt"] = pd.to_datetime(pl3["Date"], errors="coerce")
+    pl3 = pl3[(pl3["Date_dt"] >= pd.Timestamp(date_from)) & (pl3["Date_dt"] <= pd.Timestamp(date_to))]
+    if pl3.empty:
+        return {"ok": True, "message": "No production in date range", "rows": [], "summary": {}}
+
+    psm = (
+        pl3.groupby("Karigar_ID")
+        .agg(
+            Piece_Value=("Piece_Value_Rs", "sum"),
+            Total_Pieces=("Total_Pieces", "sum"),
+            Avg_Eff=("Efficiency_%", "mean"),
+        )
+        .reset_index()
+    )
+
+    att3 = att.copy()
+    if "Total_Pay" not in att3.columns:
+        return {
+            "ok": False,
+            "message": "Attendance lacks salary data. Add punches in Attendance tab.",
+            "rows": [],
+            "summary": {},
+        }
+    att3["Date_dt"] = pd.to_datetime(att3["Date"], errors="coerce")
+    att3 = att3[(att3["Date_dt"] >= pd.Timestamp(date_from)) & (att3["Date_dt"] <= pd.Timestamp(date_to))]
+    for c in ["Total_Pay", "Payable_Hrs"]:
+        if c in att3.columns:
+            att3[c] = safe_num(att3[c])
+
+    ss = (
+        att3.groupby("E_Code")
+        .agg(
+            Name=("Name", "first"),
+            Days=("Date", "nunique"),
+            Hrs=("Payable_Hrs", "sum"),
+            Salary=("Total_Pay", "sum"),
+        )
+        .round(2)
+        .reset_index()
+    )
+    ss["E_Code"] = ss["E_Code"].astype(str)
+    psm2 = psm.rename(columns={"Karigar_ID": "E_Code"}).copy()
+    psm2["E_Code"] = psm2["E_Code"].astype(str)
+    perf = ss.merge(psm2, on="E_Code", how="outer").fillna(0)
+    perf["Piece_Value"] = perf["Piece_Value"].round(2)
+    perf["Salary"] = perf["Salary"].round(2)
+    perf["Surplus"] = (perf["Piece_Value"] - perf["Salary"]).round(2)
+    perf["ROI_%"] = (perf["Piece_Value"] / perf["Salary"].replace(0, 1) * 100).round(1)
+    perf["Avg_Eff"] = perf["Avg_Eff"].round(1)
+    perf["Grade"] = perf["Avg_Eff"].apply(
+        lambda x: "A–Excellent"
+        if x >= 100
+        else ("B–Good" if x >= 85 else ("C–Average" if x >= 70 else "D–Needs Improvement"))
+    )
+
+    summary = {
+        "total_piece_value": float(perf["Piece_Value"].sum()),
+        "total_salary": float(perf["Salary"].sum()),
+        "net_surplus": float(perf["Surplus"].sum()),
+    }
+    return {
+        "ok": True,
+        "rows": perf.fillna("").to_dict(orient="records"),
+        "summary": summary,
+    }
+
+
+def update_style_operation(style: str, operation: str, *, target: int | None, rate_rs: float | None) -> dict:
+    df = get_sheet_df("style_master")
+    if df.empty:
+        return {"ok": False, "message": "Style master empty"}
+    mask = (df["Style"].astype(str) == str(style)) & (df["Operation"].astype(str) == str(operation))
+    if not mask.any():
+        return {"ok": False, "message": f"Operation {operation} not found for {style}"}
+    idx = df[mask].index[0]
+    if target is not None:
+        df.at[idx, "Target"] = int(target)
+    if rate_rs is not None:
+        df.at[idx, "Rate_Rs"] = float(rate_rs)
+    save_sheet_df("style_master", df)
+    return {"ok": True, "message": "Updated"}

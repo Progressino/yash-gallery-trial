@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { useStitchingAdmin } from '../lib/stitchingAdmin'
 
 type TabId =
   | 'dashboard'
@@ -11,6 +12,7 @@ type TabId =
   | 'payroll'
   | 'attendance'
   | 'operating'
+  | 'performance'
   | 'master'
 
 const TABS: { id: TabId; label: string }[] = [
@@ -22,6 +24,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'payroll', label: '💰 Payroll' },
   { id: 'attendance', label: '🕐 Karigar Attendance' },
   { id: 'operating', label: '🏢 Operating Staff' },
+  { id: 'performance', label: '🌟 Performance' },
   { id: 'master', label: '⚙️ Master Data' },
 ]
 
@@ -52,6 +55,7 @@ function todayStr() {
 
 export default function StitchingCosting() {
   const qc = useQueryClient()
+  const admin = useStitchingAdmin()
   const [tab, setTab] = useState<TabId>('dashboard')
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
@@ -99,30 +103,16 @@ export default function StitchingCosting() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2 items-center">
-        <button
-          type="button"
-          onClick={() => syncFrom.mutate()}
-          disabled={syncFrom.isPending || !status?.gsheet?.available}
-          className="text-xs px-3 py-1.5 rounded-lg border border-[#2c5aa0] text-[#2c5aa0] hover:bg-blue-50 disabled:opacity-40"
-        >
-          {syncFrom.isPending ? 'Loading…' : '↻ Pull from Google Sheets'}
-        </button>
-        <button
-          type="button"
-          onClick={() => syncTo.mutate()}
-          disabled={syncTo.isPending || !status?.gsheet?.available}
-          className="text-xs px-3 py-1.5 rounded-lg border border-[#2c5aa0] text-[#2c5aa0] hover:bg-blue-50 disabled:opacity-40"
-        >
-          {syncTo.isPending ? 'Saving…' : '↑ Push to Google Sheets'}
-        </button>
-        <a
-          href="/api/stitching/export-zip"
-          className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
-        >
-          📦 Export ZIP
-        </a>
-      </div>
+      <BackupRestoreBar
+        gsheetAvailable={!!status?.gsheet?.available}
+        syncFromPending={syncFrom.isPending}
+        syncToPending={syncTo.isPending}
+        onPull={() => syncFrom.mutate()}
+        onPush={() => syncTo.mutate()}
+        onFlash={flash}
+        onRestored={() => qc.invalidateQueries({ queryKey: ['stitching'] })}
+      />
+      <AdminUnlockPanel admin={admin} onFlash={flash} />
 
       <div className="flex flex-wrap gap-1 border-b border-gray-200 pb-1">
         {TABS.map(t => (
@@ -140,14 +130,21 @@ export default function StitchingCosting() {
       </div>
 
       {tab === 'dashboard' && <DashboardTab />}
-      {tab === 'production' && <ProductionTab hours={status?.hours ?? []} onSaved={() => qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })} />}
+      {tab === 'production' && (
+        <ProductionTab
+          hours={status?.hours ?? []}
+          admin={admin}
+          onSaved={() => qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })}
+        />
+      )}
       {tab === 'challan' && <ChallanTab />}
       {tab === 'style' && <StyleCostingTab />}
       {tab === 'efficiency' && <EfficiencyTab />}
       {tab === 'payroll' && <PayrollTab />}
       {tab === 'attendance' && <AttendanceTab type="karigar" />}
       {tab === 'operating' && <AttendanceTab type="operating" />}
-      {tab === 'master' && <MasterTab />}
+      {tab === 'performance' && <PerformanceTab />}
+      {tab === 'master' && <MasterTab admin={admin} />}
     </div>
   )
 }
@@ -201,7 +198,17 @@ function DashboardTab() {
   )
 }
 
-function ProductionTab({ hours, onSaved }: { hours: HourDef[]; onSaved: () => void }) {
+type AdminApi = ReturnType<typeof useStitchingAdmin>
+
+function ProductionTab({
+  hours,
+  admin,
+  onSaved,
+}: {
+  hours: HourDef[]
+  admin: AdminApi
+  onSaved: () => void
+}) {
   const [entryDate, setEntryDate] = useState(todayStr())
   const [karigarId, setKarigarId] = useState('')
   const [style, setStyle] = useState('')
@@ -212,10 +219,11 @@ function ProductionTab({ hours, onSaved }: { hours: HourDef[]; onSaved: () => vo
     queryKey: ['stitching-sheet', 'karigar_master'],
     queryFn: () => api.get('/stitching/sheets/karigar_master').then(r => r.data),
   })
-  const { data: styleSheet } = useQuery({
+  const { data: styleSheet, refetch: refetchStyles } = useQuery({
     queryKey: ['stitching-sheet', 'style_master'],
     queryFn: () => api.get('/stitching/sheets/style_master').then(r => r.data),
   })
+  const [rateEdits, setRateEdits] = useState<Record<string, { Target: number; Rate_Rs: number }>>({})
   const { data: challanSheet } = useQuery({
     queryKey: ['stitching-sheet', 'challan_master'],
     queryFn: () => api.get('/stitching/sheets/challan_master').then(r => r.data),
@@ -238,8 +246,41 @@ function ProductionTab({ hours, onSaved }: { hours: HourDef[]; onSaved: () => vo
   const operations = useMemo(() => {
     return ((styleSheet?.rows ?? []) as { Style: string; Operation: string; Target: number; Rate_Rs: number }[])
       .filter(r => r.Style === style)
-      .map(r => ({ op: r.Operation, target: r.Target, rate: r.Rate_Rs }))
-  }, [styleSheet, style])
+      .map(r => {
+        const key = `${r.Style}::${r.Operation}`
+        const ed = rateEdits[key]
+        return {
+          op: r.Operation,
+          target: ed?.Target ?? Number(r.Target),
+          rate: ed?.Rate_Rs ?? Number(r.Rate_Rs),
+        }
+      })
+  }, [styleSheet, style, rateEdits])
+
+  const saveRatesMut = useMutation({
+    mutationFn: async () => {
+      const pw = admin.adminPassword()
+      if (!pw) throw new Error('Unlock admin first')
+      for (const op of operations) {
+        const key = `${style}::${op.op}`
+        const ed = rateEdits[key]
+        if (!ed) continue
+        await api.patch('/stitching/master/style-operation', {
+          Style: style,
+          Operation: op.op,
+          Target: ed.Target,
+          Rate_Rs: ed.Rate_Rs,
+          admin_password: pw,
+        })
+      }
+    },
+    onSuccess: () => {
+      setRateEdits({})
+      refetchStyles()
+      alert('Targets and rates updated')
+    },
+    onError: (e: Error) => alert(e.message || 'Update failed'),
+  })
 
   const loadEntry = useCallback(async () => {
     if (!karigarId || !challanNo || !style) return
@@ -328,6 +369,87 @@ function ProductionTab({ hours, onSaved }: { hours: HourDef[]; onSaved: () => vo
           </select>
         </label>
       </div>
+
+      {style && operations.length > 0 && (
+        <Section title="Style operations — targets & rates">
+          {!admin.unlocked ? (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              🔐 <strong>Locked</strong> — Target and rate are read-only. Use <strong>Admin unlock</strong> above to edit.
+            </p>
+          ) : (
+            <p className="text-xs text-green-800 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+              ✅ <strong>Unlocked</strong> — You can edit targets and rates for this style.
+            </p>
+          )}
+          <div className="overflow-x-auto mt-3">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 border-b">
+                  <th className="px-2 py-2 text-left">Operation</th>
+                  <th className="px-2 py-2 text-right">Target</th>
+                  <th className="px-2 py-2 text-right">Rate ₹/pc</th>
+                </tr>
+              </thead>
+              <tbody>
+                {operations.map(op => {
+                  const key = `${style}::${op.op}`
+                  const ed = rateEdits[key] ?? { Target: op.target, Rate_Rs: op.rate }
+                  return (
+                    <tr key={op.op} className="border-b border-gray-50">
+                      <td className="px-2 py-1.5">{op.op}</td>
+                      <td className="px-2 py-1.5 text-right">
+                        {admin.unlocked ? (
+                          <input
+                            type="number"
+                            className="w-20 border rounded px-1 py-0.5 text-right"
+                            value={ed.Target}
+                            onChange={e =>
+                              setRateEdits(prev => ({
+                                ...prev,
+                                [key]: { ...ed, Target: +e.target.value || 0 },
+                              }))
+                            }
+                          />
+                        ) : (
+                          op.target
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 text-right">
+                        {admin.unlocked ? (
+                          <input
+                            type="number"
+                            step={0.25}
+                            className="w-20 border rounded px-1 py-0.5 text-right"
+                            value={ed.Rate_Rs}
+                            onChange={e =>
+                              setRateEdits(prev => ({
+                                ...prev,
+                                [key]: { ...ed, Rate_Rs: +e.target.value || 0 },
+                              }))
+                            }
+                          />
+                        ) : (
+                          op.rate
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {admin.unlocked && Object.keys(rateEdits).length > 0 && (
+            <button
+              type="button"
+              onClick={() => saveRatesMut.mutate()}
+              disabled={saveRatesMut.isPending}
+              className="mt-3 text-xs px-4 py-2 bg-violet-700 text-white rounded-lg font-semibold"
+            >
+              {saveRatesMut.isPending ? 'Saving…' : '💾 Save target & rate changes'}
+            </button>
+          )}
+        </Section>
+      )}
 
       <Section title="Hour-wise entry">
         <div className="overflow-x-auto">
@@ -673,7 +795,7 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   )
 }
 
-function MasterTab() {
+function MasterTab({ admin: _admin }: { admin: AdminApi }) {
   const qc = useQueryClient()
   const keys = ['style_master', 'karigar_master', 'employee_master'] as const
   const [active, setActive] = useState<(typeof keys)[number]>('style_master')
@@ -761,6 +883,276 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <div className="px-4 py-2 bg-[#2c5aa0] text-white text-sm font-semibold">{title}</div>
       <div className="p-4">{children}</div>
     </section>
+  )
+}
+
+function BackupRestoreBar({
+  gsheetAvailable,
+  syncFromPending,
+  syncToPending,
+  onPull,
+  onPush,
+  onFlash,
+  onRestored,
+}: {
+  gsheetAvailable: boolean
+  syncFromPending: boolean
+  syncToPending: boolean
+  onPull: () => void
+  onPush: () => void
+  onFlash: (type: 'ok' | 'err', text: string) => void
+  onRestored: () => void
+}) {
+  const zipRef = useRef<HTMLInputElement>(null)
+  const [restorePending, setRestorePending] = useState(false)
+
+  const handleExport = async () => {
+    try {
+      const res = await api.get('/stitching/export-zip', { responseType: 'blob' })
+      const url = URL.createObjectURL(res.data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `stitching_${todayStr()}.zip`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      onFlash('err', 'Export failed')
+    }
+  }
+
+  const handleRestore = async (file: File) => {
+    if (!window.confirm('Replace all stitching data with this ZIP? This cannot be undone.')) return
+    setRestorePending(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const { data } = await api.post('/stitching/import-zip', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      onFlash('ok', data.message || 'Restored')
+      onRestored()
+    } catch {
+      onFlash('err', 'Restore failed')
+    } finally {
+      setRestorePending(false)
+      if (zipRef.current) zipRef.current.value = ''
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 space-y-3">
+      <p className="text-xs font-semibold text-[#1a3a5c]">💾 Backup & restore</p>
+      <p className="text-xs text-gray-600">Data is stored on the server. Export a ZIP backup or restore from a previous export.</p>
+      <div className="flex flex-wrap gap-2 items-center">
+        <button
+          type="button"
+          onClick={onPull}
+          disabled={syncFromPending || !gsheetAvailable}
+          className="text-xs px-3 py-1.5 rounded-lg border border-[#2c5aa0] text-[#2c5aa0] hover:bg-white disabled:opacity-40"
+        >
+          {syncFromPending ? 'Loading…' : '↻ Pull from Google Sheets'}
+        </button>
+        <button
+          type="button"
+          onClick={onPush}
+          disabled={syncToPending || !gsheetAvailable}
+          className="text-xs px-3 py-1.5 rounded-lg border border-[#2c5aa0] text-[#2c5aa0] hover:bg-white disabled:opacity-40"
+        >
+          {syncToPending ? 'Saving…' : '↑ Push to Google Sheets'}
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleExport()}
+          className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+        >
+          📦 Export ZIP
+        </button>
+        <input
+          ref={zipRef}
+          type="file"
+          accept=".zip"
+          className="hidden"
+          onChange={e => {
+            const f = e.target.files?.[0]
+            if (f) void handleRestore(f)
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => zipRef.current?.click()}
+          disabled={restorePending}
+          className="text-xs px-3 py-1.5 rounded-lg border border-amber-400 bg-amber-50 text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+        >
+          {restorePending ? 'Restoring…' : '📂 Restore from ZIP'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function AdminUnlockPanel({
+  admin,
+  onFlash,
+}: {
+  admin: AdminApi
+  onFlash: (type: 'ok' | 'err', text: string) => void
+}) {
+  const [pw, setPw] = useState('')
+  const [showChange, setShowChange] = useState(false)
+  const [cur, setCur] = useState('')
+  const [n1, setN1] = useState('')
+  const [n2, setN2] = useState('')
+
+  const tryUnlock = async () => {
+    try {
+      const data = await admin.unlock(pw)
+      if (data.ok) {
+        onFlash('ok', 'Admin unlocked — you can edit targets and rates')
+        setPw('')
+      } else {
+        onFlash('err', data.message || 'Wrong password')
+      }
+    } catch {
+      onFlash('err', 'Unlock failed')
+    }
+  }
+
+  const changePw = async () => {
+    try {
+      const { data } = await api.post('/stitching/admin/change-password', {
+        current: cur,
+        new_password: n1,
+        confirm: n2,
+      })
+      onFlash('ok', data.message || 'Password changed')
+      setCur('')
+      setN1('')
+      setN2('')
+      setShowChange(false)
+    } catch (e: unknown) {
+      const msg =
+        e && typeof e === 'object' && 'response' in e
+          ? String((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Failed')
+          : 'Failed'
+      onFlash('err', msg)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-3">
+      <p className="text-xs font-semibold text-gray-700">🔐 Admin — unlock targets & rates</p>
+      {admin.unlocked ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-green-700 bg-green-50 border border-green-200 px-3 py-1.5 rounded-lg">
+            ✅ Unlocked — Target & rate edits enabled on Production Entry
+          </span>
+          <button type="button" onClick={admin.lock} className="text-xs px-3 py-1.5 rounded-lg border border-gray-300">
+            🔒 Lock
+          </button>
+          <button type="button" onClick={() => setShowChange(s => !s)} className="text-xs px-3 py-1.5 rounded-lg border border-gray-300">
+            Change password
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2 items-center">
+          <span className="text-xs text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">
+            Locked — default password: admin123
+          </span>
+          <input
+            type="password"
+            placeholder="Admin password"
+            value={pw}
+            onChange={e => setPw(e.target.value)}
+            className="text-xs border rounded px-2 py-1.5 w-40"
+          />
+          <button type="button" onClick={() => void tryUnlock()} className="text-xs px-3 py-1.5 rounded-lg bg-[#002B5B] text-white font-semibold">
+            🔓 Unlock
+          </button>
+        </div>
+      )}
+      {showChange && (
+        <div className="grid sm:grid-cols-3 gap-2 text-xs pt-2 border-t">
+          <label>
+            Current
+            <input type="password" className="w-full border rounded mt-1 px-2 py-1" value={cur} onChange={e => setCur(e.target.value)} />
+          </label>
+          <label>
+            New
+            <input type="password" className="w-full border rounded mt-1 px-2 py-1" value={n1} onChange={e => setN1(e.target.value)} />
+          </label>
+          <label>
+            Confirm
+            <input type="password" className="w-full border rounded mt-1 px-2 py-1" value={n2} onChange={e => setN2(e.target.value)} />
+          </label>
+          <button type="button" onClick={() => void changePw()} className="self-end px-3 py-2 bg-violet-700 text-white rounded text-xs sm:col-span-3 max-w-xs">
+            Save new password
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PerformanceTab() {
+  const [from, setFrom] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 29)
+    return d.toISOString().slice(0, 10)
+  })
+  const [to, setTo] = useState(todayStr())
+  const { data, refetch, isFetching } = useQuery({
+    queryKey: ['stitching-performance', from, to],
+    queryFn: () => api.get('/stitching/performance', { params: { date_from: from, date_to: to } }).then(r => r.data),
+    enabled: false,
+  })
+
+  return (
+    <div className="space-y-4">
+      <Section title="Employee performance — piece value vs salary">
+        <p className="text-xs text-gray-600 mb-3">
+          Compares production piece-value to karigar attendance pay over the selected period. Requires both production log and attendance with salary.
+        </p>
+        <div className="flex flex-wrap gap-2 items-end mb-4">
+          <label className="text-xs">
+            From
+            <input type="date" className="block border rounded mt-1 px-2 py-1" value={from} onChange={e => setFrom(e.target.value)} />
+          </label>
+          <label className="text-xs">
+            To
+            <input type="date" className="block border rounded mt-1 px-2 py-1" value={to} onChange={e => setTo(e.target.value)} />
+          </label>
+          <button type="button" onClick={() => refetch()} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm">
+            Run report
+          </button>
+        </div>
+        {isFetching && <p className="text-sm text-gray-500">Loading…</p>}
+        {data && !data.ok && <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{data.message}</p>}
+        {data?.ok && data.summary && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+            <div className="bg-white border rounded-lg p-3">
+              <p className="text-xs text-gray-500">Total piece value</p>
+              <p className="text-lg font-bold text-[#2c5aa0]">₹{Number(data.summary.total_piece_value).toLocaleString()}</p>
+            </div>
+            <div className="bg-white border rounded-lg p-3">
+              <p className="text-xs text-gray-500">Total salary paid</p>
+              <p className="text-lg font-bold text-gray-800">₹{Number(data.summary.total_salary).toLocaleString()}</p>
+            </div>
+            <div className="bg-white border rounded-lg p-3">
+              <p className="text-xs text-gray-500">Net surplus</p>
+              <p className={`text-lg font-bold ${Number(data.summary.net_surplus) >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                ₹{Number(data.summary.net_surplus).toLocaleString()}
+              </p>
+            </div>
+          </div>
+        )}
+        {data?.ok && (data.rows?.length ?? 0) > 0 && (
+          <DataTable
+            rows={data.rows}
+            cols={['E_Code', 'Name', 'Days', 'Hrs', 'Salary', 'Total_Pieces', 'Piece_Value', 'Surplus', 'ROI_%', 'Avg_Eff', 'Grade']}
+          />
+        )}
+      </Section>
+    </div>
   )
 }
 

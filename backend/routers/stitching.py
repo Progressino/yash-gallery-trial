@@ -10,7 +10,15 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from ..db.stitching_db import DATA_KEYS, get_all_sheets, get_sheet_df, save_sheet_df, save_sheet_rows
+from ..db.stitching_db import (
+    DATA_KEYS,
+    change_admin_password,
+    get_all_sheets,
+    get_sheet_df,
+    save_sheet_df,
+    save_sheet_rows,
+    verify_admin_password,
+)
 from ..services import stitching_costing as svc
 from ..services.stitching_gsheet import gsheet_status, sync_from_gsheet, sync_to_gsheet
 
@@ -72,6 +80,24 @@ class KarigarBody(BaseModel):
     Name: str
     Skill: str = "Stitching"
     Daily_Rate_Rs: float = 420.0
+
+
+class AdminPasswordBody(BaseModel):
+    password: str
+
+
+class AdminChangePasswordBody(BaseModel):
+    current: str
+    new_password: str
+    confirm: str
+
+
+class StyleOpUpdateBody(BaseModel):
+    Style: str
+    Operation: str
+    Target: Optional[int] = None
+    Rate_Rs: Optional[float] = None
+    admin_password: str
 
 
 @router.get("/status")
@@ -157,6 +183,43 @@ def efficiency(date_from: str = "", date_to: str = "", styles: str = ""):
         date_to = str(date.today())
     style_list = [s.strip() for s in styles.split(",") if s.strip()] if styles else None
     return svc.efficiency_report(date_from, date_to, style_list)
+
+
+@router.get("/performance")
+def performance(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=29))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.performance_report(date_from, date_to)
+
+
+@router.post("/admin/unlock")
+def admin_unlock(body: AdminPasswordBody):
+    if verify_admin_password(body.password):
+        return {"ok": True, "message": "Unlocked"}
+    raise HTTPException(403, "Wrong admin password")
+
+
+@router.post("/admin/change-password")
+def admin_change_password(body: AdminChangePasswordBody):
+    if body.new_password != body.confirm:
+        raise HTTPException(400, "Passwords don't match")
+    out = change_admin_password(body.current, body.new_password)
+    if not out["ok"]:
+        raise HTTPException(400, out["message"])
+    return out
+
+
+@router.patch("/master/style-operation")
+def patch_style_operation(body: StyleOpUpdateBody):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required to edit targets and rates")
+    if body.Target is None and body.Rate_Rs is None:
+        raise HTTPException(400, "Provide Target and/or Rate_Rs")
+    return svc.update_style_operation(
+        body.Style, body.Operation, target=body.Target, rate_rs=body.Rate_Rs
+    )
 
 
 @router.get("/payroll")
