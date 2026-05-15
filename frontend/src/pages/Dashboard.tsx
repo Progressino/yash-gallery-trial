@@ -13,6 +13,7 @@ import api, {
 } from '../api/client'
 import { useSession } from '../store/session'
 import './Dashboard.css'
+import { PageLoadingStripe } from '../components/LoadingProgressBar'
 
 /* ═══════════════════════════════════════════════════════════
    TYPES
@@ -960,12 +961,43 @@ export default function Dashboard() {
 
   const hiddenByName = new Set([...hiddenPlatforms].map(id => id))
 
+  const intelligenceLoading =
+    loadingPlatforms ||
+    (showDsr && loadingDsr) ||
+    (salesLoaded && loadingDsrBrands) ||
+    exportingSales ||
+    exportingDsr ||
+    exportingDsrMonthly
+
+  const intelligenceLoadLabel = useMemo(() => {
+    if (exportingSales) return 'Preparing sales export…'
+    if (exportingDsr) return 'Exporting DSR…'
+    if (exportingDsrMonthly) return 'Exporting brand monthly…'
+    if (loadingPlatforms) return 'Loading marketplace data…'
+    if (showDsr && loadingDsr) return 'Loading daily DSR…'
+    if (salesLoaded && loadingDsrBrands) return 'Loading DSR by brand…'
+    return undefined
+  }, [
+    exportingSales,
+    exportingDsr,
+    exportingDsrMonthly,
+    loadingPlatforms,
+    showDsr,
+    loadingDsr,
+    salesLoaded,
+    loadingDsrBrands,
+  ])
+
   /* ────────────────────────────────────────────────────────────────
      RENDER
      ──────────────────────────────────────────────────────────────── */
   return (
     <div className="dash-v2">
-
+      <PageLoadingStripe
+        active={intelligenceLoading}
+        label={intelligenceLoadLabel}
+        className="sticky top-0 z-50 mb-3"
+      />
       {/* ══════════ HERO ══════════ */}
       <section className="hero">
         <div className="hero-bg" aria-hidden>

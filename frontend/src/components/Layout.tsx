@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
 import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage } from '../api/client'
 import api from '../api/client'
+import { FixedTopLoadingBar } from './LoadingProgressBar'
 
 const NAV_GROUPS = [
   {
@@ -44,6 +45,18 @@ export default function Layout() {
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | 'reload' | 'delete' | null>(null)
+
+  const cacheBarLabel =
+    cacheLoading === 'load'
+      ? 'Loading cache…'
+      : cacheLoading === 'save'
+        ? 'Saving cache…'
+        : cacheLoading === 'reload'
+          ? 'Rebuilding from server…'
+          : cacheLoading === 'delete'
+            ? 'Deleting data…'
+            : undefined
+
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const autoLoadAttempted = useRef(false)
 
@@ -149,6 +162,7 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <FixedTopLoadingBar active={cacheLoading !== null} label={cacheBarLabel} />
       {/* Mobile backdrop */}
       {sidebarOpen && (
         <div

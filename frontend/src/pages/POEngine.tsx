@@ -4,6 +4,8 @@ import { api, getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
+import { PageLoadingStripe } from '../components/LoadingProgressBar'
+import { calendarDateIST, yesterdayIST } from '../lib/dates'
 
 interface PORow {
   OMS_SKU: string
@@ -51,6 +53,9 @@ interface POResult {
   message?: string
   rows?: PORow[]
   columns?: string[]
+  sales_through?: string
+  planning_date?: string
+  raise_ledger_rows?: number
 }
 interface PORiskRow extends PORow {
   risk_reasons: string
@@ -276,11 +281,8 @@ export default function POEngine() {
   const [clearLedgerBusy, setClearLedgerBusy] = useState(false)
   const [ledgerImportBusy, setLedgerImportBusy] = useState(false)
   const [ledgerImportMsg, setLedgerImportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
-  const [ledgerImportDate, setLedgerImportDate] = useState(() => {
-    const d = new Date()
-    d.setDate(d.getDate() - 1)
-    return d.toISOString().slice(0, 10)
-  })
+  const [ledgerImportDate, setLedgerImportDate] = useState(() => yesterdayIST())
+  const planningDate = calendarDateIST()
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
   const [shipment, setShipment] = useState<POResult | null>(null)
   const [shipSearch, setShipSearch] = useState('')
@@ -408,12 +410,9 @@ export default function POEngine() {
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
-      const d = new Date()
-      const p = (n: number) => String(n).padStart(2, '0')
-      const planning_date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
       const res = await api.post<POResult>('/po/calculate', {
         ...params,
-        planning_date,
+        planning_date: planningDate,
         raise_ledger_lookback_days: 14,
       })
       if (seq !== poRunSeqRef.current) return
@@ -447,12 +446,9 @@ export default function POEngine() {
       return
     }
     try {
-      const d = new Date()
-      const p = (n: number) => String(n).padStart(2, '0')
-      const raised_date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
       const { data } = await api.post<{ ok?: boolean; message?: string }>('/po/raise-confirm', {
         rows: payloadRows,
-        raised_date,
+        raised_date: planningDate,
         group_by_parent: params.group_by_parent,
       })
       if (!data?.ok) {
@@ -792,8 +788,43 @@ export default function POEngine() {
     return Array.from(groups.values())
   }, [shipmentRows, shipNumericCols])
 
+  const poPageBusy =
+    loading ||
+    quarterlyLoading ||
+    shipLoading ||
+    skuUploadBusy ||
+    dailyInvBusy ||
+    raiseConfirmBusy ||
+    clearLedgerBusy ||
+    ledgerImportBusy ||
+    effInvLoading
+
+  const poPageBusyLabel = useMemo(() => {
+    if (loading) return 'Calculating PO recommendations…'
+    if (quarterlyLoading) return 'Loading quarterly history…'
+    if (shipLoading) return 'Running shipment engine…'
+    if (skuUploadBusy) return 'Uploading SKU status sheet…'
+    if (dailyInvBusy) return 'Uploading daily inventory…'
+    if (raiseConfirmBusy) return 'Confirming raises…'
+    if (clearLedgerBusy) return 'Clearing raise ledger…'
+    if (ledgerImportBusy) return 'Importing ledger CSV…'
+    if (effInvLoading) return 'Refreshing effective inventory…'
+    return undefined
+  }, [
+    loading,
+    quarterlyLoading,
+    shipLoading,
+    skuUploadBusy,
+    dailyInvBusy,
+    raiseConfirmBusy,
+    clearLedgerBusy,
+    ledgerImportBusy,
+    effInvLoading,
+  ])
+
   return (
     <div className="p-6 space-y-6">
+      <PageLoadingStripe active={poPageBusy} label={poPageBusyLabel} className="sticky top-0 z-30 -mt-2 mb-2" />
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">🎯 PO Engine</h2>
         <p className="text-gray-400 text-sm mt-1">Calculate purchase orders with quarterly history inline.</p>
@@ -1139,6 +1170,26 @@ export default function POEngine() {
                   </div>
                   <pre className="text-yellow-900 whitespace-pre-wrap">{JSON.stringify(debugInfo, null, 2)}</pre>
                 </div>
+              )}
+
+              {result?.ok && (result.sales_through || result.planning_date) && (
+                <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2">
+                  <strong>Data anchor:</strong> sales through <strong>{result.sales_through ?? '—'}</strong>
+                  {result.planning_date ? (
+                    <> · planning day <strong>{result.planning_date}</strong> (IST)</>
+                  ) : null}
+                  {result.sales_through && result.planning_date && result.sales_through < result.planning_date ? (
+                    <> — no sales uploaded for the planning day yet; PO uses the last sales date, not calendar &quot;today&quot;.</>
+                  ) : null}
+                </p>
+              )}
+
+              {result?.ok && raiseLedgerRows === 0 && (
+                <p className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-lg px-4 py-2">
+                  <strong>Raise ledger is empty.</strong> Yesterday&apos;s raises are not applied until you use{' '}
+                  <strong>Export &amp; Confirm</strong> in Raise PO, or <strong>Import raises (CSV)</strong> with raise date{' '}
+                  <strong>{ledgerImportDate}</strong>. Plain Export CSV does not update the ledger.
+                </p>
               )}
 
               {/* Pipeline info banner */}

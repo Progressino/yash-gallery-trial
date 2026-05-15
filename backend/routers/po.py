@@ -380,15 +380,7 @@ def po_raise_confirm(request: Request, body: RaiseConfirmBody):
     )
     sess._quarterly_cache.clear()
 
-    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
-    if sid:
-        try:
-            from ..db.forecast_session_pg import persist_session_bundle
-
-            if persist_session_bundle(sid, sess):
-                logging.getLogger(__name__).info("PostgreSQL session saved after PO raise-confirm (%s…)", sid[:8])
-        except Exception:
-            logging.getLogger(__name__).exception("PostgreSQL session persist after raise-confirm failed")
+    _sync_po_sidecars_to_durable_storage(request, sess)
 
     n = int(len(sess.po_raise_ledger_df))
     return {
@@ -491,14 +483,7 @@ async def po_raise_ledger_import_csv(
     )
     sess._quarterly_cache.clear()
 
-    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
-    if sid:
-        try:
-            from ..db.forecast_session_pg import persist_session_bundle
-
-            persist_session_bundle(sid, sess)
-        except Exception:
-            logging.getLogger(__name__).exception("PostgreSQL session persist after raise-ledger CSV import failed")
+    _sync_po_sidecars_to_durable_storage(request, sess)
 
     n = int(len(sess.po_raise_ledger_df))
     tot_units = int(sum(accum.values()))
@@ -541,14 +526,7 @@ def po_clear_raise_ledger(request: Request):
         return {"ok": False, "message": "No session"}
     sess.po_raise_ledger_df = _pd.DataFrame()
     sess._quarterly_cache.clear()
-    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
-    if sid:
-        try:
-            from ..db.forecast_session_pg import persist_session_bundle
-
-            persist_session_bundle(sid, sess)
-        except Exception:
-            logging.getLogger(__name__).exception("PostgreSQL session persist after raise-ledger clear failed")
+    _sync_po_sidecars_to_durable_storage(request, sess)
     return {"ok": True, "message": "PO raise ledger cleared."}
 
 
@@ -751,10 +729,27 @@ def po_calculate(request: Request, body: PORequest):
             s = pd.to_numeric(po_df[c], errors="coerce")
             po_df[c] = s.where(np.isfinite(s), 999.0).fillna(999.0).round(1)
     rows = po_df.to_dict("records")
+    sales_through = None
+    try:
+        st = pd.to_datetime(sess.sales_df["TxnDate"], errors="coerce").max()
+        if pd.notna(st):
+            sales_through = str(pd.Timestamp(st).date())
+    except Exception:
+        pass
+    planning_out = None
+    if body.planning_date and str(body.planning_date).strip():
+        try:
+            planning_out = str(pd.Timestamp(pd.to_datetime(body.planning_date).normalize()).date())
+        except Exception:
+            planning_out = str(body.planning_date).strip()
+    ledger_n = int(len(_ledger)) if _ledger is not None and not getattr(_ledger, "empty", True) else 0
     return {
         "ok":      True,
         "rows":    rows,
         "columns": list(po_df.columns),
+        "sales_through": sales_through,
+        "planning_date": planning_out,
+        "raise_ledger_rows": ledger_n,
     }
 
 

@@ -371,10 +371,6 @@ def extend_history_with_sales(
     if sheet_max >= cap_date:
         return base[out_cols].reset_index(drop=True)
 
-    days = pd.date_range(sheet_max + pd.Timedelta(days=1), cap_date, freq="D")
-    if len(days) == 0:
-        return base[out_cols].reset_index(drop=True)
-
     # Last seen snapshot per SKU = starting point for the roll-forward.
     last_snap = (
         base.sort_values(["OMS_SKU", "Date"])
@@ -402,6 +398,32 @@ def extend_history_with_sales(
                 sales_net = (
                     s.groupby(["OMS_SKU", "Date"], as_index=False)["Net_Units"].sum()
                 )
+                # Never roll inventory past the last day we actually have sales for.
+                smax = pd.to_datetime(s["Date"], errors="coerce").max()
+                if pd.notna(smax):
+                    cap_date = min(cap_date, pd.Timestamp(smax).normalize())
+
+    if sheet_max >= cap_date:
+        return base[out_cols].reset_index(drop=True)
+
+    # Only synthesize snapshots on days with sales activity — do not fill every
+    # calendar day with flat on-hand (that inflated Eff_Days when today's sales
+    # were not uploaded yet).
+    if sales_net is not None and not sales_net.empty:
+        active = sorted(
+            pd.to_datetime(sales_net["Date"], errors="coerce")
+            .dropna()
+            .dt.normalize()
+            .unique()
+        )
+        days = pd.DatetimeIndex(
+            [d for d in active if sheet_max < pd.Timestamp(d) <= cap_date]
+        )
+    else:
+        days = pd.DatetimeIndex([])
+
+    if len(days) == 0:
+        return base[out_cols].reset_index(drop=True)
 
     if sales_net is not None and not sales_net.empty:
         pivot = (

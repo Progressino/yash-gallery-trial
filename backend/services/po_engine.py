@@ -581,6 +581,13 @@ def calculate_po_base(
     if inv_work["OMS_SKU"].duplicated().any():
         inv_work = inv_work.drop_duplicates(subset=["OMS_SKU"], keep="last")
 
+    _plan = None
+    if planning_date:
+        try:
+            _plan = pd.Timestamp(pd.to_datetime(planning_date).normalize())
+        except Exception:
+            _plan = None
+
     max_date = df["TxnDate"].max()
     # Guard against stray future-dated rows (parse quirks / bad source dates).
     # A single outlier can shift the global recent window and zero-out ADS for most SKUs.
@@ -588,6 +595,12 @@ def calculate_po_base(
     _max_allowed = _today + timedelta(days=1)
     if pd.notna(max_date) and max_date > _max_allowed:
         max_date = _today
+    # Do not run ADS / eff-days as if sales exist past the last upload (or past the
+    # operator's planning day when the browser sends it).
+    if _plan is not None and pd.notna(max_date):
+        max_date = min(max_date, _plan)
+    elif _plan is not None:
+        max_date = _plan
     # PO only needs recent and LY windows; trimming old rows avoids multi-year
     # full-table groupbys that make calculation feel stuck for large histories.
     lookback_days = int(max(30, period_days) + 365 + period_days + 7)
@@ -735,7 +748,12 @@ def calculate_po_base(
             if not ih.empty:
                 _ihmax = pd.to_datetime(ih["Date"], errors="coerce").max()
                 if pd.notna(_ihmax):
-                    inv_window_end = max(inv_window_end, pd.Timestamp(_ihmax).normalize())
+                    sheet_end = pd.Timestamp(_ihmax).normalize()
+                    if _plan is not None:
+                        sheet_end = min(sheet_end, _plan)
+                    # Uploaded inventory snapshots may run past last sales day (baseline
+                    # sheet). Do not extend past the operator's planning day.
+                    inv_window_end = max(inv_window_end, sheet_end)
             inv_window_start = inv_window_end - timedelta(days=int(ADS_WINDOW) - 1)
 
             # Auto-roll-forward: derive synthetic snapshots from sales for any
@@ -1209,14 +1227,7 @@ def calculate_po_base(
     # ── In-app confirmed PO raises (Export & Confirm) ───────────────────────────
     # Merged into effective pipeline so tomorrow's run does not re-recommend the
     # same release for a SKU before sheet pipeline / inventory reflect it.
-    try:
-        _as_of_plan = (
-            pd.Timestamp(pd.to_datetime(planning_date).normalize())
-            if planning_date
-            else pd.Timestamp.now().normalize()
-        )
-    except Exception:
-        _as_of_plan = pd.Timestamp.now().normalize()
+    _as_of_plan = _plan if _plan is not None else pd.Timestamp.now().normalize()
 
     lag = pd.DataFrame()
     if po_raise_ledger_df is not None and not po_raise_ledger_df.empty:

@@ -1772,8 +1772,9 @@ def test_extend_history_floors_at_zero_when_over_sold():
     assert qty == 0.0
 
 
-def test_extend_history_no_sales_carries_last_qty_forward():
-    """No sales activity means the SKU stayed at its last known qty."""
+def test_extend_history_no_sales_does_not_fill_calendar_gaps():
+    """Without sales rows after the baseline, do not invent daily snapshots —
+    that previously inflated Eff_Days when today's sales were not uploaded."""
     from backend.services.daily_inventory_history import extend_history_with_sales
 
     baseline = pd.DataFrame(
@@ -1784,10 +1785,8 @@ def test_extend_history_no_sales_carries_last_qty_forward():
         sales_df=pd.DataFrame(columns=["Sku", "TxnDate", "Units_Effective"]),
         cap_date=pd.Timestamp("2026-05-13"),
     )
-    out["Date"] = pd.to_datetime(out["Date"])
-    derived = out[(out["OMS_SKU"] == "IDLE") & (out["Source"] == "derived")]
-    assert len(derived) == 3
-    assert set(derived["Qty"].unique()) == {12.0}
+    derived = out[out.get("Source", "") == "derived"] if "Source" in out.columns else out.iloc[0:0]
+    assert len(derived) == 0
 
 
 def test_extend_history_skips_skus_without_baseline():
@@ -1962,4 +1961,24 @@ def test_po_raise_ledger_feeds_effective_pipeline_and_drops_repeat_po():
     assert int(row["PO_Confirmed_Raise_Pipeline"]) == qty_first
     assert int(row["PO_Pipeline_Effective"]) == int(row["PO_Pipeline_Total"]) + qty_first
     assert int(row["PO_Qty"]) < qty_first
+
+
+def test_merge_po_optional_sheets_includes_raise_ledger():
+    """Raise ledger must land in warm cache so new sessions inherit yesterday's raises."""
+    import backend.main as main_mod
+    from backend.session import AppSession
+
+    main_mod._warm_cache = {}
+    sess = AppSession()
+    sess.po_raise_ledger_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["TEST-SKU-1"],
+            "Raised_Qty": [40],
+            "Raised_Date": [pd.Timestamp("2026-05-14")],
+        }
+    )
+    main_mod.merge_po_optional_sheets_into_warm_cache(sess)
+    cached = main_mod._warm_cache.get("po_raise_ledger_df")
+    assert cached is not None and not cached.empty
+    assert int(cached.iloc[0]["Raised_Qty"]) == 40
 

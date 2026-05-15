@@ -194,7 +194,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         try:
             import backend.main as _main
             if _main._warm_cache:
-                for key in ("daily_inventory_history_df", "sku_status_lead_df"):
+                for key in ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df"):
                     if getattr(sess, key, None) is not None and not getattr(sess, key).empty:
                         continue
                     val = _main._warm_cache.get(key)

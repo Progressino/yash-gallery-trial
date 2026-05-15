@@ -84,6 +84,8 @@ _WARM_CACHE_KEYS = (
     # show "upload daily inventory again" and SKU-status merges stay in effect.
     "daily_inventory_history_df",
     "sku_status_lead_df",
+    # Confirmed PO raises (Export & Confirm / CSV import) — must survive restarts like other PO sidecars.
+    "po_raise_ledger_df",
 )
 
 
@@ -119,19 +121,19 @@ def publish_warm_cache_from_session(sess) -> None:
 def merge_po_optional_sheets_into_warm_cache(sess) -> None:
     """Copy PO-only sidecar frames into the shared warm cache (non-destructive merge).
 
-    ``POST /api/po/daily-inventory-history`` and ``POST /api/po/sku-status-lead`` used to
-    update only the in-memory session. After a restart, ``_restore_daily_if_needed`` could
-    not find these keys in ``_warm_cache``, so coverage showed *No sheet loaded* even though
-    the operator had already uploaded a baseline once. GitHub cache saves already list these
-    keys — we now mirror them into ``_warm_cache`` immediately after each upload so new
-    sessions inherit the same data without a full cache republish.
+    ``POST /api/po/daily-inventory-history``, ``POST /api/po/sku-status-lead``, and raise-ledger
+    updates used to touch only the in-memory session. After a restart, ``_restore_daily_if_needed``
+    could not find these keys in ``_warm_cache``, so coverage showed *No sheet loaded* / empty
+    ledger even though the operator had already uploaded once. GitHub cache saves list these
+    keys — we mirror them into ``_warm_cache`` after each change so new sessions inherit the
+    same data without a full cache republish.
     """
     import pandas as pd
 
     global _warm_cache
     if not _warm_cache:
         _warm_cache = {}
-    for key in ("daily_inventory_history_df", "sku_status_lead_df"):
+    for key in ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df"):
         df = getattr(sess, key, None)
         if df is None or not hasattr(df, "empty"):
             _warm_cache[key] = pd.DataFrame()

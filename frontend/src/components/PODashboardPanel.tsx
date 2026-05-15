@@ -2,6 +2,8 @@ import { useCallback, useMemo, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import api from '../api/client'
 import { usePOStore } from '../store/po'
+import { PageLoadingStripe } from './LoadingProgressBar'
+import { calendarDateIST } from '../lib/dates'
 
 /** Full PO-engine run; nginx `/api` allows up to 900s — keep client in sync so axios does not abort first. */
 const PO_DASHBOARD_TIMEOUT_MS = 300_000
@@ -102,7 +104,13 @@ export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
     mutationFn: async () => {
       const { data } = await api.post<DashboardPayload>(
         '/po/dashboard',
-        { ...params, min_denominator: 7, ...tuning },
+        {
+          ...params,
+          min_denominator: 7,
+          ...tuning,
+          planning_date: calendarDateIST(),
+          raise_ledger_lookback_days: 14,
+        },
         { timeout: PO_DASHBOARD_TIMEOUT_MS },
       )
       return data
@@ -137,6 +145,11 @@ export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
 
   return (
     <div className={rootCls}>
+      <PageLoadingStripe
+        active={mut.isPending}
+        label="Running PO dashboard…"
+        className="sticky top-0 z-20 mb-3"
+      />
       <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
         <div>
           {embedded ? (

@@ -12,3 +12,17 @@ body {
   background-color: #f8f9fa;
   font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
+
+@keyframes app-progress-slide {
+  0% {
+    left: -32%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+.app-progress-chunk {
+  animation: app-progress-slide 1.15s ease-in-out infinite;
+  will-change: left;
+}
