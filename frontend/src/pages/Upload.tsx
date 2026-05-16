@@ -5,7 +5,7 @@ import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
-  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto,
+  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, waitForSalesRebuild,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality,
   type DailyUpload, type DailySummary, type UploadResponse,
@@ -154,6 +154,7 @@ export default function Upload() {
 
   const handleDailyAuto = async (files: File[]) => {
     setL('daily', true)
+    setBuildingMsg('')
     try {
       const res = await uploadDailyAuto(files)
       if (res.ok) {
@@ -163,7 +164,15 @@ export default function Upload() {
           kept: res.detected_files,
           dropped: res.unknown_files,
         })
-        showToast('success', res.message)
+        if (res.sales_rebuild === 'pending') {
+          showToast('success', `${res.message} Please wait…`)
+          setBuildingMsg('Rebuilding combined sales in background…')
+          await waitForSalesRebuild(msg => setBuildingMsg(msg))
+          setBuildingMsg('')
+          showToast('success', 'Daily files loaded and sales rebuilt.')
+        } else {
+          showToast('success', res.message)
+        }
         await refresh()
       } else {
         captureGenericAlert('daily', res.warnings && res.warnings.length ? res.warnings : [res.message], {
@@ -473,6 +482,7 @@ export default function Upload() {
               uploading={loading['monthly_rar']}
               onUpload={async (files) => {
                 setL('monthly_rar', true)
+                setBuildingMsg('')
                 try {
                   const res = await uploadDailyAuto(files)
                   captureGenericAlert('monthly_rar', res.warnings, {
@@ -480,11 +490,21 @@ export default function Upload() {
                     kept: res.detected_files,
                     dropped: res.unknown_files,
                   })
-                  if (res.ok) { showToast('success', res.message); await refresh() }
-                  else showToast('error', res.message)
+                  if (res.ok) {
+                    if (res.sales_rebuild === 'pending') {
+                      showToast('success', `${res.message} Please wait…`)
+                      setBuildingMsg('Rebuilding combined sales in background…')
+                      await waitForSalesRebuild(msg => setBuildingMsg(msg))
+                      setBuildingMsg('')
+                      showToast('success', 'Archive loaded and sales rebuilt.')
+                    } else {
+                      showToast('success', res.message)
+                    }
+                    await refresh()
+                  } else showToast('error', res.message)
                 } catch (e: unknown) {
                   showToast('error', e instanceof Error ? e.message : 'Upload failed')
-                } finally { setL('monthly_rar', false) }
+                } finally { setL('monthly_rar', false); setBuildingMsg('') }
               }}
             />
           </div>

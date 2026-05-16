@@ -55,6 +55,9 @@ export interface CoverageResponse {
   po_raise_ledger_rows?: number
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
+  /** Tier-3 daily-auto background sales rebuild */
+  sales_rebuild?: 'idle' | 'running' | 'done' | 'error'
+  sales_rebuild_message?: string
 }
 
 // ── Upload helpers ────────────────────────────────────────────
@@ -72,6 +75,9 @@ function _errMessage(e: unknown, fallback: string): string {
     if (typeof data?.message === 'string' && data.message.trim()) return data.message
     if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail
     if (e.code === 'ECONNABORTED') return 'Request timed out. File may be too large or server is busy.'
+    if (e.response?.status === 502) {
+      return 'Server gateway timeout (502). Daily files may still be processing — wait a minute and refresh coverage, or retry.'
+    }
     if (!e.response) return 'Network error. Check connection/VPN and try again.'
   }
   if (e instanceof Error && e.message.trim()) return e.message
@@ -141,14 +147,41 @@ export async function uploadDailyAuto(
   processed_files?: number
   detected_files?: number
   unknown_files?: number
+  sales_rebuild?: 'inline' | 'pending'
 }> {
   const fd = new FormData()
   files.forEach(f => fd.append('files', f))
-  const { data } = await api.post('/upload/daily-auto', fd, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: UPLOAD_TIMEOUT_MS,
-  })
-  return data
+  try {
+    const { data } = await api.post('/upload/daily-auto', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+    })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Daily upload failed'))
+  }
+}
+
+/** Poll until Tier-3 background sales rebuild finishes (daily-auto). */
+export async function waitForSalesRebuild(
+  onTick?: (message: string) => void,
+  maxMs = UPLOAD_TIMEOUT_MS,
+): Promise<CoverageResponse> {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const cov = await getCoverage()
+    const st = cov.sales_rebuild ?? 'idle'
+    if (st === 'running') {
+      onTick?.(cov.sales_rebuild_message || 'Rebuilding combined sales…')
+      await new Promise(r => setTimeout(r, 2500))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(cov.sales_rebuild_message || 'Sales rebuild failed')
+    }
+    return cov
+  }
+  throw new Error('Sales rebuild timed out — refresh the page in a minute.')
 }
 
 export async function buildSales(): Promise<{

@@ -210,6 +210,49 @@ def _extract_rar_files(rar_bytes: bytes) -> list[tuple[str, bytes]]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _rebuild_sales_sync(sess) -> tuple[bool, str]:
+    """Rebuild combined sales_df from platform frames. Caller should hold ``_daily_restore_lock``."""
+    try:
+        sess.sales_df = build_sales_df(
+            mtr_df=sess.mtr_df,
+            myntra_df=sess.myntra_df,
+            meesho_df=sess.meesho_df,
+            flipkart_df=sess.flipkart_df,
+            snapdeal_df=sess.snapdeal_df,
+            sku_mapping=sess.sku_mapping,
+        )
+        sess._quarterly_cache.clear()
+        _session_data_changed(sess)
+        rows = len(sess.sales_df)
+        return True, f"Sales rebuilt ({rows:,} rows)."
+    except Exception as e:
+        _log.exception("sales rebuild failed")
+        return False, str(e)
+
+
+def _run_daily_auto_sales_rebuild(session_id: str) -> None:
+    """Background task: rebuild sales after Tier-3 ingest returned HTTP 200."""
+    sess = store._sessions.get(session_id)
+    if sess is None:
+        return
+    sess.sales_rebuild_status = "running"
+    sess.sales_rebuild_message = "Rebuilding combined sales…"
+    try:
+        with sess._daily_restore_lock:
+            ok, msg = _rebuild_sales_sync(sess)
+        if ok:
+            sess.sales_rebuild_status = "done"
+            sess.sales_rebuild_message = msg
+            _auto_save_cache(sess)
+        else:
+            sess.sales_rebuild_status = "error"
+            sess.sales_rebuild_message = msg
+    except Exception as e:
+        sess.sales_rebuild_status = "error"
+        sess.sales_rebuild_message = str(e)
+        _log.exception("daily-auto background sales rebuild failed")
+
+
 def _auto_save_cache(sess) -> None:
     """Run in background after build-sales: silently push session to GitHub Releases."""
     session_data = {
@@ -1232,9 +1275,15 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
     return "unknown"
 
 
-def _process_daily_auto_sync(sess, file_parts: list[tuple[str, bytes]]) -> dict:
+def _process_daily_auto_sync(
+    sess,
+    file_parts: list[tuple[str, bytes]],
+    *,
+    rebuild_sales: bool = True,
+) -> dict:
     """
-    RAR/ZIP extract, parsers, daily SQLite, and ``build_sales_df`` — CPU-heavy.
+    RAR/ZIP extract, parsers, daily SQLite — CPU-heavy.
+    ``build_sales_df`` can run here or in a background task (see ``upload_daily_auto``).
     Runs in ``run_in_threadpool`` so the asyncio loop can still answer /auth/* and /api/health.
     Serialized with ``sess._daily_restore_lock`` alongside Tier-3 restore in ``data.py``.
     """
@@ -1530,26 +1579,22 @@ def _process_daily_auto_sync(sess, file_parts: list[tuple[str, bytes]]) -> dict:
                     "unknown_files": len(file_parts),
                 }
 
-            # Track loaded platforms & auto-rebuild sales_df
-            # Always rebuild. Amazon merges even with an empty user map; bundled/Yash master fills gaps when set.
+            # Track loaded platforms; rebuild sales now or defer to background (daily-auto HTTP path).
             sess.daily_sales_sources = list(set(sess.daily_sales_sources + detected))
-            try:
-                sess.sales_df = build_sales_df(
-                    mtr_df=sess.mtr_df,
-                    myntra_df=sess.myntra_df,
-                    meesho_df=sess.meesho_df,
-                    flipkart_df=sess.flipkart_df,
-                    snapdeal_df=sess.snapdeal_df,
-                    sku_mapping=sess.sku_mapping,
-                )
-                sess._quarterly_cache.clear()
-            except Exception as e:
-                warnings.append(f"Sales rebuild warning: {e}")
+            sales_rebuild = "inline"
+            if rebuild_sales:
+                ok_rb, rb_msg = _rebuild_sales_sync(sess)
+                if not ok_rb:
+                    warnings.append(f"Sales rebuild warning: {rb_msg}")
+            else:
+                sales_rebuild = "pending"
+                _session_data_changed(sess)
 
-            _session_data_changed(sess)
             msg_parts = [f"Loaded {len(detected)} file(s): {', '.join(d.split('(')[0].strip() for d in detected)}."]
-            if not sess.sales_df.empty:
+            if rebuild_sales and not sess.sales_df.empty:
                 msg_parts.append(f"Sales rebuilt ({len(sess.sales_df):,} rows).")
+            elif not rebuild_sales:
+                msg_parts.append("Sales rebuild started in background.")
             if warnings:
                 msg_parts.append(f"Warnings: {'; '.join(warnings)}")
             return {
@@ -1560,24 +1605,41 @@ def _process_daily_auto_sync(sess, file_parts: list[tuple[str, bytes]]) -> dict:
                 "processed_files": len(file_parts),
                 "detected_files": len(detected),
                 "unknown_files": max(0, len(file_parts) - len(detected)),
+                "sales_rebuild": sales_rebuild,
             }
 
 
 @router.post("/daily-auto")
 async def upload_daily_auto(
     request: Request,
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
 ):
     """
     Drop any mix of daily report files — platform is auto-detected per file.
     Also accepts a RAR archive — each file inside is extracted and processed.
     Appends to existing session data and rebuilds sales_df automatically.
+
+    Ingest returns quickly; ``build_sales_df`` runs in a background task so
+    Cloudflare/nginx do not 502 on multi-minute rebuilds.
     """
     sess = _get_session(request)
+    sid = getattr(request.state, "session_id", None)
     file_parts: list[tuple[str, bytes]] = []
     for fobj in files:
         file_parts.append((fobj.filename or "upload", await fobj.read()))
-    payload = await run_in_threadpool(_process_daily_auto_sync, sess, file_parts)
+    payload = await run_in_threadpool(
+        _process_daily_auto_sync, sess, file_parts, rebuild_sales=False,
+    )
+    if payload.get("ok") and payload.get("sales_rebuild") == "pending" and sid:
+        sess.sales_rebuild_status = "running"
+        sess.sales_rebuild_message = "Rebuilding combined sales…"
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+            background_tasks.add_task(persist_session_bundle_thread_safe, sid, sess)
+        except Exception:
+            pass
+        background_tasks.add_task(_run_daily_auto_sales_rebuild, sid)
     return JSONResponse(content=payload)
 
 # ── Daily Orders (multi-platform CSVs) ────────────────────────

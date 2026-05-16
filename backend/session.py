@@ -49,6 +49,10 @@ class AppSession:
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session
 
+    # Async sales rebuild after Tier-3 daily-auto (avoids 502 on long build_sales_df).
+    sales_rebuild_status: str = "idle"   # idle | running | done | error
+    sales_rebuild_message: str = ""
+
     # After "Clear all app data", block warm-cache copy, Tier-3 SQLite restore, and
     # frontend auto Load-Cache until the user uploads again or clicks Load Cache.
     pause_auto_data_restore: bool = False
@@ -90,6 +94,8 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.snapdeal_parse_info = {}
     sess.inventory_debug = {}
     sess.daily_restored = False
+    sess.sales_rebuild_status = "idle"
+    sess.sales_rebuild_message = ""
     sess.pause_auto_data_restore = True
     sess._quarterly_cache.clear()
 

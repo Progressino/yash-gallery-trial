@@ -47,6 +47,9 @@ class CoverageResponse(BaseModel):
     po_raise_ledger_rows: int = 0
     # After full wipe: True until user uploads or clicks Load Cache (blocks auto-restore)
     pause_auto_data_restore: bool = False
+    # Tier-3 daily-auto background sales rebuild (idle | running | done | error)
+    sales_rebuild: str = "idle"
+    sales_rebuild_message: str = ""
 
 
 class ErrorResponse(BaseModel):

@@ -247,6 +247,8 @@ def get_coverage(request: Request):
         ),
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
         pause_auto_data_restore=paused,
+        sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
+        sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
     )
 
 
