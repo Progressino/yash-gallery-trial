@@ -2,7 +2,10 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../api/client'
+import { useAuth, type AuthUser } from '../store/auth'
+
 export default function Login() {
+  const setUser = useAuth(s => s.setUser)
   const nav = useNavigate()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -18,7 +21,15 @@ export default function Login() {
     try {
       setLoadStep('Signing in…')
       // Login is lightweight (no session blob restore); 30s covers slow networks only.
-      const { data } = await api.post('/auth/login', { username, password }, { timeout: 30_000 })
+      const { data } = await api.post('/auth/login', { username, password }, { timeout: 90_000 })
+      const profile: AuthUser = {
+        username: data.username,
+        role: data.role,
+        full_name: data.full_name,
+        karigar_id: data.karigar_id,
+        is_karigar: data.role === 'Karigar',
+      }
+      setUser(profile)
       const dest = data?.redirect || (data?.role === 'Karigar' ? '/production-entry' : '/')
       nav(dest, { replace: true })
     } catch (err: unknown) {

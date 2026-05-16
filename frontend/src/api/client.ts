@@ -395,17 +395,29 @@ export async function getDataQuality(): Promise<{
   return data
 }
 
-// ── 401 interceptor — redirect to /login on expired/missing token ─────────────
+// ── 401 interceptor — only hard-logout when token is truly invalid ─────────────
 api.interceptors.response.use(
   res => res,
   err => {
     const url: string = err.config?.url ?? ''
-    // During long uploads the server may queue requests; do not kick the user to login.
+    const isTimeout =
+      err.code === 'ECONNABORTED' ||
+      err.response?.status === 502 ||
+      err.response?.status === 503 ||
+      err.response?.status === 504
+    let hasStoredAuth = false
+    try {
+      hasStoredAuth = !!sessionStorage.getItem('erp_auth_profile_v1')
+    } catch {
+      hasStoredAuth = false
+    }
     if (
       err.response?.status === 401 &&
+      !isTimeout &&
       !url.includes('/auth/') &&
       !window.location.pathname.startsWith('/login') &&
-      !isUploadBusy()
+      !isUploadBusy() &&
+      !hasStoredAuth
     ) {
       window.location.href = '/login'
     }

@@ -89,14 +89,12 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/login")
-async def login(body: LoginRequest, request: Request, response: Response):
-    from starlette.concurrency import run_in_threadpool
-
+def login(body: LoginRequest, request: Request, response: Response):
+    """Sync handler — fast SQLite+bcrypt; must not queue behind upload thread pool."""
     username = body.username.strip()
     password = body.password
 
-    # bcrypt + SQLite are sync; keep the event loop free during busy uploads.
-    user = await run_in_threadpool(verify_erp_user, username, password)
+    user = verify_erp_user(username, password)
     if user:
         role = user.get("role_name") or "Clerk"
         token = create_token(
@@ -122,10 +120,10 @@ async def login(body: LoginRequest, request: Request, response: Response):
     expected_hash = os.environ.get("AUTH_PASSWORD_HASH", "").encode()
     if expected_user and expected_hash:
 
-        def _legacy_admin_ok() -> bool:
-            return username == expected_user and bcrypt.checkpw(password.encode(), expected_hash)
-
-        password_ok = await run_in_threadpool(_legacy_admin_ok)
+        password_ok = (
+            username == expected_user
+            and bcrypt.checkpw(password.encode(), expected_hash)
+        )
         if password_ok:
             token = create_token(username, role="Admin", full_name="Administrator")
             _set_auth_cookie(request, response, token)

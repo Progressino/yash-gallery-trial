@@ -5,8 +5,15 @@ import { useAuth } from '../store/auth'
 export default function KarigarLayout() {
   const user = useAuth(s => s.user)
 
+  const clearAuth = useAuth(s => s.clear)
+
   const logout = async () => {
-    await api.post('/auth/logout')
+    try {
+      await api.post('/auth/logout')
+    } catch {
+      /* still clear local session */
+    }
+    clearAuth()
     window.location.href = '/login'
   }
 

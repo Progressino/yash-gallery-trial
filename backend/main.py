@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.concurrency import run_in_threadpool
+from .concurrency import run_aux
 
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
@@ -684,7 +684,7 @@ async def session_middleware(request: Request, call_next):
 
     copied_warm = False
     try:
-        copied_warm = await run_in_threadpool(
+        copied_warm = await run_aux(
             _apply_warm_cache_if_needed, session, _warm_cache_generation,
         )
     except Exception:
@@ -693,7 +693,7 @@ async def session_middleware(request: Request, call_next):
     try:
         from .services.sku_mapping import ensure_default_sku_mapping_from_bundle
 
-        await run_in_threadpool(ensure_default_sku_mapping_from_bundle, session)
+        await run_aux(ensure_default_sku_mapping_from_bundle, session)
     except Exception:
         pass
 

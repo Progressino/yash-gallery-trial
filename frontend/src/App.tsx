@@ -32,7 +32,14 @@ const Admin                  = lazy(() => import('./pages/Admin'))
 const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
 const SKUDeepDive            = lazy(() => import('./pages/SKUDeepDive'))
 
-const qc = new QueryClient()
+const qc = new QueryClient({
+  defaultOptions: {
+    queries: {
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+    },
+  },
+})
 
 const AUTO_RESTORE_TIMEOUT_MS = 20_000
 
@@ -53,50 +60,58 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 function ProtectedRoute() {
   const setCoverage = useSession(s => s.setCoverage)
   const setUser = useAuth(s => s.setUser)
+  const cachedUser = useAuth(s => s.user)
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
-      const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 15_000 })
+      const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 60_000 })
       setUser(me)
       return me
     },
+    initialData: cachedUser ?? undefined,
+    initialDataUpdatedAt: cachedUser ? Date.now() : undefined,
     retry: (failureCount, err) => {
       if (axios.isAxiosError(err) && err.response?.status === 401) return false
-      return failureCount < 2
+      return failureCount < 3
     },
     refetchOnWindowFocus: false,
     staleTime: 30 * 60 * 1000,
   })
 
   const authUnauthorized =
-    axios.isAxiosError(error) && error.response?.status === 401
+    axios.isAxiosError(error) && error.response?.status === 401 && !cachedUser
 
-  const isKarigar = isKarigarUser(data)
+  const activeUser = data ?? cachedUser
+  const isKarigar = isKarigarUser(activeUser)
 
   const { isFetching: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
-      const coverage = await getCoverage()
-      if (!coverage.mtr && !coverage.sales && !coverage.pause_auto_data_restore) {
-        try {
-          await withTimeout(cacheLoad(), AUTO_RESTORE_TIMEOUT_MS)
-          const refreshed = await getCoverage()
-          setCoverage(refreshed)
-        } catch {
+      try {
+        const coverage = await getCoverage()
+        if (!coverage.mtr && !coverage.sales && !coverage.pause_auto_data_restore) {
+          try {
+            await withTimeout(cacheLoad(), AUTO_RESTORE_TIMEOUT_MS)
+            const refreshed = await getCoverage()
+            setCoverage(refreshed)
+          } catch {
+            setCoverage(coverage)
+          }
+        } else {
           setCoverage(coverage)
         }
-      } else {
-        setCoverage(coverage)
+      } catch {
+        /* server busy during upload */
       }
       return true
     },
-    enabled: !!data && !isKarigar,
-    retry: false,
+    enabled: !!activeUser && !isKarigar,
+    retry: 1,
     staleTime: Infinity,
   })
 
-  if (isLoading) {
+  if (isLoading && !cachedUser) {
     return (
       <div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">
         Loading…
@@ -104,19 +119,19 @@ function ProtectedRoute() {
     )
   }
   if (authUnauthorized) return <Navigate to="/login" replace />
-  if (!isLoading && !data) {
+  if (!activeUser) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center">
         <p className="text-gray-600 text-sm max-w-md">
-          Could not reach the server right now. You are still signed in — wait a moment and retry
-          (especially during a large upload).
+          Could not reach the server right now. If a large upload is running, wait and retry.
         </p>
         <button
           type="button"
-          onClick={() => window.location.reload()}
-          className="px-4 py-2 rounded-lg bg-[#002B5B] text-white text-sm font-medium"
+          onClick={() => void refetch()}
+          disabled={isFetching}
+          className="px-4 py-2 rounded-lg bg-[#002B5B] text-white text-sm font-medium disabled:opacity-50"
         >
-          Retry
+          {isFetching ? 'Retrying…' : 'Retry'}
         </button>
       </div>
     )

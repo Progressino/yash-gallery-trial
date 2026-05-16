@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
 import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage, invalidateDataQueries } from '../api/client'
 import api from '../api/client'
+import { useAuth } from '../store/auth'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
 
 const NAV_GROUPS = [
@@ -98,8 +99,15 @@ export default function Layout() {
     }
   }
 
+  const clearAuth = useAuth(s => s.clear)
+
   const handleLogout = async () => {
-    await api.post('/auth/logout')
+    try {
+      await api.post('/auth/logout')
+    } catch {
+      /* still clear local session */
+    }
+    clearAuth()
     window.location.href = '/login'
   }
 

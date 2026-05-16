@@ -15,7 +15,7 @@ import logging
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from starlette.concurrency import run_in_threadpool
+from ..concurrency import run_heavy
 
 from ..session import store, resume_auto_data_restore
 from ..models.schemas import UploadResponse
@@ -1628,7 +1628,7 @@ async def upload_daily_auto(
     file_parts: list[tuple[str, bytes]] = []
     for fobj in files:
         file_parts.append((fobj.filename or "upload", await fobj.read()))
-    payload = await run_in_threadpool(
+    payload = await run_heavy(
         _process_daily_auto_sync, sess, file_parts, rebuild_sales=False,
     )
     if payload.get("ok") and payload.get("sales_rebuild") == "pending" and sid:

@@ -74,7 +74,11 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     if sess.daily_restored:
         return
 
-    with sess._daily_restore_lock:
+    # Never block coverage/login behind a multi-minute Tier-3 upload on the same lock.
+    if not sess._daily_restore_lock.acquire(blocking=False):
+        return
+
+    try:
         if sess.daily_restored:
             return
 
@@ -204,6 +208,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             pass
 
         sess.daily_restored = True
+    finally:
+        sess._daily_restore_lock.release()
 
 
 # ── Coverage ──────────────────────────────────────────────────
