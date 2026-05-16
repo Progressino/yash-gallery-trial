@@ -249,13 +249,38 @@ export default function POEngine() {
     })
   }, [syncTabFromUrl])
 
-  useEffect(() => {
-    void getCoverage()
-      .then(c => setCoverage(c))
-      .catch(() => {
-        /* ignore — polling elsewhere will retry */
-      })
+  const refreshPoCoverage = useCallback(async () => {
+    try {
+      const [cov, skuRes, invRes] = await Promise.all([
+        getCoverage(),
+        api.get<{ ok?: boolean; loaded?: boolean; rows?: unknown[] }>('/po/sku-status-lead'),
+        api.get<{ ok?: boolean; loaded?: boolean; rows?: number; skus?: number }>(
+          '/po/daily-inventory-history',
+        ),
+      ])
+      const merged = { ...cov }
+      if (skuRes.data?.loaded) {
+        merged.sku_status_lead = true
+        merged.sku_status_lead_rows = Array.isArray(skuRes.data.rows)
+          ? skuRes.data.rows.length
+          : merged.sku_status_lead_rows
+      }
+      if (invRes.data?.loaded) {
+        merged.daily_inventory_history = true
+        merged.daily_inventory_history_rows = invRes.data.rows ?? merged.daily_inventory_history_rows
+        merged.daily_inventory_history_skus = invRes.data.skus ?? merged.daily_inventory_history_skus
+      }
+      setCoverage(merged)
+    } catch {
+      /* warm cache may still be loading — retry on interval */
+    }
   }, [setCoverage])
+
+  useEffect(() => {
+    void refreshPoCoverage()
+    const id = window.setInterval(() => void refreshPoCoverage(), 12_000)
+    return () => window.clearInterval(id)
+  }, [refreshPoCoverage])
 
   const selectTab = useCallback(
     (t: Tab) => {

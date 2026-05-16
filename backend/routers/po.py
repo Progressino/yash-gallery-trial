@@ -111,6 +111,12 @@ def po_get_sku_status_lead(request: Request):
     sess = request.state.session
     if sess is None:
         return {"ok": False, "loaded": False}
+    try:
+        import backend.main as _main
+
+        _main.restore_po_sidecars_from_warm(sess)
+    except Exception:
+        pass
     df = sess.sku_status_lead_df
     if df is None or df.empty:
         return {"ok": True, "loaded": False, "rows": [], "columns": []}
@@ -166,6 +172,12 @@ def po_get_daily_inventory_history(request: Request):
     sess = request.state.session
     if sess is None:
         return {"ok": False, "loaded": False}
+    try:
+        import backend.main as _main
+
+        _main.restore_po_sidecars_from_warm(sess)
+    except Exception:
+        pass
     df = sess.daily_inventory_history_df
     if df is None or df.empty:
         return {"ok": True, "loaded": False, "rows": 0, "skus": 0, "days": 0}

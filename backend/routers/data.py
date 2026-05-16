@@ -217,6 +217,12 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
 @router.get("/coverage", response_model=CoverageResponse)
 def get_coverage(request: Request):
     sess = _sess(request)
+    try:
+        import backend.main as _main
+
+        _main.restore_po_sidecars_from_warm(sess)
+    except Exception:
+        pass
     _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary

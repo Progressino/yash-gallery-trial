@@ -123,6 +123,67 @@ def publish_warm_cache_from_session(sess) -> None:
     _warm_cache_loaded_at = datetime.now(IST)
 
 
+_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df")
+
+
+def restore_po_sidecars_from_warm(sess) -> bool:
+    """Copy PO sidecar DataFrames from warm cache when the session is missing them.
+
+    Does not acquire ``_daily_restore_lock`` — safe to call from ``/data/coverage`` while
+    a Tier-3 upload holds the lock. Fixes PO UI showing \"No sheet loaded\" after restart
+    when sales/inventory were already copied but optional PO sheets were skipped.
+    """
+    if not _warm_cache:
+        return False
+    changed = False
+    for key in _PO_SIDECAR_KEYS:
+        cur = getattr(sess, key, None)
+        if cur is not None and hasattr(cur, "empty") and not cur.empty:
+            continue
+        wc = _warm_cache.get(key)
+        if wc is not None and hasattr(wc, "empty") and not wc.empty:
+            setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
+            changed = True
+    if changed:
+        sess._quarterly_cache.clear()
+    return changed
+
+
+def persist_po_sidecars_to_disk() -> None:
+    """Write PO sidecar parquets into the disk warm-cache (survives container restart)."""
+    import json
+    import os
+
+    if not _warm_cache:
+        return
+    try:
+        os.makedirs(_DISK_CACHE_DIR, exist_ok=True)
+        manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
+        manifest: dict = {}
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        keys = set(manifest.get("keys") or [])
+        for key in _PO_SIDECAR_KEYS:
+            df = _warm_cache.get(key)
+            if df is None or not hasattr(df, "empty") or df.empty:
+                continue
+            from .services.helpers import _coerce_df_for_parquet
+
+            path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
+            _coerce_df_for_parquet(df).to_parquet(path, index=False)
+            keys.add(key)
+        if not keys:
+            return
+        manifest["keys"] = sorted(keys)
+        manifest["saved_at"] = datetime.now(IST).isoformat()
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        log.info("PO sidecar disk cache updated (%s)", _DISK_CACHE_DIR)
+    except Exception as _e:
+        log.warning("PO sidecar disk persist failed: %s", _e)
+
+
 def merge_po_optional_sheets_into_warm_cache(sess) -> None:
     """Copy PO-only sidecar frames into the shared warm cache (non-destructive merge).
 
@@ -138,7 +199,7 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
     global _warm_cache
     if not _warm_cache:
         _warm_cache = {}
-    for key in ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df"):
+    for key in _PO_SIDECAR_KEYS:
         df = getattr(sess, key, None)
         if df is None or not hasattr(df, "empty"):
             _warm_cache[key] = pd.DataFrame()
@@ -146,6 +207,10 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
             _warm_cache[key] = pd.DataFrame()
         else:
             _warm_cache[key] = df.copy()
+    try:
+        persist_po_sidecars_to_disk()
+    except Exception:
+        log.exception("persist_po_sidecars_to_disk after merge failed")
 
 
 import os as _os_main
@@ -464,6 +529,7 @@ def _copy_warm_cache_to_session(sess) -> bool:
 
 def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
     """Decide whether to copy warm cache into session (sync; may run in thread pool)."""
+    restore_po_sidecars_from_warm(sess)
     if getattr(sess, "pause_auto_data_restore", False):
         return False
     _session_gen = getattr(sess, "_warm_cache_gen", 0)
@@ -476,6 +542,7 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
         for key in [
             "mtr_df", "myntra_df", "meesho_df", "flipkart_df",
             "snapdeal_df", "sales_df", "inventory_df_variant",
+            *_PO_SIDECAR_KEYS,
         ]:
             wc = _warm_cache.get(key)
             cur = getattr(sess, key, None)
@@ -677,7 +744,8 @@ async def session_middleware(request: Request, call_next):
         return await call_next(request)
 
     sid = request.cookies.get(SESSION_COOKIE)
-    sid, session = store.get_or_create(sid)
+    # Run in executor so a slow PostgreSQL session restore doesn't block the event loop.
+    sid, session = await run_aux(store.get_or_create, sid)
     request.state.session_id = sid
     request.state.session = session
     setattr(session, "_persist_sid", sid)
