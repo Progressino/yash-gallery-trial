@@ -636,7 +636,6 @@ _SESSION_LIGHTWEIGHT = frozenset({
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/me",
-    "/api/health",
 })
 
 @app.middleware("http")
