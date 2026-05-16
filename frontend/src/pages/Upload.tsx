@@ -7,10 +7,11 @@ import {
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, waitForSalesRebuild,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
-  resetAllAppData, getDataQuality,
+  resetAllAppData, getDataQuality, invalidateDataQueries,
   type DailyUpload, type DailySummary, type UploadResponse,
 } from '../api/client'
 import { useSession } from '../store/session'
+import { useUploadActivity } from '../store/uploadActivity'
 
 type Toast = { type: 'success' | 'error'; msg: string }
 type UploadAlert = {
@@ -41,11 +42,16 @@ export default function Upload() {
   const [loading, setLoading]       = useState<Record<string, boolean>>({})
   const [buildingMsg, setBuildingMsg] = useState('')
   const [uploadAlertsBySource, setUploadAlertsBySource] = useState<Record<string, UploadAlert>>({})
+  const uploadBegin = useUploadActivity(s => s.begin)
+  const uploadEnd = useUploadActivity(s => s.end)
+  const uploadBusy =
+    Object.values(loading).some(Boolean) || !!buildingMsg
 
   useQuery({
     queryKey: ['coverage'],
     queryFn: async () => { const c = await getCoverage(); setCoverage(c); return c },
-    refetchInterval: 5000,
+    refetchInterval: uploadBusy ? false : 30_000,
+    retry: 1,
   })
 
   const showToast = (type: 'success' | 'error', msg: string) => {
@@ -113,19 +119,31 @@ export default function Upload() {
     } catch (err) {
       console.warn('Post-upload coverage refresh failed; polling will retry.', err)
     }
-    qc.invalidateQueries()
+    invalidateDataQueries(qc)
+  }
+
+  const withUploadGuard = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    uploadBegin()
+    try {
+      return await fn()
+    } finally {
+      uploadEnd()
+    }
   }
 
   const handle = (key: string, fn: (file: File) => Promise<UploadResponse>) => async (file: File) => {
     setL(key, true)
     try {
-      const res = await fn(file)
-      if (res.ok) {
-        captureUploadAlerts(key, res)
-        showToast('success', res.message)
-        await refresh()
-      }
-      else showToast('error', res.message)
+      await withUploadGuard(async () => {
+        const res = await fn(file)
+        if (res.ok) {
+          captureUploadAlerts(key, res)
+          showToast('success', res.message)
+          await refresh()
+        } else {
+          showToast('error', res.message)
+        }
+      })
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Upload failed')
     } finally { setL(key, false) }
@@ -135,10 +153,12 @@ export default function Upload() {
     setL('build', true)
     setBuildingMsg('Building combined sales dataset…')
     try {
-      const res = await buildSales()
-      setSkuMapGaps(res.unmapped_skus ?? [])
-      if (res.ok) { showToast('success', res.message); await refresh() }
-      else showToast('error', res.message)
+      await withUploadGuard(async () => {
+        const res = await buildSales()
+        setSkuMapGaps(res.unmapped_skus ?? [])
+        if (res.ok) { showToast('success', res.message); await refresh() }
+        else showToast('error', res.message)
+      })
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Build failed')
     } finally { setL('build', false); setBuildingMsg('') }
@@ -156,32 +176,34 @@ export default function Upload() {
     setL('daily', true)
     setBuildingMsg('')
     try {
-      const res = await uploadDailyAuto(files)
-      if (res.ok) {
-        setDailyDetected(res.detected_platforms ?? [])
-        captureGenericAlert('daily', res.warnings, {
-          parsed: res.processed_files,
-          kept: res.detected_files,
-          dropped: res.unknown_files,
-        })
-        if (res.sales_rebuild === 'pending') {
-          showToast('success', `${res.message} Please wait…`)
-          setBuildingMsg('Rebuilding combined sales in background…')
-          await waitForSalesRebuild(msg => setBuildingMsg(msg))
-          setBuildingMsg('')
-          showToast('success', 'Daily files loaded and sales rebuilt.')
+      await withUploadGuard(async () => {
+        const res = await uploadDailyAuto(files)
+        if (res.ok) {
+          setDailyDetected(res.detected_platforms ?? [])
+          captureGenericAlert('daily', res.warnings, {
+            parsed: res.processed_files,
+            kept: res.detected_files,
+            dropped: res.unknown_files,
+          })
+          if (res.sales_rebuild === 'pending') {
+            showToast('success', `${res.message} Please wait…`)
+            setBuildingMsg('Rebuilding combined sales in background…')
+            await waitForSalesRebuild(msg => setBuildingMsg(msg))
+            setBuildingMsg('')
+            showToast('success', 'Daily files loaded and sales rebuilt.')
+          } else {
+            showToast('success', res.message)
+          }
+          await refresh()
         } else {
-          showToast('success', res.message)
+          captureGenericAlert('daily', res.warnings && res.warnings.length ? res.warnings : [res.message], {
+            parsed: res.processed_files,
+            kept: res.detected_files,
+            dropped: res.unknown_files,
+          })
+          showToast('error', res.message)
         }
-        await refresh()
-      } else {
-        captureGenericAlert('daily', res.warnings && res.warnings.length ? res.warnings : [res.message], {
-          parsed: res.processed_files,
-          kept: res.detected_files,
-          dropped: res.unknown_files,
-        })
-        showToast('error', res.message)
-      }
+      })
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Upload failed')
     } finally { setL('daily', false) }
@@ -206,7 +228,6 @@ export default function Upload() {
         showToast('success', res.message)
         setQualityReport(null)
         await refresh()
-        qc.invalidateQueries()
       } else showToast('error', res.message)
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Reset failed')
@@ -267,6 +288,19 @@ export default function Upload() {
         </div>
       </div>
 
+      {uploadBusy && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 flex items-center gap-2">
+          <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+          </svg>
+          <span>
+            <strong>Upload in progress</strong>
+            {buildingMsg ? ` — ${buildingMsg}` : ''}. Stay on this page; you will not be logged out.
+          </span>
+        </div>
+      )}
+
       {/* Toast */}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 rounded-lg px-5 py-3 shadow-lg text-sm text-white max-w-sm
@@ -303,13 +337,15 @@ export default function Upload() {
             onUpload={async (file: File) => {
               setL('sku', true)
               try {
-                const res = await uploadSkuMapping(file)
-                setSkuMapGaps(res.unmapped_skus ?? [])
-                if (res.ok) {
-                  captureUploadAlerts('sku_mapping', res)
-                  showToast('success', res.message)
-                  await refresh()
-                } else showToast('error', res.message)
+                await withUploadGuard(async () => {
+                  const res = await uploadSkuMapping(file)
+                  setSkuMapGaps(res.unmapped_skus ?? [])
+                  if (res.ok) {
+                    captureUploadAlerts('sku_mapping', res)
+                    showToast('success', res.message)
+                    await refresh()
+                  } else showToast('error', res.message)
+                })
               } catch (e: unknown) {
                 setSkuMapGaps([])
                 showToast('error', e instanceof Error ? e.message : 'Upload failed')
@@ -408,16 +444,18 @@ export default function Upload() {
             onUpload={async (files) => {
               setL('inv', true)
               try {
-                const res = await uploadInventoryAuto(files)
-                if (res.ok) {
-                  setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
-                  const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
-                    ? (res.debug.warnings as string[])
-                    : []
-                  captureGenericAlert('inv', issues)
-                  showToast('success', res.message)
-                  await refresh()
-                } else showToast('error', res.message)
+                await withUploadGuard(async () => {
+                  const res = await uploadInventoryAuto(files)
+                  if (res.ok) {
+                    setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
+                    const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
+                      ? (res.debug.warnings as string[])
+                      : []
+                    captureGenericAlert('inv', issues)
+                    showToast('success', res.message)
+                    await refresh()
+                  } else showToast('error', res.message)
+                })
               } catch (e: unknown) {
                 showToast('error', e instanceof Error ? e.message : 'Upload failed')
               } finally { setL('inv', false) }
@@ -484,24 +522,26 @@ export default function Upload() {
                 setL('monthly_rar', true)
                 setBuildingMsg('')
                 try {
-                  const res = await uploadDailyAuto(files)
-                  captureGenericAlert('monthly_rar', res.warnings, {
-                    parsed: res.processed_files,
-                    kept: res.detected_files,
-                    dropped: res.unknown_files,
+                  await withUploadGuard(async () => {
+                    const res = await uploadDailyAuto(files)
+                    captureGenericAlert('monthly_rar', res.warnings, {
+                      parsed: res.processed_files,
+                      kept: res.detected_files,
+                      dropped: res.unknown_files,
+                    })
+                    if (res.ok) {
+                      if (res.sales_rebuild === 'pending') {
+                        showToast('success', `${res.message} Please wait…`)
+                        setBuildingMsg('Rebuilding combined sales in background…')
+                        await waitForSalesRebuild(msg => setBuildingMsg(msg))
+                        setBuildingMsg('')
+                        showToast('success', 'Archive loaded and sales rebuilt.')
+                      } else {
+                        showToast('success', res.message)
+                      }
+                      await refresh()
+                    } else showToast('error', res.message)
                   })
-                  if (res.ok) {
-                    if (res.sales_rebuild === 'pending') {
-                      showToast('success', `${res.message} Please wait…`)
-                      setBuildingMsg('Rebuilding combined sales in background…')
-                      await waitForSalesRebuild(msg => setBuildingMsg(msg))
-                      setBuildingMsg('')
-                      showToast('success', 'Archive loaded and sales rebuilt.')
-                    } else {
-                      showToast('success', res.message)
-                    }
-                    await refresh()
-                  } else showToast('error', res.message)
                 } catch (e: unknown) {
                   showToast('error', e instanceof Error ? e.message : 'Upload failed')
                 } finally { setL('monthly_rar', false); setBuildingMsg('') }

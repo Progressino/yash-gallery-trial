@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
-import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage } from '../api/client'
+import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage, invalidateDataQueries } from '../api/client'
 import api from '../api/client'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
 
@@ -86,7 +86,7 @@ export default function Layout() {
       if (res.ok) {
         const c = await getCoverage()
         setCoverage(c)
-        qc.invalidateQueries()
+        invalidateDataQueries(qc)
         flash('ok', res.message)
       } else {
         flash('err', res.message)
@@ -123,7 +123,7 @@ export default function Layout() {
       if (res.ok) {
         const c = await getCoverage()
         setCoverage(c)
-        qc.invalidateQueries()
+        invalidateDataQueries(qc)
         flash('ok', res.message)
       } else {
         flash('err', res.message)

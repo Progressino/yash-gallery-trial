@@ -1,6 +1,7 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import axios from 'axios'
 import Layout from './components/Layout'
 import KarigarLayout from './components/KarigarLayout'
 import { KarigarGate, StaffGate } from './components/RouteGuards'
@@ -53,16 +54,23 @@ function ProtectedRoute() {
   const setCoverage = useSession(s => s.setCoverage)
   const setUser = useAuth(s => s.setUser)
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
       const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 15_000 })
       setUser(me)
       return me
     },
-    retry: false,
-    staleTime: 5 * 60 * 1000,
+    retry: (failureCount, err) => {
+      if (axios.isAxiosError(err) && err.response?.status === 401) return false
+      return failureCount < 2
+    },
+    refetchOnWindowFocus: false,
+    staleTime: 30 * 60 * 1000,
   })
+
+  const authUnauthorized =
+    axios.isAxiosError(error) && error.response?.status === 401
 
   const isKarigar = isKarigarUser(data)
 
@@ -95,7 +103,24 @@ function ProtectedRoute() {
       </div>
     )
   }
-  if (isError || !data) return <Navigate to="/login" replace />
+  if (authUnauthorized) return <Navigate to="/login" replace />
+  if (!isLoading && !data) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center">
+        <p className="text-gray-600 text-sm max-w-md">
+          Could not reach the server right now. You are still signed in — wait a moment and retry
+          (especially during a large upload).
+        </p>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="px-4 py-2 rounded-lg bg-[#002B5B] text-white text-sm font-medium"
+        >
+          Retry
+        </button>
+      </div>
+    )
+  }
   return (
     <>
       {isRestoring && !isKarigar && (

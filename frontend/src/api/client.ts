@@ -4,6 +4,7 @@
  * In production, nginx proxies /api → FastAPI.
  */
 import axios from 'axios'
+import { isUploadBusy } from '../store/uploadActivity'
 
 export const api = axios.create({
   baseURL: '/api',
@@ -399,15 +400,29 @@ api.interceptors.response.use(
   res => res,
   err => {
     const url: string = err.config?.url ?? ''
+    // During long uploads the server may queue requests; do not kick the user to login.
     if (
       err.response?.status === 401 &&
       !url.includes('/auth/') &&
-      !window.location.pathname.startsWith('/login')
+      !window.location.pathname.startsWith('/login') &&
+      !isUploadBusy()
     ) {
       window.location.href = '/login'
     }
     return Promise.reject(err)
   }
 )
+
+/** Invalidate data queries after upload without refetching auth (avoids false logout). */
+export function invalidateDataQueries(
+  qc: { invalidateQueries: (opts?: { predicate?: (q: { queryKey: unknown }) => boolean }) => void },
+) {
+  qc.invalidateQueries({
+    predicate: q => {
+      const key = Array.isArray(q.queryKey) ? q.queryKey[0] : q.queryKey
+      return key !== 'auth-me'
+    },
+  })
+}
 
 export default api
