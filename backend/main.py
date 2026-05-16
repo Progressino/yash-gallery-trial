@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
@@ -461,6 +462,54 @@ def _copy_warm_cache_to_session(sess) -> bool:
     return True
 
 
+def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
+    """Decide whether to copy warm cache into session (sync; may run in thread pool)."""
+    if getattr(sess, "pause_auto_data_restore", False):
+        return False
+    _session_gen = getattr(sess, "_warm_cache_gen", 0)
+    _wc_only = getattr(sess, "_warm_cache_only", False)
+    _phase2_ready = warm_cache_generation >= 2 and _session_gen < warm_cache_generation
+
+    def _warm_cache_has_more() -> bool:
+        if not _warm_cache:
+            return False
+        for key in [
+            "mtr_df", "myntra_df", "meesho_df", "flipkart_df",
+            "snapdeal_df", "sales_df", "inventory_df_variant",
+        ]:
+            wc = _warm_cache.get(key)
+            cur = getattr(sess, key, None)
+            wc_has_data = hasattr(wc, "empty") and not wc.empty
+            cur_has_data = hasattr(cur, "empty") and not cur.empty
+            if wc_has_data and not cur_has_data:
+                return True
+        return False
+
+    if sess.mtr_df.empty and sess.sales_df.empty:
+        if _copy_warm_cache_to_session(sess):
+            sess._warm_cache_gen = warm_cache_generation
+            sess._warm_cache_only = True
+            return True
+    elif _warm_cache_has_more():
+        if _copy_warm_cache_to_session(sess):
+            sess._warm_cache_gen = warm_cache_generation
+            sess._warm_cache_only = True
+            return True
+    elif _wc_only and _phase2_ready:
+        if _copy_warm_cache_to_session(sess):
+            sess._warm_cache_gen = warm_cache_generation
+            sess._warm_cache_only = True
+            return True
+    return False
+
+
+def _cookie_secure_from_request(request: Request) -> bool:
+    xf = request.headers.get("x-forwarded-proto")
+    if xf:
+        return xf.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
 def _do_marketplace_sync_all() -> None:
     """
     Called daily at 6AM IST. Pulls last 2 days of data from all connected
@@ -582,6 +631,14 @@ app.add_middleware(
 # ── Auth middleware (outermost — runs first) ──────────────────
 _AUTH_EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/health"}
 
+# Skip heavy session restore / warm-cache copy (login was blocked for minutes behind PG blobs).
+_SESSION_LIGHTWEIGHT = frozenset({
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/me",
+    "/api/health",
+})
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     if request.url.path in _AUTH_EXEMPT or not request.url.path.startswith("/api/"):
@@ -612,72 +669,36 @@ SESSION_COOKIE = "session_id"
 
 @app.middleware("http")
 async def session_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # Auth + health must never wait on multi-GB PostgreSQL session blobs or warm-cache copies.
+    if path in _SESSION_LIGHTWEIGHT:
+        request.state.session_id = None
+        request.state.session = None
+        return await call_next(request)
+
     sid = request.cookies.get(SESSION_COOKIE)
-    is_new = not (sid and store.get(sid))
     sid, session = store.get_or_create(sid)
     request.state.session_id = sid
     request.state.session = session
     setattr(session, "_persist_sid", sid)
 
-    # Pre-populate session from warm cache whenever the session has no data, OR
-    # when the warm cache has moved to a newer generation (Phase 2 after Phase 1)
-    # and the session still has only auto-copied data (no user uploads).
-    # _warm_cache_only=True means the session data came exclusively from an auto-copy
-    # of the warm cache — no explicit upload or load has run since.  Upload routes
-    # call resume_auto_data_restore() which sets _warm_cache_only=False.
     copied_warm = False
-    _session_gen   = getattr(session, "_warm_cache_gen", 0)
-    _wc_only       = getattr(session, "_warm_cache_only", False)
-    _phase2_ready  = _warm_cache_generation >= 2 and _session_gen < _warm_cache_generation
-    def _warm_cache_has_more(sess) -> bool:
-        """True when warm cache has datasets that the current session is missing."""
-        if not _warm_cache:
-            return False
-        for key in ["mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df", "sales_df", "inventory_df_variant"]:
-            wc = _warm_cache.get(key)
-            cur = getattr(sess, key, None)
-            # Use duck typing — avoid importing pandas at module level
-            wc_has_data = hasattr(wc, "empty") and not wc.empty
-            cur_has_data = hasattr(cur, "empty") and not cur.empty
-            if wc_has_data and not cur_has_data:
-                return True
-        return False
-    if not getattr(session, "pause_auto_data_restore", False):
-        if session.mtr_df.empty and session.sales_df.empty:
-            # Session has no data — copy from warm cache (available ~2 s after restart)
-            copied_warm = _copy_warm_cache_to_session(session)
-            if copied_warm:
-                session._warm_cache_gen  = _warm_cache_generation
-                session._warm_cache_only = True
-        elif _warm_cache_has_more(session):
-            # Session can hold stale/partial data from before deploy/restart.
-            # If warm cache has strictly more loaded datasets, upgrade session.
-            copied_warm = _copy_warm_cache_to_session(session)
-            if copied_warm:
-                session._warm_cache_gen = _warm_cache_generation
-                session._warm_cache_only = True
-        elif _wc_only and _phase2_ready:
-            # Session has Phase-1 SQLite data only; Phase 2 (GitHub historical) is ready.
-            # Seamlessly upgrade — no user-uploaded data to protect.
-            copied_warm = _copy_warm_cache_to_session(session)
-            if copied_warm:
-                session._warm_cache_gen  = _warm_cache_generation
-                session._warm_cache_only = True
+    try:
+        copied_warm = await run_in_threadpool(
+            _apply_warm_cache_if_needed, session, _warm_cache_generation,
+        )
+    except Exception:
+        log.exception("warm-cache apply failed")
 
     try:
         from .services.sku_mapping import ensure_default_sku_mapping_from_bundle
 
-        ensure_default_sku_mapping_from_bundle(session)
+        await run_in_threadpool(ensure_default_sku_mapping_from_bundle, session)
     except Exception:
         pass
 
     response: Response = await call_next(request)
-
-    def _cookie_secure() -> bool:
-        xf = request.headers.get("x-forwarded-proto")
-        if xf:
-            return xf.split(",")[0].strip().lower() == "https"
-        return request.url.scheme == "https"
 
     try:
         from .db.forecast_session_pg import debounced_persist_session, pg_session_persist_enabled
@@ -685,7 +706,7 @@ async def session_middleware(request: Request, call_next):
         if pg_session_persist_enabled() and sid:
             if copied_warm:
                 debounced_persist_session(sid, session, delay=5.0)
-            elif request.method in frozenset({"POST", "PUT", "DELETE", "PATCH"}) and request.url.path.startswith(
+            elif request.method in frozenset({"POST", "PUT", "DELETE", "PATCH"}) and path.startswith(
                 "/api/"
             ):
                 debounced_persist_session(sid, session, delay=12.0)
@@ -698,7 +719,7 @@ async def session_middleware(request: Request, call_next):
         value=sid,
         httponly=True,
         samesite="lax",
-        secure=_cookie_secure(),
+        secure=_cookie_secure_from_request(request),
         max_age=14 * 24 * 3600,  # 14 days — must stay stable while PostgreSQL stores session blobs by this id
     )
     return response

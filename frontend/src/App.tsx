@@ -56,7 +56,7 @@ function ProtectedRoute() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
-      const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 8_000 })
+      const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 15_000 })
       setUser(me)
       return me
     },

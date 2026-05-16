@@ -17,9 +17,8 @@ export default function Login() {
     setLoading(true)
     try {
       setLoadStep('Signing in…')
-      // Allow queueing behind a long Tier-3 upload (same worker used to unblock via threadpool;
-      // 60s still fails fast if the host is actually down).
-      const { data } = await api.post('/auth/login', { username, password }, { timeout: 60_000 })
+      // Login is lightweight (no session blob restore); 30s covers slow networks only.
+      const { data } = await api.post('/auth/login', { username, password }, { timeout: 30_000 })
       const dest = data?.redirect || (data?.role === 'Karigar' ? '/production-entry' : '/')
       nav(dest, { replace: true })
     } catch (err: unknown) {
@@ -27,8 +26,10 @@ export default function Login() {
       const status = e?.response?.status
       if (status === 401) {
         setError('Invalid username or password')
+      } else if (status === 502 || status === 504) {
+        setError('Server gateway timeout. Wait a minute (a large upload may be running) and try again.')
       } else if (e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')) {
-        setError('Server is taking too long to respond. Please try again in a moment.')
+        setError('Server is taking too long to respond. Wait a minute and try again — avoid uploading while signing in.')
       } else if (!e?.response) {
         setError('Cannot reach the server. Check your connection and try again.')
       } else {

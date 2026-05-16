@@ -2,12 +2,20 @@
 Server-side session store — mirrors st.session_state exactly.
 Each browser gets a UUID cookie; the UUID maps to an AppSession.
 """
+import logging
+import os
 import threading
 import uuid
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import Optional
 import pandas as pd
+
+_log = logging.getLogger(__name__)
+
+# Cap blocking PG restore so /api/auth/login is not queued behind a multi‑GB session blob.
+_PG_RESTORE_TIMEOUT_SEC = float(os.environ.get("SESSION_PG_RESTORE_TIMEOUT_SEC", "3"))
 
 
 @dataclass
@@ -109,6 +117,59 @@ def resume_auto_data_restore(sess: AppSession) -> None:
     sess._warm_cache_only = False
 
 
+def _load_session_from_pg_timed(session_id: str, timeout_sec: float):
+    """Load session from PostgreSQL with a hard timeout (avoids blocking login for minutes)."""
+    from .db.forecast_session_pg import load_session_from_pg
+
+    if timeout_sec <= 0:
+        return load_session_from_pg(session_id)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(load_session_from_pg, session_id)
+        try:
+            return fut.result(timeout=timeout_sec)
+        except FuturesTimeoutError:
+            _log.warning(
+                "PostgreSQL session restore timed out after %.1fs (session %s…) — using empty session; background restore scheduled",
+                timeout_sec,
+                session_id[:8],
+            )
+            return None
+
+
+def _schedule_pg_session_restore(session_id: str) -> None:
+    """Finish a large PG restore without blocking the request thread."""
+
+    def _run() -> None:
+        try:
+            from .db.forecast_session_pg import load_session_from_pg, pg_session_persist_enabled
+
+            if not pg_session_persist_enabled():
+                return
+            loaded = load_session_from_pg(session_id)
+            if loaded is None:
+                return
+            with store._pg_restore_lock:
+                cur = store._sessions.get(session_id)
+                if cur is None:
+                    store._sessions[session_id] = loaded
+                    loaded.last_accessed = time.time()
+                    return
+                # Do not clobber active user work — only replace empty / warm-cache-only shells.
+                if getattr(cur, "pause_auto_data_restore", False):
+                    return
+                if not getattr(cur, "_warm_cache_only", True) and not (
+                    cur.mtr_df.empty and cur.sales_df.empty
+                ):
+                    return
+                loaded.last_accessed = time.time()
+                store._sessions[session_id] = loaded
+                _log.info("Background PostgreSQL session restore completed (%s…)", session_id[:8])
+        except Exception:
+            _log.exception("Background PostgreSQL session restore failed")
+
+    threading.Thread(target=_run, name=f"pg-restore-{session_id[:8]}", daemon=True).start()
+
+
 class SessionStore:
     """Thread-safe in-memory session store."""
 
@@ -116,6 +177,7 @@ class SessionStore:
 
     def __init__(self):
         self._sessions: dict[str, AppSession] = {}
+        self._pg_restore_lock = threading.Lock()
 
     def get_or_create(self, sid: Optional[str]) -> tuple[str, AppSession]:
         if sid and sid in self._sessions:
@@ -127,16 +189,17 @@ class SessionStore:
         # restore from PostgreSQL so ~1M-row uploads are not "lost".
         if sid:
             try:
-                from .db.forecast_session_pg import load_session_from_pg, pg_session_persist_enabled
+                from .db.forecast_session_pg import pg_session_persist_enabled
 
                 if pg_session_persist_enabled():
-                    loaded = load_session_from_pg(sid)
+                    loaded = _load_session_from_pg_timed(sid, _PG_RESTORE_TIMEOUT_SEC)
                     if loaded is not None:
                         self._sessions[sid] = loaded
                         loaded.last_accessed = time.time()
                         return sid, loaded
+                    _schedule_pg_session_restore(sid)
             except Exception:
-                pass
+                _log.exception("PostgreSQL session restore failed")
             # Reuse the same session_id for an empty session so the next persist
             # uses the PK the browser already has (legacy behaviour rotated UUIDs).
             empty = AppSession()

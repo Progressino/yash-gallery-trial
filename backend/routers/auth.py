@@ -77,17 +77,26 @@ def _set_auth_cookie(request: Request, response: Response, token: str) -> None:
     )
 
 
+def _reset_session_cookie(request: Request, response: Response) -> None:
+    """Drop stale session_id so login is not blocked restoring a huge PostgreSQL blob."""
+    sec = _cookie_secure(request)
+    response.delete_cookie("session_id", path="/", secure=sec, httponly=True, samesite="lax")
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
 
 
 @router.post("/login")
-def login(body: LoginRequest, request: Request, response: Response):
+async def login(body: LoginRequest, request: Request, response: Response):
+    from starlette.concurrency import run_in_threadpool
+
     username = body.username.strip()
     password = body.password
 
-    user = verify_erp_user(username, password)
+    # bcrypt + SQLite are sync; keep the event loop free during busy uploads.
+    user = await run_in_threadpool(verify_erp_user, username, password)
     if user:
         role = user.get("role_name") or "Clerk"
         token = create_token(
@@ -98,6 +107,7 @@ def login(body: LoginRequest, request: Request, response: Response):
             karigar_id=str(user.get("karigar_id") or ""),
         )
         _set_auth_cookie(request, response, token)
+        _reset_session_cookie(request, response)
         return {
             "ok": True,
             "username": username,
@@ -111,10 +121,15 @@ def login(body: LoginRequest, request: Request, response: Response):
     expected_user = os.environ.get("AUTH_USERNAME", "")
     expected_hash = os.environ.get("AUTH_PASSWORD_HASH", "").encode()
     if expected_user and expected_hash:
-        password_ok = bcrypt.checkpw(password.encode(), expected_hash)
-        if username == expected_user and password_ok:
+
+        def _legacy_admin_ok() -> bool:
+            return username == expected_user and bcrypt.checkpw(password.encode(), expected_hash)
+
+        password_ok = await run_in_threadpool(_legacy_admin_ok)
+        if password_ok:
             token = create_token(username, role="Admin", full_name="Administrator")
             _set_auth_cookie(request, response, token)
+            _reset_session_cookie(request, response)
             return {
                 "ok": True,
                 "username": username,
