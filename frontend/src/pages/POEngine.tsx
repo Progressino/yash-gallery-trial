@@ -1188,14 +1188,15 @@ export default function POEngine() {
                     type="button"
                     disabled={ledgerImportBusy}
                     onClick={() => ledgerCsvRef.current?.click()}
-                    title="Record SKUs from a saved PO export (CSV or Excel). Plain Export CSV does not write the ledger; use this or Export & Confirm in Raise PO."
+                    title="Record SKUs from a saved PO export (CSV or Excel). Export CSV also records the ledger for the Raise date."
                     className="text-xs px-3 py-1.5 rounded border border-sky-300 text-sky-800 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {ledgerImportBusy ? '…' : '📥 Import raises (CSV / Excel)'}
                   </button>
                   <button
-                    onClick={() => exportPOCsv(rows, editedQty, quarterCols, quarterMap)}
+                    onClick={() => exportPOCsv(rows, editedQty, quarterCols, quarterMap, ledgerImportDate)}
                     className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+                    title="Downloads CSV and records quantities in the raise ledger for the Raise date (uses PO Qty column)."
                   >
                     ⬇ Export CSV
                   </button>
@@ -1262,8 +1263,8 @@ export default function POEngine() {
                 <p className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-lg px-4 py-2">
                   <strong>Raise ledger is empty.</strong> Import yesterday&apos;s PO file (e.g.{' '}
                   <strong>Po Requirement 14-May-26.xlsx</strong>) via{' '}
-                  <strong>Import raises (CSV / Excel)</strong> with raise date <strong>{yesterdayIST()}</strong>, then{' '}
-                  <strong>Calculate PO</strong>. Or use <strong>Export &amp; Confirm</strong> when raising in-app.
+                  <strong>Import raises (CSV / Excel)</strong> for the raise date (e.g. Saturday&apos;s file), then{' '}
+                  <strong>Calculate PO</strong>. New exports via <strong>Export CSV</strong> or <strong>Export &amp; Confirm</strong> are recorded automatically.
                 </p>
               )}
 
@@ -2381,6 +2382,7 @@ function exportPOCsv(
   editedQty: Record<string, number>,
   quarterCols: string[],
   quarterMap: Record<string, Record<string, number | string>>,
+  raisedDate: string,
 ) {
   const base = [...PO_DISPLAY_COLS]
   const all  = [...base, ...quarterCols]
@@ -2398,8 +2400,9 @@ function exportPOCsv(
     }).join(',')
   }).join('\n')
   const csv = header + '\n' + body
-  trigger(csv, 'po_recommendation.csv')
-  void archivePoExportOnServer(csv, calendarDateIST())
+  const day = raisedDate || calendarDateIST()
+  trigger(csv, `po_recommendation ${day}.csv`)
+  void archivePoExportOnServer(csv, day)
 }
 
 function exportRaisePO(rows: Array<PORow & { Final_PO_Qty: number }>) {

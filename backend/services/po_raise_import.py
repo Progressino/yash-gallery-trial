@@ -10,6 +10,79 @@ import pandas as pd
 from .po_raise_ledger import append_raise_confirm_rows
 
 
+def sync_ledger_to_durable_db(sess, raised_date: pd.Timestamp) -> None:
+    """Mirror session ledger rows for ``raised_date`` into SQLite (survives new sessions)."""
+    try:
+        from ..db.po_raised_db import replace_raises_for_date
+
+        ledger = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
+        if ledger is None or ledger.empty:
+            return
+        d = pd.Timestamp(raised_date).normalize()
+        ld = pd.to_datetime(ledger["Raised_Date"], errors="coerce").dt.normalize()
+        sub = ledger[ld == d]
+        if sub.empty:
+            return
+        items = [
+            {"oms_sku": str(r["OMS_SKU"]), "qty": int(r["Raised_Qty"])}
+            for _, r in sub.iterrows()
+            if int(r["Raised_Qty"]) > 0
+        ]
+        replace_raises_for_date(str(d.date()), items)
+    except Exception:
+        pass
+
+
+def hydrate_session_ledger_from_db(
+    sess,
+    planning_date: Optional[str] = None,
+    lookback_days: int = 14,
+) -> bool:
+    """Merge durable SQLite raises into the session ledger when missing."""
+    try:
+        from ..db.po_raised_db import ledger_rows_as_dataframe
+
+        if planning_date and str(planning_date).strip():
+            plan = pd.Timestamp(pd.to_datetime(str(planning_date).strip()).normalize())
+        else:
+            plan = pd.Timestamp.now().normalize()
+        lb = max(1, int(lookback_days))
+        start = plan - pd.Timedelta(days=lb)
+        db_df = ledger_rows_as_dataframe(
+            start_date=str(start.date()),
+            end_date=str(plan.date()),
+        )
+        if db_df.empty:
+            return False
+
+        base = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
+        if base is None or base.empty:
+            sess.po_raise_ledger_df = db_df.copy()
+            sess._quarterly_cache.clear()
+            return True
+
+        merged = pd.concat([base, db_df], ignore_index=True)
+        merged["Raised_Date"] = pd.to_datetime(merged["Raised_Date"], errors="coerce").dt.normalize()
+        merged["Raised_Qty"] = pd.to_numeric(merged["Raised_Qty"], errors="coerce").fillna(0).astype(int)
+        merged = merged[merged["Raised_Qty"] > 0]
+        merged = (
+            merged.groupby(["OMS_SKU", "Raised_Date"], as_index=False)["Raised_Qty"]
+            .sum()
+            .sort_values(["Raised_Date", "OMS_SKU"])
+        )
+        sess.po_raise_ledger_df = merged.reset_index(drop=True)
+        sess._quarterly_cache.clear()
+        return True
+    except Exception:
+        return False
+
+
+def parse_raise_date_from_filename(filename: str) -> Optional[pd.Timestamp]:
+    from .po_raise_archive import parse_raise_date_from_filename
+
+    return parse_raise_date_from_filename(filename)
+
+
 def pick_csv_column(fieldnames: list, candidates: tuple[str, ...]) -> str | None:
     if not fieldnames:
         return None
@@ -167,6 +240,7 @@ def apply_ledger_import(
     sess._quarterly_cache.clear()
     n = int(len(sess.po_raise_ledger_df))
     tot_units = int(sum(accum.values()))
+    sync_ledger_to_durable_db(sess, raised_date)
     return {
         "ok": True,
         "ledger_rows": n,

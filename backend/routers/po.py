@@ -359,6 +359,9 @@ def po_raise_confirm(request: Request, body: RaiseConfirmBody):
     )
     sess._quarterly_cache.clear()
 
+    from ..services.po_raise_import import sync_ledger_to_durable_db
+
+    sync_ledger_to_durable_db(sess, as_dt)
     _sync_po_sidecars_to_durable_storage(request, sess)
 
     n = int(len(sess.po_raise_ledger_df))
@@ -397,17 +400,36 @@ async def po_raise_ledger_archive_export(
 
     from ..services.po_raise_archive import save_archive
 
+    from ..services.po_raise_import import apply_ledger_import, parse_ledger_upload_bytes
+
     try:
         path = save_archive(sid, as_dt, raw)
     except ValueError as e:
         return {"ok": False, "message": str(e)}
+
+    ledger_msg = ""
+    accum, err = parse_ledger_upload_bytes(raw, file.filename or "")
+    if not err and accum:
+        imp = apply_ledger_import(
+            sess,
+            accum,
+            as_dt,
+            group_by_parent=False,
+            replace_day=True,
+        )
+        if imp.get("ok"):
+            _sync_po_sidecars_to_durable_storage(request, sess)
+            ledger_msg = (
+                f" Recorded {imp.get('imported_skus', 0):,} SKU(s) / "
+                f"{imp.get('total_units', 0):,} units in the raise ledger."
+            )
     return {
         "ok": True,
         "raised_date": str(as_dt.date()),
         "path": str(path),
         "message": (
-            f"Archived export for {as_dt.date()}. Tomorrow's Calculate PO can auto-import it "
-            f"into the raise ledger (no Downloads folder needed)."
+            f"Archived export for {as_dt.date()}.{ledger_msg} "
+            f"Future Calculate PO runs will not repeat these quantities."
         ),
     }
 
@@ -453,20 +475,34 @@ async def po_raise_ledger_import_csv(
     if err:
         return {"ok": False, "message": err}
 
+    from ..services.po_raise_import import parse_raise_date_from_filename
+
     try:
         if raised_date and str(raised_date).strip():
             as_dt = pd.Timestamp(pd.to_datetime(str(raised_date).strip()).normalize())
         else:
-            as_dt = pd.Timestamp((datetime.now(_IST) - timedelta(days=1)).date())
+            guessed = parse_raise_date_from_filename(file.filename or "")
+            if guessed is not None:
+                as_dt = guessed
+            else:
+                as_dt = pd.Timestamp((datetime.now(_IST) - timedelta(days=1)).date())
     except Exception:
         return {"ok": False, "message": "Invalid raised_date; use YYYY-MM-DD."}
 
     rep = str(replace_day).strip().lower() in ("1", "true", "yes", "on")
     gbp = str(group_by_parent).strip().lower() in ("1", "true", "yes", "on")
 
+    from ..services.po_raise_archive import save_archive
+
     out = apply_ledger_import(
         sess, accum, as_dt, group_by_parent=gbp, replace_day=rep
     )
+    sid = getattr(request.state, "session_id", None)
+    if sid and out.get("ok"):
+        try:
+            save_archive(sid, as_dt, raw)
+        except Exception:
+            logging.getLogger(__name__).exception("save_archive on import failed")
     _sync_po_sidecars_to_durable_storage(request, sess)
     out["message"] = (
         f"{out['message']} Run Calculate PO to refresh columns."
@@ -636,16 +672,25 @@ def po_calculate(request: Request, body: PORequest):
 
     inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
 
+    from ..services.po_raise_import import hydrate_session_ledger_from_db
+
+    hydrate_session_ledger_from_db(
+        sess,
+        body.planning_date,
+        lookback_days=max(body.raise_ledger_lookback_days, 14),
+    )
+
     ledger_auto_import = None
     sid = getattr(request.state, "session_id", None)
     if body.auto_import_yesterday_ledger and sid:
-        from ..services.po_raise_archive import try_auto_import_yesterday_ledger
+        from ..services.po_raise_archive import try_auto_import_recent_ledgers
 
-        ledger_auto_import = try_auto_import_yesterday_ledger(
+        ledger_auto_import = try_auto_import_recent_ledgers(
             sess,
             sid,
             body.planning_date,
             group_by_parent=body.group_by_parent,
+            lookback_days=max(body.raise_ledger_lookback_days, 14),
         )
         if ledger_auto_import and ledger_auto_import.get("ok"):
             _sync_po_sidecars_to_durable_storage(request, sess)

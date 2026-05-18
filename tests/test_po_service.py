@@ -1987,10 +1987,11 @@ def test_parse_ledger_excel_export():
 
 
 def test_po_raise_archive_auto_import_on_calculate_day(tmp_path, monkeypatch):
-    """Archived export for yesterday is pulled into the ledger automatically."""
+    """Archived export for a recent day is pulled into the ledger automatically."""
     import backend.services.po_raise_archive as arch
 
     monkeypatch.setattr(arch, "_ARCHIVE_DIR", str(tmp_path))
+    arch._resolved_archive_root = None
     sess = type("S", (), {})()
     sess.sku_mapping = {}
     sess.po_raise_ledger_df = pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
@@ -2000,21 +2001,23 @@ def test_po_raise_archive_auto_import_on_calculate_day(tmp_path, monkeypatch):
     yday = pd.Timestamp("2026-05-14")
     arch.save_archive("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", yday, csv.encode())
 
-    out = arch.try_auto_import_yesterday_ledger(
+    out = arch.try_auto_import_recent_ledgers(
         sess,
-        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
         "2026-05-15",
         group_by_parent=False,
+        lookback_days=14,
     )
     assert out and out.get("ok")
     assert out.get("auto") is True
     assert int(sess.po_raise_ledger_df["Raised_Qty"].sum()) == 25
 
-    again = arch.try_auto_import_yesterday_ledger(
+    again = arch.try_auto_import_recent_ledgers(
         sess,
-        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
         "2026-05-15",
         group_by_parent=False,
+        lookback_days=14,
     )
     assert again is None
 

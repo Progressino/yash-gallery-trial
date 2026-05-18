@@ -59,6 +59,69 @@ def init_db() -> None:
         conn.close()
 
 
+def replace_raises_for_date(raised_date: str, items: Iterable[dict]) -> int:
+    """Replace all ledger rows for ``raised_date`` (YYYY-MM-DD) with ``items``."""
+    day = str(raised_date).strip()[:10]
+    rows: list[tuple[str, float, Optional[int], str, str]] = []
+    for it in items:
+        sku = str(it.get("oms_sku") or it.get("OMS_SKU") or "").strip()
+        try:
+            qty = float(it.get("qty") or it.get("Raised_Qty") or it.get("Final_PO_Qty") or 0)
+        except Exception:
+            qty = 0.0
+        if not sku or qty <= 0:
+            continue
+        try:
+            lt = it.get("lead_time")
+            lt_int: Optional[int] = int(lt) if lt is not None else None
+        except Exception:
+            lt_int = None
+        note = str(it.get("note") or "")[:512]
+        rows.append((sku, qty, lt_int, note, day))
+
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM po_raised WHERE raised_date = ?", (day,))
+        if rows:
+            conn.executemany(
+                "INSERT INTO po_raised (oms_sku, qty, lead_time, note, raised_date) "
+                "VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
+def ledger_rows_as_dataframe(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> "pd.DataFrame":
+    """SKU-day ledger suitable for ``sess.po_raise_ledger_df``."""
+    import pandas as pd
+
+    rows = list_raises(start_date=start_date, end_date=end_date, limit=500_000)
+    if not rows:
+        return pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": [str(r["oms_sku"]) for r in rows],
+            "Raised_Qty": [int(float(r["qty"] or 0)) for r in rows],
+            "Raised_Date": pd.to_datetime([str(r["raised_date"]) for r in rows], errors="coerce"),
+        }
+    )
+    df = df[df["Raised_Qty"] > 0].dropna(subset=["Raised_Date"])
+    if df.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+    return (
+        df.groupby(["OMS_SKU", "Raised_Date"], as_index=False)["Raised_Qty"]
+        .sum()
+        .sort_values(["Raised_Date", "OMS_SKU"])
+        .reset_index(drop=True)
+    )
+
+
 def record_raises(items: Iterable[dict]) -> int:
     """Persist a batch of raised POs. Each item must have ``oms_sku`` and
     ``qty``; ``lead_time`` (days) and ``note`` are optional. Returns count.
