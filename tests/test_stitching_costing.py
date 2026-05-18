@@ -24,6 +24,49 @@ def test_stitching_init_and_dashboard():
     assert dash["metrics"]["total_karigar"] >= 1
 
 
+def test_save_production_entry_infers_single_operation():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-SINGLE", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    out = svc.save_production_entry(
+        date_str="2026-05-15",
+        karigar_id="K001",
+        karigar_name="Test",
+        challan_no="CH-1",
+        style="SKU-SINGLE",
+        hour_entries=[{"hour_col": "H_09_10", "operation": "", "pieces": 25}],
+    )
+    assert out["ok"] is True
+    pl = get_sheet_df("production_log")
+    assert int(pl.iloc[-1]["Total_Pieces"]) == 25
+
+
+def test_master_dedupe_and_delete():
+    svc.add_style_operation_row("SKU-X", "Cut", 100, 2.5)
+    dup = svc.add_style_operation_row("SKU-X", "Cut", 100, 2.5)
+    assert dup["ok"] is False
+    out = svc.delete_master_rows("style_master", [{"Style": "SKU-X", "Operation": "Cut"}])
+    assert out["ok"] is True
+    assert out["removed"] == 1
+
+
+def test_karigar_rate_by_date():
+    svc.add_karigar_master("K099", "Test Karigar", "Stitching", 400.0, "2026-05-01")
+    svc.update_karigar_master("K099", daily_rate_rs=500.0, effective_from="2026-05-10")
+    assert svc.get_daily_rate_for_date("K099", "2026-05-05") == 400.0
+    assert svc.get_daily_rate_for_date("K099", "2026-05-15") == 500.0
+    svc.delete_master_rows("karigar_master", [{"Karigar_ID": "K099"}])
+
+
+def test_resolve_hour_pieces_sticker_and_pl_sign():
+    assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 5, "manual_pieces": False}) == 5
+    assert svc.resolve_hour_pieces({"sticker_in": 0, "sticker_out": 0, "pieces": 12, "manual_pieces": True}) == 12
+    budgeted = 100.0
+    actual = 80.0
+    assert round(budgeted - actual, 2) == 20.0
+
+
 def test_stitching_save_production_entry():
     out = svc.save_production_entry(
         date_str="2026-05-15",
@@ -40,6 +83,37 @@ def test_stitching_save_production_entry():
     pl = get_sheet_df("production_log")
     assert not pl.empty
     assert int(pl["Total_Pieces"].sum()) >= 20
+    row = pl.iloc[-1]
+    assert float(row["PL_Rs"]) == round(float(row["Budgeted_Expense_Rs"]) - float(row["Actual_Expense_Rs"]), 2)
+
+
+def test_save_production_entry_sticker_pieces():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-ST", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    out = svc.save_production_entry(
+        date_str="2026-05-15",
+        karigar_id="K001",
+        karigar_name="Test",
+        challan_no="CH-ST",
+        style="SKU-ST",
+        hour_entries=[
+            {
+                "hour_col": "H_09_10",
+                "operation": "Stitch",
+                "sticker_in": 10,
+                "sticker_out": 5,
+                "manual_pieces": False,
+                "pieces": 0,
+            },
+        ],
+    )
+    assert out["ok"] is True
+    pl = get_sheet_df("production_log")
+    assert int(pl.iloc[-1]["H_09_10"]) == 5
+    assert int(pl.iloc[-1]["SI_H_09_10"]) == 10
+    assert int(pl.iloc[-1]["SO_H_09_10"]) == 5
 
 
 def test_stitching_performance_report():
@@ -95,6 +169,36 @@ def test_stitching_style_costing_report():
     rep = svc.style_costing_report(month="All", style="All", party="All")
     assert "summary" in rep
     assert "rows" in rep
+
+
+def test_style_costing_uses_received_qty_for_party_value():
+    save_sheet_df(
+        "challan_master",
+        pd.DataFrame(
+            [
+                {
+                    "Challan_No": "CH-90",
+                    "Style": "STYLE-A",
+                    "Party": "Party1",
+                    "Total_Qty": 100,
+                    "Received_Qty": 90,
+                    "Rate_Per_Pc": 10,
+                    "Deposit_Rs": 0,
+                    "Date": "2026-05-01",
+                }
+            ]
+        ),
+    )
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "STYLE-A", "Operation": "Stitch", "Target": 80, "Rate_Rs": 5}]),
+    )
+    rep = svc.style_costing_report(month="All", style="STYLE-A", party="All")
+    row = next(r for r in rep["rows"] if r["Challan_No"] == "CH-90")
+    assert float(row["Party_Value_Ordered_Rs"]) == 1000.0
+    assert float(row["Party_Value_Received_Rs"]) == 900.0
+    assert float(row["Party_Value_Rs"]) == 900.0
+    assert int(row["Pending"]) == 10
 
 
 def test_stitching_production_entry_reports():

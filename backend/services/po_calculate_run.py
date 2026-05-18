@@ -95,6 +95,12 @@ def execute_po_calculate(
             planning_date=body.get("planning_date"),
             raise_ledger_lookback_days=lookback,
             raise_view_date=body.get("raise_view_date"),
+            po_return_overlay_df=(
+                getattr(sess, "po_return_overlay_df", None)
+                if getattr(sess, "po_return_overlay_df", None) is not None
+                and not getattr(sess, "po_return_overlay_df", pd.DataFrame()).empty
+                else None
+            ),
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

@@ -1918,6 +1918,30 @@ def test_po_inv_window_anchors_at_latest_data_not_stale_sales_max():
     assert int(row["Eff_Days"]) == 30
 
 
+def test_raise_ledger_view_date_outside_planning_window():
+    """Raises older than lookback must still show on the Raise date column."""
+    from backend.services.po_raise_ledger import aggregate_raise_ledger_for_po
+
+    ledger = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-OLD"],
+            "Raised_Qty": [99],
+            "Raised_Date": [pd.Timestamp("2026-04-01")],
+        }
+    )
+    agg = aggregate_raise_ledger_for_po(
+        ledger,
+        {},
+        pd.Timestamp("2026-05-18"),
+        lookback_days=14,
+        raise_view_date="2026-04-01",
+    )
+    assert not agg.empty
+    row = agg[agg["OMS_SKU"] == "SKU-OLD"].iloc[0]
+    assert int(row["PO_Raised_On_View_Date"]) == 99
+    assert int(row["PO_Confirmed_Raise_Pipeline"]) == 0
+
+
 def test_raise_ledger_last_and_view_date_columns():
     from backend.services.po_raise_ledger import aggregate_raise_ledger_for_po
 

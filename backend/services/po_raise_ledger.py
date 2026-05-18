@@ -113,9 +113,72 @@ def aggregate_raise_ledger_for_po(
     lb = max(1, int(lookback_days))
     window_start = as_of - timedelta(days=lb - 1)
 
+    # View-date column uses the full ledger (any calendar day in the picker).
+    on_view = pd.DataFrame()
+    if raise_view_date and str(raise_view_date).strip():
+        try:
+            vd = pd.Timestamp(pd.to_datetime(str(raise_view_date).strip()).normalize())
+            on_view = (
+                df[df["Raised_Date"] == vd]
+                .groupby("OMS_SKU", as_index=False)["Raised_Qty"]
+                .sum()
+                .rename(columns={"Raised_Qty": "PO_Raised_On_View_Date"})
+            )
+        except Exception:
+            on_view = pd.DataFrame()
+
     win = df[(df["Raised_Date"] >= window_start) & (df["Raised_Date"] <= as_of)].copy()
+
+    def _attach_last_and_view(base: pd.DataFrame) -> pd.DataFrame:
+        out = base.copy()
+        if not on_view.empty:
+            out = out.drop(columns=["PO_Raised_On_View_Date"], errors="ignore").merge(
+                on_view, on="OMS_SKU", how="left"
+            )
+        else:
+            out["PO_Raised_On_View_Date"] = 0
+        last_recs: list[dict] = []
+        for sku, sub in df.groupby("OMS_SKU"):
+            dmax = sub["Raised_Date"].max()
+            if pd.isna(dmax):
+                continue
+            qty = int(sub.loc[sub["Raised_Date"] == dmax, "Raised_Qty"].sum())
+            if qty <= 0:
+                continue
+            last_recs.append(
+                {
+                    "OMS_SKU": sku,
+                    "PO_Last_Raised_Qty": qty,
+                    "PO_Last_Raised_Date": str(pd.Timestamp(dmax).date()),
+                }
+            )
+        if last_recs:
+            last_df = pd.DataFrame.from_records(last_recs)
+            out = out.merge(last_df, on="OMS_SKU", how="left")
+        else:
+            out["PO_Last_Raised_Qty"] = 0
+            out["PO_Last_Raised_Date"] = ""
+        out["PO_Last_Raised_Qty"] = pd.to_numeric(out.get("PO_Last_Raised_Qty"), errors="coerce").fillna(0).astype(int)
+        out["PO_Last_Raised_Date"] = out.get("PO_Last_Raised_Date", "").fillna("").astype(str)
+        out["PO_Raised_On_View_Date"] = pd.to_numeric(out["PO_Raised_On_View_Date"], errors="coerce").fillna(0).astype(int)
+        return out
+
     if win.empty:
-        return empty
+        skus: set[str] = set()
+        if not on_view.empty:
+            skus.update(on_view["OMS_SKU"].astype(str))
+        for sku in df["OMS_SKU"].astype(str):
+            skus.add(sku)
+        if not skus:
+            return empty
+        out = pd.DataFrame({"OMS_SKU": sorted(skus)})
+        for c in (
+            "PO_Confirmed_Raise_Pipeline",
+            "PO_Raised_Yesterday",
+            "PO_Raised_Today",
+        ):
+            out[c] = 0
+        return _attach_last_and_view(out)
 
     win["_day"] = win["Raised_Date"].dt.normalize().dt.date
     yday = yesterday.date()
@@ -141,50 +204,33 @@ def aggregate_raise_ledger_for_po(
         ["PO_Raised_Yesterday", "PO_Raised_Today"]
     ].fillna(0).astype(int)
 
-    # Most recent raise per SKU (full ledger — not limited to lookback window).
-    last_recs: list[dict] = []
-    for sku, sub in df.groupby("OMS_SKU"):
-        dmax = sub["Raised_Date"].max()
-        if pd.isna(dmax):
-            continue
-        qty = int(sub.loc[sub["Raised_Date"] == dmax, "Raised_Qty"].sum())
-        if qty <= 0:
-            continue
-        last_recs.append(
-            {
-                "OMS_SKU": sku,
-                "PO_Last_Raised_Qty": qty,
-                "PO_Last_Raised_Date": str(pd.Timestamp(dmax).date()),
-            }
-        )
-    if last_recs:
-        last_df = pd.DataFrame.from_records(last_recs)
-        out = out.merge(last_df, on="OMS_SKU", how="left")
-    else:
-        out["PO_Last_Raised_Qty"] = 0
-        out["PO_Last_Raised_Date"] = ""
+    return _attach_last_and_view(out)
 
-    # Qty raised on the UI "Raise date" picker (may be Saturday while planning day is Monday).
-    out["PO_Raised_On_View_Date"] = 0
-    if raise_view_date and str(raise_view_date).strip():
-        try:
-            vd = pd.Timestamp(pd.to_datetime(str(raise_view_date).strip()).normalize())
-            on_view = (
-                df[df["Raised_Date"] == vd]
-                .groupby("OMS_SKU", as_index=False)["Raised_Qty"]
-                .sum()
-                .rename(columns={"Raised_Qty": "PO_Raised_On_View_Date"})
-            )
-            if not on_view.empty:
-                out = out.drop(columns=["PO_Raised_On_View_Date"], errors="ignore").merge(
-                    on_view, on="OMS_SKU", how="left"
-                )
-        except Exception:
-            pass
-    out["PO_Last_Raised_Qty"] = pd.to_numeric(out.get("PO_Last_Raised_Qty"), errors="coerce").fillna(0).astype(int)
-    out["PO_Last_Raised_Date"] = out.get("PO_Last_Raised_Date", "").fillna("").astype(str)
-    out["PO_Raised_On_View_Date"] = pd.to_numeric(out["PO_Raised_On_View_Date"], errors="coerce").fillna(0).astype(int)
-    return out
+
+def list_raise_ledger_dates(ledger_df: Optional[pd.DataFrame]) -> list[dict]:
+    """Distinct Raised_Date values in the ledger (for PO Engine date picker hints)."""
+    if ledger_df is None or ledger_df.empty or "Raised_Date" not in ledger_df.columns:
+        return []
+    df = ledger_df.copy()
+    df["Raised_Date"] = _norm_date_series(df["Raised_Date"])
+    df["Raised_Qty"] = pd.to_numeric(df["Raised_Qty"], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["Raised_Date"])
+    df = df[df["Raised_Qty"] > 0]
+    if df.empty:
+        return []
+    grp = (
+        df.groupby("Raised_Date", as_index=False)
+        .agg(sku_count=("OMS_SKU", "nunique"), total_units=("Raised_Qty", "sum"))
+        .sort_values("Raised_Date", ascending=False)
+    )
+    return [
+        {
+            "date": str(pd.Timestamp(r["Raised_Date"]).date()),
+            "sku_count": int(r["sku_count"]),
+            "total_units": int(r["total_units"]),
+        }
+        for _, r in grp.iterrows()
+    ]
 
 
 def summarize_raise_ledger_for_dashboard(

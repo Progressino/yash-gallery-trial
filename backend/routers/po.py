@@ -535,6 +535,17 @@ def po_raise_ledger_summary(
     return {"ok": True, **summary}
 
 
+@router.get("/raise-ledger/dates")
+def po_raise_ledger_dates(request: Request):
+    from ..services.po_raise_ledger import list_raise_ledger_dates
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "dates": []}
+    df = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
+    return {"ok": True, "dates": list_raise_ledger_dates(df)}
+
+
 @router.get("/raise-ledger")
 def po_get_raise_ledger(request: Request):
     sess = request.state.session
@@ -549,6 +560,49 @@ def po_get_raise_ledger(request: Request):
         "columns": list(df.columns),
         "rows": df.fillna("").to_dict("records"),
     }
+
+
+@router.post("/returns/import-file")
+async def po_returns_import_file(
+    request: Request,
+    file: UploadFile = File(...),
+    group_by_parent: str = Form("false"),
+    replace: str = Form("true"),
+):
+    """Import return units by SKU (CSV / Excel). Reduces PO qty and feeds Net demand."""
+    from ..services.po_return_import import apply_return_overlay_import, parse_return_upload_bytes
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    raw = await file.read()
+    if not raw:
+        return {"ok": False, "message": "Empty file."}
+    gbp = str(group_by_parent).strip().lower() in ("1", "true", "yes", "on")
+    rep = str(replace).strip().lower() in ("1", "true", "yes", "on")
+    overlay, err = parse_return_upload_bytes(
+        raw,
+        file.filename or "",
+        sku_mapping=sess.sku_mapping or None,
+        group_by_parent=gbp,
+    )
+    if err:
+        return {"ok": False, "message": err}
+    out = apply_return_overlay_import(sess, overlay, replace=rep)
+    _sync_po_sidecars_to_durable_storage(request, sess)
+    out["message"] = f"{out['message']} Run Calculate PO to refresh the table."
+    return out
+
+
+@router.delete("/returns/overlay")
+def po_clear_returns_overlay(request: Request):
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    sess.po_return_overlay_df = pd.DataFrame()
+    sess._quarterly_cache.clear()
+    _sync_po_sidecars_to_durable_storage(request, sess)
+    return {"ok": True, "message": "Return overlay cleared."}
 
 
 @router.delete("/raise-ledger")
@@ -622,6 +676,13 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
             planning_date=body.planning_date,
             raise_ledger_lookback_days=body.raise_ledger_lookback_days,
+            raise_view_date=body.raise_view_date,
+            po_return_overlay_df=(
+                getattr(sess, "po_return_overlay_df", None)
+                if getattr(sess, "po_return_overlay_df", None) is not None
+                and not getattr(sess, "po_return_overlay_df", pd.DataFrame()).empty
+                else None
+            ),
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

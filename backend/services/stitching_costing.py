@@ -21,6 +21,25 @@ def safe_num(s) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
 
+def sticker_in_col(hcol: str) -> str:
+    return f"SI_{hcol}"
+
+
+def sticker_out_col(hcol: str) -> str:
+    return f"SO_{hcol}"
+
+
+def resolve_hour_pieces(entry: dict) -> int:
+    """Pieces from sticker in/out (in − out) unless user entered manual pieces."""
+    sin = int(entry.get("sticker_in") or 0)
+    sout = int(entry.get("sticker_out") or 0)
+    manual = bool(entry.get("manual_pieces"))
+    explicit = int(entry.get("pieces") or 0)
+    if (sin > 0 or sout > 0) and not manual:
+        return max(0, sin - sout)
+    return explicit
+
+
 def clean_key(val: Any) -> str:
     if val is None:
         return ""
@@ -98,7 +117,7 @@ def dashboard_summary(planning_date: str | None = None) -> dict:
                 "Karigar_ID": kid,
                 "Name": str(r.get("Name", "")),
                 "Skill": str(r.get("Skill", "")),
-                "Daily_Rate_Rs": float(r.get("Daily_Rate_Rs", 0) or 0),
+                "Daily_Rate_Rs": get_daily_rate_for_date(kid, today),
                 "Status": "Working" if kid in aids else "Idle",
             })
 
@@ -144,7 +163,10 @@ def dashboard_summary(planning_date: str | None = None) -> dict:
 def load_production_entry(date_str: str, karigar_id: str, challan_no: str, style: str) -> dict:
     """Load existing hour-wise entry for composite key."""
     pl = get_sheet_df("production_log")
-    hours: dict[str, dict] = {h: {"operation": "", "pieces": 0} for h in HOUR_COLS}
+    hours: dict[str, dict] = {
+        h: {"operation": "", "pieces": 0, "sticker_in": 0, "sticker_out": 0, "manual_pieces": False}
+        for h in HOUR_COLS
+    }
     if pl.empty:
         return {"hours": hours, "found": False}
 
@@ -170,8 +192,25 @@ def load_production_entry(date_str: str, karigar_id: str, challan_no: str, style
                 val = 0 if pd.isna(raw) else int(float(raw))
             except (ValueError, TypeError):
                 val = 0
-            if val > 0:
-                hours[hcol] = {"operation": op_name, "pieces": val}
+            si = 0
+            so = 0
+            try:
+                si = int(float(row.get(sticker_in_col(hcol), 0) or 0))
+            except (ValueError, TypeError):
+                si = 0
+            try:
+                so = int(float(row.get(sticker_out_col(hcol), 0) or 0))
+            except (ValueError, TypeError):
+                so = 0
+            if val > 0 or si > 0 or so > 0:
+                manual = si == 0 and so == 0
+                hours[hcol] = {
+                    "operation": op_name,
+                    "pieces": val,
+                    "sticker_in": si,
+                    "sticker_out": so,
+                    "manual_pieces": manual,
+                }
     return {"hours": hours, "found": True, "rows_loaded": len(existing)}
 
 
@@ -186,7 +225,7 @@ def save_production_entry(
     saved_by: str = "erp",
     saved_by_name: str = "",
 ) -> dict:
-    """hour_entries: [{hour_col, operation, pieces}, ...]"""
+    """hour_entries: [{hour_col, operation, pieces, sticker_in, sticker_out, manual_pieces}, ...]"""
     sm = get_sheet_df("style_master")
     style_ops = sm[sm["Style"] == style] if not sm.empty else pd.DataFrame()
     op_info: dict[str, dict] = {}
@@ -198,13 +237,25 @@ def save_production_entry(
         }
 
     h_vals: dict[str, int] = {}
+    si_vals: dict[str, int] = {}
+    so_vals: dict[str, int] = {}
     op_vals: dict[str, str | None] = {}
     for e in hour_entries:
         hc = e.get("hour_col") or e.get("hour")
         if hc not in HOUR_COLS:
             continue
-        h_vals[hc] = int(e.get("pieces") or 0)
+        h_vals[hc] = resolve_hour_pieces(e)
+        si_vals[hc] = int(e.get("sticker_in") or 0)
+        so_vals[hc] = int(e.get("sticker_out") or 0)
         op_vals[hc] = e.get("operation") or None
+
+    if len(op_info) == 1:
+        only_op = next(iter(op_info))
+        for hc in HOUR_COLS:
+            if hc == "H_13_14":
+                continue
+            if h_vals.get(hc, 0) > 0 and not op_vals.get(hc):
+                op_vals[hc] = only_op
 
     op_totals: dict[str, dict] = defaultdict(lambda: {"pieces": 0, "hours": 0, "value": 0.0})
     for hc in HOUR_COLS:
@@ -229,6 +280,14 @@ def save_production_entry(
         od = op_info[op_name]
         op_eff = round(data["pieces"] / od["Target"] * 100, 1) if od["Target"] > 0 else 0.0
         hour_row = {hcol: (h_vals.get(hcol, 0) if op_vals.get(hcol) == op_name else 0) for hcol in HOUR_COLS}
+        sticker_row: dict[str, int] = {}
+        for hcol in HOUR_COLS:
+            if op_vals.get(hcol) == op_name:
+                sticker_row[sticker_in_col(hcol)] = si_vals.get(hcol, 0)
+                sticker_row[sticker_out_col(hcol)] = so_vals.get(hcol, 0)
+            else:
+                sticker_row[sticker_in_col(hcol)] = 0
+                sticker_row[sticker_out_col(hcol)] = 0
         budgeted = round(od["Rate_Rs"] * od["Target"], 2)
         actual = round(data["value"], 2)
         new_row = {
@@ -239,6 +298,7 @@ def save_production_entry(
             "Style": style,
             "Operation": op_name,
             **hour_row,
+            **sticker_row,
             "Total_Pieces": data["pieces"],
             "Target": od["Target"],
             "Rate_Rs": od["Rate_Rs"],
@@ -246,7 +306,7 @@ def save_production_entry(
             "Piece_Value_Rs": actual,
             "Budgeted_Expense_Rs": budgeted,
             "Actual_Expense_Rs": actual,
-            "PL_Rs": round(actual - budgeted, 2),
+            "PL_Rs": round(budgeted - actual, 2),
             "Saved_By": saved_by,
             "Saved_By_Name": saved_by_name,
             "Save_Time": save_time,
@@ -303,7 +363,9 @@ def style_costing_report(
     for col in ["Total_Qty", "Rate_Per_Pc", "Deposit_Rs", "Received_Qty"]:
         if col in cm_sc.columns:
             cm_sc[col] = safe_num(cm_sc[col])
-    cm_sc["Pending"] = cm_sc["Total_Qty"] - cm_sc.get("Received_Qty", 0)
+    if "Received_Qty" not in cm_sc.columns:
+        cm_sc["Received_Qty"] = 0.0
+    cm_sc["Pending"] = cm_sc["Total_Qty"] - cm_sc["Received_Qty"]
     cm_sc["Is_Pending"] = cm_sc["Pending"] > 0
 
     if not sm.empty:
@@ -324,11 +386,22 @@ def style_costing_report(
     else:
         cm_sc["Actual_Labour_Rs"] = 0
 
-    cm_sc["Target_Labour_Rs"] = (cm_sc["Target_Labour_Rate_Pc"] * cm_sc["Total_Qty"]).round(2)
-    cm_sc["Party_Value_Rs"] = (cm_sc["Rate_Per_Pc"] * cm_sc["Total_Qty"]).round(2)
+    # Show costing on received qty when material is in; keep ordered totals for reference.
+    cm_sc["Party_Value_Ordered_Rs"] = (cm_sc["Rate_Per_Pc"] * cm_sc["Total_Qty"]).round(2)
+    cm_sc["Party_Value_Received_Rs"] = (cm_sc["Rate_Per_Pc"] * cm_sc["Received_Qty"]).round(2)
+    cm_sc["Target_Labour_Ordered_Rs"] = (cm_sc["Target_Labour_Rate_Pc"] * cm_sc["Total_Qty"]).round(2)
+    cm_sc["Target_Labour_Received_Rs"] = (cm_sc["Target_Labour_Rate_Pc"] * cm_sc["Received_Qty"]).round(2)
+    has_recv = cm_sc["Received_Qty"] > 0
+    cm_sc["Party_Value_Rs"] = cm_sc["Party_Value_Received_Rs"].where(
+        has_recv, cm_sc["Party_Value_Ordered_Rs"]
+    ).round(2)
+    cm_sc["Target_Labour_Rs"] = cm_sc["Target_Labour_Received_Rs"].where(
+        has_recv, cm_sc["Target_Labour_Ordered_Rs"]
+    ).round(2)
     cm_sc["Total_Expense_Rs"] = (cm_sc["Actual_Labour_Rs"] + cm_sc["Deposit_Rs"]).round(2)
     cm_sc["PL_Rs"] = (cm_sc["Party_Value_Rs"] - cm_sc["Total_Expense_Rs"]).round(2)
-    cm_sc["PL_Per_Pc"] = (cm_sc["PL_Rs"] / cm_sc["Total_Qty"].replace(0, 1)).round(2)
+    costing_qty = cm_sc["Received_Qty"].where(has_recv, cm_sc["Total_Qty"]).replace(0, 1)
+    cm_sc["PL_Per_Pc"] = (cm_sc["PL_Rs"] / costing_qty).round(2)
     cm_sc["Margin_%"] = (cm_sc["PL_Rs"] / cm_sc["Party_Value_Rs"].replace(0, 1) * 100).round(1)
     cm_sc["Cost_vs_Target_%"] = (
         cm_sc["Actual_Labour_Rs"] / cm_sc["Target_Labour_Rs"].replace(0, 1) * 100
@@ -346,14 +419,19 @@ def style_costing_report(
         cm_sc.groupby("Style")
         .agg(
             Challans=("Challan_No", "nunique"),
-            Qty=("Total_Qty", "sum"),
+            Qty_Ordered=("Total_Qty", "sum"),
+            Qty_Received=("Received_Qty", "sum"),
             Actual_Labour=("Actual_Labour_Rs", "sum"),
             Party_Value=("Party_Value_Rs", "sum"),
+            Party_Value_Ordered=("Party_Value_Ordered_Rs", "sum"),
             Total_Expense=("Total_Expense_Rs", "sum"),
             PL=("PL_Rs", "sum"),
             Pending_Challans=("Is_Pending", "sum"),
         )
         .reset_index()
+    )
+    style_rollup["Qty"] = style_rollup["Qty_Received"].where(
+        style_rollup["Qty_Received"] > 0, style_rollup["Qty_Ordered"]
     )
     style_rollup["Margin_%"] = (style_rollup["PL"] / style_rollup["Party_Value"].replace(0, 1) * 100).round(1)
     style_rollup["Result"] = style_rollup["PL"].apply(
@@ -476,16 +554,35 @@ def hour_labels() -> list[dict]:
     return [{"col": c, "label": l} for c, l in zip(HOUR_COLS, HOUR_LBLS)]
 
 
-def _get_daily_salary(karigar_id: str) -> float:
-    kid = str(karigar_id)
+def _get_daily_salary(karigar_id: str, as_of_date: str | None = None) -> float:
+    """Resolve karigar daily rate for a calendar date (rate history + master fallback)."""
+    return get_daily_rate_for_date(karigar_id, as_of_date)
+
+
+def get_daily_rate_for_date(karigar_id: str, as_of_date: str | None = None) -> float:
+    kid = clean_key(karigar_id)
+    if not kid:
+        return 0.0
+    as_of = (as_of_date or str(date.today()))[:10]
+    hist = get_sheet_df("karigar_rate_history")
+    if not hist.empty and "Karigar_ID" in hist.columns and "Effective_From" in hist.columns:
+        h = hist[hist["Karigar_ID"].apply(clean_key) == kid].copy()
+        if not h.empty:
+            h["_eff"] = pd.to_datetime(h["Effective_From"], errors="coerce")
+            cutoff = pd.to_datetime(as_of, errors="coerce")
+            if pd.notna(cutoff):
+                h = h[h["_eff"].notna() & (h["_eff"] <= cutoff)]
+                if not h.empty:
+                    h = h.sort_values("_eff", ascending=False)
+                    return float(safe_num(h["Daily_Rate_Rs"]).iloc[0])
     em = get_sheet_df("employee_master")
     if not em.empty and "E_Code" in em.columns:
-        row = em[em["E_Code"].astype(str) == kid]
+        row = em[em["E_Code"].apply(clean_key) == kid]
         if not row.empty:
             return float(safe_num(row["Daily_Rate_Rs"]).iloc[0])
     km = get_sheet_df("karigar_master")
     if not km.empty:
-        row = km[km["Karigar_ID"].astype(str) == kid]
+        row = km[km["Karigar_ID"].apply(clean_key) == kid]
         if not row.empty and "Daily_Rate_Rs" in row.columns:
             return float(safe_num(row["Daily_Rate_Rs"]).iloc[0])
     return 0.0
@@ -562,7 +659,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         hourly_target = float(row.get("Target") or 0)
         rate = float(row.get("Rate_Rs") or 0)
         kid = str(row.get("Karigar_ID", ""))
-        daily_salary = _get_daily_salary(kid)
+        daily_salary = _get_daily_salary(kid, date_str)
         hourly_salary = round(daily_salary / 8, 2)
         adj_target = round(hourly_target * wh, 0)
         budgeted_exp = round(rate * hourly_target * wh, 2)
@@ -598,7 +695,6 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
             }
         )
 
-    em = get_sheet_df("employee_master")
     report2_rows = []
     for _, row in day_pl.iterrows():
         kid = str(row.get("Karigar_ID", ""))
@@ -607,11 +703,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         rate_rs = float(row.get("Rate_Rs") or 0)
         hourly_target = float(row.get("Target") or 0)
 
-        em_row = em[em["E_Code"].astype(str) == kid] if not em.empty and "E_Code" in em.columns else pd.DataFrame()
-        if not em_row.empty:
-            daily_rate = float(safe_num(em_row["Daily_Rate_Rs"]).iloc[0])
-        else:
-            daily_rate = _get_daily_salary(kid)
+        daily_rate = _get_daily_salary(kid, date_str)
         hourly_sal = round(daily_rate / 8, 2)
 
         for hcol, hlbl in zip(HOUR_COLS, HOUR_LBLS):
@@ -787,3 +879,208 @@ def update_style_operation(style: str, operation: str, *, target: int | None, ra
         df.at[idx, "Rate_Rs"] = float(rate_rs)
     save_sheet_df("style_master", df)
     return {"ok": True, "message": "Updated"}
+
+
+MASTER_KEY_COLS: dict[str, list[str]] = {
+    "style_master": ["Style", "Operation"],
+    "karigar_master": ["Karigar_ID"],
+    "employee_master": ["E_Code"],
+}
+
+MASTER_EDITABLE_KEYS = frozenset(MASTER_KEY_COLS.keys())
+
+
+def dedupe_sheet(key: str, df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Keep last row per natural key so imports/forms cannot duplicate calculations."""
+    if df is None:
+        df = get_sheet_df(key)
+    cols = MASTER_KEY_COLS.get(key)
+    if df is None or df.empty or not cols:
+        return df if df is not None else pd.DataFrame()
+    present = [c for c in cols if c in df.columns]
+    if len(present) != len(cols):
+        return df
+    out = df.copy()
+    for c in cols:
+        out[c] = out[c].astype(str).str.strip()
+    return out.drop_duplicates(subset=cols, keep="last").reset_index(drop=True)
+
+
+def _append_rate_history(karigar_id: str, daily_rate: float, effective_from: str) -> None:
+    kid = clean_key(karigar_id)
+    eff = (effective_from or str(date.today()))[:10]
+    hist = get_sheet_df("karigar_rate_history")
+    row = {
+        "Karigar_ID": kid,
+        "Effective_From": eff,
+        "Daily_Rate_Rs": float(daily_rate),
+    }
+    if hist.empty:
+        save_sheet_df("karigar_rate_history", pd.DataFrame([row]))
+        return
+    dup = (
+        (hist["Karigar_ID"].apply(clean_key) == kid)
+        & (hist["Effective_From"].astype(str).str[:10] == eff)
+    )
+    if dup.any():
+        hist = hist.copy()
+        hist.loc[dup, "Daily_Rate_Rs"] = float(daily_rate)
+    else:
+        hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+    save_sheet_df("karigar_rate_history", dedupe_sheet("karigar_rate_history", hist))
+
+
+def _sync_employee_from_karigar(
+    karigar_id: str,
+    name: str,
+    daily_rate: float,
+) -> None:
+    kid = clean_key(karigar_id)
+    hourly = round(float(daily_rate) / 8, 2)
+    em = get_sheet_df("employee_master")
+    row = {
+        "E_Code": kid,
+        "Name": name,
+        "Type": "Karigar",
+        "Daily_Rate_Rs": float(daily_rate),
+        "Hourly_Rate_Rs": hourly,
+    }
+    if em.empty:
+        save_sheet_df("employee_master", pd.DataFrame([row]))
+        return
+    em = em.copy()
+    em["_ek"] = em["E_Code"].apply(clean_key)
+    mask = em["_ek"] == kid
+    if mask.any():
+        idx = em[mask].index[0]
+        em.at[idx, "Name"] = name
+        em.at[idx, "Type"] = "Karigar"
+        em.at[idx, "Daily_Rate_Rs"] = float(daily_rate)
+        em.at[idx, "Hourly_Rate_Rs"] = hourly
+        em = em.drop(columns=["_ek"], errors="ignore")
+    else:
+        em = em.drop(columns=["_ek"], errors="ignore")
+        em = pd.concat([em, pd.DataFrame([row])], ignore_index=True)
+    save_sheet_df("employee_master", dedupe_sheet("employee_master", em))
+
+
+def add_style_operation_row(style: str, operation: str, target: int, rate_rs: float) -> dict:
+    style_s = str(style).strip()
+    op_s = str(operation).strip()
+    if not style_s or not op_s:
+        return {"ok": False, "message": "Style and operation are required"}
+    df = get_sheet_df("style_master")
+    if not df.empty and "Style" in df.columns and "Operation" in df.columns:
+        dup = (df["Style"].astype(str).str.strip() == style_s) & (
+            df["Operation"].astype(str).str.strip() == op_s
+        )
+        if dup.any():
+            return {"ok": False, "message": f"{style_s} / {op_s} already exists — edit or delete the duplicate first"}
+    df = pd.concat(
+        [df, pd.DataFrame([{"Style": style_s, "Operation": op_s, "Target": int(target), "Rate_Rs": float(rate_rs)}])],
+        ignore_index=True,
+    )
+    save_sheet_df("style_master", dedupe_sheet("style_master", df))
+    return {"ok": True, "message": "Style operation added"}
+
+
+def add_karigar_master(
+    karigar_id: str,
+    name: str,
+    skill: str,
+    daily_rate_rs: float,
+    effective_from: str | None = None,
+) -> dict:
+    kid = clean_key(karigar_id)
+    if not kid:
+        return {"ok": False, "message": "Karigar ID is required"}
+    df = get_sheet_df("karigar_master")
+    if not df.empty and "Karigar_ID" in df.columns:
+        if (df["Karigar_ID"].apply(clean_key) == kid).any():
+            return {"ok": False, "message": f"Karigar {kid} already exists — update rate or delete first"}
+    eff = (effective_from or str(date.today()))[:10]
+    row = {
+        "Karigar_ID": kid,
+        "Name": str(name).strip(),
+        "Skill": str(skill).strip() or "Stitching",
+        "Daily_Rate_Rs": float(daily_rate_rs),
+    }
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    save_sheet_df("karigar_master", dedupe_sheet("karigar_master", df))
+    _sync_employee_from_karigar(kid, row["Name"], float(daily_rate_rs))
+    _append_rate_history(kid, float(daily_rate_rs), eff)
+    return {"ok": True, "message": f"Karigar {kid} added (rate ₹{daily_rate_rs}/day from {eff})"}
+
+
+def update_karigar_master(
+    karigar_id: str,
+    *,
+    name: str | None = None,
+    skill: str | None = None,
+    daily_rate_rs: float | None = None,
+    effective_from: str | None = None,
+) -> dict:
+    kid = clean_key(karigar_id)
+    df = get_sheet_df("karigar_master")
+    if df.empty or "Karigar_ID" not in df.columns:
+        return {"ok": False, "message": "Karigar master empty"}
+    mask = df["Karigar_ID"].apply(clean_key) == kid
+    if not mask.any():
+        return {"ok": False, "message": f"Karigar {kid} not found"}
+    idx = df[mask].index[0]
+    if name is not None:
+        df.at[idx, "Name"] = str(name).strip()
+    if skill is not None:
+        df.at[idx, "Skill"] = str(skill).strip()
+    rate_changed = False
+    if daily_rate_rs is not None:
+        df.at[idx, "Daily_Rate_Rs"] = float(daily_rate_rs)
+        rate_changed = True
+    save_sheet_df("karigar_master", df)
+    nm = str(df.at[idx, "Name"])
+    rate = float(df.at[idx, "Daily_Rate_Rs"] or 0)
+    _sync_employee_from_karigar(kid, nm, rate)
+    if rate_changed:
+        eff = (effective_from or str(date.today()))[:10]
+        _append_rate_history(kid, rate, eff)
+        return {"ok": True, "message": f"Rate ₹{rate}/day applies from {eff} (synced across app)"}
+    return {"ok": True, "message": "Karigar updated"}
+
+
+def delete_master_rows(sheet_key: str, rows: list[dict]) -> dict:
+    if sheet_key not in MASTER_EDITABLE_KEYS:
+        return {"ok": False, "message": f"Cannot delete rows from {sheet_key}"}
+    if not rows:
+        return {"ok": False, "message": "No rows selected"}
+    key_cols = MASTER_KEY_COLS[sheet_key]
+    df = get_sheet_df(sheet_key)
+    if df.empty:
+        return {"ok": False, "message": "Sheet is empty"}
+    removed = 0
+    karigar_ids: list[str] = []
+    for ident in rows:
+        mask = pd.Series(True, index=df.index)
+        for col in key_cols:
+            if col not in df.columns:
+                continue
+            val = clean_key(ident.get(col, ""))
+            mask &= df[col].apply(clean_key) == val
+        n = int(mask.sum())
+        if n:
+            removed += n
+            if sheet_key == "karigar_master" and "Karigar_ID" in ident:
+                karigar_ids.append(clean_key(ident["Karigar_ID"]))
+            df = df[~mask]
+    if removed == 0:
+        return {"ok": False, "message": "No matching rows found"}
+    save_sheet_df(sheet_key, df.reset_index(drop=True))
+    if sheet_key == "karigar_master" and karigar_ids:
+        em = get_sheet_df("employee_master")
+        if not em.empty and "E_Code" in em.columns:
+            em = em[~em["E_Code"].apply(clean_key).isin(karigar_ids)].reset_index(drop=True)
+            save_sheet_df("employee_master", em)
+        hist = get_sheet_df("karigar_rate_history")
+        if not hist.empty and "Karigar_ID" in hist.columns:
+            hist = hist[~hist["Karigar_ID"].apply(clean_key).isin(karigar_ids)].reset_index(drop=True)
+            save_sheet_df("karigar_rate_history", hist)
+    return {"ok": True, "message": f"Deleted {removed} row(s)", "removed": removed}

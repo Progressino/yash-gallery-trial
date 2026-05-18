@@ -80,6 +80,19 @@ class KarigarBody(BaseModel):
     Name: str
     Skill: str = "Stitching"
     Daily_Rate_Rs: float = 420.0
+    Effective_From: str = ""
+
+
+class KarigarUpdateBody(BaseModel):
+    Name: Optional[str] = None
+    Skill: Optional[str] = None
+    Daily_Rate_Rs: Optional[float] = None
+    Effective_From: Optional[str] = None
+
+
+class MasterDeleteBody(BaseModel):
+    sheet: str
+    rows: list[dict]
 
 
 class AdminPasswordBody(BaseModel):
@@ -147,6 +160,8 @@ async def import_sheet_file(key: str, file: UploadFile = File(...), mode: str = 
     existing = get_sheet_df(key)
     if mode == "append" and not existing.empty:
         df = pd.concat([existing, df], ignore_index=True)
+    if key in svc.MASTER_KEY_COLS:
+        df = svc.dedupe_sheet(key, df)
     save_sheet_df(key, df)
     return {"ok": True, "rows": len(df)}
 
@@ -267,7 +282,7 @@ def update_challan(challan_no: str, body: ChallanUpdateBody):
 def add_karigar_attendance(body: AttendanceBody):
     em = get_sheet_df("employee_master")
     er = em[em["E_Code"].astype(str) == str(body.E_Code)] if not em.empty else pd.DataFrame()
-    daily = float(er["Daily_Rate_Rs"].iloc[0]) if not er.empty else 0.0
+    daily = svc.get_daily_rate_for_date(str(body.E_Code), body.Date)
     name = body.Name or (str(er["Name"].iloc[0]) if not er.empty else "")
     calc = svc.calc_salary(body.In_Punch, body.Out_Punch, daily, body.ot_multiplier)
     row = {
@@ -276,6 +291,7 @@ def add_karigar_attendance(body: AttendanceBody):
         "Name": name,
         "In_Punch": body.In_Punch,
         "Out_Punch": body.Out_Punch,
+        "Daily_Rate_Rs": daily,
         **calc,
     }
     df = get_sheet_df("karigar_attendance")
@@ -322,38 +338,61 @@ def add_operating_attendance(body: AttendanceBody):
 
 @router.post("/master/style-operation")
 def add_style_operation(body: StyleOpBody):
-    df = get_sheet_df("style_master")
-    df = pd.concat([df, pd.DataFrame([body.model_dump()])], ignore_index=True)
-    save_sheet_df("style_master", df)
-    return {"ok": True}
+    out = svc.add_style_operation_row(body.Style, body.Operation, body.Target, body.Rate_Rs)
+    if not out.get("ok"):
+        raise HTTPException(409, out.get("message", "Duplicate"))
+    return out
 
 
 @router.post("/master/karigar")
 def add_karigar(body: KarigarBody):
-    df = get_sheet_df("karigar_master")
-    df = pd.concat([df, pd.DataFrame([body.model_dump()])], ignore_index=True)
-    save_sheet_df("karigar_master", df)
-    em = get_sheet_df("employee_master")
-    if em.empty or not (em["E_Code"].astype(str) == body.Karigar_ID).any():
-        em = pd.concat(
-            [
-                em,
-                pd.DataFrame(
-                    [
-                        {
-                            "E_Code": body.Karigar_ID,
-                            "Name": body.Name,
-                            "Type": "Karigar",
-                            "Daily_Rate_Rs": body.Daily_Rate_Rs,
-                            "Hourly_Rate_Rs": round(body.Daily_Rate_Rs / 8, 2),
-                        }
-                    ]
-                ),
-            ],
-            ignore_index=True,
-        )
-        save_sheet_df("employee_master", em)
-    return {"ok": True}
+    out = svc.add_karigar_master(
+        body.Karigar_ID,
+        body.Name,
+        body.Skill,
+        body.Daily_Rate_Rs,
+        body.Effective_From or None,
+    )
+    if not out.get("ok"):
+        raise HTTPException(409, out.get("message", "Duplicate"))
+    return out
+
+
+@router.patch("/master/karigar/{karigar_id}")
+def update_karigar(karigar_id: str, body: KarigarUpdateBody):
+    out = svc.update_karigar_master(
+        karigar_id,
+        name=body.Name,
+        skill=body.Skill,
+        daily_rate_rs=body.Daily_Rate_Rs,
+        effective_from=body.Effective_From,
+    )
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Not found"))
+    return out
+
+
+@router.post("/master/delete-rows")
+def delete_master_rows(body: MasterDeleteBody):
+    if body.sheet not in svc.MASTER_EDITABLE_KEYS:
+        raise HTTPException(400, f"Sheet {body.sheet} cannot be edited here")
+    out = svc.delete_master_rows(body.sheet, body.rows)
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("message", "Delete failed"))
+    return out
+
+
+@router.get("/master/karigar/{karigar_id}/rate-history")
+def karigar_rate_history(karigar_id: str):
+    hist = get_sheet_df("karigar_rate_history")
+    if hist.empty:
+        return {"rows": []}
+    kid = karigar_id.strip()
+    h = hist[hist["Karigar_ID"].astype(str).str.strip() == kid] if "Karigar_ID" in hist.columns else pd.DataFrame()
+    if h.empty:
+        return {"rows": []}
+    h = h.sort_values("Effective_From", ascending=False)
+    return {"rows": h.fillna("").to_dict(orient="records")}
 
 
 @router.post("/sync/from-gsheet")

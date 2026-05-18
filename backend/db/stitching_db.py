@@ -20,6 +20,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 DATA_KEYS = (
     "style_master",
     "karigar_master",
+    "karigar_rate_history",
     "challan_master",
     "production_log",
     "employee_master",
@@ -104,6 +105,7 @@ def _default_challan_master() -> list[dict]:
 DEFAULT_SHEETS: dict[str, list[dict]] = {
     "style_master": _default_style_master(),
     "karigar_master": _default_karigar_master(),
+    "karigar_rate_history": [],
     "challan_master": _default_challan_master(),
     "production_log": [],
     "employee_master": _default_employee_master(),

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import axios from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useStitchingAdmin } from '../lib/stitchingAdmin'
@@ -75,7 +76,7 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
   const visibleTabs = karigarOnly ? TABS.filter(t => t.id === 'production') : TABS
 
   return (
-    <div className={`space-y-4 min-w-0 ${karigarOnly ? 'overflow-x-hidden pb-24' : 'max-w-[1600px]'}`}>
+    <div className={`space-y-4 min-w-0 ${karigarOnly ? 'pb-8' : 'max-w-[1600px]'}`}>
       {!karigarOnly && (
       <div className="rounded-xl bg-gradient-to-br from-[#1a3a5c] via-[#2c5aa0] to-[#1e7ed4] text-white p-5 shadow-md">
         <h1 className="text-xl font-bold">🧵 Stitching Costing — Yash Gallery</h1>
@@ -133,14 +134,14 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
           onSaved={() => qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })}
         />
       )}
-      {!karigarOnly && tab === 'challan' && <ChallanTab />}
+      {!karigarOnly && tab === 'challan' && <ChallanTab onFlash={flash} />}
       {!karigarOnly && tab === 'style' && <StyleCostingTab />}
       {!karigarOnly && tab === 'efficiency' && <EfficiencyTab />}
       {!karigarOnly && tab === 'payroll' && <PayrollTab />}
       {!karigarOnly && tab === 'attendance' && <AttendanceTab type="karigar" />}
       {!karigarOnly && tab === 'operating' && <AttendanceTab type="operating" />}
       {!karigarOnly && tab === 'performance' && <PerformanceTab />}
-      {!karigarOnly && tab === 'master' && <MasterTab admin={admin} />}
+      {!karigarOnly && tab === 'master' && <MasterTab admin={admin} onFlash={flash} />}
     </div>
   )
 }
@@ -381,8 +382,29 @@ function KarigarSearchSelect({
   )
 }
 
+type HourEntryState = {
+  operation: string
+  pieces: number
+  sticker_in: number
+  sticker_out: number
+  manual_pieces: boolean
+}
+
+function emptyHourEntry(): HourEntryState {
+  return { operation: '', pieces: 0, sticker_in: 0, sticker_out: 0, manual_pieces: false }
+}
+
+/** Sticker in − out when stickers used; otherwise manual pieces. */
+function resolveHourPieces(st: HourEntryState | undefined): number {
+  if (!st) return 0
+  if ((st.sticker_in > 0 || st.sticker_out > 0) && !st.manual_pieces) {
+    return Math.max(0, st.sticker_in - st.sticker_out)
+  }
+  return st.pieces || 0
+}
+
 function computeEntrySummary(
-  hourState: Record<string, { operation: string; pieces: number }>,
+  hourState: Record<string, HourEntryState>,
   hours: HourDef[],
   operations: { op: string; target: number; rate: number }[],
 ) {
@@ -391,20 +413,21 @@ function computeEntrySummary(
   for (const h of hours) {
     if (h.col === 'H_13_14') continue
     const st = hourState[h.col]
-    if (!st?.operation || !st.pieces) continue
+    const pcs = resolveHourPieces(st)
+    if (!st?.operation || !pcs) continue
     const meta = operations.find(o => o.op === st.operation)
     if (!meta) continue
-    totalPcs += st.pieces
+    totalPcs += pcs
     if (!opTotals[st.operation]) opTotals[st.operation] = { pieces: 0, value: 0 }
-    opTotals[st.operation].pieces += st.pieces
-    opTotals[st.operation].value += st.pieces * meta.rate
+    opTotals[st.operation].pieces += pcs
+    opTotals[st.operation].value += pcs * meta.rate
   }
   const totalValue = Object.values(opTotals).reduce((s, d) => s + d.value, 0)
   const totalBudget = Object.entries(opTotals).reduce((s, [op]) => {
     const meta = operations.find(o => o.op === op)
     return s + (meta ? meta.rate * meta.target : 0)
   }, 0)
-  return { totalPcs, totalValue, totalBudget, pl: totalValue - totalBudget, opTotals }
+  return { totalPcs, totalValue, totalBudget, pl: totalBudget - totalValue, opTotals }
 }
 
 function ProductionTab({
@@ -424,7 +447,7 @@ function ProductionTab({
   const [karigarId, setKarigarId] = useState(lockedKarigarId || '')
   const [style, setStyle] = useState('')
   const [challanNo, setChallanNo] = useState('')
-  const [hourState, setHourState] = useState<Record<string, { operation: string; pieces: number }>>({})
+  const [hourState, setHourState] = useState<Record<string, HourEntryState>>({})
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [saveMessage, setSaveMessage] = useState('')
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(true)
@@ -549,10 +572,16 @@ function ProductionTab({
     const { data } = await api.get('/stitching/production-entry/load', {
       params: { date: entryDate, karigar_id: karigarId, challan_no: challanNo, style },
     })
-    const next: Record<string, { operation: string; pieces: number }> = {}
+    const next: Record<string, HourEntryState> = {}
     for (const h of hours) {
-      const e = data.hours?.[h.col] ?? { operation: '', pieces: 0 }
-      next[h.col] = { operation: e.operation || '', pieces: Number(e.pieces) || 0 }
+      const e = data.hours?.[h.col] ?? emptyHourEntry()
+      next[h.col] = {
+        operation: e.operation || '',
+        pieces: Number(e.pieces) || 0,
+        sticker_in: Number(e.sticker_in) || 0,
+        sticker_out: Number(e.sticker_out) || 0,
+        manual_pieces: Boolean(e.manual_pieces),
+      }
     }
     skipAutoSaveRef.current = true
     setHourState(next)
@@ -582,20 +611,72 @@ function ProductionTab({
     () =>
       hours
         .filter(h => h.col !== 'H_13_14')
-        .map(h => ({
-          hour_col: h.col,
-          operation: hourState[h.col]?.operation || '',
-          pieces: hourState[h.col]?.pieces || 0,
-        })),
+        .map(h => {
+          const st = hourState[h.col] ?? emptyHourEntry()
+          return {
+            hour_col: h.col,
+            operation: st.operation,
+            pieces: resolveHourPieces(st),
+            sticker_in: st.sticker_in,
+            sticker_out: st.sticker_out,
+            manual_pieces: st.manual_pieces,
+          }
+        }),
     [hours, hourState],
   )
+
+  const normalizeHourEntriesForSave = useCallback(() => {
+    const entries = buildHourEntries()
+    if (operations.length === 1) {
+      const onlyOp = operations[0].op
+      for (const e of entries) {
+        if ((e.pieces || 0) > 0 && !e.operation) e.operation = onlyOp
+      }
+    }
+    return entries
+  }, [buildHourEntries, operations])
+
+  const piecesWithoutOp = useMemo(() => {
+    let n = 0
+    for (const h of hours) {
+      if (h.col === 'H_13_14') continue
+      const st = hourState[h.col]
+      const pcs = resolveHourPieces(st)
+      if (pcs > 0 && !st?.operation) n += pcs
+    }
+    return n
+  }, [hours, hourState])
+
+  const saveBlockReason = useMemo(() => {
+    if (!karigarId) return 'Select karigar'
+    if (!style) return 'Select style / SKU'
+    if (!challanNo) return 'Select challan'
+    if (!operations.length) return 'No operations in master for this style'
+    if (piecesWithoutOp > 0 && operations.length > 1) {
+      return 'Pick an operation for each hour with pieces'
+    }
+    if (liveSummary.totalPcs <= 0) return 'Enter pieces in at least one hour'
+    return ''
+  }, [karigarId, style, challanNo, operations.length, piecesWithoutOp, liveSummary.totalPcs])
 
   const doSave = useCallback(
     async (silent: boolean) => {
       if (!karigarId || !challanNo || !style) return
-      if (liveSummary.totalPcs <= 0) return
+      const entries = normalizeHourEntriesForSave()
+      const savablePcs = entries.reduce(
+        (s, e) => s + (e.operation && operations.some(o => o.op === e.operation) ? e.pieces || 0 : 0),
+        0,
+      )
+      if (savablePcs <= 0) {
+        const msg = saveBlockReason || 'Nothing to save'
+        setSaveStatus('error')
+        setSaveMessage(msg)
+        if (!silent) alert(msg)
+        return
+      }
       const k = karigars.find(x => String(x.Karigar_ID) === karigarId)
       setSaveStatus('saving')
+      setSaveMessage('')
       try {
         const r = await api.post('/stitching/production-entry', {
           date: entryDate,
@@ -603,7 +684,7 @@ function ProductionTab({
           karigar_name: k?.Name ?? karigarId,
           challan_no: challanNo,
           style,
-          hour_entries: buildHourEntries(),
+          hour_entries: entries,
         })
         if (r.data.ok) {
           setSaveStatus('saved')
@@ -613,22 +694,30 @@ function ProductionTab({
           qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })
           if (!silent) alert(r.data.message || 'Saved')
         } else {
+          const msg = r.data.message || 'Save failed'
           setSaveStatus('error')
-          if (!silent) alert(r.data.message || 'Save failed')
+          setSaveMessage(msg)
+          if (!silent) alert(msg)
         }
-      } catch {
+      } catch (err: unknown) {
+        const msg =
+          axios.isAxiosError(err) && err.response?.data?.detail
+            ? String(err.response.data.detail)
+            : 'Save failed — check connection and try again'
         setSaveStatus('error')
-        if (!silent) alert('Save failed')
+        setSaveMessage(msg)
+        if (!silent) alert(msg)
       }
     },
     [
       karigarId,
       challanNo,
       style,
-      liveSummary.totalPcs,
       karigars,
       entryDate,
-      buildHourEntries,
+      normalizeHourEntriesForSave,
+      operations,
+      saveBlockReason,
       onSaved,
       refetchReports,
       qc,
@@ -640,24 +729,38 @@ function ProductionTab({
       skipAutoSaveRef.current = false
       return
     }
-    if (!karigarId || !challanNo || !style || liveSummary.totalPcs <= 0) return
+    if (!karigarId || !challanNo || !style || saveBlockReason) return
     const t = setTimeout(() => void doSave(true), 2000)
     return () => clearTimeout(t)
-  }, [hourState, entryDate, karigarId, challanNo, style, autoSaveEnabled, liveSummary.totalPcs, doSave])
+  }, [hourState, entryDate, karigarId, challanNo, style, autoSaveEnabled, saveBlockReason, doSave])
 
   const saveMut = useMutation({
     mutationFn: () => doSave(false),
   })
 
-  const setHour = (col: string, patch: Partial<{ operation: string; pieces: number }>) => {
-    setHourState(prev => ({ ...prev, [col]: { ...prev[col], operation: prev[col]?.operation ?? '', pieces: prev[col]?.pieces ?? 0, ...patch } }))
+  const setHour = (col: string, patch: Partial<HourEntryState>) => {
+    setHourState(prev => {
+      const base = { ...emptyHourEntry(), ...prev[col], ...patch }
+      if ('sticker_in' in patch || 'sticker_out' in patch) {
+        if (!base.manual_pieces) {
+          base.pieces = Math.max(0, base.sticker_in - base.sticker_out)
+        }
+      }
+      if ('pieces' in patch && patch.pieces !== undefined) {
+        base.manual_pieces = true
+      }
+      if (operations.length === 1 && resolveHourPieces(base) > 0 && !base.operation) {
+        base.operation = operations[0].op
+      }
+      return { ...prev, [col]: base }
+    })
   }
 
   const opOptions = ['', ...operations.map(o => o.op)]
 
   return (
-    <div className={`space-y-4 min-w-0 ${karigarOnly ? 'pb-4' : ''}`}>
-      <div className={`grid gap-3 bg-white p-4 rounded-xl border ${karigarOnly ? 'grid-cols-1' : 'sm:grid-cols-2 lg:grid-cols-4'}`}>
+    <div className={`space-y-4 min-w-0 ${karigarOnly ? 'pb-36' : ''}`}>
+      <div className="grid gap-3 bg-white p-4 rounded-xl border sm:grid-cols-2 lg:grid-cols-4">
         <label className="text-xs">
           <span className="font-semibold text-gray-700">Date</span>
           <input type="date" className="mt-1 w-full border rounded-lg px-3 py-2.5 text-sm touch-manipulation" value={entryDate} onChange={e => setEntryDate(e.target.value)} />
@@ -794,10 +897,20 @@ function ProductionTab({
           </label>
           {saveStatus === 'saving' && <span className="text-xs text-amber-600 font-medium">Saving…</span>}
           {saveStatus === 'saved' && <span className="text-xs text-green-600 font-medium">✓ {saveMessage}</span>}
-          {saveStatus === 'error' && <span className="text-xs text-red-600">Save failed</span>}
+          {saveStatus === 'error' && (
+            <span className="text-xs text-red-600 font-medium">{saveMessage || 'Save failed'}</span>
+          )}
         </div>
+        {saveBlockReason && (
+          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+            {saveBlockReason}
+          </p>
+        )}
+        <p className="text-xs text-gray-500 mb-3">
+          <strong>Sticker in / out</strong> — pieces = in − out (e.g. in 10, out 5 → 5 pcs). Leave stickers empty to type pieces manually.
+        </p>
 
-        <div className={`space-y-2 mb-3 ${karigarOnly ? '' : 'md:hidden'}`}>
+        <div className="space-y-2 mb-3 md:hidden">
           {hours.map(h => {
             if (h.col === 'H_13_14') {
               return (
@@ -806,9 +919,11 @@ function ProductionTab({
                 </div>
               )
             }
-            const st = hourState[h.col] ?? { operation: '', pieces: 0 }
+            const st = hourState[h.col] ?? emptyHourEntry()
+            const pcs = resolveHourPieces(st)
+            const fromSticker = (st.sticker_in > 0 || st.sticker_out > 0) && !st.manual_pieces
             const opMeta = operations.find(o => o.op === st.operation)
-            const eff = opMeta && st.pieces > 0 ? Math.round((st.pieces / Math.max(opMeta.target, 1)) * 100) : null
+            const eff = opMeta && pcs > 0 ? Math.round((pcs / Math.max(opMeta.target, 1)) * 100) : null
             return (
               <div key={h.col} className="rounded-xl border bg-white p-3 shadow-sm">
                 <div className="flex justify-between mb-2">
@@ -828,29 +943,59 @@ function ProductionTab({
                     <option key={o || '_'} value={o}>{o || '— Operation —'}</option>
                   ))}
                 </select>
+                <div className="grid grid-cols-2 gap-2 mb-2">
+                  <label className="text-[10px] text-gray-600">
+                    Sticker in
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      className="w-full border rounded-lg px-2 py-2 text-sm mt-0.5 touch-manipulation"
+                      value={st.sticker_in || ''}
+                      onChange={e => setHour(h.col, { sticker_in: +e.target.value || 0, manual_pieces: false })}
+                    />
+                  </label>
+                  <label className="text-[10px] text-gray-600">
+                    Sticker out
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      className="w-full border rounded-lg px-2 py-2 text-sm mt-0.5 touch-manipulation"
+                      value={st.sticker_out || ''}
+                      onChange={e => setHour(h.col, { sticker_out: +e.target.value || 0, manual_pieces: false })}
+                    />
+                  </label>
+                </div>
                 <div className="flex gap-2 items-center">
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    className="flex-1 border rounded-lg px-3 py-3 text-lg font-semibold touch-manipulation"
-                    value={st.pieces || ''}
-                    onChange={e => setHour(h.col, { pieces: +e.target.value || 0 })}
-                  />
-                  <span className="text-xs text-gray-400 shrink-0">tgt {opMeta?.target ?? '—'}</span>
+                  <label className="flex-1 text-[10px] text-gray-600">
+                    Pieces {fromSticker ? '(auto)' : '(manual)'}
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      readOnly={fromSticker}
+                      className={`w-full border rounded-lg px-3 py-3 text-lg font-semibold mt-0.5 touch-manipulation ${fromSticker ? 'bg-sky-50 text-[#2c5aa0]' : ''}`}
+                      value={fromSticker ? pcs || '' : st.pieces || ''}
+                      onChange={e => setHour(h.col, { pieces: +e.target.value || 0, manual_pieces: true })}
+                    />
+                  </label>
+                  <span className="text-xs text-gray-400 shrink-0 pt-4">tgt {opMeta?.target ?? '—'}</span>
                 </div>
               </div>
             )
           })}
         </div>
 
-        <div className={`overflow-x-auto ${karigarOnly ? 'hidden' : 'hidden md:block'}`}>
+        <div className="overflow-x-auto hidden md:block">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-[#1a3a5c] text-white">
                 <th className="px-2 py-2">Time</th>
                 <th className="px-2 py-2">Operation</th>
                 <th className="px-2 py-2">Target/hr</th>
+                <th className="px-2 py-2">Sticker in</th>
+                <th className="px-2 py-2">Sticker out</th>
                 <th className="px-2 py-2">Pieces</th>
                 <th className="px-2 py-2">Eff%</th>
               </tr>
@@ -861,13 +1006,15 @@ function ProductionTab({
                   return (
                     <tr key={h.col} className="bg-gray-50 text-gray-400 italic">
                       <td className="px-2 py-2 text-center">{h.label}</td>
-                      <td colSpan={4} className="px-2 py-2">Lunch break</td>
+                      <td colSpan={6} className="px-2 py-2">Lunch break</td>
                     </tr>
                   )
                 }
-                const st = hourState[h.col] ?? { operation: '', pieces: 0 }
+                const st = hourState[h.col] ?? emptyHourEntry()
+                const pcs = resolveHourPieces(st)
+                const fromSticker = (st.sticker_in > 0 || st.sticker_out > 0) && !st.manual_pieces
                 const opMeta = operations.find(o => o.op === st.operation)
-                const eff = opMeta && st.pieces > 0 ? Math.round((st.pieces / Math.max(opMeta.target, 1)) * 100) : null
+                const eff = opMeta && pcs > 0 ? Math.round((pcs / Math.max(opMeta.target, 1)) * 100) : null
                 return (
                   <tr key={h.col} className="border-b border-gray-100">
                     <td className="px-2 py-2 font-semibold text-center text-[#2c5aa0]">{h.label}</td>
@@ -887,9 +1034,29 @@ function ProductionTab({
                       <input
                         type="number"
                         min={0}
-                        className="w-20 border rounded px-1 py-1"
-                        value={st.pieces}
-                        onChange={e => setHour(h.col, { pieces: +e.target.value || 0 })}
+                        className="w-16 border rounded px-1 py-1"
+                        value={st.sticker_in || ''}
+                        onChange={e => setHour(h.col, { sticker_in: +e.target.value || 0, manual_pieces: false })}
+                      />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        min={0}
+                        className="w-16 border rounded px-1 py-1"
+                        value={st.sticker_out || ''}
+                        onChange={e => setHour(h.col, { sticker_out: +e.target.value || 0, manual_pieces: false })}
+                      />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        min={0}
+                        readOnly={fromSticker}
+                        title={fromSticker ? 'Auto from stickers' : 'Manual pieces'}
+                        className={`w-16 border rounded px-1 py-1 ${fromSticker ? 'bg-sky-50' : ''}`}
+                        value={fromSticker ? pcs : st.pieces || ''}
+                        onChange={e => setHour(h.col, { pieces: +e.target.value || 0, manual_pieces: true })}
                       />
                     </td>
                     <td className="px-2 py-2 text-center">{eff != null ? `${eff}%` : '—'}</td>
@@ -910,8 +1077,8 @@ function ProductionTab({
               <p className="text-lg font-bold text-green-700">₹{liveSummary.totalValue.toFixed(2)}</p>
             </div>
             <div className="bg-white border rounded-lg p-3 text-center col-span-2 sm:col-span-1">
-              <p className="text-[10px] uppercase text-gray-500">P&amp;L</p>
-              <p className={`text-lg font-bold ${liveSummary.pl >= 0 ? 'text-amber-700' : 'text-green-700'}`}>
+              <p className="text-[10px] uppercase text-gray-500">P&amp;L (budget − actual)</p>
+              <p className={`text-lg font-bold ${liveSummary.pl >= 0 ? 'text-green-700' : 'text-red-600'}`}>
                 ₹{liveSummary.pl.toFixed(2)}
               </p>
             </div>
@@ -922,7 +1089,7 @@ function ProductionTab({
           <button
             type="button"
             onClick={() => saveMut.mutate()}
-            disabled={saveMut.isPending || !karigarId || !challanNo || !style || liveSummary.totalPcs <= 0}
+            disabled={saveMut.isPending || !!saveBlockReason}
             className="mt-4 w-full py-3.5 rounded-xl bg-[#002B5B] text-white font-semibold text-sm disabled:opacity-50 touch-manipulation shadow-md"
           >
             {saveMut.isPending ? 'Saving…' : '💾 Save now'}
@@ -931,12 +1098,17 @@ function ProductionTab({
       </Section>
 
       {karigarOnly && (
-        <div className="fixed bottom-0 left-0 right-0 z-30 p-3 bg-gradient-to-t from-gray-100 via-gray-100 to-transparent pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          <div className="max-w-lg mx-auto">
+        <div className="fixed bottom-0 left-0 right-0 z-30 p-3 bg-gradient-to-t from-gray-100 via-gray-100 to-transparent pb-[max(0.75rem,env(safe-area-inset-bottom))] pointer-events-none">
+          <div className="max-w-lg md:max-w-3xl lg:max-w-5xl mx-auto pointer-events-auto space-y-1">
+            {saveBlockReason && (
+              <p className="text-[11px] text-center text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                {saveBlockReason}
+              </p>
+            )}
             <button
               type="button"
               onClick={() => saveMut.mutate()}
-              disabled={saveMut.isPending || !karigarId || !challanNo || !style || liveSummary.totalPcs <= 0}
+              disabled={saveMut.isPending || !!saveBlockReason}
               className="w-full py-4 rounded-xl bg-[#002B5B] text-white font-bold text-base disabled:opacity-50 touch-manipulation shadow-lg"
             >
               {saveMut.isPending ? 'Saving…' : saveStatus === 'saved' ? '✓ Saved' : '💾 Save production'}
@@ -1002,7 +1174,85 @@ function ProductionTab({
   )
 }
 
-function ChallanTab() {
+function SheetUploadBar({
+  sheetKey,
+  label,
+  onFlash,
+  onSaved,
+}: {
+  sheetKey: string
+  label?: string
+  onFlash: (type: 'ok' | 'err', text: string) => void
+  onSaved: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+  const [mode, setMode] = useState<'replace' | 'append'>('replace')
+
+  const upload = async (file: File) => {
+    setBusy(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const { data } = await api.post<{ ok?: boolean; rows?: number }>(
+        `/stitching/sheets/${sheetKey}/import-file`,
+        fd,
+        {
+          params: { mode },
+          headers: { 'Content-Type': 'multipart/form-data' },
+        },
+      )
+      onFlash(
+        'ok',
+        data?.rows != null
+          ? `Saved ${data.rows.toLocaleString()} row(s) to ${label || sheetKey.replace(/_/g, ' ')}.`
+          : 'Upload saved.',
+      )
+      onSaved()
+    } catch {
+      onFlash('err', 'Upload failed — use .csv or .xlsx with column headers matching the sheet.')
+    } finally {
+      setBusy(false)
+      if (inputRef.current) inputRef.current.value = ''
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-dashed border-[#2c5aa0]/40 bg-blue-50/40 p-3 flex flex-wrap items-center gap-2 text-xs">
+      <span className="font-semibold text-[#1a3a5c]">📤 {label || 'Import sheet'}</span>
+      <span className="text-gray-500">Upload saves automatically to the server database.</span>
+      <select
+        className="border rounded px-2 py-1 bg-white"
+        value={mode}
+        onChange={e => setMode(e.target.value as 'replace' | 'append')}
+        disabled={busy}
+      >
+        <option value="replace">Replace all rows</option>
+        <option value="append">Append rows</option>
+      </select>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".csv,.xlsx,.xls"
+        className="hidden"
+        onChange={e => {
+          const f = e.target.files?.[0]
+          if (f) void upload(f)
+        }}
+      />
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => inputRef.current?.click()}
+        className="px-3 py-1.5 rounded-lg bg-[#002B5B] text-white font-semibold disabled:opacity-50"
+      >
+        {busy ? 'Saving…' : 'Choose file'}
+      </button>
+    </div>
+  )
+}
+
+function ChallanTab({ onFlash }: { onFlash: (type: 'ok' | 'err', text: string) => void }) {
   const qc = useQueryClient()
   const { data, refetch } = useQuery({
     queryKey: ['stitching-sheet', 'challan_master'],
@@ -1030,18 +1280,32 @@ function ChallanTab() {
     Delivery_By: '',
   })
 
+  const invalidateChallan = () => {
+    qc.invalidateQueries({ queryKey: ['stitching-sheet', 'challan_master'] })
+    qc.invalidateQueries({ queryKey: ['stitching-style-costing'] })
+    qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })
+    void refetch()
+  }
+
   const addMut = useMutation({
     mutationFn: () => api.post('/stitching/challans', form),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['stitching-sheet', 'challan_master'] })
-      refetch()
+      invalidateChallan()
+      onFlash('ok', `Challan ${form.Challan_No} saved.`)
     },
+    onError: () => onFlash('err', 'Could not save challan.'),
   })
 
   const rows = (data?.rows ?? []) as Record<string, unknown>[]
 
   return (
     <div className="space-y-4">
+      <SheetUploadBar
+        sheetKey="challan_master"
+        label="Import challans"
+        onFlash={onFlash}
+        onSaved={invalidateChallan}
+      />
       <Section title="Add challan">
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
           {(
@@ -1094,12 +1358,264 @@ function ChallanTab() {
           Add challan
         </button>
       </Section>
+      <ChallanDepositSection rows={rows} onFlash={onFlash} onSaved={invalidateChallan} />
       <Section title={`Challan register (${rows.length})`}>
-        <DataTable
-          rows={rows}
-          cols={['Challan_No', 'Style', 'Party', 'Total_Qty', 'Received_Qty', 'Rate_Per_Pc', 'Date']}
-        />
+        <p className="text-xs text-gray-500 mb-2">
+          Edit <strong>Received</strong> — saves automatically. Style costing uses received qty when set (e.g. 90 received of 100 ordered).
+        </p>
+        <ChallanRegisterTable rows={rows} onFlash={onFlash} onSaved={invalidateChallan} />
       </Section>
+    </div>
+  )
+}
+
+function ChallanDepositSection({
+  rows,
+  onFlash,
+  onSaved,
+}: {
+  rows: Record<string, unknown>[]
+  onFlash: (type: 'ok' | 'err', text: string) => void
+  onSaved: () => void
+}) {
+  const [challanNo, setChallanNo] = useState('')
+  const [depositQty, setDepositQty] = useState(0)
+  const [addDepositRs, setAddDepositRs] = useState(0)
+  const [saving, setSaving] = useState(false)
+
+  const row = useMemo(
+    () => rows.find(r => String(r.Challan_No ?? '') === challanNo),
+    [rows, challanNo],
+  )
+
+  const total = Number(row?.Total_Qty ?? 0)
+  const received = Number(row?.Received_Qty ?? 0)
+  const pending = Math.max(0, total - received)
+  const currentDepositRs = Number(row?.Deposit_Rs ?? 0)
+
+  const challanOptions = useMemo<SearchSelectOption[]>(
+    () =>
+      rows
+        .map(r => {
+          const no = String(r.Challan_No ?? '')
+          const t = Number(r.Total_Qty ?? 0)
+          const rec = Number(r.Received_Qty ?? 0)
+          const pend = Math.max(0, t - rec)
+          return {
+            value: no,
+            primary: no,
+            secondary: `${String(r.Style ?? '')} · Pending ${pend} / ${t}`,
+            haystack: `${no} ${r.Style} ${r.Party}`.toLowerCase(),
+          }
+        })
+        .filter(o => o.value)
+        .sort((a, b) => a.primary.localeCompare(b.primary)),
+    [rows],
+  )
+
+  const applyDeposit = async () => {
+    if (!challanNo || !row) {
+      onFlash('err', 'Select a challan first.')
+      return
+    }
+    const add = Math.max(0, Math.floor(depositQty))
+    if (add <= 0) {
+      onFlash('err', 'Enter quantity received in this deposit.')
+      return
+    }
+    if (pending <= 0) {
+      onFlash('err', 'This challan is already fully received.')
+      return
+    }
+    const newReceived = Math.min(total, received + add)
+    const newDepositRs = currentDepositRs + Math.max(0, addDepositRs)
+    setSaving(true)
+    try {
+      await api.patch(`/stitching/challans/${encodeURIComponent(challanNo)}`, {
+        Received_Qty: newReceived,
+        Deposit_Rs: newDepositRs,
+      })
+      onFlash(
+        'ok',
+        `Challan ${challanNo}: received ${newReceived} of ${total} (+${add} this deposit).`,
+      )
+      setDepositQty(0)
+      setAddDepositRs(0)
+      onSaved()
+    } catch {
+      onFlash('err', `Could not update challan ${challanNo}.`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Section title="Record material deposit (update received qty)">
+      <p className="text-xs text-gray-600 mb-3">
+        When party sends the <strong>remaining quantity</strong>, select the challan, enter how many pieces arrived in this
+        deposit, and apply. <strong>Received</strong> increases (capped at ordered qty). Optional: add to{' '}
+        <strong>Deposit ₹</strong> for this receipt.
+      </p>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+        <div className="sm:col-span-2">
+          <SearchSelect
+            label="Challan"
+            placeholder="Search challan no. or style…"
+            value={challanNo}
+            onChange={setChallanNo}
+            options={challanOptions}
+            emptyMessage="No challans — add one above"
+          />
+        </div>
+        {row && (
+          <div className="sm:col-span-2 rounded-lg bg-sky-50 border border-sky-100 px-3 py-2 text-sky-900">
+            <span className="font-semibold">{String(row.Style)}</span>
+            {row.Party ? ` · ${String(row.Party)}` : ''}
+            <br />
+            Ordered <b>{total}</b> · Received <b>{received}</b> ·{' '}
+            <span className={pending > 0 ? 'text-amber-700' : 'text-green-700'}>
+              Pending <b>{pending}</b>
+            </span>
+            {currentDepositRs > 0 && (
+              <>
+                <br />
+                Deposit recorded: ₹{currentDepositRs.toFixed(2)}
+              </>
+            )}
+          </div>
+        )}
+        <label>
+          <span className="font-semibold text-gray-700">Qty this deposit</span>
+          <input
+            type="number"
+            min={0}
+            max={pending > 0 ? pending : undefined}
+            className="mt-1 w-full border rounded-lg px-3 py-2"
+            value={depositQty || ''}
+            onChange={e => setDepositQty(+e.target.value || 0)}
+            disabled={!challanNo || pending <= 0}
+          />
+          {pending > 0 && (
+            <span className="text-[10px] text-gray-500 mt-0.5 block">Max {pending} remaining</span>
+          )}
+        </label>
+        <label>
+          <span className="font-semibold text-gray-700">Add deposit ₹ (optional)</span>
+          <input
+            type="number"
+            min={0}
+            step={0.01}
+            className="mt-1 w-full border rounded-lg px-3 py-2"
+            value={addDepositRs || ''}
+            onChange={e => setAddDepositRs(+e.target.value || 0)}
+            disabled={!challanNo}
+          />
+        </label>
+      </div>
+      <button
+        type="button"
+        onClick={() => void applyDeposit()}
+        disabled={saving || !challanNo || pending <= 0}
+        className="mt-3 px-4 py-2.5 bg-emerald-700 text-white rounded-lg text-sm font-semibold disabled:opacity-50"
+      >
+        {saving ? 'Updating…' : 'Apply deposit & update challan'}
+      </button>
+    </Section>
+  )
+}
+
+function ChallanRegisterTable({
+  rows,
+  onFlash,
+  onSaved,
+}: {
+  rows: Record<string, unknown>[]
+  onFlash: (type: 'ok' | 'err', text: string) => void
+  onSaved: () => void
+}) {
+  const [draft, setDraft] = useState<Record<string, { received?: number; total?: number }>>({})
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  useEffect(() => {
+    return () => {
+      Object.values(saveTimers.current).forEach(clearTimeout)
+    }
+  }, [])
+
+  const scheduleSave = (challanNo: string, patch: { Received_Qty?: number; Total_Qty?: number }) => {
+    if (saveTimers.current[challanNo]) clearTimeout(saveTimers.current[challanNo])
+    saveTimers.current[challanNo] = setTimeout(() => {
+      void api
+        .patch(`/stitching/challans/${encodeURIComponent(challanNo)}`, patch)
+        .then(() => {
+          onFlash('ok', `Challan ${challanNo} saved.`)
+          onSaved()
+        })
+        .catch(() => onFlash('err', `Could not save ${challanNo}.`))
+    }, 600)
+  }
+
+  if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No challans</p>
+
+  return (
+    <div className="overflow-x-auto max-h-[min(420px,50vh)]">
+      <table className="w-full text-xs">
+        <thead className="sticky top-0 bg-gray-50 border-b">
+          <tr>
+            {['Challan_No', 'Style', 'Party', 'Total_Qty', 'Received_Qty', 'Pending', 'Rate_Per_Pc', 'Date'].map(c => (
+              <th key={c} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+                {c.replace(/_/g, ' ')}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const no = String(r.Challan_No ?? '')
+            const total = draft[no]?.total ?? Number(r.Total_Qty ?? 0)
+            const received = draft[no]?.received ?? Number(r.Received_Qty ?? 0)
+            const pending = Math.max(0, total - received)
+            return (
+              <tr key={no || i} className="border-b border-gray-50 hover:bg-gray-50/80">
+                <td className="px-2 py-1.5 font-mono">{no}</td>
+                <td className="px-2 py-1.5">{String(r.Style ?? '')}</td>
+                <td className="px-2 py-1.5">{String(r.Party ?? '')}</td>
+                <td className="px-2 py-1.5">
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-20 border rounded px-1 py-0.5 text-right"
+                    value={total}
+                    onChange={e => {
+                      const v = +e.target.value || 0
+                      setDraft(d => ({ ...d, [no]: { ...d[no], total: v, received } }))
+                      scheduleSave(no, { Total_Qty: v, Received_Qty: received })
+                    }}
+                  />
+                </td>
+                <td className="px-2 py-1.5">
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-20 border rounded px-1 py-0.5 text-right bg-sky-50"
+                    value={received}
+                    onChange={e => {
+                      const v = +e.target.value || 0
+                      setDraft(d => ({ ...d, [no]: { ...d[no], received: v, total } }))
+                      scheduleSave(no, { Received_Qty: v, Total_Qty: total })
+                    }}
+                  />
+                </td>
+                <td className={`px-2 py-1.5 font-semibold ${pending > 0 ? 'text-amber-700' : 'text-green-700'}`}>
+                  {pending}
+                </td>
+                <td className="px-2 py-1.5">{String(r.Rate_Per_Pc ?? '')}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap">{String(r.Date ?? '')}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -1114,6 +1630,9 @@ function StyleCostingTab() {
   const s = data?.summary
   return (
     <div className="space-y-4">
+      <p className="text-xs text-gray-500">
+        P&amp;L uses <strong>received</strong> qty when set (e.g. 90 of 100 ordered). Party value (ordered) is shown for reference.
+      </p>
       <div className="flex flex-wrap gap-2">
         <input className="border rounded px-2 py-1 text-sm" placeholder="Month YYYY-MM or All" value={month} onChange={e => setMonth(e.target.value)} />
         <input className="border rounded px-2 py-1 text-sm" placeholder="Style or All" value={style} onChange={e => setStyle(e.target.value)} />
@@ -1137,11 +1656,28 @@ function StyleCostingTab() {
       <Section title="Detail">
         <DataTable
           rows={data?.rows ?? []}
-          cols={['Challan_No', 'Style', 'Party', 'Total_Qty', 'Actual_Labour_Rs', 'Party_Value_Rs', 'PL_Rs', 'Margin_%']}
+          cols={[
+            'Challan_No',
+            'Style',
+            'Party',
+            'Total_Qty',
+            'Received_Qty',
+            'Pending',
+            'Party_Value_Ordered_Rs',
+            'Party_Value_Received_Rs',
+            'Party_Value_Rs',
+            'Actual_Labour_Rs',
+            'Target_Labour_Rs',
+            'PL_Rs',
+            'Margin_%',
+          ]}
         />
       </Section>
       <Section title="Style roll-up">
-        <DataTable rows={data?.style_rollup ?? []} cols={['Style', 'Challans', 'Qty', 'PL', 'Margin_%', 'Result']} />
+        <DataTable
+          rows={data?.style_rollup ?? []}
+          cols={['Style', 'Challans', 'Qty_Ordered', 'Qty_Received', 'Qty', 'PL', 'Margin_%', 'Result']}
+        />
       </Section>
     </div>
   )
@@ -1277,39 +1813,167 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   )
 }
 
-function MasterTab({ admin: _admin }: { admin: AdminApi }) {
+const MASTER_SHEETS = ['style_master', 'karigar_master', 'employee_master'] as const
+type MasterSheetKey = (typeof MASTER_SHEETS)[number]
+
+function masterRowKey(sheet: MasterSheetKey, row: Record<string, unknown>): string {
+  if (sheet === 'style_master') return `${row.Style}||${row.Operation}`
+  if (sheet === 'karigar_master') return String(row.Karigar_ID ?? '')
+  return String(row.E_Code ?? '')
+}
+
+function masterRowPayload(sheet: MasterSheetKey, row: Record<string, unknown>): Record<string, string> {
+  if (sheet === 'style_master') {
+    return { Style: String(row.Style ?? ''), Operation: String(row.Operation ?? '') }
+  }
+  if (sheet === 'karigar_master') return { Karigar_ID: String(row.Karigar_ID ?? '') }
+  return { E_Code: String(row.E_Code ?? '') }
+}
+
+function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' | 'err', text: string) => void }) {
   const qc = useQueryClient()
-  const keys = ['style_master', 'karigar_master', 'employee_master'] as const
-  const [active, setActive] = useState<(typeof keys)[number]>('style_master')
+  const [active, setActive] = useState<MasterSheetKey>('style_master')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [editKarigar, setEditKarigar] = useState<Record<string, unknown> | null>(null)
+  const [karEdit, setKarEdit] = useState({
+    Name: '',
+    Skill: '',
+    Daily_Rate_Rs: 420,
+    Effective_From: todayStr(),
+  })
   const { data, refetch } = useQuery({
     queryKey: ['stitching-sheet', active],
     queryFn: () => api.get(`/stitching/sheets/${active}`).then(r => r.data),
   })
 
+  const rows = (data?.rows ?? []) as Record<string, unknown>[]
+  const cols = (data?.columns as string[]) ?? []
+
+  const invalidateSheet = () => {
+    setSelected(new Set())
+    void refetch()
+    qc.invalidateQueries({ queryKey: ['stitching-sheet'] })
+    qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })
+    qc.invalidateQueries({ queryKey: ['stitching-style-costing'] })
+    qc.invalidateQueries({ queryKey: ['stitching-pe-reports'] })
+  }
+
   const [styleForm, setStyleForm] = useState({ Style: '', Operation: '', Target: 80, Rate_Rs: 3 })
-  const [karForm, setKarForm] = useState({ Karigar_ID: '', Name: '', Skill: 'Stitching', Daily_Rate_Rs: 420 })
+  const [karForm, setKarForm] = useState({
+    Karigar_ID: '',
+    Name: '',
+    Skill: 'Stitching',
+    Daily_Rate_Rs: 420,
+    Effective_From: todayStr(),
+  })
 
   const addStyle = useMutation({
     mutationFn: () => api.post('/stitching/master/style-operation', styleForm),
-    onSuccess: () => refetch(),
+    onSuccess: () => {
+      onFlash('ok', 'Style operation added.')
+      setStyleForm({ Style: '', Operation: '', Target: 80, Rate_Rs: 3 })
+      invalidateSheet()
+    },
+    onError: (e: { response?: { data?: { detail?: string } } }) =>
+      onFlash('err', String(e.response?.data?.detail || 'Duplicate or invalid')),
   })
   const addKar = useMutation({
-    mutationFn: () => api.post('/stitching/master/karigar', karForm),
+    mutationFn: () =>
+      api.post('/stitching/master/karigar', { ...karForm, Effective_From: karForm.Effective_From || todayStr() }),
     onSuccess: () => {
-      refetch()
-      qc.invalidateQueries({ queryKey: ['stitching-sheet', 'karigar_master'] })
-      qc.invalidateQueries({ queryKey: ['stitching-sheet', 'employee_master'] })
+      onFlash('ok', 'Karigar added.')
+      setKarForm({ Karigar_ID: '', Name: '', Skill: 'Stitching', Daily_Rate_Rs: 420, Effective_From: todayStr() })
+      invalidateSheet()
     },
+    onError: (e: { response?: { data?: { detail?: string } } }) =>
+      onFlash('err', String(e.response?.data?.detail || 'Karigar ID may already exist')),
   })
+
+  const deleteMut = useMutation({
+    mutationFn: (payload: { sheet: MasterSheetKey; rows: Record<string, string>[] }) =>
+      api.post('/stitching/master/delete-rows', payload),
+    onSuccess: r => {
+      onFlash('ok', r.data.message || 'Deleted')
+      setEditKarigar(null)
+      invalidateSheet()
+    },
+    onError: () => onFlash('err', 'Delete failed'),
+  })
+
+  const updateKarMut = useMutation({
+    mutationFn: () =>
+      api.patch(`/stitching/master/karigar/${encodeURIComponent(String(editKarigar?.Karigar_ID ?? ''))}`, {
+        Name: karEdit.Name,
+        Skill: karEdit.Skill,
+        Daily_Rate_Rs: karEdit.Daily_Rate_Rs,
+        Effective_From: karEdit.Effective_From || todayStr(),
+      }),
+    onSuccess: r => {
+      onFlash('ok', r.data.message || 'Updated')
+      invalidateSheet()
+    },
+    onError: (e: { response?: { data?: { detail?: string } } }) =>
+      onFlash('err', String(e.response?.data?.detail || 'Update failed')),
+  })
+
+  const toggleRow = (key: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const toggleAll = () => {
+    if (selected.size === rows.length) setSelected(new Set())
+    else setSelected(new Set(rows.map(r => masterRowKey(active, r))))
+  }
+
+  const deleteSelected = () => {
+    const toDelete = rows.filter(r => selected.has(masterRowKey(active, r))).map(r => masterRowPayload(active, r))
+    if (!toDelete.length) return
+    if (!window.confirm(`Delete ${toDelete.length} selected row(s)?`)) return
+    deleteMut.mutate({ sheet: active, rows: toDelete })
+  }
+
+  const deleteOne = (row: Record<string, unknown>) => {
+    if (!window.confirm(`Delete "${masterRowKey(active, row)}"?`)) return
+    deleteMut.mutate({ sheet: active, rows: [masterRowPayload(active, row)] })
+  }
+
+  const openKarigarEdit = (row: Record<string, unknown>) => {
+    setEditKarigar(row)
+    setKarEdit({
+      Name: String(row.Name ?? ''),
+      Skill: String(row.Skill ?? ''),
+      Daily_Rate_Rs: Number(row.Daily_Rate_Rs) || 420,
+      Effective_From: todayStr(),
+    })
+  }
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2">
-        {keys.map(k => (
+      <SheetUploadBar
+        sheetKey={active}
+        label={`Import ${active.replace(/_/g, ' ')}`}
+        onFlash={onFlash}
+        onSaved={invalidateSheet}
+      />
+      <p className="text-xs text-gray-600 bg-gray-50 border rounded-lg px-3 py-2">
+        Select rows to delete one or many. Duplicates are blocked on add; imports are de-duplicated. Karigar rate changes need an{' '}
+        <strong>effective date</strong> so that day&apos;s payroll and production reports use the correct daily rate.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {MASTER_SHEETS.map(k => (
           <button
             key={k}
             type="button"
-            onClick={() => setActive(k)}
+            onClick={() => {
+              setActive(k)
+              setSelected(new Set())
+              setEditKarigar(null)
+            }}
             className={`text-xs px-3 py-1.5 rounded-lg ${active === k ? 'bg-[#002B5B] text-white' : 'border'}`}
           >
             {k.replace(/_/g, ' ')}
@@ -1338,23 +2002,167 @@ function MasterTab({ admin: _admin }: { admin: AdminApi }) {
         </div>
       )}
       {active === 'karigar_master' && (
-        <div className="grid sm:grid-cols-4 gap-2 text-xs mb-3">
-          {(['Karigar_ID', 'Name', 'Skill'] as const).map(k => (
-            <label key={k}>
-              {k}
-              <input className="w-full border rounded mt-1 px-2 py-1" value={karForm[k]} onChange={e => setKarForm(f => ({ ...f, [k]: e.target.value }))} />
+        <>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-6 gap-2 text-xs mb-3">
+            {(['Karigar_ID', 'Name', 'Skill'] as const).map(k => (
+              <label key={k}>
+                {k}
+                <input className="w-full border rounded mt-1 px-2 py-1" value={karForm[k]} onChange={e => setKarForm(f => ({ ...f, [k]: e.target.value }))} />
+              </label>
+            ))}
+            <label>
+              Daily rate ₹
+              <input type="number" className="w-full border rounded mt-1 px-2 py-1" value={karForm.Daily_Rate_Rs} onChange={e => setKarForm(f => ({ ...f, Daily_Rate_Rs: +e.target.value }))} />
             </label>
-          ))}
-          <label>
-            Daily rate
-            <input type="number" className="w-full border rounded mt-1 px-2 py-1" value={karForm.Daily_Rate_Rs} onChange={e => setKarForm(f => ({ ...f, Daily_Rate_Rs: +e.target.value }))} />
-          </label>
-          <button type="button" onClick={() => addKar.mutate()} className="self-end px-3 py-2 bg-[#002B5B] text-white rounded text-xs">
-            Add karigar
-          </button>
-        </div>
+            <label>
+              Effective from
+              <input type="date" className="w-full border rounded mt-1 px-2 py-1" value={karForm.Effective_From} onChange={e => setKarForm(f => ({ ...f, Effective_From: e.target.value }))} />
+            </label>
+            <button type="button" onClick={() => addKar.mutate()} disabled={addKar.isPending} className="self-end px-3 py-2 bg-[#002B5B] text-white rounded text-xs disabled:opacity-50">
+              Add karigar
+            </button>
+          </div>
+          {editKarigar && (
+            <div className="text-xs border border-violet-200 bg-violet-50 rounded-xl p-4 space-y-2 mb-3">
+              <p className="font-semibold text-violet-900">
+                Update — {String(editKarigar.Karigar_ID)} ({String(editKarigar.Name)})
+              </p>
+              <p className="text-violet-800">
+                Daily rate applies from the effective date across attendance, production P&amp;L, and reports for that date.
+              </p>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                <label>
+                  Name
+                  <input className="w-full border rounded mt-1 px-2 py-1" value={karEdit.Name} onChange={e => setKarEdit(f => ({ ...f, Name: e.target.value }))} />
+                </label>
+                <label>
+                  Skill
+                  <input className="w-full border rounded mt-1 px-2 py-1" value={karEdit.Skill} onChange={e => setKarEdit(f => ({ ...f, Skill: e.target.value }))} />
+                </label>
+                <label>
+                  Daily rate ₹
+                  <input type="number" className="w-full border rounded mt-1 px-2 py-1" value={karEdit.Daily_Rate_Rs} onChange={e => setKarEdit(f => ({ ...f, Daily_Rate_Rs: +e.target.value }))} />
+                </label>
+                <label>
+                  Effective from
+                  <input type="date" className="w-full border rounded mt-1 px-2 py-1" value={karEdit.Effective_From} onChange={e => setKarEdit(f => ({ ...f, Effective_From: e.target.value }))} />
+                </label>
+                <div className="flex gap-2 self-end">
+                  <button type="button" onClick={() => updateKarMut.mutate()} disabled={updateKarMut.isPending} className="px-3 py-2 bg-violet-700 text-white rounded-lg font-semibold disabled:opacity-50">
+                    Save
+                  </button>
+                  <button type="button" onClick={() => setEditKarigar(null)} className="px-3 py-2 border rounded-lg">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       )}
-      <DataTable rows={data?.rows ?? []} cols={(data?.columns as string[]) ?? []} />
+      <MasterDataTable
+        rows={rows}
+        cols={cols}
+        sheet={active}
+        selected={selected}
+        onToggleRow={toggleRow}
+        onToggleAll={toggleAll}
+        onDeleteOne={deleteOne}
+        onEditKarigar={active === 'karigar_master' ? openKarigarEdit : undefined}
+        toolbar={
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <button
+              type="button"
+              onClick={deleteSelected}
+              disabled={!selected.size || deleteMut.isPending}
+              className="text-xs px-3 py-1.5 rounded-lg bg-red-600 text-white font-semibold disabled:opacity-40"
+            >
+              {deleteMut.isPending ? 'Deleting…' : `Delete selected (${selected.size})`}
+            </button>
+            <span className="text-xs text-gray-500">{rows.length} row(s)</span>
+          </div>
+        }
+      />
+    </div>
+  )
+}
+
+function MasterDataTable({
+  rows,
+  cols,
+  sheet,
+  selected,
+  onToggleRow,
+  onToggleAll,
+  onDeleteOne,
+  onEditKarigar,
+  toolbar,
+}: {
+  rows: Record<string, unknown>[]
+  cols: string[]
+  sheet: MasterSheetKey
+  selected: Set<string>
+  onToggleRow: (key: string) => void
+  onToggleAll: () => void
+  onDeleteOne: (row: Record<string, unknown>) => void
+  onEditKarigar?: (row: Record<string, unknown>) => void
+  toolbar?: React.ReactNode
+}) {
+  if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No rows</p>
+  const useCols = cols.length ? cols.filter(c => c in rows[0] || rows[0][c] !== undefined) : Object.keys(rows[0] ?? {})
+  const allSelected = rows.length > 0 && selected.size === rows.length
+
+  return (
+    <div>
+      {toolbar}
+      <div className="overflow-x-auto max-h-[min(480px,55vh)] border rounded-lg">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-50 border-b z-10">
+            <tr>
+              <th className="px-2 py-2 w-8">
+                <input type="checkbox" checked={allSelected} onChange={onToggleAll} title="Select all" />
+              </th>
+              {useCols.map(c => (
+                <th key={c} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+                  {c.replace(/_/g, ' ')}
+                </th>
+              ))}
+              <th className="px-2 py-2 w-28 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const rk = masterRowKey(sheet, r)
+              const isSel = selected.has(rk)
+              return (
+                <tr
+                  key={rk || i}
+                  className={`border-b border-gray-50 ${isSel ? 'bg-sky-50' : 'hover:bg-gray-50/80'}`}
+                >
+                  <td className="px-2 py-1.5">
+                    <input type="checkbox" checked={isSel} onChange={() => onToggleRow(rk)} />
+                  </td>
+                  {useCols.map(c => (
+                    <td key={c} className="px-2 py-1.5 whitespace-nowrap">
+                      {String(r[c] ?? '')}
+                    </td>
+                  ))}
+                  <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                    {onEditKarigar && (
+                      <button type="button" onClick={() => onEditKarigar(r)} className="text-violet-700 hover:underline mr-2">
+                        Rate
+                      </button>
+                    )}
+                    <button type="button" onClick={() => onDeleteOne(r)} className="text-red-600 hover:underline">
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

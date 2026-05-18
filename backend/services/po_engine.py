@@ -476,6 +476,7 @@ def calculate_po_base(
     planning_date: Optional[str] = None,
     raise_ledger_lookback_days: int = 14,
     raise_view_date: Optional[str] = None,
+    po_return_overlay_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -623,6 +624,36 @@ def calculate_po_base(
         inv_work, summary, ["Sold_Units", "Return_Units", "Net_Units"]
     ).fillna({"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0})
 
+    if po_return_overlay_df is not None and not po_return_overlay_df.empty:
+        ov = po_return_overlay_df.copy()
+        if "OMS_SKU" in ov.columns and "Return_Units" in ov.columns:
+            ov["OMS_SKU"] = ov["OMS_SKU"].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+            ov = ov[ov["OMS_SKU"].str.len() > 0]
+            if group_by_parent:
+                ov["OMS_SKU"] = ov["OMS_SKU"].map(
+                    lambda s: str(get_parent_sku(s) or s).strip().upper()
+                )
+            ov["Return_Overlay_Units"] = (
+                pd.to_numeric(ov["Return_Units"], errors="coerce").fillna(0).astype(int)
+            )
+            ov = ov.groupby("OMS_SKU", as_index=False)["Return_Overlay_Units"].sum()
+            po_df = po_df.merge(ov, on="OMS_SKU", how="left")
+            po_df["Return_Overlay_Units"] = (
+                pd.to_numeric(po_df["Return_Overlay_Units"], errors="coerce").fillna(0).astype(int)
+            )
+            po_df["Return_Units"] = (
+                pd.to_numeric(po_df["Return_Units"], errors="coerce").fillna(0).astype(int)
+                + po_df["Return_Overlay_Units"]
+            )
+            po_df["Net_Units"] = (
+                pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0).astype(int)
+                - po_df["Return_Units"]
+            ).clip(lower=0)
+        else:
+            po_df["Return_Overlay_Units"] = 0
+    else:
+        po_df["Return_Overlay_Units"] = 0
+
     # Shipment context column for operators (not used in PO math):
     # show broader last ~5 months shipments even when period window is shorter.
     ship_150_cutoff = max_date - timedelta(days=150)
@@ -709,6 +740,13 @@ def calculate_po_base(
     # Sold_Units / Net_Units reflect the full ADS window (period_days).
     po_df["Sold_Units"] = po_df["ADS_Sold_Units"].astype(int)
     po_df["Net_Units"]  = po_df["ADS_Net_Units"].clip(lower=0).astype(int)
+    if "Return_Overlay_Units" in po_df.columns:
+        _rov = pd.to_numeric(po_df["Return_Overlay_Units"], errors="coerce").fillna(0).astype(int)
+        if int(_rov.sum()) > 0:
+            po_df["ADS_Net_Units"] = (
+                pd.to_numeric(po_df["ADS_Net_Units"], errors="coerce").fillna(0).astype(int) - _rov
+            ).clip(lower=0)
+            po_df["Net_Units"] = po_df["ADS_Net_Units"].astype(int)
 
     # Use true active-day span per SKU. Old min_denominator floor (often 7) forced many SKUs
     # to show only 7/30 and diluted ADS, which distorted PO suggestions.
@@ -1243,7 +1281,51 @@ def calculate_po_base(
             raise_view_date=raise_view_date,
         )
     if lag is not None and not lag.empty:
-        po_df = po_df.merge(lag, on="OMS_SKU", how="left")
+        if group_by_parent:
+            po_df = po_df.merge(lag, on="OMS_SKU", how="left")
+        else:
+            po_df = po_df.copy()
+
+            def _raise_parent_key(raw: str) -> str:
+                key = canonical_oms_key(raw, _map)
+                return str(get_parent_sku(key) or key).strip().upper()
+
+            po_df["_raise_parent"] = po_df["OMS_SKU"].map(_raise_parent_key)
+            lag_p = lag.copy()
+            lag_p["_raise_parent"] = lag_p["OMS_SKU"].map(_raise_parent_key)
+            lag_num = [
+                "PO_Confirmed_Raise_Pipeline",
+                "PO_Raised_Yesterday",
+                "PO_Raised_Today",
+                "PO_Last_Raised_Qty",
+                "PO_Raised_On_View_Date",
+            ]
+            lag_p = lag_p.groupby("_raise_parent", as_index=False)[
+                [c for c in lag_num if c in lag_p.columns]
+            ].sum()
+            if "PO_Last_Raised_Date" in lag.columns:
+                lag_dates = lag.copy()
+                lag_dates["_raise_parent"] = lag_dates["OMS_SKU"].map(_raise_parent_key)
+                lag_dates["PO_Last_Raised_Date"] = lag_dates["PO_Last_Raised_Date"].fillna("").astype(str)
+                lag_dates = lag_dates[lag_dates["PO_Last_Raised_Date"].str.len() > 0]
+                if not lag_dates.empty:
+                    lag_dates["_sort"] = pd.to_datetime(
+                        lag_dates["PO_Last_Raised_Date"], errors="coerce"
+                    )
+                    last_dates = (
+                        lag_dates.sort_values("_sort")
+                        .groupby("_raise_parent", as_index=False)
+                        .tail(1)[["_raise_parent", "PO_Last_Raised_Date"]]
+                    )
+                    lag_p = lag_p.merge(last_dates, on="_raise_parent", how="left")
+                else:
+                    lag_p["PO_Last_Raised_Date"] = ""
+            po_df = po_df.merge(
+                lag_p.drop(columns=["OMS_SKU"], errors="ignore"),
+                on="_raise_parent",
+                how="left",
+            )
+            po_df.drop(columns=["_raise_parent"], inplace=True)
     for c in (
         "PO_Confirmed_Raise_Pipeline",
         "PO_Raised_Yesterday",
@@ -1283,6 +1365,14 @@ def calculate_po_base(
     po_qty_round = np.ceil(np.maximum(raw_po, 0.0) / _pack) * _pack
     po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
+
+    if "Return_Overlay_Units" in po_df.columns:
+        overlay = pd.to_numeric(po_df["Return_Overlay_Units"], errors="coerce").fillna(0).astype(int)
+        po_df["PO_Qty"] = np.maximum(
+            pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0).astype(int) - overlay,
+            0,
+        ).astype(int)
+        po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
 
     # Lead-time release (sheet-resolved lead only): no fresh PO while projected cover
     # (inv + eff. pipeline) is still *above* sheet ``Lead_Time_Days`` — then top up
