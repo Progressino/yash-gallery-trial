@@ -41,7 +41,7 @@ const qc = new QueryClient({
   },
 })
 
-const AUTO_RESTORE_TIMEOUT_MS = 20_000
+const AUTO_RESTORE_TIMEOUT_MS = 120_000
 
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let t: ReturnType<typeof setTimeout> | undefined
@@ -85,30 +85,49 @@ function ProtectedRoute() {
   const activeUser = data ?? cachedUser
   const isKarigar = isKarigarUser(activeUser)
 
+  const coverageEmpty = (c: Awaited<ReturnType<typeof getCoverage>>) =>
+    !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.snapdeal
+
   const { isFetching: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
-        const coverage = await getCoverage()
-        if (!coverage.mtr && !coverage.sales && !coverage.pause_auto_data_restore) {
+        let coverage = await getCoverage({ timeout: 90_000 })
+        setCoverage(coverage)
+        if (coverageEmpty(coverage)) {
           try {
             await withTimeout(cacheLoad(), AUTO_RESTORE_TIMEOUT_MS)
-            const refreshed = await getCoverage()
-            setCoverage(refreshed)
-          } catch {
+            coverage = await getCoverage({ timeout: 90_000 })
             setCoverage(coverage)
+          } catch {
+            /* warm cache may still be loading on server */
           }
-        } else {
-          setCoverage(coverage)
         }
       } catch {
-        /* server busy during upload */
+        /* server busy during upload — coverage polling on Upload page will retry */
       }
       return true
     },
     enabled: !!activeUser && !isKarigar,
-    retry: 1,
+    retry: 3,
+    retryDelay: 8_000,
     staleTime: Infinity,
+  })
+
+  useQuery({
+    queryKey: ['coverage-empty-retry'],
+    queryFn: async () => {
+      const c = await getCoverage({ timeout: 90_000 })
+      setCoverage(c)
+      return c
+    },
+    enabled: !!activeUser && !isKarigar && !isRestoring,
+    refetchInterval: (q) => {
+      const c = q.state.data
+      if (!c) return 8_000
+      return coverageEmpty(c) ? 8_000 : false
+    },
+    retry: 2,
   })
 
   if (isLoading && !cachedUser) {

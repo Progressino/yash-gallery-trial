@@ -126,6 +126,50 @@ def publish_warm_cache_from_session(sess) -> None:
 _PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df")
 
 
+def session_needs_operational_data(sess) -> bool:
+    """True when the browser session has no platform/sales data loaded yet."""
+    if getattr(sess, "sales_df", None) is not None and not sess.sales_df.empty:
+        return False
+    if getattr(sess, "mtr_df", None) is not None and not sess.mtr_df.empty:
+        return False
+    for key in ("myntra_df", "meesho_df", "flipkart_df", "snapdeal_df"):
+        df = getattr(sess, key, None)
+        if df is not None and hasattr(df, "empty") and not df.empty:
+            return False
+    return True
+
+
+def force_restore_session_from_server_cache(sess, warm_cache_generation: int) -> bool:
+    """
+    Fill an empty session from warm cache even when ``pause_auto_data_restore`` is set
+    (e.g. after Delete All on another tab, or a stale PostgreSQL session blob).
+
+    Clears ``daily_restored`` so Tier-3 SQLite can still top up if warm cache is partial.
+  """
+    if not session_needs_operational_data(sess):
+        return False
+    had_pause = bool(getattr(sess, "pause_auto_data_restore", False))
+    sess.pause_auto_data_restore = False
+    sess.daily_restored = False
+    changed = False
+    try:
+        restore_po_sidecars_from_warm(sess)
+        if _warm_cache and _copy_warm_cache_to_session(sess):
+            sess._warm_cache_gen = warm_cache_generation
+            sess._warm_cache_only = True
+            changed = True
+        elif _apply_warm_cache_if_needed(sess, warm_cache_generation):
+            changed = True
+    finally:
+        if had_pause and session_needs_operational_data(sess):
+            sess.pause_auto_data_restore = True
+        elif had_pause:
+            from .session import resume_auto_data_restore
+
+            resume_auto_data_restore(sess)
+    return changed
+
+
 def restore_po_sidecars_from_warm(sess) -> bool:
     """Copy PO sidecar DataFrames from warm cache when the session is missing them.
 
@@ -530,7 +574,7 @@ def _copy_warm_cache_to_session(sess) -> bool:
 def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
     """Decide whether to copy warm cache into session (sync; may run in thread pool)."""
     restore_po_sidecars_from_warm(sess)
-    if getattr(sess, "pause_auto_data_restore", False):
+    if getattr(sess, "pause_auto_data_restore", False) and not session_needs_operational_data(sess):
         return False
     _session_gen = getattr(sess, "_warm_cache_gen", 0)
     _wc_only = getattr(sess, "_warm_cache_only", False)

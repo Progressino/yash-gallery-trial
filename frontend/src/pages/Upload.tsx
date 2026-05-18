@@ -47,11 +47,23 @@ export default function Upload() {
   const uploadBusy =
     Object.values(loading).some(Boolean) || !!buildingMsg
 
+  const coverageEmpty =
+    !coverage.mtr &&
+    !coverage.sales &&
+    !coverage.myntra &&
+    !coverage.meesho &&
+    !coverage.flipkart &&
+    !coverage.snapdeal
+
   useQuery({
     queryKey: ['coverage'],
-    queryFn: async () => { const c = await getCoverage(); setCoverage(c); return c },
-    refetchInterval: uploadBusy ? false : 30_000,
-    retry: 1,
+    queryFn: async () => {
+      const c = await getCoverage({ timeout: 90_000 })
+      setCoverage(c)
+      return c
+    },
+    refetchInterval: uploadBusy ? false : coverageEmpty ? 8_000 : 30_000,
+    retry: 3,
   })
 
   const showToast = (type: 'success' | 'error', msg: string) => {
@@ -306,6 +318,23 @@ export default function Upload() {
         <div className={`fixed top-4 right-4 z-50 rounded-lg px-5 py-3 shadow-lg text-sm text-white max-w-sm
           ${toast.type === 'success' ? 'bg-green-600' : 'bg-red-600'}`}>
           {toast.msg}
+        </div>
+      )}
+
+      {!anyLoaded && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          {coverage.pause_auto_data_restore ? (
+            <p>
+              <strong>No data in this browser session.</strong> After &quot;Delete all data&quot;, use{' '}
+              <strong>Load Cache</strong> in the left sidebar (or upload files again). Server data is shared — other
+              computers may still show loaded rows until this session is refreshed.
+            </p>
+          ) : (
+            <p>
+              <strong>Data is loading…</strong> The server copies shared cache into your session (may take up to a minute
+              after login). If rows stay empty, click <strong>Load Cache</strong> in the sidebar or refresh the page.
+            </p>
+          )}
         </div>
       )}
 

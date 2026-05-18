@@ -69,10 +69,28 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     Skips platforms that already have session data.
     Also auto-restores SKU mapping from GitHub cache if missing.
     """
-    if getattr(sess, "pause_auto_data_restore", False):
+    try:
+        import backend.main as _main
+
+        if _main.session_needs_operational_data(sess):
+            _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
+    except Exception:
+        pass
+
+    needs_data = False
+    try:
+        import backend.main as _main
+
+        needs_data = _main.session_needs_operational_data(sess)
+    except Exception:
+        needs_data = False
+
+    if getattr(sess, "pause_auto_data_restore", False) and not needs_data:
         return
-    if sess.daily_restored:
+    if sess.daily_restored and not needs_data:
         return
+    if needs_data:
+        sess.daily_restored = False
 
     # Never block coverage/login behind a multi-minute Tier-3 upload on the same lock.
     if not sess._daily_restore_lock.acquire(blocking=False):

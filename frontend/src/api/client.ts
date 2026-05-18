@@ -204,9 +204,11 @@ export async function clearPlatform(platform: string): Promise<{ ok: boolean; me
 
 // ── Coverage ──────────────────────────────────────────────────
 
-export async function getCoverage(): Promise<CoverageResponse> {
+export async function getCoverage(opts?: { timeout?: number }): Promise<CoverageResponse> {
   try {
-    const { data } = await api.get<CoverageResponse>('/data/coverage', { timeout: CACHE_TIMEOUT_MS })
+    const { data } = await api.get<CoverageResponse>('/data/coverage', {
+      timeout: opts?.timeout ?? CACHE_TIMEOUT_MS,
+    })
     return data
   } catch (e: unknown) {
     throw new Error(_errMessage(e, 'Coverage refresh failed'))
