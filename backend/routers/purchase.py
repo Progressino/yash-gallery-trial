@@ -286,7 +286,15 @@ def get_jwos(status: Optional[str] = None):
 @router.post("/jwo")
 def post_jwo(body: JWOIn):
     num = create_jwo(body.model_dump())
-    return {"jwo_number": num}
+    issue_note = None
+    try:
+        from ..db.purchase_db import get_jwo_by_number
+
+        doc = get_jwo_by_number(num)
+        issue_note = doc.get("issue_note") if doc else None
+    except Exception:
+        pass
+    return {"jwo_number": num, "ok": True, "issue_note": issue_note}
 
 @router.patch("/jwo/{jwoid}/status")
 def patch_jwo_status(jwoid: int, body: StatusUpdate):
@@ -362,6 +370,30 @@ def get_jwo_by_num(jwo_number: str):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="JWO not found")
     return doc
+
+
+@router.get("/jwo/{jwoid}/issue-note")
+def get_jwo_issue_note(jwoid: int):
+    from ..services.jwo_min_notes import get_min_by_jwo_id
+
+    note = get_min_by_jwo_id(jwoid)
+    if not note:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No issue note for this JWO")
+    return note
+
+
+@router.post("/jwo/{jwoid}/issue-note/regenerate")
+def regenerate_jwo_issue_note(jwoid: int):
+    from ..db.purchase_db import get_jwo_by_id
+    from ..services.jwo_min_notes import create_min_for_jwo
+
+    jwo = get_jwo_by_id(jwoid)
+    if not jwo:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="JWO not found")
+    note = create_min_for_jwo(jwoid, jwo["jwo_number"], jwo, jwo.get("lines") or [])
+    return {"ok": True, "issue_note": note}
 # ── GRN ───────────────────────────────────────────────────────────────────────
 @router.get("/grn")
 def get_grns(status: Optional[str] = None):

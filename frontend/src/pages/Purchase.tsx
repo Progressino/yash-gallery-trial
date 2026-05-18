@@ -14,6 +14,33 @@ interface PO { id: number; po_number: string; po_date: string; supplier_name: st
 interface POLine { id: number; material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number; amount: number }
 interface JWO { id: number; jwo_number: string; jwo_date: string; processor_name: string; processor_id?: number; status: string; total: number; expected_return_date: string; pr_reference?: string; so_reference?: string; issued_by?: string; remarks?: string; lines: JWOLine[] }
 interface JWOLine { id: number; input_material: string; input_qty?: number; output_material: string; output_qty: number; process_type: string; rate: number; amount: number; unit?: string }
+interface MINLine {
+  id?: number
+  material_code: string
+  material_name?: string
+  material_type?: string
+  issue_qty: number
+  unit?: string
+  output_material?: string
+  output_material_name?: string
+  output_qty?: number
+  bom_qty_per_unit?: number
+  remarks?: string
+}
+interface IssueNote {
+  id: number
+  min_number: string
+  min_date: string
+  jwo_reference?: string
+  jwo_date?: string
+  so_reference?: string
+  to_vendor?: string
+  to_location?: string
+  from_location?: string
+  status: string
+  remarks?: string
+  lines: MINLine[]
+}
 interface GRN { id: number; grn_number: string; grn_date: string; grn_type: string; party_name: string; status: string; total_value: number; reference_number?: string; challan_no?: string; invoice_no?: string; lines: GRNLine[] }
 interface GRNLine { id: number; material_code: string; material_name?: string; received_qty: number; accepted_qty: number; rejected_qty: number; qc_status: string; rate: number; amount: number; unit?: string }
 interface MRPLineItem { material_code: string; material_name: string; material_type: string; required_qty: number; net_req: number; unit: string; inputs?: { material_code: string; material_name: string; quantity: number; unit: string }[] }
@@ -307,12 +334,13 @@ const buildMINPrintHTML = (min: any) => {
       </div>
     </div>
     <table>
-      <thead><tr><th>#</th><th>Material Code</th><th>Description</th><th>Type</th>
-        <th class="right">Issue Qty</th><th>Unit</th><th class="right">Rate (₹)</th><th class="right">Amount (₹)</th></tr></thead>
+      <thead><tr><th>#</th><th>Material Code</th><th>Description</th><th>For (Finished Item)</th><th>Type</th>
+        <th class="right">BOM/Unit</th><th class="right">Issue Qty</th><th>Unit</th></tr></thead>
       <tbody>${(min.lines || []).map((l: any, i: number) => `<tr>
         <td>${i + 1}</td><td><strong>${l.material_code}</strong></td><td>${l.material_name || '—'}</td>
-        <td>${l.material_type || 'GF'}</td><td class="right">${l.issue_qty}</td><td>${l.unit || 'MTR'}</td>
-        <td class="right">${fmt(l.rate || 0)}</td><td class="right"><strong>${fmt(l.amount || 0)}</strong></td></tr>`).join('')}</tbody>
+        <td>${l.output_material_name || l.output_material || '—'}<br/><span style="font-size:10px;color:#64748b">${l.output_qty ?? ''} planned</span></td>
+        <td>${l.material_type || 'GF'}</td><td class="right">${l.bom_qty_per_unit ?? '—'}</td>
+        <td class="right"><strong>${l.issue_qty}</strong></td><td>${l.unit || 'MTR'}</td></tr>`).join('')}</tbody>
     </table>
     <div style="background:#fef9c3;border:1px solid #fde047;border-radius:6px;padding:10px;margin-bottom:16px;font-size:11px;color:#713f12">
       <strong>Note:</strong> Material issued against JWO. Gate pass required for material moving out of factory premises.
@@ -322,6 +350,113 @@ const buildMINPrintHTML = (min: any) => {
       <div class="sign-box"><div class="sign-line">Received By (Processor)</div></div>
       <div class="sign-box"><div class="sign-line">Authorized By</div></div>
     </div>`
+}
+
+function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string }) {
+  const qc = useQueryClient()
+  const { data: note, isLoading, refetch } = useQuery<IssueNote | null>({
+    queryKey: ['jwo-issue-note', jwoId],
+    queryFn: async () => {
+      try {
+        const { data } = await api.get<IssueNote>(`/purchase/jwo/${jwoId}/issue-note`)
+        return data
+      } catch {
+        return null
+      }
+    },
+  })
+  const regen = useMutation({
+    mutationFn: () => api.post(`/purchase/jwo/${jwoId}/issue-note/regenerate`),
+    onSuccess: () => {
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['mins'] })
+    },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      alert(msg || 'Could not regenerate issue note')
+    },
+  })
+
+  if (isLoading) return <p className="text-xs text-gray-400 py-2">Loading material issue note…</p>
+  if (!note) {
+    return (
+      <div className="mt-3 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3">
+        <p className="text-xs text-gray-500">No material issue note linked to {jwoNumber}.</p>
+        <button
+          type="button"
+          onClick={() => regen.mutate()}
+          disabled={regen.isPending}
+          className="mt-2 text-xs px-2 py-1 rounded border border-sky-300 text-sky-800 hover:bg-sky-50 disabled:opacity-50"
+        >
+          {regen.isPending ? '…' : 'Generate from BOM'}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50/80 p-3 space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-sky-900">
+          📋 Material Issue Note — <span className="font-mono">{note.min_number}</span>
+          <span className="font-normal text-sky-700 ml-2">JWO {note.jwo_reference || jwoNumber} · {note.jwo_date || note.min_date}</span>
+        </p>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => printDocument(buildMINPrintHTML(note), `MIN - ${note.min_number}`)}
+            className="text-xs px-2 py-1 border border-gray-200 rounded bg-white hover:bg-gray-50"
+          >
+            🖨️ Print MIN
+          </button>
+          <button
+            type="button"
+            onClick={() => regen.mutate()}
+            disabled={regen.isPending}
+            className="text-xs px-2 py-1 border border-sky-300 rounded bg-white text-sky-800 hover:bg-sky-100 disabled:opacity-50"
+          >
+            {regen.isPending ? '…' : '↻ Refresh from BOM'}
+          </button>
+        </div>
+      </div>
+      {note.lines.length === 0 ? (
+        <p className="text-xs text-amber-800">No BOM materials — check Item Master BOM for the output item.</p>
+      ) : (
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-sky-800 uppercase border-b border-sky-200">
+              <th className="text-left py-1">Material to issue</th>
+              <th className="text-left py-1">For (finished item)</th>
+              <th className="text-right py-1">BOM/unit</th>
+              <th className="text-right py-1">Issue qty</th>
+              <th className="text-right py-1">Unit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {note.lines.map(ln => (
+              <tr key={ln.id ?? `${ln.material_code}-${ln.output_material}`} className="border-t border-sky-100">
+                <td className="py-1.5">
+                  <span className="font-medium">{ln.material_code}</span>
+                  {ln.material_name && ln.material_name !== ln.material_code && (
+                    <span className="text-gray-500 block">{ln.material_name}</span>
+                  )}
+                </td>
+                <td className="py-1.5">
+                  <span className="font-medium">{ln.output_material_name || ln.output_material || '—'}</span>
+                  {ln.output_qty != null && ln.output_qty > 0 && (
+                    <span className="text-gray-500 block">{ln.output_qty} planned</span>
+                  )}
+                </td>
+                <td className="py-1.5 text-right">{ln.bom_qty_per_unit ?? '—'}</td>
+                <td className="py-1.5 text-right font-semibold">{ln.issue_qty}</td>
+                <td className="py-1.5 text-right">{ln.unit || 'MTR'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
 }
 
 const buildGatePasePrintHTML = (gp: any) => {
@@ -370,6 +505,7 @@ export default function Purchase() {
   const qc = useQueryClient()
   const [tab, setTab] = useState<Tab>('dashboard')
   const [expanded, setExpanded] = useState<number | null>(null)
+  const [expandedMin, setExpandedMin] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')
   const [prSubTab, setPRSubTab] = useState<PRSubTab>('list')
 
@@ -453,13 +589,30 @@ export default function Purchase() {
   const rejectPRMut = useMutation({ mutationFn: (id: number) => api.post(`/purchase/pr/${id}/reject`, { remarks: '' }), onSuccess: () => qc.invalidateQueries({ queryKey: ['prs'] }) })
   const createPOMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/po', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['pos'] }); invalidate(); setShowPOForm(false); setPOLines([]) } })
   const updatePOStatusMut = useMutation({ mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/po/${id}/status`, { status }), onSuccess: () => qc.invalidateQueries({ queryKey: ['pos'] }) })
-  const createJWOMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/jwo', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['jwos'] }); invalidate(); setShowJWOForm(false); setJWOLines([]) } })
+  const createJWOMut = useMutation({
+    mutationFn: (b: object) => api.post<{ jwo_number: string; issue_note?: IssueNote }>('/purchase/jwo', b),
+    onSuccess: res => {
+      qc.invalidateQueries({ queryKey: ['jwos'] })
+      qc.invalidateQueries({ queryKey: ['mins'] })
+      invalidate()
+      setShowJWOForm(false)
+      setJWOLines([])
+      const inNum = res.data?.issue_note?.min_number
+      if (inNum) {
+        alert(`Job work order created. Material issue note ${inNum} generated from BOM.`)
+      }
+    },
+  })
   const updateJWOStatusMut = useMutation({ mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/jwo/${id}/status`, { status }), onSuccess: () => qc.invalidateQueries({ queryKey: ['jwos'] }) })
 
   // ── NEW: Update JWO mutation ───────────────────────────────────────────────
   const updateJWOMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/purchase/jwo/${id}`, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['jwos'] }); setEditingJWO(null) }
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['jwos'] })
+      qc.invalidateQueries({ queryKey: ['mins'] })
+      setEditingJWO(null)
+    },
   })
 
   const createGRNMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/grn', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grns'] }); invalidate(); setShowGRNForm(false); setGRNLines([]) } })
@@ -1547,6 +1700,7 @@ export default function Purchase() {
                             </tr>
                           ))}</tbody>
                         </table>
+                        <JWOMinPanel jwoId={jwo.id} jwoNumber={jwo.jwo_number} />
                       </div>
                     )}
                   </div>
@@ -1686,7 +1840,9 @@ export default function Purchase() {
       {tab === 'min' && (
         <div className="space-y-4">
           <div className="flex justify-between items-center">
-            <p className="text-sm text-gray-500">Material Issue Notes — Grey fabric issue to processor</p>
+            <p className="text-sm text-gray-500">
+              Material Issue Notes — auto-created from Job Work Orders (BOM quantities). Linked to each JWO.
+            </p>
             <button onClick={() => setShowMINForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ New MIN</button>
           </div>
           {showMINForm && (
@@ -1719,21 +1875,67 @@ export default function Purchase() {
             </div>
           )}
           <div className="space-y-2">
-            {(mins as any[]).map((min: any) => (
+            {(mins as IssueNote[]).map(min => {
+              const open = expandedMin === min.id
+              return (
               <div key={min.id} className="bg-white rounded-xl border shadow-sm overflow-hidden">
-                <div className="flex items-center justify-between p-4">
+                <button
+                  type="button"
+                  className="w-full flex items-center justify-between p-4 text-left hover:bg-gray-50"
+                  onClick={() => setExpandedMin(open ? null : min.id)}
+                >
                   <div>
                     <p className="font-semibold text-sm text-gray-800">{min.min_number}</p>
-                    <p className="text-xs text-gray-500">JWO: {min.jwo_reference || '—'} · To: {min.to_vendor || min.to_location || '—'} · {min.min_date}</p>
-                    <p className="text-xs text-gray-400">{min.lines?.length || 0} items · SO: {min.so_reference || '—'}</p>
+                    <p className="text-xs text-gray-500">
+                      JWO: {min.jwo_reference || '—'} · JWO date: {min.jwo_date || '—'} · To: {min.to_vendor || min.to_location || '—'} · {min.min_date}
+                    </p>
+                    <p className="text-xs text-gray-400">{min.lines?.length || 0} material line(s) · SO: {min.so_reference || '—'}</p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(min.status)}`}>{min.status}</span>
-                    <button onClick={() => printDocument(buildMINPrintHTML(min), `MIN - ${min.min_number}`)} className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50">🖨️ Print</button>
+                    <button
+                      type="button"
+                      onClick={e => { e.stopPropagation(); printDocument(buildMINPrintHTML(min), `MIN - ${min.min_number}`) }}
+                      className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50"
+                    >
+                      🖨️ Print
+                    </button>
+                    <span className="text-gray-400 text-xs">{open ? '▲' : '▼'}</span>
                   </div>
-                </div>
+                </button>
+                {open && min.lines && min.lines.length > 0 && (
+                  <div className="border-t px-4 pb-4">
+                    <table className="w-full text-xs mt-2">
+                      <thead>
+                        <tr className="text-gray-400 uppercase border-b">
+                          <th className="text-left py-1">Material to issue</th>
+                          <th className="text-left py-1">For (finished item)</th>
+                          <th className="text-right py-1">BOM/unit</th>
+                          <th className="text-right py-1">Issue qty</th>
+                          <th className="text-right py-1">Unit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {min.lines.map(ln => (
+                          <tr key={ln.id ?? `${ln.material_code}-${ln.output_material}`} className="border-t border-gray-50">
+                            <td className="py-1.5 font-medium">{ln.material_code}</td>
+                            <td className="py-1.5">
+                              {ln.output_material_name || ln.output_material || '—'}
+                              {ln.output_qty != null && ln.output_qty > 0 && (
+                                <span className="text-gray-500 block">{ln.output_qty} planned</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 text-right">{ln.bom_qty_per_unit ?? '—'}</td>
+                            <td className="py-1.5 text-right font-semibold">{ln.issue_qty}</td>
+                            <td className="py-1.5 text-right">{ln.unit || 'MTR'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
-            ))}
+            )})}
             {mins.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No material issue notes found.</p>}
           </div>
         </div>

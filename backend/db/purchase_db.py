@@ -826,7 +826,20 @@ def create_jwo(data: dict):
                         'MTR', 'Factory/Warehouse', 'Printer', num, f"JWO: {num}"))
             gconn.commit(); gconn.close()
         except Exception: pass
-    conn.commit(); conn.close(); return num
+    line_snapshots = [
+        dict(ln)
+        for ln in conn.execute("SELECT * FROM jwo_lines WHERE jwo_id=?", (jwoid,)).fetchall()
+    ]
+    jwo_header = dict(conn.execute("SELECT * FROM jwo_headers WHERE id=?", (jwoid,)).fetchone())
+    conn.commit()
+    conn.close()
+    try:
+        from ..services.jwo_min_notes import create_min_for_jwo
+
+        create_min_for_jwo(jwoid, num, jwo_header, line_snapshots)
+    except Exception:
+        pass
+    return num
 
 def update_jwo_status(jwoid: int, status: str):
     conn = _connect(); conn.execute("UPDATE jwo_headers SET status=? WHERE id=?", (status, jwoid))
@@ -854,7 +867,21 @@ def update_jwo(jwoid: int, data: dict):
                 ln['output_material'], out_qty, ln.get('output_unit','MTR'),
                 ln.get('process_type','Printing'), rate, amt, ln.get('remarks','')))
         conn.execute("UPDATE jwo_headers SET total=? WHERE id=?", (total, jwoid))
-    conn.commit(); conn.close()
+    jwo_header = dict(conn.execute("SELECT * FROM jwo_headers WHERE id=?", (jwoid,)).fetchone())
+    jwo_num = jwo_header.get("jwo_number", "")
+    line_snapshots = [
+        dict(l) for l in conn.execute("SELECT * FROM jwo_lines WHERE jwo_id=?", (jwoid,)).fetchall()
+    ]
+    conn.commit()
+    conn.close()
+    if line_snapshots:
+        try:
+            from ..services.jwo_min_notes import create_min_for_jwo
+
+            create_min_for_jwo(jwoid, jwo_num, jwo_header, line_snapshots)
+        except Exception:
+            pass
+    return
 
 # ── GRN ───────────────────────────────────────────────────────────────────────
 def list_grns(status=None):
@@ -1005,7 +1032,32 @@ def get_jwo_by_number(jwo_number: str):
     if not row: conn.close(); return None
     d = dict(row)
     d['lines'] = [dict(l) for l in conn.execute("SELECT * FROM jwo_lines WHERE jwo_id=?", (d['id'],)).fetchall()]
-    conn.close(); return d
+    conn.close()
+    try:
+        from ..services.jwo_min_notes import get_min_by_jwo_id
+
+        d['issue_note'] = get_min_by_jwo_id(d['id'])
+    except Exception:
+        d['issue_note'] = None
+    return d
+
+
+def get_jwo_by_id(jwoid: int):
+    conn = _connect()
+    row = conn.execute("SELECT * FROM jwo_headers WHERE id=?", (jwoid,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    d = dict(row)
+    d['lines'] = [dict(l) for l in conn.execute("SELECT * FROM jwo_lines WHERE jwo_id=?", (jwoid,)).fetchall()]
+    conn.close()
+    try:
+        from ..services.jwo_min_notes import get_min_by_jwo_id
+
+        d['issue_note'] = get_min_by_jwo_id(jwoid)
+    except Exception:
+        d['issue_note'] = None
+    return d
 
 # ── Material Issue Note (MIN) ─────────────────────────────────────────────────
 def init_min_table():
