@@ -18,8 +18,8 @@ export default function KarigarLayout() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 flex flex-col">
-      <header className="bg-[#002B5B] text-white px-4 py-3 shadow-md sticky top-0 z-20">
+    <div className="min-h-screen bg-gray-100 flex flex-col overflow-x-hidden">
+      <header className="bg-[#002B5B] text-white px-4 py-3 pt-[max(0.75rem,env(safe-area-inset-top))] shadow-md sticky top-0 z-20">
         <div className="max-w-lg mx-auto flex items-center justify-between gap-3">
           <div>
             <h1 className="text-base font-bold leading-tight">Production Entry</h1>
@@ -37,7 +37,7 @@ export default function KarigarLayout() {
           </button>
         </div>
       </header>
-      <main className="flex-1 p-3 max-w-lg mx-auto w-full">
+      <main className="flex-1 p-3 pb-28 max-w-lg mx-auto w-full min-w-0 overflow-x-hidden">
         <Outlet />
       </main>
     </div>

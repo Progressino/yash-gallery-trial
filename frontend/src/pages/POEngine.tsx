@@ -1,6 +1,6 @@
-import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect } from 'react'
+import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, getCoverage } from '../api/client'
+import { api, getCoverage, waitForPoCalculate } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
@@ -88,7 +88,9 @@ const PO_DISPLAY_COLS = [
   'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
   'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
-  'PO_Pipeline_Total', 'PO_Raised_Yesterday', 'PO_Raised_Today', 'PO_Confirmed_Raise_Pipeline', 'PO_Pipeline_Effective',
+  'PO_Pipeline_Total',
+  'PO_Raised_On_View_Date', 'PO_Last_Raised_Qty', 'PO_Last_Raised_Date',
+  'PO_Raised_Yesterday', 'PO_Raised_Today', 'PO_Confirmed_Raise_Pipeline', 'PO_Pipeline_Effective',
   'Projected_Running_Days', 'Post_PO_Cover_Days_Capped', 'PO_Qty',
   'PO_Block_Reason', 'Suggest_Close_SKU',
 ]
@@ -103,6 +105,9 @@ const COL_LABEL: Record<string, string> = {
   'Flat30_ADS':               '📅 Sheet FREQ (÷30)',
   'ADS':                      '⚡ ADS (Used)',
   'PO_Pipeline_Total':        '🏭 Total Pipeline',
+  'PO_Raised_On_View_Date':  '📌 Raised on raise date',
+  'PO_Last_Raised_Qty':      '📌 Last raised qty',
+  'PO_Last_Raised_Date':     '📅 Last raised date',
   'PO_Raised_Yesterday':     '📌 Raised qty (yesterday)',
   'PO_Raised_Today':         '📌 Raised qty (today)',
   'PO_Confirmed_Raise_Pipeline': '📌 Confirmed raises (window)',
@@ -122,6 +127,45 @@ const COL_LABEL: Record<string, string> = {
 
 const PRIORITY_ORDER: Record<string, number> = {
   '🔴 URGENT': 0, '🟡 HIGH': 1, '🟢 MEDIUM': 2, '🔄 In Pipeline': 3, '⚪ OK': 4,
+}
+
+function poColHeaderLabel(col: string, raiseViewDate: string): ReactNode {
+  if (col === 'PO_Qty') return <span>PO Qty ✏️</span>
+  if (col === 'PO_Raised_On_View_Date') {
+    return (
+      <span className="text-sky-800" title="Qty raised on the Raise date picker (recalculate after changing the date)">
+        Raised {raiseViewDate}
+      </span>
+    )
+  }
+  const lbl = COL_LABEL[col]
+  if (lbl) return <span>{lbl}</span>
+  return col.replace(/_/g, ' ')
+}
+
+function renderRaiseLedgerCell(col: string, row: PORow): ReactNode {
+  if (col === 'PO_Raised_On_View_Date') {
+    const n = Number(row[col] ?? 0)
+    return n > 0
+      ? <span className="text-xs font-bold text-sky-900 bg-sky-50 border border-sky-200 px-2 py-0.5 rounded">{n.toLocaleString()}</span>
+      : <span className="text-gray-300">—</span>
+  }
+  if (col === 'PO_Last_Raised_Qty') {
+    const n = Number(row[col] ?? 0)
+    const d = String(row['PO_Last_Raised_Date'] ?? '').trim()
+    if (n <= 0 && !d) return <span className="text-gray-300">—</span>
+    return (
+      <span className="text-xs">
+        <span className="font-semibold text-violet-900">{n > 0 ? n.toLocaleString() : '—'}</span>
+        {d ? <span className="block text-[10px] text-gray-500 mt-0.5">{d}</span> : null}
+      </span>
+    )
+  }
+  if (col === 'PO_Last_Raised_Date') {
+    const d = String(row[col] ?? '').trim()
+    return d ? <span className="text-xs font-mono text-gray-600">{d}</span> : <span className="text-gray-300">—</span>
+  }
+  return null
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -300,6 +344,7 @@ export default function POEngine() {
 
   // ephemeral UI state (no need to persist across navigation)
   const [loading, setLoading] = useState(false)
+  const [poProgress, setPoProgress] = useState('')
   /** Quarterly pivot loads after PO (or alone on Quarterly tab); was bundled with PO and blocked the UI. */
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [shipLoading, setShipLoading] = useState(false)
@@ -434,24 +479,41 @@ export default function POEngine() {
   const run = async () => {
     const seq = ++poRunSeqRef.current
     setLoading(true)
+    setPoProgress('Starting PO calculation…')
     setEditedQty({})
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
-      const res = await api.post<POResult>('/po/calculate', {
+      const res = await api.post<POResult & { status?: string }>('/po/calculate', {
         ...params,
         planning_date: planningDate,
+        raise_view_date: ledgerImportDate,
         raise_ledger_lookback_days: 14,
-      })
+      }, { timeout: 60_000 })
       if (seq !== poRunSeqRef.current) return
-      poRes = res.data
+      if (!res.data.ok) {
+        poRes = res.data
+        setResult(poRes)
+        return
+      }
+      if (res.data.status === 'running' || !res.data.rows) {
+        poRes = (await waitForPoCalculate(msg => {
+          if (seq === poRunSeqRef.current) setPoProgress(msg)
+        })) as POResult
+        if (seq !== poRunSeqRef.current) return
+      } else {
+        poRes = res.data
+      }
       setResult(poRes)
     } catch (e: unknown) {
       if (seq === poRunSeqRef.current) {
         setResult({ ok: false, message: e instanceof Error ? e.message : 'Error' })
       }
     } finally {
-      if (seq === poRunSeqRef.current) setLoading(false)
+      if (seq === poRunSeqRef.current) {
+        setLoading(false)
+        setPoProgress('')
+      }
     }
 
     if (seq === poRunSeqRef.current && poRes?.ledger_auto_import) {
@@ -1069,7 +1131,7 @@ export default function POEngine() {
               </button>
               {loading && (
                 <p className="text-xs text-gray-500">
-                  Computing recommendations from sales and inventory (usually the quick step).
+                  {poProgress || 'Computing recommendations from sales and inventory (may take 1–3 minutes).'}
                 </p>
               )}
             </div>
@@ -1166,14 +1228,17 @@ export default function POEngine() {
                     className="hidden"
                     onChange={e => void onLedgerCsvImport(e.target.files)}
                   />
-                  <label className="flex items-center gap-1.5 text-xs text-gray-600">
-                    <span className="whitespace-nowrap">Raise date</span>
-                    <input
-                      type="date"
-                      value={ledgerImportDate}
-                      onChange={e => setLedgerImportDate(e.target.value)}
-                      className="border border-gray-300 rounded px-2 py-1 text-xs w-[9.5rem]"
-                    />
+                  <label className="flex flex-col gap-0.5 text-xs text-gray-600">
+                    <span className="flex items-center gap-1.5">
+                      <span className="whitespace-nowrap">Raise date</span>
+                      <input
+                        type="date"
+                        value={ledgerImportDate}
+                        onChange={e => setLedgerImportDate(e.target.value)}
+                        className="border border-gray-300 rounded px-2 py-1 text-xs w-[9.5rem]"
+                      />
+                    </span>
+                    <span className="text-[10px] text-gray-400">Column &quot;Raised {ledgerImportDate}&quot; updates after Calculate PO</span>
                   </label>
                   <button
                     type="button"
@@ -1308,11 +1373,7 @@ export default function POEngine() {
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
                             ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}`}
                         >
-                          {c === 'PO_Qty'
-                            ? <span>PO Qty ✏️</span>
-                            : COL_LABEL[c]
-                              ? <span>{COL_LABEL[c]}</span>
-                              : c.replace(/_/g, ' ')}
+                          {poColHeaderLabel(c, ledgerImportDate)}
                         </th>
                       ))}
                       {/* Quarter history divider + columns */}
@@ -1406,7 +1467,8 @@ export default function POEngine() {
                                             ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
                                           : col === 'Post_PO_Cover_Days_Capped'
                                             ? <DaysLeftBadge days={postPoCoverDays(row, finalQty)} />
-                                          : col === 'PO_Qty'
+                                          : renderRaiseLedgerCell(col, row) ?? (
+                                          col === 'PO_Qty'
                                             ? <QtyInput
                                                 value={finalQty}
                                                 computed={computedQty}
@@ -1439,7 +1501,7 @@ export default function POEngine() {
                                               : typeof row[col] === 'number'
                                                 ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
                                                 : row[col] ?? '—'
-                              }
+                                          )}
                             </td>
                           ))}
 
@@ -1496,11 +1558,7 @@ export default function POEngine() {
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
                             ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}`}
                         >
-                          {c === 'PO_Qty'
-                            ? <span>PO Qty ✏️</span>
-                            : COL_LABEL[c]
-                              ? <span>{COL_LABEL[c]}</span>
-                              : c.replace(/_/g, ' ')}
+                          {poColHeaderLabel(c, ledgerImportDate)}
                         </th>
                       ))}
                       {quarterCols.length > 0 && (
@@ -1722,7 +1780,8 @@ export default function POEngine() {
                                     ? <DaysLeftBadge days={Number(variant[col] ?? 999)} />
                                   : col === 'Post_PO_Cover_Days_Capped'
                                     ? <DaysLeftBadge days={postPoCoverDays(variant, finalQty)} />
-                                  : col === 'PO_Qty'
+                                  : renderRaiseLedgerCell(col, variant) ?? (
+                                  col === 'PO_Qty'
                                     ? <QtyInput value={finalQty} computed={computedQty}
                                         onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
                                         onReset={() => { const n = {...editedQty}; delete n[sku]; setEditedQty(n) }} />
@@ -1730,7 +1789,7 @@ export default function POEngine() {
                                   : typeof variant[col] === 'number'
                                     ? Number(variant[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
                                     : variant[col] ?? '—'
-                                }
+                                  )}
                               </td>
                             ))}
                             {quarterCols.length > 0 && (

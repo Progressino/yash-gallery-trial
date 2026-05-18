@@ -11,7 +11,7 @@ from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -61,6 +61,8 @@ class PORequest(BaseModel):
     # Calendar day for PO raise-ledger "yesterday / today" columns (YYYY-MM-DD).
     # Defaults to server date if omitted; browser should send local date for daily PO.
     planning_date: Optional[str] = None
+    # Raise-date picker in PO UI — fills ``PO_Raised_On_View_Date`` (YYYY-MM-DD).
+    raise_view_date: Optional[str] = None
     # How many calendar days of confirmed raises (ending at planning_date) add to effective pipeline.
     raise_ledger_lookback_days: int = 14
     # When True (default), before PO math import yesterday's server-archived export if the
@@ -658,8 +660,31 @@ def po_dashboard(request: Request, body: PODashboardRequest):
     return payload
 
 
+@router.get("/calculate/status")
+def po_calculate_status(request: Request):
+    """Poll after POST /calculate — returns full result when status is ``done``."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "status": "error", "message": "No session"}
+    st = getattr(sess, "po_calculate_status", "idle") or "idle"
+    msg = getattr(sess, "po_calculate_message", "") or ""
+    out: dict = {"status": st, "message": msg}
+    if st == "done":
+        result = getattr(sess, "po_calculate_result", None) or {}
+        out.update(result)
+    elif st == "error":
+        result = getattr(sess, "po_calculate_result", None) or {}
+        out["ok"] = False
+        if result.get("message"):
+            out["message"] = result["message"]
+    else:
+        out["ok"] = True
+    return out
+
+
 @router.post("/calculate")
-def po_calculate(request: Request, body: PORequest):
+async def po_calculate(request: Request, body: PORequest, background_tasks: BackgroundTasks):
+    """Start PO calculation in the background (avoids 502 on large catalogs)."""
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
@@ -668,138 +693,28 @@ def po_calculate(request: Request, body: PORequest):
     if sess.inventory_df_variant.empty:
         return {"ok": False, "message": "Upload Inventory first."}
 
-    from ..services.po_engine import calculate_po_base
-
-    inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
-
-    from ..services.po_raise_import import hydrate_session_ledger_from_db
-
-    hydrate_session_ledger_from_db(
-        sess,
-        body.planning_date,
-        lookback_days=max(body.raise_ledger_lookback_days, 14),
-    )
-
-    ledger_auto_import = None
     sid = getattr(request.state, "session_id", None)
-    if body.auto_import_yesterday_ledger and sid:
-        from ..services.po_raise_archive import try_auto_import_recent_ledgers
+    if not sid:
+        return {"ok": False, "message": "No session id."}
 
-        ledger_auto_import = try_auto_import_recent_ledgers(
-            sess,
-            sid,
-            body.planning_date,
-            group_by_parent=body.group_by_parent,
-            lookback_days=max(body.raise_ledger_lookback_days, 14),
-        )
-        if ledger_auto_import and ledger_auto_import.get("ok"):
-            _sync_po_sidecars_to_durable_storage(request, sess)
+    if getattr(sess, "po_calculate_status", "idle") == "running":
+        return {
+            "ok": True,
+            "status": "running",
+            "message": getattr(sess, "po_calculate_message", "") or "PO calculation already in progress…",
+        }
 
-    _ledger = getattr(sess, "po_raise_ledger_df", None)
-    try:
-        po_df = calculate_po_base(
-            sales_df=sess.sales_df,
-            inv_df=inv_df,
-            period_days=body.period_days,
-            lead_time=body.lead_time,
-            target_days=body.target_days,
-            demand_basis=body.demand_basis,
-            min_denominator=body.min_denominator,
-            grace_days=body.grace_days,
-            safety_pct=body.safety_pct,
-            use_seasonality=body.use_seasonality,
-            seasonal_weight=body.seasonal_weight,
-            sku_mapping=sess.sku_mapping or None,
-            group_by_parent=body.group_by_parent,
-            existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
-            sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
-            enforce_two_size_minimum=body.enforce_two_size_minimum,
-            enforce_lead_time_release_gate=body.enforce_lead_time_release_gate,
-            inventory_history_df=(
-                sess.daily_inventory_history_df
-                if not sess.daily_inventory_history_df.empty
-                else None
-            ),
-            po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
-            planning_date=body.planning_date,
-            raise_ledger_lookback_days=body.raise_ledger_lookback_days,
-        )
-    except Exception as e:
-        return {"ok": False, "message": f"PO calculation error: {e}"}
+    sess.po_calculate_status = "running"
+    sess.po_calculate_message = "Calculating PO recommendations…"
+    sess.po_calculate_result = {}
 
-    if po_df.empty:
-        return {"ok": False, "message": "PO result is empty."}
+    from ..services.po_calculate_run import background_po_calculate
 
-    import numpy as np
-    import pandas as pd
-
-    def _dedupe_column_names(df: pd.DataFrame) -> pd.DataFrame:
-        """Pandas allows duplicate column labels; ``to_dict('records')`` keeps only one key
-        per name which shuffles values into wrong headers (e.g. ``fds``, ``sdaf``) in CSV/UI."""
-        seen: dict[str, int] = {}
-        out: list[str] = []
-        for c in df.columns:
-            base = str(c)
-            if base not in seen:
-                seen[base] = 0
-                out.append(base)
-            else:
-                seen[base] += 1
-                out.append(f"{base}__dup{seen[base]}")
-        df = df.copy()
-        df.columns = out
-        return df
-
-    # Serialize — keep string hints; round numerics only
-    po_df = po_df.copy()
-    po_df = _dedupe_column_names(po_df)
-    for c in ["Suggest_Close_SKU", "PO_Block_Reason", "SKU_Sheet_Status"]:
-        if c in po_df.columns:
-            po_df[c] = po_df[c].fillna("").astype(str)
-    num_cols = po_df.select_dtypes(include=[np.number]).columns
-    if len(num_cols) > 0:
-        po_df[num_cols] = (
-            po_df[num_cols]
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0)
-            .round(3)
-        )
-    # Days columns should always render with an explicit value in UI/export.
-    for c in ["Days_Left", "Projected_Running_Days"]:
-        if c in po_df.columns:
-            s = pd.to_numeric(po_df[c], errors="coerce")
-            po_df[c] = s.where(np.isfinite(s), 999.0).fillna(999.0).round(1)
-    rows = po_df.to_dict("records")
-    sales_through = None
-    try:
-        st = pd.to_datetime(sess.sales_df["TxnDate"], errors="coerce").max()
-        if pd.notna(st):
-            sales_through = str(pd.Timestamp(st).date())
-    except Exception:
-        pass
-    planning_out = None
-    if body.planning_date and str(body.planning_date).strip():
-        try:
-            planning_out = str(pd.Timestamp(pd.to_datetime(body.planning_date).normalize()).date())
-        except Exception:
-            planning_out = str(body.planning_date).strip()
-    _ledger_after = getattr(sess, "po_raise_ledger_df", None)
-    ledger_n = (
-        int(len(_ledger_after))
-        if _ledger_after is not None and not getattr(_ledger_after, "empty", True)
-        else 0
-    )
-    auto_msg = None
-    if ledger_auto_import and ledger_auto_import.get("ok"):
-        auto_msg = ledger_auto_import.get("message")
+    background_tasks.add_task(background_po_calculate, sid, body.model_dump())
     return {
-        "ok":      True,
-        "rows":    rows,
-        "columns": list(po_df.columns),
-        "sales_through": sales_through,
-        "planning_date": planning_out,
-        "raise_ledger_rows": ledger_n,
-        "ledger_auto_import": auto_msg,
+        "ok": True,
+        "status": "running",
+        "message": "PO calculation started. This may take 1–3 minutes on large catalogs.",
     }
 
 

@@ -82,7 +82,18 @@ def test_po_calculate_ok(client, session_for_client):
         json={"period_days": 30, "lead_time": 7, "target_days": 60, "safety_pct": 0},
     )
     assert r.status_code == 200
-    body = r.json()
+    kick = r.json()
+    assert kick.get("ok") is True
+    assert kick.get("status") == "running"
+    body = kick
+    for _ in range(30):
+        st = client.get("/api/po/calculate/status")
+        assert st.status_code == 200
+        body = st.json()
+        if body.get("status") == "done":
+            break
+        if body.get("status") == "error":
+            raise AssertionError(body.get("message") or "PO calculate failed")
     assert body.get("ok") is True
     assert body.get("rows")
     assert "PO_Qty" in body["columns"]

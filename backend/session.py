@@ -61,6 +61,11 @@ class AppSession:
     sales_rebuild_status: str = "idle"   # idle | running | done | error
     sales_rebuild_message: str = ""
 
+    # Async PO calculate (large catalogs exceed reverse-proxy timeouts).
+    po_calculate_status: str = "idle"   # idle | running | done | error
+    po_calculate_message: str = ""
+    po_calculate_result: dict = field(default_factory=dict)
+
     # After "Clear all app data", block warm-cache copy, Tier-3 SQLite restore, and
     # frontend auto Load-Cache until the user uploads again or clicks Load Cache.
     pause_auto_data_restore: bool = False
@@ -104,6 +109,9 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.daily_restored = False
     sess.sales_rebuild_status = "idle"
     sess.sales_rebuild_message = ""
+    sess.po_calculate_status = "idle"
+    sess.po_calculate_message = ""
+    sess.po_calculate_result = {}
     sess.pause_auto_data_restore = True
     sess._quarterly_cache.clear()
 

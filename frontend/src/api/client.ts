@@ -185,6 +185,45 @@ export async function waitForSalesRebuild(
   throw new Error('Sales rebuild timed out — refresh the page in a minute.')
 }
 
+export interface POCalculateResult {
+  ok: boolean
+  status?: string
+  message?: string
+  rows?: Record<string, unknown>[]
+  columns?: string[]
+  sales_through?: string | null
+  planning_date?: string | null
+  raise_ledger_rows?: number
+  ledger_auto_import?: string | null
+}
+
+/** Poll after POST /po/calculate (runs in background on the server). */
+export async function waitForPoCalculate(
+  onTick?: (message: string) => void,
+  maxMs = 600_000,
+): Promise<POCalculateResult> {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const { data } = await api.get<POCalculateResult>('/po/calculate/status', {
+      timeout: CACHE_TIMEOUT_MS,
+    })
+    const st = data.status ?? 'idle'
+    if (st === 'running') {
+      onTick?.(data.message || 'Calculating PO recommendations…')
+      await new Promise(r => setTimeout(r, 2000))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(data.message || 'PO calculation failed')
+    }
+    if (st === 'done') {
+      return data
+    }
+    await new Promise(r => setTimeout(r, 1500))
+  }
+  throw new Error('PO calculation timed out — try again in a minute.')
+}
+
 export async function buildSales(): Promise<{
   ok: boolean
   message: string

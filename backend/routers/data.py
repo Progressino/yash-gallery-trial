@@ -85,6 +85,11 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     except Exception:
         needs_data = False
 
+    # After "Clear all app data": warm-cache fill above may still be empty; do not pull
+    # Tier-3 SQLite into the session until the user uploads or clicks Load Cache.
+    if getattr(sess, "pause_auto_data_restore", False) and needs_data:
+        return
+
     if getattr(sess, "pause_auto_data_restore", False) and not needs_data:
         return
     if sess.daily_restored and not needs_data:

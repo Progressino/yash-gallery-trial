@@ -68,12 +68,14 @@ def aggregate_raise_ledger_for_po(
     as_of: pd.Timestamp,
     lookback_days: int = 14,
     group_by_parent: bool = False,
+    raise_view_date: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Per-SKU aggregates for PO math / display.
 
     Returns columns: OMS_SKU, PO_Confirmed_Raise_Pipeline, PO_Raised_Yesterday,
-    PO_Raised_Today (today = ``as_of`` calendar day, normalized).
+    PO_Raised_Today (today = ``as_of`` calendar day, normalized),
+    PO_Last_Raised_Qty, PO_Last_Raised_Date, PO_Raised_On_View_Date.
     """
     empty = pd.DataFrame(
         columns=[
@@ -81,6 +83,9 @@ def aggregate_raise_ledger_for_po(
             "PO_Confirmed_Raise_Pipeline",
             "PO_Raised_Yesterday",
             "PO_Raised_Today",
+            "PO_Last_Raised_Qty",
+            "PO_Last_Raised_Date",
+            "PO_Raised_On_View_Date",
         ]
     )
     if ledger_df is None or ledger_df.empty:
@@ -132,7 +137,53 @@ def aggregate_raise_ledger_for_po(
         .rename(columns={"Raised_Qty": "PO_Raised_Today"})
     )
     out = pipe.merge(yest, on="OMS_SKU", how="left").merge(tod, on="OMS_SKU", how="left")
-    out[["PO_Raised_Yesterday", "PO_Raised_Today"]] = out[["PO_Raised_Yesterday", "PO_Raised_Today"]].fillna(0).astype(int)
+    out[["PO_Raised_Yesterday", "PO_Raised_Today"]] = out[
+        ["PO_Raised_Yesterday", "PO_Raised_Today"]
+    ].fillna(0).astype(int)
+
+    # Most recent raise per SKU (full ledger — not limited to lookback window).
+    last_recs: list[dict] = []
+    for sku, sub in df.groupby("OMS_SKU"):
+        dmax = sub["Raised_Date"].max()
+        if pd.isna(dmax):
+            continue
+        qty = int(sub.loc[sub["Raised_Date"] == dmax, "Raised_Qty"].sum())
+        if qty <= 0:
+            continue
+        last_recs.append(
+            {
+                "OMS_SKU": sku,
+                "PO_Last_Raised_Qty": qty,
+                "PO_Last_Raised_Date": str(pd.Timestamp(dmax).date()),
+            }
+        )
+    if last_recs:
+        last_df = pd.DataFrame.from_records(last_recs)
+        out = out.merge(last_df, on="OMS_SKU", how="left")
+    else:
+        out["PO_Last_Raised_Qty"] = 0
+        out["PO_Last_Raised_Date"] = ""
+
+    # Qty raised on the UI "Raise date" picker (may be Saturday while planning day is Monday).
+    out["PO_Raised_On_View_Date"] = 0
+    if raise_view_date and str(raise_view_date).strip():
+        try:
+            vd = pd.Timestamp(pd.to_datetime(str(raise_view_date).strip()).normalize())
+            on_view = (
+                df[df["Raised_Date"] == vd]
+                .groupby("OMS_SKU", as_index=False)["Raised_Qty"]
+                .sum()
+                .rename(columns={"Raised_Qty": "PO_Raised_On_View_Date"})
+            )
+            if not on_view.empty:
+                out = out.drop(columns=["PO_Raised_On_View_Date"], errors="ignore").merge(
+                    on_view, on="OMS_SKU", how="left"
+                )
+        except Exception:
+            pass
+    out["PO_Last_Raised_Qty"] = pd.to_numeric(out.get("PO_Last_Raised_Qty"), errors="coerce").fillna(0).astype(int)
+    out["PO_Last_Raised_Date"] = out.get("PO_Last_Raised_Date", "").fillna("").astype(str)
+    out["PO_Raised_On_View_Date"] = pd.to_numeric(out["PO_Raised_On_View_Date"], errors="coerce").fillna(0).astype(int)
     return out
 
 

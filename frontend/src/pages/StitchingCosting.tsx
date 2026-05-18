@@ -72,30 +72,16 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
     setTimeout(() => setMsg(null), 5000)
   }
 
-  const syncFrom = useMutation({
-    mutationFn: () => api.post('/stitching/sync/from-gsheet'),
-    onSuccess: r => {
-      qc.invalidateQueries({ queryKey: ['stitching'] })
-      flash(r.data.ok ? 'ok' : 'err', r.data.ok ? 'Loaded from Google Sheets' : r.data.message || 'Sync failed')
-    },
-    onError: () => flash('err', 'Google Sheets sync failed'),
-  })
-
-  const syncTo = useMutation({
-    mutationFn: () => api.post('/stitching/sync/to-gsheet'),
-    onSuccess: r => flash(r.data.ok ? 'ok' : 'err', r.data.ok ? 'Saved to Google Sheets' : r.data.message || 'Sync failed'),
-  })
-
   const visibleTabs = karigarOnly ? TABS.filter(t => t.id === 'production') : TABS
 
   return (
-    <div className={`space-y-4 ${karigarOnly ? '' : 'max-w-[1600px]'}`}>
+    <div className={`space-y-4 min-w-0 ${karigarOnly ? 'overflow-x-hidden pb-24' : 'max-w-[1600px]'}`}>
       {!karigarOnly && (
       <div className="rounded-xl bg-gradient-to-br from-[#1a3a5c] via-[#2c5aa0] to-[#1e7ed4] text-white p-5 shadow-md">
         <h1 className="text-xl font-bold">🧵 Stitching Costing — Yash Gallery</h1>
         <p className="text-sm opacity-90 mt-1">
           Karigar tracking · Challan management · Style costing · Payroll
-          {status?.gsheet?.available ? ' · Google Sheets connected' : ' · Local database'}
+          · Local database
         </p>
         </div>
       )}
@@ -113,11 +99,6 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
       {!karigarOnly && (
         <>
           <BackupRestoreBar
-            gsheetAvailable={!!status?.gsheet?.available}
-            syncFromPending={syncFrom.isPending}
-            syncToPending={syncTo.isPending}
-            onPull={() => syncFrom.mutate()}
-            onPush={() => syncTo.mutate()}
             onFlash={flash}
             onRestored={() => qc.invalidateQueries({ queryKey: ['stitching'] })}
           />
@@ -675,8 +656,8 @@ function ProductionTab({
   const opOptions = ['', ...operations.map(o => o.op)]
 
   return (
-    <div className="space-y-4">
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-white p-4 rounded-xl border">
+    <div className={`space-y-4 min-w-0 ${karigarOnly ? 'pb-4' : ''}`}>
+      <div className={`grid gap-3 bg-white p-4 rounded-xl border ${karigarOnly ? 'grid-cols-1' : 'sm:grid-cols-2 lg:grid-cols-4'}`}>
         <label className="text-xs">
           <span className="font-semibold text-gray-700">Date</span>
           <input type="date" className="mt-1 w-full border rounded-lg px-3 py-2.5 text-sm touch-manipulation" value={entryDate} onChange={e => setEntryDate(e.target.value)} />
@@ -816,7 +797,7 @@ function ProductionTab({
           {saveStatus === 'error' && <span className="text-xs text-red-600">Save failed</span>}
         </div>
 
-        <div className="space-y-2 md:hidden mb-3">
+        <div className={`space-y-2 mb-3 ${karigarOnly ? '' : 'md:hidden'}`}>
           {hours.map(h => {
             if (h.col === 'H_13_14') {
               return (
@@ -863,7 +844,7 @@ function ProductionTab({
           })}
         </div>
 
-        <div className="overflow-x-auto hidden md:block">
+        <div className={`overflow-x-auto ${karigarOnly ? 'hidden' : 'hidden md:block'}`}>
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-[#1a3a5c] text-white">
@@ -937,15 +918,32 @@ function ProductionTab({
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={() => saveMut.mutate()}
-          disabled={saveMut.isPending || !karigarId || !challanNo || !style || liveSummary.totalPcs <= 0}
-          className="mt-4 w-full py-3.5 rounded-xl bg-[#002B5B] text-white font-semibold text-sm disabled:opacity-50 touch-manipulation shadow-md"
-        >
-          {saveMut.isPending ? 'Saving…' : '💾 Save now'}
-        </button>
+        {!karigarOnly && (
+          <button
+            type="button"
+            onClick={() => saveMut.mutate()}
+            disabled={saveMut.isPending || !karigarId || !challanNo || !style || liveSummary.totalPcs <= 0}
+            className="mt-4 w-full py-3.5 rounded-xl bg-[#002B5B] text-white font-semibold text-sm disabled:opacity-50 touch-manipulation shadow-md"
+          >
+            {saveMut.isPending ? 'Saving…' : '💾 Save now'}
+          </button>
+        )}
       </Section>
+
+      {karigarOnly && (
+        <div className="fixed bottom-0 left-0 right-0 z-30 p-3 bg-gradient-to-t from-gray-100 via-gray-100 to-transparent pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className="max-w-lg mx-auto">
+            <button
+              type="button"
+              onClick={() => saveMut.mutate()}
+              disabled={saveMut.isPending || !karigarId || !challanNo || !style || liveSummary.totalPcs <= 0}
+              className="w-full py-4 rounded-xl bg-[#002B5B] text-white font-bold text-base disabled:opacity-50 touch-manipulation shadow-lg"
+            >
+              {saveMut.isPending ? 'Saving…' : saveStatus === 'saved' ? '✓ Saved' : '💾 Save production'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {(entryReports?.recent_saves?.length > 0 || entryReports?.history?.length > 0) && (
         <Section title={karigarId ? "Today's saves — this karigar" : "Today's saves"}>
@@ -962,7 +960,7 @@ function ProductionTab({
         </Section>
       )}
 
-      {entryReports?.report1?.length > 0 && (
+      {!karigarOnly && entryReports?.report1?.length > 0 && (
         <Section title="Report 1 — Production summary">
           <DataTable
             rows={entryReports.report1}
@@ -971,7 +969,7 @@ function ProductionTab({
         </Section>
       )}
 
-      {entryReports?.report2_summary?.length > 0 && (
+      {!karigarOnly && entryReports?.report2_summary?.length > 0 && (
         <Section title="Report 2 — Salary vs piece value">
           <DataTable
             rows={entryReports.report2_summary}
@@ -985,7 +983,7 @@ function ProductionTab({
         </Section>
       )}
 
-      {entryReports?.report2_hourly?.length > 0 && (
+      {!karigarOnly && entryReports?.report2_hourly?.length > 0 && (
         <Section title="Report 2 — Hour-wise detail">
           <details className="text-xs">
             <summary className="cursor-pointer py-3 font-medium text-[#2c5aa0] touch-manipulation min-h-[44px]">
@@ -1371,19 +1369,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function BackupRestoreBar({
-  gsheetAvailable,
-  syncFromPending,
-  syncToPending,
-  onPull,
-  onPush,
   onFlash,
   onRestored,
 }: {
-  gsheetAvailable: boolean
-  syncFromPending: boolean
-  syncToPending: boolean
-  onPull: () => void
-  onPush: () => void
   onFlash: (type: 'ok' | 'err', text: string) => void
   onRestored: () => void
 }) {
@@ -1428,22 +1416,6 @@ function BackupRestoreBar({
       <p className="text-xs font-semibold text-[#1a3a5c]">💾 Backup & restore</p>
       <p className="text-xs text-gray-600">Data is stored on the server. Export a ZIP backup or restore from a previous export.</p>
       <div className="flex flex-wrap gap-2 items-center">
-        <button
-          type="button"
-          onClick={onPull}
-          disabled={syncFromPending || !gsheetAvailable}
-          className="text-xs px-3 py-1.5 rounded-lg border border-[#2c5aa0] text-[#2c5aa0] hover:bg-white disabled:opacity-40"
-        >
-          {syncFromPending ? 'Loading…' : '↻ Pull from Google Sheets'}
-        </button>
-        <button
-          type="button"
-          onClick={onPush}
-          disabled={syncToPending || !gsheetAvailable}
-          className="text-xs px-3 py-1.5 rounded-lg border border-[#2c5aa0] text-[#2c5aa0] hover:bg-white disabled:opacity-40"
-        >
-          {syncToPending ? 'Saving…' : '↑ Push to Google Sheets'}
-        </button>
         <button
           type="button"
           onClick={() => void handleExport()}

@@ -475,6 +475,7 @@ def calculate_po_base(
     po_raise_ledger_df: Optional[pd.DataFrame] = None,
     planning_date: Optional[str] = None,
     raise_ledger_lookback_days: int = 14,
+    raise_view_date: Optional[str] = None,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -1239,13 +1240,24 @@ def calculate_po_base(
             _as_of_plan,
             int(max(1, raise_ledger_lookback_days)),
             group_by_parent,
+            raise_view_date=raise_view_date,
         )
     if lag is not None and not lag.empty:
         po_df = po_df.merge(lag, on="OMS_SKU", how="left")
-    for c in ("PO_Confirmed_Raise_Pipeline", "PO_Raised_Yesterday", "PO_Raised_Today"):
+    for c in (
+        "PO_Confirmed_Raise_Pipeline",
+        "PO_Raised_Yesterday",
+        "PO_Raised_Today",
+        "PO_Last_Raised_Qty",
+        "PO_Raised_On_View_Date",
+    ):
         if c not in po_df.columns:
             po_df[c] = 0
         po_df[c] = pd.to_numeric(po_df[c], errors="coerce").fillna(0).astype(int)
+    if "PO_Last_Raised_Date" not in po_df.columns:
+        po_df["PO_Last_Raised_Date"] = ""
+    else:
+        po_df["PO_Last_Raised_Date"] = po_df["PO_Last_Raised_Date"].fillna("").astype(str)
 
     po_df["PO_Pipeline_Effective"] = (
         pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0).astype(int)
