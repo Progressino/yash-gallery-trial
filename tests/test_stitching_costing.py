@@ -51,6 +51,28 @@ def test_master_dedupe_and_delete():
     assert out["removed"] == 1
 
 
+def test_dashboard_many_karigars_uses_batch_rates():
+    """Dashboard must not call get_daily_rate_for_date per row (was minutes / timeout)."""
+    karigars = [
+        {
+            "Karigar_ID": f"K{i:04d}",
+            "Name": f"Karigar {i}",
+            "Skill": "Stitching",
+            "Daily_Rate_Rs": 400 + (i % 50),
+        }
+        for i in range(250)
+    ]
+    save_sheet_df("karigar_master", pd.DataFrame(karigars))
+    import time
+
+    t0 = time.perf_counter()
+    dash = svc.dashboard_summary("2026-05-15")
+    elapsed = time.perf_counter() - t0
+    assert dash["metrics"]["total_karigar"] == 250
+    assert len(dash["karigar_status"]) == 250
+    assert elapsed < 3.0
+
+
 def test_karigar_rate_by_date():
     svc.add_karigar_master("K099", "Test Karigar", "Stitching", 400.0, "2026-05-01")
     svc.update_karigar_master("K099", daily_rate_rs=500.0, effective_from="2026-05-10")

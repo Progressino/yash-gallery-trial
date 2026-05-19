@@ -752,6 +752,11 @@ def _session_skip_heavy_warm(path: str) -> bool:
         )
     )
 
+
+def _session_uses_stitching_db_only(path: str) -> bool:
+    """Stitching Costing uses SQLite — do not block on forecast session blobs."""
+    return path.startswith("/api/stitching/")
+
 # ── Auth middleware (outermost — runs first) ──────────────────
 _AUTH_EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/health"}
 
@@ -799,6 +804,22 @@ async def session_middleware(request: Request, call_next):
         request.state.session_id = None
         request.state.session = None
         return await call_next(request)
+
+    if _session_uses_stitching_db_only(path):
+        sid = request.cookies.get(SESSION_COOKIE)
+        request.state.session_id = sid
+        request.state.session = None
+        response: Response = await call_next(request)
+        if sid:
+            response.set_cookie(
+                key=SESSION_COOKIE,
+                value=sid,
+                httponly=True,
+                samesite="lax",
+                secure=_cookie_secure_from_request(request),
+                max_age=14 * 24 * 3600,
+            )
+        return response
 
     sid = request.cookies.get(SESSION_COOKIE)
     # Run in executor so a slow PostgreSQL session restore doesn't block the event loop.

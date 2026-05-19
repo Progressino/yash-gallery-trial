@@ -96,6 +96,7 @@ def dashboard_summary(planning_date: str | None = None) -> dict:
     pl = get_sheet_df("production_log")
     km = get_sheet_df("karigar_master")
     cm = get_sheet_df("challan_master")
+    rate_map = build_daily_rate_map(today)
 
     tdpl = pl[pl["Date"].astype(str) == today] if not pl.empty and "Date" in pl.columns else pd.DataFrame()
     active_k = int(tdpl["Karigar_ID"].nunique()) if not tdpl.empty else 0
@@ -108,17 +109,18 @@ def dashboard_summary(planning_date: str | None = None) -> dict:
         cm2["Pend"] = safe_num(cm2["Total_Qty"]) - safe_num(cm2.get("Received_Qty", 0))
         pend_c = int(len(cm2[cm2["Pend"] > 0]))
 
+    aids = set(tdpl["Karigar_ID"].astype(str).map(clean_key)) if not tdpl.empty else set()
     karigar_status = []
     if not km.empty:
-        aids = tdpl["Karigar_ID"].astype(str).unique().tolist() if not tdpl.empty else []
         for _, r in km.iterrows():
             kid = str(r["Karigar_ID"])
+            kid_key = clean_key(kid)
             karigar_status.append({
                 "Karigar_ID": kid,
                 "Name": str(r.get("Name", "")),
                 "Skill": str(r.get("Skill", "")),
-                "Daily_Rate_Rs": get_daily_rate_for_date(kid, today),
-                "Status": "Working" if kid in aids else "Idle",
+                "Daily_Rate_Rs": rate_map.get(kid_key, 0.0),
+                "Status": "Working" if kid_key in aids else "Idle",
             })
 
     challan_register = []
@@ -559,33 +561,52 @@ def _get_daily_salary(karigar_id: str, as_of_date: str | None = None) -> float:
     return get_daily_rate_for_date(karigar_id, as_of_date)
 
 
+def build_daily_rate_map(as_of_date: str | None = None) -> dict[str, float]:
+    """Resolve daily rates for all karigars in one pass (dashboard / payroll)."""
+    as_of = (as_of_date or str(date.today()))[:10]
+    cutoff = pd.to_datetime(as_of, errors="coerce")
+    rates: dict[str, float] = {}
+
+    km = get_sheet_df("karigar_master")
+    if not km.empty and "Karigar_ID" in km.columns:
+        kids = km["Karigar_ID"].map(clean_key)
+        vals = safe_num(km.get("Daily_Rate_Rs", 0))
+        for kid, val in zip(kids, vals, strict=False):
+            if kid:
+                rates[str(kid)] = float(val)
+
+    em = get_sheet_df("employee_master")
+    if not em.empty and "E_Code" in em.columns:
+        kids = em["E_Code"].map(clean_key)
+        vals = safe_num(em.get("Daily_Rate_Rs", 0))
+        for kid, val in zip(kids, vals, strict=False):
+            if kid and kid not in rates:
+                rates[str(kid)] = float(val)
+
+    hist = get_sheet_df("karigar_rate_history")
+    if (
+        not hist.empty
+        and "Karigar_ID" in hist.columns
+        and "Effective_From" in hist.columns
+        and pd.notna(cutoff)
+    ):
+        h = hist.copy()
+        h["_kid"] = h["Karigar_ID"].apply(clean_key)
+        h["_eff"] = pd.to_datetime(h["Effective_From"], errors="coerce")
+        h = h[h["_eff"].notna() & (h["_eff"] <= cutoff)]
+        if not h.empty:
+            h = h.sort_values("_eff", ascending=False)
+            for kid, sub in h.groupby("_kid", sort=False):
+                rates[str(kid)] = float(safe_num(sub["Daily_Rate_Rs"]).iloc[0])
+
+    return rates
+
+
 def get_daily_rate_for_date(karigar_id: str, as_of_date: str | None = None) -> float:
     kid = clean_key(karigar_id)
     if not kid:
         return 0.0
-    as_of = (as_of_date or str(date.today()))[:10]
-    hist = get_sheet_df("karigar_rate_history")
-    if not hist.empty and "Karigar_ID" in hist.columns and "Effective_From" in hist.columns:
-        h = hist[hist["Karigar_ID"].apply(clean_key) == kid].copy()
-        if not h.empty:
-            h["_eff"] = pd.to_datetime(h["Effective_From"], errors="coerce")
-            cutoff = pd.to_datetime(as_of, errors="coerce")
-            if pd.notna(cutoff):
-                h = h[h["_eff"].notna() & (h["_eff"] <= cutoff)]
-                if not h.empty:
-                    h = h.sort_values("_eff", ascending=False)
-                    return float(safe_num(h["Daily_Rate_Rs"]).iloc[0])
-    em = get_sheet_df("employee_master")
-    if not em.empty and "E_Code" in em.columns:
-        row = em[em["E_Code"].apply(clean_key) == kid]
-        if not row.empty:
-            return float(safe_num(row["Daily_Rate_Rs"]).iloc[0])
-    km = get_sheet_df("karigar_master")
-    if not km.empty:
-        row = km[km["Karigar_ID"].apply(clean_key) == kid]
-        if not row.empty and "Daily_Rate_Rs" in row.columns:
-            return float(safe_num(row["Daily_Rate_Rs"]).iloc[0])
-    return 0.0
+    return float(build_daily_rate_map(as_of_date).get(kid, 0.0))
 
 
 def production_entry_reports(date_str: str, karigar_id: str | None = None) -> dict:

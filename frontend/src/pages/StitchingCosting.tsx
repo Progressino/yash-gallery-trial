@@ -147,12 +147,28 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
 }
 
 function DashboardTab() {
-  const { data, isLoading } = useQuery<DashboardData>({
+  const { data, isLoading, isError, error } = useQuery<DashboardData>({
     queryKey: ['stitching-dashboard'],
-    queryFn: () => api.get('/stitching/dashboard').then(r => r.data),
+    queryFn: () => api.get('/stitching/dashboard', { timeout: 120_000 }).then(r => r.data),
+    retry: 1,
   })
   if (isLoading) return <p className="text-sm text-gray-500">Loading dashboard…</p>
-  if (!data) return null
+  if (isError) {
+    const msg =
+      error instanceof Error ? error.message : 'Could not load stitching dashboard.'
+    return (
+      <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+        {msg}
+      </p>
+    )
+  }
+  if (!data?.metrics) {
+    return (
+      <p className="text-sm text-gray-500">
+        No dashboard data yet. Add karigars and production entries on the Production Entry tab.
+      </p>
+    )
+  }
   const m = data.metrics
   const cards = [
     ['Active Karigar', `${m.active_karigar} / ${m.total_karigar}`],
