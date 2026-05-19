@@ -228,10 +228,19 @@ def background_po_calculate(session_id: str, body: dict) -> None:
     import threading
 
     from ..session import store
+    from .po_calculate_jobs import set_po_job
 
     sess = store.get(session_id)
     if sess is None:
+        set_po_job(session_id, status="error", ok=False, message="Session not found.")
         return
+
+    set_po_job(
+        session_id,
+        status="running",
+        ok=True,
+        message="Calculating PO recommendations…",
+    )
 
     def _sync() -> None:
         try:
@@ -250,25 +259,41 @@ def background_po_calculate(session_id: str, body: dict) -> None:
     try:
         _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
         if _inv_n > 500_000:
-            sess.po_calculate_message = (
-                f"Calculating PO (trimmed inventory window, {_inv_n:,} baseline rows)…"
-            )
+            msg = f"Calculating PO (trimmed inventory window, {_inv_n:,} baseline rows)…"
+            sess.po_calculate_message = msg
+            set_po_job(session_id, status="running", ok=True, message=msg)
         result = execute_po_calculate(sess, body, session_id=session_id, sync_sidecars=None)
         sess.po_calculate_result = result
         if result.get("ok"):
             sess.po_calculate_status = "done"
             n = int(result.get("total_rows") or 0)
-            sess.po_calculate_message = f"PO calculation complete ({n:,} rows)."
+            msg = f"PO calculation complete ({n:,} rows)."
+            sess.po_calculate_message = msg
+            set_po_job(
+                session_id,
+                status="done",
+                ok=True,
+                message=msg,
+                total_rows=n,
+                sales_through=result.get("sales_through"),
+                planning_date=result.get("planning_date"),
+                raise_ledger_rows=result.get("raise_ledger_rows"),
+                ledger_auto_import=result.get("ledger_auto_import"),
+            )
             threading.Thread(
                 target=_sync,
                 daemon=True,
                 name=f"po-save-{session_id[:8]}",
             ).start()
         else:
+            msg = result.get("message") or "PO calculation failed."
             sess.po_calculate_status = "error"
-            sess.po_calculate_message = result.get("message") or "PO calculation failed."
+            sess.po_calculate_message = msg
+            set_po_job(session_id, status="error", ok=False, message=msg)
     except Exception as e:
         logger.exception("background_po_calculate failed")
+        msg = str(e)
         sess.po_calculate_status = "error"
-        sess.po_calculate_message = str(e)
-        sess.po_calculate_result = {"ok": False, "message": str(e)}
+        sess.po_calculate_message = msg
+        sess.po_calculate_result = {"ok": False, "message": msg}
+        set_po_job(session_id, status="error", ok=False, message=msg)

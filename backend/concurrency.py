@@ -18,6 +18,12 @@ HEAVY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="erp-heavy",
 )
 
+# PO calculate runs separately so a daily-inventory parse does not queue behind PO math.
+PO_CALC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="po-calc",
+)
+
 # Session warm-cache copy, SKU bundle, PG persist helpers.
 AUX_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2,
@@ -37,5 +43,13 @@ async def run_aux(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         AUX_EXECUTOR,
+        lambda: fn(*args, **kwargs),
+    )
+
+
+async def run_po_calc(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        PO_CALC_EXECUTOR,
         lambda: fn(*args, **kwargs),
     )

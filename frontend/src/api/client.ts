@@ -244,17 +244,37 @@ function _isAxiosTimeout(e: unknown): boolean {
   return axios.isAxiosError(e) && e.code === 'ECONNABORTED'
 }
 
+function _isGateway502(e: unknown): boolean {
+  return axios.isAxiosError(e) && e.response?.status === 502
+}
+
+async function _sleep(ms: number): Promise<void> {
+  await new Promise(r => setTimeout(r, ms))
+}
+
 /** Poll after POST /po/calculate (runs in background on the server). */
 export async function waitForPoCalculate(
   onTick?: (message: string) => void,
   maxMs = 900_000,
 ): Promise<POCalculateResult> {
   const start = Date.now()
+  let gatewayRetries = 0
   while (Date.now() - start < maxMs) {
-    const { data } = await api.get<POCalculateResult & { row_count?: number }>(
-      '/po/calculate/status',
-      { timeout: POLL_TIMEOUT_MS },
-    )
+    let data: POCalculateResult & { row_count?: number }
+    try {
+      ;({ data } = await api.get<POCalculateResult & { row_count?: number }>(
+        '/po/calculate/status',
+        { timeout: POLL_TIMEOUT_MS },
+      ))
+    } catch (e: unknown) {
+      if (_isGateway502(e) && gatewayRetries < 40) {
+        gatewayRetries += 1
+        onTick?.('Server busy (502) — still calculating…')
+        await _sleep(3000)
+        continue
+      }
+      throw e
+    }
     const st = data.status ?? 'idle'
     if (st === 'running') {
       onTick?.(data.message || 'Calculating PO recommendations…')
@@ -271,16 +291,31 @@ export async function waitForPoCalculate(
       const allRows: Record<string, unknown>[] = []
       let meta: POCalculateResult = { ok: true }
       while (true) {
-        const { data: page } = await api.get<
-          POCalculateResult & {
-            offset?: number
-            total?: number
-            has_more?: boolean
+        let page: POCalculateResult & {
+          offset?: number
+          total?: number
+          has_more?: boolean
+        }
+        try {
+          ;({ data: page } = await api.get<
+            POCalculateResult & {
+              offset?: number
+              total?: number
+              has_more?: boolean
+            }
+          >('/po/calculate/result', {
+            params: { offset, limit: pageSize },
+            timeout: PO_RESULT_TIMEOUT_MS,
+          }))
+        } catch (e: unknown) {
+          if (_isGateway502(e) && gatewayRetries < 40) {
+            gatewayRetries += 1
+            onTick?.('Server busy (502) — loading results…')
+            await _sleep(3000)
+            continue
           }
-        >('/po/calculate/result', {
-          params: { offset, limit: pageSize },
-          timeout: PO_RESULT_TIMEOUT_MS,
-        })
+          throw e
+        }
         if (!page.ok) {
           throw new Error(page.message || 'Failed to load PO results')
         }

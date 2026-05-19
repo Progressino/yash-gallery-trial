@@ -371,12 +371,6 @@ export default function POEngine() {
     }
   }, [setCoverage])
 
-  useEffect(() => {
-    void refreshPoCoverage()
-    const id = window.setInterval(() => void refreshPoCoverage(), 12_000)
-    return () => window.clearInterval(id)
-  }, [refreshPoCoverage])
-
   const selectTab = useCallback(
     (t: Tab) => {
       setActiveTab(t)
@@ -396,6 +390,15 @@ export default function POEngine() {
   // ephemeral UI state (no need to persist across navigation)
   const [loading, setLoading] = useState(false)
   const [poProgress, setPoProgress] = useState('')
+
+  useEffect(() => {
+    if (loading) return
+    void refreshPoCoverage()
+    const id = window.setInterval(() => {
+      if (!loading) void refreshPoCoverage()
+    }, 12_000)
+    return () => window.clearInterval(id)
+  }, [refreshPoCoverage, loading])
   /** Quarterly pivot loads after PO (or alone on Quarterly tab); was bundled with PO and blocked the UI. */
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [shipLoading, setShipLoading] = useState(false)
@@ -572,7 +575,11 @@ export default function POEngine() {
       setResult(poRes)
     } catch (e: unknown) {
       if (seq === poRunSeqRef.current) {
-        setResult({ ok: false, message: e instanceof Error ? e.message : 'Error' })
+        const msg =
+          e instanceof Error
+            ? e.message
+            : 'PO calculation failed. If you saw 502, wait a minute and try again — the job may still finish on the server.'
+        setResult({ ok: false, message: msg })
       }
     } finally {
       if (seq === poRunSeqRef.current) {

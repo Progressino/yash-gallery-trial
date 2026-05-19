@@ -784,14 +784,19 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 def _session_skip_heavy_warm(path: str) -> bool:
-    """Poll endpoints must stay fast while a heavy PO job runs in the background."""
+    """Poll/start endpoints must stay fast while a heavy PO job runs in the background."""
+    if path.startswith("/api/po/calculate"):
+        return True
     return path.startswith(
         (
-            "/api/po/calculate/status",
-            "/api/po/calculate/result",
             "/api/po/daily-inventory-history/upload-status",
         )
     )
+
+
+def _session_po_calculate_status_poll(path: str, method: str) -> bool:
+    """Status polls only — must not block on PostgreSQL session restore."""
+    return method == "GET" and path == "/api/po/calculate/status"
 
 
 def _session_uses_stitching_db_only(path: str) -> bool:
@@ -850,6 +855,23 @@ async def session_middleware(request: Request, call_next):
         sid = request.cookies.get(SESSION_COOKIE)
         request.state.session_id = sid
         request.state.session = None
+        response: Response = await call_next(request)
+        if sid:
+            response.set_cookie(
+                key=SESSION_COOKIE,
+                value=sid,
+                httponly=True,
+                samesite="lax",
+                secure=_cookie_secure_from_request(request),
+                max_age=14 * 24 * 3600,
+            )
+        return response
+
+    if _session_po_calculate_status_poll(path, request.method):
+        sid = request.cookies.get(SESSION_COOKIE)
+        request.state.session_id = sid
+        sess = store.get(sid) if sid else None
+        request.state.session = sess
         response: Response = await call_next(request)
         if sid:
             response.set_cookie(

@@ -796,25 +796,42 @@ def po_dashboard(request: Request, body: PODashboardRequest):
 @router.get("/calculate/status")
 def po_calculate_status(request: Request):
     """Lightweight poll — status + message only (full table is on ``/calculate/result``)."""
+    from ..services.po_calculate_jobs import get_po_job
+
+    sid = getattr(request.state, "session_id", None) or ""
+    job = get_po_job(sid)
     sess = request.state.session
-    if sess is None:
-        return {"ok": False, "status": "error", "message": "No session"}
-    st = getattr(sess, "po_calculate_status", "idle") or "idle"
-    msg = getattr(sess, "po_calculate_message", "") or ""
+    st = (
+        job.get("status")
+        or (getattr(sess, "po_calculate_status", None) if sess is not None else None)
+        or "idle"
+    )
+    msg = (
+        job.get("message")
+        or (getattr(sess, "po_calculate_message", "") if sess is not None else "")
+        or ""
+    )
     out: dict = {"status": st, "message": msg}
     if st == "error":
-        result = getattr(sess, "po_calculate_result", None) or {}
-        out["ok"] = False
-        if result.get("message"):
-            out["message"] = result["message"]
+        out["ok"] = bool(job.get("ok", False))
+        if job.get("message"):
+            out["message"] = job["message"]
+        elif sess is not None:
+            result = getattr(sess, "po_calculate_result", None) or {}
+            if result.get("message"):
+                out["message"] = result["message"]
     elif st == "done":
-        result = getattr(sess, "po_calculate_result", None) or {}
-        out["ok"] = bool(result.get("ok", True))
-        po_df = getattr(sess, "po_calculate_result_df", None)
-        if po_df is not None and hasattr(po_df, "__len__") and not getattr(po_df, "empty", True):
-            out["row_count"] = int(len(po_df))
-        else:
-            out["row_count"] = len(result.get("rows") or []) or int(result.get("total_rows") or 0)
+        out["ok"] = bool(job.get("ok", True))
+        if job.get("total_rows") is not None:
+            out["row_count"] = int(job["total_rows"])
+        elif sess is not None:
+            result = getattr(sess, "po_calculate_result", None) or {}
+            out["ok"] = bool(result.get("ok", True))
+            po_df = getattr(sess, "po_calculate_result_df", None)
+            if po_df is not None and hasattr(po_df, "__len__") and not getattr(po_df, "empty", True):
+                out["row_count"] = int(len(po_df))
+            else:
+                out["row_count"] = len(result.get("rows") or []) or int(result.get("total_rows") or 0)
     else:
         out["ok"] = True
     return out
@@ -901,15 +918,17 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     sess.po_calculate_result = {}
     sess.po_calculate_result_df = pd.DataFrame()
 
-    from ..concurrency import HEAVY_EXECUTOR
+    from ..concurrency import run_po_calc
+    from ..services.po_calculate_jobs import set_po_job
     from ..services.po_calculate_run import background_po_calculate
 
-    asyncio.get_running_loop().run_in_executor(
-        HEAVY_EXECUTOR,
-        background_po_calculate,
+    set_po_job(
         sid,
-        body.model_dump(),
+        status="running",
+        ok=True,
+        message=sess.po_calculate_message,
     )
+    await run_po_calc(background_po_calculate, sid, body.model_dump())
     return {
         "ok": True,
         "status": "running",
