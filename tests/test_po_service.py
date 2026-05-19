@@ -1339,6 +1339,46 @@ def _wide_inv_history_workbook():
     return buf
 
 
+def test_daily_inventory_date_map_uses_row1_when_row0_missing_trailing_column():
+    """New 'today' columns often have the date stamp in row 1, not row 0."""
+    from backend.services.daily_inventory_history import _parse_one_sheet
+
+    df = pd.DataFrame(
+        [
+            ["Item SkuCode", "Item", 100, 110, ""],
+            ["", "", "2026-05-17", "2026-05-18", "2026-05-19"],
+            ["SKU-A", "PARENT", 5, 6, 7],
+        ]
+    )
+    tall = _parse_one_sheet(df, {})
+    assert not tall.empty
+    by_date = tall.groupby("Date")["Qty"].sum()
+    assert float(by_date[pd.Timestamp("2026-05-19")]) == 7.0
+
+
+def test_merge_inventory_history_keeps_newest_snapshot_day():
+    from backend.services.daily_inventory_history import merge_inventory_history
+
+    old = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A", "SKU-A"],
+            "Date": pd.to_datetime(["2026-05-17", "2026-05-18"]),
+            "Qty": [10.0, 11.0],
+        }
+    )
+    new = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"],
+            "Date": pd.to_datetime(["2026-05-19"]),
+            "Qty": [20.0],
+        }
+    )
+    merged = merge_inventory_history(old, new)
+    assert len(merged) == 3
+    row = merged[merged["Date"] == pd.Timestamp("2026-05-19")].iloc[0]
+    assert int(row["Qty"]) == 20
+
+
 def test_daily_inventory_history_parser_picks_variant_columns():
     from backend.services.daily_inventory_history import parse_daily_inventory_history_upload
 

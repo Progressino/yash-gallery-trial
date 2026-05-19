@@ -71,12 +71,25 @@ def execute_daily_inventory_upload(
     # on multi-year baselines (e.g. 30M rows → ~3.5M for a 9,500-SKU catalog).
     df, trim_note = _trim_history_to_recent(df, _MAX_HISTORY_DAYS)
 
+    from .daily_inventory_history import merge_inventory_history
+
+    existing = getattr(sess, "daily_inventory_history_df", None)
+    if existing is not None and not existing.empty:
+        df = merge_inventory_history(existing, df)
+        df, trim_note2 = _trim_history_to_recent(df, _MAX_HISTORY_DAYS)
+        if trim_note2:
+            trim_note = (trim_note + " " + trim_note2).strip() if trim_note else trim_note2
+
     sess.daily_inventory_history_df = df
     sess._quarterly_cache.clear()
     skus = int(df["OMS_SKU"].nunique())
     dates_norm = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
     days = int(dates_norm.nunique())
+    min_d = dates_norm.min()
+    max_d = dates_norm.max()
     msg = f"Loaded {len(df):,} SKU-day rows ({skus:,} SKUs × {days:,} days) for effective-days math."
+    if pd.notna(min_d) and pd.notna(max_d):
+        msg += f" Snapshot range: {pd.Timestamp(min_d).date()} → {pd.Timestamp(max_d).date()}."
     if trim_note:
         msg += f" Note: {trim_note}"
     return {
@@ -84,6 +97,8 @@ def execute_daily_inventory_upload(
         "rows": int(len(df)),
         "skus": skus,
         "days": days,
+        "min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
+        "max_date": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else "",
         "message": msg,
     }
 

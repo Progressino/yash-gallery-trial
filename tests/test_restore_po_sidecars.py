@@ -50,6 +50,17 @@ def test_restore_po_sidecars_skips_when_session_already_has_data(warm_with_po_si
     assert sess.sku_status_lead_df.iloc[0]["SKU"] == "X"
 
 
+def test_restore_po_sidecars_merges_inventory_when_both_have_rows(warm_with_po_sidecars):
+    """Session keeps its rows and gains any SKU-days present only in warm cache."""
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        {"OMS_SKU": ["X"], "Date": pd.to_datetime(["2026-02-01"]), "Qty": [1]}
+    )
+    changed = restore_po_sidecars_from_warm(sess)
+    assert changed is True
+    assert len(sess.daily_inventory_history_df) >= 2
+
+
 def test_merge_po_optional_sheets_updates_warm_cache():
     import backend.main as main
 

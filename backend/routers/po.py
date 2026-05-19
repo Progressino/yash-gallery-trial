@@ -282,6 +282,9 @@ def po_get_daily_inventory_history_for_sku(
     target = canon(sku)
     work = df.copy()
     work["OMS_SKU"] = work["OMS_SKU"].astype(str).map(canon)
+    if "Source" not in work.columns:
+        work["Source"] = "uploaded"
+    uploaded_snap = work.copy()
     # Auto-extend with sales-derived snapshots so the drawer shows the same
     # data the engine used to compute Eff_Days (including days after baseline).
     sales_for_ext = sess.sales_df if hasattr(sess, "sales_df") else None
@@ -292,6 +295,10 @@ def po_get_daily_inventory_history_for_sku(
             work = work_ext
     except Exception:
         pass  # fall back to the raw upload
+    # Uploaded snapshots always win over derived for the same calendar day.
+    if not uploaded_snap.empty:
+        uploaded_snap["Source"] = "uploaded"
+        work = pd.concat([work, uploaded_snap], ignore_index=True)
     sub = work[work["OMS_SKU"] == target].copy()
     parent_used = False
     if sub.empty:
@@ -321,8 +328,14 @@ def po_get_daily_inventory_history_for_sku(
     )
 
     sub = sub.sort_values("Date")
-    # Anchor at today so the drawer reflects the engine's "last N days" intent.
-    # Caller can override with end_date if they want a specific reference.
+    uploaded_only = sub[sub["Source"].astype(str) == "uploaded"] if "Source" in sub.columns else sub
+    uploaded_max = (
+        pd.Timestamp(uploaded_only["Date"].max()).normalize()
+        if not uploaded_only.empty and pd.notna(uploaded_only["Date"].max())
+        else None
+    )
+    # Anchor at latest uploaded snapshot (or today) so today's upload is visible
+    # even when sales / derived roll-forward only run through yesterday.
     today_norm = pd.Timestamp.now().normalize()
     if end_date:
         try:
@@ -331,6 +344,8 @@ def po_get_daily_inventory_history_for_sku(
             end_ts = today_norm
     else:
         end_ts = today_norm
+    if uploaded_max is not None:
+        end_ts = max(end_ts, uploaded_max)
     start_ts = end_ts - pd.Timedelta(days=max(0, int(window_days) - 1))
     win = sub[(sub["Date"] >= start_ts) & (sub["Date"] <= end_ts)].copy()
     in_stock_days = int((win["Qty"] >= IN_STOCK_MIN_QTY).sum())

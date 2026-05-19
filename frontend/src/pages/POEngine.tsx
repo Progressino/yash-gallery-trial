@@ -267,6 +267,7 @@ export default function POEngine() {
   // Per-SKU inventory history drill-down (lets the user verify the "Eff Days" math).
   const [effInvSku, setEffInvSku] = useState<string | null>(null)
   const [effInvLoading, setEffInvLoading] = useState(false)
+  const [dailyInvMaxDate, setDailyInvMaxDate] = useState<string | null>(null)
   const [effInvData, setEffInvData] = useState<{
     sku: string
     canonical_sku?: string
@@ -289,7 +290,11 @@ export default function POEngine() {
     setEffInvData(null)
     try {
       const { data } = await api.get('/po/daily-inventory-history/sku', {
-        params: { sku, window_days: Math.max(7, Math.min(365, windowDays || 30)) },
+        params: {
+          sku,
+          window_days: Math.max(7, Math.min(365, windowDays || 30)),
+          end_date: dailyInvMaxDate || calendarDateIST(),
+        },
       })
       if (data?.ok) setEffInvData(data)
     } catch {
@@ -338,9 +343,13 @@ export default function POEngine() {
       const [cov, skuRes, invRes] = await Promise.all([
         getCoverage(),
         api.get<{ ok?: boolean; loaded?: boolean; rows?: unknown[] }>('/po/sku-status-lead'),
-        api.get<{ ok?: boolean; loaded?: boolean; rows?: number; skus?: number }>(
-          '/po/daily-inventory-history',
-        ),
+        api.get<{
+          ok?: boolean
+          loaded?: boolean
+          rows?: number
+          skus?: number
+          max_date?: string
+        }>('/po/daily-inventory-history'),
       ])
       const merged = { ...cov }
       if (skuRes.data?.loaded) {
@@ -353,6 +362,7 @@ export default function POEngine() {
         merged.daily_inventory_history = true
         merged.daily_inventory_history_rows = invRes.data.rows ?? merged.daily_inventory_history_rows
         merged.daily_inventory_history_skus = invRes.data.skus ?? merged.daily_inventory_history_skus
+        if (invRes.data.max_date) setDailyInvMaxDate(invRes.data.max_date)
       }
       setCoverage(merged)
     } catch {
@@ -526,6 +536,7 @@ export default function POEngine() {
             result.message ||
             `Loaded ${result.rows ?? 0} rows (${result.skus ?? 0} SKUs × ${result.days ?? 0} days).`,
         })
+        if (result.max_date) setDailyInvMaxDate(result.max_date)
         setCoverage({
           ...useSession.getState(),
           daily_inventory_history: true,
@@ -1198,6 +1209,12 @@ export default function POEngine() {
                   {dailyInvLoaded ? (
                     <span className="text-green-700 font-medium">
                       ✓ {dailyInvRows.toLocaleString()} rows · {dailyInvSkus.toLocaleString()} SKUs loaded
+                      {dailyInvMaxDate ? (
+                        <span className="text-gray-600 font-normal">
+                          {' '}
+                          · latest snapshot <strong>{dailyInvMaxDate}</strong>
+                        </span>
+                      ) : null}
                     </span>
                   ) : (
                     <span>No sheet loaded (optional)</span>

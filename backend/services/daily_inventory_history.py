@@ -55,9 +55,24 @@ def _is_date_value(v) -> bool:
         return False
     if isinstance(v, (pd.Timestamp,)):
         return True
+    # Wide inventory sheets use integer column headers for on-hand totals (e.g. 150).
+    # Those must not be treated as Excel serial dates.
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        fv = float(v)
+        if fv < 40_000 or fv > 60_000:
+            return False
+        try:
+            ts = pd.to_datetime(fv, unit="D", origin="1899-12-30", errors="coerce")
+            if ts is None or pd.isna(ts):
+                return False
+            return 2015 <= int(ts.year) <= 2035
+        except Exception:
+            return False
     try:
         ts = pd.to_datetime(v, errors="coerce")
-        return ts is not None and not pd.isna(ts)
+        if ts is None or pd.isna(ts):
+            return False
+        return 2015 <= int(ts.year) <= 2035
     except Exception:
         return False
 
@@ -119,6 +134,118 @@ def _detect_parent_column(df: pd.DataFrame, sku_idx: int) -> Optional[int]:
     return candidates[0] if candidates else None
 
 
+def _row_date_hints(df: pd.DataFrame, row_idx: int, skip_cols: set[int]) -> dict[int, pd.Timestamp]:
+    out: dict[int, pd.Timestamp] = {}
+    if row_idx < 0 or row_idx >= len(df):
+        return out
+    row = df.iloc[row_idx]
+    for i, val in enumerate(row.values):
+        if i in skip_cols:
+            continue
+        if _is_date_value(val):
+            try:
+                ts = pd.to_datetime(val, errors="coerce")
+                if pd.notna(ts):
+                    out[i] = pd.Timestamp(ts).normalize()
+            except Exception:
+                pass
+    return out
+
+
+def _build_column_date_map(
+    df: pd.DataFrame,
+    sku_idx: int,
+    parent_idx: Optional[int],
+) -> tuple[dict[int, pd.Timestamp], int]:
+    """Map column index → snapshot date; return (date_map, first_data_row_index).
+
+    Yash exports put dates in row 0 for most columns; a newly added "today"
+  column may have its date only in row 1. Union hints from the first few rows
+    and column headers instead of picking only row 0 OR only headers.
+    """
+    skip = {sku_idx}
+    if parent_idx is not None:
+        skip.add(parent_idx)
+
+    header_dates: dict[int, pd.Timestamp] = {}
+    for i, col in enumerate(df.columns):
+        if i in skip:
+            continue
+        if isinstance(col, (pd.Timestamp,)) or _is_date_value(col):
+            try:
+                ts = pd.to_datetime(col, errors="coerce")
+                if pd.notna(ts):
+                    header_dates[i] = pd.Timestamp(ts).normalize()
+            except Exception:
+                pass
+
+    row_maps: list[dict[int, pd.Timestamp]] = []
+    for ridx in range(min(4, len(df))):
+        rm = _row_date_hints(df, ridx, skip)
+        if rm:
+            row_maps.append(rm)
+
+    date_map: dict[int, pd.Timestamp] = {}
+    if row_maps:
+        primary = max(row_maps, key=len)
+        date_map.update(primary)
+        for rm in row_maps:
+            for i, d in rm.items():
+                date_map.setdefault(i, d)
+    for i, d in header_dates.items():
+        date_map.setdefault(i, d)
+
+    header_row_count = 0
+    if date_map:
+        positions = sorted(date_map.keys())
+        for ridx in range(min(4, len(df))):
+            row = df.iloc[ridx]
+            hits = 0
+            for i in positions:
+                if i >= len(row):
+                    continue
+                if _is_date_value(row.iloc[i]):
+                    hits += 1
+            if hits >= max(2, len(positions) // 3):
+                header_row_count = ridx + 1
+
+    return date_map, header_row_count
+
+
+def merge_inventory_history(
+    existing: Optional[pd.DataFrame],
+    incoming: pd.DataFrame,
+) -> pd.DataFrame:
+    """Union SKU-day rows; keep max qty when both frames have the same key."""
+    if incoming is None or incoming.empty:
+        return existing if existing is not None else pd.DataFrame(columns=_TALL_COLS)
+    if existing is None or existing.empty:
+        return incoming[_TALL_COLS].copy()
+    ex = existing[[c for c in _TALL_COLS if c in existing.columns]].copy()
+    inc = incoming[_TALL_COLS].copy()
+    combined = pd.concat([ex, inc], ignore_index=True)
+    combined["Date"] = pd.to_datetime(combined["Date"], errors="coerce").dt.normalize()
+    combined["Qty"] = pd.to_numeric(combined["Qty"], errors="coerce")
+    combined = combined.dropna(subset=["Date", "OMS_SKU"])
+    combined = combined[combined["OMS_SKU"].astype(str).str.len() > 0]
+    combined = combined.dropna(subset=["Qty"])
+    if combined.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
+    return (
+        combined.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"]
+        .max()
+        .sort_values(["OMS_SKU", "Date"])
+        .reset_index(drop=True)
+    )
+
+
+def inventory_history_max_date(df: Optional[pd.DataFrame]) -> Optional[pd.Timestamp]:
+    if df is None or df.empty or "Date" not in df.columns:
+        return None
+    mx = pd.to_datetime(df["Date"], errors="coerce").max()
+    return pd.Timestamp(mx).normalize() if pd.notna(mx) else None
+
+
 def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=_TALL_COLS)
@@ -129,42 +256,13 @@ def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> p
         return pd.DataFrame(columns=_TALL_COLS)
     parent_idx = _detect_parent_column(df, sku_idx)
 
-    # Excel quirk: first data row carries the date in date columns. Build the
-    # column→date map from row 0 (and the header itself when it's already a date).
-    header_dates: dict[int, pd.Timestamp] = {}
-    for i, col in enumerate(df.columns):
-        if i in (sku_idx, parent_idx):
-            continue
-        if isinstance(col, (pd.Timestamp,)) or _is_date_value(col):
-            try:
-                ts = pd.to_datetime(col, errors="coerce")
-                if pd.notna(ts):
-                    header_dates[i] = pd.Timestamp(ts).normalize()
-            except Exception:
-                pass
-
-    first_row_dates: dict[int, pd.Timestamp] = {}
-    if df.shape[0] > 0:
-        first = df.iloc[0]
-        for i, val in enumerate(first.values):
-            if i in (sku_idx, parent_idx):
-                continue
-            if _is_date_value(val):
-                try:
-                    ts = pd.to_datetime(val, errors="coerce")
-                    if pd.notna(ts):
-                        first_row_dates[i] = pd.Timestamp(ts).normalize()
-                except Exception:
-                    pass
-
-    use_first_row_for_dates = bool(first_row_dates) and len(first_row_dates) >= len(header_dates)
-    date_map = first_row_dates if use_first_row_for_dates else header_dates
+    date_map, header_row_count = _build_column_date_map(df, sku_idx, parent_idx)
     if not date_map:
         # Sheet shape unrecognised — fail silently for this sheet, parser keeps trying others.
         return pd.DataFrame(columns=_TALL_COLS)
 
-    # Slice to data rows only.
-    body = df.iloc[1:] if use_first_row_for_dates else df
+    # Slice to data rows only (skip label/date header rows).
+    body = df.iloc[header_row_count:] if header_row_count > 0 else df
     if body.empty:
         return pd.DataFrame(columns=_TALL_COLS)
 

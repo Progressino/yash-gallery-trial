@@ -183,12 +183,25 @@ def restore_po_sidecars_from_warm(sess) -> bool:
     changed = False
     for key in _PO_SIDECAR_KEYS:
         cur = getattr(sess, key, None)
+        wc = _warm_cache.get(key)
+        if wc is None or not hasattr(wc, "empty") or wc.empty:
+            continue
+        if key == "daily_inventory_history_df":
+            from .services.daily_inventory_history import merge_inventory_history
+
+            if cur is not None and hasattr(cur, "empty") and not cur.empty:
+                merged = merge_inventory_history(cur, wc)
+                if len(merged) != len(cur) or not merged.equals(cur):
+                    setattr(sess, key, merged)
+                    changed = True
+            else:
+                setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
+                changed = True
+            continue
         if cur is not None and hasattr(cur, "empty") and not cur.empty:
             continue
-        wc = _warm_cache.get(key)
-        if wc is not None and hasattr(wc, "empty") and not wc.empty:
-            setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
-            changed = True
+        setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
+        changed = True
     if changed:
         sess._quarterly_cache.clear()
     return changed
