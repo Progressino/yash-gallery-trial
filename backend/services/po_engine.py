@@ -1384,10 +1384,14 @@ def calculate_po_base(
     else:
         po_df["PO_Last_Raised_Date"] = po_df["PO_Last_Raised_Date"].fillna("").astype(str)
 
-    po_df["PO_Pipeline_Effective"] = (
-        pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0).astype(int)
-        + pd.to_numeric(po_df["PO_Confirmed_Raise_Pipeline"], errors="coerce").fillna(0).astype(int)
-    )
+    _pipe_total_s = pd.to_numeric(po_df["PO_Pipeline_Total"], errors="coerce").fillna(0).astype(int)
+    _conf_raise_s = pd.to_numeric(po_df["PO_Confirmed_Raise_Pipeline"], errors="coerce").fillna(0).astype(int)
+    # Confirmed raises bridge the gap between "confirmed in app" and "reflected in existing-PO
+    # upload."  Once the uploaded existing-PO already carries that pipeline (PO_Pipeline_Total > 0),
+    # only count the EXCESS confirmed raises to avoid double-counting the same orders.
+    # effective = PO_Pipeline_Total + max(0, confirmed_raises − PO_Pipeline_Total)
+    #           = max(PO_Pipeline_Total, confirmed_raises)
+    po_df["PO_Pipeline_Effective"] = np.maximum(_pipe_total_s.to_numpy(), _conf_raise_s.to_numpy()).astype(int)
 
     # Sheet formula:
     # projected_days_now = (Total_Inventory + effective pipeline) / ADS
