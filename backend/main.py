@@ -466,6 +466,15 @@ def _do_load_warm_cache() -> bool:
 
         # ── Phase 2: GitHub historical cache (network, slow) ──────────────────
         # Provides data for dates not yet in the SQLite daily store.
+        # ── Free Phase-0/Phase-1 intermediates before Phase-2 allocates GitHub data ──
+        import gc as _gc
+        try:
+            del p1_raw, p1
+        except Exception:
+            pass
+        if disk_ok and disk_data is not None:
+            disk_data = None
+        _gc.collect()
         ok, msg, loaded = load_cache_from_drive()
         if not ok or not loaded:
             log.warning("Warm-cache Phase 2 (GitHub) failed: %s", msg)
@@ -546,6 +555,11 @@ def _do_load_warm_cache() -> bool:
             if phase1_ok:
                 loaded.setdefault("sales_df", _warm_cache.get("sales_df", pd.DataFrame()))
 
+        try:
+            del daily
+        except Exception:
+            pass
+        _gc.collect()
         _warm_cache = loaded
         _warm_cache_loaded_at = datetime.now(IST)
         _warm_cache_generation += 1   # generation 2+ = Phase-2 GitHub+SQLite data
