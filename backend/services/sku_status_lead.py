@@ -165,37 +165,35 @@ def parse_sku_status_lead_dataframe(
 
     _map = sku_mapping if sku_mapping is not None else {}
 
-    out_rows = []
-    for _, row in df.iterrows():
-        raw = row.get(sku_col)
+    def _norm_sku(raw) -> str:
         if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-            continue
+            return ""
         tok = normalize_id_token_for_mapping(str(raw).strip())
         s = clean_sku(tok or raw)
         if not s:
-            continue
-        s = _strip_pl_sku(s, _map)
-        if status_col:
-            st = row.get(status_col)
-            st_str = "" if pd.isna(st) else str(st).strip()
-        else:
-            st_str = ""
-        ld = pd.to_numeric(row.get(lead_col), errors="coerce")
-        out_rows.append(
-            {
-                "OMS_SKU": s,
-                "SKU_Sheet_Status": st_str,
-                "Lead_Time_From_Sheet": float(ld) if pd.notna(ld) else float("nan"),
-                "SKU_Sheet_Closed": is_closed_sku_status(st_str),
-            }
-        )
+            return ""
+        return _strip_pl_sku(s, _map)
 
-    out = pd.DataFrame(out_rows)
-    if out.empty:
+    oms = df[sku_col].map(_norm_sku)
+    mask = oms.str.len() > 0
+    if not bool(mask.any()):
         return pd.DataFrame(columns=["OMS_SKU", "SKU_Sheet_Status", "Lead_Time_From_Sheet", "SKU_Sheet_Closed"])
+
+    if status_col:
+        status = df.loc[mask, status_col].fillna("").astype(str).str.strip()
+    else:
+        status = pd.Series([""] * int(mask.sum()), index=df.index[mask])
+    out = pd.DataFrame(
+        {
+            "OMS_SKU": oms[mask].values,
+            "SKU_Sheet_Status": status.values,
+            "Lead_Time_From_Sheet": pd.to_numeric(df.loc[mask, lead_col], errors="coerce").values,
+        }
+    )
+    out["SKU_Sheet_Closed"] = out["SKU_Sheet_Status"].map(is_closed_sku_status)
     # Last row wins duplicate SKUs
     out = out.drop_duplicates(subset=["OMS_SKU"], keep="last")
-    return out
+    return out.reset_index(drop=True)
 
 
 def parse_sku_status_lead_upload(

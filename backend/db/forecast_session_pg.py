@@ -283,7 +283,14 @@ def debounced_persist_session(session_id: str, sess, delay: float = 8.0) -> None
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        persist_session_bundle(session_id, sess)
+        import threading
+
+        threading.Thread(
+            target=persist_session_bundle,
+            args=(session_id, sess),
+            daemon=True,
+            name=f"pg-persist-{session_id[:8]}",
+        ).start()
         return
 
     h = _pending_persist_handles.get(session_id)

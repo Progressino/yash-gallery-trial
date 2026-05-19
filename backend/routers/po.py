@@ -19,12 +19,19 @@ router = APIRouter()
 _IST = ZoneInfo("Asia/Kolkata")
 
 
-def _sync_po_sidecars_to_durable_storage(request: Request, sess) -> None:
+def _sync_po_sidecars_to_durable_storage(
+    request: Request,
+    sess,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> None:
     """Mirror PO-only uploads into warm cache + PostgreSQL session bundle.
 
     Without this, daily inventory / SKU status lived only in the current process
     until a full cache save — new logins or ``/api/data/coverage`` looked empty
     even though sales roll-forward was already implemented server-side.
+
+    Full session bundles can be large (sales + inventory). Persist asynchronously
+    so uploads return quickly and reverse proxies do not 502.
     """
     try:
         import backend.main as _main
@@ -36,9 +43,18 @@ def _sync_po_sidecars_to_durable_storage(request: Request, sess) -> None:
     if not sid:
         return
     try:
-        from ..db.forecast_session_pg import persist_session_bundle
+        from ..db.forecast_session_pg import (
+            debounced_persist_session,
+            persist_session_bundle_thread_safe,
+            pg_session_persist_enabled,
+        )
 
-        persist_session_bundle(sid, sess)
+        if not pg_session_persist_enabled():
+            return
+        if background_tasks is not None:
+            background_tasks.add_task(persist_session_bundle_thread_safe, sid, sess)
+        else:
+            debounced_persist_session(sid, sess, delay=3.0)
     except Exception:
         logging.getLogger(__name__).exception("PostgreSQL persist after PO sidecar upload failed")
 
@@ -82,7 +98,11 @@ class RaiseConfirmBody(BaseModel):
 
 
 @router.post("/sku-status-lead")
-async def po_upload_sku_status_lead(request: Request, file: UploadFile = File(...)):
+async def po_upload_sku_status_lead(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
     """Upload optional SKU status & per-SKU lead overrides (Excel/CSV): SKU + Lead time columns required; Status optional."""
     sess = request.state.session
     if sess is None:
@@ -104,7 +124,7 @@ async def po_upload_sku_status_lead(request: Request, file: UploadFile = File(..
         return {"ok": False, "message": "No valid SKU rows found (need SKU and Lead time columns; Status is optional)."}
     sess.sku_status_lead_df = df
     sess._quarterly_cache.clear()
-    _sync_po_sidecars_to_durable_storage(request, sess)
+    _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
     return {"ok": True, "rows": int(len(df)), "message": f"Loaded {len(df)} SKU rows (status + lead time) for PO."}
 
 
@@ -131,7 +151,11 @@ def po_get_sku_status_lead(request: Request):
 
 
 @router.post("/daily-inventory-history")
-async def po_upload_daily_inventory_history(request: Request, file: UploadFile = File(...)):
+async def po_upload_daily_inventory_history(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
     """Upload Daily Inventory History (wide-format Excel: SKU rows × date columns)."""
     sess = request.state.session
     if sess is None:
@@ -157,7 +181,7 @@ async def po_upload_daily_inventory_history(request: Request, file: UploadFile =
         }
     sess.daily_inventory_history_df = df
     sess._quarterly_cache.clear()
-    _sync_po_sidecars_to_durable_storage(request, sess)
+    _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
     skus = int(df["OMS_SKU"].nunique())
     days = int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique())
     return {
@@ -377,6 +401,7 @@ def po_raise_confirm(request: Request, body: RaiseConfirmBody):
 @router.post("/raise-ledger/archive-export")
 async def po_raise_ledger_archive_export(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     raised_date: str = Form(""),
 ):
@@ -420,7 +445,7 @@ async def po_raise_ledger_archive_export(
             replace_day=True,
         )
         if imp.get("ok"):
-            _sync_po_sidecars_to_durable_storage(request, sess)
+            _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
             ledger_msg = (
                 f" Recorded {imp.get('imported_skus', 0):,} SKU(s) / "
                 f"{imp.get('total_units', 0):,} units in the raise ledger."
@@ -439,6 +464,7 @@ async def po_raise_ledger_archive_export(
 @router.post("/raise-ledger/import-file")
 async def po_raise_ledger_import_file(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     raised_date: str = Form(""),
     group_by_parent: str = Form("false"),
@@ -446,13 +472,14 @@ async def po_raise_ledger_import_file(
 ):
     """Same as import-csv but accepts Excel (.xlsx) PO recommendation exports."""
     return await po_raise_ledger_import_csv(
-        request, file, raised_date, group_by_parent, replace_day
+        request, background_tasks, file, raised_date, group_by_parent, replace_day
     )
 
 
 @router.post("/raise-ledger/import-csv")
 async def po_raise_ledger_import_csv(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     raised_date: str = Form(""),
     group_by_parent: str = Form("false"),
@@ -505,7 +532,7 @@ async def po_raise_ledger_import_csv(
             save_archive(sid, as_dt, raw)
         except Exception:
             logging.getLogger(__name__).exception("save_archive on import failed")
-    _sync_po_sidecars_to_durable_storage(request, sess)
+    _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
     out["message"] = (
         f"{out['message']} Run Calculate PO to refresh columns."
     )
@@ -565,6 +592,7 @@ def po_get_raise_ledger(request: Request):
 @router.post("/returns/import-file")
 async def po_returns_import_file(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     group_by_parent: str = Form("false"),
     replace: str = Form("true"),
@@ -589,7 +617,7 @@ async def po_returns_import_file(
     if err:
         return {"ok": False, "message": err}
     out = apply_return_overlay_import(sess, overlay, replace=rep)
-    _sync_po_sidecars_to_durable_storage(request, sess)
+    _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
     out["message"] = f"{out['message']} Run Calculate PO to refresh the table."
     return out
 

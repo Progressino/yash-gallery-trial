@@ -436,7 +436,10 @@ export default function POEngine() {
       const { data } = await api.post<{ ok: boolean; message?: string; rows?: number }>(
         '/po/sku-status-lead',
         fd,
-        { headers: { 'Content-Type': 'multipart/form-data' } },
+        {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 120_000,
+        },
       )
       if (data.ok) {
         setSkuUploadMsg({ type: 'ok', text: data.message || `Loaded ${data.rows ?? 0} rows.` })
