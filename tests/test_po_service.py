@@ -1972,6 +1972,41 @@ def test_raise_ledger_last_and_view_date_columns():
     assert int(a["PO_Raised_Yesterday"]) == 0
 
 
+def test_raise_ledger_parent_total_not_applied_when_sizes_exist():
+    """Parent-level raise row must not fill sizes that have no row when other sizes do."""
+    from backend.services.po_engine import calculate_po_base
+
+    sales = _minimal_sales()
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["STYLE-A-S", "STYLE-A-M", "STYLE-A-3XL"],
+            "Total_Inventory": [10, 10, 10],
+        }
+    )
+    ledger = pd.DataFrame(
+        {
+            "OMS_SKU": ["STYLE-A", "STYLE-A-M"],
+            "Raised_Qty": [2100, 350],
+            "Raised_Date": [pd.Timestamp("2026-05-15")] * 2,
+        }
+    )
+    po = calculate_po_base(
+        sales,
+        inv,
+        30,
+        30,
+        90,
+        safety_pct=0.0,
+        planning_date="2026-05-16",
+        po_raise_ledger_df=ledger,
+        raise_ledger_lookback_days=14,
+    )
+    by_sku = po.set_index("OMS_SKU")
+    assert int(by_sku.loc["STYLE-A-M", "PO_Confirmed_Raise_Pipeline"]) == 350
+    assert int(by_sku.loc["STYLE-A-3XL", "PO_Confirmed_Raise_Pipeline"]) == 0
+    assert int(by_sku.loc["STYLE-A-S", "PO_Confirmed_Raise_Pipeline"]) == 0
+
+
 def test_raise_ledger_per_size_not_parent_broadcast():
     """Each size gets its own raised qty; parent total must not copy to every variant."""
     from backend.services.po_engine import calculate_po_base

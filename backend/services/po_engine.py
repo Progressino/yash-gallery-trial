@@ -1336,11 +1336,23 @@ def calculate_po_base(
             if not parent_lag.empty:
                 parent_lag["_raise_parent"] = parent_lag["OMS_SKU"].map(_raise_parent_key)
                 parent_lag = parent_lag.drop_duplicates(subset=["_raise_parent"], keep="last")
+                # If any per-size ledger rows exist for a parent, do not broadcast the parent
+                # total onto other sizes (e.g. parent 2100 + 5XL 350 must not give 3XL 2100).
+                parents_with_variant_ledger: set[str] = set()
+                for raw in lag["OMS_SKU"].astype(str):
+                    key = canonical_oms_key(raw, _map)
+                    pk = _raise_parent_key(key)
+                    if str(key).strip().upper() != pk:
+                        parents_with_variant_ledger.add(pk)
+                if parents_with_variant_ledger:
+                    parent_lag = parent_lag[
+                        ~parent_lag["_raise_parent"].isin(parents_with_variant_ledger)
+                    ]
                 po_df["_raise_parent"] = po_df["OMS_SKU"].map(_raise_parent_key)
                 missing = pd.to_numeric(
                     po_df.get("PO_Confirmed_Raise_Pipeline"), errors="coerce"
                 ).fillna(0) <= 0
-                if missing.any():
+                if missing.any() and not parent_lag.empty:
                     fill = po_df.loc[missing, ["OMS_SKU", "_raise_parent"]].merge(
                         parent_lag.drop(columns=["OMS_SKU"], errors="ignore"),
                         on="_raise_parent",

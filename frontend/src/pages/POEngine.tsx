@@ -50,6 +50,10 @@ interface ParentGroup {
   totalPendingCutting: number
   totalBalanceDispatch: number
   totalPipeline: number
+  totalPipelineEffective: number
+  totalConfirmedRaise: number
+  totalRaisedToday: number
+  totalRaisedYesterday: number
   totalFinalQty: number
   quarterTotals: Record<string, number>
   avgMonthly: number
@@ -154,8 +158,26 @@ function poColHeaderLabel(col: string, raiseViewDate: string): ReactNode {
 }
 
 function renderRaiseLedgerCell(col: string, row: PORow): ReactNode {
-  if (col === 'PO_Raised_On_View_Date') {
+  const raiseQtyCols = new Set([
+    'PO_Raised_On_View_Date',
+    'PO_Raised_Yesterday',
+    'PO_Raised_Today',
+    'PO_Confirmed_Raise_Pipeline',
+    'PO_Pipeline_Effective',
+  ])
+  if (raiseQtyCols.has(col)) {
     const n = Number(row[col] ?? 0)
+    if (col === 'PO_Pipeline_Effective') {
+      const base = Number(row['PO_Pipeline_Total'] ?? 0)
+      return (
+        <span className="text-xs font-semibold text-teal-800">
+          {n.toLocaleString()}
+          {base > 0 && n > base ? (
+            <span className="block text-[10px] text-gray-500 font-normal">sheet {base.toLocaleString()} + raises</span>
+          ) : null}
+        </span>
+      )
+    }
     return n > 0
       ? <span className="text-xs font-bold text-sky-900 bg-sky-50 border border-sky-200 px-2 py-0.5 rounded">{n.toLocaleString()}</span>
       : <span className="text-gray-300">—</span>
@@ -891,7 +913,9 @@ export default function POEngine() {
           worstPostPoCover: 999,
           totalSoldUnits: 0, totalADS: 0, totalGrossQty: 0,
           totalPOOrdered: 0, totalPendingCutting: 0, totalBalanceDispatch: 0,
-          totalPipeline: 0, totalFinalQty: 0, quarterTotals: {}, avgMonthly: 0, worstStatus: '',
+          totalPipeline: 0, totalPipelineEffective: 0, totalConfirmedRaise: 0,
+          totalRaisedToday: 0, totalRaisedYesterday: 0,
+          totalFinalQty: 0, quarterTotals: {}, avgMonthly: 0, worstStatus: '',
         })
       }
       const g = groupMap.get(parentSku)!
@@ -907,6 +931,10 @@ export default function POEngine() {
       g.totalPendingCutting += Number(row['Pending_Cutting'] ?? 0)
       g.totalBalanceDispatch += Number(row['Balance_to_Dispatch'] ?? 0)
       g.totalPipeline       += Number(row['PO_Pipeline_Total'] ?? 0)
+      g.totalPipelineEffective += Number(row['PO_Pipeline_Effective'] ?? row['PO_Pipeline_Total'] ?? 0)
+      g.totalConfirmedRaise += Number(row['PO_Confirmed_Raise_Pipeline'] ?? 0)
+      g.totalRaisedToday    += Number(row['PO_Raised_Today'] ?? 0)
+      g.totalRaisedYesterday += Number(row['PO_Raised_Yesterday'] ?? 0)
       g.totalFinalQty       += finalQty
       const p = String(row['Priority'] ?? '')
       if ((PRIORITY_ORDER[p] ?? 9) < (PRIORITY_ORDER[g.worstPriority] ?? 9)) g.worstPriority = p
@@ -1769,6 +1797,24 @@ export default function POEngine() {
                                           🏭 {group.totalPipeline.toLocaleString()}
                                         </span>
                                       : <span className="text-gray-300">—</span>
+                                  : c === 'PO_Pipeline_Effective'
+                                    ? group.totalPipelineEffective > 0
+                                      ? <span className="text-xs font-semibold text-teal-800">{group.totalPipelineEffective.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : c === 'PO_Confirmed_Raise_Pipeline'
+                                    ? group.totalConfirmedRaise > 0
+                                      ? <span className="text-xs font-bold text-sky-900">{group.totalConfirmedRaise.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : c === 'PO_Raised_Today'
+                                    ? group.totalRaisedToday > 0
+                                      ? <span className="text-xs font-bold text-sky-900">{group.totalRaisedToday.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : c === 'PO_Raised_Yesterday'
+                                    ? group.totalRaisedYesterday > 0
+                                      ? <span className="text-xs font-semibold text-sky-800">{group.totalRaisedYesterday.toLocaleString()}</span>
+                                      : <span className="text-gray-300">—</span>
+                                  : c === 'PO_Raised_On_View_Date' || c === 'PO_Last_Raised_Qty' || c === 'PO_Last_Raised_Date'
+                                    ? '—'
                                   : c === 'Projected_Running_Days'
                                     ? <DaysLeftBadge days={group.worstProjectedDays} />
                                   : c === 'Post_PO_Cover_Days_Capped'
