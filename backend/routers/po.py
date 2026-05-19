@@ -777,24 +777,45 @@ def po_dashboard(request: Request, body: PODashboardRequest):
 
 @router.get("/calculate/status")
 def po_calculate_status(request: Request):
-    """Poll after POST /calculate — returns full result when status is ``done``."""
+    """Lightweight poll — status + message only (full table is on ``/calculate/result``)."""
     sess = request.state.session
     if sess is None:
         return {"ok": False, "status": "error", "message": "No session"}
     st = getattr(sess, "po_calculate_status", "idle") or "idle"
     msg = getattr(sess, "po_calculate_message", "") or ""
     out: dict = {"status": st, "message": msg}
-    if st == "done":
-        result = getattr(sess, "po_calculate_result", None) or {}
-        out.update(result)
-    elif st == "error":
+    if st == "error":
         result = getattr(sess, "po_calculate_result", None) or {}
         out["ok"] = False
         if result.get("message"):
             out["message"] = result["message"]
+    elif st == "done":
+        result = getattr(sess, "po_calculate_result", None) or {}
+        out["ok"] = bool(result.get("ok", True))
+        out["row_count"] = len(result.get("rows") or [])
     else:
         out["ok"] = True
     return out
+
+
+@router.get("/calculate/result")
+def po_calculate_result(request: Request):
+    """Full PO table after ``status`` is ``done`` (can be large — use a long client timeout)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    st = getattr(sess, "po_calculate_status", "idle") or "idle"
+    if st == "running":
+        return {"ok": False, "status": "running", "message": "PO calculation still running."}
+    if st == "error":
+        result = getattr(sess, "po_calculate_result", None) or {}
+        return {"ok": False, "status": "error", "message": result.get("message") or "PO calculation failed."}
+    if st != "done":
+        return {"ok": False, "status": st, "message": "No PO result yet — run Calculate PO first."}
+    result = getattr(sess, "po_calculate_result", None) or {}
+    if not result:
+        return {"ok": False, "message": "PO result missing."}
+    return result
 
 
 @router.post("/calculate")

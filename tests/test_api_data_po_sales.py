@@ -95,8 +95,12 @@ def test_po_calculate_ok(client, session_for_client):
         if body.get("status") == "error":
             raise AssertionError(body.get("message") or "PO calculate failed")
     assert body.get("ok") is True
-    assert body.get("rows")
-    assert "PO_Qty" in body["columns"]
+    res = client.get("/api/po/calculate/result")
+    assert res.status_code == 200
+    full = res.json()
+    assert full.get("ok") is True
+    assert full.get("rows")
+    assert "PO_Qty" in full["columns"]
 
 
 def test_po_quarterly_loaded(client, session_for_client):

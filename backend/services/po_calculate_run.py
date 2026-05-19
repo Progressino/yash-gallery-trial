@@ -165,6 +165,8 @@ def execute_po_calculate(
 
 
 def background_po_calculate(session_id: str, body: dict) -> None:
+    import threading
+
     from ..session import store
 
     sess = store.get(session_id)
@@ -186,11 +188,17 @@ def background_po_calculate(session_id: str, body: dict) -> None:
             logger.exception("PostgreSQL persist after PO calculate failed")
 
     try:
-        result = execute_po_calculate(sess, body, session_id=session_id, sync_sidecars=_sync)
+        result = execute_po_calculate(sess, body, session_id=session_id, sync_sidecars=None)
         sess.po_calculate_result = result
         if result.get("ok"):
             sess.po_calculate_status = "done"
-            sess.po_calculate_message = "PO calculation complete."
+            n = len(result.get("rows") or [])
+            sess.po_calculate_message = f"PO calculation complete ({n:,} rows)."
+            threading.Thread(
+                target=_sync,
+                daemon=True,
+                name=f"po-save-{session_id[:8]}",
+            ).start()
         else:
             sess.po_calculate_status = "error"
             sess.po_calculate_message = result.get("message") or "PO calculation failed."

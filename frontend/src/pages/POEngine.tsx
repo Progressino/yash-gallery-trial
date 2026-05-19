@@ -4,9 +4,8 @@ import { useSearchParams } from 'react-router-dom'
 import {
   api,
   getCoverage,
-  PO_REQUEST_TIMEOUT_MS,
+  startPoCalculate,
   waitForDailyInventoryUpload,
-  waitForPoCalculate,
 } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore, type Tab } from '../store/po'
@@ -401,6 +400,7 @@ export default function POEngine() {
     try {
       const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
         params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
+        timeout: 300_000,
       })
       if (seq !== poRunSeqRef.current) return
       setQuarterly(data)
@@ -420,6 +420,7 @@ export default function POEngine() {
     try {
       const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
         params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
+        timeout: 300_000,
       })
       if (seq !== poRunSeqRef.current) return
       setQuarterly(data)
@@ -529,26 +530,18 @@ export default function POEngine() {
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
-      const res = await api.post<POResult & { status?: string }>('/po/calculate', {
-        ...params,
-        planning_date: planningDate,
-        raise_view_date: ledgerImportDate,
-        raise_ledger_lookback_days: 14,
-      }, { timeout: PO_REQUEST_TIMEOUT_MS })
-      if (seq !== poRunSeqRef.current) return
-      if (!res.data.ok) {
-        poRes = res.data
-        setResult(poRes)
-        return
-      }
-      if (res.data.status === 'running' || !res.data.rows) {
-        poRes = (await waitForPoCalculate(msg => {
+      poRes = (await startPoCalculate(
+        {
+          ...params,
+          planning_date: planningDate,
+          raise_view_date: ledgerImportDate,
+          raise_ledger_lookback_days: 14,
+        },
+        msg => {
           if (seq === poRunSeqRef.current) setPoProgress(msg)
-        })) as POResult
-        if (seq !== poRunSeqRef.current) return
-      } else {
-        poRes = res.data
-      }
+        },
+      )) as POResult
+      if (seq !== poRunSeqRef.current) return
       setResult(poRes)
     } catch (e: unknown) {
       if (seq === poRunSeqRef.current) {

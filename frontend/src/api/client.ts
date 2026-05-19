@@ -69,8 +69,10 @@ const UPLOAD_TIMEOUT_MS = 900_000
 const CACHE_TIMEOUT_MS = 120_000
 /** Status polls while server parses inventory or runs PO math (per request). */
 const POLL_TIMEOUT_MS = 180_000
+/** Fetching the full PO table after calculate completes (can be 10k+ rows). */
+const PO_RESULT_TIMEOUT_MS = 900_000
 /** POST /po/calculate should return immediately; allow headroom if the worker is busy. */
-export const PO_REQUEST_TIMEOUT_MS = 120_000
+export const PO_REQUEST_TIMEOUT_MS = 30_000
 
 function _errMessage(e: unknown, fallback: string): string {
   if (axios.isAxiosError(e)) {
@@ -236,16 +238,21 @@ export async function waitForDailyInventoryUpload(
   throw new Error('Daily inventory upload timed out — try again in a minute.')
 }
 
+function _isAxiosTimeout(e: unknown): boolean {
+  return axios.isAxiosError(e) && e.code === 'ECONNABORTED'
+}
+
 /** Poll after POST /po/calculate (runs in background on the server). */
 export async function waitForPoCalculate(
   onTick?: (message: string) => void,
-  maxMs = 600_000,
+  maxMs = 900_000,
 ): Promise<POCalculateResult> {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
-    const { data } = await api.get<POCalculateResult>('/po/calculate/status', {
-      timeout: POLL_TIMEOUT_MS,
-    })
+    const { data } = await api.get<POCalculateResult & { row_count?: number }>(
+      '/po/calculate/status',
+      { timeout: POLL_TIMEOUT_MS },
+    )
     const st = data.status ?? 'idle'
     if (st === 'running') {
       onTick?.(data.message || 'Calculating PO recommendations…')
@@ -256,11 +263,42 @@ export async function waitForPoCalculate(
       throw new Error(data.message || 'PO calculation failed')
     }
     if (st === 'done') {
-      return data
+      onTick?.('Loading PO results…')
+      const { data: full } = await api.get<POCalculateResult>('/po/calculate/result', {
+        timeout: PO_RESULT_TIMEOUT_MS,
+      })
+      return full
     }
     await new Promise(r => setTimeout(r, 1500))
   }
   throw new Error('PO calculation timed out — try again in a minute.')
+}
+
+/** Start PO calculate; if the POST times out, poll anyway (server may still be running). */
+export async function startPoCalculate(
+  body: Record<string, unknown>,
+  onTick?: (message: string) => void,
+): Promise<POCalculateResult> {
+  try {
+    const { data } = await api.post<POCalculateResult & { status?: string }>(
+      '/po/calculate',
+      body,
+      { timeout: PO_REQUEST_TIMEOUT_MS },
+    )
+    if (!data.ok) {
+      return data
+    }
+    if (data.status === 'running' || !data.rows) {
+      return waitForPoCalculate(onTick)
+    }
+    return data
+  } catch (e: unknown) {
+    if (_isAxiosTimeout(e)) {
+      onTick?.('Still calculating on server…')
+      return waitForPoCalculate(onTick)
+    }
+    throw e
+  }
 }
 
 export async function buildSales(): Promise<{
