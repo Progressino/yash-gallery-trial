@@ -481,7 +481,41 @@ def calculate_po_base(
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
 
-    df = sales_df.copy()
+    # ── Trim sales_df to the lookback window BEFORE copying ───────────────────
+    # Old pattern: df = sales_df.copy() + later df = df[mask].copy() held two
+    # full copies in RAM simultaneously (can be 800 MB–1.5 GB for large catalogs).
+    # New pattern: compute max_date/hist_cutoff on the original (no copy), make
+    # ONE trimmed copy, then the later trim at lines below is a fast no-op.
+    _s_plan_early: "pd.Timestamp | None" = None
+    if planning_date:
+        try:
+            _s_plan_early = pd.Timestamp(pd.to_datetime(planning_date).normalize())
+        except Exception:
+            pass
+    _s_txn = (
+        sales_df["TxnDate"]
+        if pd.api.types.is_datetime64_any_dtype(sales_df["TxnDate"])
+        else pd.to_datetime(sales_df["TxnDate"], errors="coerce")
+    )
+    if hasattr(_s_txn, "dt") and _s_txn.dt.tz is not None:
+        _s_txn = _s_txn.dt.tz_localize(None)
+    _s_max = _s_txn.max()
+    if pd.notna(_s_max):
+        _s_today = pd.Timestamp.now().normalize()
+        if _s_max > _s_today + timedelta(days=1):
+            _s_max = _s_today
+        if _s_plan_early is not None:
+            _s_max = min(_s_max, _s_plan_early)
+        _s_lookback = int(max(30, period_days) + 365 + period_days + 7)
+        _s_cut = _s_max - timedelta(days=_s_lookback)
+        _s_mask = _s_txn >= _s_cut
+        df = sales_df[_s_mask].copy()
+        del _s_mask
+    else:
+        df = sales_df.copy()
+    del _s_txn, _s_max, _s_plan_early
+    # ── End early trim ────────────────────────────────────────────────────────
+
     if not pd.api.types.is_datetime64_any_dtype(df["TxnDate"]):
         df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
         df = df.dropna(subset=["TxnDate"])
@@ -607,7 +641,12 @@ def calculate_po_base(
     # full-table groupbys that make calculation feel stuck for large histories.
     lookback_days = int(max(30, period_days) + 365 + period_days + 7)
     hist_cutoff = max_date - timedelta(days=lookback_days)
-    df = df[df["TxnDate"] >= hist_cutoff].copy()
+    # sales_df was already trimmed to this window at function entry (see early-trim
+    # block above). Only copy again if max_date was adjusted further after the early
+    # trim (e.g. planning_date capped it differently).
+    _df_min = df["TxnDate"].min()
+    if pd.notna(_df_min) and _df_min < hist_cutoff:
+        df = df[df["TxnDate"] >= hist_cutoff].copy()
     cutoff   = max_date - timedelta(days=period_days)
     recent   = df[df["TxnDate"] >= cutoff].copy()
 
