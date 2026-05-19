@@ -4,6 +4,7 @@ POST /api/po/calculate  → run PO calculation, return table
 GET  /api/po/quarterly  → quarterly history pivot
 POST /api/po/sku-status-lead → upload SKU status & lead time (Excel/CSV) for PO rules
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -179,12 +180,14 @@ async def po_upload_daily_inventory_history(
     if not raw:
         return {"ok": False, "message": "Empty file."}
 
+    from ..concurrency import HEAVY_EXECUTOR
     from ..services.daily_inventory_upload_run import background_daily_inventory_upload
 
     sess.daily_inventory_upload_status = "running"
     sess.daily_inventory_upload_message = "Upload received. Parsing sheet…"
     sess.daily_inventory_upload_result = {}
-    background_tasks.add_task(
+    asyncio.get_running_loop().run_in_executor(
+        HEAVY_EXECUTOR,
         background_daily_inventory_upload,
         sid,
         raw,
@@ -792,15 +795,23 @@ def po_calculate_status(request: Request):
     elif st == "done":
         result = getattr(sess, "po_calculate_result", None) or {}
         out["ok"] = bool(result.get("ok", True))
-        out["row_count"] = len(result.get("rows") or [])
+        po_df = getattr(sess, "po_calculate_result_df", None)
+        if po_df is not None and hasattr(po_df, "__len__") and not getattr(po_df, "empty", True):
+            out["row_count"] = int(len(po_df))
+        else:
+            out["row_count"] = len(result.get("rows") or []) or int(result.get("total_rows") or 0)
     else:
         out["ok"] = True
     return out
 
 
 @router.get("/calculate/result")
-def po_calculate_result(request: Request):
-    """Full PO table after ``status`` is ``done`` (can be large — use a long client timeout)."""
+def po_calculate_result(
+    request: Request,
+    offset: int = 0,
+    limit: int = 1200,
+):
+    """PO table page after ``status`` is ``done`` (paginated to stay under CDN/proxy limits)."""
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
@@ -812,10 +823,33 @@ def po_calculate_result(request: Request):
         return {"ok": False, "status": "error", "message": result.get("message") or "PO calculation failed."}
     if st != "done":
         return {"ok": False, "status": st, "message": "No PO result yet — run Calculate PO first."}
-    result = getattr(sess, "po_calculate_result", None) or {}
-    if not result:
+    meta = getattr(sess, "po_calculate_result", None) or {}
+    if not meta:
         return {"ok": False, "message": "PO result missing."}
-    return result
+    po_df = getattr(sess, "po_calculate_result_df", None)
+    if po_df is None or not hasattr(po_df, "empty") or po_df.empty:
+        # Legacy sessions may still have inline rows on the meta dict.
+        rows = meta.get("rows") or []
+        return {**meta, "ok": True, "rows": rows, "offset": 0, "limit": len(rows), "total": len(rows), "has_more": False}
+
+    total = int(len(po_df))
+    off = max(0, int(offset))
+    lim = max(1, min(int(limit), 2500))
+    end = min(off + lim, total)
+    chunk = po_df.iloc[off:end]
+    return {
+        "ok": True,
+        "columns": list(po_df.columns),
+        "rows": chunk.to_dict("records"),
+        "offset": off,
+        "limit": lim,
+        "total": total,
+        "has_more": end < total,
+        "sales_through": meta.get("sales_through"),
+        "planning_date": meta.get("planning_date"),
+        "raise_ledger_rows": meta.get("raise_ledger_rows"),
+        "ledger_auto_import": meta.get("ledger_auto_import"),
+    }
 
 
 @router.post("/calculate")
@@ -843,10 +877,17 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     sess.po_calculate_status = "running"
     sess.po_calculate_message = "Calculating PO recommendations…"
     sess.po_calculate_result = {}
+    sess.po_calculate_result_df = pd.DataFrame()
 
+    from ..concurrency import HEAVY_EXECUTOR
     from ..services.po_calculate_run import background_po_calculate
 
-    background_tasks.add_task(background_po_calculate, sid, body.model_dump())
+    asyncio.get_running_loop().run_in_executor(
+        HEAVY_EXECUTOR,
+        background_po_calculate,
+        sid,
+        body.model_dump(),
+    )
     return {
         "ok": True,
         "status": "running",

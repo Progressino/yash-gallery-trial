@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from .concurrency import run_aux
 
 from .session import store
@@ -738,6 +739,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+def _session_skip_heavy_warm(path: str) -> bool:
+    """Poll endpoints must stay fast while a heavy PO job runs in the background."""
+    return path.startswith(
+        (
+            "/api/po/calculate/status",
+            "/api/po/calculate/result",
+            "/api/po/daily-inventory-history/upload-status",
+        )
+    )
 
 # ── Auth middleware (outermost — runs first) ──────────────────
 _AUTH_EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/health"}
@@ -795,12 +808,13 @@ async def session_middleware(request: Request, call_next):
     setattr(session, "_persist_sid", sid)
 
     copied_warm = False
-    try:
-        copied_warm = await run_aux(
-            _apply_warm_cache_if_needed, session, _warm_cache_generation,
-        )
-    except Exception:
-        log.exception("warm-cache apply failed")
+    if not _session_skip_heavy_warm(path):
+        try:
+            copied_warm = await run_aux(
+                _apply_warm_cache_if_needed, session, _warm_cache_generation,
+            )
+        except Exception:
+            log.exception("warm-cache apply failed")
 
     try:
         from .services.sku_mapping import ensure_default_sku_mapping_from_bundle

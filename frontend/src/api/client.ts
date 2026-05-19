@@ -81,7 +81,7 @@ function _errMessage(e: unknown, fallback: string): string {
     if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail
     if (e.code === 'ECONNABORTED') return 'Request timed out. File may be too large or server is busy.'
     if (e.response?.status === 502) {
-      return 'Server gateway timeout (502). Daily files may still be processing — wait a minute and refresh coverage, or retry.'
+      return 'Server gateway error (502). A large job may still be running — wait 1–2 minutes and try again, or hard-refresh the page.'
     }
     if (!e.response) return 'Network error. Check connection/VPN and try again.'
   }
@@ -263,11 +263,41 @@ export async function waitForPoCalculate(
       throw new Error(data.message || 'PO calculation failed')
     }
     if (st === 'done') {
-      onTick?.('Loading PO results…')
-      const { data: full } = await api.get<POCalculateResult>('/po/calculate/result', {
-        timeout: PO_RESULT_TIMEOUT_MS,
-      })
-      return full
+      const pageSize = 1200
+      let offset = 0
+      let columns: string[] | undefined
+      const allRows: Record<string, unknown>[] = []
+      let meta: POCalculateResult = { ok: true }
+      while (true) {
+        const { data: page } = await api.get<
+          POCalculateResult & {
+            offset?: number
+            total?: number
+            has_more?: boolean
+          }
+        >('/po/calculate/result', {
+          params: { offset, limit: pageSize },
+          timeout: PO_RESULT_TIMEOUT_MS,
+        })
+        if (!page.ok) {
+          throw new Error(page.message || 'Failed to load PO results')
+        }
+        if (!columns?.length && page.columns?.length) columns = page.columns
+        if (page.rows?.length) allRows.push(...page.rows)
+        meta = {
+          ok: true,
+          columns: columns ?? page.columns,
+          sales_through: page.sales_through ?? meta.sales_through,
+          planning_date: page.planning_date ?? meta.planning_date,
+          raise_ledger_rows: page.raise_ledger_rows ?? meta.raise_ledger_rows,
+          ledger_auto_import: page.ledger_auto_import ?? meta.ledger_auto_import,
+        }
+        const total = page.total ?? allRows.length
+        onTick?.(`Loading PO results… ${Math.min(allRows.length, total).toLocaleString()} / ${total.toLocaleString()}`)
+        if (!page.has_more) break
+        offset += pageSize
+      }
+      return { ...meta, rows: allRows }
     }
     await new Promise(r => setTimeout(r, 1500))
   }

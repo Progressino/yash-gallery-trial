@@ -66,6 +66,7 @@ class AppSession:
     po_calculate_status: str = "idle"   # idle | running | done | error
     po_calculate_message: str = ""
     po_calculate_result: dict = field(default_factory=dict)
+    po_calculate_result_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     # Async daily inventory history upload (wide Excel can take minutes).
     daily_inventory_upload_status: str = "idle"  # idle | running | done | error
@@ -119,6 +120,7 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.po_calculate_status = "idle"
     sess.po_calculate_message = ""
     sess.po_calculate_result = {}
+    sess.po_calculate_result_df = pd.DataFrame()
     sess.daily_inventory_upload_status = "idle"
     sess.daily_inventory_upload_message = ""
     sess.daily_inventory_upload_result = {}

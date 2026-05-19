@@ -125,7 +125,8 @@ def execute_po_calculate(
         if c in po_df.columns:
             s = pd.to_numeric(po_df[c], errors="coerce")
             po_df[c] = s.where(np.isfinite(s), 999.0).fillna(999.0).round(1)
-    rows = po_df.to_dict("records")
+
+    sess.po_calculate_result_df = po_df
 
     sales_through = None
     try:
@@ -155,8 +156,8 @@ def execute_po_calculate(
 
     return {
         "ok": True,
-        "rows": rows,
         "columns": list(po_df.columns),
+        "total_rows": int(len(po_df)),
         "sales_through": sales_through,
         "planning_date": planning_out,
         "raise_ledger_rows": ledger_n,
@@ -192,7 +193,7 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         sess.po_calculate_result = result
         if result.get("ok"):
             sess.po_calculate_status = "done"
-            n = len(result.get("rows") or [])
+            n = int(result.get("total_rows") or 0)
             sess.po_calculate_message = f"PO calculation complete ({n:,} rows)."
             threading.Thread(
                 target=_sync,
