@@ -68,20 +68,50 @@ def execute_po_calculate(
 
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 
-    # Pre-trim inventory history to the ADS window + small buffer.
-    # calculate_po_base sets ADS_WINDOW = period_days, so for a 30-day period
-    # only the last 30 days are ever used.  Scanning the full 400-day session
-    # dataframe (up to 3.8M rows) just to extract those 30 days is wasteful —
-    # pre-trim here from max-date so the engine's own date scan is small.
+    # ── Inventory-history memory management ───────────────────────────────────
+    # Two-stage trim so the heavy calculate_po_base call starts lean.
+    #
+    # Stage 1 — session migration: sessions restored from a warm-cache or PG
+    # snapshot saved BEFORE the upload-time trim was added may carry multi-year
+    # baselines (30M+ rows).  Trim those in-place once so every future request
+    # for this session is fast.  The trimmed version is saved back to PG/warm-
+    # cache by the post-calculate _sync() thread.
+    #
+    # Stage 2 — calc-time pre-trim: even a healthy 400-day session (up to
+    # ~3.8M rows) is bigger than we need.  ADS_WINDOW = period_days, so for a
+    # 30-day period only the last 30 days matter.  Filter to period_days+14 so
+    # the engine's window-anchor shift always has data, then delete the
+    # intermediate series immediately to free RAM before calculate_po_base runs.
+    import gc as _gc
+
     _period = int(body.get("period_days", 90))
     _raw_ih = getattr(sess, "daily_inventory_history_df", None)
     _inv_history_for_calc: pd.DataFrame | None = None
+
     if _raw_ih is not None and not _raw_ih.empty:
+        from .daily_inventory_upload_run import _MAX_HISTORY_DAYS, _trim_history_to_recent
+
+        # Stage 1: migrate oversized sessions (warm-cache restore with old data).
+        if len(_raw_ih) > (_MAX_HISTORY_DAYS + 10) * 500:
+            # threshold ~ _MAX_HISTORY_DAYS days × 500 SKUs (very conservative)
+            _trimmed_sess, _trim_note = _trim_history_to_recent(_raw_ih, _MAX_HISTORY_DAYS)
+            if len(_trimmed_sess) < len(_raw_ih):
+                logger.info(
+                    "PO calc: session inventory history over-sized (%s rows) — "
+                    "trimming to %d days in-place (%s rows). %s",
+                    f"{len(_raw_ih):,}",
+                    _MAX_HISTORY_DAYS,
+                    f"{len(_trimmed_sess):,}",
+                    _trim_note,
+                )
+                sess.daily_inventory_history_df = _trimmed_sess
+                _raw_ih = _trimmed_sess
+            del _trimmed_sess, _trim_note
+
+        # Stage 2: calc-time pre-trim to period_days + 14 days.
         _inv_dates = pd.to_datetime(_raw_ih["Date"], errors="coerce")
         _max_inv = _inv_dates.max()
         if pd.notna(_max_inv):
-            # Keep period_days + 14-day buffer so the engine's window anchoring
-            # (which may shift a few days toward the planning_date) always has data.
             _pretrim_cutoff = pd.Timestamp(_max_inv).normalize() - pd.Timedelta(
                 days=_period + 14
             )
@@ -94,8 +124,11 @@ def execute_po_calculate(
                     f"{len(_inv_history_for_calc):,}",
                     _period,
                 )
+            del _mask
         else:
             _inv_history_for_calc = _raw_ih
+        del _inv_dates
+        _gc.collect()
 
     try:
         po_df = calculate_po_base(

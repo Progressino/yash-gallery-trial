@@ -563,6 +563,19 @@ def _copy_warm_cache_to_session(sess) -> bool:
     if not _warm_cache:
         return False
     for key, val in _warm_cache.items():
+        # Trim daily_inventory_history_df to _MAX_HISTORY_DAYS when copying from
+        # warm cache — prevents OOM if the cached version is a pre-trim snapshot
+        # (e.g. saved before the 400-day upload-time trim was deployed).
+        if key == "daily_inventory_history_df" and val is not None and hasattr(val, "empty") and not val.empty:
+            try:
+                from .services.daily_inventory_upload_run import _MAX_HISTORY_DAYS, _trim_history_to_recent
+                trimmed, _note = _trim_history_to_recent(val, _MAX_HISTORY_DAYS)
+                if _note:
+                    log.info("warm-cache copy: trimmed daily_inventory_history_df: %s", _note)
+                setattr(sess, key, trimmed)
+                continue
+            except Exception:
+                pass  # fall through to plain copy on any import / trim error
         setattr(sess, key, val)
     sess._quarterly_cache.clear()
     # Warm cache already contains rebuilt sales + merged platform history.
