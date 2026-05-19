@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from io import BytesIO
 from typing import Any
@@ -9,6 +10,42 @@ from typing import Any
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# PO engine only needs recent history (period_days ADS window, typically 30–210 days).
+# Keeping 400 days covers the widest ADS window + one year's seasonality without
+# storing years of data that OOM the process during calculate_po_base on large catalogs.
+_MAX_HISTORY_DAYS = int(os.environ.get("DAILY_INV_MAX_DAYS", "400"))
+
+
+def _trim_history_to_recent(df: pd.DataFrame, max_days: int) -> tuple[pd.DataFrame, str]:
+    """
+    Keep only the most-recent ``max_days`` calendar days in the history.
+
+    Anchors on the latest date present in the upload so old baseline files
+    are not accidentally discarded (the sheet may be weeks behind today).
+
+    Returns (trimmed_df, trim_note) where trim_note is "" if nothing was removed.
+    """
+    if max_days <= 0 or df.empty or "Date" not in df.columns:
+        return df, ""
+    dates = pd.to_datetime(df["Date"], errors="coerce")
+    max_date = dates.max()
+    if pd.isna(max_date):
+        return df, ""
+    cutoff = pd.Timestamp(max_date).normalize() - pd.Timedelta(days=max_days)
+    mask = dates >= cutoff
+    kept = int(mask.sum())
+    orig = int(len(df))
+    if kept >= orig:
+        return df, ""
+    trimmed = df[mask].reset_index(drop=True)
+    note = (
+        f"Trimmed to last {max_days} days ({cutoff.date()} → {pd.Timestamp(max_date).date()}): "
+        f"{orig:,} → {kept:,} rows. "
+        f"Upload DAILY_INV_MAX_DAYS env-var to keep more history."
+    )
+    logger.info("Daily inventory history: %s", note)
+    return trimmed, note
 
 
 def execute_daily_inventory_upload(
@@ -29,16 +66,25 @@ def execute_daily_inventory_upload(
             "message": "No usable rows. Need a wide-format sheet: column 1 = SKU, "
             "column 2 = parent (optional), then daily snapshot columns whose first row is the date.",
         }
+
+    # Trim to recent window before storing — prevents OOM during calculate_po_base
+    # on multi-year baselines (e.g. 30M rows → ~3.5M for a 9,500-SKU catalog).
+    df, trim_note = _trim_history_to_recent(df, _MAX_HISTORY_DAYS)
+
     sess.daily_inventory_history_df = df
     sess._quarterly_cache.clear()
     skus = int(df["OMS_SKU"].nunique())
-    days = int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique())
+    dates_norm = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    days = int(dates_norm.nunique())
+    msg = f"Loaded {len(df):,} SKU-day rows ({skus:,} SKUs × {days:,} days) for effective-days math."
+    if trim_note:
+        msg += f" Note: {trim_note}"
     return {
         "ok": True,
         "rows": int(len(df)),
         "skus": skus,
         "days": days,
-        "message": f"Loaded {len(df):,} SKU-day rows ({skus:,} SKUs × {days:,} days) for effective-days math.",
+        "message": msg,
     }
 
 

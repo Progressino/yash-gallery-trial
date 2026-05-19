@@ -304,7 +304,7 @@ export async function waitForPoCalculate(
   throw new Error('PO calculation timed out — try again in a minute.')
 }
 
-/** Start PO calculate; if the POST times out, poll anyway (server may still be running). */
+/** Start PO calculate; if the POST times out or 502s, poll anyway (server may still be running). */
 export async function startPoCalculate(
   body: Record<string, unknown>,
   onTick?: (message: string) => void,
@@ -325,6 +325,13 @@ export async function startPoCalculate(
   } catch (e: unknown) {
     if (_isAxiosTimeout(e)) {
       onTick?.('Still calculating on server…')
+      return waitForPoCalculate(onTick)
+    }
+    // 502 on the initial POST: the server may have received the request and started
+    // the calculation before the gateway timed out. Poll the status endpoint to find out.
+    if (axios.isAxiosError(e) && e.response?.status === 502) {
+      onTick?.('Server busy — checking calculation status…')
+      await new Promise(r => setTimeout(r, 3000))
       return waitForPoCalculate(onTick)
     }
     throw e
