@@ -238,7 +238,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
 # ── Coverage ──────────────────────────────────────────────────
 
 @router.get("/coverage", response_model=CoverageResponse)
-def get_coverage(request: Request):
+def get_coverage(request: Request, light: bool = False):
+    """Session coverage flags. ``light=1`` skips SQLite restore / sales rebuild (fast after PO uploads)."""
     sess = _sess(request)
     try:
         import backend.main as _main
@@ -246,13 +247,14 @@ def get_coverage(request: Request):
         _main.restore_po_sidecars_from_warm(sess)
     except Exception:
         pass
-    try:
-        from ..services.po_raise_import import hydrate_session_ledger_from_db
+    if not light:
+        try:
+            from ..services.po_raise_import import hydrate_session_ledger_from_db
 
-        hydrate_session_ledger_from_db(sess, lookback_days=30)
-    except Exception:
-        pass
-    _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
+            hydrate_session_ledger_from_db(sess, lookback_days=30)
+        except Exception:
+            pass
+        _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
 

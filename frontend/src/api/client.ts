@@ -65,10 +65,12 @@ export interface CoverageResponse {
 
 /** Tier-1 multi-year ZIPs can take several minutes to parse; align with nginx proxy_read_timeout (e.g. 900s). */
 const UPLOAD_TIMEOUT_MS = 900_000
-// Coverage/cache calls are GETs/POSTs that may queue behind a heavy upload
-// or warm-cache restore. The previous 20s budget surfaced ugly
-// "timeout of 20000ms exceeded" toasts after big uploads — bump to 60s.
-const CACHE_TIMEOUT_MS = 60_000
+// Coverage/cache calls may queue behind uploads or session restore.
+const CACHE_TIMEOUT_MS = 120_000
+/** Status polls while server parses inventory or runs PO math (per request). */
+const POLL_TIMEOUT_MS = 180_000
+/** POST /po/calculate should return immediately; allow headroom if the worker is busy. */
+export const PO_REQUEST_TIMEOUT_MS = 120_000
 
 function _errMessage(e: unknown, fallback: string): string {
   if (axios.isAxiosError(e)) {
@@ -215,7 +217,7 @@ export async function waitForDailyInventoryUpload(
   while (Date.now() - start < maxMs) {
     const { data } = await api.get<DailyInventoryUploadResult>(
       '/po/daily-inventory-history/upload-status',
-      { timeout: CACHE_TIMEOUT_MS },
+      { timeout: POLL_TIMEOUT_MS },
     )
     const st = data.status ?? 'idle'
     if (st === 'running') {
@@ -242,7 +244,7 @@ export async function waitForPoCalculate(
   const start = Date.now()
   while (Date.now() - start < maxMs) {
     const { data } = await api.get<POCalculateResult>('/po/calculate/status', {
-      timeout: CACHE_TIMEOUT_MS,
+      timeout: POLL_TIMEOUT_MS,
     })
     const st = data.status ?? 'idle'
     if (st === 'running') {
@@ -280,9 +282,15 @@ export async function clearPlatform(platform: string): Promise<{ ok: boolean; me
 
 // ── Coverage ──────────────────────────────────────────────────
 
-export async function getCoverage(opts?: { timeout?: number }): Promise<CoverageResponse> {
+export async function getCoverage(opts?: {
+  timeout?: number
+  /** Skip slow SQLite restore on the server (use after PO Engine uploads). */
+  light?: boolean
+}): Promise<CoverageResponse> {
   try {
+    const params = opts?.light ? { light: '1' } : undefined
     const { data } = await api.get<CoverageResponse>('/data/coverage', {
+      params,
       timeout: opts?.timeout ?? CACHE_TIMEOUT_MS,
     })
     return data

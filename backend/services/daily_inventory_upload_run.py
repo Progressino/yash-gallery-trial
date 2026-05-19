@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from io import BytesIO
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -74,7 +75,12 @@ def background_daily_inventory_upload(
         if result.get("ok"):
             sess.daily_inventory_upload_status = "done"
             sess.daily_inventory_upload_message = result.get("message") or "Daily inventory loaded."
-            _sync_sidecars()
+            # Respond to polls immediately; warm-cache + PG save can take minutes.
+            threading.Thread(
+                target=_sync_sidecars,
+                daemon=True,
+                name=f"daily-inv-save-{session_id[:8]}",
+            ).start()
         else:
             sess.daily_inventory_upload_status = "error"
             sess.daily_inventory_upload_message = result.get("message") or "Upload failed."

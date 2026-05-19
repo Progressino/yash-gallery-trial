@@ -1,7 +1,13 @@
 import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, getCoverage, waitForDailyInventoryUpload, waitForPoCalculate } from '../api/client'
+import {
+  api,
+  getCoverage,
+  PO_REQUEST_TIMEOUT_MS,
+  waitForDailyInventoryUpload,
+  waitForPoCalculate,
+} from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
@@ -443,8 +449,12 @@ export default function POEngine() {
       )
       if (data.ok) {
         setSkuUploadMsg({ type: 'ok', text: data.message || `Loaded ${data.rows ?? 0} rows.` })
-        const c = await getCoverage()
-        setCoverage(c)
+        setCoverage({
+          ...useSession.getState(),
+          sku_status_lead: true,
+          sku_status_lead_rows: data.rows ?? 0,
+        })
+        void getCoverage({ light: true }).then(setCoverage).catch(() => {})
       } else {
         setSkuUploadMsg({ type: 'err', text: data.message || 'Upload failed' })
       }
@@ -493,8 +503,13 @@ export default function POEngine() {
             result.message ||
             `Loaded ${result.rows ?? 0} rows (${result.skus ?? 0} SKUs × ${result.days ?? 0} days).`,
         })
-        const c = await getCoverage()
-        setCoverage(c)
+        setCoverage({
+          ...useSession.getState(),
+          daily_inventory_history: true,
+          daily_inventory_history_rows: result.rows ?? 0,
+          daily_inventory_history_skus: result.skus ?? 0,
+        })
+        void getCoverage({ light: true }).then(setCoverage).catch(() => {})
       } else {
         setDailyInvMsg({ type: 'err', text: result.message || 'Upload failed' })
       }
@@ -519,7 +534,7 @@ export default function POEngine() {
         planning_date: planningDate,
         raise_view_date: ledgerImportDate,
         raise_ledger_lookback_days: 14,
-      }, { timeout: 60_000 })
+      }, { timeout: PO_REQUEST_TIMEOUT_MS })
       if (seq !== poRunSeqRef.current) return
       if (!res.data.ok) {
         poRes = res.data
