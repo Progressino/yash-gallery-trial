@@ -189,6 +189,11 @@ def background_po_calculate(session_id: str, body: dict) -> None:
             logger.exception("PostgreSQL persist after PO calculate failed")
 
     try:
+        _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
+        if _inv_n > 500_000:
+            sess.po_calculate_message = (
+                f"Calculating PO (trimmed inventory window, {_inv_n:,} baseline rows)…"
+            )
         result = execute_po_calculate(sess, body, session_id=session_id, sync_sidecars=None)
         sess.po_calculate_result = result
         if result.get("ok"):

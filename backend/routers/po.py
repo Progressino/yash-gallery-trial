@@ -875,7 +875,14 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
         }
 
     sess.po_calculate_status = "running"
-    sess.po_calculate_message = "Calculating PO recommendations…"
+    _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
+    if _inv_n > 500_000:
+        sess.po_calculate_message = (
+            f"Calculating PO (using last {int(body.period_days)} days of "
+            f"{_inv_n:,}-row inventory history)…"
+        )
+    else:
+        sess.po_calculate_message = "Calculating PO recommendations…"
     sess.po_calculate_result = {}
     sess.po_calculate_result_df = pd.DataFrame()
 

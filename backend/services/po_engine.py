@@ -764,73 +764,100 @@ def calculate_po_base(
     # OOS shouldn't pad the ADS denominator and lowball ADS.
     if inventory_history_df is not None and not inventory_history_df.empty:
         try:
+            import logging
+
             from .daily_inventory_history import (
                 coverage_days_within,
                 effective_days_from_history,
                 extend_history_with_sales,
+                trim_inventory_history_for_po,
             )
 
-            ih = inventory_history_df.copy()
-            ih["OMS_SKU"] = ih["OMS_SKU"].astype(str).map(_canonical_oms_key)
-            ih = ih[ih["OMS_SKU"].str.len() > 0]
-            if group_by_parent and not ih.empty:
-                ih["OMS_SKU"] = ih["OMS_SKU"].map(get_parent_sku)
-                ih = (
-                    ih.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"].max()
-                )
-            # Anchor at the most recent date we actually have data for — i.e.
-            # max(sales max, inventory sheet max). With fresh daily uploads this
-            # is "today", which matches user intent: "today is May 12, eff days
-            # must be calculated for the days before May 12." Stale sales no
-            # longer pull the window backward and starve it of recent snapshots.
+            _inv_log = logging.getLogger(__name__)
+
+            # Anchor at the most recent date we actually have data for.
             inv_window_end = pd.Timestamp(max_date).normalize()
-            if not ih.empty:
-                _ihmax = pd.to_datetime(ih["Date"], errors="coerce").max()
-                if pd.notna(_ihmax):
-                    sheet_end = pd.Timestamp(_ihmax).normalize()
-                    if _plan is not None:
-                        sheet_end = min(sheet_end, _plan)
-                    # Uploaded inventory snapshots may run past last sales day (baseline
-                    # sheet). Do not extend past the operator's planning day.
-                    inv_window_end = max(inv_window_end, sheet_end)
+            _ihmax = pd.to_datetime(inventory_history_df["Date"], errors="coerce").max()
+            if pd.notna(_ihmax):
+                sheet_end = pd.Timestamp(_ihmax).normalize()
+                if _plan is not None:
+                    sheet_end = min(sheet_end, _plan)
+                inv_window_end = max(inv_window_end, sheet_end)
             inv_window_start = inv_window_end - timedelta(days=int(ADS_WINDOW) - 1)
 
-            # Auto-roll-forward: derive synthetic snapshots from sales for any
-            # day after the uploaded sheet's max date up to inv_window_end.
-            # User uploads the baseline ONCE; from then on the engine fills in
-            # subsequent days from daily sales activity.
-            ih_full = extend_history_with_sales(
-                ih,
-                sales_df=df,
-                cap_date=inv_window_end,
+            po_skus = set(po_df["OMS_SKU"].astype(str))
+            ih = trim_inventory_history_for_po(
+                inventory_history_df,
+                inv_window_start,
+                inv_window_end,
+                po_skus=po_skus,
             )
-            if ih_full is not None and not ih_full.empty:
-                ih = ih_full[["OMS_SKU", "Date", "Qty"]].copy()
-
-            eff_inv = effective_days_from_history(ih, inv_window_start, inv_window_end)
-            coverage_days = coverage_days_within(ih, inv_window_start, inv_window_end)
-            if not eff_inv.empty and coverage_days > 0:
-                po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
-                inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
-                # When the sheet covers fewer days than the ADS window, extrapolate:
-                # a SKU in-stock every covered day is assumed in-stock the full window.
-                # Otherwise an N-day sheet would collapse every SKU's Eff_Days to ≤N.
-                scale = float(ADS_WINDOW) / float(coverage_days) if coverage_days else 1.0
-                use_inv = inv_days.notna() & (inv_days > 0)
-                inv_eff = (inv_days * scale).round()
-                inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
-                po_df["Eff_Days"] = np.where(
-                    use_inv,
-                    inv_clipped.fillna(po_df["Eff_Days"]),
-                    po_df["Eff_Days"],
-                )
-                po_df["Eff_Days_Inventory"] = inv_days.fillna(0).astype(int)
-                po_df["Inv_Coverage_Days"] = int(coverage_days)
-            else:
+            if ih.empty:
                 po_df["Eff_Days_Inventory"] = 0
-                po_df["Inv_Coverage_Days"] = int(coverage_days)
-        except Exception:
-            # Inventory-history override is best-effort — never fail PO calc on its account.
+                po_df["Inv_Coverage_Days"] = 0
+            else:
+                ih["OMS_SKU"] = ih["OMS_SKU"].astype(str).map(_canonical_oms_key)
+                ih = ih[ih["OMS_SKU"].str.len() > 0]
+                if group_by_parent and not ih.empty:
+                    ih["OMS_SKU"] = ih["OMS_SKU"].map(get_parent_sku)
+                    ih = ih.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"].max()
+
+                _orig_rows = int(len(inventory_history_df))
+                _trim_rows = int(len(ih))
+                if _orig_rows > _trim_rows * 2:
+                    _inv_log.info(
+                        "PO inventory history trimmed %s → %s rows (ADS window %s..%s)",
+                        f"{_orig_rows:,}",
+                        f"{_trim_rows:,}",
+                        inv_window_start.date(),
+                        inv_window_end.date(),
+                    )
+
+                sheet_max = pd.to_datetime(ih["Date"], errors="coerce").max()
+                coverage_in_window = coverage_days_within(ih, inv_window_start, inv_window_end)
+                skip_extend = bool(
+                    pd.notna(sheet_max)
+                    and sheet_max >= inv_window_end - timedelta(days=1)
+                ) or coverage_in_window >= min(int(ADS_WINDOW), 14)
+
+                if skip_extend:
+                    ih_work = ih
+                else:
+                    ih_work = extend_history_with_sales(
+                        ih,
+                        sales_df=df,
+                        cap_date=inv_window_end,
+                    )
+                    if ih_work is not None and not ih_work.empty:
+                        ih_work = ih_work[["OMS_SKU", "Date", "Qty"]].copy()
+                    else:
+                        ih_work = ih
+
+                eff_inv = effective_days_from_history(ih_work, inv_window_start, inv_window_end)
+                coverage_days = coverage_days_within(ih_work, inv_window_start, inv_window_end)
+                if not eff_inv.empty and coverage_days > 0:
+                    po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
+                    inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
+                    scale = float(ADS_WINDOW) / float(coverage_days) if coverage_days else 1.0
+                    use_inv = inv_days.notna() & (inv_days > 0)
+                    inv_eff = (inv_days * scale).round()
+                    inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
+                    po_df["Eff_Days"] = np.where(
+                        use_inv,
+                        inv_clipped.fillna(po_df["Eff_Days"]),
+                        po_df["Eff_Days"],
+                    )
+                    po_df["Eff_Days_Inventory"] = inv_days.fillna(0).astype(int)
+                    po_df["Inv_Coverage_Days"] = int(coverage_days)
+                else:
+                    po_df["Eff_Days_Inventory"] = 0
+                    po_df["Inv_Coverage_Days"] = int(coverage_days)
+        except Exception as _ih_exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Inventory-history override skipped: %s", _ih_exc, exc_info=True
+            )
             po_df["Eff_Days_Inventory"] = 0
             po_df["Inv_Coverage_Days"] = 0
     else:

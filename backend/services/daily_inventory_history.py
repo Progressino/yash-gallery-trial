@@ -277,6 +277,37 @@ def parse_daily_inventory_history_upload(
 IN_STOCK_MIN_QTY: float = 1.0
 
 
+def trim_inventory_history_for_po(
+    inv_history: pd.DataFrame,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    po_skus: Optional[set] = None,
+) -> pd.DataFrame:
+    """Keep only SKU-day rows needed for one PO run (avoids processing multi-year baselines)."""
+    if inv_history is None or inv_history.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
+    ws = pd.Timestamp(window_start).normalize()
+    we = pd.Timestamp(window_end).normalize()
+    if ws > we:
+        return pd.DataFrame(columns=_TALL_COLS)
+
+    dates = pd.to_datetime(inv_history["Date"], errors="coerce").dt.normalize()
+    mask = (dates >= ws) & (dates <= we)
+    if po_skus:
+        mask = mask & inv_history["OMS_SKU"].astype(str).isin(po_skus)
+    if not bool(mask.any()):
+        return pd.DataFrame(columns=_TALL_COLS)
+
+    out = inv_history.loc[mask, ["OMS_SKU", "Date", "Qty"]].copy()
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.normalize()
+    out["Qty"] = pd.to_numeric(out["Qty"], errors="coerce")
+    out = out.dropna(subset=["Date", "Qty", "OMS_SKU"])
+    out = out[out["OMS_SKU"].astype(str).str.len() > 0]
+    if out.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
+    return out.reset_index(drop=True)
+
+
 def effective_days_from_history(
     inv_history: pd.DataFrame,
     cutoff_start: pd.Timestamp,
