@@ -67,6 +67,11 @@ class AppSession:
     po_calculate_message: str = ""
     po_calculate_result: dict = field(default_factory=dict)
 
+    # Async daily inventory history upload (wide Excel can take minutes).
+    daily_inventory_upload_status: str = "idle"  # idle | running | done | error
+    daily_inventory_upload_message: str = ""
+    daily_inventory_upload_result: dict = field(default_factory=dict)
+
     # After "Clear all app data", block warm-cache copy, Tier-3 SQLite restore, and
     # frontend auto Load-Cache until the user uploads again or clicks Load Cache.
     pause_auto_data_restore: bool = False
@@ -114,6 +119,9 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.po_calculate_status = "idle"
     sess.po_calculate_message = ""
     sess.po_calculate_result = {}
+    sess.daily_inventory_upload_status = "idle"
+    sess.daily_inventory_upload_message = ""
+    sess.daily_inventory_upload_result = {}
     sess.pause_auto_data_restore = True
     sess._quarterly_cache.clear()
 

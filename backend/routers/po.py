@@ -156,41 +156,67 @@ async def po_upload_daily_inventory_history(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
-    """Upload Daily Inventory History (wide-format Excel: SKU rows × date columns)."""
+    """Upload Daily Inventory History (wide-format Excel: SKU rows × date columns).
+
+    Parsing runs in the background so nginx does not 502 on large workbooks.
+    """
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-    from ..services.daily_inventory_history import parse_daily_inventory_history_upload
+    sid = getattr(request.state, "session_id", None)
+    if not sid:
+        return {"ok": False, "message": "No session id."}
+
+    if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
+        return {
+            "ok": True,
+            "status": "running",
+            "message": getattr(sess, "daily_inventory_upload_message", "")
+            or "Daily inventory upload already in progress…",
+        }
 
     raw = await file.read()
     if not raw:
         return {"ok": False, "message": "Empty file."}
-    try:
-        df = parse_daily_inventory_history_upload(
-            BytesIO(raw),
-            file.filename or "daily_inventory_history.xlsx",
-            sku_mapping=sess.sku_mapping or None,
-        )
-    except Exception as e:
-        return {"ok": False, "message": f"Parse error: {e}"}
-    if df.empty:
-        return {
-            "ok": False,
-            "message": "No usable rows. Need a wide-format sheet: column 1 = SKU, "
-            "column 2 = parent (optional), then daily snapshot columns whose first row is the date.",
-        }
-    sess.daily_inventory_history_df = df
-    sess._quarterly_cache.clear()
-    _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
-    skus = int(df["OMS_SKU"].nunique())
-    days = int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique())
+
+    from ..services.daily_inventory_upload_run import background_daily_inventory_upload
+
+    sess.daily_inventory_upload_status = "running"
+    sess.daily_inventory_upload_message = "Upload received. Parsing sheet…"
+    sess.daily_inventory_upload_result = {}
+    background_tasks.add_task(
+        background_daily_inventory_upload,
+        sid,
+        raw,
+        file.filename or "daily_inventory_history.xlsx",
+    )
     return {
         "ok": True,
-        "rows": int(len(df)),
-        "skus": skus,
-        "days": days,
-        "message": f"Loaded {len(df):,} SKU-day rows ({skus:,} SKUs × {days:,} days) for effective-days math.",
+        "status": "running",
+        "message": "Parsing daily inventory in background — this may take 1–3 minutes for large files.",
     }
+
+
+@router.get("/daily-inventory-history/upload-status")
+def po_daily_inventory_upload_status(request: Request):
+    """Poll after POST /daily-inventory-history until status is ``done`` or ``error``."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "status": "error", "message": "No session"}
+    st = getattr(sess, "daily_inventory_upload_status", "idle") or "idle"
+    msg = getattr(sess, "daily_inventory_upload_message", "") or ""
+    out: dict = {"status": st, "message": msg}
+    result = getattr(sess, "daily_inventory_upload_result", None) or {}
+    if st == "done":
+        out.update(result)
+        out["ok"] = True
+    elif st == "error":
+        out["ok"] = False
+        if result.get("message"):
+            out["message"] = result["message"]
+    else:
+        out["ok"] = True
+    return out
 
 
 @router.get("/daily-inventory-history")

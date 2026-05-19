@@ -168,29 +168,17 @@ def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> p
     if body.empty:
         return pd.DataFrame(columns=_TALL_COLS)
 
-    sku_series = body.iloc[:, sku_idx].astype(object)
-
-    rows = []
-    sku_index = sku_series.index
-    for col_pos, dt in date_map.items():
-        if col_pos >= body.shape[1]:
-            continue
-        col_vals = pd.to_numeric(body.iloc[:, col_pos], errors="coerce")
-        if col_vals.isna().all():
-            continue
-        sub = pd.DataFrame(
-            {
-                "_raw_sku": sku_series.values,
-                "Qty": col_vals.values,
-                "Date": pd.Timestamp(dt),
-            },
-            index=sku_index,
-        )
-        rows.append(sub)
-
-    if not rows:
+    date_positions = sorted(i for i in date_map if i < body.shape[1])
+    if not date_positions:
         return pd.DataFrame(columns=_TALL_COLS)
-    tall = pd.concat(rows, ignore_index=True)
+
+    block = body.iloc[:, [sku_idx] + date_positions].copy()
+    block.columns = ["_raw_sku"] + [
+        pd.Timestamp(date_map[i]).strftime("%Y-%m-%d") for i in date_positions
+    ]
+    tall = block.melt(id_vars="_raw_sku", var_name="Date", value_name="Qty")
+    tall["Date"] = pd.to_datetime(tall["Date"], errors="coerce").dt.normalize()
+    tall = tall.dropna(subset=["Date"])
     tall = tall.dropna(subset=["_raw_sku"])
     tall["_raw_sku"] = tall["_raw_sku"].astype(str).str.strip()
     tall = tall[tall["_raw_sku"].str.len() > 0]
@@ -205,7 +193,9 @@ def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> p
             clean = str(v).strip().upper()
         return _strip_pl_sku(clean, mapping)
 
-    tall["OMS_SKU"] = tall["_raw_sku"].map(_canon)
+    unique_raw = tall["_raw_sku"].unique()
+    canon_map = {r: _canon(r) for r in unique_raw}
+    tall["OMS_SKU"] = tall["_raw_sku"].map(canon_map)
     tall = tall[tall["OMS_SKU"].astype(str).str.len() > 0]
     tall["Qty"] = pd.to_numeric(tall["Qty"], errors="coerce")
     # Excel/pandas sometimes round-trips integer NA as ``iinfo(int64).min`` — those
@@ -248,6 +238,14 @@ def parse_daily_inventory_history_dataframes(
     return out
 
 
+def _sheet_looks_like_inventory(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    hints = ("oms", "amazon", "inventory", "fba", "warehouse", "stock", "on hand", "onhand")
+    return any(h in n for h in hints)
+
+
 def parse_daily_inventory_history_upload(
     file: BinaryIO,
     filename: str,
@@ -261,8 +259,11 @@ def parse_daily_inventory_history_upload(
         df = pd.read_csv(io.BytesIO(raw))
         return parse_daily_inventory_history_dataframes({"csv": df}, sku_mapping=sku_mapping)
     xl = pd.ExcelFile(io.BytesIO(raw))
+    sheet_names = list(xl.sheet_names)
+    inv_names = [sn for sn in sheet_names if _sheet_looks_like_inventory(sn)]
+    to_read = inv_names if inv_names else sheet_names
     sheets: dict[str, pd.DataFrame] = {}
-    for sn in xl.sheet_names:
+    for sn in to_read:
         try:
             sheets[sn] = xl.parse(sn)
         except Exception:

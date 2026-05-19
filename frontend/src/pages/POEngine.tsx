@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, getCoverage, waitForPoCalculate } from '../api/client'
+import { api, getCoverage, waitForDailyInventoryUpload, waitForPoCalculate } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
@@ -466,25 +466,37 @@ export default function POEngine() {
       fd.append('file', f)
       const { data } = await api.post<{
         ok: boolean
+        status?: string
         message?: string
         rows?: number
         skus?: number
         days?: number
       }>('/po/daily-inventory-history', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 900_000,
+        timeout: 120_000,
       })
-      if (data.ok) {
+      if (!data.ok) {
+        setDailyInvMsg({ type: 'err', text: data.message || 'Upload failed' })
+        return
+      }
+      let result = data
+      if (data.status === 'running' || !data.rows) {
+        setDailyInvMsg({ type: 'ok', text: data.message || 'Parsing daily inventory…' })
+        result = await waitForDailyInventoryUpload(msg => {
+          setDailyInvMsg({ type: 'ok', text: msg })
+        })
+      }
+      if (result.ok) {
         setDailyInvMsg({
           type: 'ok',
           text:
-            data.message ||
-            `Loaded ${data.rows ?? 0} rows (${data.skus ?? 0} SKUs × ${data.days ?? 0} days).`,
+            result.message ||
+            `Loaded ${result.rows ?? 0} rows (${result.skus ?? 0} SKUs × ${result.days ?? 0} days).`,
         })
         const c = await getCoverage()
         setCoverage(c)
       } else {
-        setDailyInvMsg({ type: 'err', text: data.message || 'Upload failed' })
+        setDailyInvMsg({ type: 'err', text: result.message || 'Upload failed' })
       }
     } catch (e: unknown) {
       setDailyInvMsg({ type: 'err', text: e instanceof Error ? e.message : 'Upload failed' })
