@@ -1281,51 +1281,55 @@ def calculate_po_base(
             raise_view_date=raise_view_date,
         )
     if lag is not None and not lag.empty:
-        if group_by_parent:
-            po_df = po_df.merge(lag, on="OMS_SKU", how="left")
-        else:
-            po_df = po_df.copy()
+        lag_merge_cols = [
+            c
+            for c in lag.columns
+            if c != "OMS_SKU"
+            and (
+                c.startswith("PO_")
+                or c == "PO_Last_Raised_Date"
+            )
+        ]
+        po_df = po_df.merge(lag, on="OMS_SKU", how="left")
+
+        # Variant-level PO rows: match ledger on each OMS_SKU (size), not parent totals.
+        # Only fall back to a parent-key ledger row when import used the parent SKU
+        # (no per-size row in the ledger for that variant).
+        if not group_by_parent:
 
             def _raise_parent_key(raw: str) -> str:
                 key = canonical_oms_key(raw, _map)
                 return str(get_parent_sku(key) or key).strip().upper()
 
-            po_df["_raise_parent"] = po_df["OMS_SKU"].map(_raise_parent_key)
-            lag_p = lag.copy()
-            lag_p["_raise_parent"] = lag_p["OMS_SKU"].map(_raise_parent_key)
-            lag_num = [
-                "PO_Confirmed_Raise_Pipeline",
-                "PO_Raised_Yesterday",
-                "PO_Raised_Today",
-                "PO_Last_Raised_Qty",
-                "PO_Raised_On_View_Date",
-            ]
-            lag_p = lag_p.groupby("_raise_parent", as_index=False)[
-                [c for c in lag_num if c in lag_p.columns]
-            ].sum()
-            if "PO_Last_Raised_Date" in lag.columns:
-                lag_dates = lag.copy()
-                lag_dates["_raise_parent"] = lag_dates["OMS_SKU"].map(_raise_parent_key)
-                lag_dates["PO_Last_Raised_Date"] = lag_dates["PO_Last_Raised_Date"].fillna("").astype(str)
-                lag_dates = lag_dates[lag_dates["PO_Last_Raised_Date"].str.len() > 0]
-                if not lag_dates.empty:
-                    lag_dates["_sort"] = pd.to_datetime(
-                        lag_dates["PO_Last_Raised_Date"], errors="coerce"
+            def _ledger_row_is_parent_key(raw: str) -> bool:
+                key = canonical_oms_key(raw, _map)
+                return str(key).strip().upper() == _raise_parent_key(key)
+
+            parent_lag = lag[lag["OMS_SKU"].map(_ledger_row_is_parent_key)].copy()
+            if not parent_lag.empty:
+                parent_lag["_raise_parent"] = parent_lag["OMS_SKU"].map(_raise_parent_key)
+                parent_lag = parent_lag.drop_duplicates(subset=["_raise_parent"], keep="last")
+                po_df["_raise_parent"] = po_df["OMS_SKU"].map(_raise_parent_key)
+                missing = pd.to_numeric(
+                    po_df.get("PO_Confirmed_Raise_Pipeline"), errors="coerce"
+                ).fillna(0) <= 0
+                if missing.any():
+                    fill = po_df.loc[missing, ["OMS_SKU", "_raise_parent"]].merge(
+                        parent_lag.drop(columns=["OMS_SKU"], errors="ignore"),
+                        on="_raise_parent",
+                        how="left",
                     )
-                    last_dates = (
-                        lag_dates.sort_values("_sort")
-                        .groupby("_raise_parent", as_index=False)
-                        .tail(1)[["_raise_parent", "PO_Last_Raised_Date"]]
-                    )
-                    lag_p = lag_p.merge(last_dates, on="_raise_parent", how="left")
-                else:
-                    lag_p["PO_Last_Raised_Date"] = ""
-            po_df = po_df.merge(
-                lag_p.drop(columns=["OMS_SKU"], errors="ignore"),
-                on="_raise_parent",
-                how="left",
-            )
-            po_df.drop(columns=["_raise_parent"], inplace=True)
+                    for c in lag_merge_cols:
+                        if c not in fill.columns:
+                            continue
+                        src = fill[c]
+                        if c == "PO_Last_Raised_Date":
+                            po_df.loc[missing, c] = src.fillna("").astype(str).values
+                        else:
+                            po_df.loc[missing, c] = (
+                                pd.to_numeric(src, errors="coerce").fillna(0).astype(int).values
+                            )
+                po_df.drop(columns=["_raise_parent"], inplace=True, errors="ignore")
     for c in (
         "PO_Confirmed_Raise_Pipeline",
         "PO_Raised_Yesterday",

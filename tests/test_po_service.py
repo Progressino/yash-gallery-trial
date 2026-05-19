@@ -1972,6 +1972,45 @@ def test_raise_ledger_last_and_view_date_columns():
     assert int(a["PO_Raised_Yesterday"]) == 0
 
 
+def test_raise_ledger_per_size_not_parent_broadcast():
+    """Each size gets its own raised qty; parent total must not copy to every variant."""
+    from backend.services.po_engine import calculate_po_base
+
+    sales = _minimal_sales()
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["STYLE-A-S", "STYLE-A-M", "STYLE-A-L"],
+            "Total_Inventory": [10, 10, 10],
+        }
+    )
+    ledger = pd.DataFrame(
+        {
+            "OMS_SKU": ["STYLE-A-S", "STYLE-A-M", "STYLE-A-L"],
+            "Raised_Qty": [5, 15, 20],
+            "Raised_Date": [pd.Timestamp("2026-05-15")] * 3,
+        }
+    )
+    po = calculate_po_base(
+        sales,
+        inv,
+        30,
+        30,
+        90,
+        safety_pct=0.0,
+        planning_date="2026-05-16",
+        po_raise_ledger_df=ledger,
+        raise_ledger_lookback_days=14,
+        raise_view_date="2026-05-15",
+    )
+    by_sku = po.set_index("OMS_SKU")
+    assert int(by_sku.loc["STYLE-A-S", "PO_Raised_On_View_Date"]) == 5
+    assert int(by_sku.loc["STYLE-A-M", "PO_Raised_On_View_Date"]) == 15
+    assert int(by_sku.loc["STYLE-A-L", "PO_Raised_On_View_Date"]) == 20
+    assert int(by_sku.loc["STYLE-A-S", "PO_Confirmed_Raise_Pipeline"]) == 5
+    assert int(by_sku.loc["STYLE-A-M", "PO_Confirmed_Raise_Pipeline"]) == 15
+    assert int(by_sku.loc["STYLE-A-L", "PO_Confirmed_Raise_Pipeline"]) == 20
+
+
 def test_po_raise_ledger_feeds_effective_pipeline_and_drops_repeat_po():
     """Confirmed raises (yesterday) add to effective pipeline so the next run
     does not re-recommend the same full PO for the same SKU."""
