@@ -208,6 +208,8 @@ export type DailyInventoryUploadResult = {
   rows?: number
   skus?: number
   days?: number
+  min_date?: string
+  max_date?: string
 }
 
 /** Poll after POST /po/daily-inventory-history (parses in background on the server). */

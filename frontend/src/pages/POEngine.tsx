@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
   api,
+  type DailyInventoryUploadResult,
   getCoverage,
   startPoCalculate,
   waitForDailyInventoryUpload,
@@ -507,14 +508,7 @@ export default function POEngine() {
     try {
       const fd = new FormData()
       fd.append('file', f)
-      const { data } = await api.post<{
-        ok: boolean
-        status?: string
-        message?: string
-        rows?: number
-        skus?: number
-        days?: number
-      }>('/po/daily-inventory-history', fd, {
+      const { data } = await api.post<DailyInventoryUploadResult>('/po/daily-inventory-history', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 120_000,
       })
