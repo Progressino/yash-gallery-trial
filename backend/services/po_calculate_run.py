@@ -67,11 +67,41 @@ def execute_po_calculate(
                 logger.exception("sync_sidecars after ledger auto-import failed")
 
     _ledger = getattr(sess, "po_raise_ledger_df", None)
+
+    # Pre-trim inventory history to the ADS window + small buffer.
+    # calculate_po_base sets ADS_WINDOW = period_days, so for a 30-day period
+    # only the last 30 days are ever used.  Scanning the full 400-day session
+    # dataframe (up to 3.8M rows) just to extract those 30 days is wasteful —
+    # pre-trim here from max-date so the engine's own date scan is small.
+    _period = int(body.get("period_days", 90))
+    _raw_ih = getattr(sess, "daily_inventory_history_df", None)
+    _inv_history_for_calc: pd.DataFrame | None = None
+    if _raw_ih is not None and not _raw_ih.empty:
+        _inv_dates = pd.to_datetime(_raw_ih["Date"], errors="coerce")
+        _max_inv = _inv_dates.max()
+        if pd.notna(_max_inv):
+            # Keep period_days + 14-day buffer so the engine's window anchoring
+            # (which may shift a few days toward the planning_date) always has data.
+            _pretrim_cutoff = pd.Timestamp(_max_inv).normalize() - pd.Timedelta(
+                days=_period + 14
+            )
+            _mask = _inv_dates >= _pretrim_cutoff
+            _inv_history_for_calc = _raw_ih[_mask].reset_index(drop=True)
+            if len(_inv_history_for_calc) < len(_raw_ih):
+                logger.info(
+                    "PO calc pre-trim: %s → %s inventory-history rows (period=%d days)",
+                    f"{len(_raw_ih):,}",
+                    f"{len(_inv_history_for_calc):,}",
+                    _period,
+                )
+        else:
+            _inv_history_for_calc = _raw_ih
+
     try:
         po_df = calculate_po_base(
             sales_df=sess.sales_df,
             inv_df=inv_df,
-            period_days=int(body.get("period_days", 90)),
+            period_days=_period,
             lead_time=int(body.get("lead_time", 30)),
             target_days=int(body.get("target_days", 210)),
             demand_basis=str(body.get("demand_basis", "Sold")),
@@ -86,11 +116,7 @@ def execute_po_calculate(
             sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
             enforce_two_size_minimum=bool(body.get("enforce_two_size_minimum", False)),
             enforce_lead_time_release_gate=bool(body.get("enforce_lead_time_release_gate", True)),
-            inventory_history_df=(
-                sess.daily_inventory_history_df
-                if not sess.daily_inventory_history_df.empty
-                else None
-            ),
+            inventory_history_df=_inv_history_for_calc,
             po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
             planning_date=body.get("planning_date"),
             raise_ledger_lookback_days=lookback,
