@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..db.stitching_db import DATA_KEYS, HOUR_COLS, get_all_sheets, get_sheet_df, save_sheet_df
+from ..db.stitching_db import DATA_KEYS, DEFAULT_SHEETS, HOUR_COLS, get_all_sheets, get_sheet_df, save_sheet_df
 
 IST = timezone(timedelta(hours=5, minutes=30))
 HOUR_LBLS = [
@@ -925,6 +925,65 @@ def dedupe_sheet(key: str, df: pd.DataFrame | None = None) -> pd.DataFrame:
     for c in cols:
         out[c] = out[c].astype(str).str.strip()
     return out.drop_duplicates(subset=cols, keep="last").reset_index(drop=True)
+
+
+def merge_sheet_dataframes(key: str, existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    """Union rows by master key — keep server rows; add keys only present in incoming."""
+    if incoming is None or incoming.empty:
+        return dedupe_sheet(key, existing)
+    if existing is None or existing.empty:
+        return dedupe_sheet(key, incoming)
+    cols = MASTER_KEY_COLS.get(key)
+    if not cols:
+        return dedupe_sheet(key, pd.concat([existing, incoming], ignore_index=True))
+    present_in = [c for c in cols if c in incoming.columns]
+    present_ex = [c for c in cols if c in existing.columns]
+    if len(present_in) != len(cols) or len(present_ex) != len(cols):
+        return dedupe_sheet(key, pd.concat([existing, incoming], ignore_index=True))
+    ex = existing.copy()
+    inc = incoming.copy()
+    for c in cols:
+        ex[c] = ex[c].astype(str).str.strip()
+        inc[c] = inc[c].astype(str).str.strip()
+
+    def _row_key(row: pd.Series) -> tuple[str, ...]:
+        return tuple(str(row[c]) for c in cols)
+
+    ex_keys = {_row_key(ex.iloc[i]) for i in range(len(ex))}
+    only_new = inc[~inc.apply(_row_key, axis=1).isin(ex_keys)]
+    if only_new.empty:
+        return dedupe_sheet(key, ex)
+    return dedupe_sheet(key, pd.concat([ex, only_new], ignore_index=True))
+
+
+def looks_like_seed_only_master() -> bool:
+    """True when style master is still the built-in demo (data lost after deploy)."""
+    sm = get_sheet_df("style_master")
+    if sm.empty:
+        return True
+    seed = pd.DataFrame(DEFAULT_SHEETS["style_master"])
+    if len(sm) > len(seed) + 5:
+        return False
+    if "Style" not in sm.columns:
+        return False
+    seed_styles = set(seed["Style"].astype(str).str.strip())
+    cur_styles = set(sm["Style"].astype(str).str.strip())
+    if cur_styles - seed_styles:
+        return False
+    return len(sm) <= len(seed) + 2
+
+
+def bootstrap_stitching_data() -> dict[str, Any]:
+    """Merge Google Sheet master data on startup when DB is seed-only or bootstrap is enabled."""
+    if os.environ.get("STITCHING_GSHEET_BOOTSTRAP", "1").strip().lower() in ("0", "false", "no"):
+        return {"ok": True, "skipped": "bootstrap disabled"}
+    from .stitching_gsheet import gsheet_status, sync_from_gsheet_merge
+
+    if not gsheet_status().get("available"):
+        return {"ok": True, "skipped": "gsheet unavailable"}
+    if looks_like_seed_only_master():
+        return sync_from_gsheet_merge()
+    return {"ok": True, "skipped": "custom data present"}
 
 
 def _append_rate_history(karigar_id: str, daily_rate: float, effective_from: str) -> None:

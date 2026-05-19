@@ -20,7 +20,7 @@ from ..db.stitching_db import (
     verify_admin_password,
 )
 from ..services import stitching_costing as svc
-from ..services.stitching_gsheet import gsheet_status, sync_from_gsheet, sync_to_gsheet
+from ..services.stitching_gsheet import gsheet_status, sync_from_gsheet, sync_from_gsheet_merge, sync_to_gsheet
 
 router = APIRouter()
 
@@ -158,12 +158,16 @@ async def import_sheet_file(key: str, file: UploadFile = File(...), mode: str = 
     else:
         raise HTTPException(400, "Use .csv or .xlsx")
     existing = get_sheet_df(key)
-    if mode == "append" and not existing.empty:
+    if mode == "merge":
+        df = svc.merge_sheet_dataframes(key, existing, df)
+    elif mode == "append" and not existing.empty:
         df = pd.concat([existing, df], ignore_index=True)
-    if key in svc.MASTER_KEY_COLS:
+        if key in svc.MASTER_KEY_COLS:
+            df = svc.dedupe_sheet(key, df)
+    elif key in svc.MASTER_KEY_COLS:
         df = svc.dedupe_sheet(key, df)
     save_sheet_df(key, df)
-    return {"ok": True, "rows": len(df)}
+    return {"ok": True, "rows": len(df), "mode": mode}
 
 
 @router.get("/production-entry/load")
@@ -396,8 +400,16 @@ def karigar_rate_history(karigar_id: str):
 
 
 @router.post("/sync/from-gsheet")
-def pull_gsheet():
-    return sync_from_gsheet()
+def pull_gsheet(replace: bool = False):
+    """Pull from Google Sheet. Default merge keeps server rows and adds missing keys."""
+    if replace:
+        return sync_from_gsheet()
+    return sync_from_gsheet_merge()
+
+
+@router.post("/sync/from-gsheet/merge")
+def pull_gsheet_merge():
+    return sync_from_gsheet_merge()
 
 
 @router.post("/sync/to-gsheet")

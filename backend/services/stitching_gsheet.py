@@ -72,6 +72,7 @@ def save_tab(tab_name: str, df: pd.DataFrame) -> None:
 
 
 def sync_from_gsheet(keys: list[str] | None = None) -> dict[str, Any]:
+    """Replace local sheets with Google Sheet tabs (destructive)."""
     if not _gsheet_available():
         return {"ok": False, "message": "gspread not installed or STITCHING_GSHEET_ID missing"}
     keys = keys or list(DATA_KEYS)
@@ -87,6 +88,38 @@ def sync_from_gsheet(keys: list[str] | None = None) -> dict[str, Any]:
         except Exception as e:
             errors.append({key: str(e)})
     return {"ok": len(errors) == 0, "loaded": loaded, "errors": errors}
+
+
+def sync_from_gsheet_merge(keys: list[str] | None = None) -> dict[str, Any]:
+    """Merge Google Sheet rows into local DB — keeps server-only rows, adds missing keys."""
+    from .stitching_costing import MASTER_KEY_COLS, merge_sheet_dataframes
+
+    if not _gsheet_available():
+        return {"ok": False, "message": "gspread not installed or STITCHING_GSHEET_ID missing"}
+    keys = keys or list(MASTER_KEY_COLS.keys())
+    merged = []
+    added_rows: dict[str, int] = {}
+    errors = []
+    for key in keys:
+        if key not in DATA_KEYS:
+            continue
+        try:
+            incoming = load_tab(key)
+            existing = get_sheet_df(key)
+            before = len(existing)
+            out = merge_sheet_dataframes(key, existing, incoming)
+            save_sheet_df(key, out)
+            merged.append(key)
+            added_rows[key] = max(0, len(out) - before)
+        except Exception as e:
+            errors.append({key: str(e)})
+    return {
+        "ok": len(errors) == 0,
+        "merged": merged,
+        "added_rows": added_rows,
+        "errors": errors,
+        "message": "Merged Google Sheet into server database (existing rows kept).",
+    }
 
 
 def sync_to_gsheet(keys: list[str] | None = None) -> dict[str, Any]:

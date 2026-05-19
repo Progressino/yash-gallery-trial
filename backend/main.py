@@ -712,10 +712,25 @@ async def _warm_cache_scheduler():
         await loop.run_in_executor(None, _do_marketplace_sync_all)
 
 
+def _bootstrap_stitching_on_startup() -> None:
+    try:
+        from .services.stitching_costing import bootstrap_stitching_data
+
+        out = bootstrap_stitching_data()
+        if out.get("merged"):
+            log.info("Stitching bootstrap merged sheets: %s", out.get("added_rows"))
+        elif out.get("skipped"):
+            log.debug("Stitching bootstrap skipped: %s", out.get("skipped"))
+    except Exception:
+        log.exception("Stitching bootstrap failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: load cache in background so server is ready immediately
-    asyncio.get_event_loop().run_in_executor(None, _do_load_warm_cache)
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _bootstrap_stitching_on_startup)
+    loop.run_in_executor(None, _do_load_warm_cache)
     # Schedule daily 6AM IST refresh
     task = asyncio.create_task(_warm_cache_scheduler())
     yield

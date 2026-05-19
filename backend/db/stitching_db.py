@@ -10,10 +10,13 @@ from typing import Any
 
 import pandas as pd
 
-_DB = os.environ.get(
-    "STITCHING_DB_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "stitching_costing.db"),
-)
+def _default_db_path() -> str:
+    if os.path.isdir("/data"):
+        return "/data/stitching_costing.db"
+    return os.path.join(os.path.dirname(__file__), "..", "stitching_costing.db")
+
+
+_DB = os.environ.get("STITCHING_DB_PATH", _default_db_path())
 
 IST = timezone(timedelta(hours=5, minutes=30))
 

@@ -73,6 +73,44 @@ def test_dashboard_many_karigars_uses_batch_rates():
     assert elapsed < 3.0
 
 
+def test_merge_sheet_keeps_server_and_adds_incoming():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "KEEP-ME", "Operation": "Cut", "Target": 100, "Rate_Rs": 2.0}]),
+    )
+    incoming = pd.DataFrame(
+        [
+            {"Style": "KEEP-ME", "Operation": "Cut", "Target": 999, "Rate_Rs": 9.0},
+            {"Style": "FROM-FILE", "Operation": "Stitch", "Target": 80, "Rate_Rs": 4.0},
+        ]
+    )
+    merged = svc.merge_sheet_dataframes("style_master", get_sheet_df("style_master"), incoming)
+    assert len(merged) == 2
+    keep = merged[merged["Style"] == "KEEP-ME"].iloc[0]
+    assert int(keep["Target"]) == 100
+    assert "FROM-FILE" in set(merged["Style"].astype(str))
+
+
+def test_import_merge_mode_via_router_logic():
+    save_sheet_df("style_master", pd.DataFrame([{"Style": "A", "Operation": "Op1", "Target": 1, "Rate_Rs": 1.0}]))
+    existing = get_sheet_df("style_master")
+    incoming = pd.DataFrame([{"Style": "B", "Operation": "Op2", "Target": 2, "Rate_Rs": 2.0}])
+    out = svc.merge_sheet_dataframes("style_master", existing, incoming)
+    save_sheet_df("style_master", out)
+    df = get_sheet_df("style_master")
+    assert len(df) == 2
+    assert set(df["Style"].astype(str)) == {"A", "B"}
+
+
+def test_looks_like_seed_only_master():
+    assert svc.looks_like_seed_only_master() is True
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "BRAND-NEW-STYLE", "Operation": "Cut", "Target": 1, "Rate_Rs": 1.0}]),
+    )
+    assert svc.looks_like_seed_only_master() is False
+
+
 def test_karigar_rate_by_date():
     svc.add_karigar_master("K099", "Test Karigar", "Stitching", 400.0, "2026-05-01")
     svc.update_karigar_master("K099", daily_rate_rs=500.0, effective_from="2026-05-10")

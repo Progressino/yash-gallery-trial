@@ -1203,7 +1203,7 @@ function SheetUploadBar({
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
-  const [mode, setMode] = useState<'replace' | 'append'>('replace')
+  const [mode, setMode] = useState<'merge' | 'replace' | 'append'>('merge')
 
   const upload = async (file: File) => {
     setBusy(true)
@@ -1240,11 +1240,12 @@ function SheetUploadBar({
       <select
         className="border rounded px-2 py-1 bg-white"
         value={mode}
-        onChange={e => setMode(e.target.value as 'replace' | 'append')}
+        onChange={e => setMode(e.target.value as 'merge' | 'replace' | 'append')}
         disabled={busy}
       >
+        <option value="merge">Merge (keep existing + add new)</option>
+        <option value="append">Append all file rows</option>
         <option value="replace">Replace all rows</option>
-        <option value="append">Append rows</option>
       </select>
       <input
         ref={inputRef}
@@ -2201,6 +2202,7 @@ function BackupRestoreBar({
 }) {
   const zipRef = useRef<HTMLInputElement>(null)
   const [restorePending, setRestorePending] = useState(false)
+  const [gsheetPending, setGsheetPending] = useState(false)
 
   const handleExport = async () => {
     try {
@@ -2213,6 +2215,29 @@ function BackupRestoreBar({
       URL.revokeObjectURL(url)
     } catch {
       onFlash('err', 'Export failed')
+    }
+  }
+
+  const handlePullGsheet = async () => {
+    setGsheetPending(true)
+    try {
+      const { data } = await api.post<{
+        ok?: boolean
+        message?: string
+        added_rows?: Record<string, number>
+      }>('/stitching/sync/from-gsheet/merge')
+      const added = data.added_rows
+        ? Object.entries(data.added_rows)
+            .filter(([, n]) => n > 0)
+            .map(([k, n]) => `${k.replace(/_/g, ' ')}: +${n}`)
+            .join(', ')
+        : ''
+      onFlash('ok', added ? `${data.message || 'Merged.'} ${added}` : data.message || 'Merged from Google Sheet.')
+      onRestored()
+    } catch {
+      onFlash('err', 'Google Sheet sync failed — check server credentials (STITCHING_GCP_*).')
+    } finally {
+      setGsheetPending(false)
     }
   }
 
@@ -2238,8 +2263,19 @@ function BackupRestoreBar({
   return (
     <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 space-y-3">
       <p className="text-xs font-semibold text-[#1a3a5c]">💾 Backup & restore</p>
-      <p className="text-xs text-gray-600">Data is stored on the server. Export a ZIP backup or restore from a previous export.</p>
+      <p className="text-xs text-gray-600">
+        Data is stored on the server database (persists across deploys). Export a ZIP backup, restore from ZIP, or pull
+        missing master rows from the linked Google Sheet without deleting today&apos;s entries.
+      </p>
       <div className="flex flex-wrap gap-2 items-center">
+        <button
+          type="button"
+          onClick={() => void handlePullGsheet()}
+          disabled={gsheetPending}
+          className="text-xs px-3 py-1.5 rounded-lg border border-green-500 bg-green-50 text-green-900 hover:bg-green-100 disabled:opacity-50"
+        >
+          {gsheetPending ? 'Pulling…' : '📥 Pull from Google Sheet'}
+        </button>
         <button
           type="button"
           onClick={() => void handleExport()}
