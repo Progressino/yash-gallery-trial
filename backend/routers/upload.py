@@ -10,7 +10,8 @@ import zipfile
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Callable, List, Optional, Set
+from collections import defaultdict
+from typing import Any, Callable, List, Optional, Set, Tuple
 
 import logging
 import pandas as pd
@@ -240,6 +241,19 @@ def _rebuild_sales_sync(sess) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _store_daily_auto_ingest_result(sess, payload: dict) -> None:
+    """Persist last ingest outcome for coverage polling and completion UI."""
+    sess.daily_auto_ingest_result = {
+        "ok": bool(payload.get("ok")),
+        "message": str(payload.get("message") or ""),
+        "detected_platforms": list(payload.get("detected_platforms") or []),
+        "warnings": list(payload.get("warnings") or []),
+        "processed_files": int(payload.get("processed_files") or 0),
+        "detected_files": int(payload.get("detected_files") or 0),
+        "unknown_files": int(payload.get("unknown_files") or 0),
+    }
+
+
 def _run_daily_auto_sales_rebuild(session_id: str) -> None:
     """Background task: rebuild sales after Tier-3 ingest returned HTTP 200."""
     sess = store._sessions.get(session_id)
@@ -267,39 +281,34 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
             sess.daily_auto_ingest_message = ""
 
 
-def _daily_auto_should_background(file_parts: list[tuple[str, bytes]]) -> bool:
-    """RAR / multi-file / large payloads can exceed reverse-proxy timeouts if held on the HTTP thread."""
-    if len(file_parts) >= 2:
-        return True
-    total = sum(len(b) for _, b in file_parts)
-    if total >= 6 * 1024 * 1024:
-        return True
-    for fn, raw in file_parts:
-        fl = (fn or "").lower()
-        if fl.endswith(".rar"):
-            return True
-        if len(raw) >= 6 and raw[:6] == _RAR_MAGIC:
-            return True
-    return False
-
-
 def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
     """Parse Tier-3 upload off the request thread, then queue the usual sales rebuild."""
     sess = store._sessions.get(session_id)
     if sess is None:
         return
     sess.daily_auto_ingest_status = "running"
-    sess.daily_auto_ingest_message = "Extracting archives and saving to daily store…"
+    sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
     try:
         payload = _process_daily_auto_sync(sess, file_parts, rebuild_sales=False)
     except Exception as e:
         _log.exception("daily-auto background ingest")
+        err_payload = {
+            "ok": False,
+            "message": str(e),
+            "detected_platforms": [],
+            "warnings": [str(e)],
+            "processed_files": len(file_parts),
+            "detected_files": 0,
+            "unknown_files": len(file_parts),
+        }
+        _store_daily_auto_ingest_result(sess, err_payload)
         sess.daily_auto_ingest_status = "error"
         sess.daily_auto_ingest_message = str(e)
         sess.sales_rebuild_status = "error"
         sess.sales_rebuild_message = f"Ingest failed: {e}"
         return
 
+    _store_daily_auto_ingest_result(sess, payload)
     if not payload.get("ok"):
         sess.daily_auto_ingest_status = "error"
         sess.daily_auto_ingest_message = str(payload.get("message") or "Ingest failed")
@@ -1443,6 +1452,56 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
     return "unknown"
 
 
+_DeferredSlice = Tuple[str, pd.DataFrame, str]
+
+
+def _merge_slice_into_session(
+    sess,
+    platform: str,
+    df_slice: pd.DataFrame,
+    *,
+    source_filename: Optional[str] = None,
+) -> None:
+    """Merge one parsed upload slice into session — avoids reloading full Tier-3 SQLite."""
+    if df_slice is None or df_slice.empty:
+        return
+    if platform == "amazon":
+        sess.mtr_df = _merge_platform_data(
+            sess.mtr_df, df_slice, "amazon", source_filename=source_filename,
+        )
+    elif platform == "myntra":
+        sess.myntra_df = _merge_platform_data(
+            sess.myntra_df, df_slice, "myntra", source_filename=source_filename,
+        )
+    elif platform == "meesho":
+        sess.meesho_df = _merge_platform_data(
+            sess.meesho_df, df_slice, "meesho", source_filename=source_filename,
+        )
+    elif platform == "flipkart":
+        sess.flipkart_df = _merge_platform_data(
+            sess.flipkart_df, df_slice, "flipkart", source_filename=source_filename,
+        )
+    else:
+        return
+    sess.daily_restored = False
+
+
+def _flush_deferred_session_slices(sess, queue: List[_DeferredSlice]) -> None:
+    """Batch deferred per-file slices into one merge per platform (ZIP/RAR)."""
+    if not queue:
+        return
+    by_plat: dict[str, list[_DeferredSlice]] = defaultdict(list)
+    for plat, df, fname in queue:
+        if df is not None and not df.empty:
+            by_plat[plat].append((plat, df, fname))
+    queue.clear()
+    for plat, pairs in by_plat.items():
+        frames = [df for _, df, _ in pairs]
+        combined = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+        src = pairs[0][2]
+        _merge_slice_into_session(sess, plat, combined, source_filename=src)
+
+
 def _process_daily_auto_sync(
     sess,
     file_parts: list[tuple[str, bytes]],
@@ -1459,59 +1518,30 @@ def _process_daily_auto_sync(
             detected: list[str] = []
             warnings: list[str] = []
 
-            from ..services.daily_store import load_platform_data as _load_platform_data
-
-            def _flush_deferred_platforms(defer: Set[str]) -> None:
-                """Reload Tier-3 SQLite into session without wiping warm-cache / Tier-1 bulk."""
-                if not defer:
-                    return
-                if "amazon" in defer:
-                    store = _load_platform_data("amazon")
-                    sess.mtr_df = _merge_platform_data(sess.mtr_df, store, "amazon")
-                if "myntra" in defer:
-                    store = _load_platform_data("myntra")
-                    sess.myntra_df = _merge_platform_data(sess.myntra_df, store, "myntra")
-                if "meesho" in defer:
-                    store = _load_platform_data("meesho")
-                    sess.meesho_df = _merge_platform_data(sess.meesho_df, store, "meesho")
-                if "flipkart" in defer:
-                    store = _load_platform_data("flipkart")
-                    sess.flipkart_df = _merge_platform_data(sess.flipkart_df, store, "flipkart")
-                sess.daily_restored = False
+            def _apply_parsed_slice(
+                p: str,
+                df: pd.DataFrame,
+                src_fname: str,
+                defer_queue: Optional[List[_DeferredSlice]] = None,
+            ) -> None:
+                if defer_queue is not None:
+                    defer_queue.append((p, df, src_fname))
+                else:
+                    _merge_slice_into_session(sess, p, df, source_filename=src_fname)
 
             def _handle_one(
                 fname: str,
                 raw: bytes,
-                defer_reload: Optional[Set[str]] = None,
+                defer_queue: Optional[List[_DeferredSlice]] = None,
             ) -> None:
                 """Process a single (non-RAR) file and mutate detected/warnings."""
-                from ..services.daily_store import load_platform_data as _load_platform
-
-                def _touch_platform(p: str) -> None:
-                    if defer_reload is not None:
-                        defer_reload.add(p)
-                    else:
-                        if p == "amazon":
-                            store = _load_platform("amazon")
-                            sess.mtr_df = _merge_platform_data(sess.mtr_df, store, "amazon")
-                        elif p == "myntra":
-                            store = _load_platform("myntra")
-                            sess.myntra_df = _merge_platform_data(sess.myntra_df, store, "myntra")
-                        elif p == "meesho":
-                            store = _load_platform("meesho")
-                            sess.meesho_df = _merge_platform_data(sess.meesho_df, store, "meesho")
-                        elif p == "flipkart":
-                            store = _load_platform("flipkart")
-                            sess.flipkart_df = _merge_platform_data(sess.flipkart_df, store, "flipkart")
-                        sess.daily_restored = False
-
                 platform = _detect_platform(fname, raw)
                 try:
                     if platform == "amazon_mtr_zip":
                         df_mtr, _n, sk_mtr = load_mtr_from_zip(raw)
                         if not df_mtr.empty:
                             save_daily_file("amazon", fname, df_mtr)
-                            _touch_platform("amazon")
+                            _apply_parsed_slice("amazon", df_mtr, fname, defer_queue)
                             detected.append(f"Amazon MTR ({fname})")
                             if sk_mtr:
                                 warnings.append(f"{fname}: {'; '.join(sk_mtr[:2])}")
@@ -1522,7 +1552,7 @@ def _process_daily_auto_sync(
                         df, msg = parse_mtr_csv(raw, fname)
                         if not df.empty:
                             save_daily_file("amazon", fname, df)
-                            _touch_platform("amazon")
+                            _apply_parsed_slice("amazon", df, fname, defer_queue)
                             detected.append(f"Amazon ({fname})")
                             if msg != "OK":
                                 warnings.append(f"{fname}: {msg}")
@@ -1533,7 +1563,7 @@ def _process_daily_auto_sync(
                         df, msg = parse_mtr_csv(raw, fname)
                         if not df.empty:
                             save_daily_file("amazon", fname, df)
-                            _touch_platform("amazon")
+                            _apply_parsed_slice("amazon", df, fname, defer_queue)
                             detected.append(f"Amazon B2B ({fname})")
                             if msg != "OK":
                                 warnings.append(f"{fname}: {msg}")
@@ -1546,7 +1576,7 @@ def _process_daily_auto_sync(
                         if not df.empty:
                             df = apply_dsr_segment_from_upload_filename(df, fname, "Myntra")
                             save_daily_file("myntra", fname, df)
-                            _touch_platform("myntra")
+                            _apply_parsed_slice("myntra", df, fname, defer_queue)
                             detected.append(f"Myntra ({fname})")
                             if msg != "OK":
                                 warnings.append(f"{fname}: {msg}")
@@ -1557,7 +1587,7 @@ def _process_daily_auto_sync(
                         df, _count, _skipped = load_meesho_from_zip(raw, source_filename=fname)
                         if not df.empty:
                             save_daily_file("meesho", fname, df)
-                            _touch_platform("meesho")
+                            _apply_parsed_slice("meesho", df, fname, defer_queue)
                             detected.append(f"Meesho ({fname})")
                             if _skipped:
                                 warnings.append(f"{fname}: {'; '.join(_skipped[:2])}")
@@ -1570,7 +1600,7 @@ def _process_daily_auto_sync(
                         if not df.empty:
                             df = apply_dsr_segment_from_upload_filename(df, fname, "Meesho")
                             save_daily_file("meesho", fname, df)
-                            _touch_platform("meesho")
+                            _apply_parsed_slice("meesho", df, fname, defer_queue)
                             detected.append(f"Meesho ({fname})")
                             if msg != "OK":
                                 warnings.append(f"{fname}: {msg}")
@@ -1582,7 +1612,7 @@ def _process_daily_auto_sync(
                         if not df.empty:
                             df = apply_dsr_segment_from_upload_filename(df, fname, "Meesho")
                             save_daily_file("meesho", fname, df)
-                            _touch_platform("meesho")
+                            _apply_parsed_slice("meesho", df, fname, defer_queue)
                             detected.append(f"Meesho order export ({fname})")
                             if msg != "OK":
                                 warnings.append(f"{fname}: {msg}")
@@ -1635,7 +1665,7 @@ def _process_daily_auto_sync(
                         if not df.empty:
                             df = apply_dsr_segment_from_upload_filename(df, fname, "Flipkart")
                             save_daily_file("flipkart", fname, df)
-                            _touch_platform("flipkart")
+                            _apply_parsed_slice("flipkart", df, fname, defer_queue)
                             detected.append(f"Flipkart ({fname})")
                         else:
                             warnings.append(f"{fname}: No data extracted from Flipkart file")
@@ -1655,7 +1685,7 @@ def _process_daily_auto_sync(
                             inner_files = _extract_rar_files(raw)
                             if not inner_files:
                                 warnings.append(f"{fname}: RAR archive extracted to zero files — check archive is not corrupt.")
-                            defer_rar: Set[str] = set()
+                            defer_rar: List[_DeferredSlice] = []
                             for inner_name, inner_bytes in inner_files:
                                 if not inner_bytes:
                                     continue
@@ -1664,7 +1694,7 @@ def _process_daily_auto_sync(
                                 if not base or base.endswith("/"):
                                     continue
                                 _handle_one(inner_name, inner_bytes, defer_rar)
-                            _flush_deferred_platforms(defer_rar)
+                            _flush_deferred_session_slices(sess, defer_rar)
                         except Exception as e:
                             warnings.append(f"{fname} (RAR extract): {e}")
                     elif fl.endswith(".zip"):
@@ -1683,11 +1713,9 @@ def _process_daily_auto_sync(
                                 )
                                 if not df_fk.empty:
                                     save_daily_file("flipkart", fname, df_fk)
-                                    store_fk = _load_platform_data("flipkart")
-                                    sess.flipkart_df = _merge_platform_data(
-                                        sess.flipkart_df, store_fk, "flipkart",
+                                    _merge_slice_into_session(
+                                        sess, "flipkart", df_fk, source_filename=fname,
                                     )
-                                    sess.daily_restored = False
                                     detected.append(
                                         f"Flipkart ZIP ({fname}, {n_fc} file(s))",
                                     )
@@ -1696,7 +1724,7 @@ def _process_daily_auto_sync(
                                             f"{fname}: {'; '.join(skipped_fk[:2])}",
                                         )
                                 else:
-                                    defer_z: Set[str] = set()
+                                    defer_z: List[_DeferredSlice] = []
                                     try:
                                         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                                             for info in zf.infolist():
@@ -1709,7 +1737,7 @@ def _process_daily_auto_sync(
                                                 if base.startswith("."):
                                                     continue
                                                 _handle_one(n, zf.read(n), defer_z)
-                                        _flush_deferred_platforms(defer_z)
+                                        _flush_deferred_session_slices(sess, defer_z)
                                     except Exception as e:
                                         warnings.append(f"{fname} (ZIP expand): {e}")
                                     fk_hits = [d for d in detected if "Flipkart" in d]
@@ -1725,7 +1753,7 @@ def _process_daily_auto_sync(
                             except Exception as e:
                                 warnings.append(f"{fname} (Flipkart ZIP): {e}")
                         else:
-                            defer_z: Set[str] = set()
+                            defer_z: List[_DeferredSlice] = []
                             try:
                                 with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                                     for info in zf.infolist():
@@ -1738,7 +1766,7 @@ def _process_daily_auto_sync(
                                         if base.startswith("."):
                                             continue
                                         _handle_one(n, zf.read(n), defer_z)
-                                _flush_deferred_platforms(defer_z)
+                                _flush_deferred_session_slices(sess, defer_z)
                             except Exception as e:
                                 warnings.append(f"{fname} (ZIP): {e}")
                     else:
@@ -1826,50 +1854,39 @@ async def upload_daily_auto(
             }
         )
 
-    if _daily_auto_should_background(file_parts) and sid:
-        msg = (
-            "Large upload accepted — extracting RAR / merging daily data on the server. "
-            "You can leave this page; the banner will update when finished."
+    if not sid:
+        payload = await run_heavy(
+            _process_daily_auto_sync, sess, file_parts, rebuild_sales=True,
         )
+        return JSONResponse(content=payload)
 
-        def mark_async_start():
-            sess.daily_auto_ingest_status = "running"
-            sess.daily_auto_ingest_message = msg
-
-        await _session_lock_apply(sess, mark_async_start)
-        background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
-        return JSONResponse(
-            content={
-                "ok": True,
-                "ingest_async": True,
-                "message": msg,
-                "detected_platforms": [],
-                "warnings": [],
-                "processed_files": len(file_parts),
-                "detected_files": 0,
-                "unknown_files": len(file_parts),
-                "sales_rebuild": "pending",
-            }
-        )
-
-    payload = await run_heavy(
-        _process_daily_auto_sync, sess, file_parts, rebuild_sales=False,
+    msg = (
+        "Upload accepted — parsing daily files on the server. "
+        "Status updates below; you can stay on this page."
     )
-    if payload.get("ok") and payload.get("sales_rebuild") == "pending" and sid:
 
-        def _mark_sales_rebuild_running():
-            sess.sales_rebuild_status = "running"
-            sess.sales_rebuild_message = "Rebuilding combined sales…"
+    def mark_async_start():
+        sess.daily_auto_ingest_status = "running"
+        sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
+        sess.daily_auto_ingest_result = {}
+        sess.sales_rebuild_status = "idle"
+        sess.sales_rebuild_message = ""
 
-        await _session_lock_apply(sess, _mark_sales_rebuild_running)
-        try:
-            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
-
-            background_tasks.add_task(persist_session_bundle_thread_safe, sid, sess)
-        except Exception:
-            pass
-        background_tasks.add_task(_run_daily_auto_sales_rebuild, sid)
-    return JSONResponse(content=payload)
+    await _session_lock_apply(sess, mark_async_start)
+    background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
+    return JSONResponse(
+        content={
+            "ok": True,
+            "ingest_async": True,
+            "message": msg,
+            "detected_platforms": [],
+            "warnings": [],
+            "processed_files": len(file_parts),
+            "detected_files": 0,
+            "unknown_files": len(file_parts),
+            "sales_rebuild": "pending",
+        }
+    )
 
 # ── Daily Orders (multi-platform CSVs) ────────────────────────
 

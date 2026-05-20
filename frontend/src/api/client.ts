@@ -63,6 +63,85 @@ export interface CoverageResponse {
   sales_rebuild_message?: string
   daily_auto_ingest_status?: 'idle' | 'running' | 'done' | 'error'
   daily_auto_ingest_message?: string
+  /** Set after background daily-auto ingest finishes (see session.daily_auto_ingest_result). */
+  daily_auto_ingest_detected_platforms?: string[]
+  daily_auto_ingest_warnings?: string[]
+  daily_auto_ingest_processed_files?: number
+  daily_auto_ingest_detected_files?: number
+  daily_auto_ingest_unknown_files?: number
+}
+
+export type DailyAutoIngestSummary = {
+  detected_platforms: string[]
+  warnings: string[]
+  processed_files: number
+  detected_files: number
+  unknown_files: number
+  message: string
+}
+
+export function dailyAutoSummaryFromCoverage(c: CoverageResponse): DailyAutoIngestSummary | null {
+  const hasResult =
+    (c.daily_auto_ingest_detected_platforms?.length ?? 0) > 0 ||
+    (c.daily_auto_ingest_warnings?.length ?? 0) > 0 ||
+    c.daily_auto_ingest_processed_files != null
+  if (!hasResult) return null
+  return {
+    detected_platforms: c.daily_auto_ingest_detected_platforms ?? [],
+    warnings: c.daily_auto_ingest_warnings ?? [],
+    processed_files: c.daily_auto_ingest_processed_files ?? 0,
+    detected_files: c.daily_auto_ingest_detected_files ?? 0,
+    unknown_files: c.daily_auto_ingest_unknown_files ?? 0,
+    message: c.daily_auto_ingest_message ?? '',
+  }
+}
+
+export function dailyAutoSummaryFromUpload(res: {
+  detected_platforms?: string[]
+  warnings?: string[]
+  processed_files?: number
+  detected_files?: number
+  unknown_files?: number
+  message?: string
+}): DailyAutoIngestSummary {
+  return {
+    detected_platforms: res.detected_platforms ?? [],
+    warnings: res.warnings ?? [],
+    processed_files: res.processed_files ?? 0,
+    detected_files: res.detected_files ?? 0,
+    unknown_files: res.unknown_files ?? 0,
+    message: res.message ?? '',
+  }
+}
+
+/** User-facing completion line: what parsed vs skipped. */
+export function formatDailyAutoCompleteToast(
+  s: DailyAutoIngestSummary,
+  salesRows?: number,
+): string {
+  const recognized = s.detected_files || s.detected_platforms.length
+  const total = s.processed_files || recognized + s.unknown_files
+  const platforms = [...new Set(s.detected_platforms.map(d => d.split('(')[0].trim()))]
+  const parts: string[] = []
+  parts.push(`Upload complete: ${recognized} of ${total} file(s) recognized.`)
+  if (platforms.length) parts.push(`Parsed: ${platforms.join(', ')}.`)
+  if (s.unknown_files > 0) {
+    parts.push(`${s.unknown_files} file(s) not recognized or had no data.`)
+  }
+  if (salesRows != null && salesRows > 0) {
+    parts.push(`Combined sales: ${salesRows.toLocaleString()} rows.`)
+  }
+  if (s.warnings.length) {
+    const preview = s.warnings.slice(0, 3).join('; ')
+    parts.push(
+      s.warnings.length > 3
+        ? `Warnings: ${preview} (+${s.warnings.length - 3} more — see Import completeness below)`
+        : `Warnings: ${preview}`,
+    )
+  } else if (s.message && !parts.some(p => p.includes(s.message.slice(0, 20)))) {
+    parts.push(s.message)
+  }
+  return parts.join(' ')
 }
 
 // ── Upload helpers ────────────────────────────────────────────
@@ -175,6 +254,7 @@ export async function uploadDailyAuto(
 ): Promise<{
   ok: boolean
   message: string
+  ingest_async?: boolean
   detected_platforms?: string[]
   warnings?: string[]
   processed_files?: number
@@ -187,12 +267,37 @@ export async function uploadDailyAuto(
   try {
     const { data } = await api.post('/upload/daily-auto', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: UPLOAD_TIMEOUT_MS,
+      timeout: 120_000,
     })
     return data
   } catch (e: unknown) {
     throw new Error(_errMessage(e, 'Daily upload failed'))
   }
+}
+
+/** Poll until Tier-3 background ingest finishes (daily-auto). */
+export async function waitForDailyAutoIngest(
+  onTick?: (message: string) => void,
+  maxMs = UPLOAD_TIMEOUT_MS,
+): Promise<CoverageResponse> {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const cov = await getCoverage()
+    const st = cov.daily_auto_ingest_status ?? 'idle'
+    if (st === 'running') {
+      onTick?.(cov.daily_auto_ingest_message || 'Parsing daily files…')
+      await new Promise(r => setTimeout(r, 2000))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(cov.daily_auto_ingest_message || 'Daily ingest failed')
+    }
+    if (st === 'done') {
+      return cov
+    }
+    await new Promise(r => setTimeout(r, 1500))
+  }
+  throw new Error('Daily ingest timed out — refresh the page in a minute.')
 }
 
 /** Poll until Tier-3 background sales rebuild finishes (daily-auto). */

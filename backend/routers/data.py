@@ -274,6 +274,8 @@ def get_coverage(request: Request, light: bool = False):
     _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
     _ret_ov = getattr(sess, "po_return_overlay_df", None)
     _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True)
+    _ingest = getattr(sess, "daily_auto_ingest_result", None) or {}
+    _has_ingest = bool(_ingest)
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=not sess.mtr_df.empty,
@@ -309,6 +311,21 @@ def get_coverage(request: Request, light: bool = False):
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
         daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
         daily_auto_ingest_message=getattr(sess, "daily_auto_ingest_message", "") or "",
+        daily_auto_ingest_detected_platforms=(
+            list(_ingest.get("detected_platforms") or []) if _has_ingest else None
+        ),
+        daily_auto_ingest_warnings=(
+            list(_ingest.get("warnings") or []) if _has_ingest else None
+        ),
+        daily_auto_ingest_processed_files=(
+            int(_ingest["processed_files"]) if _has_ingest else None
+        ),
+        daily_auto_ingest_detected_files=(
+            int(_ingest["detected_files"]) if _has_ingest else None
+        ),
+        daily_auto_ingest_unknown_files=(
+            int(_ingest["unknown_files"]) if _has_ingest else None
+        ),
     )
 
 

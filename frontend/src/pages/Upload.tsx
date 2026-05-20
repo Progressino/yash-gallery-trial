@@ -6,7 +6,10 @@ import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
-  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, waitForSalesRebuild,
+  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile,
+  waitForDailyAutoIngest, waitForSalesRebuild,
+  dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
+  type CoverageResponse,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, invalidateDataQueries,
   type DailyUpload, type DailySummary, type UploadResponse,
@@ -75,9 +78,38 @@ export default function Upload() {
     retry: 3,
   })
 
-  const showToast = (type: 'success' | 'error', msg: string) => {
+  const showToast = (type: 'success' | 'error', msg: string, durationMs = 5000) => {
     setToast({ type, msg })
-    setTimeout(() => setToast(null), 5000)
+    setTimeout(() => setToast(null), durationMs)
+  }
+
+  const finalizeDailyAutoUpload = (
+    source: string,
+    cov: CoverageResponse | null,
+    initialRes?: Awaited<ReturnType<typeof uploadDailyAuto>>,
+  ) => {
+    const summary =
+      (cov ? dailyAutoSummaryFromCoverage(cov) : null) ??
+      (initialRes?.detected_platforms?.length || initialRes?.warnings?.length
+        ? dailyAutoSummaryFromUpload(initialRes)
+        : null)
+    const detected = summary?.detected_platforms ?? initialRes?.detected_platforms ?? []
+    const warnings = summary?.warnings ?? initialRes?.warnings ?? []
+    if (source === 'daily') setDailyDetected(detected)
+    captureGenericAlert(source, warnings, {
+      parsed: summary?.processed_files ?? initialRes?.processed_files,
+      kept: summary?.detected_files ?? initialRes?.detected_files,
+      dropped: summary?.unknown_files ?? initialRes?.unknown_files,
+    })
+    const toastMsg = summary
+      ? formatDailyAutoCompleteToast(summary, cov?.sales_rows)
+      : (initialRes?.message ?? 'Daily upload complete.')
+    const failed = (summary?.detected_files ?? initialRes?.detected_files ?? 0) === 0
+      && (summary?.processed_files ?? initialRes?.processed_files ?? 0) > 0
+    const hasIssues = (summary?.unknown_files ?? initialRes?.unknown_files ?? 0) > 0
+      || (warnings.length > 0)
+    showToast(failed ? 'error' : 'success', toastMsg, hasIssues ? 14_000 : 10_000)
+    return toastMsg
   }
 
   const captureUploadAlerts = (source: string, res: UploadResponse) => {
@@ -200,29 +232,29 @@ export default function Upload() {
       await withUploadGuard(async () => {
         const res = await uploadDailyAuto(files)
         if (res.ok) {
-          setDailyDetected(res.detected_platforms ?? [])
-          captureGenericAlert('daily', res.warnings, {
-            parsed: res.processed_files,
-            kept: res.detected_files,
-            dropped: res.unknown_files,
-          })
-          if (res.sales_rebuild === 'pending') {
-            showToast('success', `${res.message} Please wait…`)
-            setBuildingMsg('Rebuilding combined sales in background…')
-            await waitForSalesRebuild(msg => setBuildingMsg(msg))
+          if (res.ingest_async || res.sales_rebuild === 'pending') {
+            showToast('success', `${res.message} Processing on server…`, 6000)
+            let cov: CoverageResponse | null = null
+            if (res.ingest_async) {
+              cov = await waitForDailyAutoIngest(msg => setBuildingMsg(msg))
+            }
+            if (res.sales_rebuild === 'pending') {
+              setBuildingMsg('Rebuilding combined sales…')
+              cov = await waitForSalesRebuild(msg => setBuildingMsg(msg))
+            }
             setBuildingMsg('')
-            showToast('success', 'Daily files loaded and sales rebuilt.')
+            finalizeDailyAutoUpload('daily', cov, res)
           } else {
-            showToast('success', res.message)
+            finalizeDailyAutoUpload('daily', null, res)
           }
           await refresh()
         } else {
-          captureGenericAlert('daily', res.warnings && res.warnings.length ? res.warnings : [res.message], {
+          captureGenericAlert('daily', res.warnings?.length ? res.warnings : [res.message], {
             parsed: res.processed_files,
             kept: res.detected_files,
             dropped: res.unknown_files,
           })
-          showToast('error', res.message)
+          showToast('error', res.message, 10_000)
         }
       })
     } catch (e: unknown) {
@@ -595,23 +627,31 @@ export default function Upload() {
                 try {
                   await withUploadGuard(async () => {
                     const res = await uploadDailyAuto(files)
-                    captureGenericAlert('monthly_rar', res.warnings, {
-                      parsed: res.processed_files,
-                      kept: res.detected_files,
-                      dropped: res.unknown_files,
-                    })
                     if (res.ok) {
-                      if (res.sales_rebuild === 'pending') {
-                        showToast('success', `${res.message} Please wait…`)
-                        setBuildingMsg('Rebuilding combined sales in background…')
-                        await waitForSalesRebuild(msg => setBuildingMsg(msg))
+                      if (res.ingest_async || res.sales_rebuild === 'pending') {
+                        showToast('success', `${res.message} Processing on server…`, 6000)
+                        let cov: CoverageResponse | null = null
+                        if (res.ingest_async) {
+                          cov = await waitForDailyAutoIngest(msg => setBuildingMsg(msg))
+                        }
+                        if (res.sales_rebuild === 'pending') {
+                          setBuildingMsg('Rebuilding combined sales…')
+                          cov = await waitForSalesRebuild(msg => setBuildingMsg(msg))
+                        }
                         setBuildingMsg('')
-                        showToast('success', 'Archive loaded and sales rebuilt.')
+                        finalizeDailyAutoUpload('monthly_rar', cov, res)
                       } else {
-                        showToast('success', res.message)
+                        finalizeDailyAutoUpload('monthly_rar', null, res)
                       }
                       await refresh()
-                    } else showToast('error', res.message)
+                    } else {
+                      captureGenericAlert('monthly_rar', res.warnings?.length ? res.warnings : [res.message], {
+                        parsed: res.processed_files,
+                        kept: res.detected_files,
+                        dropped: res.unknown_files,
+                      })
+                      showToast('error', res.message, 10_000)
+                    }
                   })
                 } catch (e: unknown) {
                   showToast('error', e instanceof Error ? e.message : 'Upload failed')
@@ -743,8 +783,8 @@ export default function Upload() {
             onUpload={async (files) => { await handleDailyAuto(files); qc.invalidateQueries({ queryKey: ['daily-summary'] }); qc.invalidateQueries({ queryKey: ['daily-uploads'] }) }}
           />
           {dailyDetected.length > 0 && (
-            <p className="text-xs text-green-600">
-              ✓ Last upload detected: {dailyDetected.map(d => d.split('(')[0].trim()).join(', ')}
+            <p className="text-xs text-green-700">
+              ✓ Recognized: {dailyDetected.join(' · ')}
             </p>
           )}
           {showImportCompleteness && uploadAlertsBySource['daily'] && (

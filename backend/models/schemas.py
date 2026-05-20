@@ -55,6 +55,12 @@ class CoverageResponse(BaseModel):
     # Tier-3 daily-auto background ingest (RAR / large multi-file) before sales rebuild
     daily_auto_ingest_status: str = "idle"
     daily_auto_ingest_message: str = ""
+    # Populated after background daily-auto ingest completes (see session.daily_auto_ingest_result).
+    daily_auto_ingest_detected_platforms: Optional[list[str]] = None
+    daily_auto_ingest_warnings: Optional[list[str]] = None
+    daily_auto_ingest_processed_files: Optional[int] = None
+    daily_auto_ingest_detected_files: Optional[int] = None
+    daily_auto_ingest_unknown_files: Optional[int] = None
 
 
 class ErrorResponse(BaseModel):
