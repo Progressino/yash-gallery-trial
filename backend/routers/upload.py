@@ -1294,16 +1294,21 @@ def _process_daily_auto_sync(
             from ..services.daily_store import load_platform_data as _load_platform_data
 
             def _flush_deferred_platforms(defer: Set[str]) -> None:
+                """Reload Tier-3 SQLite into session without wiping warm-cache / Tier-1 bulk."""
                 if not defer:
                     return
                 if "amazon" in defer:
-                    sess.mtr_df = _load_platform_data("amazon")
+                    store = _load_platform_data("amazon")
+                    sess.mtr_df = _merge_platform_data(sess.mtr_df, store, "amazon")
                 if "myntra" in defer:
-                    sess.myntra_df = _load_platform_data("myntra")
+                    store = _load_platform_data("myntra")
+                    sess.myntra_df = _merge_platform_data(sess.myntra_df, store, "myntra")
                 if "meesho" in defer:
-                    sess.meesho_df = _load_platform_data("meesho")
+                    store = _load_platform_data("meesho")
+                    sess.meesho_df = _merge_platform_data(sess.meesho_df, store, "meesho")
                 if "flipkart" in defer:
-                    sess.flipkart_df = _load_platform_data("flipkart")
+                    store = _load_platform_data("flipkart")
+                    sess.flipkart_df = _merge_platform_data(sess.flipkart_df, store, "flipkart")
                 sess.daily_restored = False
 
             def _handle_one(
@@ -1319,13 +1324,17 @@ def _process_daily_auto_sync(
                         defer_reload.add(p)
                     else:
                         if p == "amazon":
-                            sess.mtr_df = _load_platform("amazon")
+                            store = _load_platform("amazon")
+                            sess.mtr_df = _merge_platform_data(sess.mtr_df, store, "amazon")
                         elif p == "myntra":
-                            sess.myntra_df = _load_platform("myntra")
+                            store = _load_platform("myntra")
+                            sess.myntra_df = _merge_platform_data(sess.myntra_df, store, "myntra")
                         elif p == "meesho":
-                            sess.meesho_df = _load_platform("meesho")
+                            store = _load_platform("meesho")
+                            sess.meesho_df = _merge_platform_data(sess.meesho_df, store, "meesho")
                         elif p == "flipkart":
-                            sess.flipkart_df = _load_platform("flipkart")
+                            store = _load_platform("flipkart")
+                            sess.flipkart_df = _merge_platform_data(sess.flipkart_df, store, "flipkart")
                         sess.daily_restored = False
 
                 platform = _detect_platform(fname, raw)
@@ -1506,7 +1515,10 @@ def _process_daily_auto_sync(
                                 )
                                 if not df_fk.empty:
                                     save_daily_file("flipkart", fname, df_fk)
-                                    sess.flipkart_df = _load_platform_data("flipkart")
+                                    store_fk = _load_platform_data("flipkart")
+                                    sess.flipkart_df = _merge_platform_data(
+                                        sess.flipkart_df, store_fk, "flipkart",
+                                    )
                                     sess.daily_restored = False
                                     detected.append(
                                         f"Flipkart ZIP ({fname}, {n_fc} file(s))",
