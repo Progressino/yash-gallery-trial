@@ -85,16 +85,16 @@ export default function HRM() {
       if (score > bestScore) { bestScore = score; matchedEmp = e }
     })
     let frequency = 'Daily'
-    if (lowerText.includes('weekly') || lowerText.includes('hafte')) frequency = 'Weekly'
-    else if (lowerText.includes('monthly') || lowerText.includes('mahine')) frequency = 'Monthly'
-    else if (lowerText.includes('one time') || lowerText.includes('ek baar')) frequency = 'One-time'
+    if (lowerText.includes('weekly')) frequency = 'Weekly'
+    else if (lowerText.includes('monthly')) frequency = 'Monthly'
+    else if (lowerText.includes('one time') || lowerText.includes('one-time')) frequency = 'One-time'
     let title = text
     if (matchedEmp) {
       matchedEmp.name.split(' ').forEach((part: string) => {
         title = title.replace(new RegExp(part, 'gi'), '').trim()
       })
     }
-    title = title.replace(/\b(ab se|daily|weekly|monthly|hoga|hogi|karega|karegi|ki|ka|ke|ne|se|hai|aur|or)\b/gi, '').replace(/\s+/g, ' ').trim()
+    title = title.replace(/\b(from now on|daily|weekly|monthly|will|shall|must|the|and|or)\b/gi, '').replace(/\s+/g, ' ').trim()
     if (!title) title = text
     const parsed = { employee_id: matchedEmp?.id || null, employee_name: matchedEmp?.name || '', department_id: matchedEmp?.department_id || null, title, frequency, category: 'General' }
     setAiParsed(parsed)
@@ -105,7 +105,7 @@ export default function HRM() {
 
   const startListening = () => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR) { alert('Chrome use karo'); return }
+    if (!SR) { alert('Speech recognition requires Chrome or Edge.'); return }
     const recognition = new SR()
     recognition.lang = 'en-IN'
     recognition.continuous = false
@@ -209,35 +209,35 @@ export default function HRM() {
           <div className="bg-gradient-to-r from-[#002B5B] to-blue-700 rounded-xl p-4 text-white">
             <div className="flex items-center justify-between mb-3">
               <div>
-                <h3 className="font-bold">🎙️ Voice Se Responsibility Add Karo</h3>
-                <p className="text-blue-200 text-xs mt-0.5">Example: "Vikash daily bill pe delivery date likhega"</p>
+                <h3 className="font-bold">🎙️ Add responsibility by voice</h3>
+                <p className="text-blue-200 text-xs mt-0.5">Example: &quot;Vikash will enter delivery dates on bills daily&quot;</p>
               </div>
               <button onClick={startListening} disabled={isListening || aiParsing}
                 className={`px-4 py-2 rounded-xl font-bold text-sm ${isListening ? 'bg-red-500 animate-pulse' : aiParsing ? 'bg-yellow-500' : 'bg-white text-[#002B5B] hover:bg-blue-50'} disabled:cursor-wait`}>
-                {isListening ? '🔴 Sun raha hoon...' : aiParsing ? '⏳ Samajh raha hoon...' : '🎙️ Bolo'}
+                {isListening ? '🔴 Listening…' : aiParsing ? '⏳ Parsing…' : '🎙️ Speak'}
               </button>
             </div>
             {voiceText && (
               <div className="bg-white/10 rounded-lg px-3 py-2 text-sm mb-2">
-                <p className="text-blue-200 text-xs">Suna:</p>
+                <p className="text-blue-200 text-xs">Heard:</p>
                 <p className="text-white font-medium">"{voiceText}"</p>
               </div>
             )}
             {aiParsed && (
               <div className="bg-white rounded-lg p-3 text-gray-800 text-sm space-y-2">
-                <p className="font-semibold text-[#002B5B] text-xs uppercase">✅ Samajha — Confirm karo:</p>
+                <p className="font-semibold text-[#002B5B] text-xs uppercase">✅ Parsed — please confirm:</p>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <div><span className="text-gray-500">Employee:</span> <b>{aiParsed.employee_name || '—'}</b></div>
                   <div><span className="text-gray-500">Task:</span> <b>{aiParsed.title || '—'}</b></div>
                   <div><span className="text-gray-500">Frequency:</span> <b>{aiParsed.frequency}</b></div>
                   <div><span className="text-gray-500">Category:</span> <b>{aiParsed.category}</b></div>
                 </div>
-                {!aiParsed.employee_id && <p className="text-amber-600 text-xs">⚠️ Employee nahi mila — niche select karo</p>}
+                {!aiParsed.employee_id && <p className="text-amber-600 text-xs">⚠️ Employee not matched — select below</p>}
                 <div className="flex gap-2 flex-wrap">
                   <button onClick={() => createRespMut.mutate({ ...quickResp, employee_id: quickResp.employee_id ? +quickResp.employee_id : undefined, department_id: quickResp.department_id ? +quickResp.department_id : null })}
                     disabled={createRespMut.isPending || !quickResp.employee_id || !quickResp.title}
                     className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium disabled:opacity-50">
-                    {createRespMut.isPending ? 'Saving…' : '✅ Save Karo'}
+                    {createRespMut.isPending ? 'Saving…' : '✅ Save'}
                   </button>
                   <button onClick={() => setShowQuickResp(!showQuickResp)} className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs bg-white">✏️ Edit</button>
                   <button onClick={() => { setAiParsed(null); setVoiceText('') }} className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs bg-white">✕</button>
@@ -441,7 +441,7 @@ export default function HRM() {
                   </select>
                 </div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Task Title *</label>
-                  <input value={respForm.title} onChange={e => setRespForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Bill pe delivery date likhna" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                  <input value={respForm.title} onChange={e => setRespForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Enter delivery date on bills" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 <div><label className="text-xs text-gray-500">Frequency</label>
                   <select value={respForm.frequency} onChange={e => setRespForm(f => ({ ...f, frequency: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
@@ -504,7 +504,7 @@ export default function HRM() {
             <span className="text-gray-400 text-xs">to</span>
             <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
           </div>
-          {!hodDept && <p className="text-center text-gray-400 py-8 text-sm">Department select karo</p>}
+          {!hodDept && <p className="text-center text-gray-400 py-8 text-sm">Select a department</p>}
           {hodDept && hodData && (
             <div className="bg-white rounded-xl border overflow-hidden">
               <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between">
@@ -673,7 +673,7 @@ export default function HRM() {
             <span className="text-gray-400 text-xs">to</span>
             <input type="date" value={appraisalTo} onChange={e => setAppraisalTo(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
           </div>
-          {!appraisalEmp && <p className="text-center text-gray-400 py-8 text-sm">Employee select karo appraisal dekhne ke liye</p>}
+          {!appraisalEmp && <p className="text-center text-gray-400 py-8 text-sm">Select an employee to view appraisal</p>}
           {appraisalData && (
             <div className="space-y-4">
               {/* Header */}
@@ -719,7 +719,7 @@ export default function HRM() {
               {/* Blockers caused */}
               {appraisalData.blockers_caused?.length > 0 && (
                 <div className="bg-white rounded-xl border p-4">
-                  <h4 className="font-semibold text-purple-600 mb-2">🔴 Blockers Caused — Dusron ka kaam roka ({appraisalData.blockers_caused.length})</h4>
+                  <h4 className="font-semibold text-purple-600 mb-2">🔴 Blockers caused — blocked others&apos; work ({appraisalData.blockers_caused.length})</h4>
                   <table className="w-full text-xs">
                     <thead><tr className="text-gray-400 border-b"><th className="text-left py-1">Date</th><th className="text-left py-1">Affected Employee</th><th className="text-left py-1">Task</th><th className="text-left py-1">Reason</th></tr></thead>
                     <tbody>{appraisalData.blockers_caused.map((b: any, i: number) => (
@@ -774,7 +774,7 @@ export default function HRM() {
                 </div>
               </div>
             ))}
-            {(perfData as any[]).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No data. HOD view mein tasks mark karo pehle.</p>}
+            {(perfData as any[]).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No data yet. Mark tasks in HOD view first.</p>}
           </div>
         </div>
       )}
@@ -783,9 +783,9 @@ export default function HRM() {
       {blockedModal && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
-            <h3 className="font-semibold text-purple-700">🔴 Task Blocked — Kaun zimmedaar hai?</h3>
+            <h3 className="font-semibold text-purple-700">🔴 Task blocked — who is responsible?</h3>
             <p className="text-xs text-gray-500 bg-purple-50 px-3 py-2 rounded-lg">
-              Yeh task block hua — Blocker employee ke record mein automatically issue add ho jaayega
+              This task is blocked. An issue will be added automatically to the blocker employee&apos;s record.
             </p>
             <div className="space-y-3">
               <div><label className="text-xs text-gray-500">Blocker Employee *</label>
@@ -797,7 +797,7 @@ export default function HRM() {
               </div>
               <div><label className="text-xs text-gray-500">Reason *</label>
                 <input value={blockedForm.blocker_reason} onChange={e => setBlockedForm(f => ({ ...f, blocker_reason: e.target.value }))}
-                  placeholder="e.g. Cutting data nahi diya"
+                  placeholder="e.g. Cutting data not provided"
                   className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
               <div><label className="text-xs text-gray-500">Marked By</label>
                 <input value={blockedForm.marked_by} onChange={e => setBlockedForm(f => ({ ...f, marked_by: e.target.value }))}
