@@ -66,6 +66,13 @@ def _disk_warm_load(ignore_age: bool = False):
     return _main._load_warm_cache_from_disk(ignore_age=ignore_age)
 
 
+def _disk_recovery_payload() -> dict:
+    """Merged on-disk layers (manifest + loose + ``WARM_CACHE_RECOVERY_DIR``)."""
+    import backend.main as _main
+
+    return _main.warm_cache_disk_recovery_dict()
+
+
 def _merge_disk_warm_cache_into_loaded(loaded: dict) -> tuple[dict, str]:
     """
     After ``load_cache_from_drive``, merge the on-disk Phase-0 warm snapshot
@@ -80,12 +87,12 @@ def _merge_disk_warm_cache_into_loaded(loaded: dict) -> tuple[dict, str]:
     older than ``WARM_CACHE_MAX_AGE_HOURS``.
     """
     try:
-        disk_ok, disk_data = _disk_warm_load(ignore_age=True)
+        disk_data = _disk_recovery_payload()
     except Exception as e:
         _log.warning("disk warm-cache recovery load failed: %s", e)
         return loaded, ""
 
-    if not disk_ok or not disk_data:
+    if not disk_data:
         return loaded, ""
 
     _sanitize_snapdeal_in_loaded(disk_data)
@@ -126,6 +133,23 @@ def _merge_disk_warm_cache_into_loaded(loaded: dict) -> tuple[dict, str]:
     if not notes:
         return loaded, ""
     return loaded, " Server disk snapshot merged (" + "; ".join(notes) + ")."
+
+
+def _tier1_still_missing_hint(sess) -> str:
+    """After reload, if Amazon MTR is still tiny, explain that Tier-1 bulk is absent from all stores."""
+    try:
+        mtr = getattr(sess, "mtr_df", None)
+        n = len(mtr) if mtr is not None and hasattr(mtr, "__len__") else 0
+    except Exception:
+        return ""
+    if n >= 7500:
+        return ""
+    return (
+        " NOTE: Amazon MTR is still very small after GitHub + on-disk recovery — "
+        "full Tier-1 bulk is not present in the GitHub Release, Tier-3 SQLite, or "
+        "/data/warm_cache. Re-upload the historical MTR / platform ZIPs (or set "
+        "WARM_CACHE_RECOVERY_DIR to a folder of backup parquets), then Save Cache."
+    )
 
 
 def _sanitize_snapdeal_in_loaded(loaded: dict) -> None:
@@ -435,7 +459,8 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
                 setattr(sess, key, val)
         daily_note = _merge_daily_store_into_session(sess)
         n_sales = _rebuild_sales_in_session(sess)
-        msg = f"Full reload from GitHub.{disk_note}{daily_note} {msg}"
+        hint = _tier1_still_missing_hint(sess)
+        msg = f"Full reload from GitHub.{disk_note}{daily_note} {msg}{hint}"
     else:
         if not _main._do_load_warm_cache():
             return CacheReloadResponse(

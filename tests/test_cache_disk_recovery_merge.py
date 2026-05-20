@@ -29,10 +29,10 @@ def test_merge_disk_recovers_rows_missing_from_github(monkeypatch):
         }
     )
 
-    def fake_disk(ignore_age=True):
-        return True, {"mtr_df": big, "sku_mapping": {"A": 1, "B": 2, "C": 3}}
+    def fake_payload():
+        return {"mtr_df": big, "sku_mapping": {"A": 1, "B": 2, "C": 3}}
 
-    monkeypatch.setattr("backend.routers.cache._disk_warm_load", fake_disk)
+    monkeypatch.setattr("backend.routers.cache._disk_recovery_payload", fake_payload)
 
     loaded = {"mtr_df": small, "sku_mapping": {"A": 9}}
     out, note = _merge_disk_warm_cache_into_loaded(loaded)
@@ -44,7 +44,7 @@ def test_merge_disk_recovers_rows_missing_from_github(monkeypatch):
 
 
 def test_merge_disk_noop_when_disk_empty(monkeypatch):
-    monkeypatch.setattr("backend.routers.cache._disk_warm_load", lambda ignore_age=True: (False, {}))
+    monkeypatch.setattr("backend.routers.cache._disk_recovery_payload", lambda: {})
     loaded = {"mtr_df": pd.DataFrame({"x": [1]})}
     out, note = _merge_disk_warm_cache_into_loaded(loaded)
     assert len(out["mtr_df"]) == 1

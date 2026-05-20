@@ -363,6 +363,121 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
         return False, {}
 
 
+def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
+    """Load ``mtr_df.parquet`` / etc. from ``disk_dir`` without ``_manifest.json``."""
+    import json
+    from pathlib import Path
+
+    import pandas as pd
+
+    out: dict = {}
+    if not disk_dir.is_dir():
+        return out
+    for key in (
+        "mtr_df",
+        "myntra_df",
+        "meesho_df",
+        "flipkart_df",
+        "snapdeal_df",
+        "sales_df",
+        "inventory_df_variant",
+        "inventory_df_parent",
+        "existing_po_df",
+    ):
+        p = disk_dir / f"{key}.parquet"
+        if p.is_file():
+            try:
+                out[key] = pd.read_parquet(p)
+            except Exception as ex:
+                log.warning("warm-cache parquet read %s: %s", p, ex)
+    sm = disk_dir / "sku_mapping.json"
+    if sm.is_file():
+        try:
+            with open(sm) as f:
+                out["sku_mapping"] = json.load(f)
+        except Exception as ex:
+            log.warning("warm-cache sku_mapping read %s: %s", sm, ex)
+    return out
+
+
+def warm_cache_disk_recovery_dict() -> dict:
+    """
+    Build the best on-disk snapshot for ``/cache/reload-fresh`` recovery.
+
+    Combines, in order:
+    1. Manifest-based load from ``WARM_CACHE_DIR`` (``_load_warm_cache_from_disk(ignore_age=True)``)
+    2. Loose parquets in the same directory (when manifest is missing or incomplete)
+    3. Optional ``WARM_CACHE_RECOVERY_DIR`` (e.g. operator-mounted backup volume)
+
+    For each sales platform, frames from all sources are merged with
+    ``merge_platform_data`` in **ascending row-count order** so the largest file
+    wins on overlapping keys (avoids a small snapshot overwriting bulk).
+    """
+    import os
+    from pathlib import Path
+
+    import pandas as pd
+
+    from .services.daily_store import merge_platform_data as _merge_pd
+
+    base = Path(_DISK_CACHE_DIR)
+    layers: list[dict] = []
+
+    ok_m, data_m = _load_warm_cache_from_disk(ignore_age=True)
+    if ok_m and data_m:
+        layers.append(data_m)
+
+    loose_main = _warm_cache_loose_parquets_from_dir(base)
+    if loose_main:
+        layers.append(loose_main)
+
+    rec = (os.environ.get("WARM_CACHE_RECOVERY_DIR") or "").strip()
+    if rec:
+        loose_rec = _warm_cache_loose_parquets_from_dir(Path(rec))
+        if loose_rec:
+            log.info(
+                "warm-cache recovery: merged WARM_CACHE_RECOVERY_DIR=%s (%d keys)",
+                rec,
+                len(loose_rec),
+            )
+            layers.append(loose_rec)
+
+    if not layers:
+        return {}
+
+    pairs = [
+        ("amazon", "mtr_df"),
+        ("myntra", "myntra_df"),
+        ("meesho", "meesho_df"),
+        ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
+    ]
+    out: dict = {}
+    for plat, key in pairs:
+        frames = [
+            L[key]
+            for L in layers
+            if isinstance(L.get(key), pd.DataFrame) and not L[key].empty
+        ]
+        if not frames:
+            continue
+        frames.sort(key=len)
+        acc = frames[0]
+        for nxt in frames[1:]:
+            acc = _merge_pd(acc, nxt, plat)
+        out[key] = acc
+
+    sku: dict = {}
+    for L in layers:
+        d = L.get("sku_mapping")
+        if isinstance(d, dict) and d:
+            sku = {**sku, **d}
+    if sku:
+        out["sku_mapping"] = sku
+
+    return out
+
+
 def _do_load_warm_cache() -> bool:
     """
     Three-phase warm-cache load. Thread-safe (GIL).
