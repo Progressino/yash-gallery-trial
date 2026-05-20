@@ -129,7 +129,7 @@ def check_upload_api_access(role: str, method: str, path: str) -> str | None:
         if m == "POST" and any(p.startswith(prefix) for prefix in _PO_ADMIN_BASELINE_PREFIXES):
             return (
                 "PO baseline uploads are Admin-only while historical data is locked. "
-                "Use the Upload → Daily tab for daily sales, snapshot inventory, and returns."
+                "Use the Upload → Daily uploads tab for daily sales, snapshot inventory, and returns."
             )
         if m == "DELETE" and p.startswith("/api/po/daily-inventory-history"):
             return "Removing daily inventory history is Admin-only while data is locked."
