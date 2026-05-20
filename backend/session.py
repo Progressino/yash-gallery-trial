@@ -85,8 +85,8 @@ class AppSession:
     # Keyed by (group_by_parent, n_quarters) — cleared when sales data changes
     _quarterly_cache: dict = field(default_factory=dict)
 
-    # Serialize Tier-3 SQLite restore + build_sales_df so parallel /data/* requests
-    # do not race (previously daily_restored was set before work finished).
+    # Serialize Tier-3 SQLite restore + build_sales_df + Tier-1 upload mutations so parallel
+    # requests on the same browser session do not corrupt DataFrames (see ``upload._session_lock_apply``).
     _daily_restore_lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False,
     )

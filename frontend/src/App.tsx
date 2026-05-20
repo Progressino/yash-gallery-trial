@@ -28,6 +28,7 @@ const TNA         = lazy(() => import('./pages/TNA'))
 const Production  = lazy(() => import('./pages/Production'))
 const StitchingCosting = lazy(() => import('./pages/StitchingCosting'))
 const GreyFabric  = lazy(() => import('./pages/GreyFabric'))
+const HRM         = lazy(() => import('./pages/HRM'))
 const Admin                  = lazy(() => import('./pages/Admin'))
 const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
 const SKUDeepDive            = lazy(() => import('./pages/SKUDeepDive'))
@@ -207,6 +208,7 @@ export default function App() {
               <Route path="production" element={<Production />} />
               <Route path="stitching-costing" element={<StitchingCosting />} />
               <Route path="grey"      element={<GreyFabric />} />
+              <Route path="hrm"       element={<HRM />} />
               <Route path="admin"       element={<Admin />} />
               <Route path="marketplace-connections" element={<MarketplaceConnections />} />
               <Route path="sku-deepdive" element={<SKUDeepDive />} />

@@ -29,6 +29,7 @@ from .routers.tna import router as tna_router
 from .routers.production import router as production_router
 from .routers.grey import router as grey_router
 from .routers.stitching import router as stitching_router
+from .routers.hrm import router as hrm_router
 from .routers.erp_admin import router as erp_admin_router
 from .routers.marketplace_connect import router as marketplace_router
 from .db.finance_db import init_db
@@ -40,6 +41,7 @@ from .db.tna_db import init_db as init_tna_db
 from .db.production_db import init_db as init_production_db
 from .db.grey_db import init_db as init_grey_db
 from .db.stitching_db import init_db as init_stitching_db
+from .db.hrm_db import init_db as init_hrm_db
 from .db.users_db import init_db as init_users_db
 from .db.po_raised_db import init_db as init_po_raised_db
 from .db.forecast_session_pg import init_db as init_forecast_session_pg
@@ -53,6 +55,7 @@ init_tna_db()
 init_production_db()
 init_grey_db()
 init_stitching_db()
+init_hrm_db()
 init_users_db()
 init_po_raised_db()
 init_forecast_session_pg()
@@ -975,8 +978,8 @@ def _session_po_calculate_status_poll(path: str, method: str) -> bool:
 
 
 def _session_uses_stitching_db_only(path: str) -> bool:
-    """Stitching Costing uses SQLite — do not block on forecast session blobs."""
-    return path.startswith("/api/stitching/")
+    """SQLite-only modules — do not block on forecast session blobs."""
+    return path.startswith("/api/stitching/") or path.startswith("/api/hrm/")
 
 # ── Auth middleware (outermost — runs first) ──────────────────
 _AUTH_EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/health"}
@@ -1140,6 +1143,7 @@ app.include_router(tna_router,         prefix="/api/tna",        tags=["tna"])
 app.include_router(production_router,  prefix="/api/production", tags=["production"])
 app.include_router(grey_router,        prefix="/api/grey",       tags=["grey"])
 app.include_router(stitching_router,   prefix="/api/stitching",  tags=["stitching"])
+app.include_router(hrm_router,         prefix="/api/hrm",        tags=["hrm"])
 app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])
 app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketplace"])
 

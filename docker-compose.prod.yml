@@ -51,6 +51,7 @@ services:
       - USERS_DB_PATH=/data/users.db
       - MARKETPLACE_DB_PATH=/data/marketplace.db
       - STITCHING_DB_PATH=/data/stitching_costing.db
+      - HRM_DB_PATH=/data/hrm.db
       - MARKETPLACE_ENCRYPTION_KEY=${MARKETPLACE_ENCRYPTION_KEY}
       # Myntra date bucketing: use dispatch/shipment date so monthly totals align with
       # seller DSR (Myntra Seller Hub reports are dispatch-date filtered).

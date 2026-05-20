@@ -33,6 +33,7 @@ const NAV_GROUPS = [
       { to: '/production', label: '⚙️ Production' },
       { to: '/stitching-costing', label: '🧵 Stitching Costing' },
       { to: '/grey',       label: '🧵 Grey Fabric' },
+      { to: '/hrm',        label: '👥 HRM' },
       { to: '/inventory',  label: '📦 Inventory' },
       { to: '/po', label: '🎯 PO Engine' },
       { to: '/admin',      label: '🔐 Admin' },
