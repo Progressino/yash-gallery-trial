@@ -5,7 +5,8 @@ import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
-  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport, waitForSalesRebuild,
+  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
+  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, waitForSalesRebuild,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, invalidateDataQueries,
   type DailyUpload, type DailySummary, type UploadResponse,
@@ -295,7 +296,7 @@ export default function Upload() {
               </li>
               <li>
                 <strong>History &amp; setup</strong> tab — <em>Admin / Manager</em>: SKU map, multi-year bulk archives, Amazon extras, and monthly RAR drops.
-                SKU master map, existing PO baseline sheet, and wide daily-inventory <em>matrix</em> for PO are <strong>Admin-only</strong> while the lock is on.
+                SKU master map, existing PO baseline sheet, and PO Engine baseline sheets (SKU status / wide inventory matrix) are <strong>Admin-only</strong> while the lock is on — see <em>History &amp; setup</em> below.
               </li>
             </ul>
           ) : (
@@ -620,6 +621,110 @@ export default function Upload() {
           </div>
         </UploadCard>
       </Section>}
+
+      {showAdminTab && uploadTab === 'admin' && allowHistorical && (
+        <Section title="PO Engine — baseline sheets (optional)">
+          {allowAdminBaseline ? (
+            <>
+              <UploadCard
+                title="SKU status &amp; lead time (PO)"
+                subtitle="Excel/CSV with SKU, Status, and Lead time. Closed SKUs get zero PO; missing lead blocks that row."
+                loaded={!!coverage.sku_status_lead}
+                rows={coverage.sku_status_lead_rows}
+                alert={showImportCompleteness ? uploadAlertsBySource['po_sku_status'] : undefined}
+                onClearAlert={() => clearUploadAlert('po_sku_status')}
+              >
+                <FileUpload
+                  label="Upload .xlsx, .xls, or .csv"
+                  accept={{
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+                    'application/vnd.ms-excel': ['.xls'],
+                    'text/csv': ['.csv'],
+                    'application/octet-stream': ['.xlsx', '.xls'],
+                  }}
+                  onUpload={async (file: File) => {
+                    setL('po_sku_status', true)
+                    try {
+                      await withUploadGuard(async () => {
+                        const data = await uploadPoSkuStatusLead(file)
+                        const res = {
+                          ok: !!data.ok,
+                          message:
+                            data.message ||
+                            (data.ok ? `Loaded ${Number(data.rows ?? 0).toLocaleString()} SKU rows.` : 'Upload failed.'),
+                        } as UploadResponse
+                        if (res.ok) {
+                          captureUploadAlerts('po_sku_status', res)
+                          showToast('success', res.message)
+                          await refresh()
+                        } else {
+                          showToast('error', res.message)
+                        }
+                      })
+                    } catch (e: unknown) {
+                      showToast('error', e instanceof Error ? e.message : 'Upload failed')
+                    } finally {
+                      setL('po_sku_status', false)
+                    }
+                  }}
+                  uploading={loading['po_sku_status']}
+                />
+              </UploadCard>
+              <UploadCard
+                title="Daily inventory history matrix (PO)"
+                subtitle="Wide Excel: rows = SKUs, columns = daily snapshot totals (OMS / Amazon Inventory sheets). Used for Eff. Days in PO."
+                loaded={!!coverage.daily_inventory_history}
+                rows={coverage.daily_inventory_history_rows}
+                alert={showImportCompleteness ? uploadAlertsBySource['po_daily_inv'] : undefined}
+                onClearAlert={() => clearUploadAlert('po_daily_inv')}
+              >
+                <FileUpload
+                  label="Upload .xlsx, .xls, or .csv"
+                  accept={{
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+                    'application/vnd.ms-excel': ['.xls'],
+                    'text/csv': ['.csv'],
+                    'application/octet-stream': ['.xlsx', '.xls'],
+                  }}
+                  onUpload={async (file: File) => {
+                    setL('po_daily_inv', true)
+                    setBuildingMsg('')
+                    try {
+                      await withUploadGuard(async () => {
+                        const result = await uploadPoDailyInventoryHistoryFile(file, msg => setBuildingMsg(msg))
+                        setBuildingMsg('')
+                        if (result.ok) {
+                          captureGenericAlert('po_daily_inv', [], {
+                            parsed: result.rows,
+                            kept: result.skus,
+                          })
+                          showToast('success', result.message || `Loaded ${(result.rows ?? 0).toLocaleString()} matrix rows.`)
+                          await refresh()
+                        } else {
+                          showToast('error', result.message || 'Upload failed')
+                        }
+                      })
+                    } catch (e: unknown) {
+                      setBuildingMsg('')
+                      showToast('error', e instanceof Error ? e.message : 'Upload failed')
+                    } finally {
+                      setL('po_daily_inv', false)
+                    }
+                  }}
+                  uploading={loading['po_daily_inv']}
+                />
+              </UploadCard>
+            </>
+          ) : (
+            <div className="col-span-2 rounded-xl border border-amber-100 bg-amber-50/60 p-5 text-sm text-amber-950 space-y-2">
+              <p className="font-semibold text-[#002B5B]">PO baseline sheets</p>
+              <p className="text-xs">
+                SKU status / lead and the wide daily inventory matrix can only be uploaded by an <strong>Admin</strong> while data is locked.
+              </p>
+            </div>
+          )}
+        </Section>
+      )}
 
       {(uploadTab === 'daily' || !showAdminTab) && (
       <Section title="Daily uploads — sales, snapshot inventory, returns">

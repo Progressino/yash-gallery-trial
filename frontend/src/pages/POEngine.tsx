@@ -1,16 +1,9 @@
 import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
-import {
-  api,
-  type DailyInventoryUploadResult,
-  getCoverage,
-  startPoCalculate,
-  waitForDailyInventoryUpload,
-} from '../api/client'
+import { useSearchParams, Link } from 'react-router-dom'
+import { api, getCoverage, startPoCalculate } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore, type Tab } from '../store/po'
-import { useAuth, mayUploadPoBaseline } from '../store/auth'
 import { PODashboardPanel } from '../components/PODashboardPanel'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
@@ -243,8 +236,6 @@ function postPoCoverDays(row: PORow, finalPoQty: number): number {
 
 export default function POEngine() {
   const setCoverage = useSession(s => s.setCoverage)
-  const authUser = useAuth(s => s.user)
-  const canUploadPoBaseline = mayUploadPoBaseline(authUser)
   const skuStatusLoaded = useSession(s => s.sku_status_lead ?? false)
   const skuStatusRows = useSession(s => s.sku_status_lead_rows ?? 0)
   const dailyInvLoaded = useSession(s => s.daily_inventory_history ?? false)
@@ -258,16 +249,10 @@ export default function POEngine() {
     enabled: raiseLedgerRows > 0,
   })
   const ledgerDates = ledgerDatesResp?.dates ?? []
-  const skuFileRef = useRef<HTMLInputElement>(null)
-  const dailyInvFileRef = useRef<HTMLInputElement>(null)
   const ledgerCsvRef = useRef<HTMLInputElement>(null)
   const returnFileRef = useRef<HTMLInputElement>(null)
   /** Bumps on each Calculate / quarterly load so stale async responses are ignored. */
   const poRunSeqRef = useRef(0)
-  const [skuUploadBusy, setSkuUploadBusy] = useState(false)
-  const [skuUploadMsg, setSkuUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
-  const [dailyInvBusy, setDailyInvBusy] = useState(false)
-  const [dailyInvMsg, setDailyInvMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   // Per-SKU inventory history drill-down (lets the user verify the "Eff Days" math).
   const [effInvSku, setEffInvSku] = useState<string | null>(null)
   const [effInvLoading, setEffInvLoading] = useState(false)
@@ -468,90 +453,6 @@ export default function POEngine() {
       console.warn('[PO] quarterly-only load failed:', e)
     } finally {
       if (seq === poRunSeqRef.current) setQuarterlyLoading(false)
-    }
-  }
-
-  const onSkuStatusFile = async (files: FileList | null) => {
-    const f = files?.[0]
-    if (!f) return
-    setSkuUploadBusy(true)
-    setSkuUploadMsg(null)
-    try {
-      const fd = new FormData()
-      fd.append('file', f)
-      const { data } = await api.post<{ ok: boolean; message?: string; rows?: number }>(
-        '/po/sku-status-lead',
-        fd,
-        {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          timeout: 120_000,
-        },
-      )
-      if (data.ok) {
-        setSkuUploadMsg({ type: 'ok', text: data.message || `Loaded ${data.rows ?? 0} rows.` })
-        setCoverage({
-          ...useSession.getState(),
-          sku_status_lead: true,
-          sku_status_lead_rows: data.rows ?? 0,
-        })
-        void getCoverage({ light: true }).then(setCoverage).catch(() => {})
-      } else {
-        setSkuUploadMsg({ type: 'err', text: data.message || 'Upload failed' })
-      }
-    } catch (e: unknown) {
-      setSkuUploadMsg({ type: 'err', text: e instanceof Error ? e.message : 'Upload failed' })
-    } finally {
-      setSkuUploadBusy(false)
-      if (skuFileRef.current) skuFileRef.current.value = ''
-    }
-  }
-
-  const onDailyInvFile = async (files: FileList | null) => {
-    const f = files?.[0]
-    if (!f) return
-    setDailyInvBusy(true)
-    setDailyInvMsg(null)
-    try {
-      const fd = new FormData()
-      fd.append('file', f)
-      const { data } = await api.post<DailyInventoryUploadResult>('/po/daily-inventory-history', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 120_000,
-      })
-      if (!data.ok) {
-        setDailyInvMsg({ type: 'err', text: data.message || 'Upload failed' })
-        return
-      }
-      let result = data
-      if (data.status === 'running' || !data.rows) {
-        setDailyInvMsg({ type: 'ok', text: data.message || 'Parsing daily inventory…' })
-        result = await waitForDailyInventoryUpload(msg => {
-          setDailyInvMsg({ type: 'ok', text: msg })
-        })
-      }
-      if (result.ok) {
-        setDailyInvMsg({
-          type: 'ok',
-          text:
-            result.message ||
-            `Loaded ${result.rows ?? 0} rows (${result.skus ?? 0} SKUs × ${result.days ?? 0} days).`,
-        })
-        if (result.max_date) setDailyInvMaxDate(result.max_date)
-        setCoverage({
-          ...useSession.getState(),
-          daily_inventory_history: true,
-          daily_inventory_history_rows: result.rows ?? 0,
-          daily_inventory_history_skus: result.skus ?? 0,
-        })
-        void getCoverage({ light: true }).then(setCoverage).catch(() => {})
-      } else {
-        setDailyInvMsg({ type: 'err', text: result.message || 'Upload failed' })
-      }
-    } catch (e: unknown) {
-      setDailyInvMsg({ type: 'err', text: e instanceof Error ? e.message : 'Upload failed' })
-    } finally {
-      setDailyInvBusy(false)
-      if (dailyInvFileRef.current) dailyInvFileRef.current.value = ''
     }
   }
 
@@ -1027,8 +928,6 @@ export default function POEngine() {
     loading ||
     quarterlyLoading ||
     shipLoading ||
-    skuUploadBusy ||
-    dailyInvBusy ||
     raiseConfirmBusy ||
     clearLedgerBusy ||
     ledgerImportBusy ||
@@ -1038,8 +937,6 @@ export default function POEngine() {
     if (loading) return 'Calculating PO recommendations…'
     if (quarterlyLoading) return 'Loading quarterly history…'
     if (shipLoading) return 'Running shipment engine…'
-    if (skuUploadBusy) return 'Uploading SKU status sheet…'
-    if (dailyInvBusy) return 'Uploading daily inventory…'
     if (raiseConfirmBusy) return 'Confirming raises…'
     if (clearLedgerBusy) return 'Clearing raise ledger…'
     if (ledgerImportBusy) return 'Importing ledger CSV…'
@@ -1049,8 +946,6 @@ export default function POEngine() {
     loading,
     quarterlyLoading,
     shipLoading,
-    skuUploadBusy,
-    dailyInvBusy,
     raiseConfirmBusy,
     clearLedgerBusy,
     ledgerImportBusy,
@@ -1150,105 +1045,39 @@ export default function POEngine() {
               />
             </div>
 
-            {canUploadPoBaseline ? (
-              <>
-            <div className="mt-5 p-4 rounded-lg border border-dashed border-gray-300 bg-gray-50/80">
-              <h4 className="text-sm font-semibold text-gray-700 mb-1">SKU status &amp; lead time (for PO)</h4>
-              <p className="text-xs text-gray-500 mb-3">
-                Upload Excel/CSV with <strong>SKU</strong>, <strong>Status</strong>, and <strong>Lead time</strong> columns.
-                <strong> Closed</strong> SKUs (status text such as &quot;Closed SKU&quot;) get <strong>zero PO quantity</strong> — they are excluded from recommendations.
-                A positive <strong>Lead time</strong> per SKU (or a resolvable parent / style rollup from the sheet) overrides the default lead above; if the sheet is loaded but no lead can be resolved for a SKU, <strong>PO is blocked</strong> for that row so we do not silently fall back to the global default only.
+            <div className="mt-5 p-4 rounded-lg border border-slate-200 bg-slate-50/90 text-xs text-slate-800 space-y-2">
+              <p className="font-semibold text-slate-900">PO baseline sheets</p>
+              <p className="text-slate-700 leading-relaxed">
+                SKU status / lead time and the wide <strong>daily inventory history</strong> matrix are uploaded on the{' '}
+                <Link to="/upload" className="text-[#002B5B] font-semibold underline hover:text-blue-800">
+                  Upload Data
+                </Link>{' '}
+                page → <strong>History &amp; setup</strong> → <em>PO Engine — baseline sheets</em> (Admin when the org lock is on).
               </p>
-              <div className="flex flex-wrap items-center gap-3">
-                <input ref={skuFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e => void onSkuStatusFile(e.target.files)} />
-                <button
-                  type="button"
-                  disabled={skuUploadBusy}
-                  onClick={() => skuFileRef.current?.click()}
-                  className="text-xs px-4 py-2 rounded-lg border border-[#002B5B] text-[#002B5B] font-semibold hover:bg-blue-50 disabled:opacity-50"
-                >
-                  {skuUploadBusy ? 'Uploading…' : '📤 Upload sheet'}
-                </button>
-                <span className="text-xs text-gray-600">
-                  {skuStatusLoaded ? <span className="text-green-700 font-medium">✓ {skuStatusRows} SKU rows loaded</span> : <span>No sheet loaded (optional)</span>}
-                </span>
-              </div>
-              {skuUploadMsg && (
-                <p className={`mt-2 text-xs rounded px-2 py-1 ${skuUploadMsg.type === 'ok' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}>
-                  {skuUploadMsg.text}
-                </p>
-              )}
+              <p className="text-slate-600">
+                Status — SKU status:{' '}
+                {skuStatusLoaded ? (
+                  <span className="text-emerald-700 font-medium">✓ {skuStatusRows} rows</span>
+                ) : (
+                  <span>optional / not loaded</span>
+                )}
+                . Inventory matrix:{' '}
+                {dailyInvLoaded ? (
+                  <span className="text-emerald-700 font-medium">
+                    ✓ {dailyInvRows.toLocaleString()} rows · {dailyInvSkus.toLocaleString()} SKUs
+                    {dailyInvMaxDate ? (
+                      <span className="text-slate-600 font-normal">
+                        {' '}
+                        · latest <strong>{dailyInvMaxDate}</strong>
+                      </span>
+                    ) : null}
+                  </span>
+                ) : (
+                  <span>optional / not loaded</span>
+                )}
+                .
+              </p>
             </div>
-
-            <div className="mt-4 p-4 rounded-lg border border-dashed border-gray-300 bg-gray-50/80">
-              <h4 className="text-sm font-semibold text-gray-700 mb-1">Daily Inventory History (effective days)</h4>
-              <p className="text-xs text-gray-500 mb-3">
-                Upload a wide-format Excel where rows are <strong>SKUs</strong> and columns are <strong>daily snapshots</strong>
-                (column header = total inventory; first row = the date). Two sheets are recognised: <code>OMS</code> and{' '}
-                <code>Amazon Inventory</code>. PO will count only the days a SKU actually had stock when computing ADS,
-                so out-of-stock days don&apos;t lowball the daily run rate.
-              </p>
-              <p className="text-xs text-sky-800 bg-sky-50 border border-sky-200 rounded px-2 py-1 mb-3">
-                <strong>You only need to upload this once.</strong> Going forward, each daily sales upload auto-rolls
-                inventory forward (shipments reduce on-hand, refunds add it back). Re-upload only when you want a fresh
-                ground-truth baseline. The baseline is saved in the server warm cache (and in your cloud session when
-                enabled), so it should reappear after restart — if this line briefly shows &quot;No sheet&quot;, wait for
-                the app to finish loading data or open Upload → Load Cache, then refresh.
-              </p>
-              <div className="flex flex-wrap items-center gap-3">
-                <input
-                  ref={dailyInvFileRef}
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={e => void onDailyInvFile(e.target.files)}
-                />
-                <button
-                  type="button"
-                  disabled={dailyInvBusy}
-                  onClick={() => dailyInvFileRef.current?.click()}
-                  className="text-xs px-4 py-2 rounded-lg border border-[#002B5B] text-[#002B5B] font-semibold hover:bg-blue-50 disabled:opacity-50"
-                >
-                  {dailyInvBusy ? 'Uploading…' : '📤 Upload daily inventory history'}
-                </button>
-                <span className="text-xs text-gray-600">
-                  {dailyInvLoaded ? (
-                    <span className="text-green-700 font-medium">
-                      ✓ {dailyInvRows.toLocaleString()} rows · {dailyInvSkus.toLocaleString()} SKUs loaded
-                      {dailyInvMaxDate ? (
-                        <span className="text-gray-600 font-normal">
-                          {' '}
-                          · latest snapshot <strong>{dailyInvMaxDate}</strong>
-                        </span>
-                      ) : null}
-                    </span>
-                  ) : (
-                    <span>No sheet loaded (optional)</span>
-                  )}
-                </span>
-              </div>
-              {dailyInvMsg && (
-                <p
-                  className={`mt-2 text-xs rounded px-2 py-1 ${dailyInvMsg.type === 'ok' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}
-                >
-                  {dailyInvMsg.text}
-                </p>
-              )}
-            </div>
-              </>
-            ) : (
-              <div className="mt-5 p-4 rounded-lg border border-slate-200 bg-slate-50/90 text-xs text-slate-800 space-y-2">
-                <p className="font-semibold text-slate-900">PO baseline files (Admin-managed)</p>
-                <p className="text-slate-700">
-                  SKU status &amp; lead times and the wide <strong>daily inventory history</strong> matrix can only be changed by an Admin while data is locked.
-                  Use <strong>Upload → Daily uploads</strong> for daily sales, snapshot inventory, and return files.
-                </p>
-                <p className="text-slate-600">
-                  SKU status sheet: {skuStatusLoaded ? `✓ ${skuStatusRows} rows` : '— not loaded'}. Daily inventory matrix:{' '}
-                  {dailyInvLoaded ? `✓ ${dailyInvRows.toLocaleString()} rows` : '— not loaded'}.
-                </p>
-              </div>
-            )}
 
             <div className="mt-5 space-y-1">
               <button
@@ -2482,7 +2311,11 @@ export default function POEngine() {
                 <span>Loading…</span>
               ) : !effInvData ? (
                 <span className="text-amber-700">
-                  No daily inventory history uploaded for this SKU. Upload the “Daily Inventory History” sheet on the PO Engine page to enable verification.
+                  No daily inventory history uploaded for this SKU. Upload the “Daily Inventory History” matrix on the{' '}
+                  <Link to="/upload" className="underline font-medium text-amber-900">
+                    Upload Data
+                  </Link>{' '}
+                  page (History &amp; setup → PO Engine baselines) to enable verification.
                 </span>
               ) : (
                 <>
@@ -2492,7 +2325,11 @@ export default function POEngine() {
                   <span><strong>Out-of-stock:</strong> <span className="text-rose-700 font-semibold">{effInvData.out_of_stock_days}d</span></span>
                   {(effInvData.derived_days ?? 0) > 0 && (
                     <span className="w-full text-sky-800 bg-sky-50 border border-sky-200 rounded px-2 py-1">
-                      ℹ {effInvData.uploaded_days ?? 0} days from uploaded sheet, <strong>{effInvData.derived_days}</strong> days auto-derived from daily sales activity (shipments down, refunds back up). Upload the baseline inventory sheet once — subsequent days roll forward automatically as sales come in.
+                      ℹ {effInvData.uploaded_days ?? 0} days from uploaded sheet, <strong>{effInvData.derived_days}</strong> days auto-derived from daily sales activity (shipments down, refunds back up). Upload the baseline matrix once on{' '}
+                      <Link to="/upload" className="underline font-medium">
+                        Upload → History &amp; setup
+                      </Link>{' '}
+                      — subsequent days roll forward automatically as sales come in.
                     </span>
                   )}
                   {(effInvData.covered_days ?? 0) < effInvData.window_days && (effInvData.covered_days ?? 0) > 0 && (

@@ -240,6 +240,39 @@ export type DailyInventoryUploadResult = {
   max_date?: string
 }
 
+/** SKU / status / lead-time sheet for PO rules (POST /po/sku-status-lead). */
+export async function uploadPoSkuStatusLead(file: File): Promise<{ ok: boolean; message?: string; rows?: number }> {
+  const fd = new FormData()
+  fd.append('file', file)
+  const { data } = await api.post<{ ok?: boolean; message?: string; rows?: number }>(
+    '/po/sku-status-lead',
+    fd,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: UPLOAD_TIMEOUT_MS },
+  )
+  return { ok: !!data?.ok, message: data?.message, rows: data?.rows }
+}
+
+/** Wide daily inventory matrix for PO effective-days (POST /po/daily-inventory-history). */
+export async function uploadPoDailyInventoryHistoryFile(
+  file: File,
+  onTick?: (message: string) => void,
+): Promise<DailyInventoryUploadResult> {
+  const fd = new FormData()
+  fd.append('file', file)
+  const { data } = await api.post<DailyInventoryUploadResult>(
+    '/po/daily-inventory-history',
+    fd,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: UPLOAD_TIMEOUT_MS },
+  )
+  if (!data?.ok) {
+    return { ok: false, message: data?.message || 'Upload failed.' }
+  }
+  if (data.status === 'running' || !data.rows) {
+    return waitForDailyInventoryUpload(onTick)
+  }
+  return data
+}
+
 /** Poll after POST /po/daily-inventory-history (parses in background on the server). */
 export async function waitForDailyInventoryUpload(
   onTick?: (message: string) => void,
