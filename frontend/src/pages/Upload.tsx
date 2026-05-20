@@ -5,16 +5,14 @@ import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
-  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, waitForSalesRebuild,
+  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport, waitForSalesRebuild,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, invalidateDataQueries,
-  uploadReturnSheet, clearReturnSheet,
-  waitForDailyAutoIngest,
   type DailyUpload, type DailySummary, type UploadResponse,
 } from '../api/client'
 import { useSession } from '../store/session'
 import { useUploadActivity } from '../store/uploadActivity'
-import { useAuth, mayUploadHistorical, mayResetSharedData } from '../store/auth'
+import { useAuth, mayUploadHistorical, mayResetSharedData, mayUploadPoBaseline, mayDeleteDailyUploadFile } from '../store/auth'
 
 type Toast = { type: 'success' | 'error'; msg: string }
 type UploadAlert = {
@@ -43,6 +41,10 @@ export default function Upload() {
   const authUser    = useAuth((s) => s.user)
   const allowHistorical = mayUploadHistorical(authUser)
   const allowReset = mayResetSharedData(authUser)
+  const allowAdminBaseline = mayUploadPoBaseline(authUser)
+  const mayDeleteDailyFiles = mayDeleteDailyUploadFile(authUser)
+  const showAdminTab = allowHistorical
+  const [uploadTab, setUploadTab] = useState<'daily' | 'admin'>('daily')
 
   const [toast, setToast]           = useState<Toast | null>(null)
   const [loading, setLoading]       = useState<Record<string, boolean>>({})
@@ -203,15 +205,7 @@ export default function Upload() {
             kept: res.detected_files,
             dropped: res.unknown_files,
           })
-          if (res.ingest_async) {
-            showToast('success', `${res.message} Please wait…`)
-            setBuildingMsg('Processing archives on server…')
-            await waitForDailyAutoIngest((msg) => setBuildingMsg(msg))
-            setBuildingMsg('Rebuilding combined sales…')
-            await waitForSalesRebuild((msg) => setBuildingMsg(msg))
-            setBuildingMsg('')
-            showToast('success', 'Daily files loaded and sales rebuilt.')
-          } else if (res.sales_rebuild === 'pending') {
+          if (res.sales_rebuild === 'pending') {
             showToast('success', `${res.message} Please wait…`)
             setBuildingMsg('Rebuilding combined sales in background…')
             await waitForSalesRebuild(msg => setBuildingMsg(msg))
@@ -293,22 +287,21 @@ export default function Upload() {
         <p className="text-gray-500 text-sm mt-1">Manage your data files and build the sales dataset.</p>
         <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
           <p className="font-semibold text-[#002B5B] text-xs uppercase tracking-wide">Typical workflow</p>
-          {allowHistorical ? (
+          {showAdminTab ? (
             <ul className="mt-2 space-y-1.5 text-xs text-gray-600 list-disc list-inside">
               <li>
-                <strong>Tier 1</strong> — Load SKU mapping, then <em>historical bulk</em> data (e.g. ~2 years: Amazon MTR ZIP/RAR,
-                Myntra/Meesho/Flipkart/Snapdeal archives, inventory). Use this when onboarding or replacing base history.
+                <strong>Daily uploads</strong> tab — <em>everyone</em>: daily sales files (auto-detect), snapshot inventory (OMS / marketplace files),
+                and return reports for PO. Data saves automatically; only Admins can delete saved daily files when the org lock is on.
               </li>
               <li>
-                <strong>Tier 3</strong> — <em>Daily</em> file drops (auto-detect). Append recent reports without re-uploading full history;
-                sales are rebuilt after each batch.
+                <strong>History &amp; setup</strong> tab — <em>Admin / Manager</em>: SKU map, multi-year bulk archives, Amazon extras, and monthly RAR drops.
+                SKU master map, existing PO baseline sheet, and wide daily-inventory <em>matrix</em> for PO are <strong>Admin-only</strong> while the lock is on.
               </li>
             </ul>
           ) : (
             <p className="mt-2 text-xs text-gray-600">
-              <strong>Historical data is fixed</strong> on the server — your account can add{' '}
-              <strong>daily sales files</strong> below and <strong>daily inventory</strong> on PO Engine.
-              Use <strong>Load Cache</strong> in the sidebar if rows look empty after login.
+              Use the <strong>Daily uploads</strong> section below: <strong>daily sales</strong> (auto-detect), <strong>snapshot inventory</strong>, and{' '}
+              <strong>returns</strong>. Files are saved automatically; contact an Admin to change base history or SKU mapping.
             </p>
           )}
           <label className="mt-3 inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
@@ -348,7 +341,7 @@ export default function Upload() {
           {coverage.pause_auto_data_restore ? (
             <p>
               <strong>No data in this browser session.</strong> Click <strong>Load Cache</strong> in the left sidebar
-              (shared server history is not deleted).{allowHistorical ? ' Admins may re-upload Tier 1 if needed.' : ''}
+              (shared server history is not deleted).{showAdminTab ? ' Open History & setup if you may replace Tier 1.' : ''}
             </p>
           ) : (
             <p>
@@ -359,29 +352,31 @@ export default function Upload() {
         </div>
       )}
 
-      {!allowHistorical && (
+      {!showAdminTab && (
         <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
-          <p className="font-semibold">Daily uploads only</p>
+          <p className="font-semibold">Daily uploads</p>
           <p className="mt-1 text-xs">
-            Bulk history, platform clear, and delete-all are disabled for your role so existing data stays fixed for everyone.
-            Contact an Admin to replace base history.
+            Bulk history, platform clear, and delete-all are not available for your role. Everything you need is in{' '}
+            <strong>Daily uploads</strong> below (sales, snapshot inventory, returns).
+          </p>
+        </div>
+      )}
+
+      {showAdminTab && authUser?.historical_upload_locked && !allowAdminBaseline && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-950">
+          <p className="font-semibold">Manager access</p>
+          <p className="mt-1 text-xs">
+            You can upload multi-year platform files on <strong>History &amp; setup</strong>. Replacing the SKU master map, existing PO baseline, or the wide
+            daily-inventory matrix is <strong>Admin-only</strong> while data is locked.
           </p>
         </div>
       )}
 
       {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiCard label="SKU Mapping"  value={coverage.sku_mapping ? '✅ Loaded' : '— Not loaded'} />
         <KpiCard label="Amazon Rows"  value={coverage.mtr_rows > 0 ? coverage.mtr_rows.toLocaleString() : '—'} />
         <KpiCard label="Sales Rows"   value={coverage.sales_rows > 0 ? coverage.sales_rows.toLocaleString() : '—'} />
-        <KpiCard
-          label="Return sheet"
-          value={
-            coverage.return_sheet && (coverage.return_sheet_skus ?? 0) > 0
-              ? `✅ ${(coverage.return_sheet_skus ?? 0).toLocaleString()} SKU(s)`
-              : '— Not loaded'
-          }
-        />
         <KpiCard label="Platforms"    value={[
           coverage.myntra && 'Myntra',
           coverage.meesho && 'Meesho',
@@ -390,8 +385,40 @@ export default function Upload() {
         ].filter(Boolean).join(', ') || '—'} />
       </div>
 
+      {showAdminTab && (
+        <div className="flex gap-1 border-b border-slate-200 mb-1" role="tablist" aria-label="Upload sections">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={uploadTab === 'daily'}
+            className={`px-4 py-2.5 text-sm font-semibold rounded-t-lg border-b-2 -mb-px transition-colors ${
+              uploadTab === 'daily'
+                ? 'border-[#002B5B] text-[#002B5B] bg-white'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-200'
+            }`}
+            onClick={() => setUploadTab('daily')}
+          >
+            Daily uploads
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={uploadTab === 'admin'}
+            className={`px-4 py-2.5 text-sm font-semibold rounded-t-lg border-b-2 -mb-px transition-colors ${
+              uploadTab === 'admin'
+                ? 'border-[#002B5B] text-[#002B5B] bg-white'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-200'
+            }`}
+            onClick={() => setUploadTab('admin')}
+          >
+            History &amp; setup
+          </button>
+        </div>
+      )}
+
       {/* Tier 1 — Required (Admin / Manager only when historical lock is on) */}
-      {allowHistorical && <Section title="Tier 1 — Required">
+      {showAdminTab && uploadTab === 'admin' && allowHistorical && <Section title="Tier 1 — Required">
+        {allowAdminBaseline ? (
         <UploadCard
           title="1️⃣ SKU Mapping"
           subtitle="Master Yash map (~all panels) ships with the app. Upload your .xlsx to replace or extend it."
@@ -439,6 +466,17 @@ export default function Upload() {
             </div>
           )}
         </UploadCard>
+        ) : (
+          <div className="col-span-2 bg-white rounded-xl border border-amber-100 p-5 shadow-sm space-y-2">
+            <h3 className="font-semibold text-[#002B5B] text-sm">1️⃣ SKU Mapping</h3>
+            <p className="text-xs text-gray-600">
+              Replacing the master map is <strong>Admin-only</strong> while historical data is locked. Ask an Admin to upload a new map.
+            </p>
+            <p className="text-xs text-gray-500">
+              {coverage.sku_mapping ? '✓ This session reports a loaded SKU map.' : '— No SKU map reported in coverage yet.'}
+            </p>
+          </div>
+        )}
 
         <UploadCard title="2️⃣ Amazon" subtitle="MTR master ZIP or RAR — upload multiple; data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']} alert={showImportCompleteness ? uploadAlertsBySource['mtr'] : undefined} onClearAlert={() => clearUploadAlert('mtr')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
@@ -455,7 +493,7 @@ export default function Upload() {
         </UploadCard>
       </Section>}
 
-      {allowHistorical && <Section title="Tier 1 — Platform history (bulk / multi-year)">
+      {showAdminTab && uploadTab === 'admin' && allowHistorical && <Section title="Tier 1 — Platform history (bulk / multi-year)">
         <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={handleClear('myntra')} clearing={loading['clear_myntra']} alert={showImportCompleteness ? uploadAlertsBySource['myntra'] : undefined} onClearAlert={() => clearUploadAlert('myntra')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
@@ -502,117 +540,9 @@ export default function Upload() {
             multiple={true}
           />
         </UploadCard>
-
-        <UploadCard title="📦 Inventory" subtitle="Drop any mix: OMS CSV, Flipkart CSV, Myntra CSV, Amazon RAR — auto-detected" loaded={coverage.inventory} alert={showImportCompleteness ? uploadAlertsBySource['inv'] : undefined} onClearAlert={() => clearUploadAlert('inv')}>
-          {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
-          <InventoryDropzone
-            disabled={!coverage.sku_mapping}
-            uploading={loading['inv']}
-            onUpload={async (files) => {
-              setL('inv', true)
-              try {
-                await withUploadGuard(async () => {
-                  const res = await uploadInventoryAuto(files)
-                  if (res.ok) {
-                    setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
-                    const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
-                      ? (res.debug.warnings as string[])
-                      : []
-                    captureGenericAlert('inv', issues)
-                    showToast('success', res.message)
-                    await refresh()
-                  } else showToast('error', res.message)
-                })
-              } catch (e: unknown) {
-                showToast('error', e instanceof Error ? e.message : 'Upload failed')
-              } finally { setL('inv', false) }
-            }}
-          />
-          {inventoryAmzDisclaimer && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900">
-              <p className="font-medium">Amazon inventory disclaimer</p>
-              <p className="mt-1">
-                Only latest 1 report day is used
-                {inventoryAmzDisclaimer.latest_report_date ? ` (${inventoryAmzDisclaimer.latest_report_date})` : ''}.
-              </p>
-              <p className="mt-1">
-                Raw: {Number(inventoryAmzDisclaimer.raw_total_units ?? 0).toLocaleString()} ·
-                Non-sellable excluded: {Number(inventoryAmzDisclaimer.excluded_non_sellable_units ?? 0).toLocaleString()} ·
-                ZNNE excluded: {Number(inventoryAmzDisclaimer.excluded_znne_units ?? 0).toLocaleString()} ·
-                Older-date excluded: {Number(inventoryAmzDisclaimer.excluded_older_date_units ?? 0).toLocaleString()} ·
-                Included: {Number(inventoryAmzDisclaimer.latest_report_units ?? 0).toLocaleString()}
-              </p>
-            </div>
-          )}
-        </UploadCard>
       </Section>}
 
-      <Section title="Return sheet → net sales & PO">
-        <UploadCard
-          title="↩ Marketplace return report"
-          subtitle="CSV or Excel with SKU + return quantity columns. Counts merge into unified sales (dashboard net) and PO return overlay. If channel files already include full refunds, avoid double-counting."
-          loaded={!!coverage.return_sheet && (coverage.return_sheet_skus ?? 0) > 0}
-        >
-          <div className="flex flex-wrap items-center gap-3">
-            <FileUpload
-              label="Upload return sheet"
-              accept={{
-                'text/csv': ['.csv'],
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-                'application/vnd.ms-excel': ['.xls'],
-              }}
-              onUpload={async (file: File) => {
-                setL('return_sheet', true)
-                try {
-                  await withUploadGuard(async () => {
-                    const res = await uploadReturnSheet(file, { replace: true })
-                    if (res.ok) {
-                      showToast('success', res.message || 'Return sheet imported.')
-                      await refresh()
-                    } else {
-                      showToast('error', res.message || 'Import failed')
-                    }
-                  })
-                } catch (e: unknown) {
-                  showToast('error', e instanceof Error ? e.message : 'Upload failed')
-                } finally {
-                  setL('return_sheet', false)
-                }
-              }}
-              uploading={loading['return_sheet']}
-            />
-            {(coverage.return_sheet_skus ?? 0) > 0 && (
-              <button
-                type="button"
-                className="text-xs px-3 py-2 rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                disabled={loading['return_sheet_clear']}
-                onClick={async () => {
-                  setL('return_sheet_clear', true)
-                  try {
-                    await withUploadGuard(async () => {
-                      const res = await clearReturnSheet()
-                      if (res.ok) {
-                        showToast('success', res.message || 'Return sheet cleared.')
-                        await refresh()
-                      } else {
-                        showToast('error', res.message || 'Clear failed')
-                      }
-                    })
-                  } catch (e: unknown) {
-                    showToast('error', e instanceof Error ? e.message : 'Clear failed')
-                  } finally {
-                    setL('return_sheet_clear', false)
-                  }
-                }}
-              >
-                {loading['return_sheet_clear'] ? '…' : 'Clear return sheet'}
-              </button>
-            )}
-          </div>
-        </UploadCard>
-      </Section>
-
-      {allowHistorical && <Section title="Tier 2 — Amazon Orders & PO Pipeline">
+      {showAdminTab && uploadTab === 'admin' && allowHistorical && <Section title="Tier 2 — Amazon Orders & PO Pipeline">
         <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false} alert={showImportCompleteness ? uploadAlertsBySource['b2c'] : undefined} onClearAlert={() => clearUploadAlert('b2c')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
@@ -633,6 +563,7 @@ export default function Upload() {
           />
         </UploadCard>
 
+        {allowAdminBaseline ? (
         <UploadCard title="📦 Existing PO Sheet" subtitle="Open/pending POs (XLSX or CSV)" loaded={coverage.existing_po} alert={showImportCompleteness ? uploadAlertsBySource['existingpo'] : undefined} onClearAlert={() => clearUploadAlert('existingpo')}>
           <FileUpload
             label="Upload PO Sheet"
@@ -644,6 +575,14 @@ export default function Upload() {
             uploading={loading['existingpo']}
           />
         </UploadCard>
+        ) : (
+          <div className="col-span-2 bg-white rounded-xl border border-amber-100 p-5 shadow-sm space-y-2">
+            <h3 className="font-semibold text-[#002B5B] text-sm">📦 Existing PO Sheet</h3>
+            <p className="text-xs text-gray-600">
+              Updating the baseline open-PO sheet is <strong>Admin-only</strong> while historical data is locked.
+            </p>
+          </div>
+        )}
 
         <UploadCard title="🗜️ Monthly Sales RAR" subtitle="Drop Monthly.rar — Amazon, Flipkart, Meesho, Myntra auto-detected inside" loaded={false} alert={showImportCompleteness ? uploadAlertsBySource['monthly_rar'] : undefined} onClearAlert={() => clearUploadAlert('monthly_rar')}>
           <div className="space-y-2">
@@ -661,15 +600,7 @@ export default function Upload() {
                       dropped: res.unknown_files,
                     })
                     if (res.ok) {
-                      if (res.ingest_async) {
-                        showToast('success', `${res.message} Please wait…`)
-                        setBuildingMsg('Processing archives on server…')
-                        await waitForDailyAutoIngest((msg) => setBuildingMsg(msg))
-                        setBuildingMsg('Rebuilding combined sales…')
-                        await waitForSalesRebuild((msg) => setBuildingMsg(msg))
-                        setBuildingMsg('')
-                        showToast('success', 'Archive loaded and sales rebuilt.')
-                      } else if (res.sales_rebuild === 'pending') {
+                      if (res.sales_rebuild === 'pending') {
                         showToast('success', `${res.message} Please wait…`)
                         setBuildingMsg('Rebuilding combined sales in background…')
                         await waitForSalesRebuild(msg => setBuildingMsg(msg))
@@ -690,30 +621,8 @@ export default function Upload() {
         </UploadCard>
       </Section>}
 
-      {!allowHistorical && (
-        <Section title="Monthly pipeline (allowed)">
-          <UploadCard
-            title="📦 Existing PO Sheet"
-            subtitle="Update open/pending POs (XLSX or CSV) — does not replace sales history"
-            loaded={coverage.existing_po}
-            alert={showImportCompleteness ? uploadAlertsBySource['existingpo'] : undefined}
-            onClearAlert={() => clearUploadAlert('existingpo')}
-          >
-            <FileUpload
-              label="Upload PO Sheet"
-              accept={{
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-                'text/csv': ['.csv'],
-              }}
-              onUpload={handle('existingpo', (file: File) => uploadExistingPO(file))}
-              uploading={loading['existingpo']}
-            />
-          </UploadCard>
-        </Section>
-      )}
-
-      {/* Tier 3 — Daily Orders */}
-      <Section title="Tier 3 — Daily orders (incremental; auto-detect)">
+      {(uploadTab === 'daily' || !showAdminTab) && (
+      <Section title="Daily uploads — sales, snapshot inventory, returns">
         <div className="col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-3">
           <div>
             <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily order upload</h3>
@@ -754,13 +663,86 @@ export default function Upload() {
             <p className="text-xs text-blue-600">Daily orders loaded ✓ — included in sales dataset.</p>
           )}
         </div>
+
+        <UploadCard
+          title="📦 Snapshot inventory (today)"
+          subtitle="OMS CSV/XLSX, Flipkart, Myntra, Amazon RAR/CSV — auto-detected. Replaces the current snapshot; server saves automatically."
+          loaded={coverage.inventory}
+          alert={showImportCompleteness ? uploadAlertsBySource['inv'] : undefined}
+          onClearAlert={() => clearUploadAlert('inv')}
+        >
+          {!coverage.sku_mapping && <Warn>SKU map must be loaded on the server (ask Admin if missing).</Warn>}
+          <InventoryDropzone
+            disabled={!coverage.sku_mapping}
+            uploading={loading['inv']}
+            onUpload={async (files) => {
+              setL('inv', true)
+              try {
+                await withUploadGuard(async () => {
+                  const res = await uploadInventoryAuto(files)
+                  if (res.ok) {
+                    setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
+                    const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
+                      ? (res.debug.warnings as string[])
+                      : []
+                    captureGenericAlert('inv', issues)
+                    showToast('success', res.message)
+                    await refresh()
+                  } else showToast('error', res.message)
+                })
+              } catch (e: unknown) {
+                showToast('error', e instanceof Error ? e.message : 'Upload failed')
+              } finally { setL('inv', false) }
+            }}
+          />
+          {inventoryAmzDisclaimer && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900">
+              <p className="font-medium">Amazon inventory disclaimer</p>
+              <p className="mt-1">
+                Only latest 1 report day is used
+                {inventoryAmzDisclaimer.latest_report_date ? ` (${inventoryAmzDisclaimer.latest_report_date})` : ''}.
+              </p>
+              <p className="mt-1">
+                Raw: {Number(inventoryAmzDisclaimer.raw_total_units ?? 0).toLocaleString()} ·
+                Non-sellable excluded: {Number(inventoryAmzDisclaimer.excluded_non_sellable_units ?? 0).toLocaleString()} ·
+                ZNNE excluded: {Number(inventoryAmzDisclaimer.excluded_znne_units ?? 0).toLocaleString()} ·
+                Older-date excluded: {Number(inventoryAmzDisclaimer.excluded_older_date_units ?? 0).toLocaleString()} ·
+                Included: {Number(inventoryAmzDisclaimer.latest_report_units ?? 0).toLocaleString()}
+              </p>
+            </div>
+          )}
+        </UploadCard>
+
+        <UploadCard
+          title="↩ Returns (for PO)"
+          subtitle="CSV or Excel with return units by SKU — reduces PO qty and net demand. Then run Calculate PO on the PO Engine page."
+          loaded={false}
+          alert={showImportCompleteness ? uploadAlertsBySource['returns_po'] : undefined}
+          onClearAlert={() => clearUploadAlert('returns_po')}
+        >
+          <FileUpload
+            label="Upload returns file"
+            accept={{
+              'text/csv': ['.csv'],
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+              'application/vnd.ms-excel': ['.xls'],
+              'application/octet-stream': ['.xlsx', '.xls'],
+            }}
+            onUpload={handle('returns_po', async (file: File) => {
+              const data = await uploadPoReturnsImport(file)
+              return { ok: data.ok, message: data.message } as UploadResponse
+            })}
+            uploading={loading['returns_po']}
+          />
+        </UploadCard>
+
         <div className="col-span-2">
-          <DailyHistory allowDelete={allowReset} />
+          <DailyHistory allowDelete={mayDeleteDailyFiles} />
         </div>
       </Section>
+      )}
 
-      {/* Build Sales */}
-      {anyLoaded && (
+      {(uploadTab === 'daily' || !showAdminTab) && anyLoaded && (
         <div className="bg-white rounded-xl border border-gray-200 p-5 flex items-center justify-between">
           <div>
             <h3 className="font-semibold text-[#002B5B]">🔄 Build Combined Sales Dataset</h3>
@@ -783,8 +765,8 @@ export default function Upload() {
       {/* Reset & data verification */}
       <div>
         <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Verify data</h3>
-        <div className={`grid grid-cols-1 gap-4 ${allowReset ? 'md:grid-cols-2' : ''}`}>
-          {allowReset && (
+        <div className={`grid grid-cols-1 gap-4 ${allowReset && (!showAdminTab || uploadTab === 'admin') ? 'md:grid-cols-2' : ''}`}>
+          {allowReset && (!showAdminTab || uploadTab === 'admin') && (
           <div className="rounded-xl border border-red-200 bg-red-50/60 p-5 space-y-3">
             <h4 className="font-semibold text-red-900 text-sm">Clear all app data (Admin)</h4>
             <p className="text-xs text-red-900/80 leading-relaxed">
@@ -1306,21 +1288,16 @@ function MonthlyRarUploader({ uploading, onUpload }: {
   uploading: boolean
   onUpload: (files: File[]) => Promise<void>
 }) {
-  const [files, setFiles] = useState<File[]>([])
+  const [file, setFile] = useState<File | null>(null)
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const list = e.target.files
-    if (!list?.length) {
-      setFiles([])
-      return
-    }
-    setFiles(Array.from(list))
+    setFile(e.target.files?.[0] ?? null)
   }
 
   const submit = async () => {
-    if (!files.length) return
-    await onUpload(files)
-    setFiles([])
+    if (!file) return
+    await onUpload([file])
+    setFile(null)
   }
 
   return (
@@ -1328,24 +1305,19 @@ function MonthlyRarUploader({ uploading, onUpload }: {
       <input
         type="file"
         accept="*"
-        multiple
         onChange={handleChange}
         disabled={uploading}
         className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100 w-full"
       />
-      {files.length > 0 && (
-        <ul className="text-xs text-gray-500 max-h-24 overflow-y-auto space-y-0.5">
-          {files.map((f) => (
-            <li key={`${f.name}-${f.size}`} className="truncate">📦 {f.name}</li>
-          ))}
-        </ul>
+      {file && (
+        <p className="text-xs text-gray-500 truncate">📦 {file.name}</p>
       )}
       <button
         onClick={submit}
-        disabled={!files.length || uploading}
+        disabled={!file || uploading}
         className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
       >
-        {uploading ? 'Processing…' : `⬆ Upload monthly RAR${files.length > 1 ? ` (${files.length} files)` : ''}`}
+        {uploading ? 'Processing RAR…' : '⬆ Upload Monthly RAR'}
       </button>
     </div>
   )

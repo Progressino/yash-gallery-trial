@@ -21,7 +21,10 @@ def test_clerk_blocked_from_bulk_upload_when_locked(monkeypatch):
 def test_clerk_may_daily_auto_when_locked(monkeypatch):
     monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
     assert check_upload_api_access("Clerk", "POST", "/api/upload/daily-auto") is None
-    assert check_upload_api_access("Clerk", "POST", "/api/po/daily-inventory-history") is None
+    assert check_upload_api_access("Clerk", "POST", "/api/upload/inventory-auto") is None
+    assert check_upload_api_access("Clerk", "POST", "/api/po/returns/import-file") is None
+    err = check_upload_api_access("Clerk", "POST", "/api/po/daily-inventory-history")
+    assert err is not None
 
 
 def test_admin_may_bulk_when_locked(monkeypatch):
@@ -40,3 +43,21 @@ def test_upload_policy_payload():
     pol = upload_policy_for_role("Clerk")
     assert pol["may_upload_daily"] is True
     assert pol["historical_upload_locked"] is True
+    assert pol["may_upload_po_baseline"] is False
+
+
+def test_manager_blocked_sku_mapping_when_locked(monkeypatch):
+    monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
+    assert check_upload_api_access("Manager", "POST", "/api/upload/mtr") is None
+    assert check_upload_api_access("Manager", "POST", "/api/upload/sku-mapping") is not None
+
+
+def test_admin_may_sku_mapping_when_locked(monkeypatch):
+    monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
+    assert check_upload_api_access("Admin", "POST", "/api/upload/sku-mapping") is None
+
+
+def test_manager_blocked_clear_returns_overlay_when_locked(monkeypatch):
+    monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
+    assert check_upload_api_access("Manager", "DELETE", "/api/po/returns/overlay") is not None
+    assert check_upload_api_access("Admin", "DELETE", "/api/po/returns/overlay") is None

@@ -19,6 +19,8 @@ export interface AuthUser {
   may_save_shared_cache?: boolean
   may_reload_shared_cache?: boolean
   may_delete_daily_upload?: boolean
+  /** Wide PO inventory history + SKU status/lead; Admin-only when org historical lock is on. */
+  may_upload_po_baseline?: boolean
 }
 
 function readStoredUser(): AuthUser | null {
@@ -75,5 +77,21 @@ export function mayResetSharedData(user: AuthUser | null | undefined): boolean {
   if (!user) return false
   if (user.may_reset_all === true) return true
   if (user.may_reset_all === false) return false
+  return user.role === 'Admin'
+}
+
+/** PO baseline sheets (daily inventory history matrix, SKU status/lead) and related Admin-only uploads when locked. */
+export function mayUploadPoBaseline(user: AuthUser | null | undefined): boolean {
+  if (!user) return false
+  if (user.may_upload_po_baseline === true) return true
+  if (user.may_upload_po_baseline === false) return false
+  return user.role === 'Admin' || user.role === 'Manager'
+}
+
+/** Removing saved Tier-3 daily files from the server. */
+export function mayDeleteDailyUploadFile(user: AuthUser | null | undefined): boolean {
+  if (!user) return false
+  if (user.may_delete_daily_upload === true) return true
+  if (user.may_delete_daily_upload === false) return false
   return user.role === 'Admin'
 }

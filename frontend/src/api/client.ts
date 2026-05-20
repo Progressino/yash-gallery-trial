@@ -119,39 +119,6 @@ export const uploadAmazonB2B  = (file: File) => uploadFile('/upload/amazon-b2b',
 export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po', file)
 export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
-export interface ReturnSheetImportResponse {
-  ok: boolean
-  message?: string
-  skus?: number
-  total_units?: number
-  sales_rebuilt?: boolean
-}
-
-/** Return sheet (CSV / Excel) — merged into unified sales (net) and PO return overlay. Upload tab only in UI. */
-export async function uploadReturnSheet(
-  file: File,
-  opts?: { groupByParent?: boolean; replace?: boolean },
-): Promise<ReturnSheetImportResponse> {
-  const fd = new FormData()
-  fd.append('file', file)
-  fd.append('group_by_parent', opts?.groupByParent ? 'true' : 'false')
-  fd.append('replace', opts?.replace === false ? 'false' : 'true')
-  try {
-    const { data } = await api.post<ReturnSheetImportResponse>('/po/returns/import-file', fd, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: UPLOAD_TIMEOUT_MS,
-    })
-    return data
-  } catch (e: unknown) {
-    throw new Error(_errMessage(e, 'Return sheet upload failed'))
-  }
-}
-
-export async function clearReturnSheet(): Promise<{ ok: boolean; message?: string }> {
-  const { data } = await api.delete<{ ok: boolean; message?: string }>('/po/returns/overlay')
-  return data
-}
-
 export async function uploadInventoryAuto(
   files: File[]
 ): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown>; detected?: string[] }> {
@@ -179,12 +146,35 @@ export async function uploadInventory(files: {
   return data
 }
 
+/** Import return units overlay for PO (same as PO Engine → Import returns). */
+export async function uploadPoReturnsImport(
+  file: File,
+  opts?: { groupByParent?: boolean; replace?: boolean },
+): Promise<{ ok: boolean; message: string }> {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('group_by_parent', opts?.groupByParent ? 'true' : 'false')
+  fd.append('replace', opts?.replace === false ? 'false' : 'true')
+  try {
+    const { data } = await api.post<{ ok?: boolean; message?: string }>(
+      '/po/returns/import-file',
+      fd,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: UPLOAD_TIMEOUT_MS },
+    )
+    return {
+      ok: !!data?.ok,
+      message: data?.message || (data?.ok ? 'Returns imported.' : 'Import failed.'),
+    }
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Returns import failed'))
+  }
+}
+
 export async function uploadDailyAuto(
   files: File[]
 ): Promise<{
   ok: boolean
   message: string
-  ingest_async?: boolean
   detected_platforms?: string[]
   warnings?: string[]
   processed_files?: number
@@ -225,28 +215,6 @@ export async function waitForSalesRebuild(
     return cov
   }
   throw new Error('Sales rebuild timed out — refresh the page in a minute.')
-}
-
-/** Poll until Tier-3 background ingest (RAR / large multi-file) finishes. */
-export async function waitForDailyAutoIngest(
-  onTick?: (message: string) => void,
-  maxMs = UPLOAD_TIMEOUT_MS,
-): Promise<CoverageResponse> {
-  const start = Date.now()
-  while (Date.now() - start < maxMs) {
-    const cov = await getCoverage()
-    const st = cov.daily_auto_ingest_status ?? 'idle'
-    if (st === 'running') {
-      onTick?.(cov.daily_auto_ingest_message || 'Processing archives on server…')
-      await new Promise(r => setTimeout(r, 2500))
-      continue
-    }
-    if (st === 'error') {
-      throw new Error(cov.daily_auto_ingest_message || 'Tier-3 ingest failed')
-    }
-    return cov
-  }
-  throw new Error('Tier-3 ingest timed out — refresh the page in a minute.')
 }
 
 export interface POCalculateResult {

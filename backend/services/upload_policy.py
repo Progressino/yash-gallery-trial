@@ -11,9 +11,9 @@ _RESET_DATA_ROLES = frozenset({"Admin"})
 _DAILY_UPLOAD_PREFIXES = (
     "/api/upload/daily-auto",
     "/api/upload/daily",
-    "/api/upload/existing-po",
     "/api/upload/build-sales",
-    "/api/po/daily-inventory-history",
+    "/api/upload/inventory-auto",
+    "/api/po/returns/import-file",
 )
 
 # Always allowed (read shared cache into session; does not overwrite org history).
@@ -39,12 +39,17 @@ _HISTORICAL_UPLOAD_PREFIXES = (
     "/api/upload/meesho",
     "/api/upload/flipkart",
     "/api/upload/snapdeal",
-    "/api/upload/inventory-auto",
     "/api/upload/inventory",
     "/api/upload/amazon-b2c",
     "/api/upload/amazon-b2b",
     "/api/upload/existing-po",
     "/api/upload/cogs",
+)
+
+# PO baseline sheets (wide daily inventory history, SKU status/lead) — Admin only when locked.
+_PO_ADMIN_BASELINE_PREFIXES = (
+    "/api/po/daily-inventory-history",
+    "/api/po/sku-status-lead",
 )
 
 
@@ -78,6 +83,11 @@ def may_delete_daily_upload_file(role: str) -> bool:
     return may_reset_shared_data(role)
 
 
+def may_upload_po_baseline(role: str) -> bool:
+    """Wide PO inventory history + SKU status/lead — Admin only when org lock is on."""
+    return may_reset_shared_data(role)
+
+
 def upload_policy_for_role(role: str) -> dict:
     hist = may_upload_historical(role)
     locked = historical_upload_locked()
@@ -90,6 +100,7 @@ def upload_policy_for_role(role: str) -> dict:
         "may_save_shared_cache": hist,
         "may_reload_shared_cache": hist,
         "may_delete_daily_upload": may_delete_daily_upload_file(role),
+        "may_upload_po_baseline": may_upload_po_baseline(role),
     }
 
 
@@ -99,8 +110,6 @@ def check_upload_api_access(role: str, method: str, path: str) -> str | None:
     None means allowed.
     """
     if not historical_upload_locked():
-        return None
-    if may_upload_historical(role):
         return None
 
     m = method.upper()
@@ -113,6 +122,25 @@ def check_upload_api_access(role: str, method: str, path: str) -> str | None:
         return None
 
     if m == "POST" and any(p.startswith(prefix) for prefix in _CACHE_LOAD_PREFIXES):
+        return None
+
+    # Admin-only while lock is on: PO baselines, SKU master map, existing PO sheet.
+    if not may_reset_shared_data(role):
+        if m == "POST" and any(p.startswith(prefix) for prefix in _PO_ADMIN_BASELINE_PREFIXES):
+            return (
+                "PO baseline uploads are Admin-only while historical data is locked. "
+                "Use the Upload → Daily tab for daily sales, snapshot inventory, and returns."
+            )
+        if m == "DELETE" and p.startswith("/api/po/daily-inventory-history"):
+            return "Removing daily inventory history is Admin-only while data is locked."
+        if m == "POST" and p.startswith("/api/upload/sku-mapping"):
+            return "SKU mapping is Admin-only while historical data is locked."
+        if m == "POST" and p.startswith("/api/upload/existing-po"):
+            return "Existing PO baseline upload is Admin-only while historical data is locked."
+        if p == "/api/po/returns/overlay" and m == "DELETE":
+            return "Historical data is locked. Clearing return data is Admin-only."
+
+    if may_upload_historical(role):
         return None
 
     if p.startswith("/api/upload/clear/") and m == "DELETE":
@@ -132,8 +160,8 @@ def check_upload_api_access(role: str, method: str, path: str) -> str | None:
 
     if m == "POST" and any(p.startswith(prefix) for prefix in _HISTORICAL_UPLOAD_PREFIXES):
         return (
-            "Historical bulk uploads are locked. Use Tier 3 daily file drop "
-            "(or daily inventory on PO Engine) — contact Admin to replace base history."
+            "Historical bulk uploads are locked. Use the Daily uploads tab for daily sales, "
+            "snapshot inventory, and returns — contact Admin to replace base history."
         )
 
     return None

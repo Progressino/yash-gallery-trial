@@ -685,6 +685,13 @@ async def po_returns_import_file(
     base_msg = str(out.get("message") or "").strip()
     out["message"] = f"{base_msg} {sales_note}".strip()
     out["sales_rebuilt"] = sales_rebuilt
+    try:
+        from ..routers.upload import _auto_save_cache
+
+        background_tasks.add_task(_auto_save_cache, sess)
+    except Exception:
+        logging.getLogger(__name__).exception("auto-save after returns import failed to schedule")
+    out["message"] = f"{out['message']} Run Calculate PO to refresh the table.".strip()
     return out
 
 
