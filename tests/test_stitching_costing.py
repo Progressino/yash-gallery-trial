@@ -276,4 +276,14 @@ def test_stitching_production_entry_reports():
     rep = svc.production_entry_reports("2026-05-15", "K001")
     assert len(rep["history"]) >= 1
     assert len(rep["report1"]) >= 1
-    assert rep["report1"][0]["Total_Pieces"] >= 20
+    r1 = rep["report1"][0]
+    assert r1["Total_Pieces"] >= 20
+    assert r1["Style"] == "1894YKDGREEN"
+    assert float(r1["Daily_Salary_Rs"]) > 0
+    assert float(r1["Hourly_Salary_Rs"]) > 0
+    if rep["report2_summary"]:
+        assert rep["report2_summary"][0]["Style"] == "1894YKDGREEN"
+        assert float(rep["report2_summary"][0]["Daily_Salary_Rs"]) > 0
+    if rep["report2_hourly"]:
+        assert rep["report2_hourly"][0]["Style"] == "1894YKDGREEN"
+        assert float(rep["report2_hourly"][0]["Hourly_Salary_Rs"]) > 0

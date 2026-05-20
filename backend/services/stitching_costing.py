@@ -708,6 +708,8 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
                 "Total_Pieces": int(total_pcs),
                 "Adj_Target": int(adj_target),
                 "Efficiency_%": efficiency,
+                "Daily_Salary_Rs": daily_salary,
+                "Hourly_Salary_Rs": hourly_salary,
                 "Budgeted_Expense_Rs": budgeted_exp,
                 "Actual_Expense_Rs": actual_exp,
                 "PL_Rs": pl_val,
@@ -739,10 +741,12 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
             report2_rows.append(
                 {
                     "Karigar": kar_name,
+                    "Karigar_ID": kid,
                     "Challan_No": str(row.get("Challan_No", "")),
                     "Style": str(row.get("Style", "")),
                     "Hour": hlbl,
                     "Operation": op_name,
+                    "Daily_Salary_Rs": daily_rate,
                     "Hourly_Salary_Rs": hourly_sal,
                     "Pieces_Done": pcs,
                     "Hourly_Target_Pcs": int(hourly_target),
@@ -760,11 +764,13 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         r2_sum = (
             r2_df.groupby(["Karigar", "Operation"])
             .agg(
+                Karigar_ID=("Karigar_ID", "first"),
                 Challan_No=("Challan_No", "first"),
                 Style=("Style", "first"),
                 Hours_Worked=("Hour", "count"),
                 Total_Pieces=("Pieces_Done", "sum"),
                 Hourly_Target_Pcs=("Hourly_Target_Pcs", "first"),
+                Daily_Salary_Rs=("Daily_Salary_Rs", "first"),
                 Total_Salary_Cost=("Hourly_Salary_Rs", "sum"),
                 Total_Actual_Val=("Actual_Piece_Val_Rs", "sum"),
                 Total_Target_Val=("Target_Piece_Val_Rs", "sum"),

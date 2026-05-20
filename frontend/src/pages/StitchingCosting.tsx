@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import axios from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
@@ -618,6 +618,47 @@ function ProductionTab({
     enabled: !!entryDate,
   })
 
+  const [showSalaryCols, setShowSalaryCols] = useState(!!karigarId)
+  useEffect(() => {
+    if (karigarId) setShowSalaryCols(true)
+  }, [karigarId])
+  const showSalary = !!karigarId || showSalaryCols
+
+  const report1Cols = useMemo(() => {
+    const base = [
+      'Karigar_Name',
+      'Challan_No',
+      'Style',
+      'Operation',
+      'Working_Hours',
+      'Total_Pieces',
+      'Efficiency_%',
+    ]
+    if (showSalary) {
+      base.push('Daily_Salary_Rs', 'Hourly_Salary_Rs', 'Actual_Expense_Rs', 'PL_Rs')
+    } else {
+      base.push('PL_Rs')
+    }
+    return base
+  }, [showSalary])
+
+  const report2SummaryCols = useMemo(() => {
+    const base = ['Karigar', 'Style', 'Challan_No', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']
+    if (showSalary) base.splice(4, 0, 'Daily_Salary_Rs', 'Total_Salary_Cost')
+    return base
+  }, [showSalary])
+
+  const report2HourlyCols = useMemo(() => {
+    const base = ['Karigar', 'Style', 'Challan_No', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
+    if (showSalary) base.splice(5, 0, 'Daily_Salary_Rs', 'Hourly_Salary_Rs')
+    return base
+  }, [showSalary])
+
+  const historyCols = useMemo(
+    () => ['Save_Time', 'Karigar_Name', 'Challan_No', 'Style', 'Operation', 'Total_Pieces', 'PL_Rs'],
+    [],
+  )
+
   const liveSummary = useMemo(
     () => computeEntrySummary(hourState, hours, operations),
     [hourState, hours, operations],
@@ -1134,57 +1175,80 @@ function ProductionTab({
       )}
 
       {(entryReports?.recent_saves?.length > 0 || entryReports?.history?.length > 0) && (
-        <Section title={karigarId ? "Today's saves — this karigar" : "Today's saves"}>
+        <ReportTableSection
+          title={karigarId ? "Today's saves — this karigar" : "Today's saves"}
+          rows={(entryReports.recent_saves?.length ? entryReports.recent_saves : entryReports.history) as Record<string, unknown>[]}
+          cols={historyCols}
+          downloadName={`production-saves-${entryDate}.csv`}
+        >
           <div className="space-y-2">
             {(entryReports.recent_saves?.length ? entryReports.recent_saves : entryReports.history)
               .slice(0, 8)
               .map((row: Record<string, unknown>, i: number) => (
                 <div key={i} className="text-xs bg-blue-50 border-l-4 border-[#2c5aa0] rounded-r-lg px-3 py-2.5">
-                  {String(row.Save_Time || '—')} · <b>{String(row.Karigar_Name)}</b> · {String(row.Challan_No)} /{' '}
-                  {String(row.Operation)} · <b>{String(row.Total_Pieces)} pcs</b>
+                  {String(row.Save_Time || '—')} · <b>{String(row.Karigar_Name)}</b> · {String(row.Challan_No)} ·{' '}
+                  <b>{String(row.Style || '—')}</b> · {String(row.Operation)} · <b>{String(row.Total_Pieces)} pcs</b>
                 </div>
               ))}
           </div>
-        </Section>
+        </ReportTableSection>
       )}
 
-      {!karigarOnly && entryReports?.report1?.length > 0 && (
-        <Section title="Report 1 — Production summary">
-          <DataTable
-            rows={entryReports.report1}
-            cols={['Karigar_Name', 'Challan_No', 'Operation', 'Working_Hours', 'Total_Pieces', 'Efficiency_%', 'PL_Rs']}
+      {!karigarOnly && !karigarId && (
+        <label className="flex items-center gap-2 text-xs text-gray-600 bg-white border rounded-lg px-3 py-2 w-fit">
+          <input
+            type="checkbox"
+            checked={showSalaryCols}
+            onChange={e => setShowSalaryCols(e.target.checked)}
+            className="rounded"
           />
-        </Section>
+          Show karigar salary columns in reports
+        </label>
       )}
 
-      {!karigarOnly && entryReports?.report2_summary?.length > 0 && (
-        <Section title="Report 2 — Salary vs piece value">
-          <DataTable
-            rows={entryReports.report2_summary}
-            cols={['Karigar', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']}
-          />
+      {entryReports?.report1?.length > 0 && (
+        <ReportTableSection
+          title="Report 1 — Production summary"
+          rows={entryReports.report1 as Record<string, unknown>[]}
+          cols={report1Cols}
+          downloadName={`production-summary-${entryDate}${karigarId ? `-${karigarId}` : ''}.csv`}
+        />
+      )}
+
+      {entryReports?.report2_summary?.length > 0 && (
+        <ReportTableSection
+          title="Report 2 — Salary vs piece value"
+          rows={entryReports.report2_summary as Record<string, unknown>[]}
+          cols={report2SummaryCols}
+          downloadName={`production-salary-summary-${entryDate}${karigarId ? `-${karigarId}` : ''}.csv`}
+        >
           {entryReports.grand_total && (
             <p className="mt-2 text-xs rounded-lg px-3 py-2 bg-gray-50 border text-gray-700">
               Grand net P&amp;L: ₹{entryReports.grand_total.total_net_pl}
+              {showSalary && entryReports.grand_total.total_salary_cost != null && (
+                <span className="ml-2">· Total salary cost: ₹{entryReports.grand_total.total_salary_cost}</span>
+              )}
             </p>
           )}
-        </Section>
+        </ReportTableSection>
       )}
 
-      {!karigarOnly && entryReports?.report2_hourly?.length > 0 && (
-        <Section title="Report 2 — Hour-wise detail">
+      {entryReports?.report2_hourly?.length > 0 && (
+        <ReportTableSection
+          title="Report 2 — Hour-wise detail"
+          rows={entryReports.report2_hourly as Record<string, unknown>[]}
+          cols={report2HourlyCols}
+          downloadName={`production-hourly-${entryDate}${karigarId ? `-${karigarId}` : ''}.csv`}
+        >
           <details className="text-xs">
             <summary className="cursor-pointer py-3 font-medium text-[#2c5aa0] touch-manipulation min-h-[44px]">
               Show hour-wise rows ({entryReports.report2_hourly.length})
             </summary>
             <div className="mt-2 max-h-64 overflow-auto">
-              <DataTable
-                rows={entryReports.report2_hourly}
-                cols={['Karigar', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']}
-              />
+              <DataTable rows={entryReports.report2_hourly} cols={report2HourlyCols} />
             </div>
           </details>
-        </Section>
+        </ReportTableSection>
       )}
     </div>
   )
@@ -2469,6 +2533,58 @@ function PerformanceTab() {
         )}
       </Section>
     </div>
+  )
+}
+
+function csvEscapeCell(v: unknown): string {
+  const s = String(v ?? '')
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function downloadReportCsv(filename: string, rows: Record<string, unknown>[], cols: string[]) {
+  if (!rows.length) return
+  const useCols = cols.filter(c => rows.some(r => r[c] !== undefined && r[c] !== ''))
+  if (!useCols.length) return
+  const header = useCols.join(',')
+  const body = rows.map(r => useCols.map(c => csvEscapeCell(r[c])).join(',')).join('\n')
+  const blob = new Blob([`${header}\n${body}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename.endsWith('.csv') ? filename : `${filename}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function ReportTableSection({
+  title,
+  rows,
+  cols,
+  downloadName,
+  children,
+}: {
+  title: string
+  rows: Record<string, unknown>[]
+  cols: string[]
+  downloadName: string
+  children?: ReactNode
+}) {
+  const canDownload = rows.length > 0
+  return (
+    <Section title={title}>
+      <div className="flex flex-wrap items-center justify-end gap-2 mb-2 -mt-1">
+        <button
+          type="button"
+          disabled={!canDownload}
+          onClick={() => downloadReportCsv(downloadName, rows, cols)}
+          className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#002B5B] text-[#002B5B] bg-white hover:bg-blue-50 disabled:opacity-40 touch-manipulation"
+        >
+          ⬇ Download CSV
+        </button>
+      </div>
+      {children ?? <DataTable rows={rows} cols={cols} />}
+    </Section>
   )
 }
 
