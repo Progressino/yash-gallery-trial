@@ -99,7 +99,10 @@ def apply_return_overlay_import(
     sess._quarterly_cache.clear()
     return {
         "ok": True,
-        "message": f"Return overlay: {n} SKU(s), {units:,} units. Run Calculate PO to apply.",
+        "message": (
+            f"Return sheet: {n} SKU(s), {units:,} return units. "
+            "These units are merged into unified sales (dashboard net) and PO return overlay."
+        ),
         "skus": n,
         "total_units": units,
     }

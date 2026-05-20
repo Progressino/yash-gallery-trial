@@ -44,6 +44,7 @@ export interface CoverageResponse {
   sku_status_lead?: boolean
   daily_inventory_history?: boolean
   po_raise_ledger?: boolean
+  return_sheet?: boolean
   mtr_rows: number
   sales_rows: number
   myntra_rows: number
@@ -54,11 +55,14 @@ export interface CoverageResponse {
   daily_inventory_history_rows?: number
   daily_inventory_history_skus?: number
   po_raise_ledger_rows?: number
+  return_sheet_skus?: number
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
   /** Tier-3 daily-auto background sales rebuild */
   sales_rebuild?: 'idle' | 'running' | 'done' | 'error'
   sales_rebuild_message?: string
+  daily_auto_ingest_status?: 'idle' | 'running' | 'done' | 'error'
+  daily_auto_ingest_message?: string
 }
 
 // ── Upload helpers ────────────────────────────────────────────
@@ -115,6 +119,39 @@ export const uploadAmazonB2B  = (file: File) => uploadFile('/upload/amazon-b2b',
 export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po', file)
 export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
+export interface ReturnSheetImportResponse {
+  ok: boolean
+  message?: string
+  skus?: number
+  total_units?: number
+  sales_rebuilt?: boolean
+}
+
+/** Return sheet (CSV / Excel) — merged into unified sales (net) and PO return overlay. Upload tab only in UI. */
+export async function uploadReturnSheet(
+  file: File,
+  opts?: { groupByParent?: boolean; replace?: boolean },
+): Promise<ReturnSheetImportResponse> {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('group_by_parent', opts?.groupByParent ? 'true' : 'false')
+  fd.append('replace', opts?.replace === false ? 'false' : 'true')
+  try {
+    const { data } = await api.post<ReturnSheetImportResponse>('/po/returns/import-file', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+    })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Return sheet upload failed'))
+  }
+}
+
+export async function clearReturnSheet(): Promise<{ ok: boolean; message?: string }> {
+  const { data } = await api.delete<{ ok: boolean; message?: string }>('/po/returns/overlay')
+  return data
+}
+
 export async function uploadInventoryAuto(
   files: File[]
 ): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown>; detected?: string[] }> {
@@ -147,6 +184,7 @@ export async function uploadDailyAuto(
 ): Promise<{
   ok: boolean
   message: string
+  ingest_async?: boolean
   detected_platforms?: string[]
   warnings?: string[]
   processed_files?: number
@@ -187,6 +225,28 @@ export async function waitForSalesRebuild(
     return cov
   }
   throw new Error('Sales rebuild timed out — refresh the page in a minute.')
+}
+
+/** Poll until Tier-3 background ingest (RAR / large multi-file) finishes. */
+export async function waitForDailyAutoIngest(
+  onTick?: (message: string) => void,
+  maxMs = UPLOAD_TIMEOUT_MS,
+): Promise<CoverageResponse> {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const cov = await getCoverage()
+    const st = cov.daily_auto_ingest_status ?? 'idle'
+    if (st === 'running') {
+      onTick?.(cov.daily_auto_ingest_message || 'Processing archives on server…')
+      await new Promise(r => setTimeout(r, 2500))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(cov.daily_auto_ingest_message || 'Tier-3 ingest failed')
+    }
+    return cov
+  }
+  throw new Error('Tier-3 ingest timed out — refresh the page in a minute.')
 }
 
 export interface POCalculateResult {

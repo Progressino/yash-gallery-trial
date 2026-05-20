@@ -62,6 +62,10 @@ class AppSession:
     sales_rebuild_status: str = "idle"   # idle | running | done | error
     sales_rebuild_message: str = ""
 
+    # Async Tier-3 ingest (RAR extract + daily SQLite) — avoids 502 while proxy waits.
+    daily_auto_ingest_status: str = "idle"   # idle | running | done | error
+    daily_auto_ingest_message: str = ""
+
     # Async PO calculate (large catalogs exceed reverse-proxy timeouts).
     po_calculate_status: str = "idle"   # idle | running | done | error
     po_calculate_message: str = ""
@@ -117,6 +121,8 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.daily_restored = False
     sess.sales_rebuild_status = "idle"
     sess.sales_rebuild_message = ""
+    sess.daily_auto_ingest_status = "idle"
+    sess.daily_auto_ingest_message = ""
     sess.po_calculate_status = "idle"
     sess.po_calculate_message = ""
     sess.po_calculate_result = {}

@@ -349,6 +349,37 @@ def test_build_sales_df_amazon_with_empty_mapping_includes_rows():
     assert "1023YKBLUE-3XL" in merged["Sku"].astype(str).values or merged["Sku"].astype(str).str.contains("1023").any()
 
 
+def test_build_sales_df_return_sheet_overlay_in_net_sales_summary():
+    """Optional return sheet rows must land in unified sales so dashboard net KPIs include them."""
+    mtr = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-04-01"]),
+            "SKU": ["1001YK-RED-L"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [10.0],
+            "Order_Id": ["OID-1"],
+            "Invoice_Number": [""],
+        }
+    )
+    mapping = {"1001YK-RED-L": "1001YK-RED-L"}
+    overlay = pd.DataFrame({"OMS_SKU": ["1001YK-RED-L"], "Return_Units": [3]})
+    merged = build_sales_df(
+        mtr_df=mtr,
+        myntra_df=pd.DataFrame(),
+        meesho_df=pd.DataFrame(),
+        flipkart_df=pd.DataFrame(),
+        sku_mapping=mapping,
+        return_overlay_df=overlay,
+    )
+    summ = get_sales_summary(merged, months=0)
+    assert summ["total_units"] == 10
+    assert summ["total_returns"] == 3
+    assert summ["net_units"] == 7
+    rs = merged[merged["Source"].astype(str) == "Return_Sheet"]
+    assert len(rs) == 1
+    assert str(rs["Transaction Type"].iloc[0]) == "Refund"
+
+
 def test_filter_sales_for_export_date_and_source():
     df = pd.DataFrame(
         {

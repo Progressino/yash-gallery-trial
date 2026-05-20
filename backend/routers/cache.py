@@ -190,6 +190,8 @@ def _rebuild_sales_in_session(sess) -> int:
     if not sess.sku_mapping:
         return 0
     try:
+        ro = getattr(sess, "po_return_overlay_df", None)
+        ov = None if ro is None or getattr(ro, "empty", True) else ro
         sess.sales_df = build_sales_df(
             mtr_df=sess.mtr_df,
             myntra_df=sess.myntra_df,
@@ -197,6 +199,7 @@ def _rebuild_sales_in_session(sess) -> int:
             flipkart_df=sess.flipkart_df,
             snapdeal_df=sess.snapdeal_df,
             sku_mapping=sess.sku_mapping,
+            return_overlay_df=ov,
         )
         return len(sess.sales_df)
     except Exception as e:
@@ -216,6 +219,7 @@ def _auto_save_cache(sess) -> None:
         "inventory_df_variant": sess.inventory_df_variant,
         "inventory_df_parent":  sess.inventory_df_parent,
         "existing_po_df":        sess.existing_po_df,
+        "po_return_overlay_df": getattr(sess, "po_return_overlay_df", pd.DataFrame()),
     }
     ok, msg = save_cache_to_drive(session_data)
     if ok:

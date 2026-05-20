@@ -34,6 +34,7 @@ _CACHE_FILES = {
     "daily_inventory_history_df": "daily_inventory_history_df.parquet",
     "sku_status_lead_df":    "sku_status_lead_df.parquet",
     "po_raise_ledger_df":    "po_raise_ledger_df.parquet",
+    "po_return_overlay_df": "po_return_overlay_df.parquet",
 }
 
 

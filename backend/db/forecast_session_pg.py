@@ -41,6 +41,7 @@ _PARQUET_KEYS = (
     "daily_orders_df",
     "existing_po_df",
     "po_raise_ledger_df",
+    "po_return_overlay_df",
     "sku_status_lead_df",
     "daily_inventory_history_df",
     "transfer_df",

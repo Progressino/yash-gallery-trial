@@ -395,6 +395,55 @@ def _build_mtr_sales_tagged(mtr_df: pd.DataFrame, sku_mapping: Dict[str, str]) -
     return _downcast_sales(out)
 
 
+# Synthetic unified-sales rows for the optional PO return sheet (Upload tab).
+# Source is not a marketplace key — upload-day gating leaves these rows visible.
+RETURN_SHEET_SOURCE = "Return_Sheet"
+RETURN_SHEET_ORDER_PLACEHOLDER = "RETURN_SHEET"
+
+
+def return_sheet_refund_rows_from_overlay(
+    overlay: pd.DataFrame,
+    sku_mapping: Dict[str, str],
+    *,
+    ref_txn_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """Build Refund rows (positive Quantity, negative Units_Effective) from OMS_SKU + Return_Units."""
+    if overlay is None or overlay.empty:
+        return pd.DataFrame()
+    need = {"OMS_SKU", "Return_Units"}
+    if not need.issubset(overlay.columns):
+        return pd.DataFrame()
+    qty = pd.to_numeric(overlay["Return_Units"], errors="coerce").fillna(0).astype(int)
+    sk = overlay["OMS_SKU"].astype(str).str.strip()
+    ok = (qty > 0) & (sk.str.len() > 0) & ~sk.str.lower().isin(["nan", "none"])
+    if not ok.any():
+        return pd.DataFrame()
+    qty = qty.loc[ok]
+    sk = sk.loc[ok]
+    ref = txn_reporting_naive_ist(pd.Series([pd.Timestamp(ref_txn_date)])).iloc[0]
+    if pd.isna(ref):
+        ref = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+    else:
+        ref = pd.Timestamp(ref).normalize()
+
+    synth = pd.DataFrame(
+        {
+            "Sku": sk.values,
+            "TxnDate": ref,
+            "Transaction Type": "Refund",
+            "Quantity": qty.astype(float).values,
+            "Units_Effective": (-qty.astype(float)).values,
+            "OrderId": RETURN_SHEET_ORDER_PLACEHOLDER,
+            "LineKey": "",
+            "Source": RETURN_SHEET_SOURCE,
+        }
+    )
+    synth = _apply_unified_oms_skus(synth, sku_mapping or {})
+    synth["LineKey"] = "RETURN_SHEET|" + synth["Sku"].astype(str)
+    synth["DSR_Segment"] = ""
+    return synth
+
+
 def build_sales_df(
     mtr_df: pd.DataFrame,
     myntra_df: pd.DataFrame,
@@ -402,6 +451,7 @@ def build_sales_df(
     flipkart_df: pd.DataFrame,
     sku_mapping: Dict[str, str],
     snapdeal_df: Optional[pd.DataFrame] = None,
+    return_overlay_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Concatenate all platform DataFrames into a unified sales_df and deduplicate.
@@ -453,7 +503,13 @@ def build_sales_df(
                     sales_parts.append(part)
 
     if not sales_parts:
-        return pd.DataFrame()
+        if return_overlay_df is None or return_overlay_df.empty:
+            return pd.DataFrame()
+        ref0 = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+        synth0 = return_sheet_refund_rows_from_overlay(
+            return_overlay_df, sku_mapping or {}, ref_txn_date=ref0
+        )
+        return _downcast_sales(synth0) if not synth0.empty else pd.DataFrame()
 
     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
 
@@ -514,6 +570,19 @@ def build_sales_df(
 
     if not result.empty and "DSR_Segment" not in result.columns:
         result["DSR_Segment"] = ""
+
+    if return_overlay_df is not None and not return_overlay_df.empty:
+        if not result.empty:
+            ref_dt = txn_reporting_naive_ist(result["TxnDate"]).max()
+        else:
+            ref_dt = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+        synth = return_sheet_refund_rows_from_overlay(
+            return_overlay_df, sku_mapping or {}, ref_txn_date=ref_dt
+        )
+        if not synth.empty:
+            if not result.empty and "DSR_Segment" in result.columns and "DSR_Segment" not in synth.columns:
+                synth["DSR_Segment"] = ""
+            result = pd.concat([result, synth], ignore_index=True)
 
     return _downcast_sales(result)
 

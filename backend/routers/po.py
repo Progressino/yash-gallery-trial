@@ -661,8 +661,30 @@ async def po_returns_import_file(
     if err:
         return {"ok": False, "message": err}
     out = apply_return_overlay_import(sess, overlay, replace=rep)
+    sales_rebuilt = False
+    sales_note = ""
+    try:
+        with sess._daily_restore_lock:
+            from ..routers import upload as _upload_router
+
+            ok_rb, msg_rb = _upload_router._rebuild_sales_sync(sess)
+            sales_rebuilt = bool(ok_rb)
+            sales_note = msg_rb if ok_rb else f"Unified sales rebuild skipped: {msg_rb}"
+    except Exception:
+        logging.getLogger(__name__).exception("sales rebuild after return sheet import")
+        sales_note = "Unified sales rebuild failed (see server logs)."
+
+    try:
+        import backend.main as _main
+
+        _main.publish_warm_cache_from_session(sess)
+    except Exception:
+        logging.getLogger(__name__).exception("publish_warm_cache_from_session after return import")
+
     _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
-    out["message"] = f"{out['message']} Run Calculate PO to refresh the table."
+    base_msg = str(out.get("message") or "").strip()
+    out["message"] = f"{base_msg} {sales_note}".strip()
+    out["sales_rebuilt"] = sales_rebuilt
     return out
 
 
@@ -673,8 +695,24 @@ def po_clear_returns_overlay(request: Request):
         return {"ok": False, "message": "No session"}
     sess.po_return_overlay_df = pd.DataFrame()
     sess._quarterly_cache.clear()
+    sales_note = ""
+    try:
+        with sess._daily_restore_lock:
+            from ..routers import upload as _upload_router
+
+            ok_rb, msg_rb = _upload_router._rebuild_sales_sync(sess)
+            sales_note = msg_rb if ok_rb else f"Sales rebuild warning: {msg_rb}"
+    except Exception:
+        logging.getLogger(__name__).exception("sales rebuild after clear return overlay")
+        sales_note = "Sales rebuild failed (see server logs)."
+    try:
+        import backend.main as _main
+
+        _main.publish_warm_cache_from_session(sess)
+    except Exception:
+        logging.getLogger(__name__).exception("publish_warm_cache_from_session after clear returns")
     _sync_po_sidecars_to_durable_storage(request, sess)
-    return {"ok": True, "message": "Return overlay cleared."}
+    return {"ok": True, "message": f"Return sheet cleared. {sales_note}".strip()}
 
 
 @router.delete("/raise-ledger")

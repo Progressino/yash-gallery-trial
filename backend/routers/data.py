@@ -187,6 +187,12 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
                     flipkart_df=sess.flipkart_df,
                     snapdeal_df=sess.snapdeal_df,
                     sku_mapping=sess.sku_mapping,
+                    return_overlay_df=(
+                        None
+                        if getattr(sess, "po_return_overlay_df", None) is None
+                        or getattr(sess.po_return_overlay_df, "empty", True)
+                        else sess.po_return_overlay_df
+                    ),
                 )
                 sess._quarterly_cache.clear()
             except Exception:
@@ -222,7 +228,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         try:
             import backend.main as _main
             if _main._warm_cache:
-                for key in ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df"):
+                for key in ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df", "po_return_overlay_df"):
                     if getattr(sess, key, None) is not None and not getattr(sess, key).empty:
                         continue
                     val = _main._warm_cache.get(key)
@@ -266,6 +272,8 @@ def get_coverage(request: Request, light: bool = False):
     tier3_any = bool(get_summary())
     _po_ledger = getattr(sess, "po_raise_ledger_df", None)
     _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
+    _ret_ov = getattr(sess, "po_return_overlay_df", None)
+    _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True)
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=not sess.mtr_df.empty,
@@ -280,6 +288,7 @@ def get_coverage(request: Request, light: bool = False):
         sku_status_lead=not sess.sku_status_lead_df.empty,
         daily_inventory_history=not sess.daily_inventory_history_df.empty,
         po_raise_ledger=bool(_po_ledger_ok),
+        return_sheet=bool(_ret_ok),
         mtr_rows=len(sess.mtr_df),
         sales_rows=len(sess.sales_df),
         myntra_rows=len(sess.myntra_df),
@@ -294,9 +303,12 @@ def get_coverage(request: Request, light: bool = False):
             else 0
         ),
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
+        return_sheet_skus=int(len(_ret_ov)) if _ret_ok else 0,
         pause_auto_data_restore=paused,
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
+        daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
+        daily_auto_ingest_message=getattr(sess, "daily_auto_ingest_message", "") or "",
     )
 
 

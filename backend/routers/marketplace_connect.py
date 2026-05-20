@@ -126,6 +126,8 @@ def _run_sync(platform: str, creds: dict, days_back: int, session=None) -> None:
             setattr(session, session_attr, merged)
             # Rebuild unified sales_df
             from ..services.sales import build_sales_df
+            ro = getattr(session, "po_return_overlay_df", None)
+            ov = None if ro is None or getattr(ro, "empty", True) else ro
             session.sales_df = build_sales_df(
                 mtr_df=session.mtr_df,
                 myntra_df=session.myntra_df,
@@ -133,6 +135,7 @@ def _run_sync(platform: str, creds: dict, days_back: int, session=None) -> None:
                 flipkart_df=session.flipkart_df,
                 snapdeal_df=session.snapdeal_df,
                 sku_mapping=session.sku_mapping,
+                return_overlay_df=ov,
             )
             session._quarterly_cache.clear()
         except Exception as e:

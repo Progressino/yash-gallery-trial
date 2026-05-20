@@ -42,6 +42,14 @@ router = APIRouter()
 _log = logging.getLogger(__name__)
 
 
+def _sess_return_overlay(sess):
+    """Optional PO return-sheet overlay (OMS_SKU + Return_Units) merged into unified sales."""
+    ov = getattr(sess, "po_return_overlay_df", None)
+    if ov is None or getattr(ov, "empty", True):
+        return None
+    return ov
+
+
 def _session_data_changed(sess) -> None:
     """Undo pause_auto_data_restore after uploads / builds so Tier-3 merge and warm cache work again."""
     resume_auto_data_restore(sess)
@@ -220,6 +228,7 @@ def _rebuild_sales_sync(sess) -> tuple[bool, str]:
             flipkart_df=sess.flipkart_df,
             snapdeal_df=sess.snapdeal_df,
             sku_mapping=sess.sku_mapping,
+            return_overlay_df=_sess_return_overlay(sess),
         )
         sess._quarterly_cache.clear()
         _session_data_changed(sess)
@@ -251,6 +260,66 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
         sess.sales_rebuild_status = "error"
         sess.sales_rebuild_message = str(e)
         _log.exception("daily-auto background sales rebuild failed")
+    finally:
+        if getattr(sess, "daily_auto_ingest_status", "") == "done":
+            sess.daily_auto_ingest_status = "idle"
+            sess.daily_auto_ingest_message = ""
+
+
+def _daily_auto_should_background(file_parts: list[tuple[str, bytes]]) -> bool:
+    """RAR / multi-file / large payloads can exceed reverse-proxy timeouts if held on the HTTP thread."""
+    if len(file_parts) >= 2:
+        return True
+    total = sum(len(b) for _, b in file_parts)
+    if total >= 6 * 1024 * 1024:
+        return True
+    for fn, raw in file_parts:
+        fl = (fn or "").lower()
+        if fl.endswith(".rar"):
+            return True
+        if len(raw) >= 6 and raw[:6] == _RAR_MAGIC:
+            return True
+    return False
+
+
+def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
+    """Parse Tier-3 upload off the request thread, then queue the usual sales rebuild."""
+    sess = store._sessions.get(session_id)
+    if sess is None:
+        return
+    sess.daily_auto_ingest_status = "running"
+    sess.daily_auto_ingest_message = "Extracting archives and saving to daily store…"
+    try:
+        payload = _process_daily_auto_sync(sess, file_parts, rebuild_sales=False)
+    except Exception as e:
+        _log.exception("daily-auto background ingest")
+        sess.daily_auto_ingest_status = "error"
+        sess.daily_auto_ingest_message = str(e)
+        sess.sales_rebuild_status = "error"
+        sess.sales_rebuild_message = f"Ingest failed: {e}"
+        return
+
+    if not payload.get("ok"):
+        sess.daily_auto_ingest_status = "error"
+        sess.daily_auto_ingest_message = str(payload.get("message") or "Ingest failed")
+        sess.sales_rebuild_status = "idle"
+        sess.sales_rebuild_message = ""
+        return
+
+    sess.daily_auto_ingest_status = "done"
+    sess.daily_auto_ingest_message = str(payload.get("message") or "Ingest finished.")
+
+    if payload.get("sales_rebuild") == "pending":
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+
+            persist_session_bundle_thread_safe(session_id, sess)
+        except Exception:
+            _log.exception("PostgreSQL persist after Tier-3 background ingest")
+        _run_daily_auto_sales_rebuild(session_id)
+    else:
+        sess.sales_rebuild_status = "idle"
+        sess.sales_rebuild_message = ""
 
 
 def _auto_save_cache(sess) -> None:
@@ -266,6 +335,7 @@ def _auto_save_cache(sess) -> None:
         "inventory_df_variant": sess.inventory_df_variant,
         "inventory_df_parent":  sess.inventory_df_parent,
         "existing_po_df":        sess.existing_po_df,
+        "po_return_overlay_df": getattr(sess, "po_return_overlay_df", pd.DataFrame()),
     }
     ok, msg = save_cache_to_drive(session_data)
     if ok:
@@ -318,6 +388,7 @@ async def upload_sku_mapping(
                 flipkart_df=sess.flipkart_df,
                 snapdeal_df=sess.snapdeal_df,
                 sku_mapping=mapping,
+                return_overlay_df=_sess_return_overlay(sess),
             )
             background_tasks.add_task(_auto_save_cache, sess)
 
@@ -527,6 +598,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                     flipkart_df=sess.flipkart_df,
                     snapdeal_df=sess.snapdeal_df,
                     sku_mapping=sess.sku_mapping,
+                    return_overlay_df=_sess_return_overlay(sess),
                 )
                 total = len(sess.meesho_df)
                 years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -589,6 +661,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
                 flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
                 sku_mapping=sess.sku_mapping,
+                return_overlay_df=_sess_return_overlay(sess),
             )
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -642,6 +715,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
                 flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
                 sku_mapping=sess.sku_mapping,
+                return_overlay_df=_sess_return_overlay(sess),
             )
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -798,6 +872,7 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
                 flipkart_df=sess.flipkart_df,
                 snapdeal_df=sess.snapdeal_df,
                 sku_mapping=sess.sku_mapping,
+                return_overlay_df=_sess_return_overlay(sess),
             )
             sess._quarterly_cache.clear()
 
@@ -1632,14 +1707,53 @@ async def upload_daily_auto(
     Also accepts a RAR archive — each file inside is extracted and processed.
     Appends to existing session data and rebuilds sales_df automatically.
 
-    Ingest returns quickly; ``build_sales_df`` runs in a background task so
-    Cloudflare/nginx do not 502 on multi-minute rebuilds.
+    Large / RAR / multi-file uploads run ingest in a FastAPI **background task** so the
+    HTTP response returns immediately (avoids nginx/Cloudflare 502 while work continues).
+    ``build_sales_df`` still runs after ingest (same as the historical async sales rebuild).
     """
     sess = _get_session(request)
     sid = getattr(request.state, "session_id", None)
     file_parts: list[tuple[str, bytes]] = []
     for fobj in files:
         file_parts.append((fobj.filename or "upload", await fobj.read()))
+
+    if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": (
+                    "A Tier-3 upload is still processing on the server. "
+                    "Wait until the status banner clears, then try again."
+                ),
+                "detected_platforms": [],
+                "warnings": [],
+                "processed_files": len(file_parts),
+                "detected_files": 0,
+                "unknown_files": len(file_parts),
+            }
+        )
+
+    if _daily_auto_should_background(file_parts) and sid:
+        sess.daily_auto_ingest_status = "running"
+        sess.daily_auto_ingest_message = (
+            "Large upload accepted — extracting RAR / merging daily data on the server. "
+            "You can leave this page; the banner will update when finished."
+        )
+        background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
+        return JSONResponse(
+            content={
+                "ok": True,
+                "ingest_async": True,
+                "message": sess.daily_auto_ingest_message,
+                "detected_platforms": [],
+                "warnings": [],
+                "processed_files": len(file_parts),
+                "detected_files": 0,
+                "unknown_files": len(file_parts),
+                "sales_rebuild": "pending",
+            }
+        )
+
     payload = await run_heavy(
         _process_daily_auto_sync, sess, file_parts, rebuild_sales=False,
     )
@@ -1648,6 +1762,7 @@ async def upload_daily_auto(
         sess.sales_rebuild_message = "Rebuilding combined sales…"
         try:
             from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+
             background_tasks.add_task(persist_session_bundle_thread_safe, sid, sess)
         except Exception:
             pass
@@ -1801,6 +1916,7 @@ async def build_sales(request: Request, background_tasks: BackgroundTasks):
             flipkart_df=sess.flipkart_df,
             snapdeal_df=sess.snapdeal_df,
             sku_mapping=sess.sku_mapping,
+            return_overlay_df=_sess_return_overlay(sess),
         )
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Build error: {e}"})

@@ -258,7 +258,6 @@ export default function POEngine() {
   const skuFileRef = useRef<HTMLInputElement>(null)
   const dailyInvFileRef = useRef<HTMLInputElement>(null)
   const ledgerCsvRef = useRef<HTMLInputElement>(null)
-  const returnFileRef = useRef<HTMLInputElement>(null)
   /** Bumps on each Calculate / quarterly load so stale async responses are ignored. */
   const poRunSeqRef = useRef(0)
   const [skuUploadBusy, setSkuUploadBusy] = useState(false)
@@ -408,8 +407,6 @@ export default function POEngine() {
   const [clearLedgerBusy, setClearLedgerBusy] = useState(false)
   const [ledgerImportBusy, setLedgerImportBusy] = useState(false)
   const [ledgerImportMsg, setLedgerImportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
-  const [returnImportBusy, setReturnImportBusy] = useState(false)
-  const [returnImportMsg, setReturnImportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [ledgerImportDate, setLedgerImportDate] = useState(() => yesterdayIST())
   const planningDate = calendarDateIST()
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
@@ -699,33 +696,6 @@ export default function POEngine() {
     const f = files?.[0]
     if (!f) return
     await importLedgerCsvFile(f, ledgerImportDate)
-  }
-
-  const importReturnFile = async (file: File) => {
-    setReturnImportBusy(true)
-    setReturnImportMsg(null)
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append('group_by_parent', params.group_by_parent ? 'true' : 'false')
-      fd.append('replace', 'true')
-      const { data } = await api.post<{ ok?: boolean; message?: string }>(
-        '/po/returns/import-file',
-        fd,
-        { timeout: 120_000, headers: { 'Content-Type': 'multipart/form-data' } },
-      )
-      if (data?.ok) {
-        setReturnImportMsg({ type: 'ok', text: data.message || 'Returns imported.' })
-        await run()
-      } else {
-        setReturnImportMsg({ type: 'err', text: data?.message || 'Import failed.' })
-      }
-    } catch (e: unknown) {
-      setReturnImportMsg({ type: 'err', text: e instanceof Error ? e.message : 'Import failed.' })
-    } finally {
-      setReturnImportBusy(false)
-      if (returnFileRef.current) returnFileRef.current.value = ''
-    }
   }
 
   /** Opens Downloads (Chrome/Edge) or file picker with raise date = yesterday (IST). */
@@ -1323,7 +1293,7 @@ export default function POEngine() {
                     🔍 Diag
                   </button>
                 )}
-                <div className="ml-auto flex gap-2">
+                <div className="ml-auto flex flex-wrap gap-2 justify-end">
                   {someSelected && (
                     <button
                       onClick={() => { setRaiseConfirmErr(null); setRaiseModal(true) }}
@@ -1369,25 +1339,6 @@ export default function POEngine() {
                   >
                     {ledgerImportBusy ? '…' : '📥 Import raises (CSV / Excel)'}
                   </button>
-                  <input
-                    ref={returnFileRef}
-                    type="file"
-                    accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    className="hidden"
-                    onChange={e => {
-                      const f = e.target.files?.[0]
-                      if (f) void importReturnFile(f)
-                    }}
-                  />
-                  <button
-                    type="button"
-                    disabled={returnImportBusy}
-                    onClick={() => returnFileRef.current?.click()}
-                    title="Upload return report (extract RAR first if needed). Reduces PO qty and Net demand."
-                    className="text-xs px-3 py-1.5 rounded border border-orange-300 text-orange-900 hover:bg-orange-50 disabled:opacity-50"
-                  >
-                    {returnImportBusy ? '…' : '↩ Import returns'}
-                  </button>
                   <button
                     onClick={() => exportPOCsv(rows, editedQty, quarterCols, quarterMap, ledgerImportDate)}
                     className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
@@ -1416,26 +1367,15 @@ export default function POEngine() {
                       ⚠ Export Review CSV
                     </button>
                   )}
+                  <p className="w-full text-[10px] text-gray-500 text-right mt-0.5">
+                    Return sheet (net sales + PO): use the <strong>Upload</strong> tab → Return sheet section.
+                  </p>
                 </div>
               </div>
 
               {ledgerImportMsg && (
                 <div className={`text-xs rounded-lg px-3 py-2 border ${ledgerImportMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-900 border-emerald-200' : 'bg-red-50 text-red-800 border-red-200'}`}>
                   {ledgerImportMsg.text}
-                </div>
-              )}
-              {returnImportMsg && (
-                <div
-                  className={`text-xs rounded-lg px-3 py-2 border ${
-                    returnImportMsg.type === 'ok'
-                      ? 'bg-orange-50 text-orange-900 border-orange-200'
-                      : 'bg-red-50 text-red-800 border-red-200'
-                  }`}
-                >
-                  {returnImportMsg.text}
-                  <span className="block text-[10px] text-gray-500 mt-1">
-                    Extract <strong>Return Data.rar</strong> on your computer, then upload the CSV/Excel inside.
-                  </span>
                 </div>
               )}
 

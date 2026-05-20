@@ -8,6 +8,8 @@ import {
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, waitForSalesRebuild,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, invalidateDataQueries,
+  uploadReturnSheet, clearReturnSheet,
+  waitForDailyAutoIngest,
   type DailyUpload, type DailySummary, type UploadResponse,
 } from '../api/client'
 import { useSession } from '../store/session'
@@ -201,7 +203,15 @@ export default function Upload() {
             kept: res.detected_files,
             dropped: res.unknown_files,
           })
-          if (res.sales_rebuild === 'pending') {
+          if (res.ingest_async) {
+            showToast('success', `${res.message} Please wait…`)
+            setBuildingMsg('Processing archives on server…')
+            await waitForDailyAutoIngest((msg) => setBuildingMsg(msg))
+            setBuildingMsg('Rebuilding combined sales…')
+            await waitForSalesRebuild((msg) => setBuildingMsg(msg))
+            setBuildingMsg('')
+            showToast('success', 'Daily files loaded and sales rebuilt.')
+          } else if (res.sales_rebuild === 'pending') {
             showToast('success', `${res.message} Please wait…`)
             setBuildingMsg('Rebuilding combined sales in background…')
             await waitForSalesRebuild(msg => setBuildingMsg(msg))
@@ -360,10 +370,18 @@ export default function Upload() {
       )}
 
       {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
         <KpiCard label="SKU Mapping"  value={coverage.sku_mapping ? '✅ Loaded' : '— Not loaded'} />
         <KpiCard label="Amazon Rows"  value={coverage.mtr_rows > 0 ? coverage.mtr_rows.toLocaleString() : '—'} />
         <KpiCard label="Sales Rows"   value={coverage.sales_rows > 0 ? coverage.sales_rows.toLocaleString() : '—'} />
+        <KpiCard
+          label="Return sheet"
+          value={
+            coverage.return_sheet && (coverage.return_sheet_skus ?? 0) > 0
+              ? `✅ ${(coverage.return_sheet_skus ?? 0).toLocaleString()} SKU(s)`
+              : '— Not loaded'
+          }
+        />
         <KpiCard label="Platforms"    value={[
           coverage.myntra && 'Myntra',
           coverage.meesho && 'Meesho',
@@ -529,6 +547,71 @@ export default function Upload() {
         </UploadCard>
       </Section>}
 
+      <Section title="Return sheet → net sales & PO">
+        <UploadCard
+          title="↩ Marketplace return report"
+          subtitle="CSV or Excel with SKU + return quantity columns. Counts merge into unified sales (dashboard net) and PO return overlay. If channel files already include full refunds, avoid double-counting."
+          loaded={!!coverage.return_sheet && (coverage.return_sheet_skus ?? 0) > 0}
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <FileUpload
+              label="Upload return sheet"
+              accept={{
+                'text/csv': ['.csv'],
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+                'application/vnd.ms-excel': ['.xls'],
+              }}
+              onUpload={async (file: File) => {
+                setL('return_sheet', true)
+                try {
+                  await withUploadGuard(async () => {
+                    const res = await uploadReturnSheet(file, { replace: true })
+                    if (res.ok) {
+                      showToast('success', res.message || 'Return sheet imported.')
+                      await refresh()
+                    } else {
+                      showToast('error', res.message || 'Import failed')
+                    }
+                  })
+                } catch (e: unknown) {
+                  showToast('error', e instanceof Error ? e.message : 'Upload failed')
+                } finally {
+                  setL('return_sheet', false)
+                }
+              }}
+              uploading={loading['return_sheet']}
+            />
+            {(coverage.return_sheet_skus ?? 0) > 0 && (
+              <button
+                type="button"
+                className="text-xs px-3 py-2 rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                disabled={loading['return_sheet_clear']}
+                onClick={async () => {
+                  setL('return_sheet_clear', true)
+                  try {
+                    await withUploadGuard(async () => {
+                      const res = await clearReturnSheet()
+                      if (res.ok) {
+                        showToast('success', res.message || 'Return sheet cleared.')
+                        await refresh()
+                      } else {
+                        showToast('error', res.message || 'Clear failed')
+                      }
+                    })
+                  } catch (e: unknown) {
+                    showToast('error', e instanceof Error ? e.message : 'Clear failed')
+                  } finally {
+                    setL('return_sheet_clear', false)
+                  }
+                }}
+              >
+                {loading['return_sheet_clear'] ? '…' : 'Clear return sheet'}
+              </button>
+            )}
+          </div>
+        </UploadCard>
+      </Section>
+
       {allowHistorical && <Section title="Tier 2 — Amazon Orders & PO Pipeline">
         <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false} alert={showImportCompleteness ? uploadAlertsBySource['b2c'] : undefined} onClearAlert={() => clearUploadAlert('b2c')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
@@ -578,7 +661,15 @@ export default function Upload() {
                       dropped: res.unknown_files,
                     })
                     if (res.ok) {
-                      if (res.sales_rebuild === 'pending') {
+                      if (res.ingest_async) {
+                        showToast('success', `${res.message} Please wait…`)
+                        setBuildingMsg('Processing archives on server…')
+                        await waitForDailyAutoIngest((msg) => setBuildingMsg(msg))
+                        setBuildingMsg('Rebuilding combined sales…')
+                        await waitForSalesRebuild((msg) => setBuildingMsg(msg))
+                        setBuildingMsg('')
+                        showToast('success', 'Archive loaded and sales rebuilt.')
+                      } else if (res.sales_rebuild === 'pending') {
                         showToast('success', `${res.message} Please wait…`)
                         setBuildingMsg('Rebuilding combined sales in background…')
                         await waitForSalesRebuild(msg => setBuildingMsg(msg))
@@ -1215,16 +1306,21 @@ function MonthlyRarUploader({ uploading, onUpload }: {
   uploading: boolean
   onUpload: (files: File[]) => Promise<void>
 }) {
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<File[]>([])
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFile(e.target.files?.[0] ?? null)
+    const list = e.target.files
+    if (!list?.length) {
+      setFiles([])
+      return
+    }
+    setFiles(Array.from(list))
   }
 
   const submit = async () => {
-    if (!file) return
-    await onUpload([file])
-    setFile(null)
+    if (!files.length) return
+    await onUpload(files)
+    setFiles([])
   }
 
   return (
@@ -1232,19 +1328,24 @@ function MonthlyRarUploader({ uploading, onUpload }: {
       <input
         type="file"
         accept="*"
+        multiple
         onChange={handleChange}
         disabled={uploading}
         className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-100 w-full"
       />
-      {file && (
-        <p className="text-xs text-gray-500 truncate">📦 {file.name}</p>
+      {files.length > 0 && (
+        <ul className="text-xs text-gray-500 max-h-24 overflow-y-auto space-y-0.5">
+          {files.map((f) => (
+            <li key={`${f.name}-${f.size}`} className="truncate">📦 {f.name}</li>
+          ))}
+        </ul>
       )}
       <button
         onClick={submit}
-        disabled={!file || uploading}
+        disabled={!files.length || uploading}
         className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
       >
-        {uploading ? 'Processing RAR…' : '⬆ Upload Monthly RAR'}
+        {uploading ? 'Processing…' : `⬆ Upload monthly RAR${files.length > 1 ? ` (${files.length} files)` : ''}`}
       </button>
     </div>
   )

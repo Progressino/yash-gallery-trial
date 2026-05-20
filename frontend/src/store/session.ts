@@ -23,6 +23,7 @@ const empty: CoverageResponse = {
   sku_status_lead: false,
   daily_inventory_history: false,
   po_raise_ledger: false,
+  return_sheet: false,
   mtr_rows: 0,
   sales_rows: 0,
   myntra_rows: 0,
@@ -33,7 +34,12 @@ const empty: CoverageResponse = {
   daily_inventory_history_rows: 0,
   daily_inventory_history_skus: 0,
   po_raise_ledger_rows: 0,
+  return_sheet_skus: 0,
   pause_auto_data_restore: false,
+  sales_rebuild: 'idle',
+  sales_rebuild_message: '',
+  daily_auto_ingest_status: 'idle',
+  daily_auto_ingest_message: '',
 }
 
 export const useSession = create<SessionState>((set) => ({
