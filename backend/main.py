@@ -92,7 +92,6 @@ _WARM_CACHE_KEYS = (
     "sku_status_lead_df",
     # Confirmed PO raises (Export & Confirm / CSV import) — must survive restarts like other PO sidecars.
     "po_raise_ledger_df",
-    "po_return_overlay_df",
 )
 
 
@@ -125,7 +124,7 @@ def publish_warm_cache_from_session(sess) -> None:
     _warm_cache_loaded_at = datetime.now(IST)
 
 
-_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df", "po_return_overlay_df")
+_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df")
 
 
 def session_needs_operational_data(sess) -> bool:
@@ -570,7 +569,6 @@ def _do_load_warm_cache() -> bool:
                         mtr_df=p1["mtr_df"],       myntra_df=p1["myntra_df"],
                         meesho_df=p1["meesho_df"], flipkart_df=p1["flipkart_df"],
                         sku_mapping={},            snapdeal_df=p1["snapdeal_df"],
-                        return_overlay_df=None,
                     )
                 # Only publish Phase-1 data to _warm_cache when Phase 0 disk cache
                 # is absent — Phase 0 data is full historical and must not be
@@ -593,37 +591,8 @@ def _do_load_warm_cache() -> bool:
 
         # ── Phase 2: GitHub historical cache (network, slow) ──────────────────
         # Provides data for dates not yet in the SQLite daily store.
-        #
-        # ── Free Phase-0 data before Phase-2 to prevent OOM ──────────────────
-        # When disk_ok=True, _warm_cache holds the full Phase-0 historical data
-        # (potentially 2-4 GB with large MTR history). Phase-2 then downloads
-        # another 2-4 GB from GitHub on top. Running both simultaneously can
-        # exceed the 7.5 GB container limit.
-        #
-        # Fix: before Phase-2 downloads, swap _warm_cache from Phase-0 (heavy)
-        # to Phase-1 SQLite data (lightweight, ~200 MB). If Phase-1 had no data,
-        # clear _warm_cache entirely. Either way Phase-0 data is dereferenced
-        # and freed before the GitHub download allocates memory.
+        # ── Free Phase-0/Phase-1 intermediates before Phase-2 allocates GitHub data ──
         import gc as _gc
-        if disk_ok:
-            if p1_raw:
-                # Phase-1 data available: temporarily publish it so sessions get
-                # recent SQLite data while Phase-2 loads (better than empty).
-                _warm_cache = p1
-                _warm_cache_loaded_at = datetime.now(IST)
-                _warm_cache_ready.set()
-                log.info(
-                    "Phase-2 pre-load: swapped Phase-0 → Phase-1 SQLite data "
-                    "to free memory before GitHub download."
-                )
-            else:
-                # No Phase-1 data: clear warm cache to free Phase-0 memory.
-                # Brief empty window (~60-90 s) while Phase-2 loads.
-                _warm_cache = {}
-                log.info(
-                    "Phase-2 pre-load: cleared Phase-0 data (no Phase-1 available) "
-                    "to free memory before GitHub download."
-                )
         try:
             del p1_raw, p1
         except Exception:
@@ -635,9 +604,8 @@ def _do_load_warm_cache() -> bool:
         if not ok or not loaded:
             log.warning("Warm-cache Phase 2 (GitHub) failed: %s", msg)
             if not phase1_ok:
-                # Nothing at all — no SQLite, no GitHub.
-                # disk_data was freed before Phase-2; check disk_ok flag instead.
-                if disk_ok:
+                # Nothing at all — no disk cache, no SQLite, no GitHub
+                if disk_ok and disk_data:
                     log.info("Using Phase 0 disk cache only (GitHub unavailable, SQLite empty).")
                     return True
                 return False
@@ -696,6 +664,30 @@ def _do_load_warm_cache() -> bool:
         except Exception as e:
             log.warning("Phase 2 daily-store merge warning: %s", e)
 
+        # ── Trim platform DFs in loaded to 18-month window before build_sales_df ──
+        # Large uploads (e.g. 107 MB MTR) can push build_sales_df memory to 6+ GB.
+        # Trim each platform DF to the most recent 18 months; PO calc uses ≤15 months.
+        try:
+            _trim_cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=18)
+            for _trim_key, _date_col in [
+                ("mtr_df", "Date"), ("myntra_df", "Date"),
+                ("meesho_df", "Date"), ("flipkart_df", "Date"),
+                ("snapdeal_df", "Date"),
+            ]:
+                _df = loaded.get(_trim_key)
+                if _df is not None and not _df.empty and _date_col in _df.columns:
+                    _dates = pd.to_datetime(_df[_date_col], errors="coerce")
+                    _mask = _dates >= _trim_cutoff
+                    if _mask.sum() < len(_df):
+                        loaded[_trim_key] = _df[_mask].reset_index(drop=True)
+                        log.info(
+                            "Phase 2 trim: %s %d→%d rows (18-month window)",
+                            _trim_key, len(_df), len(loaded[_trim_key]),
+                        )
+            _gc.collect()
+        except Exception as _trim_err:
+            log.warning("Phase 2 platform trim warning (non-fatal): %s", _trim_err)
+
         # ── Free daily + old warm cache before build_sales_df (memory peak) ────
         # build_sales_df is the heaviest allocation in Phase 2. Free everything we
         # no longer need so it doesn't run alongside _warm_cache + loaded + daily.
@@ -722,7 +714,6 @@ def _do_load_warm_cache() -> bool:
                 flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
                 sku_mapping=loaded.get("sku_mapping") or {},
                 snapdeal_df=loaded.get("snapdeal_df"),
-                return_overlay_df=loaded.get("po_return_overlay_df"),
             )
             log.info("Phase 2 sales_df: %d rows", len(loaded["sales_df"]))
         except Exception as e:
@@ -1020,9 +1011,14 @@ async def auth_middleware(request: Request, call_next):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"detail": "Admin access required"})
 
+    _po_upload_policy = (
+        path.startswith("/api/po/returns/")
+        or path.startswith("/api/po/daily-inventory-history")
+        or path.startswith("/api/po/sku-status-lead")
+    )
     if path.startswith("/api/upload/") or path.startswith("/api/cache/") or (
         path.startswith("/api/data/daily-uploads/") and request.method.upper() == "DELETE"
-    ):
+    ) or (_po_upload_policy and request.method.upper() in ("POST", "DELETE", "PUT")):
         from .services.upload_policy import check_upload_api_access
 
         blocked = check_upload_api_access(role, request.method, path)
