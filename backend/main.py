@@ -301,8 +301,11 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
         log.warning("Warm-cache disk save failed: %s", _e)
 
 
-def _load_warm_cache_from_disk() -> "tuple[bool, dict]":
-    """Load warm_cache from /data/warm_cache/ if the manifest is < WARM_CACHE_MAX_AGE_HOURS old.
+def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
+    """Load warm_cache from /data/warm_cache/ if the manifest is < WARM_CACHE_MAX_AGE_HOURS old
+    (unless ``ignore_age`` is True — used by ``/cache/reload-fresh`` to recover bulk history
+    when the GitHub Release was overwritten by a small session snapshot).
+
     Returns (ok, loaded_dict). ok=False means disk cache is absent, stale, or corrupt."""
     import os, json
     try:
@@ -319,12 +322,19 @@ def _load_warm_cache_from_disk() -> "tuple[bool, dict]":
         if saved_at.tzinfo is None:
             saved_at = saved_at.replace(tzinfo=IST)
         age_hours = (datetime.now(IST) - saved_at).total_seconds() / 3600
-        if age_hours > _DISK_CACHE_MAX_AGE:
+        if not ignore_age and age_hours > _DISK_CACHE_MAX_AGE:
             log.info(
                 "Disk cache is %.1fh old (limit %dh) — skipping, will reload from GitHub.",
                 age_hours, _DISK_CACHE_MAX_AGE,
             )
             return False, {}
+        if ignore_age and age_hours > _DISK_CACHE_MAX_AGE:
+            log.warning(
+                "reload-fresh recovery: using disk warm-cache despite age %.1fh (limit %dh) — "
+                "merging with GitHub to restore rows missing from Release assets.",
+                age_hours,
+                _DISK_CACHE_MAX_AGE,
+            )
 
         import pandas as pd
         keys = manifest.get("keys", [])

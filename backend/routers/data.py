@@ -64,9 +64,9 @@ def _sess(request: Request):
 
 def _restore_daily_if_needed(sess: AppSession) -> None:
     """
-    On first coverage check per session, load any persisted daily SQLite data
-    into the session DFs (fills in data lost on server restart).
-    Skips platforms that already have session data.
+    On first coverage check per session, merge any persisted daily SQLite data
+    into the session platform DFs (fills gaps after restart and folds Tier-3
+    rows into warm-cache copies without replacing bulk history).
     Also auto-restores SKU mapping from GitHub cache if missing.
     """
     try:
@@ -106,7 +106,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             return
 
         import pandas as pd
-        from ..services.daily_store import load_platform_data
+        from ..services.daily_store import load_platform_data, merge_platform_data
         from ..services.sales import build_sales_df
 
         # Auto-restore SKU mapping from GitHub cache if missing (lightweight — JSON only)
@@ -142,19 +142,19 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
             ("snapdeal", "snapdeal_df"),
         ]
         for platform, attr in platform_attrs:
-            if getattr(sess, attr).empty:
-                # Fast path for session auto-restore: skip deep dedup here to avoid
-                # long blocking sync on first dashboard load. Upload-time merges and
-                # sales build dedup still normalize rows for analytics.
-                df = load_platform_data(
-                    platform,
-                    months=_auto_months,
-                    dedup=False,
-                    max_files=_auto_max_files,
-                )
-                if not df.empty:
-                    setattr(sess, attr, df)
-                    changed = True
+            # Merge Tier-3 SQLite into whatever the session already holds (warm cache,
+            # prior uploads). Replacing only when empty allowed a small SQLite slice to
+            # leave stale partial session data from an earlier bug path.
+            df = load_platform_data(
+                platform,
+                months=_auto_months,
+                dedup=False,
+                max_files=_auto_max_files,
+            )
+            if not df.empty:
+                cur = getattr(sess, attr)
+                setattr(sess, attr, merge_platform_data(cur, df, platform))
+                changed = True
 
         # Safety net: if bounded restore found nothing, do one full-history pass.
         # This prevents "all data missing" after restart when the useful history sits
@@ -174,7 +174,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
                         max_files=None,
                     )
                     if not df.empty:
-                        setattr(sess, attr, df)
+                        cur = getattr(sess, attr)
+                        setattr(sess, attr, merge_platform_data(cur, df, platform))
                         changed = True
 
         if changed:

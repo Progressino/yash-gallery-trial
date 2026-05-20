@@ -10,6 +10,22 @@ def _disable_dashboard_upload_day_gate_by_default(monkeypatch):
     monkeypatch.setenv("DASHBOARD_UPLOAD_DAY_GATE", "0")
 
 
+@pytest.fixture(autouse=True)
+def isolated_daily_sales_sqlite(tmp_path, monkeypatch):
+    """Tier-3 store path is resolved at import time; point it at an empty per-test DB.
+
+    Without this, ``_restore_daily_if_needed`` merges the developer's real
+    ``daily_sales.db`` into TestClient sessions (e.g. platform-summary tests).
+    """
+    from pathlib import Path
+
+    from backend.services import daily_store
+
+    db = tmp_path / "daily_sales_pytest.db"
+    monkeypatch.setattr(daily_store, "_DB_PATH", Path(db))
+    yield
+
+
 @pytest.fixture
 def auth_token(monkeypatch):
     def _decode(token: str | None):

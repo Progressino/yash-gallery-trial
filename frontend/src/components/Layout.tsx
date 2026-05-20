@@ -276,7 +276,7 @@ export default function Layout() {
               type="button"
               onClick={handleReloadFresh}
               disabled={cacheLoading !== null}
-              title="Full server reload from GitHub + Tier-3 merge (operators)."
+              title="GitHub Release + merge with on-disk warm snapshot (if present) + Tier-3 SQLite. Recovers bulk rows missing from GitHub after a bad save."
               className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
             >
               {cacheLoading === 'reload' ? 'Rebuilding…' : '↻ Fresh reload (server)'}

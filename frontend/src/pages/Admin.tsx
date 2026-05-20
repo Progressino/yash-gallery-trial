@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import axios from 'axios'
 import api from '../api/client'
 
 type Tab = 'dashboard' | 'users' | 'roles' | 'activity'
 
 interface AdminStats { total_users: number; total_roles: number; recent_activity: number; by_role: { role_name: string; cnt: number }[] }
-interface ERPUser { id: number; username: string; email: string; full_name: string; role_id: number; role_name: string; department: string; karigar_id?: string; active: number; created_at: string }
+interface ERPUser { id: number; username: string; email: string | null; full_name: string; role_id: number; role_name: string; department: string; karigar_id?: string; active: number; created_at: string }
 interface Role { id: number; role_name: string; description: string; created_at: string }
 interface ActivityLog { id: number; username: string; action: string; document_type: string; document_no: string; details: string; created_at: string }
 
@@ -19,6 +20,16 @@ const actionColor = (a: string) => {
   return 'bg-gray-100 text-gray-600'
 }
 
+function formatUserCreateError(err: unknown): string {
+  if (!axios.isAxiosError(err)) return 'Request failed'
+  const d = err.response?.data as { detail?: unknown } | undefined
+  const detail = d?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail))
+    return detail.map((x: { msg?: string }) => x?.msg).filter(Boolean).join('; ') || 'Request failed'
+  return 'Request failed'
+}
+
 export default function Admin() {
   const qc = useQueryClient()
   const [tab, setTab] = useState<Tab>('dashboard')
@@ -29,9 +40,17 @@ export default function Admin() {
 
   const [userForm, setUserForm] = useState({ username: '', email: '', password: 'changeme123', full_name: '', role_id: 1, department: 'Production', karigar_id: '' })
   const [roleForm, setRoleForm] = useState({ role_name: '', description: '' })
+  const [includeInactiveUsers, setIncludeInactiveUsers] = useState(false)
 
   const { data: stats } = useQuery<AdminStats>({ queryKey: ['admin-stats'], queryFn: () => api.get('/erp-admin/stats').then(r => r.data) })
-  const { data: users = [] } = useQuery<ERPUser[]>({ queryKey: ['erp-users'], queryFn: () => api.get('/erp-admin/users').then(r => r.data), enabled: tab === 'users' || tab === 'dashboard' })
+  const { data: users = [] } = useQuery<ERPUser[]>({
+    queryKey: ['erp-users', includeInactiveUsers],
+    queryFn: () =>
+      api
+        .get('/erp-admin/users', { params: { include_inactive: includeInactiveUsers } })
+        .then(r => r.data),
+    enabled: tab === 'users' || tab === 'dashboard',
+  })
   const { data: roles = [] } = useQuery<Role[]>({ queryKey: ['erp-roles'], queryFn: () => api.get('/erp-admin/roles').then(r => r.data) })
   const { data: activity = [] } = useQuery<ActivityLog[]>({ queryKey: ['activity-log'], queryFn: () => api.get('/erp-admin/activity?limit=100').then(r => r.data), enabled: tab === 'activity' })
 
@@ -138,8 +157,19 @@ export default function Admin() {
       {/* Users */}
       {tab === 'users' && (
         <div className="space-y-4">
-          <div className="flex justify-between">
-            <p className="text-sm text-gray-500">{users.length} users</p>
+          <div className="flex justify-between items-center flex-wrap gap-2">
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-gray-500">{users.length} users</p>
+              <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeInactiveUsers}
+                  onChange={e => setIncludeInactiveUsers(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Show inactive
+              </label>
+            </div>
             <button onClick={openNewUserForm} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ Add User</button>
           </div>
 
@@ -183,7 +213,9 @@ export default function Admin() {
                 </button>
                 <button onClick={() => setShowUserForm(false)} className="px-4 py-2 border rounded-lg text-sm text-gray-600">Cancel</button>
               </div>
-              {createUserMut.isError && <p className="text-xs text-red-500">Error: username or email already exists</p>}
+              {createUserMut.isError && (
+                <p className="text-xs text-red-500">Error: {formatUserCreateError(createUserMut.error)}</p>
+              )}
             </div>
           )}
 
@@ -267,7 +299,15 @@ export default function Admin() {
                         <button onClick={() => { setEditUser(u); setEditData({}) }} className="text-xs text-blue-500 hover:text-blue-700">Edit</button>
                         {u.active ? (
                           <button onClick={() => deactivateUserMut.mutate(u.id)} className="text-xs text-red-400 hover:text-red-600">Deactivate</button>
-                        ) : null}
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => updateUserMut.mutate({ id: u.id, data: { active: 1 } })}
+                            className="text-xs text-green-600 hover:text-green-800"
+                          >
+                            Reactivate
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

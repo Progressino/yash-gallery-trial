@@ -55,3 +55,29 @@ def test_karigar_login_and_api_scope():
     assert karigar_may_access_api("/api/stitching/sheets/style_master", "GET")
     assert not karigar_may_access_api("/api/stitching/dashboard", "GET")
     assert not karigar_may_access_api("/api/purchase/orders", "GET")
+
+
+def test_multiple_users_with_blank_email():
+    """Empty email must not collide on UNIQUE(email) — only one '' was allowed before NULL normalization."""
+    roles = list_roles()
+    admin_id = next(r["id"] for r in roles if r["role_name"] == "Admin")
+    create_user(
+        {
+            "username": "u_blank_a",
+            "email": "",
+            "password": "pw",
+            "role_id": admin_id,
+            "department": "Admin",
+        }
+    )
+    create_user(
+        {
+            "username": "u_blank_b",
+            "email": "",
+            "password": "pw",
+            "role_id": admin_id,
+            "department": "Admin",
+        }
+    )
+    names = {u["username"] for u in users_db.list_users()}
+    assert "u_blank_a" in names and "u_blank_b" in names

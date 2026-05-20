@@ -59,6 +59,75 @@ class DsrBackfillResponse(BaseModel):
     skipped_files: int = 0
 
 
+def _disk_warm_load(ignore_age: bool = False):
+    """Indirection so tests can monkeypatch without importing ``backend.main``."""
+    import backend.main as _main
+
+    return _main._load_warm_cache_from_disk(ignore_age=ignore_age)
+
+
+def _merge_disk_warm_cache_into_loaded(loaded: dict) -> tuple[dict, str]:
+    """
+    After ``load_cache_from_drive``, merge the on-disk Phase-0 warm snapshot
+    (``WARM_CACHE_DIR``, default ``/data/warm_cache``) into ``loaded``.
+
+    Uses ``merge_platform_data(disk, github)`` per platform so duplicate keys keep
+    the GitHub copy while rows that only exist on disk are recovered. This addresses
+    cases where **Save Cache** wrote a truncated session to GitHub but the server
+    volume still holds a fuller parquet from the last successful Phase-2 save.
+
+    Disk age limits are ignored here so recovery still works when the manifest is
+    older than ``WARM_CACHE_MAX_AGE_HOURS``.
+    """
+    try:
+        disk_ok, disk_data = _disk_warm_load(ignore_age=True)
+    except Exception as e:
+        _log.warning("disk warm-cache recovery load failed: %s", e)
+        return loaded, ""
+
+    if not disk_ok or not disk_data:
+        return loaded, ""
+
+    _sanitize_snapdeal_in_loaded(disk_data)
+
+    notes: list[str] = []
+    platform_pairs = [
+        ("amazon", "mtr_df"),
+        ("myntra", "myntra_df"),
+        ("meesho", "meesho_df"),
+        ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
+    ]
+
+    for plat, key in platform_pairs:
+        dsk = disk_data.get(key)
+        if not isinstance(dsk, pd.DataFrame) or dsk.empty:
+            continue
+        gh = loaded.get(key)
+        if not isinstance(gh, pd.DataFrame):
+            gh = pd.DataFrame()
+        before = len(gh) if not gh.empty else 0
+        merged = _merge_platform_data(dsk, gh, plat)
+        after = len(merged)
+        loaded[key] = merged
+        if after > before:
+            notes.append(f"{key} +{after - before:,}")
+
+    dm = disk_data.get("sku_mapping")
+    if isinstance(dm, dict) and dm:
+        lm = loaded.get("sku_mapping")
+        if not isinstance(lm, dict) or not lm:
+            loaded["sku_mapping"] = dm.copy()
+            notes.append("sku_mapping from disk")
+        elif len(dm) > len(lm):
+            loaded["sku_mapping"] = {**dm, **lm}
+            notes.append(f"sku_mapping +{len(dm) - len(lm):,} keys")
+
+    if not notes:
+        return loaded, ""
+    return loaded, " Server disk snapshot merged (" + "; ".join(notes) + ")."
+
+
 def _sanitize_snapdeal_in_loaded(loaded: dict) -> None:
     if "snapdeal_df" not in loaded or not isinstance(loaded["snapdeal_df"], pd.DataFrame):
         return
@@ -220,13 +289,14 @@ def cache_load(request: Request, background_tasks: BackgroundTasks):
     ok, msg, loaded = load_cache_from_drive()
     if ok:
         _sanitize_snapdeal_in_loaded(loaded)
+        loaded, disk_note = _merge_disk_warm_cache_into_loaded(loaded)
         for key, val in loaded.items():
             if hasattr(sess, key):
                 setattr(sess, key, val)
         sess._quarterly_cache.clear()
         daily_note = _merge_daily_store_into_session(sess)
         n_sales = _rebuild_sales_in_session(sess)
-        msg = f"{msg}{daily_note} Sales rebuilt: {n_sales:,} rows."
+        msg = f"{msg}{disk_note}{daily_note} Sales rebuilt: {n_sales:,} rows."
         try:
             import backend.main as _main
             _main.publish_warm_cache_from_session(sess)
@@ -359,12 +429,13 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
     ok, msg, loaded = load_cache_from_drive()
     if ok:
         _sanitize_snapdeal_in_loaded(loaded)
+        loaded, disk_note = _merge_disk_warm_cache_into_loaded(loaded)
         for key, val in loaded.items():
             if hasattr(sess, key):
                 setattr(sess, key, val)
         daily_note = _merge_daily_store_into_session(sess)
         n_sales = _rebuild_sales_in_session(sess)
-        msg = f"Full reload from GitHub.{daily_note} {msg}"
+        msg = f"Full reload from GitHub.{disk_note}{daily_note} {msg}"
     else:
         if not _main._do_load_warm_cache():
             return CacheReloadResponse(

@@ -65,6 +65,15 @@ def init_db():
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         except Exception:
             pass
+    # Empty string counted as a value under UNIQUE(email); only one '' was allowed.
+    # Normalize to NULL so many users can omit email.
+    try:
+        conn.execute(
+            "UPDATE erp_users SET email = NULL "
+            "WHERE email IS NOT NULL AND trim(email) = ''"
+        )
+    except Exception:
+        pass
     conn.commit(); conn.close()
 
 # ── Roles ──────────────────────────────────────────────────────────────────────
@@ -93,18 +102,33 @@ def list_users(active_only=True):
         result.append(d)
     conn.close(); return result
 
+def _normalize_email(value) -> str | None:
+    """Blank / whitespace-only email → NULL in DB (avoids UNIQUE collisions on '')."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
 def create_user(data: dict):
     conn = _connect()
+    username = (data.get("username") or "").strip()
+    if not username:
+        conn.close()
+        raise ValueError("username is required")
     pw = data.get('password', 'changeme123')
     hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+    email = _normalize_email(data.get("email"))
     conn.execute("""INSERT INTO erp_users(username,email,password_hash,full_name,role_id,department,karigar_id,active)
         VALUES(?,?,?,?,?,?,?,?)""",
-        (data['username'], data.get('email',''), hashed,
+        (username, email, hashed,
          data.get('full_name',''), data.get('role_id'), data.get('department',''),
          data.get('karigar_id', '') or '', 1))
     conn.commit(); conn.close()
 
 def update_user(uid: int, data: dict):
+    if "email" in data:
+        data = {**data, "email": _normalize_email(data.get("email"))}
     allowed = ['email','full_name','role_id','department','active','karigar_id']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]

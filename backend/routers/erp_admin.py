@@ -1,4 +1,6 @@
 """Admin Module router — Users, Roles, Activity Log"""
+import sqlite3
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -55,16 +57,32 @@ def post_role(body: RoleIn):
 
 # ── Users ─────────────────────────────────────────────────────────────────────
 @router.get("/users")
-def get_users(active_only: bool = True):
-    return list_users(active_only)
+def get_users(include_inactive: bool = False):
+    """By default only active users. Set ``include_inactive=true`` to audit deactivated accounts."""
+    return list_users(active_only=not include_inactive)
+
 
 @router.post("/users")
 def post_user(body: UserIn):
     try:
         create_user(body.model_dump())
         return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except sqlite3.IntegrityError as e:
+        raw = str(e).lower()
+        if "username" in raw:
+            detail = (
+                "That username is already in the database (including deactivated accounts). "
+                "Enable ‘Show inactive users’, reactivate that row, or pick another username."
+            )
+        elif "email" in raw:
+            detail = "That email is already registered. Use a different address or leave email blank."
+        else:
+            detail = f"Could not create user: {e}"
+        raise HTTPException(status_code=409, detail=detail) from e
     except Exception as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 @router.patch("/users/{uid}")
 def patch_user(uid: int, body: UserUpdate):
