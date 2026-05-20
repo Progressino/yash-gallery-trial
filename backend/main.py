@@ -664,6 +664,23 @@ def _do_load_warm_cache() -> bool:
         except Exception as e:
             log.warning("Phase 2 daily-store merge warning: %s", e)
 
+        # ── Free daily + old warm cache before build_sales_df (memory peak) ────
+        # build_sales_df is the heaviest allocation in Phase 2. Free everything we
+        # no longer need so it doesn't run alongside _warm_cache + loaded + daily.
+        try:
+            del daily
+        except Exception:
+            pass
+        # Save fallback sales_df in case build_sales_df fails below.
+        _old_sales_df: "pd.DataFrame" = (
+            _warm_cache.get("sales_df", pd.DataFrame())
+            if _warm_cache else pd.DataFrame()
+        )
+        # Swap out the old warm cache before the peak allocation.
+        # Active sessions already hold their own data; the brief empty window is safe.
+        _warm_cache = {}
+        _gc.collect()
+
         # Rebuild unified sales_df from the fully-merged platform data
         try:
             loaded["sales_df"] = build_sales_df(
@@ -678,12 +695,8 @@ def _do_load_warm_cache() -> bool:
         except Exception as e:
             log.warning("Phase 2 sales_df rebuild failed: %s", e)
             if phase1_ok:
-                loaded.setdefault("sales_df", _warm_cache.get("sales_df", pd.DataFrame()))
-
-        try:
-            del daily
-        except Exception:
-            pass
+                loaded.setdefault("sales_df", _old_sales_df)
+        del _old_sales_df
         _gc.collect()
         _warm_cache = loaded
         _warm_cache_loaded_at = datetime.now(IST)
