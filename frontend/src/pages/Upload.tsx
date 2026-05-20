@@ -12,6 +12,7 @@ import {
 } from '../api/client'
 import { useSession } from '../store/session'
 import { useUploadActivity } from '../store/uploadActivity'
+import { useAuth, mayUploadHistorical, mayResetSharedData } from '../store/auth'
 
 type Toast = { type: 'success' | 'error'; msg: string }
 type UploadAlert = {
@@ -37,6 +38,9 @@ export default function Upload() {
   const setCoverage = useSession((s) => s.setCoverage)
   const coverage    = useSession()
   const qc          = useQueryClient()
+  const authUser    = useAuth((s) => s.user)
+  const allowHistorical = mayUploadHistorical(authUser)
+  const allowReset = mayResetSharedData(authUser)
 
   const [toast, setToast]           = useState<Toast | null>(null)
   const [loading, setLoading]       = useState<Record<string, boolean>>({})
@@ -279,16 +283,24 @@ export default function Upload() {
         <p className="text-gray-500 text-sm mt-1">Manage your data files and build the sales dataset.</p>
         <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
           <p className="font-semibold text-[#002B5B] text-xs uppercase tracking-wide">Typical workflow</p>
-          <ul className="mt-2 space-y-1.5 text-xs text-gray-600 list-disc list-inside">
-            <li>
-              <strong>Tier 1</strong> — Load SKU mapping, then <em>historical bulk</em> data (e.g. ~2 years: Amazon MTR ZIP/RAR,
-              Myntra/Meesho/Flipkart/Snapdeal archives, inventory). Use this when onboarding or replacing base history.
-            </li>
-            <li>
-              <strong>Tier 3</strong> — <em>Daily</em> file drops (auto-detect). Append recent reports without re-uploading full history;
-              sales are rebuilt after each batch.
-            </li>
-          </ul>
+          {allowHistorical ? (
+            <ul className="mt-2 space-y-1.5 text-xs text-gray-600 list-disc list-inside">
+              <li>
+                <strong>Tier 1</strong> — Load SKU mapping, then <em>historical bulk</em> data (e.g. ~2 years: Amazon MTR ZIP/RAR,
+                Myntra/Meesho/Flipkart/Snapdeal archives, inventory). Use this when onboarding or replacing base history.
+              </li>
+              <li>
+                <strong>Tier 3</strong> — <em>Daily</em> file drops (auto-detect). Append recent reports without re-uploading full history;
+                sales are rebuilt after each batch.
+              </li>
+            </ul>
+          ) : (
+            <p className="mt-2 text-xs text-gray-600">
+              <strong>Historical data is fixed</strong> on the server — your account can add{' '}
+              <strong>daily sales files</strong> below and <strong>daily inventory</strong> on PO Engine.
+              Use <strong>Load Cache</strong> in the sidebar if rows look empty after login.
+            </p>
+          )}
           <label className="mt-3 inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
             <input
               type="checkbox"
@@ -325,16 +337,25 @@ export default function Upload() {
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
           {coverage.pause_auto_data_restore ? (
             <p>
-              <strong>No data in this browser session.</strong> After &quot;Delete all data&quot;, use{' '}
-              <strong>Load Cache</strong> in the left sidebar (or upload files again). Server data is shared — other
-              computers may still show loaded rows until this session is refreshed.
+              <strong>No data in this browser session.</strong> Click <strong>Load Cache</strong> in the left sidebar
+              (shared server history is not deleted).{allowHistorical ? ' Admins may re-upload Tier 1 if needed.' : ''}
             </p>
           ) : (
             <p>
-              <strong>Data is loading…</strong> The server copies shared cache into your session (may take up to a minute
+              <strong>Data is loading…</strong> The server copies shared history into your session (may take up to a minute
               after login). If rows stay empty, click <strong>Load Cache</strong> in the sidebar or refresh the page.
             </p>
           )}
+        </div>
+      )}
+
+      {!allowHistorical && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
+          <p className="font-semibold">Daily uploads only</p>
+          <p className="mt-1 text-xs">
+            Bulk history, platform clear, and delete-all are disabled for your role so existing data stays fixed for everyone.
+            Contact an Admin to replace base history.
+          </p>
         </div>
       )}
 
@@ -351,8 +372,8 @@ export default function Upload() {
         ].filter(Boolean).join(', ') || '—'} />
       </div>
 
-      {/* Tier 1 — Required */}
-      <Section title="Tier 1 — Required">
+      {/* Tier 1 — Required (Admin / Manager only when historical lock is on) */}
+      {allowHistorical && <Section title="Tier 1 — Required">
         <UploadCard
           title="1️⃣ SKU Mapping"
           subtitle="Master Yash map (~all panels) ships with the app. Upload your .xlsx to replace or extend it."
@@ -414,10 +435,9 @@ export default function Upload() {
             uploading={loading['mtr']}
           />
         </UploadCard>
-      </Section>
+      </Section>}
 
-      {/* Tier 1 — Platforms */}
-      <Section title="Tier 1 — Platform history (bulk / multi-year)">
+      {allowHistorical && <Section title="Tier 1 — Platform history (bulk / multi-year)">
         <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={handleClear('myntra')} clearing={loading['clear_myntra']} alert={showImportCompleteness ? uploadAlertsBySource['myntra'] : undefined} onClearAlert={() => clearUploadAlert('myntra')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
@@ -507,10 +527,9 @@ export default function Upload() {
             </div>
           )}
         </UploadCard>
-      </Section>
+      </Section>}
 
-      {/* Tier 2 — Amazon Individual CSVs + Existing PO */}
-      <Section title="Tier 2 — Amazon Orders & PO Pipeline">
+      {allowHistorical && <Section title="Tier 2 — Amazon Orders & PO Pipeline">
         <UploadCard title="📄 Amazon MTR CSV" subtitle="Single-month MTR or FBA shipment CSV" loaded={false} alert={showImportCompleteness ? uploadAlertsBySource['b2c'] : undefined} onClearAlert={() => clearUploadAlert('b2c')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
@@ -578,7 +597,29 @@ export default function Upload() {
             />
           </div>
         </UploadCard>
-      </Section>
+      </Section>}
+
+      {!allowHistorical && (
+        <Section title="Monthly pipeline (allowed)">
+          <UploadCard
+            title="📦 Existing PO Sheet"
+            subtitle="Update open/pending POs (XLSX or CSV) — does not replace sales history"
+            loaded={coverage.existing_po}
+            alert={showImportCompleteness ? uploadAlertsBySource['existingpo'] : undefined}
+            onClearAlert={() => clearUploadAlert('existingpo')}
+          >
+            <FileUpload
+              label="Upload PO Sheet"
+              accept={{
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+                'text/csv': ['.csv'],
+              }}
+              onUpload={handle('existingpo', (file: File) => uploadExistingPO(file))}
+              uploading={loading['existingpo']}
+            />
+          </UploadCard>
+        </Section>
+      )}
 
       {/* Tier 3 — Daily Orders */}
       <Section title="Tier 3 — Daily orders (incremental; auto-detect)">
@@ -623,7 +664,7 @@ export default function Upload() {
           )}
         </div>
         <div className="col-span-2">
-          <DailyHistory />
+          <DailyHistory allowDelete={allowReset} />
         </div>
       </Section>
 
@@ -650,10 +691,11 @@ export default function Upload() {
 
       {/* Reset & data verification */}
       <div>
-        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Start fresh & verify</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Verify data</h3>
+        <div className={`grid grid-cols-1 gap-4 ${allowReset ? 'md:grid-cols-2' : ''}`}>
+          {allowReset && (
           <div className="rounded-xl border border-red-200 bg-red-50/60 p-5 space-y-3">
-            <h4 className="font-semibold text-red-900 text-sm">Clear all app data</h4>
+            <h4 className="font-semibold text-red-900 text-sm">Clear all app data (Admin)</h4>
             <p className="text-xs text-red-900/80 leading-relaxed">
               Wipes <strong>everything</strong> in this browser session: SKU map, all platform files, inventory,
               existing PO sheet imports, combined sales, and PO quarterly cache. Use this before a clean Tier‑1 re-upload.
@@ -684,6 +726,7 @@ export default function Upload() {
               {loading['reset_all'] ? 'Working…' : '🗑️ Clear all app data…'}
             </button>
           </div>
+          )}
           <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-5 space-y-3">
             <h4 className="font-semibold text-emerald-900 text-sm">Check for duplicates / sanity</h4>
             <p className="text-xs text-emerald-900/80 leading-relaxed">
@@ -989,7 +1032,7 @@ const PLATFORM_LABELS: Record<string, { label: string; color: string }> = {
   flipkart: { label: 'Flipkart', color: 'bg-yellow-100 text-yellow-700' },
 }
 
-function DailyHistory() {
+function DailyHistory({ allowDelete = false }: { allowDelete?: boolean }) {
   const qc = useQueryClient()
 
   const { data: summary, isLoading: summaryLoading } = useQuery<DailySummary>({
@@ -1073,14 +1116,16 @@ function DailyHistory() {
                   </span>
                   <span className="text-xs text-gray-600 truncate flex-1 min-w-0">{u.filename}</span>
                   <span className="text-xs text-gray-400 shrink-0">{u.rows.toLocaleString()} rows</span>
-                  <button
-                    onClick={() => deleteMut.mutate(u.id)}
-                    disabled={deleteMut.isPending}
-                    title="Delete this upload"
-                    className="text-gray-300 hover:text-red-500 transition-colors shrink-0 ml-1 disabled:opacity-40"
-                  >
-                    🗑
-                  </button>
+                  {allowDelete ? (
+                    <button
+                      onClick={() => deleteMut.mutate(u.id)}
+                      disabled={deleteMut.isPending}
+                      title="Delete this upload"
+                      className="text-gray-300 hover:text-red-500 transition-colors shrink-0 ml-1 disabled:opacity-40"
+                    >
+                      🗑
+                    </button>
+                  ) : null}
                 </div>
               )
             })}

@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
 import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage, invalidateDataQueries } from '../api/client'
 import api from '../api/client'
-import { useAuth } from '../store/auth'
+import { useAuth, mayResetSharedData, mayUploadHistorical } from '../store/auth'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
 
 const NAV_GROUPS = [
@@ -100,6 +100,9 @@ export default function Layout() {
   }
 
   const clearAuth = useAuth(s => s.clear)
+  const authUser = useAuth(s => s.user)
+  const allowReset = mayResetSharedData(authUser)
+  const allowHistorical = mayUploadHistorical(authUser)
 
   const handleLogout = async () => {
     try {
@@ -259,31 +262,42 @@ export default function Layout() {
           >
             {cacheLoading === 'load' ? 'Loading…' : '📥 Load Cache'}
           </button>
-          <button
-            onClick={handleSave}
-            disabled={cacheLoading !== null}
-            className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-[#002B5B] hover:bg-gray-50 disabled:opacity-50"
-          >
-            {cacheLoading === 'save' ? 'Saving…' : '💾 Save Cache'}
-          </button>
-          <button
-            type="button"
-            onClick={handleReloadFresh}
-            disabled={cacheLoading !== null}
-            title="Full server reload from GitHub + Tier-3 merge (operators)."
-            className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
-          >
-            {cacheLoading === 'reload' ? 'Rebuilding…' : '↻ Fresh reload (server)'}
-          </button>
-          <button
-            type="button"
-            onClick={handleDeleteAll}
-            disabled={cacheLoading !== null}
-            title="Wipes session, server warm cache, Tier-3 SQLite, AND GitHub Release cache. Re-upload required."
-            className="w-full py-1.5 rounded text-xs font-semibold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
-          >
-            {cacheLoading === 'delete' ? 'Deleting…' : '🗑️ Delete All Data'}
-          </button>
+          {allowHistorical && (
+            <button
+              onClick={handleSave}
+              disabled={cacheLoading !== null}
+              className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-[#002B5B] hover:bg-gray-50 disabled:opacity-50"
+            >
+              {cacheLoading === 'save' ? 'Saving…' : '💾 Save Cache'}
+            </button>
+          )}
+          {allowHistorical && (
+            <button
+              type="button"
+              onClick={handleReloadFresh}
+              disabled={cacheLoading !== null}
+              title="Full server reload from GitHub + Tier-3 merge (operators)."
+              className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {cacheLoading === 'reload' ? 'Rebuilding…' : '↻ Fresh reload (server)'}
+            </button>
+          )}
+          {allowReset && (
+            <button
+              type="button"
+              onClick={handleDeleteAll}
+              disabled={cacheLoading !== null}
+              title="Wipes session, server warm cache, Tier-3 SQLite, AND GitHub Release cache. Re-upload required."
+              className="w-full py-1.5 rounded text-xs font-semibold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+            >
+              {cacheLoading === 'delete' ? 'Deleting…' : '🗑️ Delete All Data'}
+            </button>
+          )}
+          {!allowHistorical && (
+            <p className="text-[10px] text-gray-500 leading-snug">
+              Shared history is read-only for your role. Use Upload → Tier 3 for daily sales files.
+            </p>
+          )}
           {cacheMsg && (
             <p className={`text-xs leading-tight ${cacheMsg.type === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
               {cacheMsg.text}

@@ -22,7 +22,22 @@ _ERP_ADMIN_ROLES = frozenset({"Admin", "Manager"})
 def permissions_for_role(role_name: str) -> list[str]:
     if role_name == KARIGAR_ROLE:
         return ["stitching.production_entry"]
-    return ["*"]
+    from .upload_policy import upload_policy_for_role
+
+    pol = upload_policy_for_role(role_name)
+    perms = ["upload.daily", "data.read"]
+    if pol.get("may_upload_historical"):
+        perms.append("upload.historical")
+    if pol.get("may_reset_all"):
+        perms.append("data.reset")
+    if pol.get("may_clear_platform"):
+        perms.append("upload.clear")
+    # Backward compat: Admin/Manager retain wildcard for ERP modules not yet permission-gated.
+    if role_name in _ERP_ADMIN_ROLES:
+        perms.append("*")
+    elif role_name in FULL_ACCESS_ROLES:
+        perms.extend(["*"])
+    return perms
 
 
 def karigar_may_access_api(path: str, method: str) -> bool:

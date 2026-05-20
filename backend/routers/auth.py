@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..db.users_db import verify_erp_user, get_user_auth_profile
 from ..services.permissions import permissions_for_role, KARIGAR_ROLE
+from ..services.upload_policy import upload_policy_for_role
 
 router = APIRouter()
 
@@ -106,6 +107,7 @@ def login(body: LoginRequest, request: Request, response: Response):
         )
         _set_auth_cookie(request, response, token)
         _reset_session_cookie(request, response)
+        pol = upload_policy_for_role(role)
         return {
             "ok": True,
             "username": username,
@@ -113,6 +115,7 @@ def login(body: LoginRequest, request: Request, response: Response):
             "full_name": user.get("full_name") or "",
             "karigar_id": user.get("karigar_id") or "",
             "permissions": permissions_for_role(role),
+            **pol,
             "redirect": "/production-entry" if role == KARIGAR_ROLE else "/",
         }
 
@@ -128,6 +131,7 @@ def login(body: LoginRequest, request: Request, response: Response):
             token = create_token(username, role="Admin", full_name="Administrator")
             _set_auth_cookie(request, response, token)
             _reset_session_cookie(request, response)
+            pol = upload_policy_for_role("Admin")
             return {
                 "ok": True,
                 "username": username,
@@ -135,6 +139,7 @@ def login(body: LoginRequest, request: Request, response: Response):
                 "full_name": "Administrator",
                 "karigar_id": "",
                 "permissions": permissions_for_role("Admin"),
+                **pol,
                 "redirect": "/",
             }
 
@@ -176,6 +181,7 @@ def me(request: Request):
 
     if profile:
         role = profile.get("role_name") or role
+        pol = upload_policy_for_role(role)
         return {
             "username": username,
             "role": role,
@@ -185,8 +191,10 @@ def me(request: Request):
             "department": profile.get("department") or "",
             "permissions": permissions_for_role(role),
             "is_karigar": role == KARIGAR_ROLE,
+            **pol,
         }
 
+    pol = upload_policy_for_role(role)
     return {
         "username": username,
         "role": role,
@@ -196,4 +204,5 @@ def me(request: Request):
         "department": "",
         "permissions": payload.get("permissions") or permissions_for_role(role),
         "is_karigar": role == KARIGAR_ROLE,
+        **pol,
     }

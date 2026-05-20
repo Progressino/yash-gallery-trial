@@ -245,6 +245,10 @@ def get_coverage(request: Request, light: bool = False):
         import backend.main as _main
 
         _main.restore_po_sidecars_from_warm(sess)
+        if _main.session_needs_operational_data(sess):
+            _main.force_restore_session_from_server_cache(
+                sess, _main._warm_cache_generation
+            )
     except Exception:
         pass
     if not light:

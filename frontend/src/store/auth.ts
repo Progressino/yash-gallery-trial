@@ -11,6 +11,14 @@ export interface AuthUser {
   department?: string
   permissions?: string[]
   is_karigar?: boolean
+  historical_upload_locked?: boolean
+  may_upload_historical?: boolean
+  may_upload_daily?: boolean
+  may_clear_platform?: boolean
+  may_reset_all?: boolean
+  may_save_shared_cache?: boolean
+  may_reload_shared_cache?: boolean
+  may_delete_daily_upload?: boolean
 }
 
 function readStoredUser(): AuthUser | null {
@@ -53,4 +61,19 @@ export const useAuth = create<AuthState>(set => ({
 
 export function isKarigarUser(user: AuthUser | null | undefined): boolean {
   return user?.role === 'Karigar' || !!user?.is_karigar
+}
+
+/** Bulk history / platform clears — Admin & Manager when org lock is on. */
+export function mayUploadHistorical(user: AuthUser | null | undefined): boolean {
+  if (!user) return false
+  if (user.may_upload_historical === true) return true
+  if (user.may_upload_historical === false) return false
+  return user.role === 'Admin' || user.role === 'Manager'
+}
+
+export function mayResetSharedData(user: AuthUser | null | undefined): boolean {
+  if (!user) return false
+  if (user.may_reset_all === true) return true
+  if (user.may_reset_all === false) return false
+  return user.role === 'Admin'
 }

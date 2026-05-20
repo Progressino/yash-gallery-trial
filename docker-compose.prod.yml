@@ -38,6 +38,8 @@ services:
       - PYTHONUNBUFFERED=1
       # Emergency stabilization: keep Intelligence aligned with loaded uploaded data
       - DASHBOARD_UPLOAD_DAY_GATE=0
+      # Lock Tier-1 bulk uploads / clear / reset for non-Admin roles (daily uploads only).
+      - UPLOAD_HISTORICAL_LOCKED=1
       - FORECAST_SESSION_DATABASE_URL=postgresql://forecast:${FORECAST_PG_PASSWORD:-forecast}@postgres:5432/forecast
       - FINANCE_DB_PATH=/data/finance.db
       - ITEM_DB_PATH=/data/items.db

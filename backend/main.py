@@ -849,6 +849,17 @@ async def auth_middleware(request: Request, call_next):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"detail": "Admin access required"})
 
+    if path.startswith("/api/upload/") or path.startswith("/api/cache/") or (
+        path.startswith("/api/data/daily-uploads/") and request.method.upper() == "DELETE"
+    ):
+        from .services.upload_policy import check_upload_api_access
+
+        blocked = check_upload_api_access(role, request.method, path)
+        if blocked:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(status_code=403, content={"detail": blocked})
+
     return await call_next(request)
 
 
