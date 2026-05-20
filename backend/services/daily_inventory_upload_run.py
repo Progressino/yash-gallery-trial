@@ -11,10 +11,10 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# PO engine only needs recent history (period_days ADS window, typically 30–210 days).
-# Keeping 400 days covers the widest ADS window + one year's seasonality without
-# storing years of data that OOM the process during calculate_po_base on large catalogs.
-_MAX_HISTORY_DAYS = int(os.environ.get("DAILY_INV_MAX_DAYS", "400"))
+# PO engine only uses recent history for Eff_Days / roll-forward (default: last 30 calendar
+# days in the sheet, anchored on the latest snapshot date). Older columns are dropped at
+# ingest to keep memory and Calculate PO fast. Set DAILY_INV_MAX_DAYS to keep more (e.g. 90).
+_MAX_HISTORY_DAYS = int(os.environ.get("DAILY_INV_MAX_DAYS", "30"))
 
 
 def _trim_history_to_recent(df: pd.DataFrame, max_days: int) -> tuple[pd.DataFrame, str]:
@@ -42,7 +42,7 @@ def _trim_history_to_recent(df: pd.DataFrame, max_days: int) -> tuple[pd.DataFra
     note = (
         f"Trimmed to last {max_days} days ({cutoff.date()} → {pd.Timestamp(max_date).date()}): "
         f"{orig:,} → {kept:,} rows. "
-        f"Upload DAILY_INV_MAX_DAYS env-var to keep more history."
+        f"Set DAILY_INV_MAX_DAYS env-var to keep more than {max_days} days."
     )
     logger.info("Daily inventory history: %s", note)
     return trimmed, note

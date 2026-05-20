@@ -77,11 +77,9 @@ def execute_po_calculate(
     # for this session is fast.  The trimmed version is saved back to PG/warm-
     # cache by the post-calculate _sync() thread.
     #
-    # Stage 2 — calc-time pre-trim: even a healthy 400-day session (up to
-    # ~3.8M rows) is bigger than we need.  ADS_WINDOW = period_days, so for a
-    # 30-day period only the last 30 days matter.  Filter to period_days+14 so
-    # the engine's window-anchor shift always has data, then delete the
-    # intermediate series immediately to free RAM before calculate_po_base runs.
+    # Stage 2 — calc-time pre-trim: keep only rows needed for this run. Cap depth at
+    # min(period_days + 14, DAILY_INV_MAX_DAYS) so we never scan more inventory history
+    # than the server retains (default 30 days).
     import gc as _gc
 
     _period = int(body.get("period_days", 90))
@@ -108,21 +106,23 @@ def execute_po_calculate(
                 _raw_ih = _trimmed_sess
             del _trimmed_sess, _trim_note
 
-        # Stage 2: calc-time pre-trim to period_days + 14 days.
+        # Stage 2: calc-time pre-trim (bounded by DAILY_INV_MAX_DAYS / _MAX_HISTORY_DAYS).
         _inv_dates = pd.to_datetime(_raw_ih["Date"], errors="coerce")
         _max_inv = _inv_dates.max()
         if pd.notna(_max_inv):
+            _depth_days = min(_period + 14, _MAX_HISTORY_DAYS)
             _pretrim_cutoff = pd.Timestamp(_max_inv).normalize() - pd.Timedelta(
-                days=_period + 14
+                days=_depth_days
             )
             _mask = _inv_dates >= _pretrim_cutoff
             _inv_history_for_calc = _raw_ih[_mask].reset_index(drop=True)
             if len(_inv_history_for_calc) < len(_raw_ih):
                 logger.info(
-                    "PO calc pre-trim: %s → %s inventory-history rows (period=%d days)",
+                    "PO calc pre-trim: %s → %s inventory-history rows (period=%d days, depth_cap=%d)",
                     f"{len(_raw_ih):,}",
                     f"{len(_inv_history_for_calc):,}",
                     _period,
+                    _depth_days,
                 )
             del _mask
         else:

@@ -672,7 +672,7 @@ export default function Upload() {
               </UploadCard>
               <UploadCard
                 title="Daily inventory history matrix (PO)"
-                subtitle="Wide Excel: rows = SKUs, columns = daily snapshot totals (OMS / Amazon Inventory sheets). Used for Eff. Days in PO."
+                subtitle="Wide Excel: rows = SKUs, columns = daily snapshot totals (OMS / Amazon Inventory sheets). For speed, the server keeps only the latest 30 calendar days of history (set env DAILY_INV_MAX_DAYS to keep more)."
                 loaded={!!coverage.daily_inventory_history}
                 rows={coverage.daily_inventory_history_rows}
                 alert={showImportCompleteness ? uploadAlertsBySource['po_daily_inv'] : undefined}
