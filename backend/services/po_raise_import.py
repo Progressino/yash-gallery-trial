@@ -61,16 +61,10 @@ def hydrate_session_ledger_from_db(
             sess._quarterly_cache.clear()
             return True
 
+        from .po_raise_ledger import normalize_raise_ledger_df
+
         merged = pd.concat([base, db_df], ignore_index=True)
-        merged["Raised_Date"] = pd.to_datetime(merged["Raised_Date"], errors="coerce").dt.normalize()
-        merged["Raised_Qty"] = pd.to_numeric(merged["Raised_Qty"], errors="coerce").fillna(0).astype(int)
-        merged = merged[merged["Raised_Qty"] > 0]
-        merged = (
-            merged.groupby(["OMS_SKU", "Raised_Date"], as_index=False)["Raised_Qty"]
-            .sum()
-            .sort_values(["Raised_Date", "OMS_SKU"])
-        )
-        sess.po_raise_ledger_df = merged.reset_index(drop=True)
+        sess.po_raise_ledger_df = normalize_raise_ledger_df(merged)
         sess._quarterly_cache.clear()
         return True
     except Exception:
@@ -81,6 +75,25 @@ def parse_raise_date_from_filename(filename: str) -> Optional[pd.Timestamp]:
     from .po_raise_archive import parse_raise_date_from_filename
 
     return parse_raise_date_from_filename(filename)
+
+
+_QTY_COLUMN_BLOCKLIST = (
+    "confirmed",
+    "pipeline",
+    "effective",
+    "last_raised",
+    "raised_yesterday",
+    "raised_today",
+    "on_view",
+    "projected",
+    "cover_days",
+    "block_reason",
+)
+
+
+def _is_blocked_qty_column(name: str) -> bool:
+    fl = str(name).replace("\ufeff", "").strip().lower().replace(" ", "_")
+    return any(tok in fl for tok in _QTY_COLUMN_BLOCKLIST)
 
 
 def pick_csv_column(fieldnames: list, candidates: tuple[str, ...]) -> str | None:
@@ -94,10 +107,12 @@ def pick_csv_column(fieldnames: list, candidates: tuple[str, ...]) -> str | None
         norm_map[key] = f
     for cand in candidates:
         k = cand.strip().lower().replace(" ", "_")
-        if k in norm_map:
+        if k in norm_map and not _is_blocked_qty_column(norm_map[k]):
             return norm_map[k]
     for f in fieldnames:
         if f is None:
+            continue
+        if _is_blocked_qty_column(f):
             continue
         fl = str(f).replace("\ufeff", "").strip().lower()
         for cand in candidates:
@@ -108,13 +123,13 @@ def pick_csv_column(fieldnames: list, candidates: tuple[str, ...]) -> str | None
 
 _SKU_CANDS = ("oms_sku", "sku", "oms sku", "item_sku", "item sku", "variant_sku")
 _QTY_CANDS = (
-    "po_qty",
     "final_po_qty",
+    "raised_qty",
+    "po_qty",
     "gross_po_qty",
     "po qty",
     "net_po_qty",
     "recommended_po_qty",
-    "raised_qty",
     "confirmed_qty",
 )
 

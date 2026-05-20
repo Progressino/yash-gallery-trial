@@ -114,12 +114,9 @@ def ledger_rows_as_dataframe(
     df = df[df["Raised_Qty"] > 0].dropna(subset=["Raised_Date"])
     if df.empty:
         return pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
-    return (
-        df.groupby(["OMS_SKU", "Raised_Date"], as_index=False)["Raised_Qty"]
-        .sum()
-        .sort_values(["Raised_Date", "OMS_SKU"])
-        .reset_index(drop=True)
-    )
+    from ..services.po_raise_ledger import normalize_raise_ledger_df
+
+    return normalize_raise_ledger_df(df)
 
 
 def record_raises(items: Iterable[dict]) -> int:

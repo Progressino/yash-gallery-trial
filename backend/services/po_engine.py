@@ -1397,16 +1397,20 @@ def calculate_po_base(
                         on="_raise_parent",
                         how="left",
                     )
-                    for c in lag_merge_cols:
+                    # Only pipeline totals may fall back to a parent-key ledger row.
+                    # Per-size "last raised" / day columns must never inherit parent totals.
+                    _parent_fill_cols = {
+                        c
+                        for c in lag_merge_cols
+                        if c in ("PO_Confirmed_Raise_Pipeline",)
+                    }
+                    for c in _parent_fill_cols:
                         if c not in fill.columns:
                             continue
                         src = fill[c]
-                        if c == "PO_Last_Raised_Date":
-                            po_df.loc[missing, c] = src.fillna("").astype(str).values
-                        else:
-                            po_df.loc[missing, c] = (
-                                pd.to_numeric(src, errors="coerce").fillna(0).astype(int).values
-                            )
+                        po_df.loc[missing, c] = (
+                            pd.to_numeric(src, errors="coerce").fillna(0).astype(int).values
+                        )
                 po_df.drop(columns=["_raise_parent"], inplace=True, errors="ignore")
     for c in (
         "PO_Confirmed_Raise_Pipeline",

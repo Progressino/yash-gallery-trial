@@ -19,6 +19,84 @@ def _norm_date_series(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce").dt.normalize()
 
 
+def _raise_parent_key(sku: str) -> str:
+    return str(get_parent_sku(str(sku).strip()) or str(sku).strip()).strip().upper()
+
+
+def _ledger_row_is_parent_key(sku: str) -> bool:
+    key = str(sku).strip().upper()
+    return key == _raise_parent_key(key)
+
+
+def _collapse_raised_qty_for_sku_day(series: pd.Series) -> int:
+    """
+    Collapse duplicate ledger lines for the same SKU-day.
+
+    Identical repeated rows (re-import / restore duplicates) must not sum to
+    an inflated total (e.g. 91 copies of 15 → 1365). Distinct positive amounts
+    on the same day are summed (e.g. 15 + 10 → 25).
+    """
+    vals = [int(v) for v in pd.to_numeric(series, errors="coerce").fillna(0) if int(v) > 0]
+    if not vals:
+        return 0
+    if len(vals) == 1 or len(set(vals)) == 1:
+        return vals[0]
+    return int(sum(vals))
+
+
+def normalize_raise_ledger_df(
+    ledger_df: Optional[pd.DataFrame],
+    sku_mapping: Optional[Dict[str, str]] = None,
+    *,
+    group_by_parent: bool = False,
+) -> pd.DataFrame:
+    """
+    Canonicalize SKUs, collapse duplicate SKU-day rows, and drop parent-key rows
+    when any size-level row exists for that parent (prevents parent totals from
+    inflating per-size "last raised" / confirmed columns).
+    """
+    empty = pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
+    if ledger_df is None or ledger_df.empty:
+        return empty
+
+    need = {"OMS_SKU", "Raised_Qty", "Raised_Date"}
+    if not need.issubset({str(c).strip() for c in ledger_df.columns}):
+        return empty
+
+    df = ledger_df.copy()
+    df["OMS_SKU"] = df["OMS_SKU"].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+    df = df[df["OMS_SKU"].str.len() > 0]
+    if group_by_parent:
+        df["OMS_SKU"] = df["OMS_SKU"].map(lambda s: str(get_parent_sku(s) or s).strip().upper())
+    df["Raised_Date"] = _norm_date_series(df["Raised_Date"])
+    df["Raised_Qty"] = pd.to_numeric(df["Raised_Qty"], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["Raised_Date"])
+    df = df[df["Raised_Qty"] > 0]
+    if df.empty:
+        return empty
+
+    df = (
+        df.groupby(["OMS_SKU", "Raised_Date"], as_index=False)["Raised_Qty"]
+        .agg(_collapse_raised_qty_for_sku_day)
+        .sort_values(["Raised_Date", "OMS_SKU"])
+    )
+
+    if not group_by_parent:
+        parents_with_variants: set[str] = set()
+        for sku in df["OMS_SKU"].astype(str):
+            pk = _raise_parent_key(sku)
+            if str(sku).strip().upper() != pk:
+                parents_with_variants.add(pk)
+        if parents_with_variants:
+            keep = [
+                not (_ledger_row_is_parent_key(s) and _raise_parent_key(s) in parents_with_variants)
+                for s in df["OMS_SKU"].astype(str)
+            ]
+            df = df.loc[keep]
+
+    return df.reset_index(drop=True)
+
+
 def append_raise_confirm_rows(
     ledger: pd.DataFrame,
     rows: List[Tuple[str, int]],
@@ -49,17 +127,11 @@ def append_raise_confirm_rows(
     chunk = pd.DataFrame.from_records(recs)
     base = ledger if ledger is not None and not ledger.empty else pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
     out = pd.concat([base, chunk], ignore_index=True)
-    out["Raised_Date"] = _norm_date_series(out["Raised_Date"])
-    out["Raised_Qty"] = pd.to_numeric(out["Raised_Qty"], errors="coerce").fillna(0).astype(int)
-    out = out[out["Raised_Qty"] > 0]
-    if out.empty:
-        return pd.DataFrame(columns=["OMS_SKU", "Raised_Qty", "Raised_Date"])
-    out = (
-        out.groupby(["OMS_SKU", "Raised_Date"], as_index=False)["Raised_Qty"]
-        .sum()
-        .sort_values(["Raised_Date", "OMS_SKU"])
+    return normalize_raise_ledger_df(
+        out,
+        sku_mapping=sku_mapping,
+        group_by_parent=group_by_parent,
     )
-    return out.reset_index(drop=True)
 
 
 def aggregate_raise_ledger_for_po(
@@ -96,15 +168,11 @@ def aggregate_raise_ledger_for_po(
     if not need.issubset(norm_cols):
         return empty
 
-    df = ledger_df.copy()
-    df["OMS_SKU"] = df["OMS_SKU"].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
-    df = df[df["OMS_SKU"].str.len() > 0]
-    if group_by_parent:
-        df["OMS_SKU"] = df["OMS_SKU"].map(lambda s: str(get_parent_sku(s) or s).strip().upper())
-    df["Raised_Date"] = _norm_date_series(df["Raised_Date"])
-    df["Raised_Qty"] = pd.to_numeric(df["Raised_Qty"], errors="coerce").fillna(0).astype(int)
-    df = df.dropna(subset=["Raised_Date"])
-    df = df[df["Raised_Qty"] > 0]
+    df = normalize_raise_ledger_df(
+        ledger_df,
+        sku_mapping=sku_mapping,
+        group_by_parent=group_by_parent,
+    )
     if df.empty:
         return empty
 
@@ -138,7 +206,8 @@ def aggregate_raise_ledger_for_po(
         else:
             out["PO_Raised_On_View_Date"] = 0
         last_recs: list[dict] = []
-        for sku, sub in df.groupby("OMS_SKU"):
+        last_src = df[df["Raised_Date"] <= as_of].copy()
+        for sku, sub in last_src.groupby("OMS_SKU"):
             dmax = sub["Raised_Date"].max()
             if pd.isna(dmax):
                 continue

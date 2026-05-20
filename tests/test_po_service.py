@@ -1982,6 +1982,88 @@ def test_raise_ledger_view_date_outside_planning_window():
     assert int(row["PO_Confirmed_Raise_Pipeline"]) == 0
 
 
+def test_raise_ledger_dedupes_duplicate_sku_day_rows_for_last_raised():
+    """Repeated imports must not inflate last raised (e.g. 91×15 → 1365)."""
+    from backend.services.po_raise_ledger import aggregate_raise_ledger_for_po
+
+    dupes = pd.DataFrame(
+        {
+            "OMS_SKU": ["1037DPT19WHITE-7XL"] * 91,
+            "Raised_Qty": [15] * 91,
+            "Raised_Date": [pd.Timestamp("2026-05-16")] * 91,
+        }
+    )
+    agg = aggregate_raise_ledger_for_po(
+        dupes,
+        {},
+        pd.Timestamp("2026-05-19"),
+        lookback_days=14,
+    )
+    row = agg[agg["OMS_SKU"] == "1037DPT19WHITE-7XL"].iloc[0]
+    assert int(row["PO_Last_Raised_Qty"]) == 15
+    assert int(row["PO_Confirmed_Raise_Pipeline"]) == 15
+
+
+def test_raise_ledger_last_raised_ignores_parent_when_sizes_exist():
+    from backend.services.po_raise_ledger import aggregate_raise_ledger_for_po
+
+    ledger = pd.DataFrame(
+        {
+            "OMS_SKU": ["1037DPT19WHITE", "1037DPT19WHITE-7XL", "1037DPT19WHITE-XL"],
+            "Raised_Qty": [1365, 15, 55],
+            "Raised_Date": [pd.Timestamp("2026-05-16")] * 3,
+        }
+    )
+    agg = aggregate_raise_ledger_for_po(
+        ledger,
+        {},
+        pd.Timestamp("2026-05-19"),
+        lookback_days=14,
+    )
+    r7 = agg[agg["OMS_SKU"] == "1037DPT19WHITE-7XL"].iloc[0]
+    rx = agg[agg["OMS_SKU"] == "1037DPT19WHITE-XL"].iloc[0]
+    assert int(r7["PO_Last_Raised_Qty"]) == 15
+    assert int(rx["PO_Last_Raised_Qty"]) == 55
+    assert "1037DPT19WHITE" not in set(agg["OMS_SKU"].astype(str))
+
+
+def test_raise_ledger_last_raised_matches_saturday_fixture_import():
+    from pathlib import Path
+
+    from backend.services.po_raise_import import parse_ledger_upload_bytes
+    from backend.services.po_raise_ledger import aggregate_raise_ledger_for_po
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "po_recommendation_16-5-26.csv"
+    if not fixture.is_file():
+        pytest.skip("fixture missing")
+    accum, err = parse_ledger_upload_bytes(fixture.read_bytes(), fixture.name)
+    assert err is None
+    ledger = pd.DataFrame(
+        {
+            "OMS_SKU": list(accum.keys()),
+            "Raised_Qty": list(accum.values()),
+            "Raised_Date": [pd.Timestamp("2026-05-16")] * len(accum),
+        }
+    )
+    agg = aggregate_raise_ledger_for_po(
+        ledger,
+        {},
+        pd.Timestamp("2026-05-19"),
+        lookback_days=14,
+        raise_view_date="2026-05-16",
+    )
+    for sku, expected in (
+        ("1037DPT19WHITE-7XL", 15),
+        ("1037DPT19WHITE-8XL", 25),
+        ("1037DPT19WHITE-L", 20),
+        ("1037DPT19WHITE-XL", 55),
+    ):
+        row = agg[agg["OMS_SKU"] == sku].iloc[0]
+        assert int(row["PO_Last_Raised_Qty"]) == expected
+        assert row["PO_Last_Raised_Date"] == "2026-05-16"
+        assert int(row["PO_Raised_On_View_Date"]) == expected
+
+
 def test_raise_ledger_last_and_view_date_columns():
     from backend.services.po_raise_ledger import aggregate_raise_ledger_for_po
 
