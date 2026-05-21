@@ -246,6 +246,17 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         sess._daily_restore_lock.release()
 
 
+def _ensure_warm_session_data(sess: AppSession) -> None:
+    """Fast path for dashboard reads — warm cache only, no Tier-3 SQLite scan."""
+    try:
+        import backend.main as _main
+
+        if _main.session_needs_operational_data(sess):
+            _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
+    except Exception:
+        pass
+
+
 # ── Coverage ──────────────────────────────────────────────────
 
 @router.get("/coverage", response_model=CoverageResponse)
@@ -430,7 +441,7 @@ def sales_summary(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
-    _restore_daily_if_needed(sess)
+    _ensure_warm_session_data(sess)
     return get_sales_summary(sess.sales_df, months=months, start_date=start_date, end_date=end_date)
 
 
@@ -538,7 +549,7 @@ def top_skus(
 ):
     """``basis=gross`` (default): rank by shipment quantity. ``basis=net``: by ``Units_Effective`` sum."""
     sess = _sess(request)
-    _restore_daily_if_needed(sess)
+    _ensure_warm_session_data(sess)
     return get_top_skus(
         sess.sales_df,
         limit=limit,
@@ -1405,7 +1416,7 @@ def platform_summary(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
-    _restore_daily_if_needed(sess)
+    _ensure_warm_session_data(sess)
     return get_platform_summary(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,
@@ -1421,7 +1432,7 @@ def anomalies_endpoint(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
-    _restore_daily_if_needed(sess)
+    _ensure_warm_session_data(sess)
     return get_anomalies(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,

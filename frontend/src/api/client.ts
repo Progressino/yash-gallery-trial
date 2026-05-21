@@ -874,6 +874,16 @@ export async function cacheSave() {
     throw new Error(_errMessage(e, 'Cache save failed'))
   }
 }
+/** Fast path after login: copy server warm cache into session (Tier-3 merges in background). */
+export async function cacheHydrateWarm() {
+  try {
+    const { data } = await api.post('/cache/hydrate-warm', undefined, { timeout: CACHE_TIMEOUT_MS })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Warm cache hydrate failed'))
+  }
+}
+
 export async function cacheLoad() {
   try {
     const { data } = await api.post('/cache/load', undefined, { timeout: CACHE_TIMEOUT_MS })

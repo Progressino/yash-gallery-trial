@@ -290,29 +290,85 @@ def cache_save(request: Request):
     return CacheStatusResponse(ok=ok, message=msg)
 
 
+def _hydrate_session_from_warm(
+    sess,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    *,
+    defer_daily_merge: bool = False,
+) -> CacheStatusResponse | None:
+    """Copy in-memory warm cache into session. Returns None if warm cache is not ready."""
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            return None
+        _main._copy_warm_cache_to_session(sess)
+        n_sales = _rebuild_sales_in_session(sess)
+        sess._quarterly_cache.clear()
+        _main.publish_warm_cache_from_session(sess)
+        resume_auto_data_restore(sess)
+
+        if defer_daily_merge:
+
+            def _tier3_topup() -> None:
+                try:
+                    note = _merge_daily_store_into_session(sess)
+                    _rebuild_sales_in_session(sess)
+                    _log.info("hydrate-warm tier-3 top-up done%s", note)
+                except Exception:
+                    _log.exception("hydrate-warm tier-3 top-up failed")
+                try:
+                    _persist_pg_session_bg(session_id, sess)
+                except Exception:
+                    pass
+
+            background_tasks.add_task(_tier3_topup)
+            return CacheStatusResponse(
+                ok=True,
+                message=f"Loaded from warm cache ({n_sales:,} sales rows). Daily uploads merging in background.",
+            )
+
+        daily_note = _merge_daily_store_into_session(sess)
+        n_sales = _rebuild_sales_in_session(sess)
+        background_tasks.add_task(_persist_pg_session_bg, session_id, sess)
+        return CacheStatusResponse(
+            ok=True,
+            message=f"Loaded from warm cache; sales rebuilt ({n_sales:,} rows).{daily_note}",
+        )
+    except Exception:
+        _log.exception("hydrate from warm cache failed")
+        return CacheStatusResponse(ok=False, message="Warm cache hydrate failed.")
+
+
+@router.post("/hydrate-warm", response_model=CacheStatusResponse)
+def cache_hydrate_warm(request: Request, background_tasks: BackgroundTasks):
+    """Fast login path: warm cache → session, Tier-3 merge in background."""
+    sess = request.state.session
+    if sess is None:
+        return CacheStatusResponse(ok=False, message="No session")
+    sid = getattr(request.state, "session_id", None) or ""
+    out = _hydrate_session_from_warm(
+        sess, sid, background_tasks, defer_daily_merge=True
+    )
+    if out is not None:
+        return out
+    return CacheStatusResponse(
+        ok=False,
+        message="Warm cache is still loading on the server — wait a moment and retry.",
+    )
+
+
 @router.post("/load", response_model=CacheStatusResponse)
 def cache_load(request: Request, background_tasks: BackgroundTasks):
     sess = request.state.session
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
 
-    # ── Fast path: warm cache already in memory — no GitHub download needed ──
-    try:
-        import backend.main as _main
-        if _main._warm_cache:
-            _main._copy_warm_cache_to_session(sess)
-            daily_note = _merge_daily_store_into_session(sess)
-            n_sales = _rebuild_sales_in_session(sess)
-            sess._quarterly_cache.clear()
-            _main.publish_warm_cache_from_session(sess)
-            resume_auto_data_restore(sess)
-            background_tasks.add_task(_persist_pg_session_bg, request.state.session_id, sess)
-            return CacheStatusResponse(
-                ok=True,
-                message=f"Loaded from warm cache; sales rebuilt ({n_sales:,} rows).{daily_note}",
-            )
-    except Exception:
-        pass  # fall through to GitHub download
+    sid = getattr(request.state, "session_id", None) or ""
+    out = _hydrate_session_from_warm(sess, sid, background_tasks, defer_daily_merge=False)
+    if out is not None and out.ok:
+        return out
 
     ok, msg, loaded = load_cache_from_drive()
     if ok:

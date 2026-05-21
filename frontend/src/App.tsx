@@ -7,7 +7,7 @@ import KarigarLayout from './components/KarigarLayout'
 import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuards'
 import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
-import api, { cacheLoad, getCoverage } from './api/client'
+import api, { cacheHydrateWarm, cacheLoad, getCoverage } from './api/client'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
 
@@ -43,7 +43,7 @@ const qc = new QueryClient({
   },
 })
 
-const AUTO_RESTORE_TIMEOUT_MS = 120_000
+const HYDRATE_WARM_TIMEOUT_MS = 300_000
 
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let t: ReturnType<typeof setTimeout> | undefined
@@ -104,17 +104,31 @@ function ProtectedRoute() {
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
-        let coverage = await getCoverage({ timeout: 90_000 })
+        // Light coverage: warm-cache fill only — avoids multi-minute Tier-3 SQLite on login.
+        let coverage = await getCoverage({ light: true, timeout: 45_000 })
         setCoverage(coverage)
         if (coverageEmpty(coverage)) {
           try {
-            await withTimeout(cacheLoad(), AUTO_RESTORE_TIMEOUT_MS)
-            coverage = await getCoverage({ timeout: 90_000 })
+            await withTimeout(cacheHydrateWarm(), HYDRATE_WARM_TIMEOUT_MS)
+            coverage = await getCoverage({ light: true, timeout: 45_000 })
             setCoverage(coverage)
           } catch {
-            /* warm cache may still be loading on server */
+            /* warm cache may still be starting after deploy */
           }
         }
+        if (coverageEmpty(coverage)) {
+          try {
+            await withTimeout(cacheLoad(), HYDRATE_WARM_TIMEOUT_MS)
+            coverage = await getCoverage({ light: true, timeout: 45_000 })
+            setCoverage(coverage)
+          } catch {
+            /* GitHub cache optional */
+          }
+        }
+        // Tier-3 top-up in background — dashboard can render once warm data is in session.
+        void getCoverage({ timeout: 600_000 })
+          .then(c => setCoverage(c))
+          .catch(() => {})
       } catch {
         /* server busy during upload — coverage polling on Upload page will retry */
       }
@@ -129,7 +143,7 @@ function ProtectedRoute() {
   useQuery({
     queryKey: ['coverage-empty-retry'],
     queryFn: async () => {
-      const c = await getCoverage({ timeout: 90_000 })
+      const c = await getCoverage({ light: true, timeout: 45_000 })
       setCoverage(c)
       return c
     },

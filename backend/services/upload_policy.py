@@ -19,6 +19,7 @@ _DAILY_UPLOAD_PREFIXES = (
 # Always allowed (read shared cache into session; does not overwrite org history).
 _CACHE_LOAD_PREFIXES = (
     "/api/cache/load",
+    "/api/cache/hydrate-warm",
     "/api/cache/status",
 )
 

@@ -828,21 +828,25 @@ export default function Dashboard() {
   const { data: salesSummary } = useQuery<SalesSummary>({
     queryKey: ['sales-summary', dateStart, dateEnd],
     queryFn: async () => { const { data } = await api.get(`/data/sales-summary?${summaryParams}`); return data },
+    enabled: salesLoaded,
     staleTime: 120_000,
   })
   const { data: topSkusRaw } = useQuery<TopSku[]>({
     queryKey: ['top-skus', dateStart, dateEnd, topSkuLimit, salesViewNet],
     queryFn: async () => { const { data } = await api.get(`/data/top-skus?${dateParams}`); return data },
+    enabled: salesLoaded,
     staleTime: 120_000,
   })
   const { data: platformSummary, isLoading: loadingPlatforms } = useQuery<PlatformSummaryItem[]>({
     queryKey: ['platform-summary', dateStart, dateEnd],
     queryFn: async () => { const { data } = await api.get(`/data/platform-summary?${summaryParams}`); return data },
+    enabled: salesLoaded,
     staleTime: 300_000,
   })
   const { data: anomalies } = useQuery<AnomalyItem[]>({
     queryKey: ['anomalies', dateStart, dateEnd],
     queryFn: async () => { const { data } = await api.get(`/data/anomalies?${summaryParams}`); return data },
+    enabled: salesLoaded,
     staleTime: 120_000,
   })
   const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
@@ -962,6 +966,7 @@ export default function Dashboard() {
   const hiddenByName = new Set([...hiddenPlatforms].map(id => id))
 
   const intelligenceLoading =
+    !salesLoaded ||
     loadingPlatforms ||
     (showDsr && loadingDsr) ||
     (salesLoaded && loadingDsrBrands) ||
@@ -970,6 +975,7 @@ export default function Dashboard() {
     exportingDsrMonthly
 
   const intelligenceLoadLabel = useMemo(() => {
+    if (!salesLoaded) return 'Syncing your data…'
     if (exportingSales) return 'Preparing sales export…'
     if (exportingDsr) return 'Exporting DSR…'
     if (exportingDsrMonthly) return 'Exporting brand monthly…'
@@ -981,10 +987,10 @@ export default function Dashboard() {
     exportingSales,
     exportingDsr,
     exportingDsrMonthly,
+    salesLoaded,
     loadingPlatforms,
     showDsr,
     loadingDsr,
-    salesLoaded,
     loadingDsrBrands,
   ])
 
@@ -1018,7 +1024,9 @@ export default function Dashboard() {
             </h1>
             <p className="hero-sub">
               {dateStart || 'All time'} → {dateEnd || 'today'} ·{' '}
-              {loadedPlatforms.length} of {platforms.length || 5} marketplaces loaded
+              {salesLoaded
+                ? `${loadedPlatforms.length} of ${platforms.length || 5} marketplaces loaded`
+                : 'Preparing marketplace data…'}
             </p>
           </div>
           <div className="hero-actions">
