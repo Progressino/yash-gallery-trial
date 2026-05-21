@@ -1,9 +1,11 @@
 """
 Authentication router.
 
-POST /api/auth/login   → ERP users (users.db) or legacy env admin
-POST /api/auth/logout  → clear cookie
-GET  /api/auth/me      → current user profile + role
+POST /api/auth/login        → password; new devices require OTP
+POST /api/auth/otp/resend   → resend OTP SMS
+POST /api/auth/otp/verify   → verify OTP + optional trust device
+POST /api/auth/logout       → clear cookies
+GET  /api/auth/me           → current user profile + role
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -11,12 +13,21 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from fastapi import APIRouter, Request, Response, HTTPException
 from jose import jwt, JWTError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..db.users_db import verify_erp_user, get_user_auth_profile
 from ..services.permissions import permissions_for_role, KARIGAR_ROLE
 from ..services.upload_policy import upload_policy_for_role
-from ..services.rbac import build_hrm_scope, resolve_module_access
+from ..services.rbac import build_hrm_scope, resolve_module_access, ROLE_SUPER_ADMIN
+from ..services.login_otp import (
+    otp_required_globally,
+    normalize_india_phone,
+    mask_phone,
+    start_login_challenge,
+    resend_challenge,
+    verify_otp_code,
+)
+from ..services.device_trust import is_device_trusted, set_trusted_device_cookie
 
 router = APIRouter()
 
@@ -85,9 +96,111 @@ def _reset_session_cookie(request: Request, response: Response) -> None:
     response.delete_cookie("session_id", path="/", secure=sec, httponly=True, samesite="lax")
 
 
+def _login_payload(user: dict) -> dict:
+    role = user.get("role_name") or user.get("role") or "Clerk"
+    username = user.get("username") or ""
+    modules = resolve_module_access(role, user.get("module_access"))
+    hrm_scope = build_hrm_scope(user, role=role)
+    redirect = "/production-entry" if role == KARIGAR_ROLE else "/"
+    if role not in (KARIGAR_ROLE,) and modules == ["hrm"]:
+        redirect = "/hrm"
+    pol = upload_policy_for_role(role)
+    return {
+        "ok": True,
+        "username": username,
+        "role": role,
+        "full_name": user.get("full_name") or "",
+        "karigar_id": user.get("karigar_id") or "",
+        "employee_id": user.get("employee_id"),
+        "hrm_department_id": user.get("hrm_department_id"),
+        "user_id": user.get("id"),
+        "modules": modules,
+        "hrm_scope": {
+            "level": hrm_scope.level,
+            "department_id": hrm_scope.department_id,
+            "employee_id": hrm_scope.employee_id,
+            "can_manage_org": hrm_scope.can_manage_org,
+        },
+        "permissions": permissions_for_role(role),
+        **pol,
+        "redirect": redirect,
+    }
+
+
+def _complete_login(request: Request, response: Response, user: dict) -> dict:
+    role = user.get("role_name") or user.get("role") or "Clerk"
+    username = user.get("username") or ""
+    token = create_token(
+        username,
+        role=role,
+        user_id=user.get("id"),
+        full_name=user.get("full_name") or "",
+        karigar_id=str(user.get("karigar_id") or ""),
+    )
+    _set_auth_cookie(request, response, token)
+    _reset_session_cookie(request, response)
+    return _login_payload(user)
+
+
+def _resolve_phone(user: dict | None, username: str) -> str | None:
+    if user:
+        p = normalize_india_phone(user.get("phone") or "")
+        if p:
+            return p
+    if username == (os.environ.get("SUPER_ADMIN_USERNAME") or os.environ.get("AUTH_USERNAME") or "admin").strip():
+        return normalize_india_phone(os.environ.get("SUPER_ADMIN_PHONE", ""))
+    return None
+
+
+def _needs_otp(request: Request, user: dict, phone: str | None) -> bool:
+    if not otp_required_globally():
+        return False
+    if not phone:
+        return False
+    if is_device_trusted(
+        request,
+        user_id=user.get("id"),
+        username=user.get("username") or "",
+    ):
+        return False
+    return True
+
+
+def _authenticate_password(username: str, password: str) -> dict | None:
+    user = verify_erp_user(username, password)
+    if user:
+        return user
+
+    expected_user = os.environ.get("AUTH_USERNAME", "")
+    expected_hash = os.environ.get("AUTH_PASSWORD_HASH", "").encode()
+    super_name = (os.environ.get("SUPER_ADMIN_USERNAME") or expected_user or "admin").strip()
+    if expected_user and expected_hash and username in (expected_user, super_name):
+        if bcrypt.checkpw(password.encode(), expected_hash):
+            profile = get_user_auth_profile(super_name) or get_user_auth_profile(expected_user)
+            if profile:
+                return profile
+            return {
+                "username": super_name,
+                "role_name": ROLE_SUPER_ADMIN,
+                "full_name": "Super Administrator",
+                "karigar_id": "",
+            }
+    return None
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class OtpResendRequest(BaseModel):
+    challenge_id: str
+
+
+class OtpVerifyRequest(BaseModel):
+    challenge_id: str
+    code: str = Field(min_length=4, max_length=8)
+    trust_device: bool = True
 
 
 @router.post("/login")
@@ -96,69 +209,72 @@ def login(body: LoginRequest, request: Request, response: Response):
     username = body.username.strip()
     password = body.password
 
-    user = verify_erp_user(username, password)
-    if user:
-        role = user.get("role_name") or "Clerk"
-        token = create_token(
-            username,
-            role=role,
-            user_id=user.get("id"),
-            full_name=user.get("full_name") or "",
-            karigar_id=str(user.get("karigar_id") or ""),
-        )
-        _set_auth_cookie(request, response, token)
-        _reset_session_cookie(request, response)
-        pol = upload_policy_for_role(role)
-        modules = resolve_module_access(role, user.get("module_access"))
-        hrm_scope = build_hrm_scope(user, role=role)
-        redirect = "/production-entry" if role == KARIGAR_ROLE else "/"
-        if role not in (KARIGAR_ROLE,) and modules == ["hrm"]:
-            redirect = "/hrm"
+    user = _authenticate_password(username, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    phone = _resolve_phone(user, username)
+    if _needs_otp(request, user, phone):
+        try:
+            challenge_id, masked = start_login_challenge(
+                user_id=user.get("id"),
+                username=user.get("username") or username,
+                phone=phone,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         return {
-            "ok": True,
-            "username": username,
-            "role": role,
-            "full_name": user.get("full_name") or "",
-            "karigar_id": user.get("karigar_id") or "",
-            "employee_id": user.get("employee_id"),
-            "hrm_department_id": user.get("hrm_department_id"),
-            "modules": modules,
-            "hrm_scope": {
-                "level": hrm_scope.level,
-                "department_id": hrm_scope.department_id,
-                "employee_id": hrm_scope.employee_id,
-                "can_manage_org": hrm_scope.can_manage_org,
-            },
-            "permissions": permissions_for_role(role),
-            **pol,
-            "redirect": redirect,
+            "ok": False,
+            "otp_required": True,
+            "challenge_id": challenge_id,
+            "masked_phone": masked,
+            "message": f"OTP sent to {masked}. Required on new devices.",
         }
 
-    expected_user = os.environ.get("AUTH_USERNAME", "")
-    expected_hash = os.environ.get("AUTH_PASSWORD_HASH", "").encode()
-    if expected_user and expected_hash:
+    return _complete_login(request, response, user)
 
-        password_ok = (
-            username == expected_user
-            and bcrypt.checkpw(password.encode(), expected_hash)
+
+@router.post("/otp/resend")
+def otp_resend(body: OtpResendRequest):
+    try:
+        masked = resend_challenge(body.challenge_id.strip())
+        return {"ok": True, "masked_phone": masked}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@router.post("/otp/verify")
+def otp_verify(body: OtpVerifyRequest, request: Request, response: Response):
+    try:
+        row = verify_otp_code(body.challenge_id.strip(), body.code.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    username = row.get("username") or ""
+    profile = get_user_auth_profile(username)
+    if profile:
+        user = profile
+    else:
+        user = {
+            "username": username,
+            "role_name": ROLE_SUPER_ADMIN,
+            "full_name": "Super Administrator",
+            "karigar_id": "",
+        }
+
+    if body.trust_device:
+        set_trusted_device_cookie(
+            request,
+            response,
+            user_id=user.get("id"),
+            username=username,
         )
-        if password_ok:
-            token = create_token(username, role="Admin", full_name="Administrator")
-            _set_auth_cookie(request, response, token)
-            _reset_session_cookie(request, response)
-            pol = upload_policy_for_role("Admin")
-            return {
-                "ok": True,
-                "username": username,
-                "role": "Admin",
-                "full_name": "Administrator",
-                "karigar_id": "",
-                "permissions": permissions_for_role("Admin"),
-                **pol,
-                "redirect": "/",
-            }
 
-    raise HTTPException(status_code=401, detail="Invalid username or password")
+    return _complete_login(request, response, user)
 
 
 @router.post("/logout")
@@ -178,6 +294,7 @@ def logout(request: Request, response: Response):
     sec = _cookie_secure(request)
     response.delete_cookie("auth_token", path="/", secure=sec, httponly=True, samesite="lax")
     response.delete_cookie("session_id", path="/", secure=sec, httponly=True, samesite="lax")
+    # Keep device_trust cookie so OTP is not required again on this browser after logout.
     return {"ok": True}
 
 

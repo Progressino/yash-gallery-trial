@@ -993,12 +993,20 @@ def _session_uses_stitching_db_only(path: str) -> bool:
     return path.startswith("/api/stitching/") or path.startswith("/api/hrm/")
 
 # ── Auth middleware (outermost — runs first) ──────────────────
-_AUTH_EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/health"}
+_AUTH_EXEMPT = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/otp/resend",
+    "/api/auth/otp/verify",
+    "/api/health",
+}
 
 # Skip heavy session restore / warm-cache copy (login was blocked for minutes behind PG blobs).
 _SESSION_LIGHTWEIGHT = frozenset({
     "/api/auth/login",
     "/api/auth/logout",
+    "/api/auth/otp/resend",
+    "/api/auth/otp/verify",
     "/api/auth/me",
 })
 

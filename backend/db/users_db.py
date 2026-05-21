@@ -11,6 +11,7 @@ def _connect():
     return conn
 
 DEFAULT_ROLES = [
+    ('Super Admin', 'Full system access — OTP on new devices; manages all users'),
     ('Admin',     'Full access to all modules'),
     ('Sir',       'Management — full ERP access'),
     ('HOD',       'Head of department — HRM module, team data only'),
@@ -61,12 +62,36 @@ def init_db():
         try:
             conn.execute("INSERT OR IGNORE INTO roles(role_name,description) VALUES(?,?)", (name, desc))
         except: pass
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS login_otps (
+        challenge_id  TEXT PRIMARY KEY,
+        user_id       INTEGER,
+        username      TEXT NOT NULL,
+        phone         TEXT NOT NULL,
+        code_hash     TEXT NOT NULL,
+        expires_at    TEXT NOT NULL,
+        verified      INTEGER DEFAULT 0,
+        attempts      INTEGER DEFAULT 0,
+        created_at    TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS trusted_devices (
+        device_id     TEXT PRIMARY KEY,
+        user_id       INTEGER,
+        username      TEXT NOT NULL,
+        fingerprint   TEXT NOT NULL,
+        user_agent    TEXT,
+        expires_at    TEXT NOT NULL,
+        created_at    TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_trusted_devices_user ON trusted_devices(username, fingerprint);
+    """)
     for table, col, decl in [
         ("erp_users", "karigar_id", "TEXT DEFAULT ''"),
         ("erp_users", "employee_id", "INTEGER"),
         ("erp_users", "hrm_department_id", "INTEGER"),
         ("erp_users", "reporting_hod_user_id", "INTEGER"),
         ("erp_users", "module_access", "TEXT"),
+        ("erp_users", "phone", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -81,7 +106,73 @@ def init_db():
         )
     except Exception:
         pass
+    ensure_super_admin(conn)
     conn.commit(); conn.close()
+
+# ── Super Admin bootstrap ─────────────────────────────────────────────────────
+def ensure_super_admin(conn=None):
+    """Ensure env admin exists in erp_users as Super Admin with phone for OTP."""
+    from ..services.login_otp import normalize_india_phone
+
+    close = False
+    if conn is None:
+        conn = _connect()
+        close = True
+    row = conn.execute("SELECT id FROM roles WHERE role_name='Super Admin'").fetchone()
+    if not row:
+        conn.execute(
+            "INSERT OR IGNORE INTO roles(role_name,description) VALUES(?,?)",
+            ("Super Admin", "Full system access — OTP on new devices; manages all users"),
+        )
+        row = conn.execute("SELECT id FROM roles WHERE role_name='Super Admin'").fetchone()
+    if not row:
+        if close:
+            conn.commit()
+            conn.close()
+        return
+    role_id = row["id"]
+    username = (os.environ.get("SUPER_ADMIN_USERNAME") or os.environ.get("AUTH_USERNAME") or "admin").strip()
+    phone_raw = os.environ.get("SUPER_ADMIN_PHONE", "").strip()
+    phone = normalize_india_phone(phone_raw) if phone_raw else None
+    pw_hash = os.environ.get("AUTH_PASSWORD_HASH", "").strip()
+    if not username:
+        if close:
+            conn.commit()
+            conn.close()
+        return
+    existing = conn.execute("SELECT id, phone FROM erp_users WHERE username=?", (username,)).fetchone()
+    if existing:
+        sets = ["role_id=?", "active=1", "updated_at=?"]
+        vals = [role_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+        if phone and not (existing["phone"] or "").strip():
+            sets.append("phone=?")
+            vals.append(phone)
+        vals.append(existing["id"])
+        conn.execute(f"UPDATE erp_users SET {', '.join(sets)} WHERE id=?", vals)
+    elif pw_hash:
+        conn.execute(
+            """INSERT INTO erp_users(username,email,password_hash,full_name,role_id,department,phone,active)
+               VALUES(?,?,?,?,?,?,?,1)""",
+            (
+                username,
+                None,
+                pw_hash,
+                "Super Administrator",
+                role_id,
+                "Admin",
+                phone,
+            ),
+        )
+    if close:
+        conn.commit()
+        conn.close()
+
+
+def get_role_id(role_name: str) -> int | None:
+    conn = _connect()
+    row = conn.execute("SELECT id FROM roles WHERE role_name=?", (role_name,)).fetchone()
+    conn.close()
+    return int(row["id"]) if row else None
 
 # ── Roles ──────────────────────────────────────────────────────────────────────
 def list_roles():
@@ -126,15 +217,17 @@ def create_user(data: dict):
     pw = data.get('password', 'changeme123')
     hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
     email = _normalize_email(data.get("email"))
+    from ..services.login_otp import normalize_india_phone
+    phone = normalize_india_phone(data.get("phone") or "") if data.get("phone") else None
     conn.execute("""INSERT INTO erp_users(
         username,email,password_hash,full_name,role_id,department,karigar_id,
-        employee_id,hrm_department_id,reporting_hod_user_id,module_access,active)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        employee_id,hrm_department_id,reporting_hod_user_id,module_access,phone,active)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (username, email, hashed,
          data.get('full_name',''), data.get('role_id'), data.get('department',''),
          data.get('karigar_id', '') or '',
          data.get('employee_id'), data.get('hrm_department_id'),
-         data.get('reporting_hod_user_id'), data.get('module_access'),
+         data.get('reporting_hod_user_id'), data.get('module_access'), phone,
          1))
     conn.commit(); conn.close()
 
@@ -143,7 +236,7 @@ def update_user(uid: int, data: dict):
         data = {**data, "email": _normalize_email(data.get("email"))}
     allowed = [
         'email', 'full_name', 'role_id', 'department', 'active', 'karigar_id',
-        'employee_id', 'hrm_department_id', 'reporting_hod_user_id', 'module_access',
+        'employee_id', 'hrm_department_id', 'reporting_hod_user_id', 'module_access', 'phone',
     ]
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
@@ -187,7 +280,7 @@ def get_user_auth_profile(username: str) -> dict | None:
     row = conn.execute(
         """SELECT u.id, u.username, u.email, u.full_name, u.role_id, u.department,
                   u.karigar_id, u.employee_id, u.hrm_department_id, u.reporting_hod_user_id,
-                  u.module_access, u.active, r.role_name
+                  u.module_access, u.phone, u.active, r.role_name
            FROM erp_users u
            LEFT JOIN roles r ON r.id = u.role_id
            WHERE u.username=? AND u.active=1""",
@@ -220,3 +313,68 @@ def get_admin_stats():
             GROUP BY r.id ORDER BY r.id""").fetchall()],
     }
     conn.close(); return stats
+
+
+# ── OTP challenges ─────────────────────────────────────────────────────────────
+def create_otp_challenge(*, challenge_id: str, user_id: int | None, username: str, phone: str,
+                         code_hash: str, expires_at: str) -> None:
+    conn = _connect()
+    conn.execute(
+        """INSERT OR REPLACE INTO login_otps
+           (challenge_id, user_id, username, phone, code_hash, expires_at, verified, attempts, created_at)
+           VALUES (?,?,?,?,?,?,0,0,datetime('now'))""",
+        (challenge_id, user_id, username, phone, code_hash, expires_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_otp_challenge(challenge_id: str) -> dict | None:
+    conn = _connect()
+    row = conn.execute("SELECT * FROM login_otps WHERE challenge_id=?", (challenge_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def increment_otp_attempts(challenge_id: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE login_otps SET attempts = attempts + 1 WHERE challenge_id=?",
+        (challenge_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_otp_verified(challenge_id: str) -> None:
+    conn = _connect()
+    conn.execute("UPDATE login_otps SET verified=1 WHERE challenge_id=?", (challenge_id,))
+    conn.commit()
+    conn.close()
+
+
+# ── Trusted devices ────────────────────────────────────────────────────────────
+def register_trusted_device(*, device_id: str, user_id: int | None, username: str,
+                            fingerprint: str, user_agent: str, trust_days: int) -> None:
+    from datetime import timedelta, timezone
+    exp = (datetime.now(tz=timezone.utc) + timedelta(days=trust_days)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect()
+    conn.execute(
+        """INSERT OR REPLACE INTO trusted_devices
+           (device_id, user_id, username, fingerprint, user_agent, expires_at, created_at)
+           VALUES (?,?,?,?,?,?,datetime('now'))""",
+        (device_id, user_id, username, fingerprint, user_agent, exp),
+    )
+    conn.commit()
+    conn.close()
+
+
+def trusted_device_exists(*, device_id: str, username: str) -> bool:
+    conn = _connect()
+    row = conn.execute(
+        """SELECT 1 FROM trusted_devices
+           WHERE device_id=? AND username=? AND datetime(expires_at) > datetime('now')""",
+        (device_id, username),
+    ).fetchone()
+    conn.close()
+    return row is not None

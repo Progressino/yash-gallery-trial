@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 
 # Roles allowed to replace bulk history, clear platforms, or reset shared cache.
-_HISTORICAL_UPLOAD_ROLES = frozenset({"Admin", "Manager"})
-_RESET_DATA_ROLES = frozenset({"Admin"})
+_HISTORICAL_UPLOAD_ROLES = frozenset({"Super Admin", "Admin", "Manager"})
+_RESET_DATA_ROLES = frozenset({"Super Admin", "Admin"})
 
 # POST paths any authenticated non-karigar user may call when historical data is locked.
 _DAILY_UPLOAD_PREFIXES = (

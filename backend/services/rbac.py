@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 # Target HRM RBAC roles (also seeded in users_db).
+ROLE_SUPER_ADMIN = "Super Admin"
 ROLE_ADMIN = "Admin"
 ROLE_SIR = "Sir"
 ROLE_HOD = "HOD"
@@ -15,7 +16,7 @@ ROLE_KARIGAR = "Karigar"
 # Legacy roles that retain full ERP access.
 LEGACY_FULL_ERP_ROLES = frozenset({"Manager", "Executive", "Clerk", "Viewer"})
 
-FULL_ERP_ROLES = frozenset({ROLE_ADMIN, ROLE_SIR}) | LEGACY_FULL_ERP_ROLES
+FULL_ERP_ROLES = frozenset({ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_SIR}) | LEGACY_FULL_ERP_ROLES
 HRM_ONLY_ROLES = frozenset({ROLE_HOD, ROLE_EMPLOYEE})
 
 # Sidebar / route module keys (must match frontend).
@@ -87,7 +88,7 @@ class HrmScope:
 
     @property
     def can_manage_org(self) -> bool:
-        return self.role in (ROLE_ADMIN, ROLE_SIR) or self.role in LEGACY_FULL_ERP_ROLES
+        return self.role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_SIR) or self.role in LEGACY_FULL_ERP_ROLES
 
     @property
     def is_hod(self) -> bool:
@@ -164,7 +165,7 @@ def build_hrm_scope(profile: dict[str, Any] | None, *, role: str | None = None) 
     except (TypeError, ValueError):
         hod_uid = None
 
-    if role_name in (ROLE_ADMIN, ROLE_SIR) or role_name in LEGACY_FULL_ERP_ROLES:
+    if role_name in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_SIR) or role_name in LEGACY_FULL_ERP_ROLES:
         return HrmScope(level="all", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
     if role_name == ROLE_HOD:
         return HrmScope(level="department", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)

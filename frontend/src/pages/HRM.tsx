@@ -46,7 +46,7 @@ export default function HRM() {
     queryFn: () => api.get('/hrm/scope').then(r => r.data),
   })
   const scope = scopeApi || authUser?.hrm_scope
-  const canManageOrg = scope?.can_manage_org ?? (authUser?.role === 'Admin' || authUser?.role === 'Sir')
+  const canManageOrg = scope?.can_manage_org ?? (authUser?.role === 'Super Admin' || authUser?.role === 'Admin' || authUser?.role === 'Sir')
   const scopeLevel = scope?.level || 'all'
 
   const [tab, setTab] = useState<Tab>('dashboard')

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 # Roles with full ERP + analytics access (existing env admin maps to Admin).
-FULL_ACCESS_ROLES = frozenset({"Admin", "Manager", "Executive", "Clerk", "Viewer"})
+FULL_ACCESS_ROLES = frozenset({"Super Admin", "Admin", "Manager", "Executive", "Clerk", "Viewer"})
 
 KARIGAR_ROLE = "Karigar"
 
@@ -16,7 +16,7 @@ _KARIGAR_STITCHING_PREFIXES = (
 )
 
 # Admin-only ERP user management.
-_ERP_ADMIN_ROLES = frozenset({"Admin", "Manager", "Sir"})
+_ERP_ADMIN_ROLES = frozenset({"Super Admin", "Admin", "Manager", "Sir"})
 
 
 def permissions_for_role(role_name: str) -> list[str]:

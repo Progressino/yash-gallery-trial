@@ -78,7 +78,7 @@ export function isKarigarUser(user: AuthUser | null | undefined): boolean {
   return user?.role === 'Karigar' || !!user?.is_karigar
 }
 
-const FULL_ERP_ROLES = new Set(['Admin', 'Sir', 'Manager', 'Executive', 'Clerk', 'Viewer'])
+const FULL_ERP_ROLES = new Set(['Super Admin', 'Admin', 'Sir', 'Manager', 'Executive', 'Clerk', 'Viewer'])
 
 export function userModules(user: AuthUser | null | undefined): string[] {
   if (!user) return []
@@ -101,7 +101,7 @@ export function isHrmOnlyUser(user: AuthUser | null | undefined): boolean {
 }
 
 export function mayAccessErpAdmin(user: AuthUser | null | undefined): boolean {
-  return user?.role === 'Admin' || user?.role === 'Manager' || user?.role === 'Sir'
+  return user?.role === 'Super Admin' || user?.role === 'Admin' || user?.role === 'Manager' || user?.role === 'Sir'
 }
 
 /** Bulk history / platform clears — Admin & Manager when org lock is on. */
@@ -109,14 +109,14 @@ export function mayUploadHistorical(user: AuthUser | null | undefined): boolean 
   if (!user) return false
   if (user.may_upload_historical === true) return true
   if (user.may_upload_historical === false) return false
-  return user.role === 'Admin' || user.role === 'Manager'
+  return user.role === 'Super Admin' || user.role === 'Admin' || user.role === 'Manager'
 }
 
 export function mayResetSharedData(user: AuthUser | null | undefined): boolean {
   if (!user) return false
   if (user.may_reset_all === true) return true
   if (user.may_reset_all === false) return false
-  return user.role === 'Admin'
+  return user.role === 'Super Admin' || user.role === 'Admin'
 }
 
 /** PO baseline sheets (daily inventory history matrix, SKU status/lead) and related Admin-only uploads when locked. */
@@ -124,7 +124,7 @@ export function mayUploadPoBaseline(user: AuthUser | null | undefined): boolean 
   if (!user) return false
   if (user.may_upload_po_baseline === true) return true
   if (user.may_upload_po_baseline === false) return false
-  return user.role === 'Admin' || user.role === 'Manager'
+  return user.role === 'Super Admin' || user.role === 'Admin' || user.role === 'Manager'
 }
 
 /** Removing saved Tier-3 daily files from the server. */
@@ -132,5 +132,5 @@ export function mayDeleteDailyUploadFile(user: AuthUser | null | undefined): boo
   if (!user) return false
   if (user.may_delete_daily_upload === true) return true
   if (user.may_delete_daily_upload === false) return false
-  return user.role === 'Admin'
+  return user.role === 'Super Admin' || user.role === 'Admin'
 }

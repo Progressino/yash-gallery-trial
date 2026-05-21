@@ -12,6 +12,7 @@ interface ERPUser {
   id: number
   username: string
   email: string | null
+  phone?: string | null
   full_name: string
   role_id: number
   role_name: string
@@ -50,7 +51,7 @@ function formatUserCreateError(err: unknown): string {
 const HRM_ROLES = new Set(['HOD', 'Employee'])
 
 const EMPTY_USER_FORM = {
-  username: '', email: '', password: 'changeme123', full_name: '', role_id: 1,
+  username: '', email: '', phone: '', password: 'changeme123', full_name: '', role_id: 1,
   department: 'Production', karigar_id: '',
   employee_id: '' as number | '', hrm_department_id: '' as number | '',
   reporting_hod_user_id: '' as number | '', module_access: '',
@@ -75,6 +76,7 @@ export default function Admin() {
       department: form.department,
       karigar_id: form.karigar_id,
     }
+    if (form.phone.trim()) body.phone = form.phone.trim()
     if (form.employee_id !== '') body.employee_id = Number(form.employee_id)
     if (form.hrm_department_id !== '') body.hrm_department_id = Number(form.hrm_department_id)
     if (form.reporting_hod_user_id !== '') body.reporting_hod_user_id = Number(form.reporting_hod_user_id)
@@ -240,7 +242,7 @@ export default function Admin() {
             <div className="bg-white rounded-xl border p-4 space-y-3">
               <h3 className="font-semibold text-gray-700">New User</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                {[['username','Username *'],['email','Email'],['password','Password'],['full_name','Full Name']].map(([k,l]) => (
+                {[['username','Username *'],['email','Email'],['phone','Mobile (+91)'],['password','Password'],['full_name','Full Name']].map(([k,l]) => (
                   <div key={k}><label className="text-xs text-gray-500">{l}</label>
                     <input value={(userForm as Record<string,string|number>)[k] as string}
                       type={k === 'password' ? 'password' : 'text'}

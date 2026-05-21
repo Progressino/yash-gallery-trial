@@ -23,6 +23,7 @@ class UserIn(BaseModel):
     full_name: Optional[str] = ''
     role_id: Optional[int] = None
     department: Optional[str] = ''
+    phone: Optional[str] = None
     karigar_id: Optional[str] = ''
     employee_id: Optional[int] = None
     hrm_department_id: Optional[int] = None
@@ -36,6 +37,7 @@ class UserUpdate(BaseModel):
     department: Optional[str] = None
     active: Optional[int] = None
     password: Optional[str] = None
+    phone: Optional[str] = None
     karigar_id: Optional[str] = None
     employee_id: Optional[int] = None
     hrm_department_id: Optional[int] = None
