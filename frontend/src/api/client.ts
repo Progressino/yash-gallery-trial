@@ -389,6 +389,12 @@ export async function uploadDailyAuto(
   }
 }
 
+/** Clear a session stuck on “parsing…” after daily upload (server-side reset). */
+export async function resetStuckDailyUpload(): Promise<{ ok: boolean; cleared: boolean; message: string }> {
+  const { data } = await api.post('/upload/daily-auto/reset-stuck', {}, { timeout: 30_000 })
+  return data
+}
+
 /** Poll until Tier-3 background ingest finishes (daily-auto). */
 export async function waitForDailyAutoIngest(
   onTick?: (message: string) => void,

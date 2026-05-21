@@ -88,19 +88,27 @@ export default function Upload() {
     cov: CoverageResponse | null,
     initialRes?: Awaited<ReturnType<typeof uploadDailyAuto>>,
   ) => {
+    const pendingOnly =
+      !!(initialRes as { parsing_pending?: boolean })?.parsing_pending &&
+      !cov &&
+      (initialRes?.detected_files ?? 0) === 0
     const summary =
       (cov ? dailyAutoSummaryFromCoverage(cov) : null) ??
-      (initialRes?.detected_platforms?.length || initialRes?.warnings?.length
-        ? dailyAutoSummaryFromUpload(initialRes)
-        : null)
+      (pendingOnly
+        ? null
+        : initialRes?.detected_platforms?.length || initialRes?.warnings?.length
+          ? dailyAutoSummaryFromUpload(initialRes)
+          : null)
     const detected = summary?.detected_platforms ?? initialRes?.detected_platforms ?? []
     const warnings = summary?.warnings ?? initialRes?.warnings ?? []
     if (source === 'daily') setDailyDetected(detected)
-    captureGenericAlert(source, warnings, {
-      parsed: summary?.processed_files ?? initialRes?.processed_files,
-      kept: summary?.detected_files ?? initialRes?.detected_files,
-      dropped: summary?.unknown_files ?? initialRes?.unknown_files,
-    })
+    if (!pendingOnly) {
+      captureGenericAlert(source, warnings, {
+        parsed: summary?.processed_files ?? initialRes?.processed_files,
+        kept: summary?.detected_files ?? initialRes?.detected_files,
+        dropped: summary?.unknown_files ?? initialRes?.unknown_files,
+      })
+    }
     const toastMsg = summary
       ? formatDailyAutoCompleteToast(summary, cov?.sales_rows)
       : (initialRes?.message ?? 'Daily upload complete.')
@@ -249,17 +257,38 @@ export default function Upload() {
           }
           await refresh()
         } else {
+          const stuck = !!(res as { stuck?: boolean }).stuck
           captureGenericAlert('daily', res.warnings?.length ? res.warnings : [res.message], {
             parsed: res.processed_files,
             kept: res.detected_files,
             dropped: res.unknown_files,
           })
-          showToast('error', res.message, 10_000)
+          showToast('error', stuck ? `${res.message} Use “Clear stuck upload” below.` : res.message, 12_000)
         }
       })
     } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : 'Upload failed')
+      const msg = e instanceof Error ? e.message : 'Upload failed'
+      showToast(
+        'error',
+        /timed out/i.test(msg)
+          ? `${msg} Files may still be on the server — try “Clear stuck upload”, then Load Cache.`
+          : msg,
+        12_000,
+      )
     } finally { setL('daily', false) }
+  }
+
+  const handleClearStuckDaily = async () => {
+    setL('daily_reset', true)
+    try {
+      const { resetStuckDailyUpload } = await import('../api/client')
+      const res = await resetStuckDailyUpload()
+      showToast(res.cleared ? 'success' : 'success', res.message)
+      setBuildingMsg('')
+      await refresh()
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Could not reset')
+    } finally { setL('daily_reset', false) }
   }
 
   const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
@@ -778,10 +807,25 @@ export default function Upload() {
             </p>
           </div>
           <DailyDropzone
-            uploading={loading['daily']}
+            uploading={loading['daily'] || loading['daily_reset']}
             onReject={(msg) => showToast('error', msg)}
             onUpload={async (files) => { await handleDailyAuto(files); qc.invalidateQueries({ queryKey: ['daily-summary'] }); qc.invalidateQueries({ queryKey: ['daily-uploads'] }) }}
           />
+          {(coverage.daily_auto_ingest_status === 'running' || loading['daily']) && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-amber-800">
+                {coverage.daily_auto_ingest_message || buildingMsg || 'Processing daily files on server…'}
+              </span>
+              <button
+                type="button"
+                onClick={handleClearStuckDaily}
+                disabled={loading['daily_reset']}
+                className="px-3 py-1 rounded-lg border border-amber-300 bg-white text-amber-900 hover:bg-amber-50 disabled:opacity-50"
+              >
+                {loading['daily_reset'] ? 'Clearing…' : 'Clear stuck upload'}
+              </button>
+            </div>
+          )}
           {dailyDetected.length > 0 && (
             <p className="text-xs text-green-700">
               ✓ Recognized: {dailyDetected.join(' · ')}

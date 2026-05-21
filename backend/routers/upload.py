@@ -14,13 +14,14 @@ from collections import defaultdict
 from typing import Any, Callable, List, Optional, Set, Tuple
 
 import logging
+import time
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from ..concurrency import run_heavy
+from ..concurrency import HEAVY_EXECUTOR, run_heavy
 
-from ..session import store, resume_auto_data_restore
+from ..session import store, resume_auto_data_restore, AppSession
 from ..models.schemas import UploadResponse
 from ..services.sku_mapping import parse_sku_mapping
 from ..services.mtr import load_mtr_from_zip, load_mtr_from_extracted_files, parse_mtr_csv
@@ -260,7 +261,7 @@ def _store_daily_auto_ingest_result(sess, payload: dict) -> None:
 
 def _run_daily_auto_sales_rebuild(session_id: str) -> None:
     """Background task: rebuild sales after Tier-3 ingest returned HTTP 200."""
-    sess = store._sessions.get(session_id)
+    sess = _resolve_upload_session(session_id)
     if sess is None:
         return
     sess.sales_rebuild_status = "running"
@@ -283,14 +284,39 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
         if getattr(sess, "daily_auto_ingest_status", "") == "done":
             sess.daily_auto_ingest_status = "idle"
             sess.daily_auto_ingest_message = ""
+            sess.daily_auto_ingest_started = 0.0
+
+
+@router.post("/daily-auto/reset-stuck")
+async def reset_stuck_daily_upload(request: Request):
+    """Clear a session stuck in daily ingest / sales rebuild (UI “Clear stuck upload”)."""
+    sess = _get_session(request)
+    cleared = _clear_stuck_daily_ingest(sess, force=True)
+    return {
+        "ok": True,
+        "cleared": cleared,
+        "daily_auto_ingest_status": getattr(sess, "daily_auto_ingest_status", "idle"),
+        "message": (
+            "Upload status reset — you can upload again. "
+            "If files were already parsed, use Load Cache on the dashboard."
+            if cleared
+            else "No stuck upload on this session."
+        ),
+    }
+
+
+def _queue_daily_auto_ingest(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
+    """Schedule ingest on the heavy executor (keeps asyncio responsive)."""
+    HEAVY_EXECUTOR.submit(_run_daily_auto_ingest_pipeline, session_id, file_parts)
 
 
 def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
     """Parse Tier-3 upload off the request thread, then queue the usual sales rebuild."""
-    sess = store._sessions.get(session_id)
+    sess = _resolve_upload_session(session_id)
     if sess is None:
         return
     sess.daily_auto_ingest_status = "running"
+    sess.daily_auto_ingest_started = time.time()
     sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
     try:
         payload = _process_daily_auto_sync(sess, file_parts, rebuild_sales=False)
@@ -322,8 +348,10 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
 
     sess.daily_auto_ingest_status = "done"
     sess.daily_auto_ingest_message = str(payload.get("message") or "Ingest finished.")
+    sess.daily_auto_ingest_started = 0.0
 
     if payload.get("sales_rebuild") == "pending":
+        sess.sales_rebuild_status = "running"
         try:
             from ..db.forecast_session_pg import persist_session_bundle_thread_safe
 
@@ -373,6 +401,56 @@ def _get_session(request: Request):
     if sess is None:
         raise HTTPException(status_code=500, detail="Session not initialised")
     return sess
+
+
+def _resolve_upload_session(session_id: str) -> AppSession | None:
+    """Session for background chunk finalize — must not silently skip ingest."""
+    if not session_id:
+        return None
+    sess = store._sessions.get(session_id)
+    if sess is not None:
+        sess.last_accessed = time.time()
+        return sess
+    _log.warning(
+        "Upload session %s… missing from RAM — attaching empty session for background ingest",
+        session_id[:8],
+    )
+    sess = AppSession()
+    sess.last_accessed = time.time()
+    store._sessions[session_id] = sess
+    return sess
+
+
+def _clear_stuck_daily_ingest(sess: AppSession, *, force: bool = False) -> bool:
+    """Reset a session stuck in daily_auto_ingest_status=running."""
+    if getattr(sess, "daily_auto_ingest_status", "idle") != "running":
+        return False
+    started = float(getattr(sess, "daily_auto_ingest_started", 0) or 0)
+    age = time.time() - started if started > 0 else 999999
+    stuck_sec = int(os.environ.get("DAILY_INGEST_STUCK_SEC", "1800"))
+    if not force and age < stuck_sec:
+        return False
+    sess.daily_auto_ingest_status = "error"
+    sess.daily_auto_ingest_message = (
+        "Previous daily upload did not finish (timed out or server was busy). "
+        "Your files may still be saved on the server — try Load Cache, or upload again."
+    )
+    _store_daily_auto_ingest_result(
+        sess,
+        {
+            "ok": False,
+            "message": sess.daily_auto_ingest_message,
+            "detected_platforms": [],
+            "warnings": [sess.daily_auto_ingest_message],
+            "processed_files": 0,
+            "detected_files": 0,
+            "unknown_files": 0,
+        },
+    )
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
+        sess.sales_rebuild_status = "idle"
+        sess.sales_rebuild_message = ""
+    return True
 
 
 async def _session_lock_apply(sess, fn: Callable[[], Any]) -> Any:
@@ -1989,20 +2067,22 @@ async def upload_daily_auto(
     n_files = len(files)
 
     if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
-        return JSONResponse(
-            content={
-                "ok": False,
-                "message": (
-                    "A Tier-3 upload is still processing on the server. "
-                    "Wait until the status banner clears, then try again."
-                ),
-                "detected_platforms": [],
-                "warnings": [],
-                "processed_files": n_files,
-                "detected_files": 0,
-                "unknown_files": n_files,
-            }
-        )
+        if not _clear_stuck_daily_ingest(sess, force=False):
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "stuck": True,
+                    "message": (
+                        "A daily upload is still processing. Wait for it to finish, "
+                        "or use “Clear stuck upload”, then try again."
+                    ),
+                    "detected_platforms": [],
+                    "warnings": [],
+                    "processed_files": n_files,
+                    "detected_files": 0,
+                    "unknown_files": 0,
+                }
+            )
 
     if n_files > _DAILY_AUTO_DIRECT_MAX_FILES:
         return JSONResponse(
@@ -2052,13 +2132,14 @@ async def upload_daily_auto(
 
     def mark_async_start():
         sess.daily_auto_ingest_status = "running"
+        sess.daily_auto_ingest_started = time.time()
         sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
         sess.daily_auto_ingest_result = {}
         sess.sales_rebuild_status = "idle"
         sess.sales_rebuild_message = ""
 
     await _session_lock_apply(sess, mark_async_start)
-    background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
+    background_tasks.add_task(_queue_daily_auto_ingest, sid, file_parts)
     return JSONResponse(
         content={
             "ok": True,
@@ -2311,32 +2392,36 @@ async def _accept_daily_auto_file_parts(
 ) -> dict:
     n_files = len(file_parts)
     if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
-        return {
-            "ok": False,
-            "message": (
-                "A Tier-3 upload is still processing on the server. "
-                "Wait until the status banner clears, then try again."
-            ),
-            "detected_platforms": [],
-            "warnings": [],
-            "processed_files": n_files,
-            "detected_files": 0,
-            "unknown_files": n_files,
-        }
+        if not _clear_stuck_daily_ingest(sess, force=False):
+            return {
+                "ok": False,
+                "stuck": True,
+                "message": (
+                    "A daily upload is still processing. Wait for it to finish, "
+                    "or use “Clear stuck upload”, then try again."
+                ),
+                "detected_platforms": [],
+                "warnings": [],
+                "processed_files": n_files,
+                "detected_files": 0,
+                "unknown_files": 0,
+            }
 
     def mark_async_start():
         sess.daily_auto_ingest_status = "running"
+        sess.daily_auto_ingest_started = time.time()
         sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
         sess.daily_auto_ingest_result = {}
         sess.sales_rebuild_status = "idle"
         sess.sales_rebuild_message = ""
 
     await _session_lock_apply(sess, mark_async_start)
-    background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
+    background_tasks.add_task(_queue_daily_auto_ingest, sid, file_parts)
     return {
         "ok": True,
         "ingest_async": True,
         "chunked": True,
+        "parsing_pending": True,
         "message": (
             "Upload complete — parsing daily files on the server. "
             "Status updates below; you can stay on this page."
@@ -2345,7 +2430,7 @@ async def _accept_daily_auto_file_parts(
         "warnings": [],
         "processed_files": n_files,
         "detected_files": 0,
-        "unknown_files": n_files,
+        "unknown_files": 0,
         "sales_rebuild": "pending",
     }
 
@@ -2463,9 +2548,9 @@ def _set_chunk_finalize_error(sess, target: str, message: str) -> None:
         )
 
 
-def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:
-    """Assemble chunk files on disk, then run Tier-3 ingest (background thread)."""
-    sess = store._sessions.get(session_id)
+def _finalize_chunk_upload_worker(session_id: str, upload_id: str) -> None:
+    """Assemble chunk files on disk, then run Tier-3 ingest (heavy worker thread)."""
+    sess = _resolve_upload_session(session_id)
     if sess is None:
         return
     target = "daily-auto"
@@ -2493,6 +2578,11 @@ def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:
                 loop.close()
 
 
+def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:
+    """Queue chunk finalize on the heavy executor (do not block the asyncio event loop)."""
+    HEAVY_EXECUTOR.submit(_finalize_chunk_upload_worker, session_id, upload_id)
+
+
 @router.post("/chunk/complete")
 async def chunk_upload_complete(
     request: Request,
@@ -2516,20 +2606,23 @@ async def chunk_upload_complete(
 
     if target == "daily-auto":
         if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
-            return JSONResponse(
-                content={
-                    "ok": False,
-                    "message": (
-                        "A Tier-3 upload is still processing on the server. "
-                        "Wait until the status banner clears, then try again."
-                    ),
-                    "detected_platforms": [],
-                    "warnings": [],
-                    "processed_files": n_files,
-                    "detected_files": 0,
-                    "unknown_files": n_files,
-                }
-            )
+            if not _clear_stuck_daily_ingest(sess, force=False):
+                return JSONResponse(
+                    content={
+                        "ok": False,
+                        "stuck": True,
+                        "message": (
+                            "A daily upload is still processing. Wait for it to finish, "
+                            "or use “Clear stuck upload” below, then try again."
+                        ),
+                        "detected_platforms": [],
+                        "warnings": [],
+                        "processed_files": n_files,
+                        "detected_files": 0,
+                        "unknown_files": 0,
+                    }
+                )
+            _log.info("Cleared stuck daily ingest before new chunk upload session=%s", sid[:8])
     elif getattr(sess, "inventory_upload_status", "idle") == "running":
         return JSONResponse(
             content={
@@ -2541,6 +2634,7 @@ async def chunk_upload_complete(
     def mark_assembling():
         if target == "daily-auto":
             sess.daily_auto_ingest_status = "running"
+            sess.daily_auto_ingest_started = time.time()
             sess.daily_auto_ingest_message = "Assembling uploaded files…"
             sess.daily_auto_ingest_result = {}
             sess.sales_rebuild_status = "idle"
@@ -2559,15 +2653,16 @@ async def chunk_upload_complete(
                 "ok": True,
                 "ingest_async": True,
                 "chunked": True,
+                "parsing_pending": True,
                 "message": (
-                    "All chunks received — assembling and parsing on the server. "
+                    "All chunks received — parsing on the server. "
                     "Status updates below; you can stay on this page."
                 ),
                 "detected_platforms": [],
                 "warnings": [],
                 "processed_files": n_files,
                 "detected_files": 0,
-                "unknown_files": n_files,
+                "unknown_files": 0,
                 "sales_rebuild": "pending",
             }
         )

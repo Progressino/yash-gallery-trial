@@ -65,6 +65,7 @@ class AppSession:
     # Async Tier-3 ingest (RAR extract + daily SQLite) — avoids 502 while proxy waits.
     daily_auto_ingest_status: str = "idle"   # idle | running | done | error
     daily_auto_ingest_message: str = ""
+    daily_auto_ingest_started: float = 0.0  # monotonic time when ingest/rebuild started
     # Last Tier-3 ingest outcome (for UI after async ingest; survives sales-rebuild idle reset).
     daily_auto_ingest_result: dict = field(default_factory=dict)
 
@@ -130,6 +131,7 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.sales_rebuild_message = ""
     sess.daily_auto_ingest_status = "idle"
     sess.daily_auto_ingest_message = ""
+    sess.daily_auto_ingest_started = 0.0
     sess.daily_auto_ingest_result = {}
     sess.po_calculate_status = "idle"
     sess.po_calculate_message = ""
