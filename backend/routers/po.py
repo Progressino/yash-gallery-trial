@@ -963,7 +963,9 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     sess.po_calculate_result = {}
     sess.po_calculate_result_df = pd.DataFrame()
 
-    from ..concurrency import run_po_calc
+    import asyncio
+
+    from ..concurrency import PO_CALC_EXECUTOR
     from ..services.po_calculate_jobs import set_po_job
     from ..services.po_calculate_run import background_po_calculate
 
@@ -973,7 +975,13 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
         ok=True,
         message=sess.po_calculate_message,
     )
-    await run_po_calc(background_po_calculate, sid, body.model_dump())
+    # Fire-and-forget — must not await (large catalogs run several minutes).
+    asyncio.get_running_loop().run_in_executor(
+        PO_CALC_EXECUTOR,
+        background_po_calculate,
+        sid,
+        body.model_dump(),
+    )
     return {
         "ok": True,
         "status": "running",

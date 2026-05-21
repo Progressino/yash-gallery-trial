@@ -984,9 +984,16 @@ def _session_skip_heavy_warm(path: str) -> bool:
     )
 
 
-def _session_po_calculate_status_poll(path: str, method: str) -> bool:
-    """Status polls only — must not block on PostgreSQL session restore."""
-    return method == "GET" and path == "/api/po/calculate/status"
+def _session_po_calculate_light(path: str, method: str) -> bool:
+    """PO calc poll/start/result — avoid PG restore + warm-cache copy (stay fast during long jobs)."""
+    if method == "POST" and path == "/api/po/calculate":
+        return True
+    if method == "GET" and path in (
+        "/api/po/calculate/status",
+        "/api/po/calculate/result",
+    ):
+        return True
+    return False
 
 
 def _session_uses_stitching_db_only(path: str) -> bool:
@@ -1081,10 +1088,12 @@ async def session_middleware(request: Request, call_next):
             )
         return response
 
-    if _session_po_calculate_status_poll(path, request.method):
+    if _session_po_calculate_light(path, request.method):
         sid = request.cookies.get(SESSION_COOKIE)
-        request.state.session_id = sid
         sess = store.get(sid) if sid else None
+        if sess is None and request.method == "POST" and path == "/api/po/calculate":
+            sid, sess = await run_aux(store.get_or_create, sid)
+        request.state.session_id = sid
         request.state.session = sess
         response: Response = await call_next(request)
         if sid:
