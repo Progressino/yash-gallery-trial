@@ -1,4 +1,4 @@
-/** Hour-wise production entry: sticker in − out → pieces (shared with Production Entry UI). */
+/** Hour-wise production entry: |sticker in − out| → pieces (shared with Production Entry UI). */
 
 export type HourEntryState = {
   operation: string
@@ -12,17 +12,17 @@ export function emptyHourEntry(): HourEntryState {
   return { operation: '', pieces: 0, sticker_in: 0, sticker_out: 0, manual_pieces: false }
 }
 
-/** True when pieces should be computed from sticker in − out. */
+/** True when pieces should be computed from |sticker in − out|. */
 export function isStickerMode(st: HourEntryState | undefined): boolean {
   if (!st || st.manual_pieces) return false
   return st.sticker_in !== 0 || st.sticker_out !== 0
 }
 
-/** Sticker in − out when in sticker mode; otherwise manual pieces. */
+/** |Sticker in − out| when in sticker mode; otherwise manual pieces. */
 export function resolveHourPieces(st: HourEntryState | undefined): number {
   if (!st) return 0
   if (isStickerMode(st)) {
-    return Math.max(0, Number(st.sticker_in) - Number(st.sticker_out))
+    return Math.abs(Number(st.sticker_in) - Number(st.sticker_out))
   }
   return Number(st.pieces) || 0
 }
@@ -38,7 +38,7 @@ export function applyHourEntryPatch(
 
   if (stickerTouched && patch.manual_pieces !== true) {
     base.manual_pieces = false
-    base.pieces = Math.max(0, Number(base.sticker_in) - Number(base.sticker_out))
+    base.pieces = Math.abs(Number(base.sticker_in) - Number(base.sticker_out))
   } else if (piecesTouched) {
     base.manual_pieces = true
   }

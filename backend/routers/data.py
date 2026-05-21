@@ -123,9 +123,13 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         # they prefer faster startup over completeness.
         # 0 or negative disables each cap (loads all history).
         try:
-            _auto_months = int((os.environ.get("AUTO_RESTORE_MONTHS") or "0").strip())
+            from ..services.platform_session_window import AUTO_RESTORE_MONTHS_DEFAULT
+
+            _auto_months = int((os.environ.get("AUTO_RESTORE_MONTHS") or str(AUTO_RESTORE_MONTHS_DEFAULT)).strip())
         except Exception:
-            _auto_months = 0
+            from ..services.platform_session_window import AUTO_RESTORE_MONTHS_DEFAULT
+
+            _auto_months = AUTO_RESTORE_MONTHS_DEFAULT
         _auto_months = None if _auto_months <= 0 else _auto_months
         try:
             _auto_max_files = int((os.environ.get("AUTO_RESTORE_MAX_FILES") or "0").strip())
@@ -325,6 +329,14 @@ def get_coverage(request: Request, light: bool = False):
         ),
         daily_auto_ingest_unknown_files=(
             int(_ingest["unknown_files"]) if _has_ingest else None
+        ),
+        inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
+        inventory_upload_message=getattr(sess, "inventory_upload_message", "") or "",
+        inventory_upload_rows=(
+            int(sess.inventory_upload_result["rows"])
+            if getattr(sess, "inventory_upload_result", None)
+            and sess.inventory_upload_result.get("rows") is not None
+            else None
         ),
     )
 

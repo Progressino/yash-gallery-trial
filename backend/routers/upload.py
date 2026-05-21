@@ -223,6 +223,9 @@ def _extract_rar_files(rar_bytes: bytes) -> list[tuple[str, bytes]]:
 def _rebuild_sales_sync(sess) -> tuple[bool, str]:
     """Rebuild combined sales_df from platform frames. Caller should hold ``_daily_restore_lock``."""
     try:
+        from ..services.platform_session_window import trim_session_platform_frames
+
+        trim_session_platform_frames(sess)
         sess.sales_df = build_sales_df(
             mtr_df=sess.mtr_df,
             myntra_df=sess.myntra_df,
@@ -1036,6 +1039,102 @@ def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
     return "oms"  # safe default
 
 
+async def _read_and_process_inventory_auto(session_id: str, files: List[UploadFile]) -> None:
+    """Read uploaded files after HTTP 200, then parse inventory on a worker thread."""
+    sess = store._sessions.get(session_id)
+    if sess is None:
+        return
+    oms_bytes_list: list[bytes] = []
+    fk_bytes_list: list[bytes] = []
+    myntra_bytes_list: list[bytes] = []
+    amz_bytes = None
+    detected: list[str] = []
+    try:
+        for file in files:
+            raw = await file.read()
+            fname = file.filename or ""
+            inv_type = _detect_inventory_type(fname, raw)
+            if inv_type == "rar":
+                amz_bytes = raw
+                detected.append(f"RAR archive ({fname})")
+            elif inv_type == "flipkart":
+                fk_bytes_list.append(raw)
+                detected.append(f"Flipkart ({fname})")
+            elif inv_type == "myntra":
+                myntra_bytes_list.append(raw)
+                detected.append(f"Myntra ({fname})")
+            elif inv_type == "amazon":
+                amz_bytes = raw
+                detected.append(f"Amazon ({fname})")
+            else:
+                oms_bytes_list.append(raw)
+                detected.append(f"OMS ({fname})")
+    except Exception as e:
+        _log.exception("inventory-auto read files")
+        sess.inventory_upload_status = "error"
+        sess.inventory_upload_message = str(e)
+        sess.inventory_upload_result = {"ok": False, "message": str(e)}
+        return
+
+    fk_bytes = fk_bytes_list or None
+    myntra_bytes = myntra_bytes_list if myntra_bytes_list else None
+    if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
+        sess.inventory_upload_status = "error"
+        sess.inventory_upload_message = "No files provided."
+        sess.inventory_upload_result = {"ok": False, "message": "No files provided."}
+        return
+
+    def work():
+        df_variant, debug = load_inventory_consolidated(
+            oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
+            group_by_parent=False, return_debug=True,
+        )
+        try:
+            from ..services.helpers import get_parent_sku
+            df_parent = df_variant.copy()
+            inv_cols = [
+                c for c in df_parent.columns
+                if c.endswith("_Inventory") or c.endswith("_Live") or c.endswith("_InTransit")
+                   or c in ("Buffer_Stock", "Marketplace_Total", "Total_Inventory")
+            ]
+            df_parent["Parent_SKU"] = df_parent["OMS_SKU"].apply(get_parent_sku)
+            df_parent = (
+                df_parent.groupby("Parent_SKU")[inv_cols].sum()
+                .reset_index()
+                .rename(columns={"Parent_SKU": "OMS_SKU"})
+            )
+        except Exception:
+            df_parent = df_variant
+        sess.inventory_df_variant = df_variant
+        sess.inventory_df_parent = df_parent
+        sess.inventory_debug = debug
+        _session_data_changed(sess)
+        parts = [f"{len(df_variant):,} total SKUs"]
+        for src, info in debug.items():
+            parts.append(f"{src}: {info}")
+        payload = {
+            "ok": True,
+            "message": " | ".join(parts),
+            "rows": len(df_variant),
+            "debug": debug,
+            "detected": detected,
+            "v": "inv-v9",
+        }
+        sess.inventory_upload_result = payload
+        sess.inventory_upload_status = "done"
+        sess.inventory_upload_message = payload["message"]
+        return payload
+
+    try:
+        await asyncio.to_thread(_session_lock_apply_sync, sess, work)
+        _auto_save_cache(sess)
+    except Exception as e:
+        _log.exception("inventory-auto parse")
+        sess.inventory_upload_status = "error"
+        sess.inventory_upload_message = f"Parse error: {e}"
+        sess.inventory_upload_result = {"ok": False, "message": f"Parse error: {e}"}
+
+
 @router.post("/inventory-auto")
 async def upload_inventory_auto(
     request: Request,
@@ -1050,17 +1149,47 @@ async def upload_inventory_auto(
     if not sess.sku_mapping:
         return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
 
+    if not files:
+        return JSONResponse(content={"ok": False, "message": "No files provided."})
+
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
+            }
+        )
+
+    sid = getattr(request.state, "session_id", None)
+    if sid:
+
+        def mark_async_start():
+            sess.inventory_upload_status = "running"
+            sess.inventory_upload_message = "Reading inventory files and merging snapshot…"
+            sess.inventory_upload_result = {}
+
+        await _session_lock_apply(sess, mark_async_start)
+        background_tasks.add_task(_read_and_process_inventory_auto, sid, files)
+        return JSONResponse(
+            content={
+                "ok": True,
+                "ingest_async": True,
+                "message": (
+                    "Upload accepted — parsing inventory on the server. "
+                    "Status updates below; you can stay on this page."
+                ),
+            }
+        )
+
     oms_bytes_list: list[bytes] = []
     fk_bytes_list: list[bytes] = []
     myntra_bytes_list: list[bytes] = []
     amz_bytes = None
     detected: list[str] = []
-
     for file in files:
         raw = await file.read()
         fname = file.filename or ""
         inv_type = _detect_inventory_type(fname, raw)
-
         if inv_type == "rar":
             amz_bytes = raw
             detected.append(f"RAR archive ({fname})")
@@ -1073,29 +1202,21 @@ async def upload_inventory_auto(
         elif inv_type == "amazon":
             amz_bytes = raw
             detected.append(f"Amazon ({fname})")
-        else:  # oms or unknown
+        else:
             oms_bytes_list.append(raw)
             detected.append(f"OMS ({fname})")
 
     fk_bytes = fk_bytes_list or None
     myntra_bytes = myntra_bytes_list if myntra_bytes_list else None
-
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
         return JSONResponse(content={"ok": False, "message": "No files provided."})
 
     try:
-
         def work():
             df_variant, debug = load_inventory_consolidated(
                 oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
                 group_by_parent=False, return_debug=True,
             )
-
-            # Always replace inventory snapshot for this upload batch.
-            # This prevents stale values after accidental duplicate file uploads.
-            # Users can upload the full current set again to refresh all sources cleanly.
-
-            # Rebuild parent view from merged variant DF (group by parent SKU)
             try:
                 from ..services.helpers import get_parent_sku
                 df_parent = df_variant.copy()
@@ -1111,13 +1232,11 @@ async def upload_inventory_auto(
                     .rename(columns={"Parent_SKU": "OMS_SKU"})
                 )
             except Exception:
-                df_parent = df_variant  # fallback
-
+                df_parent = df_variant
             sess.inventory_df_variant = df_variant
             sess.inventory_df_parent = df_parent
-            sess.inventory_debug = debug   # persist so /data/inventory can expose it
+            sess.inventory_debug = debug
             _session_data_changed(sess)
-
             parts = [f"{len(df_variant):,} total SKUs"]
             for src, info in debug.items():
                 parts.append(f"{src}: {info}")
@@ -1127,7 +1246,7 @@ async def upload_inventory_auto(
                 "rows": len(df_variant),
                 "debug": debug,
                 "detected": detected,
-                "v": "inv-v8",   # RAR: all Myntra/FK/OMS/Amazon CSVs + byte dedupe; multi-Myntra auto-upload
+                "v": "inv-v8",
             }
 
         data = await _session_lock_apply(sess, work)
@@ -1817,6 +1936,35 @@ def _process_daily_auto_sync(
             }
 
 
+async def _read_files_and_run_daily_ingest(session_id: str, files: List[UploadFile]) -> None:
+    """Read multipart bodies after HTTP 200, then run Tier-3 ingest on a worker thread."""
+    sess = store._sessions.get(session_id)
+    if sess is None:
+        return
+    file_parts: list[tuple[str, bytes]] = []
+    try:
+        for fobj in files:
+            file_parts.append((fobj.filename or "upload", await fobj.read()))
+    except Exception as e:
+        _log.exception("daily-auto read files")
+        sess.daily_auto_ingest_status = "error"
+        sess.daily_auto_ingest_message = str(e)
+        _store_daily_auto_ingest_result(
+            sess,
+            {
+                "ok": False,
+                "message": str(e),
+                "detected_platforms": [],
+                "warnings": [str(e)],
+                "processed_files": 0,
+                "detected_files": 0,
+                "unknown_files": 0,
+            },
+        )
+        return
+    await asyncio.to_thread(_run_daily_auto_ingest_pipeline, session_id, file_parts)
+
+
 @router.post("/daily-auto")
 async def upload_daily_auto(
     request: Request,
@@ -1834,9 +1982,7 @@ async def upload_daily_auto(
     """
     sess = _get_session(request)
     sid = getattr(request.state, "session_id", None)
-    file_parts: list[tuple[str, bytes]] = []
-    for fobj in files:
-        file_parts.append((fobj.filename or "upload", await fobj.read()))
+    n_files = len(files)
 
     if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
         return JSONResponse(
@@ -1848,13 +1994,16 @@ async def upload_daily_auto(
                 ),
                 "detected_platforms": [],
                 "warnings": [],
-                "processed_files": len(file_parts),
+                "processed_files": n_files,
                 "detected_files": 0,
-                "unknown_files": len(file_parts),
+                "unknown_files": n_files,
             }
         )
 
     if not sid:
+        file_parts: list[tuple[str, bytes]] = []
+        for fobj in files:
+            file_parts.append((fobj.filename or "upload", await fobj.read()))
         payload = await run_heavy(
             _process_daily_auto_sync, sess, file_parts, rebuild_sales=True,
         )
@@ -1867,13 +2016,13 @@ async def upload_daily_auto(
 
     def mark_async_start():
         sess.daily_auto_ingest_status = "running"
-        sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
+        sess.daily_auto_ingest_message = "Reading daily files…"
         sess.daily_auto_ingest_result = {}
         sess.sales_rebuild_status = "idle"
         sess.sales_rebuild_message = ""
 
     await _session_lock_apply(sess, mark_async_start)
-    background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
+    background_tasks.add_task(_read_files_and_run_daily_ingest, sid, files)
     return JSONResponse(
         content={
             "ok": True,
@@ -1881,9 +2030,9 @@ async def upload_daily_auto(
             "message": msg,
             "detected_platforms": [],
             "warnings": [],
-            "processed_files": len(file_parts),
+            "processed_files": n_files,
             "detected_files": 0,
-            "unknown_files": len(file_parts),
+            "unknown_files": n_files,
             "sales_rebuild": "pending",
         }
     )

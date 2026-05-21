@@ -387,13 +387,13 @@ def sticker_out_col(hcol: str) -> str:
 
 
 def resolve_hour_pieces(entry: dict) -> int:
-    """Pieces from sticker in/out (in − out) unless user entered manual pieces."""
+    """Pieces from |sticker in − out| unless user entered manual pieces."""
     sin = int(entry.get("sticker_in") or 0)
     sout = int(entry.get("sticker_out") or 0)
     manual = bool(entry.get("manual_pieces"))
     explicit = int(entry.get("pieces") or 0)
     if (sin > 0 or sout > 0) and not manual:
-        return max(0, sin - sout)
+        return abs(sin - sout)
     return explicit
 
 

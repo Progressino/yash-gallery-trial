@@ -61,6 +61,10 @@ class CoverageResponse(BaseModel):
     daily_auto_ingest_processed_files: Optional[int] = None
     daily_auto_ingest_detected_files: Optional[int] = None
     daily_auto_ingest_unknown_files: Optional[int] = None
+    # Snapshot inventory-auto background job
+    inventory_upload_status: str = "idle"
+    inventory_upload_message: str = ""
+    inventory_upload_rows: Optional[int] = None
 
 
 class ErrorResponse(BaseModel):

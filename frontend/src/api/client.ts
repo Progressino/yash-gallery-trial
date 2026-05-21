@@ -69,6 +69,9 @@ export interface CoverageResponse {
   daily_auto_ingest_processed_files?: number
   daily_auto_ingest_detected_files?: number
   daily_auto_ingest_unknown_files?: number
+  inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
+  inventory_upload_message?: string
+  inventory_upload_rows?: number
 }
 
 export type DailyAutoIngestSummary = {
@@ -200,14 +203,25 @@ export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', f
 
 export async function uploadInventoryAuto(
   files: File[]
-): Promise<{ ok: boolean; message: string; rows?: number; debug?: Record<string, unknown>; detected?: string[] }> {
+): Promise<{
+  ok: boolean
+  message: string
+  ingest_async?: boolean
+  rows?: number
+  debug?: Record<string, unknown>
+  detected?: string[]
+}> {
   const fd = new FormData()
   files.forEach(f => fd.append('files', f))
-  const { data } = await api.post('/upload/inventory-auto', fd, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: UPLOAD_TIMEOUT_MS,
-  })
-  return data
+  try {
+    const { data } = await api.post('/upload/inventory-auto', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+    })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Inventory upload failed'))
+  }
 }
 
 export async function uploadInventory(files: {
@@ -267,7 +281,7 @@ export async function uploadDailyAuto(
   try {
     const { data } = await api.post('/upload/daily-auto', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120_000,
+      timeout: UPLOAD_TIMEOUT_MS,
     })
     return data
   } catch (e: unknown) {
@@ -298,6 +312,31 @@ export async function waitForDailyAutoIngest(
     await new Promise(r => setTimeout(r, 1500))
   }
   throw new Error('Daily ingest timed out — refresh the page in a minute.')
+}
+
+/** Poll until snapshot inventory-auto finishes parsing. */
+export async function waitForInventoryUpload(
+  onTick?: (message: string) => void,
+  maxMs = UPLOAD_TIMEOUT_MS,
+): Promise<CoverageResponse> {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const cov = await getCoverage()
+    const st = cov.inventory_upload_status ?? 'idle'
+    if (st === 'running') {
+      onTick?.(cov.inventory_upload_message || 'Parsing inventory…')
+      await new Promise(r => setTimeout(r, 2000))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(cov.inventory_upload_message || 'Inventory upload failed')
+    }
+    if (st === 'done') {
+      return cov
+    }
+    await new Promise(r => setTimeout(r, 1500))
+  }
+  throw new Error('Inventory upload timed out — refresh the page in a minute.')
 }
 
 /** Poll until Tier-3 background sales rebuild finishes (daily-auto). */

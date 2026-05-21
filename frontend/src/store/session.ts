@@ -40,6 +40,8 @@ const empty: CoverageResponse = {
   sales_rebuild_message: '',
   daily_auto_ingest_status: 'idle',
   daily_auto_ingest_message: '',
+  inventory_upload_status: 'idle',
+  inventory_upload_message: '',
 }
 
 export const useSession = create<SessionState>((set) => ({

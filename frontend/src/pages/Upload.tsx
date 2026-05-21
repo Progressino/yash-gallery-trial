@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
-  uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, buildSales, getCoverage,
+  uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile,
   waitForDailyAutoIngest, waitForSalesRebuild,
@@ -826,12 +826,21 @@ export default function Upload() {
                 await withUploadGuard(async () => {
                   const res = await uploadInventoryAuto(files)
                   if (res.ok) {
-                    setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
-                    const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
-                      ? (res.debug.warnings as string[])
-                      : []
-                    captureGenericAlert('inv', issues)
-                    showToast('success', res.message)
+                    if (res.ingest_async) {
+                      showToast('success', `${res.message} Processing on server…`, 6000)
+                      await waitForInventoryUpload(msg => setBuildingMsg(msg))
+                      setBuildingMsg('')
+                      const cov = await getCoverage()
+                      const doneMsg = cov.inventory_upload_message || 'Inventory updated.'
+                      showToast('success', doneMsg)
+                    } else {
+                      setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
+                      const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
+                        ? (res.debug.warnings as string[])
+                        : []
+                      captureGenericAlert('inv', issues)
+                      showToast('success', res.message)
+                    }
                     await refresh()
                   } else showToast('error', res.message)
                 })

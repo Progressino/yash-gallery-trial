@@ -671,7 +671,9 @@ def _do_load_warm_cache() -> bool:
         # Large uploads (e.g. 107 MB MTR) can push build_sales_df memory to 6+ GB.
         # Trim each platform DF to the most recent 18 months; PO calc uses ≤15 months.
         try:
-            _trim_cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=18)
+            from .services.platform_session_window import SESSION_PLATFORM_MAX_DAYS
+
+            _trim_cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=SESSION_PLATFORM_MAX_DAYS)
             for _trim_key, _date_col in [
                 ("mtr_df", "Date"), ("myntra_df", "Date"),
                 ("meesho_df", "Date"), ("flipkart_df", "Date"),
@@ -684,8 +686,8 @@ def _do_load_warm_cache() -> bool:
                     if _mask.sum() < len(_df):
                         loaded[_trim_key] = _df[_mask].reset_index(drop=True)
                         log.info(
-                            "Phase 2 trim: %s %d→%d rows (18-month window)",
-                            _trim_key, len(_df), len(loaded[_trim_key]),
+                            "Phase 2 trim: %s %d→%d rows (%d-day window)",
+                            _trim_key, len(_df), len(loaded[_trim_key]), SESSION_PLATFORM_MAX_DAYS,
                         )
             _gc.collect()
         except Exception as _trim_err:
@@ -767,6 +769,15 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 continue
             except Exception:
                 pass  # fall through to plain copy on any import / trim error
+        if key in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df") and val is not None and hasattr(val, "empty") and not val.empty:
+            try:
+                from .services.platform_session_window import trim_platform_df
+                before = len(val)
+                val = trim_platform_df(val)
+                if len(val) < before:
+                    log.info("warm-cache copy: trimmed %s %d→%d rows", key, before, len(val))
+            except Exception:
+                pass
         setattr(sess, key, val)
     sess._quarterly_cache.clear()
     # Warm cache already contains rebuilt sales + merged platform history.

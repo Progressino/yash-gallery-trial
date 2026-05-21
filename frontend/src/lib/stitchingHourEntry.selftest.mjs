@@ -22,7 +22,10 @@ assert(piecesInputValue(st) === '10', `pieces display should be 10, got ${pieces
 assert(isStickerMode(st), 'sticker mode should be on')
 
 st = applyHourEntryPatch(st, { sticker_out: 5 })
-assert(resolveHourPieces(st) === 5, `expected 10-5=5, got ${resolveHourPieces(st)}`)
+assert(resolveHourPieces(st) === 5, `expected |10-5|=5, got ${resolveHourPieces(st)}`)
+
+st = applyHourEntryPatch(emptyHourEntry(), { sticker_in: 10, sticker_out: 20 })
+assert(resolveHourPieces(st) === 10, `expected |10-20|=10, got ${resolveHourPieces(st)}`)
 
 st = applyHourEntryPatch(emptyHourEntry(), { pieces: 12, manual_pieces: true })
 assert(resolveHourPieces(st) === 12, 'manual pieces')

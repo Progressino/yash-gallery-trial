@@ -121,6 +121,7 @@ def test_karigar_rate_by_date():
 
 def test_resolve_hour_pieces_sticker_and_pl_sign():
     assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 5, "manual_pieces": False}) == 5
+    assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 20, "manual_pieces": False}) == 10
     assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 0, "manual_pieces": False}) == 10
     assert svc.resolve_hour_pieces({"sticker_in": 0, "sticker_out": 0, "pieces": 12, "manual_pieces": True}) == 12
     budgeted = 100.0
