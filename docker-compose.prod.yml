@@ -70,6 +70,30 @@ services:
     mem_limit: 7.5g
     memswap_limit: 9g   # raised from 7g/8g: kernel OOM-killed uvicorn at ~7.3 GB RSS during warm-cache phase 2 + first session copy (2026-05-13). Host has 7.8 GiB RAM + 2 GiB swap; postgres ~0.5 GiB so this leaves ~0.3 GiB physical + 1.5 GiB swap headroom.
     restart: unless-stopped
+    labels:
+      - autoheal=true
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=8)\"",
+        ]
+      interval: 30s
+      timeout: 12s
+      retries: 3
+      start_period: 180s
+
+  # Restarts backend (and any labeled service) when Docker marks it unhealthy.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    restart: always
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=15
+      - AUTOHEAL_START_PERIOD=180
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   # ── React frontend + nginx reverse proxy ────────────────────
   frontend:

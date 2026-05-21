@@ -1,0 +1,89 @@
+name: Auto-heal backend
+
+# Every 5 minutes on the VPS: if /api/health fails through nginx or loopback,
+# restart the backend container (OOM, deadlock, or stuck uvicorn).
+# Docker autoheal also restarts containers marked unhealthy; this catches 502s
+# when nginx cannot reach a running-but-dead process edge case.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: auto-heal-backend
+  cancel-in-progress: false
+
+jobs:
+  heal:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
+    steps:
+      - name: Detect docker compose binary
+        id: dc
+        run: |
+          set -eu
+          if docker compose version >/dev/null 2>&1; then
+            echo "cmd=docker compose" >> "$GITHUB_OUTPUT"
+          elif command -v docker-compose >/dev/null 2>&1; then
+            echo "cmd=docker-compose" >> "$GITHUB_OUTPUT"
+          else
+            echo "ERROR: neither 'docker compose' nor docker-compose found." >&2
+            exit 1
+          fi
+
+      - name: Probe API health
+        id: probe
+        run: |
+          set +e
+          _ok() {
+            curl -sf --connect-timeout 8 --max-time 15 "$1" >/dev/null 2>&1
+          }
+          healthy=0
+          for i in 1 2 3; do
+            if _ok "http://127.0.0.1:8000/api/health" \
+              || _ok "http://127.0.0.1/api/health" \
+              || _ok "http://localhost/api/health"; then
+              healthy=1
+              break
+            fi
+            echo "health probe attempt $i/3 failed"
+            sleep 5
+          done
+          echo "healthy=$healthy" >> "$GITHUB_OUTPUT"
+          if [ "$healthy" = "1" ]; then
+            echo "OK: backend responding"
+            exit 0
+          fi
+          echo "WARN: backend not healthy after 3 probes"
+
+      - name: Restart backend
+        if: steps.probe.outputs.healthy != '1'
+        run: |
+          set -eu
+          DC="${{ steps.dc.outputs.cmd }}"
+          echo "Restarting backend container…"
+          $DC -f docker-compose.prod.yml restart backend
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl -sf --connect-timeout 8 http://127.0.0.1:8000/api/health; then
+              echo ""
+              echo "OK: backend healthy after auto-heal restart (attempt $i)"
+              exit 0
+            fi
+            echo "… waiting for /api/health after restart ($i/12)"
+            sleep 5
+          done
+          echo "ERROR: backend still unhealthy after auto-heal restart" >&2
+          $DC -f docker-compose.prod.yml logs --tail=80 backend 2>&1 || true
+          exit 1
+
+      - name: Ensure autoheal sidecar is running
+        run: |
+          set +e
+          DC="${{ steps.dc.outputs.cmd }}"
+          if ! $DC -f docker-compose.prod.yml ps --status running 2>/dev/null | grep -q autoheal; then
+            echo "Starting autoheal sidecar…"
+            $DC -f docker-compose.prod.yml up -d autoheal
+          fi

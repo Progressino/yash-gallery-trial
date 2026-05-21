@@ -66,6 +66,7 @@ jobs:
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
           _dc -f docker-compose.prod.yml up -d --remove-orphans
+          _dc -f docker-compose.prod.yml up -d autoheal
           docker image prune -f || true
 
       # Prefer direct backend on loopback :8000 (see docker-compose.prod.yml ports).
