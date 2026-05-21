@@ -263,6 +263,13 @@ def get_coverage(request: Request, light: bool = False):
     except Exception:
         pass
     if not light:
+        if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+            light = True
+        if getattr(sess, "sales_rebuild_status", "idle") == "running":
+            light = True
+        if getattr(sess, "inventory_upload_status", "idle") == "running":
+            light = True
+    if not light:
         try:
             from ..services.po_raise_import import hydrate_session_ledger_from_db
 

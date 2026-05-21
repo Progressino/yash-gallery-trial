@@ -10,9 +10,10 @@ import {
   normalizeLoadedHourEntry,
   piecesInputValue,
   resolveHourPieces,
+  resolveSessionHourPieces,
   type HourEntryState,
 } from '../lib/stitchingHourEntry'
-import { computeFinancialAudit, formatProfitLoss } from '../lib/stitchingFinancial'
+import { computeDayFinancialSummary, formatProfitLoss } from '../lib/stitchingFinancial'
 import { useAuth } from '../store/auth'
 
 type TabId =
@@ -419,41 +420,30 @@ function computeEntrySummary(
   operations: { op: string; target: number; rate: number }[],
   dailyRate: number,
 ) {
+  const sessionPcs = resolveSessionHourPieces(hours, hourState)
   const opTotals: Record<string, { pieces: number; value: number; target: number }> = {}
-  let totalPcs = 0
   for (const h of hours) {
     if (h.col === 'H_13_14') continue
     const st = hourState[h.col]
-    const pcs = resolveHourPieces(st)
+    const pcs = sessionPcs[h.col] ?? 0
     if (!st?.operation || !pcs) continue
     const meta = operations.find(o => o.op === st.operation)
     if (!meta) continue
-    totalPcs += pcs
     if (!opTotals[st.operation]) opTotals[st.operation] = { pieces: 0, value: 0, target: meta.target }
     opTotals[st.operation].pieces += pcs
     opTotals[st.operation].value += pcs * meta.rate
   }
   const totalValue = Object.values(opTotals).reduce((s, d) => s + d.value, 0)
-  let totalBudgeted = 0
-  let totalActual = 0
-  const opFin: Record<string, ReturnType<typeof computeFinancialAudit>> = {}
-  for (const [op, d] of Object.entries(opTotals)) {
-    const share = totalPcs > 0 ? d.pieces / totalPcs : 1
-    const fin = computeFinancialAudit(d.target, d.pieces, dailyRate, {
-      allocatedActualAmount: dailyRate * share,
-    })
-    opFin[op] = fin
-    totalBudgeted += fin.budgetedAmount
-    totalActual += fin.actualAmount
-  }
+  const fin = computeDayFinancialSummary(opTotals, dailyRate)
   return {
-    totalPcs,
+    totalPcs: fin.totalPcs,
     totalValue,
-    totalBudgeted,
-    totalActual,
-    pl: totalBudgeted - totalActual,
+    totalBudgeted: fin.totalBudgeted,
+    totalActual: fin.totalActual,
+    pl: fin.pl,
     opTotals,
-    opFin,
+    opFin: fin.opFin,
+    sessionPcs,
   }
 }
 
@@ -690,23 +680,22 @@ function ProductionTab({
     [hourState, hours, operations, karigarDailyRate],
   )
 
-  const buildHourEntries = useCallback(
-    () =>
-      hours
-        .filter(h => h.col !== 'H_13_14')
-        .map(h => {
-          const st = hourState[h.col] ?? emptyHourEntry()
-          return {
-            hour_col: h.col,
-            operation: st.operation,
-            pieces: resolveHourPieces(st),
-            sticker_in: st.sticker_in,
-            sticker_out: st.sticker_out,
-            manual_pieces: st.manual_pieces,
-          }
-        }),
-    [hours, hourState],
-  )
+  const buildHourEntries = useCallback(() => {
+    const sessionPcs = resolveSessionHourPieces(hours, hourState)
+    return hours
+      .filter(h => h.col !== 'H_13_14')
+      .map(h => {
+        const st = hourState[h.col] ?? emptyHourEntry()
+        return {
+          hour_col: h.col,
+          operation: st.operation,
+          pieces: sessionPcs[h.col] ?? 0,
+          sticker_in: st.sticker_in,
+          sticker_out: st.sticker_out,
+          manual_pieces: st.manual_pieces,
+        }
+      })
+  }, [hours, hourState])
 
   const normalizeHourEntriesForSave = useCallback(() => {
     const entries = buildHourEntries()
@@ -823,11 +812,21 @@ function ProductionTab({
 
   const setHour = (col: string, patch: Partial<HourEntryState>) => {
     setHourState(prev => {
-      const base = applyHourEntryPatch(prev[col], patch)
-      if (operations.length === 1 && resolveHourPieces(base) > 0 && !base.operation) {
+      const merged = { ...prev, [col]: applyHourEntryPatch(prev[col], patch) }
+      const sessionPcs = resolveSessionHourPieces(hours, merged)
+      for (const h of hours) {
+        if (h.col === 'H_13_14') continue
+        const st = merged[h.col]
+        if (!st || st.manual_pieces) continue
+        if (st.sticker_in !== 0 || st.sticker_out !== 0) {
+          merged[h.col] = { ...st, pieces: sessionPcs[h.col] ?? 0, manual_pieces: false }
+        }
+      }
+      const base = merged[col]
+      if (operations.length === 1 && (sessionPcs[col] ?? 0) > 0 && !base.operation) {
         base.operation = operations[0].op
       }
-      return { ...prev, [col]: base }
+      return merged
     })
   }
 
@@ -982,7 +981,8 @@ function ProductionTab({
           </p>
         )}
         <p className="text-xs text-gray-500 mb-3">
-          <strong>Sticker in / out</strong> — pieces = in − out (e.g. in 10, out 5 → 5 pcs). Leave stickers empty to type pieces manually.
+          <strong>Sticker in / out</strong> — pieces = |in − out|; sticker out only uses hourly count (rising out = cumulative delta).
+          Leave stickers empty to type pieces manually. Same challan re-save replaces the previous entry.
         </p>
 
         <div className="space-y-2 mb-3 md:hidden">
@@ -995,7 +995,7 @@ function ProductionTab({
               )
             }
             const st = hourState[h.col] ?? emptyHourEntry()
-            const pcs = resolveHourPieces(st)
+            const pcs = liveSummary.sessionPcs?.[h.col] ?? resolveHourPieces(st)
             const fromSticker = isStickerMode(st)
             const opMeta = operations.find(o => o.op === st.operation)
             const eff = opMeta && pcs > 0 ? Math.round((pcs / Math.max(opMeta.target, 1)) * 100) : null
@@ -1051,7 +1051,7 @@ function ProductionTab({
                       min={0}
                       readOnly={fromSticker}
                       className={`w-full border rounded-lg px-3 py-3 text-lg font-semibold mt-0.5 touch-manipulation ${fromSticker ? 'bg-sky-50 text-[#2c5aa0]' : ''}`}
-                      value={piecesInputValue(st)}
+                      value={piecesInputValue(st, liveSummary.sessionPcs, h.col)}
                       onChange={e => setHour(h.col, { pieces: +e.target.value || 0, manual_pieces: true })}
                     />
                   </label>
@@ -1086,7 +1086,7 @@ function ProductionTab({
                   )
                 }
                 const st = hourState[h.col] ?? emptyHourEntry()
-                const pcs = resolveHourPieces(st)
+                const pcs = liveSummary.sessionPcs?.[h.col] ?? resolveHourPieces(st)
                 const fromSticker = isStickerMode(st)
                 const opMeta = operations.find(o => o.op === st.operation)
                 const eff = opMeta && pcs > 0 ? Math.round((pcs / Math.max(opMeta.target, 1)) * 100) : null
@@ -1130,7 +1130,7 @@ function ProductionTab({
                         readOnly={fromSticker}
                         title={fromSticker ? 'Auto from stickers' : 'Manual pieces'}
                         className={`w-16 border rounded px-1 py-1 ${fromSticker ? 'bg-sky-50' : ''}`}
-                        value={piecesInputValue(st)}
+                        value={piecesInputValue(st, liveSummary.sessionPcs, h.col)}
                         onChange={e => setHour(h.col, { pieces: +e.target.value || 0, manual_pieces: true })}
                       />
                     </td>
@@ -1144,8 +1144,9 @@ function ProductionTab({
         {liveSummary.totalPcs > 0 && (
           <div className="mt-4 space-y-3">
             <p className="text-[10px] text-gray-500">
-              Financial audit: budget rate = ₹480 ÷ base target · budgeted = pieces × budget rate · actual = daily
-              wage (split across operations) · P&amp;L = budgeted − actual.
+              Stickers: in − out per hour, or <strong>sticker out only</strong> (rising counts use hourly delta).
+              Financial audit: budget rate = ₹480 ÷ base target · budgeted capped at ₹480/day total · actual = daily wage ·
+              P&amp;L = budgeted − actual. Re-saving the same date + challan + style updates the row (no duplicate).
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <div className="bg-white border rounded-lg p-3 text-center">

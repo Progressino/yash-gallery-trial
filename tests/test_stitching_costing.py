@@ -123,7 +123,44 @@ def test_resolve_hour_pieces_sticker_and_pl_sign():
     assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 5, "manual_pieces": False}) == 5
     assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 20, "manual_pieces": False}) == 10
     assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 0, "manual_pieces": False}) == 10
+    assert svc.resolve_hour_pieces({"sticker_in": 0, "sticker_out": 25, "manual_pieces": False}) == 25
     assert svc.resolve_hour_pieces({"sticker_in": 0, "sticker_out": 0, "pieces": 12, "manual_pieces": True}) == 12
+
+
+def test_resolve_session_hour_pieces_cumulative_out():
+    entries = [
+        {"hour_col": "H_09_10", "operation": "Astin Attach", "sticker_out": 30, "manual_pieces": False},
+        {"hour_col": "H_10_11", "operation": "Astin Attach", "sticker_out": 55, "manual_pieces": False},
+        {"hour_col": "H_11_12", "operation": "Astin Attach", "sticker_out": 95, "manual_pieces": False},
+    ]
+    pcs = svc.resolve_session_hour_pieces(entries)
+    assert pcs["H_09_10"] == 30
+    assert pcs["H_10_11"] == 25
+    assert pcs["H_11_12"] == 40
+    assert sum(pcs.values()) == 95
+
+
+def test_financial_audit_caps_day_budget():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-CAP", "Operation": "Op", "Target": 30, "Rate_Rs": 2.0}]),
+    )
+    out = svc.save_production_entry(
+        date_str="2026-05-21",
+        karigar_id="K200",
+        karigar_name="Cap Test",
+        challan_no="CH-CAP",
+        style="SKU-CAP",
+        hour_entries=[
+            {"hour_col": "H_09_10", "operation": "Op", "pieces": 200, "manual_pieces": True},
+            {"hour_col": "H_10_11", "operation": "Op", "pieces": 125, "manual_pieces": True},
+        ],
+    )
+    assert out["ok"] is True
+    pl = get_sheet_df("production_log")
+    row = pl[pl["Karigar_ID"].astype(str) == "K200"].iloc[-1]
+    assert float(row["Budgeted_Expense_Rs"]) <= 480.01
+    assert float(row["Budgeted_Expense_Rs"]) > 400
     budgeted = 100.0
     actual = 80.0
     assert round(budgeted - actual, 2) == 20.0

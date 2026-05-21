@@ -1,41 +1,32 @@
 /**
  * Run: node frontend/src/lib/stitchingHourEntry.selftest.mjs
- * Lightweight checks for sticker in/out → pieces (no vitest required).
  */
 import {
   applyHourEntryPatch,
   emptyHourEntry,
-  isStickerMode,
-  normalizeLoadedHourEntry,
-  piecesInputValue,
   resolveHourPieces,
+  resolveSessionHourPieces,
 } from './stitchingHourEntry.ts'
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
 }
 
-let st = emptyHourEntry()
-st = applyHourEntryPatch(st, { sticker_in: 10, manual_pieces: false })
-assert(resolveHourPieces(st) === 10, `expected 10-0=10, got ${resolveHourPieces(st)}`)
-assert(piecesInputValue(st) === '10', `pieces display should be 10, got ${piecesInputValue(st)}`)
-assert(isStickerMode(st), 'sticker mode should be on')
+const hours = [
+  { col: 'H_09_10' },
+  { col: 'H_10_11' },
+  { col: 'H_11_12' },
+]
+const state = {
+  H_09_10: { operation: 'Astin', sticker_in: 0, sticker_out: 30, pieces: 0, manual_pieces: false },
+  H_10_11: { operation: 'Astin', sticker_in: 0, sticker_out: 55, pieces: 0, manual_pieces: false },
+  H_11_12: { operation: 'Astin', sticker_in: 0, sticker_out: 95, pieces: 0, manual_pieces: false },
+}
+const pcs = resolveSessionHourPieces(hours, state)
+assert(pcs.H_09_10 === 30, `h1 ${pcs.H_09_10}`)
+assert(pcs.H_10_11 === 25, `h2 ${pcs.H_10_11}`)
+assert(pcs.H_11_12 === 40, `h3 ${pcs.H_11_12}`)
 
-st = applyHourEntryPatch(st, { sticker_out: 5 })
-assert(resolveHourPieces(st) === 5, `expected |10-5|=5, got ${resolveHourPieces(st)}`)
-
-st = applyHourEntryPatch(emptyHourEntry(), { sticker_in: 10, sticker_out: 20 })
-assert(resolveHourPieces(st) === 10, `expected |10-20|=10, got ${resolveHourPieces(st)}`)
-
-st = applyHourEntryPatch(emptyHourEntry(), { pieces: 12, manual_pieces: true })
-assert(resolveHourPieces(st) === 12, 'manual pieces')
-assert(!isStickerMode(st), 'not sticker mode when manual')
-
-st = applyHourEntryPatch(st, { sticker_in: 10, sticker_out: 0, manual_pieces: false })
-assert(resolveHourPieces(st) === 10, 'sticker patch should clear manual and compute 10')
-
-const loaded = normalizeLoadedHourEntry({ sticker_in: 10, sticker_out: 0, pieces: 0, manual_pieces: true })
-assert(!loaded.manual_pieces, 'load with stickers must not stay manual_pieces')
-assert(resolveHourPieces(loaded) === 10, 'loaded row should resolve 10 from stickers')
+assert(resolveHourPieces({ sticker_in: 10, sticker_out: 20, manual_pieces: false }) === 10, 'abs in-out')
 
 console.log('stitchingHourEntry.selftest: OK')

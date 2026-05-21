@@ -335,7 +335,7 @@ export async function waitForDailyAutoIngest(
 ): Promise<CoverageResponse> {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
-    const cov = await getCoverage()
+    const cov = await getCoverage({ light: true })
     const st = cov.daily_auto_ingest_status ?? 'idle'
     if (st === 'running') {
       onTick?.(cov.daily_auto_ingest_message || 'Parsing daily files…')
@@ -360,7 +360,7 @@ export async function waitForInventoryUpload(
 ): Promise<CoverageResponse> {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
-    const cov = await getCoverage()
+    const cov = await getCoverage({ light: true })
     const st = cov.inventory_upload_status ?? 'idle'
     if (st === 'running') {
       onTick?.(cov.inventory_upload_message || 'Parsing inventory…')
@@ -385,7 +385,7 @@ export async function waitForSalesRebuild(
 ): Promise<CoverageResponse> {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
-    const cov = await getCoverage()
+    const cov = await getCoverage({ light: true })
     const st = cov.sales_rebuild ?? 'idle'
     if (st === 'running') {
       onTick?.(cov.sales_rebuild_message || 'Rebuilding combined sales…')

@@ -91,12 +91,13 @@ def compute_financial_audit(
     daily_rate: float,
     *,
     allocated_actual_amount: float | None = None,
+    allocated_budgeted_amount: float | None = None,
 ) -> dict[str, Any]:
     """
     Factory financial audit (benchmark ₹480 / operation target).
 
     Budget rate/pc = 480 / Base Target
-    Budgeted amount = Actual pieces × budget rate/pc
+    Budgeted amount = pieces × budget rate/pc (capped at ₹480/day across ops when allocated)
     Actual amount = karigar daily rate (allocated across ops when multiple rows/day)
     P&L = Budgeted − Actual (profit if positive)
     """
@@ -104,7 +105,11 @@ def compute_financial_audit(
     pcs = max(int(pieces or 0), 0)
     dr = float(daily_rate or 0)
     budget_rate = round(BENCHMARK_DAILY_RATE_RS / bt, 4)
-    budgeted = round(pcs * budget_rate, 2)
+    budgeted = (
+        round(float(allocated_budgeted_amount), 2)
+        if allocated_budgeted_amount is not None
+        else round(pcs * budget_rate, 2)
+    )
     if allocated_actual_amount is not None:
         actual_amt = round(float(allocated_actual_amount), 2)
     else:
@@ -387,14 +392,52 @@ def sticker_out_col(hcol: str) -> str:
 
 
 def resolve_hour_pieces(entry: dict) -> int:
-    """Pieces from |sticker in − out| unless user entered manual pieces."""
+    """Pieces from stickers or manual count (single hour; use resolve_session_hour_pieces for a full day)."""
+    if bool(entry.get("manual_pieces")):
+        return int(entry.get("pieces") or 0)
     sin = int(entry.get("sticker_in") or 0)
     sout = int(entry.get("sticker_out") or 0)
-    manual = bool(entry.get("manual_pieces"))
-    explicit = int(entry.get("pieces") or 0)
-    if (sin > 0 or sout > 0) and not manual:
-        return abs(sin - sout)
-    return explicit
+    if sin == 0 and sout == 0:
+        return int(entry.get("pieces") or 0)
+    if sin == 0 and sout > 0:
+        return sout
+    return abs(sin - sout)
+
+
+def resolve_session_hour_pieces(hour_entries: list[dict]) -> dict[str, int]:
+    """
+    Resolve pieces per hour in time order.
+    Sticker-out-only with non-decreasing counts = cumulative machine counter (use delta).
+    """
+    by_col = {
+        (e.get("hour_col") or e.get("hour") or ""): e
+        for e in hour_entries
+        if (e.get("hour_col") or e.get("hour") or "") in HOUR_COLS
+    }
+    prev_out = 0
+    out: dict[str, int] = {}
+    for hc in HOUR_COLS:
+        if hc == "H_13_14":
+            continue
+        e = by_col.get(hc)
+        if not e:
+            out[hc] = 0
+            continue
+        if bool(e.get("manual_pieces")):
+            out[hc] = int(e.get("pieces") or 0)
+            continue
+        sin = int(e.get("sticker_in") or 0)
+        sout = int(e.get("sticker_out") or 0)
+        if sin == 0 and sout == 0:
+            out[hc] = int(e.get("pieces") or 0)
+            continue
+        if sin == 0 and sout > 0:
+            pcs = sout - prev_out if prev_out > 0 and sout >= prev_out else sout
+            out[hc] = max(0, pcs)
+            prev_out = max(prev_out, sout)
+            continue
+        out[hc] = abs(sin - sout)
+    return out
 
 
 def clean_key(val: Any) -> str:
@@ -545,14 +588,12 @@ def load_production_entry(date_str: str, karigar_id: str, challan_no: str, style
 
     if "Save_Time" in existing.columns:
         existing = existing.sort_values("Save_Time", ascending=False, na_position="last")
+    if "Operation" in existing.columns:
+        existing["_op_norm"] = existing["Operation"].apply(normalize_operation_name)
+        existing = existing.drop_duplicates(subset=["_op_norm"], keep="first")
 
-    seen_ops: set[str] = set()
     for _, row in existing.iterrows():
         op_name = normalize_operation_name(row.get("Operation", ""))
-        op_key = op_name.lower()
-        if op_key in seen_ops:
-            continue
-        seen_ops.add(op_key)
         for hcol in HOUR_COLS:
             raw = row.get(hcol, 0)
             try:
@@ -607,7 +648,7 @@ def save_production_entry(
                 "Hourly_Target": max(1, int(row["Target"])),
             }
 
-        h_vals: dict[str, int] = {}
+        h_vals = resolve_session_hour_pieces(hour_entries)
         si_vals: dict[str, int] = {}
         so_vals: dict[str, int] = {}
         op_vals: dict[str, str | None] = {}
@@ -615,7 +656,6 @@ def save_production_entry(
             hc = e.get("hour_col") or e.get("hour")
             if hc not in HOUR_COLS:
                 continue
-            h_vals[hc] = resolve_hour_pieces(e)
             si_vals[hc] = int(e.get("sticker_in") or 0)
             so_vals[hc] = int(e.get("sticker_out") or 0)
             raw_op = e.get("operation") or None
@@ -653,6 +693,16 @@ def save_production_entry(
         new_op_pieces = {op: int(data["pieces"]) for op, data in op_totals.items()}
         day_piece_total = _karigar_pieces_on_date(
             log_df, date_str, karigar_id, additional_by_op=new_op_pieces,
+        )
+        raw_budget_by_op: dict[str, float] = {}
+        for op_name, data in op_totals.items():
+            bt = int(op_info[op_name]["Target"])
+            raw_budget_by_op[op_name] = data["pieces"] * (BENCHMARK_DAILY_RATE_RS / max(bt, 1))
+        raw_budget_total = sum(raw_budget_by_op.values())
+        budget_scale = (
+            min(1.0, BENCHMARK_DAILY_RATE_RS / raw_budget_total)
+            if raw_budget_total > BENCHMARK_DAILY_RATE_RS
+            else 1.0
         )
         new_rows: list[dict] = []
 
@@ -692,6 +742,7 @@ def save_production_entry(
                 pcs,
                 daily_rate,
                 allocated_actual_amount=allocated_actual,
+                allocated_budgeted_amount=raw_budget_by_op.get(op_name, 0) * budget_scale,
             )
             new_rows.append(
                 {
