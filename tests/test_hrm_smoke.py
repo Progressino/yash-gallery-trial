@@ -13,12 +13,14 @@ def hrm_db(tmp_path, monkeypatch):
     monkeypatch.setenv("HRM_DB_PATH", db_path)
     from backend.db import hrm_db
 
+    monkeypatch.setattr(hrm_db, "_DB", db_path)
     hrm_db.init_db()
     return hrm_db
 
 
 def test_hrm_department_employee_task_flow(hrm_db):
-    hrm_db.create_department({"name": "Accounts", "hod_name": "Raj"})
+    import uuid
+    hrm_db.create_department({"name": f"Accounts-{uuid.uuid4().hex[:8]}", "hod_name": "Raj"})
     depts = hrm_db.list_departments()
     assert len(depts) == 1
     dept_id = depts[0]["id"]

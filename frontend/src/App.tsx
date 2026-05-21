@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-quer
 import axios from 'axios'
 import Layout from './components/Layout'
 import KarigarLayout from './components/KarigarLayout'
-import { KarigarGate, StaffGate } from './components/RouteGuards'
+import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuards'
+import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheLoad, getCoverage } from './api/client'
 import { useSession } from './store/session'
@@ -85,6 +86,7 @@ function ProtectedRoute() {
 
   const activeUser = data ?? cachedUser
   const isKarigar = isKarigarUser(activeUser)
+  const hrmOnly = isHrmOnlyUser(activeUser)
 
   const coverageEmpty = (c: Awaited<ReturnType<typeof getCoverage>>) =>
     !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.snapdeal
@@ -109,7 +111,7 @@ function ProtectedRoute() {
       }
       return true
     },
-    enabled: !!activeUser && !isKarigar,
+    enabled: !!activeUser && !isKarigar && !hrmOnly,
     retry: 3,
     retryDelay: 8_000,
     staleTime: Infinity,
@@ -122,7 +124,7 @@ function ProtectedRoute() {
       setCoverage(c)
       return c
     },
-    enabled: !!activeUser && !isKarigar && !isRestoring,
+    enabled: !!activeUser && !isKarigar && !hrmOnly && !isRestoring,
     refetchInterval: (q) => {
       const c = q.state.data
       if (!c) return 8_000
@@ -189,6 +191,7 @@ export default function App() {
             </Route>
             <Route element={<StaffGate />}>
             <Route path="/" element={<Layout />}>
+              <Route element={<ModuleAccessGate />}>
               <Route index element={<Dashboard />} />
               <Route path="upload"    element={<Upload />} />
               <Route path="mtr"       element={<MTR />} />
@@ -212,6 +215,7 @@ export default function App() {
               <Route path="admin"       element={<Admin />} />
               <Route path="marketplace-connections" element={<MarketplaceConnections />} />
               <Route path="sku-deepdive" element={<SKUDeepDive />} />
+              </Route>
             </Route>
             </Route>
           </Route>

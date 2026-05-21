@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { useAuth } from '../store/auth'
 
 type Tab = 'dashboard' | 'employees' | 'responsibilities' | 'hod' | 'issues' | 'appraisal' | 'performance'
 
@@ -39,6 +40,15 @@ const statusBg = (s: string) => {
 
 export default function HRM() {
   const qc = useQueryClient()
+  const authUser = useAuth(s => s.user)
+  const { data: scopeApi } = useQuery({
+    queryKey: ['hrm-scope'],
+    queryFn: () => api.get('/hrm/scope').then(r => r.data),
+  })
+  const scope = scopeApi || authUser?.hrm_scope
+  const canManageOrg = scope?.can_manage_org ?? (authUser?.role === 'Admin' || authUser?.role === 'Sir')
+  const scopeLevel = scope?.level || 'all'
+
   const [tab, setTab] = useState<Tab>('dashboard')
   const [selDept, setSelDept] = useState<number | ''>('')
   const [selEmp, setSelEmp] = useState<number | ''>('')
@@ -117,6 +127,19 @@ export default function HRM() {
     recognition.start()
   }
 
+  useEffect(() => {
+    if (!scope) return
+    if (scope.level === 'self' && scope.employee_id) {
+      setSelEmp(scope.employee_id)
+      setAppraisalEmp(scope.employee_id)
+      if (scope.department_id) setSelDept(scope.department_id)
+    }
+    if (scope.level === 'department' && scope.department_id) {
+      setSelDept(scope.department_id)
+      setHodDept(scope.department_id)
+    }
+  }, [scope?.level, scope?.employee_id, scope?.department_id])
+
   // ── Queries ──────────────────────────────────────────────────────────────────
   const { data: depts = [] } = useQuery({ queryKey: ['hrm-depts'], queryFn: () => api.get('/hrm/departments').then(r => r.data) })
   const { data: employees = [] } = useQuery({ queryKey: ['hrm-emps', selDept], queryFn: () => api.get(`/hrm/employees${selDept ? `?department_id=${selDept}` : ''}`).then(r => r.data) })
@@ -162,7 +185,7 @@ export default function HRM() {
 
   const deptName = (id: any) => (depts as any[]).find(d => d.id === id)?.name || '—'
 
-  const TABS: [Tab, string][] = [
+  const ALL_TABS: [Tab, string][] = [
     ['dashboard', '📊 Dashboard'],
     ['employees', '👥 Employees'],
     ['responsibilities', '📋 Responsibilities'],
@@ -172,11 +195,35 @@ export default function HRM() {
     ['performance', '📈 Performance'],
   ]
 
+  const TABS = useMemo(() => {
+    if (scopeLevel === 'self') {
+      return ALL_TABS.filter(([k]) => ['dashboard', 'responsibilities', 'issues', 'appraisal'].includes(k))
+    }
+    if (scopeLevel === 'department') {
+      return ALL_TABS
+    }
+    return ALL_TABS
+  }, [scopeLevel])
+
+  useEffect(() => {
+    if (!TABS.some(([k]) => k === tab)) setTab(TABS[0]?.[0] || 'dashboard')
+  }, [TABS, tab])
+
+  const scopeHint =
+    scopeLevel === 'self'
+      ? 'You see only your own tasks and performance.'
+      : scopeLevel === 'department'
+        ? 'You see your department team only.'
+        : null
+
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-bold text-gray-800">HRM — Task & Performance Tracker</h1>
-        <p className="text-sm text-gray-500">Employees · Tasks · Issues · Dependency · Appraisal</p>
+        <p className="text-sm text-gray-500">
+          Employees · Tasks · Issues · Dependency · Appraisal
+          {scopeHint && <span className="block text-amber-700 mt-1">{scopeHint}</span>}
+        </p>
       </div>
 
       <div className="flex flex-wrap gap-1 bg-gray-100 p-1 rounded-lg">
@@ -292,7 +339,9 @@ export default function HRM() {
           <div className="bg-white rounded-xl border p-4">
             <div className="flex justify-between items-center mb-3">
               <h3 className="font-semibold text-gray-700">Departments</h3>
+              {canManageOrg && (
               <button onClick={() => setShowDeptForm(true)} className="px-3 py-1.5 bg-[#002B5B] text-white rounded-lg text-xs font-medium">+ Add</button>
+              )}
             </div>
             {showDeptForm && (
               <div className="grid grid-cols-3 gap-3 mb-3 bg-blue-50 p-3 rounded-lg">
@@ -323,7 +372,9 @@ export default function HRM() {
                     <>
                       <p className="font-semibold text-sm">{d.name}</p>
                       <p className="text-xs text-gray-500">HOD: {d.hod_name || '—'}</p>
+                      {canManageOrg && (
                       <button onClick={() => setEditDept({ id: d.id, name: d.name, hod_name: d.hod_name || '' })} className="text-xs text-blue-600 mt-1">✏️ Edit</button>
+                      )}
                     </>
                   )}
                 </div>
@@ -337,11 +388,18 @@ export default function HRM() {
       {tab === 'employees' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+            <select
+              value={selDept}
+              onChange={e => setSelDept(e.target.value ? +e.target.value : '')}
+              disabled={scopeLevel === 'department'}
+              className="border rounded-lg px-3 py-1.5 text-sm disabled:bg-gray-100"
+            >
               <option value="">All Departments</option>
               {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
+            {(canManageOrg || scopeLevel === 'department') && (
             <button onClick={() => setShowEmpForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Add Employee</button>
+            )}
           </div>
           {showEmpForm && (
             <div className="bg-white rounded-xl border p-4 space-y-3">

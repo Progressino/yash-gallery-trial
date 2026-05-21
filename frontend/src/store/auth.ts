@@ -2,6 +2,13 @@ import { create } from 'zustand'
 
 const AUTH_STORAGE_KEY = 'erp_auth_profile_v1'
 
+export interface HrmScopeInfo {
+  level: 'all' | 'department' | 'self'
+  department_id?: number | null
+  employee_id?: number | null
+  can_manage_org?: boolean
+}
+
 export interface AuthUser {
   username: string
   role: string
@@ -9,6 +16,12 @@ export interface AuthUser {
   karigar_id?: string
   user_id?: number
   department?: string
+  employee_id?: number | null
+  hrm_department_id?: number | null
+  reporting_hod_user_id?: number | null
+  module_access?: string
+  modules?: string[]
+  hrm_scope?: HrmScopeInfo
   permissions?: string[]
   is_karigar?: boolean
   historical_upload_locked?: boolean
@@ -63,6 +76,32 @@ export const useAuth = create<AuthState>(set => ({
 
 export function isKarigarUser(user: AuthUser | null | undefined): boolean {
   return user?.role === 'Karigar' || !!user?.is_karigar
+}
+
+const FULL_ERP_ROLES = new Set(['Admin', 'Sir', 'Manager', 'Executive', 'Clerk', 'Viewer'])
+
+export function userModules(user: AuthUser | null | undefined): string[] {
+  if (!user) return []
+  if (user.modules?.length) return user.modules
+  if (user.role === 'Karigar') return ['stitching']
+  if (user.role === 'HOD' || user.role === 'Employee') return ['hrm']
+  if (FULL_ERP_ROLES.has(user.role || '')) return ['*']
+  return ['hrm']
+}
+
+export function canAccessModule(user: AuthUser | null | undefined, moduleKey: string): boolean {
+  const mods = userModules(user)
+  if (mods.includes('*')) return true
+  return mods.includes(moduleKey)
+}
+
+export function isHrmOnlyUser(user: AuthUser | null | undefined): boolean {
+  const mods = userModules(user)
+  return mods.length === 1 && mods[0] === 'hrm'
+}
+
+export function mayAccessErpAdmin(user: AuthUser | null | undefined): boolean {
+  return user?.role === 'Admin' || user?.role === 'Manager' || user?.role === 'Sir'
 }
 
 /** Bulk history / platform clears — Admin & Manager when org lock is on. */

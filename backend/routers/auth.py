@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from ..db.users_db import verify_erp_user, get_user_auth_profile
 from ..services.permissions import permissions_for_role, KARIGAR_ROLE
 from ..services.upload_policy import upload_policy_for_role
+from ..services.rbac import build_hrm_scope, resolve_module_access
 
 router = APIRouter()
 
@@ -108,15 +109,29 @@ def login(body: LoginRequest, request: Request, response: Response):
         _set_auth_cookie(request, response, token)
         _reset_session_cookie(request, response)
         pol = upload_policy_for_role(role)
+        modules = resolve_module_access(role, user.get("module_access"))
+        hrm_scope = build_hrm_scope(user, role=role)
+        redirect = "/production-entry" if role == KARIGAR_ROLE else "/"
+        if role not in (KARIGAR_ROLE,) and modules == ["hrm"]:
+            redirect = "/hrm"
         return {
             "ok": True,
             "username": username,
             "role": role,
             "full_name": user.get("full_name") or "",
             "karigar_id": user.get("karigar_id") or "",
+            "employee_id": user.get("employee_id"),
+            "hrm_department_id": user.get("hrm_department_id"),
+            "modules": modules,
+            "hrm_scope": {
+                "level": hrm_scope.level,
+                "department_id": hrm_scope.department_id,
+                "employee_id": hrm_scope.employee_id,
+                "can_manage_org": hrm_scope.can_manage_org,
+            },
             "permissions": permissions_for_role(role),
             **pol,
-            "redirect": "/production-entry" if role == KARIGAR_ROLE else "/",
+            "redirect": redirect,
         }
 
     expected_user = os.environ.get("AUTH_USERNAME", "")
@@ -182,6 +197,8 @@ def me(request: Request):
     if profile:
         role = profile.get("role_name") or role
         pol = upload_policy_for_role(role)
+        hrm_scope = build_hrm_scope(profile, role=role)
+        modules = resolve_module_access(role, profile.get("module_access"))
         return {
             "username": username,
             "role": role,
@@ -189,6 +206,17 @@ def me(request: Request):
             "karigar_id": profile.get("karigar_id") or "",
             "user_id": profile.get("id"),
             "department": profile.get("department") or "",
+            "employee_id": profile.get("employee_id"),
+            "hrm_department_id": profile.get("hrm_department_id"),
+            "reporting_hod_user_id": profile.get("reporting_hod_user_id"),
+            "module_access": profile.get("module_access") or "",
+            "modules": modules,
+            "hrm_scope": {
+                "level": hrm_scope.level,
+                "department_id": hrm_scope.department_id,
+                "employee_id": hrm_scope.employee_id,
+                "can_manage_org": hrm_scope.can_manage_org,
+            },
             "permissions": permissions_for_role(role),
             "is_karigar": role == KARIGAR_ROLE,
             **pol,

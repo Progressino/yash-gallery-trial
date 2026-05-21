@@ -2,11 +2,28 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
+import { ALL_MODULE_KEYS, MODULE_LABELS } from '../lib/modules'
+import { mayAccessErpAdmin, useAuth } from '../store/auth'
 
 type Tab = 'dashboard' | 'users' | 'roles' | 'activity'
 
 interface AdminStats { total_users: number; total_roles: number; recent_activity: number; by_role: { role_name: string; cnt: number }[] }
-interface ERPUser { id: number; username: string; email: string | null; full_name: string; role_id: number; role_name: string; department: string; karigar_id?: string; active: number; created_at: string }
+interface ERPUser {
+  id: number
+  username: string
+  email: string | null
+  full_name: string
+  role_id: number
+  role_name: string
+  department: string
+  karigar_id?: string
+  employee_id?: number | null
+  hrm_department_id?: number | null
+  reporting_hod_user_id?: number | null
+  module_access?: string | null
+  active: number
+  created_at: string
+}
 interface Role { id: number; role_name: string; description: string; created_at: string }
 interface ActivityLog { id: number; username: string; action: string; document_type: string; document_no: string; details: string; created_at: string }
 
@@ -30,15 +47,44 @@ function formatUserCreateError(err: unknown): string {
   return 'Request failed'
 }
 
+const HRM_ROLES = new Set(['HOD', 'Employee'])
+
+const EMPTY_USER_FORM = {
+  username: '', email: '', password: 'changeme123', full_name: '', role_id: 1,
+  department: 'Production', karigar_id: '',
+  employee_id: '' as number | '', hrm_department_id: '' as number | '',
+  reporting_hod_user_id: '' as number | '', module_access: '',
+}
+
 export default function Admin() {
+  const authUser = useAuth(s => s.user)
   const qc = useQueryClient()
   const [tab, setTab] = useState<Tab>('dashboard')
   const [showUserForm, setShowUserForm] = useState(false)
   const [showRoleForm, setShowRoleForm] = useState(false)
   const [editUser, setEditUser] = useState<ERPUser | null>(null)
-  const [editData, setEditData] = useState<Record<string, string | number>>({})
+  const [editData, setEditData] = useState<Record<string, string | number | null>>({})
 
-  const [userForm, setUserForm] = useState({ username: '', email: '', password: 'changeme123', full_name: '', role_id: 1, department: 'Production', karigar_id: '' })
+  const payloadFromUserForm = (form: typeof EMPTY_USER_FORM, modules: string[]) => {
+    const body: Record<string, unknown> = {
+      username: form.username,
+      email: form.email,
+      password: form.password,
+      full_name: form.full_name,
+      role_id: form.role_id,
+      department: form.department,
+      karigar_id: form.karigar_id,
+    }
+    if (form.employee_id !== '') body.employee_id = Number(form.employee_id)
+    if (form.hrm_department_id !== '') body.hrm_department_id = Number(form.hrm_department_id)
+    if (form.reporting_hod_user_id !== '') body.reporting_hod_user_id = Number(form.reporting_hod_user_id)
+    if (modules.length) body.module_access = JSON.stringify(modules)
+    else if (form.module_access) body.module_access = form.module_access
+    return body
+  }
+
+  const [userForm, setUserForm] = useState({ ...EMPTY_USER_FORM })
+  const [modulePick, setModulePick] = useState<string[]>([])
   const [roleForm, setRoleForm] = useState({ role_name: '', description: '' })
   const [includeInactiveUsers, setIncludeInactiveUsers] = useState(false)
 
@@ -52,11 +98,27 @@ export default function Admin() {
     enabled: tab === 'users' || tab === 'dashboard',
   })
   const { data: roles = [] } = useQuery<Role[]>({ queryKey: ['erp-roles'], queryFn: () => api.get('/erp-admin/roles').then(r => r.data) })
+  const { data: hrmDepts = [] } = useQuery({
+    queryKey: ['hrm-depts-admin'],
+    queryFn: () => api.get('/hrm/departments').then(r => r.data),
+    enabled: tab === 'users' && !!mayAccessErpAdmin(authUser),
+  })
+  const { data: hrmEmployees = [] } = useQuery({
+    queryKey: ['hrm-emps-admin'],
+    queryFn: () => api.get('/hrm/employees').then(r => r.data),
+    enabled: tab === 'users' && !!mayAccessErpAdmin(authUser),
+  })
   const { data: activity = [] } = useQuery<ActivityLog[]>({ queryKey: ['activity-log'], queryFn: () => api.get('/erp-admin/activity?limit=100').then(r => r.data), enabled: tab === 'activity' })
 
   const createUserMut = useMutation({
     mutationFn: (b: object) => api.post('/erp-admin/users', b),
-      onSuccess: () => { qc.invalidateQueries({ queryKey: ['erp-users'] }); qc.invalidateQueries({ queryKey: ['admin-stats'] }); setShowUserForm(false); setUserForm({ username: '', email: '', password: 'changeme123', full_name: '', role_id: 1, department: 'Production', karigar_id: '' }) }
+      onSuccess: () => {
+        qc.invalidateQueries({ queryKey: ['erp-users'] })
+        qc.invalidateQueries({ queryKey: ['admin-stats'] })
+        setShowUserForm(false)
+        setModulePick([])
+        setUserForm({ ...EMPTY_USER_FORM })
+      }
   })
   const updateUserMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/erp-admin/users/${id}`, data),
@@ -79,23 +141,24 @@ export default function Admin() {
 
   const openNewUserForm = () => {
     const karigarRole = roles.find(r => r.role_name === 'Karigar')
-    setUserForm({
-      username: '',
-      email: '',
-      password: 'changeme123',
-      full_name: '',
-      role_id: karigarRole?.id ?? 1,
-      department: 'Production',
-      karigar_id: '',
-    })
+    setUserForm({ ...EMPTY_USER_FORM, role_id: karigarRole?.id ?? 1 })
     setShowUserForm(true)
+  }
+
+  if (!mayAccessErpAdmin(authUser)) {
+    return (
+      <div className="p-8 text-center text-gray-600">
+        <p className="font-medium">Admin access required</p>
+        <p className="text-sm mt-2">Your role cannot manage ERP users.</p>
+      </div>
+    )
   }
 
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-bold text-gray-800">Admin</h1>
-        <p className="text-sm text-gray-500">User management, roles, and activity audit log</p>
+        <p className="text-sm text-gray-500">Users, roles (Admin / Sir / HOD / Employee), HRM links, and module access</p>
       </div>
 
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
@@ -205,9 +268,48 @@ export default function Admin() {
                     <p className="text-[10px] text-gray-400 mt-0.5">Must match karigar_master (e.g. K001)</p>
                   </div>
                 )}
+                {newUserRole && HRM_ROLES.has(newUserRole) && (
+                  <>
+                    <div><label className="text-xs text-gray-500">HRM department</label>
+                      <select value={userForm.hrm_department_id} onChange={e => setUserForm(f => ({ ...f, hrm_department_id: e.target.value ? +e.target.value : '' }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">—</option>
+                        {(hrmDepts as { id: number; name: string }[]).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select></div>
+                    <div><label className="text-xs text-gray-500">Linked HRM employee</label>
+                      <select value={userForm.employee_id} onChange={e => setUserForm(f => ({ ...f, employee_id: e.target.value ? +e.target.value : '' }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">—</option>
+                        {(hrmEmployees as { id: number; name: string; emp_code: string }[]).map(e => (
+                          <option key={e.id} value={e.id}>{e.name} ({e.emp_code})</option>
+                        ))}
+                      </select></div>
+                    <div><label className="text-xs text-gray-500">Reporting HOD (user)</label>
+                      <select value={userForm.reporting_hod_user_id} onChange={e => setUserForm(f => ({ ...f, reporting_hod_user_id: e.target.value ? +e.target.value : '' }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">—</option>
+                        {users.filter(u => u.role_name === 'HOD' && u.active).map(u => (
+                          <option key={u.id} value={u.id}>{u.full_name || u.username}</option>
+                        ))}
+                      </select></div>
+                  </>
+                )}
+                <div className="col-span-2 md:col-span-3">
+                  <label className="text-xs text-gray-500">Module access override (optional)</label>
+                  <p className="text-[10px] text-gray-400 mb-1">Leave empty for role default. HOD/Employee → HRM only; Admin/Sir → full ERP.</p>
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    {ALL_MODULE_KEYS.map(m => (
+                      <label key={m} className="flex items-center gap-1 text-xs border rounded px-2 py-1 cursor-pointer">
+                        <input type="checkbox" checked={modulePick.includes(m)}
+                          onChange={e => setModulePick(prev => e.target.checked ? [...prev, m] : prev.filter(x => x !== m))} />
+                        {MODULE_LABELS[m]}
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => createUserMut.mutate(userForm)} disabled={createUserMut.isPending || !userForm.username}
+                <button onClick={() => createUserMut.mutate(payloadFromUserForm(userForm, modulePick))} disabled={createUserMut.isPending || !userForm.username}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
                   {createUserMut.isPending ? 'Saving…' : 'Create User'}
                 </button>
@@ -263,6 +365,22 @@ export default function Admin() {
                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 font-mono" />
                   </div>
                 )}
+                {editUserRole && HRM_ROLES.has(editUserRole) && (
+                  <>
+                    <div><label className="text-xs text-gray-500">HRM department ID</label>
+                      <input type="number" value={(editData.hrm_department_id as number) ?? editUser.hrm_department_id ?? ''}
+                        onChange={e => setEditData(d => ({ ...d, hrm_department_id: e.target.value ? +e.target.value : null }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                    <div><label className="text-xs text-gray-500">HRM employee ID</label>
+                      <input type="number" value={(editData.employee_id as number) ?? editUser.employee_id ?? ''}
+                        onChange={e => setEditData(d => ({ ...d, employee_id: e.target.value ? +e.target.value : null }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                    <div><label className="text-xs text-gray-500">Reporting HOD user ID</label>
+                      <input type="number" value={(editData.reporting_hod_user_id as number) ?? editUser.reporting_hod_user_id ?? ''}
+                        onChange={e => setEditData(d => ({ ...d, reporting_hod_user_id: e.target.value ? +e.target.value : null }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                  </>
+                )}
               </div>
               <div className="flex gap-2">
                 <button onClick={() => updateUserMut.mutate({ id: editUser.id, data: editData })} disabled={updateUserMut.isPending}
@@ -277,7 +395,7 @@ export default function Admin() {
           <div className="bg-white rounded-xl border overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-gray-400 text-xs uppercase">
-                <tr>{['Username','Full Name','Role','Karigar ID','Department','Email','Status','Actions'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
+                <tr>{['Username','Full Name','Role','HRM Emp','HRM Dept','Department','Email','Status','Actions'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
               </thead>
               <tbody>
                 {users.map(u => (
@@ -287,7 +405,8 @@ export default function Admin() {
                     <td className="px-4 py-2">
                       <span className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">{u.role_name}</span>
                     </td>
-                    <td className="px-4 py-2 font-mono text-xs text-gray-600">{u.karigar_id || '—'}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-gray-600">{u.employee_id ?? '—'}</td>
+                    <td className="px-4 py-2 text-gray-500">{u.hrm_department_id ?? '—'}</td>
                     <td className="px-4 py-2 text-gray-500">{u.department}</td>
                     <td className="px-4 py-2 text-gray-400">{u.email || '—'}</td>
                     <td className="px-4 py-2">

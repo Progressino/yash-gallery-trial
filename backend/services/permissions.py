@@ -16,7 +16,7 @@ _KARIGAR_STITCHING_PREFIXES = (
 )
 
 # Admin-only ERP user management.
-_ERP_ADMIN_ROLES = frozenset({"Admin", "Manager"})
+_ERP_ADMIN_ROLES = frozenset({"Admin", "Manager", "Sir"})
 
 
 def permissions_for_role(role_name: str) -> list[str]:

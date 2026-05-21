@@ -12,6 +12,9 @@ def _connect():
 
 DEFAULT_ROLES = [
     ('Admin',     'Full access to all modules'),
+    ('Sir',       'Management — full ERP access'),
+    ('HOD',       'Head of department — HRM module, team data only'),
+    ('Employee',  'HRM module — own tasks and performance only'),
     ('Manager',   'Create/edit/approve in assigned departments'),
     ('Executive', 'Create documents; view reports'),
     ('Clerk',     'Data entry only; limited view'),
@@ -60,6 +63,10 @@ def init_db():
         except: pass
     for table, col, decl in [
         ("erp_users", "karigar_id", "TEXT DEFAULT ''"),
+        ("erp_users", "employee_id", "INTEGER"),
+        ("erp_users", "hrm_department_id", "INTEGER"),
+        ("erp_users", "reporting_hod_user_id", "INTEGER"),
+        ("erp_users", "module_access", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -119,17 +126,25 @@ def create_user(data: dict):
     pw = data.get('password', 'changeme123')
     hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
     email = _normalize_email(data.get("email"))
-    conn.execute("""INSERT INTO erp_users(username,email,password_hash,full_name,role_id,department,karigar_id,active)
-        VALUES(?,?,?,?,?,?,?,?)""",
+    conn.execute("""INSERT INTO erp_users(
+        username,email,password_hash,full_name,role_id,department,karigar_id,
+        employee_id,hrm_department_id,reporting_hod_user_id,module_access,active)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
         (username, email, hashed,
          data.get('full_name',''), data.get('role_id'), data.get('department',''),
-         data.get('karigar_id', '') or '', 1))
+         data.get('karigar_id', '') or '',
+         data.get('employee_id'), data.get('hrm_department_id'),
+         data.get('reporting_hod_user_id'), data.get('module_access'),
+         1))
     conn.commit(); conn.close()
 
 def update_user(uid: int, data: dict):
     if "email" in data:
         data = {**data, "email": _normalize_email(data.get("email"))}
-    allowed = ['email','full_name','role_id','department','active','karigar_id']
+    allowed = [
+        'email', 'full_name', 'role_id', 'department', 'active', 'karigar_id',
+        'employee_id', 'hrm_department_id', 'reporting_hod_user_id', 'module_access',
+    ]
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
     if 'password' in data:
@@ -171,7 +186,8 @@ def get_user_auth_profile(username: str) -> dict | None:
     conn = _connect()
     row = conn.execute(
         """SELECT u.id, u.username, u.email, u.full_name, u.role_id, u.department,
-                  u.karigar_id, u.active, r.role_name
+                  u.karigar_id, u.employee_id, u.hrm_department_id, u.reporting_hod_user_id,
+                  u.module_access, u.active, r.role_name
            FROM erp_users u
            LEFT JOIN roles r ON r.id = u.role_id
            WHERE u.username=? AND u.active=1""",

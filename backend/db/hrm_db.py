@@ -119,9 +119,37 @@ def _next_emp_code(conn):
     return f"EMP-{n:03d}"
 
 
-def list_departments():
+def employee_department_id(employee_id: int) -> int | None:
     conn = _connect()
-    rows = conn.execute("SELECT * FROM departments ORDER BY name").fetchall()
+    row = conn.execute("SELECT department_id FROM employees WHERE id=?", (employee_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row["department_id"]
+
+
+def get_responsibility_owner(responsibility_id: int) -> int | None:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT employee_id FROM responsibilities WHERE id=? AND active=1",
+        (responsibility_id,),
+    ).fetchone()
+    conn.close()
+    return int(row["employee_id"]) if row else None
+
+
+def list_departments(department_id: int | None = None):
+    conn = _connect()
+    if department_id is not None and int(department_id) < 0:
+        conn.close()
+        return []
+    if department_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM departments WHERE id=? ORDER BY name",
+            (int(department_id),),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM departments ORDER BY name").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -147,8 +175,25 @@ def update_department(did: int, data: dict):
     conn.close()
 
 
-def list_employees(department_id=None, status="Active"):
+def list_employees(department_id=None, status="Active", employee_id: int | None = None):
     conn = _connect()
+    if employee_id is not None and int(employee_id) < 0:
+        conn.close()
+        return []
+    if employee_id is not None:
+        rows = conn.execute(
+            """
+            SELECT e.*, d.name as department_name
+            FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+            WHERE e.id=? AND e.status=? ORDER BY e.name
+        """,
+            (int(employee_id), status),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    if department_id is not None and int(department_id) < 0:
+        conn.close()
+        return []
     if department_id:
         rows = conn.execute(
             """
@@ -463,6 +508,13 @@ def create_issue(data: dict):
     )
     conn.commit()
     conn.close()
+
+
+def get_issue_employee_id(issue_id: int) -> int | None:
+    conn = _connect()
+    row = conn.execute("SELECT employee_id FROM issue_logs WHERE id=?", (issue_id,)).fetchone()
+    conn.close()
+    return int(row["employee_id"]) if row else None
 
 
 def resolve_issue(issue_id: int, resolution: str):

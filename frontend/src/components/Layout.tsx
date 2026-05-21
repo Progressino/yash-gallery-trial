@@ -4,43 +4,53 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
 import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage, invalidateDataQueries } from '../api/client'
 import api from '../api/client'
-import { useAuth, mayResetSharedData, mayUploadHistorical } from '../store/auth'
+import { useAuth, mayResetSharedData, mayUploadHistorical, canAccessModule, isHrmOnlyUser } from '../store/auth'
+import type { ModuleKey } from '../lib/modules'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
 
-const NAV_GROUPS = [
+type NavItem = { to: string; label: string; module: ModuleKey }
+
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: 'Sales & Analytics',
     items: [
-      { to: '/',          label: '📊 Intelligence' },
-      { to: '/upload',    label: '📁 Upload Data' },
-      { to: '/mtr',       label: '📦 Amazon' },
-      { to: '/myntra',    label: '🛍️ Myntra' },
-      { to: '/meesho',    label: '🛒 Meesho' },
-      { to: '/flipkart',  label: '🟡 Flipkart' },
-      { to: '/snapdeal',  label: '🔴 Snapdeal' },
-      { to: '/forecast',    label: '📈 AI Forecast' },
-      { to: '/finance',     label: '💰 Finance' },
-      { to: '/sku-deepdive', label: '🔬 SKU Deepdive' },
+      { to: '/', module: 'intelligence', label: '📊 Intelligence' },
+      { to: '/upload', module: 'upload', label: '📁 Upload Data' },
+      { to: '/mtr', module: 'amazon', label: '📦 Amazon' },
+      { to: '/myntra', module: 'myntra', label: '🛍️ Myntra' },
+      { to: '/meesho', module: 'meesho', label: '🛒 Meesho' },
+      { to: '/flipkart', module: 'flipkart', label: '🟡 Flipkart' },
+      { to: '/snapdeal', module: 'snapdeal', label: '🔴 Snapdeal' },
+      { to: '/forecast', module: 'forecast', label: '📈 AI Forecast' },
+      { to: '/finance', module: 'finance', label: '💰 Finance' },
+      { to: '/sku-deepdive', module: 'sku_deepdive', label: '🔬 SKU Deepdive' },
     ],
   },
   {
     label: 'ERP',
     items: [
-      { to: '/sales',      label: '🧾 Sales Orders' },
-      { to: '/items',      label: '🏭 Item Master' },
-      { to: '/purchase',   label: '🛒 Purchase' },
-      { to: '/tna',        label: '📅 TNA Calendar' },
-      { to: '/production', label: '⚙️ Production' },
-      { to: '/stitching-costing', label: '🧵 Stitching Costing' },
-      { to: '/grey',       label: '🧵 Grey Fabric' },
-      { to: '/hrm',        label: '👥 HRM' },
-      { to: '/inventory',  label: '📦 Inventory' },
-      { to: '/po', label: '🎯 PO Engine' },
-      { to: '/admin',      label: '🔐 Admin' },
-      { to: '/marketplace-connections', label: '🔗 Marketplace API' },
+      { to: '/sales', module: 'sales', label: '🧾 Sales Orders' },
+      { to: '/items', module: 'items', label: '🏭 Item Master' },
+      { to: '/purchase', module: 'purchase', label: '🛒 Purchase' },
+      { to: '/tna', module: 'tna', label: '📅 TNA Calendar' },
+      { to: '/production', module: 'production', label: '⚙️ Production' },
+      { to: '/stitching-costing', module: 'stitching', label: '🧵 Stitching Costing' },
+      { to: '/grey', module: 'grey', label: '🧵 Grey Fabric' },
+      { to: '/hrm', module: 'hrm', label: '👥 HRM' },
+      { to: '/inventory', module: 'inventory', label: '📦 Inventory' },
+      { to: '/po', module: 'po', label: '🎯 PO Engine' },
+      { to: '/admin', module: 'admin', label: '🔐 Admin' },
+      { to: '/marketplace-connections', module: 'marketplace', label: '🔗 Marketplace API' },
     ],
   },
 ]
+
+function filterNavGroups(user: ReturnType<typeof useAuth.getState>['user']) {
+  return NAV_GROUPS.map(g => ({
+    ...g,
+    items: g.items.filter(item => canAccessModule(user, item.module)),
+  })).filter(g => g.items.length > 0)
+}
 
 export default function Layout() {
   const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, setCoverage } =
@@ -104,6 +114,8 @@ export default function Layout() {
   const authUser = useAuth(s => s.user)
   const allowReset = mayResetSharedData(authUser)
   const allowHistorical = mayUploadHistorical(authUser)
+  const navGroups = filterNavGroups(authUser)
+  const hrmOnly = isHrmOnlyUser(authUser)
 
   const handleLogout = async () => {
     try {
@@ -208,7 +220,7 @@ export default function Layout() {
         </div>
 
         <nav className="flex-1 overflow-y-auto py-2">
-          {NAV_GROUPS.map(({ label, items }) => (
+          {navGroups.map(({ label, items }) => (
             <div key={label}>
               <p className="px-4 pt-3 pb-1 text-[10px] font-bold text-gray-400 uppercase tracking-widest">{label}</p>
               {items.map(({ to, label: navLabel }) => (
@@ -232,7 +244,8 @@ export default function Layout() {
           ))}
         </nav>
 
-        {/* Data coverage badges */}
+        {/* Data coverage badges — full ERP users only */}
+        {!hrmOnly && (
         <div className="px-3 py-3 border-t border-gray-100 text-xs space-y-1">
           <p className="font-semibold text-gray-500 uppercase tracking-wide mb-2">Loaded</p>
           <Badge label="SKU Map"  active={sku_mapping} />
@@ -243,6 +256,7 @@ export default function Layout() {
           <Badge label="Flipkart" active={flipkart} />
           <Badge label="Snapdeal" active={snapdeal} />
         </div>
+        )}
 
         {/* Logout */}
         <div className="px-3 pb-2">
@@ -254,7 +268,8 @@ export default function Layout() {
           </button>
         </div>
 
-        {/* Cache controls */}
+        {/* Cache controls — analytics modules only */}
+        {!hrmOnly && (
         <div className="px-3 py-3 border-t border-gray-100 space-y-2">
           <button
             onClick={handleLoad}
@@ -305,6 +320,7 @@ export default function Layout() {
             </p>
           )}
         </div>
+        )}
 
         {/* Built by Progressino */}
         <div className="px-3 py-3 border-t border-gray-100 flex items-center justify-center gap-1.5">

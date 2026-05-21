@@ -24,6 +24,10 @@ class UserIn(BaseModel):
     role_id: Optional[int] = None
     department: Optional[str] = ''
     karigar_id: Optional[str] = ''
+    employee_id: Optional[int] = None
+    hrm_department_id: Optional[int] = None
+    reporting_hod_user_id: Optional[int] = None
+    module_access: Optional[str] = None
 
 class UserUpdate(BaseModel):
     email: Optional[str] = None
@@ -33,6 +37,10 @@ class UserUpdate(BaseModel):
     active: Optional[int] = None
     password: Optional[str] = None
     karigar_id: Optional[str] = None
+    employee_id: Optional[int] = None
+    hrm_department_id: Optional[int] = None
+    reporting_hod_user_id: Optional[int] = None
+    module_access: Optional[str] = None
 
 class ActivityIn(BaseModel):
     username: str

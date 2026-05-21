@@ -27,7 +27,14 @@ export default function Login() {
         role: data.role,
         full_name: data.full_name,
         karigar_id: data.karigar_id,
+        user_id: data.user_id,
+        employee_id: data.employee_id,
+        hrm_department_id: data.hrm_department_id,
+        modules: data.modules,
+        hrm_scope: data.hrm_scope,
         is_karigar: data.role === 'Karigar',
+        may_upload_historical: data.may_upload_historical,
+        may_reset_all: data.may_reset_all,
       }
       setUser(profile)
       const dest = data?.redirect || (data?.role === 'Karigar' ? '/production-entry' : '/')
