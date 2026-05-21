@@ -30,6 +30,12 @@ AUX_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="erp-aux",
 )
 
+# Auth only — never share with session warm-cache (aux pool can be busy for minutes).
+AUTH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="erp-auth",
+)
+
 
 async def run_heavy(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     loop = asyncio.get_running_loop()
@@ -51,5 +57,13 @@ async def run_po_calc(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         PO_CALC_EXECUTOR,
+        lambda: fn(*args, **kwargs),
+    )
+
+
+async def run_auth(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        AUTH_EXECUTOR,
         lambda: fn(*args, **kwargs),
     )

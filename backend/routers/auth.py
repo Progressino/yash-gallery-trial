@@ -30,7 +30,7 @@ from ..services.login_otp import (
     verify_otp_code,
 )
 from ..services.device_trust import is_device_trusted, set_trusted_device_cookie
-from ..concurrency import run_aux
+from ..concurrency import run_auth
 
 router = APIRouter()
 
@@ -245,11 +245,11 @@ async def login(body: LoginRequest, request: Request, response: Response):
     username = body.username.strip()
     password = body.password
 
-    user = await run_aux(_authenticate_password, username, password)
+    user = await run_auth(_authenticate_password, username, password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    return await run_aux(
+    return await run_auth(
         _login_after_password,
         request,
         response,
