@@ -28,6 +28,12 @@ jobs:
           git checkout -f main
           git reset --hard origin/main
           git log -1 --oneline
+          # Keep session ZIP writes off until disk is stable (warm cache + Tier-3 hold data).
+          if grep -q '^SESSION_PG_PERSIST=' .env 2>/dev/null; then
+            sed -i 's/^SESSION_PG_PERSIST=.*/SESSION_PG_PERSIST=0/' .env
+          else
+            echo 'SESSION_PG_PERSIST=0' >> .env
+          fi
 
       # Never block deploy on diagnostics (docker/python quirks on self-hosted).
       - name: Tooling snapshot (debug)
@@ -73,6 +79,9 @@ jobs:
           _prune_stale_compose_containers backend
           _prune_stale_compose_containers frontend
           docker container prune -f 2>/dev/null || true
+          # Stop app containers before rebuild — avoids "No such container" ghost IDs on compose up.
+          _dc -f docker-compose.prod.yml stop backend frontend 2>/dev/null || true
+          docker rm -f app-backend-1 app-frontend-1 2>/dev/null || true
 
           # Exit 137 on small VPS is usually OOM during build. Avoid --no-cache on every push;
           # use workflow_dispatch checkbox "no_cache" when you need a clean rebuild.
@@ -83,7 +92,7 @@ jobs:
           fi
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          _dc -f docker-compose.prod.yml up -d --remove-orphans
+          _dc -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
           _dc -f docker-compose.prod.yml up -d autoheal
           docker image prune -f || true
 
