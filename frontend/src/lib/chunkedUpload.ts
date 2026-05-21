@@ -33,11 +33,12 @@ const CHUNK_RETRY_MAX = 4
 
 export function shouldUseChunkedUpload(files: File[]): boolean {
   if (!files.length) return false
+  // Multi-file batches always use chunks (direct POST closes UploadFile streams in background).
+  if (files.length >= 2) return true
   const total = files.reduce((s, f) => s + f.size, 0)
   return (
     total >= CHUNK_UPLOAD_BATCH_THRESHOLD ||
-    files.some(f => f.size >= CHUNK_UPLOAD_FILE_THRESHOLD) ||
-    files.length >= 4
+    files.some(f => f.size >= CHUNK_UPLOAD_FILE_THRESHOLD)
   )
 }
 

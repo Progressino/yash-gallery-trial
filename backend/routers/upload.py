@@ -1141,20 +1141,7 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
         sess.inventory_upload_result = {"ok": False, "message": f"Parse error: {e}"}
 
 
-async def _read_and_process_inventory_auto(session_id: str, files: List[UploadFile]) -> None:
-    """Read uploaded files after HTTP 200, then parse inventory on a worker thread."""
-    sess = store._sessions.get(session_id)
-    if sess is None:
-        return
-    try:
-        file_parts = [(f.filename or "upload", await f.read()) for f in files]
-    except Exception as e:
-        _log.exception("inventory-auto read files")
-        sess.inventory_upload_status = "error"
-        sess.inventory_upload_message = str(e)
-        sess.inventory_upload_result = {"ok": False, "message": str(e)}
-        return
-    await _run_inventory_auto_from_parts(session_id, file_parts)
+_INVENTORY_AUTO_DIRECT_MAX_FILES = int(os.environ.get("INVENTORY_AUTO_DIRECT_MAX_FILES", "3"))
 
 
 @router.post("/inventory-auto")
@@ -1182,16 +1169,36 @@ async def upload_inventory_auto(
             }
         )
 
+    if len(files) > _INVENTORY_AUTO_DIRECT_MAX_FILES:
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": (
+                    f"Too many files ({len(files)}) for a single upload. "
+                    "Refresh the page — the app will upload in smaller chunks automatically."
+                ),
+                "require_chunked": True,
+            }
+        )
+
+    file_parts: list[tuple[str, bytes]] = []
+    try:
+        for f in files:
+            file_parts.append((f.filename or "upload", await f.read()))
+    except Exception as e:
+        _log.exception("inventory-auto read files in request")
+        return JSONResponse(content={"ok": False, "message": str(e)})
+
     sid = getattr(request.state, "session_id", None)
     if sid:
 
         def mark_async_start():
             sess.inventory_upload_status = "running"
-            sess.inventory_upload_message = "Reading inventory files and merging snapshot…"
+            sess.inventory_upload_message = "Parsing inventory files and merging snapshot…"
             sess.inventory_upload_result = {}
 
         await _session_lock_apply(sess, mark_async_start)
-        background_tasks.add_task(_read_and_process_inventory_auto, sid, files)
+        background_tasks.add_task(_run_inventory_auto_from_parts, sid, file_parts)
         return JSONResponse(
             content={
                 "ok": True,
@@ -1958,33 +1965,8 @@ def _process_daily_auto_sync(
             }
 
 
-async def _read_files_and_run_daily_ingest(session_id: str, files: List[UploadFile]) -> None:
-    """Read multipart bodies after HTTP 200, then run Tier-3 ingest on a worker thread."""
-    sess = store._sessions.get(session_id)
-    if sess is None:
-        return
-    file_parts: list[tuple[str, bytes]] = []
-    try:
-        for fobj in files:
-            file_parts.append((fobj.filename or "upload", await fobj.read()))
-    except Exception as e:
-        _log.exception("daily-auto read files")
-        sess.daily_auto_ingest_status = "error"
-        sess.daily_auto_ingest_message = str(e)
-        _store_daily_auto_ingest_result(
-            sess,
-            {
-                "ok": False,
-                "message": str(e),
-                "detected_platforms": [],
-                "warnings": [str(e)],
-                "processed_files": 0,
-                "detected_files": 0,
-                "unknown_files": 0,
-            },
-        )
-        return
-    await asyncio.to_thread(_run_daily_auto_ingest_pipeline, session_id, file_parts)
+# Batches above this count must use POST /upload/chunk/* (UploadFile streams close after HTTP 200).
+_DAILY_AUTO_DIRECT_MAX_FILES = int(os.environ.get("DAILY_AUTO_DIRECT_MAX_FILES", "3"))
 
 
 @router.post("/daily-auto")
@@ -2022,10 +2004,42 @@ async def upload_daily_auto(
             }
         )
 
-    if not sid:
-        file_parts: list[tuple[str, bytes]] = []
+    if n_files > _DAILY_AUTO_DIRECT_MAX_FILES:
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": (
+                    f"Too many files ({n_files}) for a single upload. "
+                    "Refresh the page — the app will upload in smaller chunks automatically."
+                ),
+                "require_chunked": True,
+                "detected_platforms": [],
+                "warnings": [],
+                "processed_files": n_files,
+                "detected_files": 0,
+                "unknown_files": n_files,
+            }
+        )
+
+    file_parts: list[tuple[str, bytes]] = []
+    try:
         for fobj in files:
             file_parts.append((fobj.filename or "upload", await fobj.read()))
+    except Exception as e:
+        _log.exception("daily-auto read files in request")
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": str(e),
+                "detected_platforms": [],
+                "warnings": [str(e)],
+                "processed_files": n_files,
+                "detected_files": 0,
+                "unknown_files": n_files,
+            }
+        )
+
+    if not sid:
         payload = await run_heavy(
             _process_daily_auto_sync, sess, file_parts, rebuild_sales=True,
         )
@@ -2038,13 +2052,13 @@ async def upload_daily_auto(
 
     def mark_async_start():
         sess.daily_auto_ingest_status = "running"
-        sess.daily_auto_ingest_message = "Reading daily files…"
+        sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
         sess.daily_auto_ingest_result = {}
         sess.sales_rebuild_status = "idle"
         sess.sales_rebuild_message = ""
 
     await _session_lock_apply(sess, mark_async_start)
-    background_tasks.add_task(_read_files_and_run_daily_ingest, sid, files)
+    background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
     return JSONResponse(
         content={
             "ok": True,

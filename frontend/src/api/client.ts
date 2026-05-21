@@ -226,10 +226,18 @@ export async function uploadInventoryAuto(
     }
     const fd = new FormData()
     files.forEach(f => fd.append('files', f))
-    const { data } = await api.post('/upload/inventory-auto', fd, {
+    const { data } = await api.post<{
+      ok: boolean
+      message: string
+      require_chunked?: boolean
+      ingest_async?: boolean
+    }>('/upload/inventory-auto', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: UPLOAD_TIMEOUT_MS,
     })
+    if (data?.require_chunked) {
+      return await uploadFilesChunked('inventory-auto', files, onProgress)
+    }
     return data
   } catch (e: unknown) {
     throw new Error(_errMessage(e, 'Inventory upload failed'))
@@ -296,10 +304,24 @@ export async function uploadDailyAuto(
     }
     const fd = new FormData()
     files.forEach(f => fd.append('files', f))
-    const { data } = await api.post('/upload/daily-auto', fd, {
+    const { data } = await api.post<{
+      ok: boolean
+      message: string
+      require_chunked?: boolean
+      ingest_async?: boolean
+      detected_platforms?: string[]
+      warnings?: string[]
+      processed_files?: number
+      detected_files?: number
+      unknown_files?: number
+      sales_rebuild?: 'inline' | 'pending'
+    }>('/upload/daily-auto', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: UPLOAD_TIMEOUT_MS,
     })
+    if (data?.require_chunked) {
+      return await uploadFilesChunked('daily-auto', files, onProgress)
+    }
     return data
   } catch (e: unknown) {
     throw new Error(_errMessage(e, 'Daily upload failed'))

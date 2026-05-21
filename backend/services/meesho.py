@@ -355,6 +355,15 @@ def refresh_meesho_dataframe_oms_inplace(df: pd.DataFrame, mapping: Optional[dic
         df["OMS_SKU"] = df["SKU"]
 
 
+def _read_excel_zip_member(inner_zf, member_path: str) -> pd.DataFrame:
+    """Read xlsx from zip before the zip entry handle is closed (avoids 'closed file' errors)."""
+    with inner_zf.open(member_path) as fh:
+        data = fh.read()
+    if not data:
+        return pd.DataFrame()
+    return pd.read_excel(io.BytesIO(data))
+
+
 def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     # Basename index: Supplier archives often use paths like Report_Dec/tcs_sales.xlsx
     files: dict[str, str] = {}
@@ -384,8 +393,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df_inner["_Date"] = pd.NaT
 
     if "tcs_sales.xlsx" in files:
-        with inner_zf.open(files["tcs_sales.xlsx"]) as fh:
-            df = pd.read_excel(fh)
+        df = _read_excel_zip_member(inner_zf, files["tcs_sales.xlsx"])
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=False)
             _assign_row_dates(df, date_col)
@@ -407,8 +415,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
     if "tcs_sales_return.xlsx" in files:
-        with inner_zf.open(files["tcs_sales_return.xlsx"]) as fh:
-            df = pd.read_excel(fh)
+        df = _read_excel_zip_member(inner_zf, files["tcs_sales_return.xlsx"])
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=True)
             _assign_row_dates(df, date_col)
@@ -432,8 +439,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     # ForwardReports = shipments (used when no TCS data present)
     _fwd_key = next((k for k in ["forwardreports.xlsx"] if k in files), None)
     if _fwd_key and not rows:
-        with inner_zf.open(files[_fwd_key]) as fh:
-            df = pd.read_excel(fh)
+        df = _read_excel_zip_member(inner_zf, files[_fwd_key])
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=False)
             _assign_row_dates(df, date_col)
@@ -459,8 +465,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
     if _rev_key and not any(
         (r["_TxnType"] == "Refund").any() for r in rows if not r.empty
     ):
-        with inner_zf.open(files[_rev_key]) as fh:
-            df = pd.read_excel(fh)
+        df = _read_excel_zip_member(inner_zf, files[_rev_key])
         if not df.empty:
             date_col = _best_date_col(df, prefer_return=True)
             _assign_row_dates(df, date_col)
