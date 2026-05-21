@@ -2,7 +2,7 @@
  * Chunked multipart upload for large daily / inventory batches.
  * Each chunk is a small POST so slow links and proxies are less likely to time out.
  */
-import axios from 'axios'
+import axios, { type AxiosError } from 'axios'
 
 const chunkApi = axios.create({
   baseURL: '/api',
@@ -27,6 +27,9 @@ export const CHUNK_UPLOAD_FILE_THRESHOLD = 1.5 * 1024 * 1024
 export const CHUNK_UPLOAD_BATCH_THRESHOLD = 4 * 1024 * 1024
 
 const CHUNK_REQUEST_TIMEOUT_MS = 120_000
+const COMPLETE_TIMEOUT_MS = 45_000
+const CHUNK_CONCURRENCY = 3
+const CHUNK_RETRY_MAX = 4
 
 export function shouldUseChunkedUpload(files: File[]): boolean {
   if (!files.length) return false
@@ -40,6 +43,60 @@ export function shouldUseChunkedUpload(files: File[]): boolean {
 
 function fileChunkCount(size: number, chunkSize: number): number {
   return Math.max(1, Math.ceil(size / chunkSize))
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms))
+}
+
+function isRetryableChunkError(e: unknown): boolean {
+  if (!axios.isAxiosError(e)) return false
+  const err = e as AxiosError
+  if (err.code === 'ECONNABORTED') return true
+  const st = err.response?.status
+  return st === 502 || st === 503 || st === 504
+}
+
+async function postChunkWithRetry(fd: FormData): Promise<void> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt < CHUNK_RETRY_MAX; attempt++) {
+    try {
+      const { data: part } = await chunkApi.post<{ ok: boolean; message?: string }>(
+        '/upload/chunk',
+        fd,
+        {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: CHUNK_REQUEST_TIMEOUT_MS,
+        },
+      )
+      if (!part?.ok) {
+        throw new Error(part?.message || 'Chunk upload failed')
+      }
+      return
+    } catch (e) {
+      lastErr = e
+      if (attempt < CHUNK_RETRY_MAX - 1 && isRetryableChunkError(e)) {
+        await sleep(1500 * (attempt + 1))
+        continue
+      }
+      throw e
+    }
+  }
+  throw lastErr
+}
+
+/** Run async tasks with a fixed concurrency limit. */
+async function runPool<T>(items: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
+  const results: T[] = new Array(items.length)
+  let next = 0
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await items[i]()
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()))
+  return results
 }
 
 export async function uploadFilesChunked<T extends Record<string, unknown>>(
@@ -86,14 +143,28 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
   const uploadId = initData.upload_id
   const chunkSize = initData.chunk_size
 
+  type ChunkJob = { fileIndex: number; file: File; chunkIndex: number; totalChunks: number; blob: Blob }
+
   try {
+    const jobs: ChunkJob[] = []
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
       const file = files[fileIndex]
       const totalChunks = fileChunkCount(file.size, chunkSize)
       for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
         const start = chunkIndex * chunkSize
         const end = Math.min(start + chunkSize, file.size)
-        const blob = file.slice(start, end)
+        jobs.push({
+          fileIndex,
+          file,
+          chunkIndex,
+          totalChunks,
+          blob: file.slice(start, end),
+        })
+      }
+    }
+
+    const jobFns = jobs.map(
+      ({ fileIndex, file, chunkIndex, totalChunks, blob }) => async () => {
         const fd = new FormData()
         fd.append('upload_id', uploadId)
         fd.append('file_index', String(fileIndex))
@@ -112,20 +183,12 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
           message: `Uploading ${file.name} (${chunkIndex + 1}/${totalChunks})…`,
         })
 
-        const { data: part } = await chunkApi.post<{ ok: boolean; message?: string }>(
-          '/upload/chunk',
-          fd,
-          {
-            headers: { 'Content-Type': 'multipart/form-data' },
-            timeout: CHUNK_REQUEST_TIMEOUT_MS,
-          },
-        )
-        if (!part?.ok) {
-          throw new Error(part?.message || 'Chunk upload failed')
-        }
+        await postChunkWithRetry(fd)
         bytesSent += blob.size
-      }
-    }
+      },
+    )
+
+    await runPool(jobFns, CHUNK_CONCURRENCY)
 
     onProgress?.({
       phase: 'complete',
@@ -138,13 +201,27 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
       message: 'Finishing upload on server…',
     })
 
-    const { data: done } = await chunkApi.post<T & { ok?: boolean; message?: string }>(
-      '/upload/chunk/complete',
-      { upload_id: uploadId },
-      { timeout: 120_000 },
-    )
-    if (!done || (done as { ok?: boolean }).ok === false) {
-      throw new Error((done as { message?: string })?.message || 'Chunked upload finalize failed')
+    let done: (T & { ok?: boolean; message?: string }) | undefined
+    for (let attempt = 0; attempt < CHUNK_RETRY_MAX; attempt++) {
+      try {
+        const res = await chunkApi.post<T & { ok?: boolean; message?: string }>(
+          '/upload/chunk/complete',
+          { upload_id: uploadId },
+          { timeout: COMPLETE_TIMEOUT_MS },
+        )
+        done = res.data
+        break
+      } catch (e) {
+        if (attempt < CHUNK_RETRY_MAX - 1 && isRetryableChunkError(e)) {
+          await sleep(2000 * (attempt + 1))
+          continue
+        }
+        throw e
+      }
+    }
+
+    if (!done || done.ok === false) {
+      throw new Error(done?.message || 'Chunked upload finalize failed')
     }
     return done as T
   } catch (e) {
@@ -155,6 +232,12 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
     }
     if (axios.isAxiosError(e) && e.code === 'ECONNABORTED') {
       throw new Error('Chunk upload timed out. Check connection and try again.')
+    }
+    if (axios.isAxiosError(e) && e.response?.status === 502) {
+      throw new Error(
+        'Server gateway error (502) while finishing upload. Wait 1–2 minutes and refresh — '
+        + 'your files may still be processing on the server.',
+      )
     }
     throw e
   }

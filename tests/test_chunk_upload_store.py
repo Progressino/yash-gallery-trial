@@ -35,6 +35,16 @@ def test_assemble_multi_chunk_file(store: ChunkUploadStore):
     assert parts[0][1] == data
 
 
+def test_verify_ready_ok(store: ChunkUploadStore):
+    sid = "sess-v"
+    data = b"hello world"
+    upload_id, _ = store.create(sid, target="daily-auto", files=[("x.csv", len(data))])
+    store.write_chunk(sid, upload_id, file_index=0, chunk_index=0, total_chunks=1, data=data)
+    info = store.verify_ready(sid, upload_id)
+    assert info["target"] == "daily-auto"
+    assert info["file_count"] == 1
+
+
 def test_missing_chunk_raises(store: ChunkUploadStore):
     sid = "sess-2"
     upload_id, _ = store.create(sid, target="inventory-auto", files=[("a.csv", 100)])

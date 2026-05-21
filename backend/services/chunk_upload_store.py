@@ -172,6 +172,27 @@ class ChunkUploadStore:
             "chunks_expected": total_expected,
         }
 
+    def get_target(self, session_id: str, upload_id: str) -> ChunkTarget:
+        _root, meta, _files = self._load_meta(session_id, upload_id)
+        return meta.get("target") or "daily-auto"
+
+    def verify_ready(self, session_id: str, upload_id: str) -> dict:
+        """Fast check that every file has all chunks on disk (no assembly)."""
+        _root, meta, files = self._load_meta(session_id, upload_id)
+        for fm in files:
+            if not fm.total_chunks:
+                raise ValueError(f"Incomplete upload for {fm.name} (no chunks received)")
+            if len(fm.received_chunks) < fm.total_chunks:
+                missing = sorted(set(range(fm.total_chunks)) - fm.received_chunks)
+                raise ValueError(
+                    f"Missing chunks for {fm.name}: {missing[:8]}"
+                    + ("…" if len(missing) > 8 else "")
+                )
+        return {
+            "target": meta.get("target") or "daily-auto",
+            "file_count": len(files),
+        }
+
     def assemble(self, session_id: str, upload_id: str) -> tuple[ChunkTarget, list[tuple[str, bytes]]]:
         root, meta, files = self._load_meta(session_id, upload_id)
         target: ChunkTarget = meta.get("target") or "daily-auto"
@@ -187,13 +208,13 @@ class ChunkUploadStore:
                 missing = sorted(set(range(fm.total_chunks)) - fm.received_chunks)
                 raise ValueError(f"Missing chunks for {fm.name}: {missing[:5]}")
 
-            parts: list[bytes] = []
+            blob = bytearray()
             for c in range(fm.total_chunks):
                 cp = fdir / f"chunk_{c:06d}"
                 if not cp.is_file():
                     raise ValueError(f"Missing chunk file {c} for {fm.name}")
-                parts.append(cp.read_bytes())
-            blob = b"".join(parts)
+                blob.extend(cp.read_bytes())
+            blob = bytes(blob)
             if fm.size and len(blob) != fm.size:
                 raise ValueError(
                     f"Size mismatch for {fm.name}: expected {fm.size}, got {len(blob)}"

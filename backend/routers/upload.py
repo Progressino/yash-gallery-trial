@@ -2427,29 +2427,147 @@ async def chunk_upload_part(
     return JSONResponse(content={"ok": True, **progress})
 
 
+def _set_chunk_finalize_error(sess, target: str, message: str) -> None:
+    if target == "inventory-auto":
+        sess.inventory_upload_status = "error"
+        sess.inventory_upload_message = message
+        sess.inventory_upload_result = {"ok": False, "message": message}
+    else:
+        sess.daily_auto_ingest_status = "error"
+        sess.daily_auto_ingest_message = message
+        _store_daily_auto_ingest_result(
+            sess,
+            {
+                "ok": False,
+                "message": message,
+                "detected_platforms": [],
+                "warnings": [message],
+                "processed_files": 0,
+                "detected_files": 0,
+                "unknown_files": 0,
+            },
+        )
+
+
+def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:
+    """Assemble chunk files on disk, then run Tier-3 ingest (background thread)."""
+    sess = store._sessions.get(session_id)
+    if sess is None:
+        return
+    target = "daily-auto"
+    try:
+        target = chunk_store.get_target(session_id, upload_id)
+        _target, file_parts = chunk_store.assemble(session_id, upload_id)
+        target = _target
+    except Exception as e:
+        _log.exception("chunk finalize assemble upload_id=%s", upload_id)
+        _set_chunk_finalize_error(sess, target, str(e))
+        return
+
+    if target == "daily-auto":
+        sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
+        _run_daily_auto_ingest_pipeline(session_id, file_parts)
+    else:
+        sess.inventory_upload_message = "Parsing inventory files and merging snapshot…"
+        try:
+            asyncio.run(_run_inventory_auto_from_parts(session_id, file_parts))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_run_inventory_auto_from_parts(session_id, file_parts))
+            finally:
+                loop.close()
+
+
 @router.post("/chunk/complete")
 async def chunk_upload_complete(
     request: Request,
     background_tasks: BackgroundTasks,
     body: ChunkCompleteIn,
 ):
-    """Assemble chunks and start daily-auto or inventory-auto processing."""
+    """Verify all chunks, return immediately, assemble + ingest in background."""
     sid = getattr(request.state, "session_id", None)
     if not sid:
         return JSONResponse(content={"ok": False, "message": "Session required."}, status_code=400)
     sess = _get_session(request)
     try:
-        target, file_parts = chunk_store.assemble(sid, body.upload_id)
+        info = chunk_store.verify_ready(sid, body.upload_id)
     except FileNotFoundError:
         return JSONResponse(content={"ok": False, "message": "Unknown or expired upload."}, status_code=404)
     except ValueError as e:
         return JSONResponse(content={"ok": False, "message": str(e)}, status_code=400)
 
+    target = info["target"]
+    n_files = int(info["file_count"])
+
     if target == "daily-auto":
-        payload = await _accept_daily_auto_file_parts(sess, sid, file_parts, background_tasks)
-    else:
-        payload = await _accept_inventory_auto_file_parts(sess, sid, file_parts, background_tasks)
-    return JSONResponse(content=payload)
+        if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "message": (
+                        "A Tier-3 upload is still processing on the server. "
+                        "Wait until the status banner clears, then try again."
+                    ),
+                    "detected_platforms": [],
+                    "warnings": [],
+                    "processed_files": n_files,
+                    "detected_files": 0,
+                    "unknown_files": n_files,
+                }
+            )
+    elif getattr(sess, "inventory_upload_status", "idle") == "running":
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
+            }
+        )
+
+    def mark_assembling():
+        if target == "daily-auto":
+            sess.daily_auto_ingest_status = "running"
+            sess.daily_auto_ingest_message = "Assembling uploaded files…"
+            sess.daily_auto_ingest_result = {}
+            sess.sales_rebuild_status = "idle"
+            sess.sales_rebuild_message = ""
+        else:
+            sess.inventory_upload_status = "running"
+            sess.inventory_upload_message = "Assembling uploaded files…"
+            sess.inventory_upload_result = {}
+
+    await _session_lock_apply(sess, mark_assembling)
+    background_tasks.add_task(_finalize_chunk_upload, sid, body.upload_id)
+
+    if target == "daily-auto":
+        return JSONResponse(
+            content={
+                "ok": True,
+                "ingest_async": True,
+                "chunked": True,
+                "message": (
+                    "All chunks received — assembling and parsing on the server. "
+                    "Status updates below; you can stay on this page."
+                ),
+                "detected_platforms": [],
+                "warnings": [],
+                "processed_files": n_files,
+                "detected_files": 0,
+                "unknown_files": n_files,
+                "sales_rebuild": "pending",
+            }
+        )
+    return JSONResponse(
+        content={
+            "ok": True,
+            "ingest_async": True,
+            "chunked": True,
+            "message": (
+                "All chunks received — assembling inventory on the server. "
+                "Status updates below; you can stay on this page."
+            ),
+        }
+    )
 
 
 @router.delete("/chunk/{upload_id}")
