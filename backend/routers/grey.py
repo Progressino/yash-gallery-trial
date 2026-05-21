@@ -253,9 +253,18 @@ def get_printed_fabric_checked():
     return gdb.list_printed_fabric_checked()
 
 
+@router.get("/printed-fabric/reserve-options")
+def get_printed_fabric_reserve_options():
+    """Checked fabrics (available only) + open sales orders with SKUs for reserve form."""
+    return gdb.printed_fabric_reserve_options()
+
+
 @router.post("/printed-fabric/reserve")
 def post_printed_fabric_reserve(body: PrintedFabricReserveIn):
-    gdb.reserve_printed_fabric(body.model_dump())
+    try:
+        gdb.reserve_printed_fabric(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
 
 

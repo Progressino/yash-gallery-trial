@@ -872,21 +872,102 @@ def list_printed_fabric_checked():
         return []
 
 
+def list_printed_fabric_checked_available():
+    """Checked printed fabric with stock available to reserve (available_qty > 0)."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM printed_fabric_checked_stock
+               WHERE COALESCE(available_qty, 0) > 0
+               ORDER BY fabric_code"""
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        conn.close()
+        return []
+
+
+def printed_fabric_reserve_options() -> dict:
+    """Dropdown data: checked fabrics + open sales orders with line SKUs."""
+    fabrics = list_printed_fabric_checked_available()
+    try:
+        from .sales_db import list_orders
+
+        orders_raw = list_orders()
+    except Exception:
+        orders_raw = []
+    sales_orders = []
+    for so in orders_raw:
+        status = (so.get("status") or "").strip()
+        if status in ("Closed", "Cancelled"):
+            continue
+        lines = []
+        for ln in so.get("lines") or []:
+            sku = (ln.get("sku") or "").strip()
+            if not sku:
+                continue
+            lines.append(
+                {
+                    "id": ln.get("id"),
+                    "sku": sku,
+                    "sku_name": ln.get("sku_name") or "",
+                    "qty": ln.get("qty") or 0,
+                    "unit": ln.get("unit") or "PCS",
+                }
+            )
+        if not lines:
+            continue
+        sales_orders.append(
+            {
+                "so_number": so.get("so_number") or "",
+                "buyer": so.get("buyer") or "",
+                "status": status,
+                "delivery_date": so.get("delivery_date") or "",
+                "lines": lines,
+            }
+        )
+    return {"fabrics": fabrics, "sales_orders": sales_orders}
+
+
 def reserve_printed_fabric(data: dict):
     """Printed checked fabric reserve karo against SO — Ready to Cut ke liye."""
+    fabric_code = (data.get("fabric_code") or "").strip()
+    so_number = (data.get("so_number") or "").strip()
+    qty = float(data.get("qty") or 0)
+    if not fabric_code:
+        raise ValueError("fabric_code is required")
+    if not so_number:
+        raise ValueError("so_number is required")
+    if qty <= 0:
+        raise ValueError("qty must be greater than 0")
+
     conn = _connect()
+    row = conn.execute(
+        "SELECT fabric_name, available_qty FROM printed_fabric_checked_stock WHERE fabric_code=?",
+        (fabric_code,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"Fabric {fabric_code} is not in checked stock")
+    available = float(row["available_qty"] or 0)
+    if qty > available + 0.001:
+        conn.close()
+        raise ValueError(f"Cannot reserve {qty}m — only {available:.1f}m available")
+
+    fabric_name = data.get("fabric_name") or row["fabric_name"] or ""
     conn.execute(
         """UPDATE printed_fabric_checked_stock
         SET reserved_qty = COALESCE(reserved_qty, 0) + ?,
             available_qty = available_qty - ?
         WHERE fabric_code = ?""",
-        (float(data.get('qty', 0)), float(data.get('qty', 0)), data['fabric_code'])
+        (qty, qty, fabric_code)
     )
     conn.execute(
         """INSERT INTO printed_fabric_reservations(fabric_code, fabric_name, so_number, sku, qty, unit, status, remarks)
         VALUES (?,?,?,?,?,?,?,?)""",
-        (data['fabric_code'], data.get('fabric_name', ''), data.get('so_number', ''),
-         data.get('sku', ''), float(data.get('qty', 0)), 'MTR', 'Active', data.get('remarks', ''))
+        (fabric_code, fabric_name, so_number,
+         (data.get('sku') or '').strip(), qty, 'MTR', 'Active', data.get('remarks', ''))
     )
     conn.commit()
     conn.close()
