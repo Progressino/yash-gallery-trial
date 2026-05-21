@@ -1,0 +1,57 @@
+name: Weekly VPS maintenance
+
+# Every Sunday night (23:00 IST / 17:30 UTC): log disk %, prune Docker cruft,
+# trim old PostgreSQL session blobs (keep 15 newest). Does not stop the app.
+
+on:
+  schedule:
+    # Sunday 17:30 UTC = Sunday 23:00 IST
+    - cron: "30 17 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-vps-maintenance
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
+    steps:
+      - name: Sync repo (maintenance script)
+        run: |
+          set -eu
+          export GIT_TERMINAL_PROMPT=0
+          test -d .git || { echo "ERROR: /root/app is not a git clone"; exit 1; }
+          git fetch origin main
+          git checkout -f main
+          git reset --hard origin/main
+          chmod +x scripts/weekly_vps_maintenance.sh
+
+      - name: Run weekly maintenance
+        run: |
+          set -eu
+          bash scripts/weekly_vps_maintenance.sh
+
+      - name: Upload log snippet (artifact)
+        if: always()
+        run: |
+          set +e
+          LOG="$(ls -t /root/app-data/maintenance/weekly-*.log 2>/dev/null | head -1)"
+          if [ -n "$LOG" ] && [ -f "$LOG" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/maintenance-logs"
+            cp "$LOG" "$GITHUB_WORKSPACE/maintenance-logs/latest-weekly.log"
+            tail -80 "$LOG"
+          else
+            echo "No maintenance log file found"
+          fi
+
+      - name: Archive maintenance log
+        if: always() && hashFiles('maintenance-logs/latest-weekly.log') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-maintenance-log
+          path: maintenance-logs/latest-weekly.log
+          retention-days: 30
