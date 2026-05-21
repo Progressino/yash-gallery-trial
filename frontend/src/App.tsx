@@ -125,10 +125,12 @@ function ProtectedRoute() {
             /* GitHub cache optional */
           }
         }
-        // Tier-3 top-up in background — dashboard can render once warm data is in session.
-        void getCoverage({ timeout: 600_000 })
-          .then(c => setCoverage(c))
-          .catch(() => {})
+        // Optional Tier-3 top-up in background (light only — avoids heavy SQLite on the server).
+        if (!coverageEmpty(coverage)) {
+          void getCoverage({ light: true, timeout: 120_000 })
+            .then(c => setCoverage(c))
+            .catch(() => {})
+        }
       } catch {
         /* server busy during upload — coverage polling on Upload page will retry */
       }
@@ -151,7 +153,7 @@ function ProtectedRoute() {
     refetchInterval: (q) => {
       const c = q.state.data
       if (!c) return 8_000
-      return coverageEmpty(c) ? 8_000 : false
+      return coverageEmpty(c) ? 30_000 : false
     },
     retry: 2,
   })

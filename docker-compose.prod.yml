@@ -16,6 +16,7 @@ services:
       POSTGRES_USER: forecast
       POSTGRES_PASSWORD: ${FORECAST_PG_PASSWORD:-forecast}
       POSTGRES_DB: forecast
+    mem_limit: 768m
     volumes:
       - ${APP_DATA_DIR:-/root/app-data}/postgres:/var/lib/postgresql/data
     expose:

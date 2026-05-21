@@ -279,6 +279,49 @@ _DISK_CACHE_DIR     = _os_main.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
 _DISK_CACHE_MAX_AGE = int(_os_main.environ.get("WARM_CACHE_MAX_AGE_HOURS", "24"))
 
 
+def _skip_phase2_when_disk_fresh() -> bool:
+    """When Phase-0 disk cache is valid, skip GitHub download (saves ~1–3 GB RAM, 60–90s CPU)."""
+    return _os_main.environ.get("WARM_CACHE_SKIP_PHASE2_WHEN_DISK_FRESH", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _merge_recent_sqlite_into_warm_cache(months: int = 4) -> None:
+    """Light Tier-3 top-up into ``_warm_cache`` without GitHub Phase 2."""
+    global _warm_cache
+    from .services.daily_store import load_platform_data, merge_platform_data
+    from .services.sales import build_sales_df
+    import pandas as pd
+
+    if not _warm_cache:
+        return
+    for plat, key in (
+        ("amazon", "mtr_df"),
+        ("myntra", "myntra_df"),
+        ("meesho", "meesho_df"),
+        ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
+    ):
+        df = load_platform_data(plat, months=months)
+        if df is not None and not df.empty:
+            cur = _warm_cache.get(key, pd.DataFrame())
+            _warm_cache[key] = merge_platform_data(cur, df, plat)
+    try:
+        _warm_cache["sales_df"] = build_sales_df(
+            mtr_df=_warm_cache.get("mtr_df", pd.DataFrame()),
+            myntra_df=_warm_cache.get("myntra_df", pd.DataFrame()),
+            meesho_df=_warm_cache.get("meesho_df", pd.DataFrame()),
+            flipkart_df=_warm_cache.get("flipkart_df", pd.DataFrame()),
+            snapdeal_df=_warm_cache.get("snapdeal_df", pd.DataFrame()),
+            sku_mapping=_warm_cache.get("sku_mapping") or {},
+        )
+    except Exception:
+        log.exception("merge_recent_sqlite_into_warm_cache: sales rebuild failed")
+
+
 def _save_warm_cache_to_disk(cache_dict: dict) -> None:
     """Persist warm_cache DataFrames + sku_mapping to /data/warm_cache/ as parquet/JSON.
     Called after Phase 2 completes. ~2-3 s. Safe from any thread."""
@@ -591,6 +634,21 @@ def _do_load_warm_cache() -> bool:
                 )
         except Exception as e:
             log.warning("Warm-cache Phase 1 (SQLite) failed: %s — continuing to GitHub", e)
+
+        if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
+            log.info(
+                "Warm-cache: fresh disk cache — skipping GitHub Phase 2 "
+                "(set WARM_CACHE_SKIP_PHASE2_WHEN_DISK_FRESH=0 to force full reload)."
+            )
+            try:
+                _merge_recent_sqlite_into_warm_cache(months=_P1_MONTHS or 4)
+            except Exception:
+                log.exception("Warm-cache SQLite top-up after disk load failed")
+            try:
+                _save_warm_cache_to_disk(_warm_cache)
+            except Exception:
+                pass
+            return True
 
         # ── Phase 2: GitHub historical cache (network, slow) ──────────────────
         # Provides data for dates not yet in the SQLite daily store.
@@ -927,6 +985,19 @@ def _bootstrap_stitching_on_startup() -> None:
         log.exception("Stitching bootstrap failed")
 
 
+async def _session_eviction_loop() -> None:
+    """Drop idle browser sessions from RAM (each can duplicate warm-cache-sized frames)."""
+    interval = int(_os_main.environ.get("SESSION_EVICT_INTERVAL_SEC", "1800"))
+    while True:
+        await asyncio.sleep(max(300, interval))
+        try:
+            n = store.evict_stale()
+            if n:
+                log.info("Evicted %d idle session(s) from memory", n)
+        except Exception:
+            log.exception("session eviction failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: load cache in background so server is ready immediately
@@ -936,8 +1007,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(run_heavy(_do_load_warm_cache))
     # Schedule daily 6AM IST refresh
     task = asyncio.create_task(_warm_cache_scheduler())
+    evict_task = asyncio.create_task(_session_eviction_loop())
     yield
     task.cancel()
+    evict_task.cancel()
 
 
 app = FastAPI(
@@ -1123,12 +1196,20 @@ async def session_middleware(request: Request, call_next):
         except Exception:
             log.exception("warm-cache apply failed")
 
-    try:
-        from .services.sku_mapping import ensure_default_sku_mapping_from_bundle
+    # SKU bundle merge is expensive; skip on read-only data APIs when sales are already loaded.
+    _skip_sku_bundle = (
+        request.method == "GET"
+        and path.startswith("/api/data/")
+        and not getattr(session, "sales_df", None) is None
+        and not getattr(session, "sales_df").empty
+    )
+    if not _skip_sku_bundle:
+        try:
+            from .services.sku_mapping import ensure_default_sku_mapping_from_bundle
 
-        await run_aux(ensure_default_sku_mapping_from_bundle, session)
-    except Exception:
-        pass
+            await run_aux(ensure_default_sku_mapping_from_bundle, session)
+        except Exception:
+            pass
 
     response: Response = await call_next(request)
 
@@ -1137,11 +1218,11 @@ async def session_middleware(request: Request, call_next):
 
         if pg_session_persist_enabled() and sid:
             if copied_warm:
-                debounced_persist_session(sid, session, delay=5.0)
+                debounced_persist_session(sid, session, delay=15.0)
             elif request.method in frozenset({"POST", "PUT", "DELETE", "PATCH"}) and path.startswith(
                 "/api/"
             ):
-                debounced_persist_session(sid, session, delay=12.0)
+                debounced_persist_session(sid, session, delay=30.0)
     except Exception:
         pass
 

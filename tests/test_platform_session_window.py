@@ -13,7 +13,7 @@ from backend.services.platform_session_window import (
 
 def test_default_window_is_two_years():
     assert SESSION_PLATFORM_MAX_DAYS == 730
-    assert AUTO_RESTORE_MONTHS_DEFAULT == 24
+    assert AUTO_RESTORE_MONTHS_DEFAULT == 12
 
 
 def test_trim_platform_df_drops_old_rows():

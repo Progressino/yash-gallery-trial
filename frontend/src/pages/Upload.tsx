@@ -74,7 +74,7 @@ export default function Upload() {
       setCoverage(c)
       return c
     },
-    refetchInterval: uploadBusy ? false : coverageEmpty ? 8_000 : 30_000,
+    refetchInterval: uploadBusy ? false : coverageEmpty ? 20_000 : 60_000,
     retry: 3,
   })
 

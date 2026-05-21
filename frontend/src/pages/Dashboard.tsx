@@ -822,8 +822,9 @@ export default function Dashboard() {
   /* ── queries ── */
   useQuery({
     queryKey: ['coverage'],
-    queryFn: async () => { const c = await getCoverage(); setCoverage(c); return c },
-    staleTime: 60_000, refetchInterval: 120_000,
+    queryFn: async () => { const c = await getCoverage({ light: true }); setCoverage(c); return c },
+    enabled: salesLoaded,
+    staleTime: 300_000,
   })
   const { data: salesSummary } = useQuery<SalesSummary>({
     queryKey: ['sales-summary', dateStart, dateEnd],

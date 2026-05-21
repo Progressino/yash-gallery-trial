@@ -9,7 +9,7 @@ import pandas as pd
 
 # Max calendar days kept in browser session / warm-cache copy (SQLite keeps full history).
 SESSION_PLATFORM_MAX_DAYS = int(os.environ.get("SESSION_PLATFORM_MAX_DAYS", "730"))
-AUTO_RESTORE_MONTHS_DEFAULT = int(os.environ.get("AUTO_RESTORE_MONTHS", "24"))
+AUTO_RESTORE_MONTHS_DEFAULT = int(os.environ.get("AUTO_RESTORE_MONTHS", "12"))
 
 _DATE_COL_CANDIDATES: tuple[str, ...] = (
     "TxnDate",
