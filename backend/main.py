@@ -15,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from .concurrency import run_aux
+from .concurrency import run_aux, run_heavy
 
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
@@ -909,9 +909,9 @@ async def _warm_cache_scheduler():
         await asyncio.sleep(wait_seconds)
         log.info("Running scheduled warm-cache refresh…")
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _do_load_warm_cache)
+        await run_heavy(_do_load_warm_cache)
         # Run all marketplace API syncs after cache refresh
-        await loop.run_in_executor(None, _do_marketplace_sync_all)
+        await run_heavy(_do_marketplace_sync_all)
 
 
 def _bootstrap_stitching_on_startup() -> None:
@@ -930,9 +930,10 @@ def _bootstrap_stitching_on_startup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: load cache in background so server is ready immediately
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, _bootstrap_stitching_on_startup)
-    loop.run_in_executor(None, _do_load_warm_cache)
+    # Never use the default thread pool (Starlette run_in_threadpool / sync routes).
+    # Warm-cache load can run many minutes and would starve /api/auth/login → 504.
+    asyncio.create_task(run_heavy(_bootstrap_stitching_on_startup))
+    asyncio.create_task(run_heavy(_do_load_warm_cache))
     # Schedule daily 6AM IST refresh
     task = asyncio.create_task(_warm_cache_scheduler())
     yield

@@ -30,6 +30,7 @@ from ..services.login_otp import (
     verify_otp_code,
 )
 from ..services.device_trust import is_device_trusted, set_trusted_device_cookie
+from ..concurrency import run_aux
 
 router = APIRouter()
 
@@ -209,16 +210,13 @@ class OtpVerifyRequest(BaseModel):
     trust_device: bool = True
 
 
-@router.post("/login")
-def login(body: LoginRequest, request: Request, response: Response):
-    """Sync handler — fast SQLite+bcrypt; must not queue behind upload thread pool."""
-    username = body.username.strip()
-    password = body.password
-
-    user = _authenticate_password(username, password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
+def _login_after_password(
+    request: Request,
+    response: Response,
+    *,
+    username: str,
+    user: dict,
+) -> dict:
     phone = _resolve_phone(user, username)
     if _needs_otp(request, user, phone):
         try:
@@ -238,8 +236,26 @@ def login(body: LoginRequest, request: Request, response: Response):
             "masked_phone": masked,
             "message": f"OTP sent to {masked}. Required on new devices.",
         }
-
     return _complete_login(request, response, user)
+
+
+@router.post("/login")
+async def login(body: LoginRequest, request: Request, response: Response):
+    """Async + aux thread pool — must not queue behind warm-cache on the default pool."""
+    username = body.username.strip()
+    password = body.password
+
+    user = await run_aux(_authenticate_password, username, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    return await run_aux(
+        _login_after_password,
+        request,
+        response,
+        username=username,
+        user=user,
+    )
 
 
 @router.post("/otp/resend")

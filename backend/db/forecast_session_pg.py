@@ -274,8 +274,12 @@ def debounced_persist_session(session_id: str, sess, delay: float = 8.0) -> None
         def _run():
             _pending_persist_handles.pop(sid, None)
             try:
+                from ..concurrency import AUX_EXECUTOR
+
                 loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, lambda: persist_session_bundle(sid, s))
+                loop.run_in_executor(
+                    AUX_EXECUTOR, lambda: persist_session_bundle(sid, s)
+                )
             except Exception:
                 persist_session_bundle(sid, s)
 
