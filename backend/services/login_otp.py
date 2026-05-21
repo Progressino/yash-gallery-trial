@@ -24,6 +24,29 @@ def otp_required_globally() -> bool:
     return os.environ.get("OTP_REQUIRED", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+def super_admin_otp_bypass_enabled() -> bool:
+    """When set, Super Admin accounts skip OTP on all devices (password only)."""
+    return os.environ.get("SUPER_ADMIN_OTP_BYPASS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def is_super_admin_user(user: dict | None, username: str = "") -> bool:
+    from ..services.rbac import ROLE_SUPER_ADMIN
+
+    role = (user or {}).get("role_name") or (user or {}).get("role") or ""
+    if role == ROLE_SUPER_ADMIN:
+        return True
+    super_name = (
+        os.environ.get("SUPER_ADMIN_USERNAME") or os.environ.get("AUTH_USERNAME") or "admin"
+    ).strip()
+    uname = (user or {}).get("username") or username
+    return bool(super_name and uname == super_name)
+
+
 def normalize_india_phone(raw: str) -> str | None:
     """Return E.164-style digits only: 91 + 10-digit mobile, or None."""
     if not raw:

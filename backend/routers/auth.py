@@ -21,6 +21,8 @@ from ..services.upload_policy import upload_policy_for_role
 from ..services.rbac import build_hrm_scope, resolve_module_access, ROLE_SUPER_ADMIN
 from ..services.login_otp import (
     otp_required_globally,
+    super_admin_otp_bypass_enabled,
+    is_super_admin_user,
     normalize_india_phone,
     mask_phone,
     start_login_challenge,
@@ -154,6 +156,10 @@ def _resolve_phone(user: dict | None, username: str) -> str | None:
 
 def _needs_otp(request: Request, user: dict, phone: str | None) -> bool:
     if not otp_required_globally():
+        return False
+    if super_admin_otp_bypass_enabled() and is_super_admin_user(
+        user, user.get("username") or ""
+    ):
         return False
     if not phone:
         return False
