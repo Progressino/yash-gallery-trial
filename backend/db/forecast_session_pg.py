@@ -65,7 +65,18 @@ _pending_persist_handles: dict[str, asyncio.TimerHandle] = {}
 
 
 def pg_session_persist_enabled() -> bool:
+    if os.environ.get("SESSION_PG_PERSIST", "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
     return bool(_connection_url())
+
+
+def _max_bundle_bytes() -> int:
+    """Cap per-session ZIP size (multi‑GB blobs filled the VPS disk)."""
+    try:
+        mb = int(os.environ.get("SESSION_PG_MAX_BUNDLE_MB", "80"))
+    except ValueError:
+        mb = 80
+    return max(5, mb) * 1024 * 1024
 
 
 def _connection_url() -> Optional[str]:
@@ -100,6 +111,7 @@ def init_db() -> None:
             )
         _table_ready = True
         _log.info("forecast_app_sessions table ready (PostgreSQL)")
+        prune_old_sessions(keep=15)
     except Exception:
         _log.exception("forecast session PostgreSQL init failed — sessions stay in-memory only")
         _table_ready = False
@@ -231,6 +243,13 @@ def persist_session_bundle(session_id: str, sess) -> bool:
         return False
     try:
         blob = session_bundle_bytes(sess)
+        if len(blob) > _max_bundle_bytes():
+            _log.warning(
+                "skip persist session_id=%s: bundle %d MB exceeds SESSION_PG_MAX_BUNDLE_MB",
+                (session_id[:8] + "…") if len(session_id) > 8 else session_id,
+                len(blob) // (1024 * 1024),
+            )
+            return False
         with conn:
             conn.execute(
                 """
@@ -249,6 +268,35 @@ def persist_session_bundle(session_id: str, sess) -> bool:
             (session_id[:8] + "…") if len(session_id) > 8 else session_id,
         )
         return False
+
+
+def prune_old_sessions(*, keep: int = 15) -> int:
+    """Delete stale session blobs so PostgreSQL does not fill the disk."""
+    if not _table_ready or keep < 1:
+        return 0
+    conn = _require_conn()
+    if conn is None:
+        return 0
+    try:
+        with conn:
+            cur = conn.execute(
+                """
+                DELETE FROM forecast_app_sessions
+                WHERE session_id NOT IN (
+                    SELECT session_id FROM forecast_app_sessions
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                )
+                """,
+                (int(keep),),
+            )
+            deleted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+        if deleted:
+            _log.warning("Pruned %d old forecast_app_sessions row(s); kept %d newest", deleted, keep)
+        return deleted
+    except Exception:
+        _log.exception("prune_old_sessions failed")
+        return 0
 
 
 def delete_session_bundle(session_id: str) -> None:

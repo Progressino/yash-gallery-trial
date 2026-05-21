@@ -42,6 +42,9 @@ services:
       # Lock Tier-1 bulk uploads / clear / reset for non-Admin roles (daily uploads only).
       - UPLOAD_HISTORICAL_LOCKED=1
       - FORECAST_SESSION_DATABASE_URL=postgresql://forecast:${FORECAST_PG_PASSWORD:-forecast}@postgres:5432/forecast
+      # Set SESSION_PG_PERSIST=0 to disable multi‑GB session ZIP writes (warm cache + Tier‑3 hold data).
+      - SESSION_PG_PERSIST=${SESSION_PG_PERSIST:-1}
+      - SESSION_PG_MAX_BUNDLE_MB=${SESSION_PG_MAX_BUNDLE_MB:-80}
       - FINANCE_DB_PATH=/data/finance.db
       - ITEM_DB_PATH=/data/items.db
       - SALES_DB_PATH=/data/sales.db
