@@ -82,9 +82,18 @@ function ProtectedRoute() {
   })
 
   const authUnauthorized =
-    axios.isAxiosError(error) && error.response?.status === 401 && !cachedUser
+    axios.isAxiosError(error) && error.response?.status === 401
 
-  const activeUser = data ?? cachedUser
+  const authUnreachable =
+    !!error &&
+    !authUnauthorized &&
+    axios.isAxiosError(error) &&
+    (!error.response ||
+      error.code === 'ECONNABORTED' ||
+      [502, 503, 504].includes(error.response?.status ?? 0))
+
+  /** Keep last known profile when the server is busy (upload/restart) but cookie may still be valid. */
+  const activeUser = data ?? (authUnreachable ? cachedUser : null) ?? cachedUser
   const isKarigar = isKarigarUser(activeUser)
   const hrmOnly = isHrmOnlyUser(activeUser)
 
@@ -145,21 +154,42 @@ function ProtectedRoute() {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center">
         <p className="text-gray-600 text-sm max-w-md">
-          Could not reach the server right now. If a large upload is running, wait and retry.
+          Could not reach the server right now. The app may be restarting or a large upload is running.
+          Wait a minute, then sign in again.
         </p>
-        <button
-          type="button"
-          onClick={() => void refetch()}
-          disabled={isFetching}
-          className="px-4 py-2 rounded-lg bg-[#002B5B] text-white text-sm font-medium disabled:opacity-50"
-        >
-          {isFetching ? 'Retrying…' : 'Retry'}
-        </button>
+        <div className="flex flex-wrap gap-2 justify-center">
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            disabled={isFetching}
+            className="px-4 py-2 rounded-lg bg-[#002B5B] text-white text-sm font-medium disabled:opacity-50"
+          >
+            {isFetching ? 'Retrying…' : 'Retry'}
+          </button>
+          <a
+            href="/login"
+            className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50"
+          >
+            Sign in
+          </a>
+        </div>
       </div>
     )
   }
   return (
     <>
+      {authUnreachable && activeUser && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-amber-600 text-white text-xs py-1.5 px-3 shadow-md">
+          Server is slow to respond — using your saved sign-in. Data sync may catch up in a moment.
+          <button
+            type="button"
+            className="underline font-semibold"
+            onClick={() => void refetch()}
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {isRestoring && !isKarigar && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
