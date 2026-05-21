@@ -15,8 +15,9 @@ from typing import Any, Callable, List, Optional, Set, Tuple
 
 import logging
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from ..concurrency import run_heavy
 
 from ..session import store, resume_auto_data_restore
@@ -1039,45 +1040,50 @@ def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
     return "oms"  # safe default
 
 
-async def _read_and_process_inventory_auto(session_id: str, files: List[UploadFile]) -> None:
-    """Read uploaded files after HTTP 200, then parse inventory on a worker thread."""
-    sess = store._sessions.get(session_id)
-    if sess is None:
-        return
+def _classify_inventory_file_parts(
+    file_parts: list[tuple[str, bytes]],
+) -> tuple[list[bytes], list[bytes] | None, list[bytes] | None, bytes | None, list[str]]:
     oms_bytes_list: list[bytes] = []
     fk_bytes_list: list[bytes] = []
     myntra_bytes_list: list[bytes] = []
     amz_bytes = None
     detected: list[str] = []
+    for fname, raw in file_parts:
+        inv_type = _detect_inventory_type(fname, raw)
+        if inv_type == "rar":
+            amz_bytes = raw
+            detected.append(f"RAR archive ({fname})")
+        elif inv_type == "flipkart":
+            fk_bytes_list.append(raw)
+            detected.append(f"Flipkart ({fname})")
+        elif inv_type == "myntra":
+            myntra_bytes_list.append(raw)
+            detected.append(f"Myntra ({fname})")
+        elif inv_type == "amazon":
+            amz_bytes = raw
+            detected.append(f"Amazon ({fname})")
+        else:
+            oms_bytes_list.append(raw)
+            detected.append(f"OMS ({fname})")
+    fk_bytes = fk_bytes_list or None
+    myntra_bytes = myntra_bytes_list if myntra_bytes_list else None
+    return oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected
+
+
+async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
+    """Parse assembled inventory file bytes on a worker thread."""
+    sess = store._sessions.get(session_id)
+    if sess is None:
+        return
     try:
-        for file in files:
-            raw = await file.read()
-            fname = file.filename or ""
-            inv_type = _detect_inventory_type(fname, raw)
-            if inv_type == "rar":
-                amz_bytes = raw
-                detected.append(f"RAR archive ({fname})")
-            elif inv_type == "flipkart":
-                fk_bytes_list.append(raw)
-                detected.append(f"Flipkart ({fname})")
-            elif inv_type == "myntra":
-                myntra_bytes_list.append(raw)
-                detected.append(f"Myntra ({fname})")
-            elif inv_type == "amazon":
-                amz_bytes = raw
-                detected.append(f"Amazon ({fname})")
-            else:
-                oms_bytes_list.append(raw)
-                detected.append(f"OMS ({fname})")
+        oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected = _classify_inventory_file_parts(file_parts)
     except Exception as e:
-        _log.exception("inventory-auto read files")
+        _log.exception("inventory-auto classify files")
         sess.inventory_upload_status = "error"
         sess.inventory_upload_message = str(e)
         sess.inventory_upload_result = {"ok": False, "message": str(e)}
         return
 
-    fk_bytes = fk_bytes_list or None
-    myntra_bytes = myntra_bytes_list if myntra_bytes_list else None
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
         sess.inventory_upload_status = "error"
         sess.inventory_upload_message = "No files provided."
@@ -1133,6 +1139,22 @@ async def _read_and_process_inventory_auto(session_id: str, files: List[UploadFi
         sess.inventory_upload_status = "error"
         sess.inventory_upload_message = f"Parse error: {e}"
         sess.inventory_upload_result = {"ok": False, "message": f"Parse error: {e}"}
+
+
+async def _read_and_process_inventory_auto(session_id: str, files: List[UploadFile]) -> None:
+    """Read uploaded files after HTTP 200, then parse inventory on a worker thread."""
+    sess = store._sessions.get(session_id)
+    if sess is None:
+        return
+    try:
+        file_parts = [(f.filename or "upload", await f.read()) for f in files]
+    except Exception as e:
+        _log.exception("inventory-auto read files")
+        sess.inventory_upload_status = "error"
+        sess.inventory_upload_message = str(e)
+        sess.inventory_upload_result = {"ok": False, "message": str(e)}
+        return
+    await _run_inventory_auto_from_parts(session_id, file_parts)
 
 
 @router.post("/inventory-auto")
@@ -2246,3 +2268,193 @@ async def clear_platform(platform: str, request: Request):
 
     body = await _session_lock_apply(sess, work)
     return JSONResponse(content=body)
+
+
+# ── Chunked upload (large daily / inventory batches) ───────────────
+
+from ..services.chunk_upload_store import chunk_store, CHUNK_SIZE_BYTES
+
+
+class ChunkInitFileIn(BaseModel):
+    name: str
+    size: int = Field(ge=0, le=500 * 1024 * 1024)
+
+
+class ChunkInitIn(BaseModel):
+    target: str
+    files: list[ChunkInitFileIn]
+
+
+class ChunkCompleteIn(BaseModel):
+    upload_id: str
+
+
+async def _accept_daily_auto_file_parts(
+    sess,
+    sid: str,
+    file_parts: list[tuple[str, bytes]],
+    background_tasks: BackgroundTasks,
+) -> dict:
+    n_files = len(file_parts)
+    if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+        return {
+            "ok": False,
+            "message": (
+                "A Tier-3 upload is still processing on the server. "
+                "Wait until the status banner clears, then try again."
+            ),
+            "detected_platforms": [],
+            "warnings": [],
+            "processed_files": n_files,
+            "detected_files": 0,
+            "unknown_files": n_files,
+        }
+
+    def mark_async_start():
+        sess.daily_auto_ingest_status = "running"
+        sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
+        sess.daily_auto_ingest_result = {}
+        sess.sales_rebuild_status = "idle"
+        sess.sales_rebuild_message = ""
+
+    await _session_lock_apply(sess, mark_async_start)
+    background_tasks.add_task(_run_daily_auto_ingest_pipeline, sid, file_parts)
+    return {
+        "ok": True,
+        "ingest_async": True,
+        "chunked": True,
+        "message": (
+            "Upload complete — parsing daily files on the server. "
+            "Status updates below; you can stay on this page."
+        ),
+        "detected_platforms": [],
+        "warnings": [],
+        "processed_files": n_files,
+        "detected_files": 0,
+        "unknown_files": n_files,
+        "sales_rebuild": "pending",
+    }
+
+
+async def _accept_inventory_auto_file_parts(
+    sess,
+    sid: str,
+    file_parts: list[tuple[str, bytes]],
+    background_tasks: BackgroundTasks,
+) -> dict:
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return {
+            "ok": False,
+            "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
+        }
+
+    def mark_async_start():
+        sess.inventory_upload_status = "running"
+        sess.inventory_upload_message = "Parsing inventory files and merging snapshot…"
+        sess.inventory_upload_result = {}
+
+    await _session_lock_apply(sess, mark_async_start)
+    background_tasks.add_task(_run_inventory_auto_from_parts, sid, file_parts)
+    return {
+        "ok": True,
+        "ingest_async": True,
+        "chunked": True,
+        "message": (
+            "Upload complete — parsing inventory on the server. "
+            "Status updates below; you can stay on this page."
+        ),
+    }
+
+
+@router.post("/chunk/init")
+async def chunk_upload_init(request: Request, body: ChunkInitIn):
+    """Start a chunked upload session; client uploads 4 MB parts via POST /chunk."""
+    sid = getattr(request.state, "session_id", None)
+    if not sid:
+        return JSONResponse(content={"ok": False, "message": "Session required."}, status_code=400)
+    sess = _get_session(request)
+    if body.target not in ("daily-auto", "inventory-auto"):
+        return JSONResponse(content={"ok": False, "message": "Invalid target."}, status_code=400)
+    if body.target == "inventory-auto" and not sess.sku_mapping:
+        return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
+    if not body.files:
+        return JSONResponse(content={"ok": False, "message": "No files listed."}, status_code=400)
+    try:
+        upload_id, chunk_size = chunk_store.create(
+            sid,
+            target=body.target,  # type: ignore[arg-type]
+            files=[(f.name, f.size) for f in body.files],
+        )
+    except ValueError as e:
+        return JSONResponse(content={"ok": False, "message": str(e)}, status_code=400)
+    return JSONResponse(
+        content={
+            "ok": True,
+            "upload_id": upload_id,
+            "chunk_size": chunk_size,
+            "file_count": len(body.files),
+        }
+    )
+
+
+@router.post("/chunk")
+async def chunk_upload_part(
+    request: Request,
+    upload_id: str = Form(...),
+    file_index: int = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    chunk: UploadFile = File(...),
+):
+    """Upload one chunk (typically 4 MB) for a file in an active chunked session."""
+    sid = getattr(request.state, "session_id", None)
+    if not sid:
+        return JSONResponse(content={"ok": False, "message": "Session required."}, status_code=400)
+    raw = await chunk.read()
+    try:
+        progress = chunk_store.write_chunk(
+            sid,
+            upload_id,
+            file_index=file_index,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            data=raw,
+        )
+    except FileNotFoundError:
+        return JSONResponse(content={"ok": False, "message": "Unknown or expired upload."}, status_code=404)
+    except ValueError as e:
+        return JSONResponse(content={"ok": False, "message": str(e)}, status_code=400)
+    return JSONResponse(content={"ok": True, **progress})
+
+
+@router.post("/chunk/complete")
+async def chunk_upload_complete(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    body: ChunkCompleteIn,
+):
+    """Assemble chunks and start daily-auto or inventory-auto processing."""
+    sid = getattr(request.state, "session_id", None)
+    if not sid:
+        return JSONResponse(content={"ok": False, "message": "Session required."}, status_code=400)
+    sess = _get_session(request)
+    try:
+        target, file_parts = chunk_store.assemble(sid, body.upload_id)
+    except FileNotFoundError:
+        return JSONResponse(content={"ok": False, "message": "Unknown or expired upload."}, status_code=404)
+    except ValueError as e:
+        return JSONResponse(content={"ok": False, "message": str(e)}, status_code=400)
+
+    if target == "daily-auto":
+        payload = await _accept_daily_auto_file_parts(sess, sid, file_parts, background_tasks)
+    else:
+        payload = await _accept_inventory_auto_file_parts(sess, sid, file_parts, background_tasks)
+    return JSONResponse(content=payload)
+
+
+@router.delete("/chunk/{upload_id}")
+async def chunk_upload_abort(request: Request, upload_id: str):
+    sid = getattr(request.state, "session_id", None)
+    if sid:
+        chunk_store.abort(sid, upload_id)
+    return JSONResponse(content={"ok": True})

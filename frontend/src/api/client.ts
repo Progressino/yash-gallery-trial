@@ -5,6 +5,13 @@
  */
 import axios from 'axios'
 import { isUploadBusy } from '../store/uploadActivity'
+import {
+  shouldUseChunkedUpload,
+  uploadFilesChunked,
+  type ChunkUploadProgress,
+} from '../lib/chunkedUpload'
+
+export type { ChunkUploadProgress }
 
 export const api = axios.create({
   baseURL: '/api',
@@ -202,18 +209,23 @@ export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po'
 export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
 export async function uploadInventoryAuto(
-  files: File[]
+  files: File[],
+  onProgress?: (p: ChunkUploadProgress) => void,
 ): Promise<{
   ok: boolean
   message: string
   ingest_async?: boolean
+  chunked?: boolean
   rows?: number
   debug?: Record<string, unknown>
   detected?: string[]
 }> {
-  const fd = new FormData()
-  files.forEach(f => fd.append('files', f))
   try {
+    if (shouldUseChunkedUpload(files)) {
+      return await uploadFilesChunked('inventory-auto', files, onProgress)
+    }
+    const fd = new FormData()
+    files.forEach(f => fd.append('files', f))
     const { data } = await api.post('/upload/inventory-auto', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: UPLOAD_TIMEOUT_MS,
@@ -264,11 +276,13 @@ export async function uploadPoReturnsImport(
 }
 
 export async function uploadDailyAuto(
-  files: File[]
+  files: File[],
+  onProgress?: (p: ChunkUploadProgress) => void,
 ): Promise<{
   ok: boolean
   message: string
   ingest_async?: boolean
+  chunked?: boolean
   detected_platforms?: string[]
   warnings?: string[]
   processed_files?: number
@@ -276,9 +290,12 @@ export async function uploadDailyAuto(
   unknown_files?: number
   sales_rebuild?: 'inline' | 'pending'
 }> {
-  const fd = new FormData()
-  files.forEach(f => fd.append('files', f))
   try {
+    if (shouldUseChunkedUpload(files)) {
+      return await uploadFilesChunked('daily-auto', files, onProgress)
+    }
+    const fd = new FormData()
+    files.forEach(f => fd.append('files', f))
     const { data } = await api.post('/upload/daily-auto', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: UPLOAD_TIMEOUT_MS,

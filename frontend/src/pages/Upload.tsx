@@ -230,7 +230,7 @@ export default function Upload() {
     setBuildingMsg('')
     try {
       await withUploadGuard(async () => {
-        const res = await uploadDailyAuto(files)
+        const res = await uploadDailyAuto(files, p => setBuildingMsg(p.message))
         if (res.ok) {
           if (res.ingest_async || res.sales_rebuild === 'pending') {
             showToast('success', `${res.message} Processing on server…`, 6000)
@@ -626,7 +626,7 @@ export default function Upload() {
                 setBuildingMsg('')
                 try {
                   await withUploadGuard(async () => {
-                    const res = await uploadDailyAuto(files)
+                    const res = await uploadDailyAuto(files, p => setBuildingMsg(p.message))
                     if (res.ok) {
                       if (res.ingest_async || res.sales_rebuild === 'pending') {
                         showToast('success', `${res.message} Processing on server…`, 6000)
@@ -824,7 +824,7 @@ export default function Upload() {
               setL('inv', true)
               try {
                 await withUploadGuard(async () => {
-                  const res = await uploadInventoryAuto(files)
+                  const res = await uploadInventoryAuto(files, p => setBuildingMsg(p.message))
                   if (res.ok) {
                     if (res.ingest_async) {
                       showToast('success', `${res.message} Processing on server…`, 6000)
