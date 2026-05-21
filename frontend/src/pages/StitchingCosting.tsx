@@ -29,6 +29,10 @@ type TabId =
   | 'performance'
   | 'master'
 
+function normStyleKey(s: string) {
+  return s.trim().toLowerCase()
+}
+
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '🏠 Dashboard' },
   { id: 'production', label: '📋 Production Entry' },
@@ -484,19 +488,26 @@ function ProductionTab({
     queryFn: () => api.get('/stitching/sheets/style_master').then(r => r.data),
   })
   const [rateEdits, setRateEdits] = useState<Record<string, { Target: number; Rate_Rs: number }>>({})
-  const { data: challanSheet } = useQuery({
+  const { data: challanSheet, refetch: refetchChallans } = useQuery({
     queryKey: ['stitching-sheet', 'challan_master'],
     queryFn: () => api.get('/stitching/sheets/challan_master').then(r => r.data),
+    staleTime: 0,
   })
 
   const karigars = (karigarSheet?.rows ?? []) as KarigarRow[]
+  const allChallansEarly = (challanSheet?.rows ?? []) as { Style?: string }[]
   const styles = useMemo(() => {
-    const s = new Set<string>()
+    const byKey = new Map<string, string>()
     for (const r of (styleSheet?.rows ?? []) as { Style: string }[]) {
-      if (r.Style) s.add(String(r.Style))
+      const label = String(r.Style ?? '').trim()
+      if (label) byKey.set(normStyleKey(label), label)
     }
-    return [...s]
-  }, [styleSheet])
+    for (const c of allChallansEarly) {
+      const label = String(c.Style ?? '').trim()
+      if (label && !byKey.has(normStyleKey(label))) byKey.set(normStyleKey(label), label)
+    }
+    return [...byKey.values()].sort((a, b) => a.localeCompare(b))
+  }, [styleSheet, allChallansEarly])
   type ChallanRow = {
     Challan_No: string
     Style: string
@@ -511,9 +522,13 @@ function ProductionTab({
   )
 
   const challansForStyle = useMemo(
-    () => allChallans.filter(c => style && String(c.Style) === style),
+    () => (style ? allChallans.filter(c => normStyleKey(String(c.Style ?? '')) === normStyleKey(style)) : []),
     [allChallans, style],
   )
+
+  useEffect(() => {
+    void refetchChallans()
+  }, [refetchChallans])
 
   const styleOptions = useMemo<SearchSelectOption[]>(
     () =>
@@ -547,7 +562,7 @@ function ProductionTab({
 
   const operations = useMemo(() => {
     return ((styleSheet?.rows ?? []) as { Style: string; Operation: string; Target: number; Rate_Rs: number }[])
-      .filter(r => r.Style === style)
+      .filter(r => style && normStyleKey(String(r.Style)) === normStyleKey(style))
       .map(r => {
         const key = `${r.Style}::${r.Operation}`
         const ed = rateEdits[key]
@@ -868,8 +883,14 @@ function ProductionTab({
           onChange={setChallanNo}
           options={challanOptions}
           disabled={!style}
-          emptyMessage={style ? 'No challan for this style — add in Challans tab' : 'Select a style first'}
-          hint={style ? `${challansForStyle.length} challan(s) for ${style}` : undefined}
+          emptyMessage={
+            style
+              ? challansForStyle.length === 0 && allChallans.length > 0
+                ? 'No challan for this style — check Style spelling matches Challans tab'
+                : 'No challan for this style — add in Challans tab'
+              : 'Select a style first'
+          }
+          hint={style ? `${challansForStyle.length} challan(s) for ${style} · ${allChallans.length} total in register` : undefined}
         />
       </div>
 
@@ -1473,7 +1494,7 @@ function ChallanTab({ onFlash }: { onFlash: (type: 'ok' | 'err', text: string) =
         <p className="text-xs text-gray-500 mb-2">
           Edit <strong>Received</strong> — saves automatically. Style costing uses received qty when set (e.g. 90 received of 100 ordered).
         </p>
-        <ChallanRegisterTable rows={rows} onFlash={onFlash} onSaved={invalidateChallan} />
+        <ChallanRegisterTable rows={rows} onFlash={onFlash} onSaved={invalidateChallan} onDelete={invalidateChallan} />
       </Section>
     </div>
   )
@@ -1638,10 +1659,12 @@ function ChallanRegisterTable({
   rows,
   onFlash,
   onSaved,
+  onDelete,
 }: {
   rows: Record<string, unknown>[]
   onFlash: (type: 'ok' | 'err', text: string) => void
   onSaved: () => void
+  onDelete?: () => void
 }) {
   const [draft, setDraft] = useState<Record<string, { received?: number; total?: number }>>({})
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
@@ -1677,6 +1700,7 @@ function ChallanRegisterTable({
                 {c.replace(/_/g, ' ')}
               </th>
             ))}
+            <th className="px-2 py-2 w-20 text-right font-semibold text-gray-600">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -1721,6 +1745,25 @@ function ChallanRegisterTable({
                 </td>
                 <td className="px-2 py-1.5">{String(r.Rate_Per_Pc ?? '')}</td>
                 <td className="px-2 py-1.5 whitespace-nowrap">{String(r.Date ?? '')}</td>
+                <td className="px-2 py-1.5 text-right">
+                  <button
+                    type="button"
+                    className="text-red-600 hover:underline font-semibold"
+                    onClick={async () => {
+                      if (!no || !window.confirm(`Delete challan ${no}? This cannot be undone.`)) return
+                      try {
+                        await api.delete(`/stitching/challans/${encodeURIComponent(no)}`)
+                        onFlash('ok', `Challan ${no} deleted.`)
+                        onSaved()
+                        onDelete?.()
+                      } catch {
+                        onFlash('err', `Could not delete ${no}.`)
+                      }
+                    }}
+                  >
+                    Delete
+                  </button>
+                </td>
               </tr>
             )
           })}
@@ -2047,6 +2090,7 @@ function TargetControlTab({
     'Karigar_Name',
     'Daily_Rate_Rs',
     'Base_Target',
+    'Tolerance_%',
     'Formula_LTL',
     'Manual_Override',
     'Final_Applied_LTL',
@@ -2057,12 +2101,19 @@ function TargetControlTab({
     <div className="space-y-4">
       <Section title="Target Control — Multi-Style LTL">
         <p className="text-xs text-gray-600 mb-3">
-          Benchmark daily rate <strong>₹{preview?.benchmark_daily_rate_rs ?? 480}</strong> · Tolerance floor{' '}
-          <strong>{Math.round((preview?.tolerance_factor ?? 0.8) * 100)}%</strong> of style target · Formula:{' '}
-          <code className="text-[10px] bg-gray-100 px-1 rounded">
-            ROUND((Base Target × 0.80) × (Daily Rate / 480), 0)
-          </code>
-          . Production logs use <strong>Final Applied LTL</strong> (manual override if set, else formula).
+          Benchmark daily rate <strong>₹{preview?.benchmark_daily_rate_rs ?? 480}</strong>. Tolerance % by karigar daily
+          rate (applied as <strong>Base Target × (1 − tolerance %)</strong> × rate/480):{' '}
+          {(
+            (preview?.tolerance_bands as { from_rs: number; to_rs: number; tolerance_pct: number }[] | undefined) ?? [
+              { from_rs: 200, to_rs: 300, tolerance_pct: 35 },
+              { from_rs: 300, to_rs: 400, tolerance_pct: 12 },
+            ]
+          ).map(b => (
+            <span key={`${b.from_rs}-${b.to_rs}`} className="inline-block mr-2">
+              ₹{b.from_rs}–{b.to_rs}: <strong>{b.tolerance_pct}%</strong>
+            </span>
+          ))}
+          . Production uses <strong>Final Applied LTL</strong> (manual override if set, else formula).
         </p>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-4">
           <label className="text-xs block">
@@ -2186,6 +2237,212 @@ function TargetControlTab({
   )
 }
 
+type StyleMasterReportView = 'summary' | 'master' | 'production' | 'costing' | 'full'
+
+function StyleMasterReportPanel({
+  styleOptions,
+  focusStyle,
+  onFocusStyle,
+}: {
+  styleOptions: SearchSelectOption[]
+  focusStyle: string
+  onFocusStyle: (s: string) => void
+}) {
+  const [reportStyle, setReportStyle] = useState('')
+  const [dateFrom, setDateFrom] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 29)
+    return d.toISOString().slice(0, 10)
+  })
+  const [dateTo, setDateTo] = useState(todayStr())
+  const [view, setView] = useState<StyleMasterReportView>('summary')
+  const [showKarigar, setShowKarigar] = useState(true)
+  const [showByDate, setShowByDate] = useState(true)
+  const [showDetail, setShowDetail] = useState(false)
+  const [showCostingTable, setShowCostingTable] = useState(true)
+
+  useEffect(() => {
+    if (focusStyle) setReportStyle(focusStyle)
+  }, [focusStyle])
+
+  const activeStyle = reportStyle.trim()
+  const { data, isFetching, isError } = useQuery({
+    queryKey: ['stitching-style-master-report', activeStyle, dateFrom, dateTo, view, showDetail],
+    queryFn: () =>
+      api
+        .get('/stitching/master/style-report', {
+          params: {
+            style: activeStyle,
+            date_from: dateFrom,
+            date_to: dateTo,
+            view,
+            include_production_detail: showDetail,
+          },
+        })
+        .then(r => r.data),
+    enabled: !!activeStyle,
+  })
+
+  const totals = data?.totals as Record<string, number> | undefined
+  const master = data?.master as { operations?: Record<string, unknown>[]; totals?: Record<string, unknown> } | undefined
+  const production = data?.production as {
+    summary?: Record<string, number>
+    by_operation?: Record<string, unknown>[]
+    by_karigar?: Record<string, unknown>[]
+    by_date?: Record<string, unknown>[]
+    detail?: Record<string, unknown>[]
+  } | undefined
+  const costing = data?.costing as { summary?: Record<string, number>; challans?: Record<string, unknown>[] } | undefined
+  const columnSets = (data?.column_sets ?? {}) as Record<string, string[]>
+
+  const viewTabs: { id: StyleMasterReportView; label: string }[] = [
+    { id: 'summary', label: 'Totals' },
+    { id: 'master', label: 'Operations' },
+    { id: 'production', label: 'Production' },
+    { id: 'costing', label: 'Costing' },
+    { id: 'full', label: 'Full report' },
+  ]
+
+  return (
+    <div className="border border-sky-200 bg-sky-50/60 rounded-xl p-4 space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold text-[#002B5B]">Style report</p>
+          <p className="text-xs text-gray-600 mt-0.5">
+            Pick a style for totals across master operations, floor production, and challan costing. Customize sections below.
+          </p>
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
+        <div className="sm:col-span-2">
+          <SearchSelect
+            label="Style"
+            placeholder="Search style code…"
+            value={reportStyle}
+            onChange={v => {
+              setReportStyle(v)
+              onFocusStyle(v)
+            }}
+            options={styleOptions}
+            emptyMessage="No styles in master"
+            hint="Click a style in the table below to load its report"
+          />
+        </div>
+        <label>
+          From
+          <input type="date" className="w-full border rounded mt-1 px-2 py-1.5" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+        </label>
+        <label>
+          To
+          <input type="date" className="w-full border rounded mt-1 px-2 py-1.5" value={dateTo} onChange={e => setDateTo(e.target.value)} />
+        </label>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {viewTabs.map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setView(t.id)}
+            className={`text-xs px-3 py-1.5 rounded-lg ${view === t.id ? 'bg-[#002B5B] text-white' : 'bg-white border'}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-3 text-xs text-gray-700">
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={showKarigar} onChange={e => setShowKarigar(e.target.checked)} />
+          By karigar
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={showByDate} onChange={e => setShowByDate(e.target.checked)} />
+          By date
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={showDetail} onChange={e => setShowDetail(e.target.checked)} />
+          Production detail rows
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={showCostingTable} onChange={e => setShowCostingTable(e.target.checked)} />
+          Challan table
+        </label>
+      </div>
+      {!activeStyle && <p className="text-xs text-gray-500">Select a style to load the report.</p>}
+      {activeStyle && isFetching && <p className="text-xs text-gray-500">Loading report…</p>}
+      {activeStyle && isError && <p className="text-xs text-red-600">Could not load report.</p>}
+      {activeStyle && totals && (view === 'summary' || view === 'full') && (
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2">
+          {[
+            ['Operations', totals.master_operations],
+            ['Labour ₹/pc', `₹${Number(totals.labour_rate_per_piece_rs ?? 0).toLocaleString()}`],
+            ['Prod pieces', totals.production_pieces],
+            ['Prod value', `₹${Number(totals.production_piece_value_rs ?? 0).toLocaleString()}`],
+            ['Prod P&L', `₹${Number(totals.production_pl_rs ?? 0).toLocaleString()}`],
+            ['Party value', `₹${Number(totals.costing_party_value_rs ?? 0).toLocaleString()}`],
+            ['Costing P&L', `₹${Number(totals.costing_net_pl_rs ?? 0).toLocaleString()}`],
+          ].map(([l, v]) => (
+            <div key={String(l)} className="bg-white border rounded-lg p-2.5">
+              <p className="text-[10px] text-gray-500">{l}</p>
+              <p className="font-bold text-[#2c5aa0] text-sm">{v}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {activeStyle && master && (view === 'master' || view === 'full') && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold text-gray-700">
+            Master operations ({String(master.totals?.operation_count ?? 0)}) — labour benchmark ₹
+            {Number(master.totals?.benchmark_labour_per_piece_rs ?? 0).toLocaleString()}/pc (₹480/day SOP)
+          </p>
+          <DataTable rows={master.operations ?? []} cols={columnSets.master_operations ?? ['Operation', 'Target', 'Rate_Rs']} />
+        </div>
+      )}
+      {activeStyle && production && (view === 'production' || view === 'full') && (
+        <div className="space-y-3">
+          {production.summary && (
+            <p className="text-xs text-gray-600">
+              Production {dateFrom} → {dateTo}: {production.summary.pieces} pcs, {production.summary.karigars} karigar(s), avg eff{' '}
+              {production.summary.avg_efficiency_pct}%
+            </p>
+          )}
+          <DataTable
+            rows={production.by_operation ?? []}
+            cols={columnSets.production_by_operation ?? ['Operation', 'Pieces', 'Piece_Value_Rs', 'PL_Rs']}
+          />
+          {showKarigar && (
+            <DataTable
+              rows={production.by_karigar ?? []}
+              cols={columnSets.production_by_karigar ?? ['Karigar_ID', 'Karigar_Name', 'Pieces', 'PL_Rs']}
+            />
+          )}
+          {showByDate && (
+            <DataTable rows={production.by_date ?? []} cols={columnSets.production_by_date ?? ['Date', 'Pieces', 'PL_Rs']} />
+          )}
+          {showDetail && (
+            <DataTable
+              rows={production.detail ?? []}
+              cols={columnSets.production_detail ?? ['Date', 'Karigar_ID', 'Operation', 'Total_Pieces', 'PL_Rs']}
+            />
+          )}
+        </div>
+      )}
+      {activeStyle && costing && (view === 'costing' || view === 'full') && (
+        <div className="space-y-2">
+          {costing.summary && (
+            <p className="text-xs text-gray-600">
+              {costing.summary.challans} challan(s), party ₹{Number(costing.summary.party_value ?? 0).toLocaleString()}, net P&L ₹
+              {Number(costing.summary.net_pl ?? 0).toLocaleString()}
+            </p>
+          )}
+          {showCostingTable && (
+            <DataTable rows={costing.challans ?? []} cols={columnSets.costing_challans ?? ['Challan_No', 'Party_Value_Rs', 'PL_Rs']} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function masterRowPayload(sheet: MasterSheetKey, row: Record<string, unknown>): Record<string, string> {
   if (sheet === 'style_master') {
     return { Style: String(row.Style ?? ''), Operation: String(row.Operation ?? '') }
@@ -2197,6 +2454,7 @@ function masterRowPayload(sheet: MasterSheetKey, row: Record<string, unknown>): 
 function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' | 'err', text: string) => void }) {
   const qc = useQueryClient()
   const [active, setActive] = useState<MasterSheetKey>('style_master')
+  const [reportFocusStyle, setReportFocusStyle] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [editKarigar, setEditKarigar] = useState<Record<string, unknown> | null>(null)
   const [karEdit, setKarEdit] = useState({
@@ -2212,6 +2470,25 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
 
   const rows = (data?.rows ?? []) as Record<string, unknown>[]
   const cols = (data?.columns as string[]) ?? []
+
+  const styleReportOptions = useMemo((): SearchSelectOption[] => {
+    if (active !== 'style_master') return []
+    const seen = new Set<string>()
+    const opts: SearchSelectOption[] = []
+    for (const r of rows) {
+      const s = String(r.Style ?? '').trim()
+      if (!s || seen.has(s)) continue
+      seen.add(s)
+      const opCount = rows.filter(x => String(x.Style ?? '').trim() === s).length
+      opts.push({
+        value: s,
+        primary: s,
+        secondary: `${opCount} operation(s)`,
+        haystack: s.toLowerCase(),
+      })
+    }
+    return opts.sort((a, b) => a.primary.localeCompare(b.primary))
+  }, [active, rows])
 
   const invalidateSheet = () => {
     setSelected(new Set())
@@ -2345,6 +2622,13 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
         ))}
       </div>
       {active === 'style_master' && (
+        <StyleMasterReportPanel
+          styleOptions={styleReportOptions}
+          focusStyle={reportFocusStyle}
+          onFocusStyle={setReportFocusStyle}
+        />
+      )}
+      {active === 'style_master' && (
         <div className="grid sm:grid-cols-4 gap-2 text-xs mb-3">
           {(['Style', 'Operation'] as const).map(k => (
             <label key={k}>
@@ -2433,6 +2717,7 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
         onToggleAll={toggleAll}
         onDeleteOne={deleteOne}
         onEditKarigar={active === 'karigar_master' ? openKarigarEdit : undefined}
+        onStyleReport={active === 'style_master' ? setReportFocusStyle : undefined}
         toolbar={
           <div className="flex flex-wrap items-center gap-2 mb-2">
             <button
@@ -2460,6 +2745,7 @@ function MasterDataTable({
   onToggleAll,
   onDeleteOne,
   onEditKarigar,
+  onStyleReport,
   toolbar,
 }: {
   rows: Record<string, unknown>[]
@@ -2470,6 +2756,7 @@ function MasterDataTable({
   onToggleAll: () => void
   onDeleteOne: (row: Record<string, unknown>) => void
   onEditKarigar?: (row: Record<string, unknown>) => void
+  onStyleReport?: (style: string) => void
   toolbar?: React.ReactNode
 }) {
   if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No rows</p>
@@ -2508,10 +2795,29 @@ function MasterDataTable({
                   </td>
                   {useCols.map(c => (
                     <td key={c} className="px-2 py-1.5 whitespace-nowrap">
-                      {String(r[c] ?? '')}
+                      {sheet === 'style_master' && c === 'Style' && onStyleReport ? (
+                        <button
+                          type="button"
+                          className="text-[#2c5aa0] font-medium hover:underline text-left"
+                          onClick={() => onStyleReport(String(r[c] ?? '').trim())}
+                        >
+                          {String(r[c] ?? '')}
+                        </button>
+                      ) : (
+                        String(r[c] ?? '')
+                      )}
                     </td>
                   ))}
                   <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                    {sheet === 'style_master' && onStyleReport && (
+                      <button
+                        type="button"
+                        onClick={() => onStyleReport(String(r.Style ?? '').trim())}
+                        className="text-[#2c5aa0] hover:underline mr-2"
+                      >
+                        Report
+                      </button>
+                    )}
                     {onEditKarigar && (
                       <button type="button" onClick={() => onEditKarigar(r)} className="text-violet-700 hover:underline mr-2">
                         Rate

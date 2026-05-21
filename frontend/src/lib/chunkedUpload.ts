@@ -234,11 +234,13 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
     if (axios.isAxiosError(e) && e.code === 'ECONNABORTED') {
       throw new Error('Chunk upload timed out. Check connection and try again.')
     }
-    if (axios.isAxiosError(e) && e.response?.status === 502) {
-      throw new Error(
-        'Server gateway error (502) while finishing upload. Wait 1–2 minutes and refresh — '
-        + 'your files may still be processing on the server.',
-      )
+    if (isRetryableChunkError(e)) {
+      const err = new Error(
+        'GATEWAY_502_CHUNK_COMPLETE: Server gateway timed out while finishing upload. '
+        + 'Chunks were likely received — poll server status.',
+      ) as Error & { gateway502?: boolean }
+      err.gateway502 = true
+      throw err
     }
     throw e
   }

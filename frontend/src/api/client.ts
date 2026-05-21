@@ -283,6 +283,64 @@ export async function uploadPoReturnsImport(
   }
 }
 
+/** True when Cloudflare/nginx returned 502 but the server may still be processing. */
+export function isUploadGateway502(e: unknown): boolean {
+  if (axios.isAxiosError(e) && e.response?.status === 502) return true
+  if (e instanceof Error && (e as Error & { gateway502?: boolean }).gateway502) return true
+  return e instanceof Error && e.message.includes('GATEWAY_502_CHUNK_COMPLETE')
+}
+
+function dailyUploadPendingAfter502(fileCount: number): {
+  ok: boolean
+  message: string
+  ingest_async: boolean
+  sales_rebuild: 'pending'
+  processed_files: number
+  detected_files: number
+  unknown_files: number
+  detected_platforms: string[]
+  warnings: string[]
+} {
+  return {
+    ok: true,
+    message:
+      'Upload may have been accepted (gateway timed out). Checking server status — stay on this page.',
+    ingest_async: true,
+    sales_rebuild: 'pending',
+    processed_files: fileCount,
+    detected_files: 0,
+    unknown_files: 0,
+    detected_platforms: [],
+    warnings: [],
+  }
+}
+
+/** Chunked daily upload with 502 → treat as async pending (server often still ingesting). */
+export async function uploadDailyAutoChunked(
+  files: File[],
+  onProgress?: (p: ChunkUploadProgress) => void,
+): Promise<{
+  ok: boolean
+  message: string
+  ingest_async?: boolean
+  chunked?: boolean
+  detected_platforms?: string[]
+  warnings?: string[]
+  processed_files?: number
+  detected_files?: number
+  unknown_files?: number
+  sales_rebuild?: 'inline' | 'pending'
+}> {
+  try {
+    return await uploadFilesChunked('daily-auto', files, onProgress)
+  } catch (e: unknown) {
+    if (isUploadGateway502(e)) {
+      return { ...dailyUploadPendingAfter502(files.length), chunked: true }
+    }
+    throw e
+  }
+}
+
 export async function uploadDailyAuto(
   files: File[],
   onProgress?: (p: ChunkUploadProgress) => void,
@@ -300,7 +358,7 @@ export async function uploadDailyAuto(
 }> {
   try {
     if (shouldUseChunkedUpload(files)) {
-      return await uploadFilesChunked('daily-auto', files, onProgress)
+      return await uploadDailyAutoChunked(files, onProgress)
     }
     const fd = new FormData()
     files.forEach(f => fd.append('files', f))
@@ -320,10 +378,13 @@ export async function uploadDailyAuto(
       timeout: UPLOAD_TIMEOUT_MS,
     })
     if (data?.require_chunked) {
-      return await uploadFilesChunked('daily-auto', files, onProgress)
+      return await uploadDailyAutoChunked(files, onProgress)
     }
     return data
   } catch (e: unknown) {
+    if (isUploadGateway502(e)) {
+      return dailyUploadPendingAfter502(files.length)
+    }
     throw new Error(_errMessage(e, 'Daily upload failed'))
   }
 }
@@ -334,20 +395,34 @@ export async function waitForDailyAutoIngest(
   maxMs = UPLOAD_TIMEOUT_MS,
 ): Promise<CoverageResponse> {
   const start = Date.now()
+  let sawRunning = false
   while (Date.now() - start < maxMs) {
     const cov = await getCoverage({ light: true })
     const st = cov.daily_auto_ingest_status ?? 'idle'
-    if (st === 'running') {
-      onTick?.(cov.daily_auto_ingest_message || 'Parsing daily files…')
+    const salesSt = cov.sales_rebuild ?? 'idle'
+    if (st === 'running' || salesSt === 'running') {
+      sawRunning = true
+      onTick?.(
+        cov.daily_auto_ingest_message ||
+          cov.sales_rebuild_message ||
+          'Parsing daily files…',
+      )
       await new Promise(r => setTimeout(r, 2000))
       continue
     }
     if (st === 'error') {
       throw new Error(cov.daily_auto_ingest_message || 'Daily ingest failed')
     }
-    if (st === 'done') {
+    if (st === 'done' || (sawRunning && st === 'idle')) {
+      const salesBusy = String(cov.sales_rebuild ?? 'idle') === 'running'
+      if (salesBusy) {
+        onTick?.(cov.sales_rebuild_message || 'Rebuilding combined sales…')
+        await new Promise(r => setTimeout(r, 2000))
+        continue
+      }
       return cov
     }
+    onTick?.('Waiting for server to start processing…')
     await new Promise(r => setTimeout(r, 1500))
   }
   throw new Error('Daily ingest timed out — refresh the page in a minute.')

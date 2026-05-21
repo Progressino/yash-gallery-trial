@@ -19,9 +19,38 @@ HOUR_LBLS = [
 
 _PRODUCTION_LOG_LOCK = threading.Lock()
 
-# Factory SOP — benchmark karigar ₹480/day, 20% tolerance floor (80% of operation target).
+# Factory SOP — benchmark karigar ₹480/day; LTL tolerance % by daily-rate band.
 BENCHMARK_DAILY_RATE_RS = 480.0
-LTL_TOLERANCE_FACTOR = 0.80
+# (min_daily_rate_inclusive, max_daily_rate_exclusive, tolerance_percent)
+LTL_TOLERANCE_BANDS: list[tuple[float, float, float]] = [
+    (200.0, 300.0, 35.0),
+    (300.0, 400.0, 12.0),
+]
+# Below ₹200/day uses the ₹200–300 band (35%). ₹400+ uses the 12% band.
+LTL_TOLERANCE_FACTOR = 1.0 - (LTL_TOLERANCE_BANDS[0][2] / 100.0)
+
+
+def ltl_tolerance_factor(daily_rate: float) -> float:
+    """Return multiplier applied to base target (1 − tolerance %)."""
+    dr = float(daily_rate or 0)
+    for lo, hi, pct in LTL_TOLERANCE_BANDS:
+        if lo <= dr < hi:
+            return 1.0 - (pct / 100.0)
+    if dr >= LTL_TOLERANCE_BANDS[-1][0]:
+        return 1.0 - (LTL_TOLERANCE_BANDS[-1][2] / 100.0)
+    if dr >= LTL_TOLERANCE_BANDS[0][0]:
+        return 1.0 - (LTL_TOLERANCE_BANDS[0][2] / 100.0)
+    return 1.0 - (LTL_TOLERANCE_BANDS[0][2] / 100.0)
+
+
+def ltl_tolerance_pct_for_rate(daily_rate: float) -> float:
+    dr = float(daily_rate or 0)
+    for lo, hi, pct in LTL_TOLERANCE_BANDS:
+        if lo <= dr < hi:
+            return pct
+    if dr >= LTL_TOLERANCE_BANDS[-1][0]:
+        return LTL_TOLERANCE_BANDS[-1][2]
+    return LTL_TOLERANCE_BANDS[0][2]
 
 
 def normalize_operation_name(name: Any) -> str:
@@ -146,12 +175,13 @@ def _financial_from_log_row(row: pd.Series, *, date_str: str, kid: str) -> dict[
 
 
 def compute_formula_ltl(base_target: int | float, daily_rate: float) -> int:
-    """ROUND((Operation Target × 0.80) × (Daily Rate / 480), 0)."""
+    """ROUND((Operation Target × tolerance factor) × (Daily Rate / 480), 0)."""
     bt = int(base_target or 0)
     dr = float(daily_rate or 0)
     if bt <= 0 or dr <= 0:
         return 0
-    return int(round((bt * LTL_TOLERANCE_FACTOR) * (dr / BENCHMARK_DAILY_RATE_RS), 0))
+    tol = ltl_tolerance_factor(dr)
+    return int(round((bt * tol) * (dr / BENCHMARK_DAILY_RATE_RS), 0))
 
 
 def _ltl_override_key(style: str, operation: str, karigar_id: str) -> tuple[str, str, str]:
@@ -226,6 +256,8 @@ def resolve_applied_ltl(
         "operation": op,
         "karigar_id": clean_key(karigar_id),
         "daily_rate_rs": round(dr, 2),
+        "tolerance_pct": ltl_tolerance_pct_for_rate(dr),
+        "tolerance_factor": ltl_tolerance_factor(dr),
         "base_target": bt,
         "formula_ltl": formula_ltl,
         "manual_override": manual,
@@ -249,7 +281,10 @@ def target_control_preview(
         return {
             "date": date_str,
             "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
-            "tolerance_factor": LTL_TOLERANCE_FACTOR,
+            "tolerance_bands": [
+                {"from_rs": lo, "to_rs": hi, "tolerance_pct": pct}
+                for lo, hi, pct in LTL_TOLERANCE_BANDS
+            ],
             "rows": [],
         }
 
@@ -289,6 +324,7 @@ def target_control_preview(
                     "Karigar_Name": km_names.get(clean_key(kid), ""),
                     "Daily_Rate_Rs": info["daily_rate_rs"],
                     "Base_Target": info["base_target"],
+                    "Tolerance_%": info["tolerance_pct"],
                     "Formula_LTL": info["formula_ltl"],
                     "Manual_Override": info["manual_override"] if info["manual_override"] else "",
                     "Final_Applied_LTL": info["applied_ltl"],
@@ -301,7 +337,10 @@ def target_control_preview(
     return {
         "date": date_str,
         "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
-        "tolerance_factor": LTL_TOLERANCE_FACTOR,
+        "tolerance_bands": [
+            {"from_rs": lo, "to_rs": hi, "tolerance_pct": pct}
+            for lo, hi, pct in LTL_TOLERANCE_BANDS
+        ],
         "rows": rows,
     }
 
@@ -896,6 +935,303 @@ def style_costing_report(
     }
 
 
+STYLE_MASTER_COLUMN_SETS: dict[str, list[str]] = {
+    "master_operations": ["Operation", "Target", "Rate_Rs"],
+    "production_by_operation": [
+        "Operation",
+        "Pieces",
+        "Avg_Efficiency_%",
+        "Piece_Value_Rs",
+        "Budgeted_Rs",
+        "Actual_Rs",
+        "PL_Rs",
+        "Sessions",
+    ],
+    "production_by_karigar": [
+        "Karigar_ID",
+        "Karigar_Name",
+        "Pieces",
+        "Avg_Efficiency_%",
+        "Piece_Value_Rs",
+        "Budgeted_Rs",
+        "Actual_Rs",
+        "PL_Rs",
+        "Sessions",
+    ],
+    "production_by_date": [
+        "Date",
+        "Pieces",
+        "Piece_Value_Rs",
+        "Budgeted_Rs",
+        "Actual_Rs",
+        "PL_Rs",
+        "Karigars",
+        "Sessions",
+    ],
+    "production_detail": [
+        "Date",
+        "Karigar_ID",
+        "Karigar_Name",
+        "Challan_No",
+        "Operation",
+        "Total_Pieces",
+        "Efficiency_%",
+        "Piece_Value_Rs",
+        "Budgeted_Expense_Rs",
+        "Actual_Expense_Rs",
+        "PL_Rs",
+    ],
+    "costing_challans": [
+        "Challan_No",
+        "Party",
+        "Total_Qty",
+        "Received_Qty",
+        "Pending",
+        "Party_Value_Rs",
+        "Actual_Labour_Rs",
+        "Target_Labour_Rs",
+        "Total_Expense_Rs",
+        "PL_Rs",
+        "Margin_%",
+        "Date",
+    ],
+}
+
+
+def _filter_df_by_style(df: pd.DataFrame, style: str) -> pd.DataFrame:
+    if df.empty or "Style" not in df.columns:
+        return df.iloc[0:0]
+    sk = clean_key(style)
+    return df[df["Style"].map(clean_key) == sk].copy()
+
+
+def _filter_df_by_date(df: pd.DataFrame, date_from: str | None, date_to: str | None) -> pd.DataFrame:
+    if df.empty or "Date" not in df.columns or (not date_from and not date_to):
+        return df
+    out = df.copy()
+    out["Date_dt"] = pd.to_datetime(out["Date"], errors="coerce")
+    if date_from:
+        out = out[out["Date_dt"] >= pd.Timestamp(date_from)]
+    if date_to:
+        out = out[out["Date_dt"] <= pd.Timestamp(date_to)]
+    return out.drop(columns=["Date_dt"], errors="ignore")
+
+
+def _aggregate_production(pl_f: pd.DataFrame) -> dict[str, Any]:
+    """Build production summary and breakdown tables for one style."""
+    empty: dict[str, Any] = {
+        "summary": {},
+        "by_operation": [],
+        "by_karigar": [],
+        "by_date": [],
+        "detail": [],
+    }
+    if pl_f.empty:
+        return empty
+
+    num_cols = [
+        "Total_Pieces",
+        "Efficiency_%",
+        "Piece_Value_Rs",
+        "Budgeted_Expense_Rs",
+        "Actual_Expense_Rs",
+        "PL_Rs",
+    ]
+    for c in num_cols:
+        if c in pl_f.columns:
+            pl_f[c] = safe_num(pl_f[c])
+
+    summary = {
+        "pieces": int(pl_f["Total_Pieces"].sum()) if "Total_Pieces" in pl_f.columns else 0,
+        "piece_value_rs": round(float(pl_f["Piece_Value_Rs"].sum()), 2)
+        if "Piece_Value_Rs" in pl_f.columns
+        else 0.0,
+        "budgeted_rs": round(float(pl_f["Budgeted_Expense_Rs"].sum()), 2)
+        if "Budgeted_Expense_Rs" in pl_f.columns
+        else 0.0,
+        "actual_rs": round(float(pl_f["Actual_Expense_Rs"].sum()), 2)
+        if "Actual_Expense_Rs" in pl_f.columns
+        else 0.0,
+        "pl_rs": round(float(pl_f["PL_Rs"].sum()), 2) if "PL_Rs" in pl_f.columns else 0.0,
+        "avg_efficiency_pct": round(float(pl_f["Efficiency_%"].mean()), 1)
+        if "Efficiency_%" in pl_f.columns
+        else 0.0,
+        "sessions": len(pl_f),
+        "karigars": int(pl_f["Karigar_ID"].nunique()) if "Karigar_ID" in pl_f.columns else 0,
+        "challans": int(pl_f["Challan_No"].nunique()) if "Challan_No" in pl_f.columns else 0,
+        "date_first": str(pl_f["Date"].min()) if "Date" in pl_f.columns else "",
+        "date_last": str(pl_f["Date"].max()) if "Date" in pl_f.columns else "",
+    }
+
+    agg_map: dict[str, tuple[str, str]] = {}
+    if "Total_Pieces" in pl_f.columns:
+        agg_map["Pieces"] = ("Total_Pieces", "sum")
+    if "Efficiency_%" in pl_f.columns:
+        agg_map["Avg_Efficiency_%"] = ("Efficiency_%", "mean")
+    if "Piece_Value_Rs" in pl_f.columns:
+        agg_map["Piece_Value_Rs"] = ("Piece_Value_Rs", "sum")
+    if "Budgeted_Expense_Rs" in pl_f.columns:
+        agg_map["Budgeted_Rs"] = ("Budgeted_Expense_Rs", "sum")
+    if "Actual_Expense_Rs" in pl_f.columns:
+        agg_map["Actual_Rs"] = ("Actual_Expense_Rs", "sum")
+    if "PL_Rs" in pl_f.columns:
+        agg_map["PL_Rs"] = ("PL_Rs", "sum")
+    if "Operation" in pl_f.columns:
+        agg_map["Sessions"] = ("Operation", "count")
+
+    def _group_table(group_col: str, extra_cols: list[str] | None = None) -> list[dict]:
+        if group_col not in pl_f.columns or not agg_map:
+            return []
+        g = pl_f.groupby(group_col).agg(**agg_map).round(2).reset_index()
+        if extra_cols:
+            for col in extra_cols:
+                if col in pl_f.columns and col != group_col:
+                    firsts = pl_f.groupby(group_col)[col].first().reset_index()
+                    g = g.merge(firsts, on=group_col, how="left")
+        return g.fillna("").to_dict(orient="records")
+
+    by_operation = _group_table("Operation")
+    by_karigar = _group_table("Karigar_ID", ["Karigar_Name"])
+    by_date = _group_table("Date")
+    if by_date and "Karigar_ID" in pl_f.columns:
+        k_per_day = pl_f.groupby("Date")["Karigar_ID"].nunique().reset_index()
+        k_per_day.columns = ["Date", "Karigars"]
+        by_date_df = pd.DataFrame(by_date).merge(k_per_day, on="Date", how="left")
+        by_date = by_date_df.fillna("").to_dict(orient="records")
+
+    detail_cols = [c for c in STYLE_MASTER_COLUMN_SETS["production_detail"] if c in pl_f.columns]
+    detail = (
+        pl_f[detail_cols].sort_values(["Date", "Karigar_ID"], ascending=[False, True]).fillna("").head(200).to_dict(
+            orient="records"
+        )
+        if detail_cols
+        else []
+    )
+
+    return {
+        "summary": summary,
+        "by_operation": by_operation,
+        "by_karigar": by_karigar,
+        "by_date": by_date,
+        "detail": detail,
+    }
+
+
+def style_master_report(
+    style: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    view: str = "full",
+    include_production_detail: bool = False,
+) -> dict:
+    """Per-style report for Master Data: operations, production totals, challan costing."""
+    style = str(style).strip()
+    if not style:
+        return {"ok": False, "message": "Style required"}
+
+    view = (view or "full").strip().lower()
+    if view not in ("full", "summary", "master", "production", "costing"):
+        view = "full"
+
+    sm = get_sheet_df("style_master")
+    pl = get_sheet_df("production_log")
+
+    sm_f = _filter_df_by_style(sm, style)
+    master_ops: list[dict] = []
+    master_totals = {
+        "operation_count": 0,
+        "sum_target": 0,
+        "sum_rate_rs": 0.0,
+        "benchmark_labour_per_piece_rs": 0.0,
+        "benchmark_daily_budget_rs": BENCHMARK_DAILY_RATE_RS,
+    }
+    if not sm_f.empty:
+        sm_f = sm_f.copy()
+        sm_f["Target"] = safe_num(sm_f["Target"])
+        sm_f["Rate_Rs"] = safe_num(sm_f["Rate_Rs"])
+        if "Operation" in sm_f.columns:
+            sm_f["Operation"] = sm_f["Operation"].map(normalize_operation_name)
+        master_ops = sm_f[["Operation", "Target", "Rate_Rs"]].fillna("").to_dict(orient="records")
+        rate_sum = float(sm_f["Rate_Rs"].sum())
+        master_totals = {
+            "operation_count": len(sm_f),
+            "sum_target": int(sm_f["Target"].sum()),
+            "sum_rate_rs": round(rate_sum, 2),
+            "benchmark_labour_per_piece_rs": round(rate_sum, 2),
+            "benchmark_daily_budget_rs": BENCHMARK_DAILY_RATE_RS,
+        }
+
+    pl_f = _filter_df_by_date(_filter_df_by_style(pl, style), date_from, date_to)
+    production = _aggregate_production(pl_f)
+    if not include_production_detail:
+        production["detail"] = []
+
+    month = "All"
+    if date_from and date_to and date_from[:7] == date_to[:7]:
+        month = date_from[:7]
+    costing_rep = style_costing_report(month=month, style=style, party="All")
+    costing_rows = costing_rep.get("rows") or []
+    if date_from or date_to:
+        filtered = []
+        for row in costing_rows:
+            d = str(row.get("Date") or "")
+            if date_from and d and d < date_from:
+                continue
+            if date_to and d and d > date_to:
+                continue
+            filtered.append(row)
+        costing_rows = filtered
+        costing_summary = {
+            "challans": len(costing_rows),
+            "pending": sum(1 for r in costing_rows if r.get("Is_Pending")),
+            "party_value": round(sum(float(r.get("Party_Value_Rs") or 0) for r in costing_rows), 2),
+            "actual_expense": round(sum(float(r.get("Total_Expense_Rs") or 0) for r in costing_rows), 2),
+            "net_pl": round(sum(float(r.get("PL_Rs") or 0) for r in costing_rows), 2),
+            "target_labour": round(sum(float(r.get("Target_Labour_Rs") or 0) for r in costing_rows), 2),
+            "actual_labour": round(sum(float(r.get("Actual_Labour_Rs") or 0) for r in costing_rows), 2),
+        }
+    else:
+        costing_summary = dict(costing_rep.get("summary") or {})
+        costing_summary.setdefault(
+            "target_labour",
+            round(sum(float(r.get("Target_Labour_Rs") or 0) for r in costing_rows), 2),
+        )
+        costing_summary.setdefault(
+            "actual_labour",
+            round(sum(float(r.get("Actual_Labour_Rs") or 0) for r in costing_rows), 2),
+        )
+
+    prod_s = production.get("summary") or {}
+    totals = {
+        "master_operations": master_totals["operation_count"],
+        "labour_rate_per_piece_rs": master_totals["benchmark_labour_per_piece_rs"],
+        "production_pieces": prod_s.get("pieces", 0),
+        "production_piece_value_rs": prod_s.get("piece_value_rs", 0),
+        "production_pl_rs": prod_s.get("pl_rs", 0),
+        "costing_party_value_rs": costing_summary.get("party_value", 0),
+        "costing_net_pl_rs": costing_summary.get("net_pl", 0),
+        "costing_challans": costing_summary.get("challans", 0),
+    }
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "style": style,
+        "date_from": date_from or "",
+        "date_to": date_to or "",
+        "view": view,
+        "totals": totals,
+        "column_sets": STYLE_MASTER_COLUMN_SETS,
+    }
+    if view in ("full", "summary", "master"):
+        out["master"] = {"operations": master_ops, "totals": master_totals}
+    if view in ("full", "summary", "production"):
+        out["production"] = production
+    if view in ("full", "summary", "costing"):
+        out["costing"] = {"summary": costing_summary, "challans": costing_rows}
+    return out
+
+
 def efficiency_report(date_from: str, date_to: str, styles: list[str] | None = None) -> dict:
     pl = get_sheet_df("production_log")
     if pl.empty:
@@ -1374,11 +1710,64 @@ def update_style_operation(style: str, operation: str, *, target: int | None, ra
     return {"ok": True, "message": "Updated"}
 
 
+CHALLAN_KEY_COLS = ["Challan_No"]
+
+
+def normalize_challan_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Trim keys and dedupe by challan number after import or manual add."""
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+    out = df.copy()
+    rename_map = {
+        "challan no": "Challan_No",
+        "challan_no": "Challan_No",
+        "Challan No": "Challan_No",
+        "style": "Style",
+        "party": "Party",
+        "total qty": "Total_Qty",
+        "total_qty": "Total_Qty",
+        "received qty": "Received_Qty",
+        "received_qty": "Received_Qty",
+        "rate per pc": "Rate_Per_Pc",
+        "rate_per_pc": "Rate_Per_Pc",
+        "deposit rs": "Deposit_Rs",
+        "deposit_rs": "Deposit_Rs",
+        "delivery by": "Delivery_By",
+        "delivery_by": "Delivery_By",
+    }
+    out.columns = [rename_map.get(str(c).strip().lower(), str(c).strip()) for c in out.columns]
+    for c in ["Challan_No", "Style", "Party", "Delivery_By"]:
+        if c in out.columns:
+            out[c] = out[c].astype(str).str.strip()
+    if "Challan_No" not in out.columns:
+        return out
+    out = out[out["Challan_No"].astype(str).str.len() > 0]
+    out["Challan_No"] = out["Challan_No"].astype(str).str.strip()
+    return out.drop_duplicates(subset=["Challan_No"], keep="last").reset_index(drop=True)
+
+
+def delete_challan(challan_no: str) -> dict:
+    df = get_sheet_df("challan_master")
+    if df.empty or "Challan_No" not in df.columns:
+        return {"ok": False, "message": "No challans"}
+    ck = clean_key(challan_no)
+    if not ck:
+        return {"ok": False, "message": "Challan number required"}
+    mask = df["Challan_No"].apply(clean_key) == ck
+    if not mask.any():
+        return {"ok": False, "message": f"Challan {challan_no} not found"}
+    removed = int(mask.sum())
+    df = df[~mask].reset_index(drop=True)
+    save_sheet_df("challan_master", df)
+    return {"ok": True, "message": f"Deleted challan {challan_no}", "removed": removed}
+
+
 MASTER_KEY_COLS: dict[str, list[str]] = {
     "style_master": ["Style", "Operation"],
     "karigar_master": ["Karigar_ID"],
     "target_ltl_override": ["Style", "Operation", "Karigar_ID"],
     "employee_master": ["E_Code"],
+    "challan_master": CHALLAN_KEY_COLS,
 }
 
 MASTER_EDITABLE_KEYS = frozenset(MASTER_KEY_COLS.keys())

@@ -175,6 +175,8 @@ async def import_sheet_file(key: str, file: UploadFile = File(...), mode: str = 
             df = svc.dedupe_sheet(key, df)
     elif key in svc.MASTER_KEY_COLS:
         df = svc.dedupe_sheet(key, df)
+    if key == "challan_master":
+        df = svc.normalize_challan_dataframe(df)
     save_sheet_df(key, df)
     return {"ok": True, "rows": len(df), "mode": mode}
 
@@ -272,6 +274,25 @@ def admin_change_password(body: AdminChangePasswordBody):
     return out
 
 
+@router.get("/master/style-report")
+def master_style_report(
+    style: str,
+    date_from: str = "",
+    date_to: str = "",
+    view: str = "full",
+    include_production_detail: bool = False,
+):
+    if not style.strip():
+        raise HTTPException(400, "Style is required")
+    return svc.style_master_report(
+        style.strip(),
+        date_from=date_from.strip() or None,
+        date_to=date_to.strip() or None,
+        view=view,
+        include_production_detail=include_production_detail,
+    )
+
+
 @router.patch("/master/style-operation")
 def patch_style_operation(body: StyleOpUpdateBody):
     if not verify_admin_password(body.admin_password):
@@ -298,9 +319,22 @@ def add_challan(body: ChallanBody):
     row = body.model_dump()
     if not row.get("Date"):
         row["Date"] = str(date.today())
+    if row.get("Style"):
+        row["Style"] = str(row["Style"]).strip()
+    if row.get("Challan_No"):
+        row["Challan_No"] = str(row["Challan_No"]).strip()
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df = svc.normalize_challan_dataframe(df)
     save_sheet_df("challan_master", df)
     return {"ok": True, "challan_no": body.Challan_No}
+
+
+@router.delete("/challans/{challan_no}")
+def delete_challan(challan_no: str):
+    out = svc.delete_challan(challan_no)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Not found"))
+    return out
 
 
 @router.patch("/challans/{challan_no}")
@@ -308,7 +342,7 @@ def update_challan(challan_no: str, body: ChallanUpdateBody):
     df = get_sheet_df("challan_master")
     if df.empty:
         raise HTTPException(404, "No challans")
-    mask = df["Challan_No"].astype(str) == challan_no
+    mask = df["Challan_No"].apply(svc.clean_key) == svc.clean_key(challan_no)
     if not mask.any():
         raise HTTPException(404, f"Challan {challan_no} not found")
     idx = df[mask].index[0]

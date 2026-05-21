@@ -270,6 +270,68 @@ def test_stitching_style_costing_report():
     assert "rows" in rep
 
 
+def test_style_master_report_totals_and_views():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame(
+            [
+                {"Style": "STYLE-R", "Operation": "Stitch", "Target": 80, "Rate_Rs": 5},
+                {"Style": "STYLE-R", "Operation": "Finish", "Target": 60, "Rate_Rs": 3},
+            ]
+        ),
+    )
+    save_sheet_df(
+        "production_log",
+        pd.DataFrame(
+            [
+                {
+                    "Date": "2026-05-10",
+                    "Style": "STYLE-R",
+                    "Operation": "Stitch",
+                    "Karigar_ID": "K1",
+                    "Karigar_Name": "Ali",
+                    "Challan_No": "CH-1",
+                    "Total_Pieces": 50,
+                    "Efficiency_%": 90,
+                    "Piece_Value_Rs": 250,
+                    "Budgeted_Expense_Rs": 240,
+                    "Actual_Expense_Rs": 250,
+                    "PL_Rs": -10,
+                }
+            ]
+        ),
+    )
+    save_sheet_df(
+        "challan_master",
+        pd.DataFrame(
+            [
+                {
+                    "Challan_No": "CH-1",
+                    "Style": "STYLE-R",
+                    "Party": "P1",
+                    "Total_Qty": 100,
+                    "Received_Qty": 80,
+                    "Rate_Per_Pc": 20,
+                    "Deposit_Rs": 0,
+                    "Date": "2026-05-01",
+                }
+            ]
+        ),
+    )
+    full = svc.style_master_report("STYLE-R", date_from="2026-05-01", date_to="2026-05-31", view="full")
+    assert full["ok"] is True
+    assert full["totals"]["master_operations"] == 2
+    assert full["totals"]["labour_rate_per_piece_rs"] == 8.0
+    assert full["totals"]["production_pieces"] == 50
+    assert full["master"]["totals"]["sum_rate_rs"] == 8.0
+    assert len(full["production"]["by_operation"]) >= 1
+    assert len(full["costing"]["challans"]) >= 1
+
+    master_only = svc.style_master_report("STYLE-R", view="master")
+    assert "master" in master_only
+    assert "production" not in master_only
+
+
 def test_style_costing_uses_received_qty_for_party_value():
     save_sheet_df(
         "challan_master",
@@ -319,10 +381,22 @@ def test_compute_financial_audit_sop_examples():
 
 
 def test_compute_formula_ltl_sop_examples():
-    assert svc.compute_formula_ltl(100, 520) == 87
-    assert svc.compute_formula_ltl(100, 200) == 33
-    assert svc.compute_formula_ltl(20, 350) == 12
-    assert svc.compute_formula_ltl(20, 500) == 17
+    assert svc.ltl_tolerance_pct_for_rate(250) == 35.0
+    assert svc.ltl_tolerance_pct_for_rate(350) == 12.0
+    assert svc.compute_formula_ltl(100, 520) == 95
+    assert svc.compute_formula_ltl(100, 200) == 27
+    assert svc.compute_formula_ltl(20, 350) == 13
+    assert svc.compute_formula_ltl(20, 500) == 18
+
+
+def test_delete_challan():
+    save_sheet_df(
+        "challan_master",
+        pd.DataFrame([{"Challan_No": "DEL-1", "Style": "S1", "Party": "P", "Total_Qty": 10}]),
+    )
+    out = svc.delete_challan("DEL-1")
+    assert out["ok"] is True
+    assert get_sheet_df("challan_master").empty
 
 
 def test_resolve_applied_ltl_manual_override_precedence():
@@ -336,7 +410,7 @@ def test_resolve_applied_ltl_manual_override_precedence():
     )
     svc.upsert_ltl_override("1065YKBLL", "Gala Piping", "944", 40)
     out = svc.resolve_applied_ltl("1065YKBLL", "Gala Piping", "944", as_of_date="2026-05-21", base_target=100)
-    assert out["formula_ltl"] == 33
+    assert out["formula_ltl"] == 27
     assert out["applied_ltl"] == 40
     assert out["target_type"] == "Manual Override"
     svc.upsert_ltl_override("1065YKBLL", "Gala Piping", "944", None)
@@ -361,9 +435,9 @@ def test_save_production_entry_persists_applied_ltl():
     )
     pl = get_sheet_df("production_log")
     row = pl.iloc[-1]
-    assert int(row["Applied_LTL"]) == 12
+    assert int(row["Applied_LTL"]) == 13
     assert int(row["Base_Target"]) == 20
-    assert int(row["Formula_LTL"]) == 12
+    assert int(row["Formula_LTL"]) == 13
 
 
 def test_save_production_entry_replaces_same_session_on_resave():
