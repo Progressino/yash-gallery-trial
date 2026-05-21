@@ -113,6 +113,15 @@ class StyleOpUpdateBody(BaseModel):
     admin_password: str
 
 
+class LtlOverrideBody(BaseModel):
+    Style: str
+    Operation: str
+    Karigar_ID: str
+    Manual_LTL: Optional[int] = None
+    Notes: str = ""
+    admin_password: str = ""
+
+
 @router.get("/status")
 def status():
     sheets = {k: len(get_sheet_df(k)) for k in DATA_KEYS}
@@ -191,6 +200,34 @@ def save_entry(body: ProductionEntryBody):
         hour_entries=body.hour_entries,
         saved_by=body.saved_by,
         saved_by_name=body.saved_by_name,
+    )
+
+
+@router.get("/target-control/preview")
+def target_control_preview(
+    date: str = "",
+    style: str = "",
+    karigar_id: str = "",
+    operation: str = "",
+):
+    return svc.target_control_preview(
+        date or str(date.today()),
+        style=style,
+        karigar_id=karigar_id,
+        operation=operation,
+    )
+
+
+@router.put("/target-control/override")
+def put_ltl_override(body: LtlOverrideBody):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required to set manual LTL overrides")
+    return svc.upsert_ltl_override(
+        body.Style,
+        body.Operation,
+        body.Karigar_ID,
+        body.Manual_LTL,
+        notes=body.Notes,
     )
 
 

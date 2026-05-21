@@ -3,11 +3,22 @@ import axios from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useStitchingAdmin } from '../lib/stitchingAdmin'
+import {
+  applyHourEntryPatch,
+  emptyHourEntry,
+  isStickerMode,
+  normalizeLoadedHourEntry,
+  piecesInputValue,
+  resolveHourPieces,
+  type HourEntryState,
+} from '../lib/stitchingHourEntry'
+import { computeFinancialAudit, formatProfitLoss } from '../lib/stitchingFinancial'
 import { useAuth } from '../store/auth'
 
 type TabId =
   | 'dashboard'
   | 'production'
+  | 'target_control'
   | 'challan'
   | 'style'
   | 'efficiency'
@@ -20,6 +31,7 @@ type TabId =
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '🏠 Dashboard' },
   { id: 'production', label: '📋 Production Entry' },
+  { id: 'target_control', label: '🎯 Target Control' },
   { id: 'challan', label: '🧾 Challans' },
   { id: 'style', label: '💎 Style Costing' },
   { id: 'efficiency', label: '📊 Efficiency' },
@@ -133,6 +145,9 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
           lockedKarigarId={lockedKarigarId}
           onSaved={() => qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })}
         />
+      )}
+      {!karigarOnly && tab === 'target_control' && (
+        <TargetControlTab admin={admin} onFlash={flash} />
       )}
       {!karigarOnly && tab === 'challan' && <ChallanTab onFlash={flash} />}
       {!karigarOnly && tab === 'style' && <StyleCostingTab />}
@@ -398,33 +413,13 @@ function KarigarSearchSelect({
   )
 }
 
-type HourEntryState = {
-  operation: string
-  pieces: number
-  sticker_in: number
-  sticker_out: number
-  manual_pieces: boolean
-}
-
-function emptyHourEntry(): HourEntryState {
-  return { operation: '', pieces: 0, sticker_in: 0, sticker_out: 0, manual_pieces: false }
-}
-
-/** Sticker in − out when stickers used; otherwise manual pieces. */
-function resolveHourPieces(st: HourEntryState | undefined): number {
-  if (!st) return 0
-  if ((st.sticker_in > 0 || st.sticker_out > 0) && !st.manual_pieces) {
-    return Math.max(0, st.sticker_in - st.sticker_out)
-  }
-  return st.pieces || 0
-}
-
 function computeEntrySummary(
   hourState: Record<string, HourEntryState>,
   hours: HourDef[],
   operations: { op: string; target: number; rate: number }[],
+  dailyRate: number,
 ) {
-  const opTotals: Record<string, { pieces: number; value: number }> = {}
+  const opTotals: Record<string, { pieces: number; value: number; target: number }> = {}
   let totalPcs = 0
   for (const h of hours) {
     if (h.col === 'H_13_14') continue
@@ -434,16 +429,32 @@ function computeEntrySummary(
     const meta = operations.find(o => o.op === st.operation)
     if (!meta) continue
     totalPcs += pcs
-    if (!opTotals[st.operation]) opTotals[st.operation] = { pieces: 0, value: 0 }
+    if (!opTotals[st.operation]) opTotals[st.operation] = { pieces: 0, value: 0, target: meta.target }
     opTotals[st.operation].pieces += pcs
     opTotals[st.operation].value += pcs * meta.rate
   }
   const totalValue = Object.values(opTotals).reduce((s, d) => s + d.value, 0)
-  const totalBudget = Object.entries(opTotals).reduce((s, [op]) => {
-    const meta = operations.find(o => o.op === op)
-    return s + (meta ? meta.rate * meta.target : 0)
-  }, 0)
-  return { totalPcs, totalValue, totalBudget, pl: totalBudget - totalValue, opTotals }
+  let totalBudgeted = 0
+  let totalActual = 0
+  const opFin: Record<string, ReturnType<typeof computeFinancialAudit>> = {}
+  for (const [op, d] of Object.entries(opTotals)) {
+    const share = totalPcs > 0 ? d.pieces / totalPcs : 1
+    const fin = computeFinancialAudit(d.target, d.pieces, dailyRate, {
+      allocatedActualAmount: dailyRate * share,
+    })
+    opFin[op] = fin
+    totalBudgeted += fin.budgetedAmount
+    totalActual += fin.actualAmount
+  }
+  return {
+    totalPcs,
+    totalValue,
+    totalBudgeted,
+    totalActual,
+    pl: totalBudgeted - totalActual,
+    opTotals,
+    opFin,
+  }
 }
 
 function ProductionTab({
@@ -590,14 +601,7 @@ function ProductionTab({
     })
     const next: Record<string, HourEntryState> = {}
     for (const h of hours) {
-      const e = data.hours?.[h.col] ?? emptyHourEntry()
-      next[h.col] = {
-        operation: e.operation || '',
-        pieces: Number(e.pieces) || 0,
-        sticker_in: Number(e.sticker_in) || 0,
-        sticker_out: Number(e.sticker_out) || 0,
-        manual_pieces: Boolean(e.manual_pieces),
-      }
+      next[h.col] = normalizeLoadedHourEntry(data.hours?.[h.col] ?? {})
     }
     skipAutoSaveRef.current = true
     setHourState(next)
@@ -626,42 +630,64 @@ function ProductionTab({
 
   const report1Cols = useMemo(() => {
     const base = [
+      'Date',
+      'Save_Time',
       'Karigar_Name',
       'Challan_No',
       'Style',
       'Operation',
-      'Working_Hours',
+      'Base_Target',
+      'Applied_LTL',
+      'Daily_Salary_Rs',
       'Total_Pieces',
+      'Budget_Rate_Per_Piece',
+      'Budgeted_Expense_Rs',
+      'Actual_Rate_Per_Piece',
+      'Actual_Expense_Rs',
+      'Profit_Loss',
       'Efficiency_%',
+      'Working_Hours',
     ]
-    if (showSalary) {
-      base.push('Daily_Salary_Rs', 'Hourly_Salary_Rs', 'Actual_Expense_Rs', 'PL_Rs')
-    } else {
-      base.push('PL_Rs')
-    }
     return base
-  }, [showSalary])
+  }, [])
 
   const report2SummaryCols = useMemo(() => {
-    const base = ['Karigar', 'Style', 'Challan_No', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']
+    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']
     if (showSalary) base.splice(4, 0, 'Daily_Salary_Rs', 'Total_Salary_Cost')
     return base
   }, [showSalary])
 
   const report2HourlyCols = useMemo(() => {
-    const base = ['Karigar', 'Style', 'Challan_No', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
+    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
     if (showSalary) base.splice(5, 0, 'Daily_Salary_Rs', 'Hourly_Salary_Rs')
     return base
   }, [showSalary])
 
   const historyCols = useMemo(
-    () => ['Save_Time', 'Karigar_Name', 'Challan_No', 'Style', 'Operation', 'Total_Pieces', 'PL_Rs'],
+    () => [
+      'Date',
+      'Save_Time',
+      'Karigar_Name',
+      'Challan_No',
+      'Style',
+      'Operation',
+      'Total_Pieces',
+      'Budgeted_Expense_Rs',
+      'Actual_Expense_Rs',
+      'Profit_Loss',
+    ],
     [],
   )
 
+  const karigarDailyRate = useMemo(() => {
+    if (!karigarId) return 0
+    const k = karigars.find(x => String(x.Karigar_ID) === karigarId)
+    return Number(k?.Daily_Rate_Rs) || 0
+  }, [karigars, karigarId])
+
   const liveSummary = useMemo(
-    () => computeEntrySummary(hourState, hours, operations),
-    [hourState, hours, operations],
+    () => computeEntrySummary(hourState, hours, operations, karigarDailyRate),
+    [hourState, hours, operations, karigarDailyRate],
   )
 
   const buildHourEntries = useCallback(
@@ -797,15 +823,7 @@ function ProductionTab({
 
   const setHour = (col: string, patch: Partial<HourEntryState>) => {
     setHourState(prev => {
-      const base = { ...emptyHourEntry(), ...prev[col], ...patch }
-      if ('sticker_in' in patch || 'sticker_out' in patch) {
-        if (!base.manual_pieces) {
-          base.pieces = Math.max(0, base.sticker_in - base.sticker_out)
-        }
-      }
-      if ('pieces' in patch && patch.pieces !== undefined) {
-        base.manual_pieces = true
-      }
+      const base = applyHourEntryPatch(prev[col], patch)
       if (operations.length === 1 && resolveHourPieces(base) > 0 && !base.operation) {
         base.operation = operations[0].op
       }
@@ -978,7 +996,7 @@ function ProductionTab({
             }
             const st = hourState[h.col] ?? emptyHourEntry()
             const pcs = resolveHourPieces(st)
-            const fromSticker = (st.sticker_in > 0 || st.sticker_out > 0) && !st.manual_pieces
+            const fromSticker = isStickerMode(st)
             const opMeta = operations.find(o => o.op === st.operation)
             const eff = opMeta && pcs > 0 ? Math.round((pcs / Math.max(opMeta.target, 1)) * 100) : null
             return (
@@ -1033,7 +1051,7 @@ function ProductionTab({
                       min={0}
                       readOnly={fromSticker}
                       className={`w-full border rounded-lg px-3 py-3 text-lg font-semibold mt-0.5 touch-manipulation ${fromSticker ? 'bg-sky-50 text-[#2c5aa0]' : ''}`}
-                      value={fromSticker ? pcs || '' : st.pieces || ''}
+                      value={piecesInputValue(st)}
                       onChange={e => setHour(h.col, { pieces: +e.target.value || 0, manual_pieces: true })}
                     />
                   </label>
@@ -1069,7 +1087,7 @@ function ProductionTab({
                 }
                 const st = hourState[h.col] ?? emptyHourEntry()
                 const pcs = resolveHourPieces(st)
-                const fromSticker = (st.sticker_in > 0 || st.sticker_out > 0) && !st.manual_pieces
+                const fromSticker = isStickerMode(st)
                 const opMeta = operations.find(o => o.op === st.operation)
                 const eff = opMeta && pcs > 0 ? Math.round((pcs / Math.max(opMeta.target, 1)) * 100) : null
                 return (
@@ -1112,7 +1130,7 @@ function ProductionTab({
                         readOnly={fromSticker}
                         title={fromSticker ? 'Auto from stickers' : 'Manual pieces'}
                         className={`w-16 border rounded px-1 py-1 ${fromSticker ? 'bg-sky-50' : ''}`}
-                        value={fromSticker ? pcs : st.pieces || ''}
+                        value={piecesInputValue(st)}
                         onChange={e => setHour(h.col, { pieces: +e.target.value || 0, manual_pieces: true })}
                       />
                     </td>
@@ -1124,20 +1142,30 @@ function ProductionTab({
           </table>
         </div>
         {liveSummary.totalPcs > 0 && (
-          <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2">
-            <div className="bg-white border rounded-lg p-3 text-center">
-              <p className="text-[10px] uppercase text-gray-500">Pieces</p>
-              <p className="text-lg font-bold text-[#2c5aa0]">{liveSummary.totalPcs}</p>
-            </div>
-            <div className="bg-white border rounded-lg p-3 text-center">
-              <p className="text-[10px] uppercase text-gray-500">Actual ₹</p>
-              <p className="text-lg font-bold text-green-700">₹{liveSummary.totalValue.toFixed(2)}</p>
-            </div>
-            <div className="bg-white border rounded-lg p-3 text-center col-span-2 sm:col-span-1">
-              <p className="text-[10px] uppercase text-gray-500">P&amp;L (budget − actual)</p>
-              <p className={`text-lg font-bold ${liveSummary.pl >= 0 ? 'text-green-700' : 'text-red-600'}`}>
-                ₹{liveSummary.pl.toFixed(2)}
-              </p>
+          <div className="mt-4 space-y-3">
+            <p className="text-[10px] text-gray-500">
+              Financial audit: budget rate = ₹480 ÷ base target · budgeted = pieces × budget rate · actual = daily
+              wage (split across operations) · P&amp;L = budgeted − actual.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="bg-white border rounded-lg p-3 text-center">
+                <p className="text-[10px] uppercase text-gray-500">Pieces</p>
+                <p className="text-lg font-bold text-[#2c5aa0]">{liveSummary.totalPcs}</p>
+              </div>
+              <div className="bg-white border rounded-lg p-3 text-center">
+                <p className="text-[10px] uppercase text-gray-500">Budgeted</p>
+                <p className="text-lg font-bold text-[#2c5aa0]">₹{liveSummary.totalBudgeted.toFixed(2)}</p>
+              </div>
+              <div className="bg-white border rounded-lg p-3 text-center">
+                <p className="text-[10px] uppercase text-gray-500">Actual (daily)</p>
+                <p className="text-lg font-bold text-amber-800">₹{liveSummary.totalActual.toFixed(2)}</p>
+              </div>
+              <div className="bg-white border rounded-lg p-3 text-center">
+                <p className="text-[10px] uppercase text-gray-500">Profit / Loss</p>
+                <p className={`text-lg font-bold ${liveSummary.pl >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                  {formatProfitLoss(liveSummary.pl)}
+                </p>
+              </div>
             </div>
           </div>
         )}
@@ -1901,6 +1929,260 @@ function masterRowKey(sheet: MasterSheetKey, row: Record<string, unknown>): stri
   if (sheet === 'style_master') return `${row.Style}||${row.Operation}`
   if (sheet === 'karigar_master') return String(row.Karigar_ID ?? '')
   return String(row.E_Code ?? '')
+}
+
+type TargetControlRow = {
+  Style: string
+  Operation: string
+  Karigar_ID: string
+  Karigar_Name?: string
+  Daily_Rate_Rs: number
+  Base_Target: number
+  Formula_LTL: number
+  Manual_Override: number | string
+  Final_Applied_LTL: number
+  Target_Type: string
+  LTL_Source: string
+}
+
+function TargetControlTab({
+  admin,
+  onFlash,
+}: {
+  admin: AdminApi
+  onFlash: (type: 'ok' | 'err', text: string) => void
+}) {
+  const qc = useQueryClient()
+  const [planDate, setPlanDate] = useState(todayStr())
+  const [styleFilter, setStyleFilter] = useState('')
+  const [karFilter, setKarFilter] = useState('')
+  const [opFilter, setOpFilter] = useState('')
+  const [overrideEdits, setOverrideEdits] = useState<Record<string, string>>({})
+
+  const { data: styleSheet } = useQuery({
+    queryKey: ['stitching-sheet', 'style_master'],
+    queryFn: () => api.get('/stitching/sheets/style_master').then(r => r.data),
+  })
+  const { data: karSheet } = useQuery({
+    queryKey: ['stitching-sheet', 'karigar_master'],
+    queryFn: () => api.get('/stitching/sheets/karigar_master').then(r => r.data),
+  })
+
+  const styles = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of (styleSheet?.rows ?? []) as { Style: string }[]) {
+      if (r.Style) s.add(String(r.Style))
+    }
+    return [...s].sort()
+  }, [styleSheet])
+
+  const karigars = useMemo(() => {
+    return ((karSheet?.rows ?? []) as { Karigar_ID: string; Name: string }[])
+      .map(k => ({ id: String(k.Karigar_ID), name: String(k.Name || k.Karigar_ID) }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [karSheet])
+
+  const ops = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of (styleSheet?.rows ?? []) as { Style: string; Operation: string }[]) {
+      if (!styleFilter || r.Style === styleFilter) {
+        if (r.Operation) s.add(String(r.Operation))
+      }
+    }
+    return [...s].sort()
+  }, [styleSheet, styleFilter])
+
+  const { data: preview, isFetching, refetch } = useQuery({
+    queryKey: ['stitching-target-control', planDate, styleFilter, karFilter, opFilter],
+    queryFn: () =>
+      api
+        .get('/stitching/target-control/preview', {
+          params: {
+            date: planDate,
+            style: styleFilter || undefined,
+            karigar_id: karFilter || undefined,
+            operation: opFilter || undefined,
+          },
+        })
+        .then(r => r.data),
+  })
+
+  const rows = (preview?.rows ?? []) as TargetControlRow[]
+  const rowKey = (r: TargetControlRow) => `${r.Style}::${r.Operation}::${r.Karigar_ID}`
+
+  const saveOverride = async (r: TargetControlRow) => {
+    const pw = admin.adminPassword()
+    if (!pw) {
+      onFlash('err', 'Unlock admin to set manual overrides')
+      return
+    }
+    const raw = overrideEdits[rowKey(r)]
+    const manual = raw === '' || raw === undefined ? null : Math.max(0, parseInt(raw, 10) || 0)
+    try {
+      const { data } = await api.put('/stitching/target-control/override', {
+        Style: r.Style,
+        Operation: r.Operation,
+        Karigar_ID: r.Karigar_ID,
+        Manual_LTL: manual,
+        admin_password: pw,
+      })
+      onFlash('ok', data.message || 'Override saved')
+      setOverrideEdits(prev => {
+        const next = { ...prev }
+        delete next[rowKey(r)]
+        return next
+      })
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['stitching-pe-reports'] })
+    } catch (e: unknown) {
+      onFlash('err', axios.isAxiosError(e) ? String(e.response?.data?.detail || 'Save failed') : 'Save failed')
+    }
+  }
+
+  const cols = [
+    'Style',
+    'Operation',
+    'Karigar_ID',
+    'Karigar_Name',
+    'Daily_Rate_Rs',
+    'Base_Target',
+    'Formula_LTL',
+    'Manual_Override',
+    'Final_Applied_LTL',
+    'Target_Type',
+  ]
+
+  return (
+    <div className="space-y-4">
+      <Section title="Target Control — Multi-Style LTL">
+        <p className="text-xs text-gray-600 mb-3">
+          Benchmark daily rate <strong>₹{preview?.benchmark_daily_rate_rs ?? 480}</strong> · Tolerance floor{' '}
+          <strong>{Math.round((preview?.tolerance_factor ?? 0.8) * 100)}%</strong> of style target · Formula:{' '}
+          <code className="text-[10px] bg-gray-100 px-1 rounded">
+            ROUND((Base Target × 0.80) × (Daily Rate / 480), 0)
+          </code>
+          . Production logs use <strong>Final Applied LTL</strong> (manual override if set, else formula).
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-4">
+          <label className="text-xs block">
+            <span className="font-semibold text-gray-700">Planning date</span>
+            <input
+              type="date"
+              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+              value={planDate}
+              onChange={e => setPlanDate(e.target.value)}
+            />
+          </label>
+          <label className="text-xs block">
+            <span className="font-semibold text-gray-700">Style</span>
+            <select
+              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+              value={styleFilter}
+              onChange={e => setStyleFilter(e.target.value)}
+            >
+              <option value="">All styles</option>
+              {styles.map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs block">
+            <span className="font-semibold text-gray-700">Karigar</span>
+            <select
+              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+              value={karFilter}
+              onChange={e => setKarFilter(e.target.value)}
+            >
+              <option value="">All karigars</option>
+              {karigars.map(k => (
+                <option key={k.id} value={k.id}>{k.id} — {k.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs block">
+            <span className="font-semibold text-gray-700">Operation</span>
+            <select
+              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+              value={opFilter}
+              onChange={e => setOpFilter(e.target.value)}
+            >
+              <option value="">All operations</option>
+              {ops.map(o => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {isFetching && <p className="text-xs text-gray-500 mb-2">Refreshing ledger…</p>}
+        <div className="overflow-x-auto border rounded-lg">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-[#1a3a5c] text-white">
+                {cols.map(c => (
+                  <th key={c} className="px-2 py-2 text-left whitespace-nowrap">{c.replace(/_/g, ' ')}</th>
+                ))}
+                <th className="px-2 py-2">Override action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={cols.length + 1} className="px-3 py-6 text-center text-gray-400">
+                    No rows — add style operations and karigars in Master Data first.
+                  </td>
+                </tr>
+              )}
+              {rows.map(r => {
+                const key = rowKey(r)
+                const editVal = overrideEdits[key]
+                const displayOverride =
+                  editVal !== undefined ? editVal : r.Manual_Override === '' ? '' : String(r.Manual_Override)
+                const isOverride = r.Target_Type === 'Manual Override'
+                return (
+                  <tr key={key} className={`border-b ${isOverride ? 'bg-amber-50' : ''}`}>
+                    <td className="px-2 py-1 font-mono">{r.Style}</td>
+                    <td className="px-2 py-1">{r.Operation}</td>
+                    <td className="px-2 py-1">{r.Karigar_ID}</td>
+                    <td className="px-2 py-1">{r.Karigar_Name}</td>
+                    <td className="px-2 py-1 text-right">₹{r.Daily_Rate_Rs}</td>
+                    <td className="px-2 py-1 text-center">{r.Base_Target}</td>
+                    <td className="px-2 py-1 text-center font-semibold text-[#2c5aa0]">{r.Formula_LTL}</td>
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        min={0}
+                        placeholder="Blank = formula"
+                        className="w-20 border rounded px-1 py-1"
+                        value={displayOverride}
+                        onChange={e => setOverrideEdits(prev => ({ ...prev, [key]: e.target.value }))}
+                      />
+                    </td>
+                    <td className="px-2 py-1 text-center font-bold">{r.Final_Applied_LTL}</td>
+                    <td className="px-2 py-1 text-[10px]">{r.Target_Type}</td>
+                    <td className="px-2 py-1">
+                      <button
+                        type="button"
+                        className="text-[10px] px-2 py-1 rounded bg-[#002B5B] text-white"
+                        onClick={() => void saveOverride(r)}
+                      >
+                        Apply
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        <ReportTableSection
+          title="Export audit ledger"
+          rows={rows as unknown as Record<string, unknown>[]}
+          cols={cols}
+          downloadName={`target-control-${planDate}.csv`}
+        />
+      </Section>
+    </div>
+  )
 }
 
 function masterRowPayload(sheet: MasterSheetKey, row: Record<string, unknown>): Record<string, string> {

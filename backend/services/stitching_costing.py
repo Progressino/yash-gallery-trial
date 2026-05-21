@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -15,6 +16,362 @@ HOUR_LBLS = [
     "9-10", "10-11", "11-12", "12-13", "13-14",
     "14-15", "15-16", "16-17", "17-18", "18-19", "19-20", "20-21",
 ]
+
+_PRODUCTION_LOG_LOCK = threading.Lock()
+
+# Factory SOP — benchmark karigar ₹480/day, 20% tolerance floor (80% of operation target).
+BENCHMARK_DAILY_RATE_RS = 480.0
+LTL_TOLERANCE_FACTOR = 0.80
+
+
+def normalize_operation_name(name: Any) -> str:
+    return " ".join(str(name or "").split())
+
+
+def _production_session_keys(date_str: str, karigar_id: str, challan_no: str, style: str) -> tuple[str, str, str, str]:
+    return (
+        clean_key(date_str),
+        clean_key(karigar_id),
+        clean_key(challan_no),
+        clean_key(style),
+    )
+
+
+def _drop_production_session_rows(
+    log_df: pd.DataFrame,
+    date_str: str,
+    karigar_id: str,
+    challan_no: str,
+    style: str,
+) -> pd.DataFrame:
+    """Remove every operation row for this karigar + challan + style + date (upsert before re-save)."""
+    if log_df.empty:
+        return log_df
+    d, k, c, s = _production_session_keys(date_str, karigar_id, challan_no, style)
+    work = log_df.copy()
+    work["_ck_date"] = work["Date"].apply(clean_key)
+    work["_ck_kar"] = work["Karigar_ID"].apply(clean_key)
+    work["_ck_challan"] = work["Challan_No"].apply(clean_key)
+    work["_ck_style"] = work["Style"].apply(clean_key)
+    keep = ~(
+        (work["_ck_date"] == d)
+        & (work["_ck_kar"] == k)
+        & (work["_ck_challan"] == c)
+        & (work["_ck_style"] == s)
+    )
+    return work[keep].drop(
+        columns=["_ck_date", "_ck_kar", "_ck_challan", "_ck_style"],
+        errors="ignore",
+    )
+
+
+def _karigar_pieces_on_date(
+    log_df: pd.DataFrame,
+    date_str: str,
+    karigar_id: str,
+    *,
+    additional_by_op: dict[str, int] | None = None,
+) -> int:
+    """Sum pieces already logged today for this karigar plus pieces in the current save."""
+    total = 0
+    if log_df is not None and not log_df.empty and "Total_Pieces" in log_df.columns:
+        mask = (
+            log_df["Date"].apply(clean_key) == clean_key(date_str)
+        ) & (log_df["Karigar_ID"].apply(clean_key) == clean_key(karigar_id))
+        if mask.any():
+            total += int(safe_num(log_df.loc[mask, "Total_Pieces"]).sum())
+    if additional_by_op:
+        total += sum(max(0, int(v)) for v in additional_by_op.values())
+    return max(total, 0)
+
+
+def compute_financial_audit(
+    base_target: int | float,
+    pieces: int | float,
+    daily_rate: float,
+    *,
+    allocated_actual_amount: float | None = None,
+) -> dict[str, Any]:
+    """
+    Factory financial audit (benchmark ₹480 / operation target).
+
+    Budget rate/pc = 480 / Base Target
+    Budgeted amount = Actual pieces × budget rate/pc
+    Actual amount = karigar daily rate (allocated across ops when multiple rows/day)
+    P&L = Budgeted − Actual (profit if positive)
+    """
+    bt = max(int(base_target or 0), 1)
+    pcs = max(int(pieces or 0), 0)
+    dr = float(daily_rate or 0)
+    budget_rate = round(BENCHMARK_DAILY_RATE_RS / bt, 4)
+    budgeted = round(pcs * budget_rate, 2)
+    if allocated_actual_amount is not None:
+        actual_amt = round(float(allocated_actual_amount), 2)
+    else:
+        actual_amt = round(dr, 2)
+    actual_rate_pc = round(actual_amt / pcs, 4) if pcs > 0 else 0.0
+    pl = round(budgeted - actual_amt, 2)
+    return {
+        "budget_rate_per_piece": budget_rate,
+        "budgeted_amount": budgeted,
+        "actual_rate_per_piece": actual_rate_pc,
+        "actual_amount": actual_amt,
+        "pl_rs": pl,
+        "daily_rate_rs": round(dr, 2),
+    }
+
+
+def _financial_from_log_row(row: pd.Series, *, date_str: str, kid: str) -> dict[str, Any]:
+    """Use persisted audit columns when present; else recompute for legacy rows."""
+    pcs = int(safe_num(pd.Series([row.get("Total_Pieces", 0)])).iloc[0])
+    base_target = int(float(row.get("Base_Target") or row.get("Target") or 0))
+    daily_rate = float(row.get("Daily_Rate_Rs") or 0)
+    if daily_rate <= 0:
+        daily_rate = _get_daily_salary(kid, date_str)
+    if "Budget_Rate_Per_Piece" in row.index and pd.notna(row.get("Budgeted_Expense_Rs")):
+        return {
+            "budget_rate_per_piece": float(row.get("Budget_Rate_Per_Piece") or 0),
+            "budgeted_amount": float(row.get("Budgeted_Expense_Rs") or 0),
+            "actual_rate_per_piece": float(row.get("Actual_Rate_Per_Piece") or 0),
+            "actual_amount": float(row.get("Actual_Expense_Rs") or 0),
+            "pl_rs": float(row.get("PL_Rs") or 0),
+            "daily_rate_rs": daily_rate,
+        }
+    return compute_financial_audit(base_target, pcs, daily_rate)
+
+
+def compute_formula_ltl(base_target: int | float, daily_rate: float) -> int:
+    """ROUND((Operation Target × 0.80) × (Daily Rate / 480), 0)."""
+    bt = int(base_target or 0)
+    dr = float(daily_rate or 0)
+    if bt <= 0 or dr <= 0:
+        return 0
+    return int(round((bt * LTL_TOLERANCE_FACTOR) * (dr / BENCHMARK_DAILY_RATE_RS), 0))
+
+
+def _ltl_override_key(style: str, operation: str, karigar_id: str) -> tuple[str, str, str]:
+    return (
+        clean_key(style),
+        normalize_operation_name(operation).lower(),
+        clean_key(karigar_id),
+    )
+
+
+def _load_ltl_override_map() -> dict[tuple[str, str, str], int]:
+    df = get_sheet_df("target_ltl_override")
+    out: dict[tuple[str, str, str], int] = {}
+    if df.empty:
+        return out
+    for _, row in df.iterrows():
+        try:
+            val = int(float(row.get("Manual_LTL") or 0))
+        except (ValueError, TypeError):
+            continue
+        if val <= 0:
+            continue
+        key = _ltl_override_key(
+            str(row.get("Style", "")),
+            str(row.get("Operation", "")),
+            str(row.get("Karigar_ID", "")),
+        )
+        out[key] = val
+    return out
+
+
+def resolve_applied_ltl(
+    style: str,
+    operation: str,
+    karigar_id: str,
+    *,
+    as_of_date: str | None = None,
+    base_target: int | None = None,
+    daily_rate: float | None = None,
+    override_map: dict[tuple[str, str, str], int] | None = None,
+) -> dict[str, Any]:
+    """Resolve Formula LTL, optional manual override, and Final Applied LTL."""
+    op = normalize_operation_name(operation)
+    bt = int(base_target) if base_target is not None else 0
+    if bt <= 0:
+        sm = get_sheet_df("style_master")
+        if not sm.empty:
+            hit = sm[
+                (sm["Style"].astype(str).str.strip() == str(style).strip())
+                & (sm["Operation"].astype(str).str.strip().str.lower() == op.lower())
+            ]
+            if not hit.empty:
+                bt = int(float(hit.iloc[0]["Target"] or 0))
+    dr = float(daily_rate) if daily_rate is not None else 0.0
+    if dr <= 0:
+        dr = float(get_daily_rate_for_date(karigar_id, as_of_date))
+
+    formula_ltl = compute_formula_ltl(bt, dr)
+    omap = override_map if override_map is not None else _load_ltl_override_map()
+    manual = omap.get(_ltl_override_key(style, op, karigar_id))
+    if manual is not None and manual > 0:
+        applied = int(manual)
+        source = "override"
+        target_type = "Manual Override"
+    else:
+        applied = formula_ltl
+        source = "formula"
+        target_type = "Automated Formula"
+
+    return {
+        "style": str(style).strip(),
+        "operation": op,
+        "karigar_id": clean_key(karigar_id),
+        "daily_rate_rs": round(dr, 2),
+        "base_target": bt,
+        "formula_ltl": formula_ltl,
+        "manual_override": manual,
+        "applied_ltl": applied,
+        "ltl_source": source,
+        "target_type": target_type,
+    }
+
+
+def target_control_preview(
+    date_str: str,
+    *,
+    style: str = "",
+    karigar_id: str = "",
+    operation: str = "",
+) -> dict:
+    """Central Target Control ledger — style matrix × karigar with formula + overrides."""
+    sm = get_sheet_df("style_master")
+    km = get_sheet_df("karigar_master")
+    if sm.empty or km.empty:
+        return {
+            "date": date_str,
+            "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
+            "tolerance_factor": LTL_TOLERANCE_FACTOR,
+            "rows": [],
+        }
+
+    sm = sm.copy()
+    sm["Style"] = sm["Style"].astype(str).str.strip()
+    sm["Operation"] = sm["Operation"].astype(str).str.strip()
+    if style:
+        sm = sm[sm["Style"] == style.strip()]
+    if operation:
+        op_f = normalize_operation_name(operation).lower()
+        sm = sm[sm["Operation"].str.lower() == op_f]
+
+    km = km.copy()
+    km["Karigar_ID"] = km["Karigar_ID"].apply(clean_key)
+    if karigar_id:
+        km = km[km["Karigar_ID"] == clean_key(karigar_id)]
+
+    omap = _load_ltl_override_map()
+    km_names = {clean_key(str(r["Karigar_ID"])): str(r.get("Name", "")) for _, r in km.iterrows()}
+    rows: list[dict] = []
+    for _, srow in sm.iterrows():
+        st = str(srow["Style"])
+        op = str(srow["Operation"])
+        bt = int(float(srow["Target"] or 0))
+        for kid in km["Karigar_ID"].astype(str):
+            info = resolve_applied_ltl(
+                st, op, kid,
+                as_of_date=date_str,
+                base_target=bt,
+                override_map=omap,
+            )
+            rows.append(
+                {
+                    "Style": st,
+                    "Operation": op,
+                    "Karigar_ID": kid,
+                    "Karigar_Name": km_names.get(clean_key(kid), ""),
+                    "Daily_Rate_Rs": info["daily_rate_rs"],
+                    "Base_Target": info["base_target"],
+                    "Formula_LTL": info["formula_ltl"],
+                    "Manual_Override": info["manual_override"] if info["manual_override"] else "",
+                    "Final_Applied_LTL": info["applied_ltl"],
+                    "Target_Type": info["target_type"],
+                    "LTL_Source": info["ltl_source"],
+                }
+            )
+
+    rows.sort(key=lambda r: (r["Style"], r["Operation"], r["Karigar_ID"]))
+    return {
+        "date": date_str,
+        "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
+        "tolerance_factor": LTL_TOLERANCE_FACTOR,
+        "rows": rows,
+    }
+
+
+def upsert_ltl_override(
+    style: str,
+    operation: str,
+    karigar_id: str,
+    manual_ltl: int | None,
+    *,
+    notes: str = "",
+) -> dict:
+    """Set or clear managerial manual LTL override for (Style, Operation, Karigar)."""
+    st = str(style).strip()
+    op = normalize_operation_name(operation)
+    kid = clean_key(karigar_id)
+    if not st or not op or not kid:
+        return {"ok": False, "message": "Style, Operation, and Karigar_ID are required"}
+
+    df = get_sheet_df("target_ltl_override")
+    if df.empty:
+        df = pd.DataFrame(columns=["Style", "Operation", "Karigar_ID", "Manual_LTL", "Notes", "Updated_At"])
+
+    for c in ["Style", "Operation", "Karigar_ID", "Manual_LTL", "Notes", "Updated_At"]:
+        if c not in df.columns:
+            df[c] = ""
+
+    mask = (
+        (df["Style"].astype(str).str.strip() == st)
+        & (df["Operation"].astype(str).str.strip().str.lower() == op.lower())
+        & (df["Karigar_ID"].apply(clean_key) == kid)
+    )
+
+    if manual_ltl is None or int(manual_ltl) <= 0:
+        if mask.any():
+            df = df[~mask].reset_index(drop=True)
+            save_sheet_df("target_ltl_override", df)
+        return {"ok": True, "message": "Manual override cleared — formula LTL will apply"}
+
+    row = {
+        "Style": st,
+        "Operation": op,
+        "Karigar_ID": kid,
+        "Manual_LTL": int(manual_ltl),
+        "Notes": str(notes or "").strip(),
+        "Updated_At": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if mask.any():
+        idx = df[mask].index[0]
+        for k, v in row.items():
+            df.at[idx, k] = v
+    else:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df = dedupe_sheet("target_ltl_override", df)
+    save_sheet_df("target_ltl_override", df)
+    applied = resolve_applied_ltl(st, op, kid, base_target=None)
+    return {
+        "ok": True,
+        "message": f"Manual LTL {int(manual_ltl)} saved for {st} / {op} / {kid}",
+        "applied_ltl": applied["applied_ltl"],
+    }
+
+
+def _resolve_style_operation(name: str, op_info: dict[str, dict]) -> str | None:
+    """Map UI operation text to style_master operation key (trim + case-insensitive)."""
+    n = normalize_operation_name(name)
+    if not n:
+        return None
+    if n in op_info:
+        return n
+    lower = n.lower()
+    for key in op_info:
+        if key.lower() == lower:
+            return key
+    return None
 
 
 def safe_num(s) -> pd.Series:
@@ -186,8 +543,16 @@ def load_production_entry(date_str: str, karigar_id: str, challan_no: str, style
     if existing.empty:
         return {"hours": hours, "found": False}
 
+    if "Save_Time" in existing.columns:
+        existing = existing.sort_values("Save_Time", ascending=False, na_position="last")
+
+    seen_ops: set[str] = set()
     for _, row in existing.iterrows():
-        op_name = str(row["Operation"]).strip()
+        op_name = normalize_operation_name(row.get("Operation", ""))
+        op_key = op_name.lower()
+        if op_key in seen_ops:
+            continue
+        seen_ops.add(op_key)
         for hcol in HOUR_COLS:
             raw = row.get(hcol, 0)
             try:
@@ -228,116 +593,146 @@ def save_production_entry(
     saved_by_name: str = "",
 ) -> dict:
     """hour_entries: [{hour_col, operation, pieces, sticker_in, sticker_out, manual_pieces}, ...]"""
-    sm = get_sheet_df("style_master")
-    style_ops = sm[sm["Style"] == style] if not sm.empty else pd.DataFrame()
-    op_info: dict[str, dict] = {}
-    for _, row in style_ops.iterrows():
-        op_info[str(row["Operation"])] = {
-            "Target": int(row["Target"]),
-            "Rate_Rs": float(row["Rate_Rs"]),
-            "Hourly_Target": max(1, int(row["Target"])),
-        }
+    with _PRODUCTION_LOG_LOCK:
+        sm = get_sheet_df("style_master")
+        style_ops = sm[sm["Style"] == style] if not sm.empty else pd.DataFrame()
+        op_info: dict[str, dict] = {}
+        for _, row in style_ops.iterrows():
+            op_key = normalize_operation_name(row["Operation"])
+            if not op_key:
+                continue
+            op_info[op_key] = {
+                "Target": int(row["Target"]),
+                "Rate_Rs": float(row["Rate_Rs"]),
+                "Hourly_Target": max(1, int(row["Target"])),
+            }
 
-    h_vals: dict[str, int] = {}
-    si_vals: dict[str, int] = {}
-    so_vals: dict[str, int] = {}
-    op_vals: dict[str, str | None] = {}
-    for e in hour_entries:
-        hc = e.get("hour_col") or e.get("hour")
-        if hc not in HOUR_COLS:
-            continue
-        h_vals[hc] = resolve_hour_pieces(e)
-        si_vals[hc] = int(e.get("sticker_in") or 0)
-        so_vals[hc] = int(e.get("sticker_out") or 0)
-        op_vals[hc] = e.get("operation") or None
+        h_vals: dict[str, int] = {}
+        si_vals: dict[str, int] = {}
+        so_vals: dict[str, int] = {}
+        op_vals: dict[str, str | None] = {}
+        for e in hour_entries:
+            hc = e.get("hour_col") or e.get("hour")
+            if hc not in HOUR_COLS:
+                continue
+            h_vals[hc] = resolve_hour_pieces(e)
+            si_vals[hc] = int(e.get("sticker_in") or 0)
+            so_vals[hc] = int(e.get("sticker_out") or 0)
+            raw_op = e.get("operation") or None
+            op_vals[hc] = _resolve_style_operation(raw_op, op_info) if raw_op else None
 
-    if len(op_info) == 1:
-        only_op = next(iter(op_info))
+        if len(op_info) == 1:
+            only_op = next(iter(op_info))
+            for hc in HOUR_COLS:
+                if hc == "H_13_14":
+                    continue
+                if h_vals.get(hc, 0) > 0 and not op_vals.get(hc):
+                    op_vals[hc] = only_op
+
+        op_totals: dict[str, dict] = defaultdict(lambda: {"pieces": 0, "hours": 0, "value": 0.0})
         for hc in HOUR_COLS:
             if hc == "H_13_14":
                 continue
-            if h_vals.get(hc, 0) > 0 and not op_vals.get(hc):
-                op_vals[hc] = only_op
+            op = op_vals.get(hc)
+            pcs = h_vals.get(hc, 0)
+            if op and op in op_info and pcs > 0:
+                od = op_info[op]
+                op_totals[op]["pieces"] += pcs
+                op_totals[op]["hours"] += 1
+                op_totals[op]["value"] += pcs * od["Rate_Rs"]
 
-    op_totals: dict[str, dict] = defaultdict(lambda: {"pieces": 0, "hours": 0, "value": 0.0})
-    for hc in HOUR_COLS:
-        if hc == "H_13_14":
-            continue
-        op = op_vals.get(hc)
-        pcs = h_vals.get(hc, 0)
-        if op and op in op_info and pcs > 0:
-            od = op_info[op]
-            op_totals[op]["pieces"] += pcs
-            op_totals[op]["hours"] += 1
-            op_totals[op]["value"] += pcs * od["Rate_Rs"]
+        if not op_totals:
+            return {"ok": False, "message": "No pieces entered"}
 
-    if not op_totals:
-        return {"ok": False, "message": "No pieces entered"}
+        log_df = get_sheet_df("production_log")
+        log_df = _drop_production_session_rows(log_df, date_str, karigar_id, challan_no, style)
 
-    log_df = get_sheet_df("production_log")
-    save_time = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-    rows_added = 0
+        save_time = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+        ltl_overrides = _load_ltl_override_map()
+        daily_rate = get_daily_rate_for_date(karigar_id, date_str)
+        new_op_pieces = {op: int(data["pieces"]) for op, data in op_totals.items()}
+        day_piece_total = _karigar_pieces_on_date(
+            log_df, date_str, karigar_id, additional_by_op=new_op_pieces,
+        )
+        new_rows: list[dict] = []
 
-    for op_name, data in op_totals.items():
-        od = op_info[op_name]
-        op_eff = round(data["pieces"] / od["Target"] * 100, 1) if od["Target"] > 0 else 0.0
-        hour_row = {hcol: (h_vals.get(hcol, 0) if op_vals.get(hcol) == op_name else 0) for hcol in HOUR_COLS}
-        sticker_row: dict[str, int] = {}
-        for hcol in HOUR_COLS:
-            if op_vals.get(hcol) == op_name:
-                sticker_row[sticker_in_col(hcol)] = si_vals.get(hcol, 0)
-                sticker_row[sticker_out_col(hcol)] = so_vals.get(hcol, 0)
-            else:
-                sticker_row[sticker_in_col(hcol)] = 0
-                sticker_row[sticker_out_col(hcol)] = 0
-        budgeted = round(od["Rate_Rs"] * od["Target"], 2)
-        actual = round(data["value"], 2)
-        new_row = {
-            "Date": date_str,
-            "Karigar_ID": karigar_id,
-            "Karigar_Name": karigar_name,
-            "Challan_No": challan_no,
-            "Style": style,
-            "Operation": op_name,
-            **hour_row,
-            **sticker_row,
-            "Total_Pieces": data["pieces"],
-            "Target": od["Target"],
-            "Rate_Rs": od["Rate_Rs"],
-            "Efficiency_%": op_eff,
-            "Piece_Value_Rs": actual,
-            "Budgeted_Expense_Rs": budgeted,
-            "Actual_Expense_Rs": actual,
-            "PL_Rs": round(budgeted - actual, 2),
-            "Saved_By": saved_by,
-            "Saved_By_Name": saved_by_name,
-            "Save_Time": save_time,
+        for op_name, data in op_totals.items():
+            od = op_info[op_name]
+            base_target = int(od["Target"])
+            ltl_info = resolve_applied_ltl(
+                style,
+                op_name,
+                karigar_id,
+                as_of_date=date_str,
+                base_target=base_target,
+                override_map=ltl_overrides,
+            )
+            applied_ltl = int(ltl_info["applied_ltl"])
+            wh = int(data["hours"])
+            adj_target = max(applied_ltl * wh, 1)
+            op_eff = round(data["pieces"] / adj_target * 100, 1) if applied_ltl > 0 else 0.0
+            hour_row = {
+                hcol: (h_vals.get(hcol, 0) if op_vals.get(hcol) == op_name else 0)
+                for hcol in HOUR_COLS
+            }
+            sticker_row: dict[str, int] = {}
+            for hcol in HOUR_COLS:
+                if op_vals.get(hcol) == op_name:
+                    sticker_row[sticker_in_col(hcol)] = si_vals.get(hcol, 0)
+                    sticker_row[sticker_out_col(hcol)] = so_vals.get(hcol, 0)
+                else:
+                    sticker_row[sticker_in_col(hcol)] = 0
+                    sticker_row[sticker_out_col(hcol)] = 0
+            pcs = int(data["pieces"])
+            piece_value = round(pcs * od["Rate_Rs"], 2)
+            share = (pcs / day_piece_total) if day_piece_total > 0 else 1.0
+            allocated_actual = round(daily_rate * share, 2)
+            fin = compute_financial_audit(
+                base_target,
+                pcs,
+                daily_rate,
+                allocated_actual_amount=allocated_actual,
+            )
+            new_rows.append(
+                {
+                    "Date": date_str,
+                    "Karigar_ID": karigar_id,
+                    "Karigar_Name": karigar_name,
+                    "Challan_No": challan_no,
+                    "Style": style,
+                    "Operation": op_name,
+                    **hour_row,
+                    **sticker_row,
+                    "Total_Pieces": pcs,
+                    "Base_Target": base_target,
+                    "Formula_LTL": int(ltl_info["formula_ltl"]),
+                    "Applied_LTL": applied_ltl,
+                    "LTL_Source": ltl_info["ltl_source"],
+                    "Target": applied_ltl,
+                    "Rate_Rs": od["Rate_Rs"],
+                    "Daily_Rate_Rs": fin["daily_rate_rs"],
+                    "Efficiency_%": op_eff,
+                    "Piece_Value_Rs": piece_value,
+                    "Budget_Rate_Per_Piece": fin["budget_rate_per_piece"],
+                    "Budgeted_Expense_Rs": fin["budgeted_amount"],
+                    "Actual_Rate_Per_Piece": fin["actual_rate_per_piece"],
+                    "Actual_Expense_Rs": fin["actual_amount"],
+                    "PL_Rs": fin["pl_rs"],
+                    "Saved_By": saved_by,
+                    "Saved_By_Name": saved_by_name,
+                    "Save_Time": save_time,
+                }
+            )
+
+        log_df = pd.concat([log_df, pd.DataFrame(new_rows)], ignore_index=True)
+        save_sheet_df("production_log", log_df)
+        rows_added = len(new_rows)
+        return {
+            "ok": True,
+            "message": f"Saved {rows_added} operation row(s)",
+            "rows_added": rows_added,
+            "save_time": save_time,
         }
-
-        if not log_df.empty:
-            log_df = log_df.copy()
-            log_df["_ck_date"] = log_df["Date"].apply(clean_key)
-            log_df["_ck_kar"] = log_df["Karigar_ID"].apply(clean_key)
-            log_df["_ck_challan"] = log_df["Challan_No"].apply(clean_key)
-            log_df["_ck_style"] = log_df["Style"].apply(clean_key)
-            log_df["_ck_op"] = log_df["Operation"].apply(clean_key)
-            keep = ~(
-                (log_df["_ck_date"] == clean_key(date_str))
-                & (log_df["_ck_kar"] == clean_key(karigar_id))
-                & (log_df["_ck_challan"] == clean_key(challan_no))
-                & (log_df["_ck_style"] == clean_key(style))
-                & (log_df["_ck_op"] == clean_key(op_name))
-            )
-            log_df = log_df[keep].drop(
-                columns=["_ck_date", "_ck_kar", "_ck_challan", "_ck_style", "_ck_op"],
-                errors="ignore",
-            )
-
-        log_df = pd.concat([log_df, pd.DataFrame([new_row])], ignore_index=True)
-        rows_added += 1
-
-    save_sheet_df("production_log", log_df)
-    return {"ok": True, "message": f"Saved {rows_added} operation row(s)", "rows_added": rows_added}
 
 
 def style_costing_report(
@@ -648,6 +1043,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
     hist_cols = [
         c
         for c in [
+            "Date",
             "Save_Time",
             "Saved_By_Name",
             "Karigar_Name",
@@ -656,8 +1052,12 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
             "Style",
             "Operation",
             "Total_Pieces",
+            "Budget_Rate_Per_Piece",
+            "Budgeted_Expense_Rs",
+            "Actual_Rate_Per_Piece",
             "Actual_Expense_Rs",
             "PL_Rs",
+            "Profit_Loss",
             "Efficiency_%",
         ]
         if c in day_pl.columns
@@ -665,6 +1065,8 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
     history = day_pl.copy()
     if "Save_Time" in history.columns:
         history = history.sort_values("Save_Time", ascending=False)
+    if "Profit_Loss" not in history.columns and "PL_Rs" in history.columns:
+        history["Profit_Loss"] = history["PL_Rs"]
     history_rows = history[hist_cols].fillna("").to_dict(orient="records") if hist_cols else []
 
     recent = history_rows[:5] if history_rows else []
@@ -677,17 +1079,16 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
     report1_rows = []
     for _, row in day_pl.iterrows():
         wh = working_hours(row)
-        hourly_target = float(row.get("Target") or 0)
+        base_target = float(row.get("Base_Target") or row.get("Target") or 0)
+        applied_ltl = float(row.get("Applied_LTL") or row.get("Target") or 0)
         rate = float(row.get("Rate_Rs") or 0)
         kid = str(row.get("Karigar_ID", ""))
         daily_salary = _get_daily_salary(kid, date_str)
         hourly_salary = round(daily_salary / 8, 2)
-        adj_target = round(hourly_target * wh, 0)
-        budgeted_exp = round(rate * hourly_target * wh, 2)
-        actual_exp = round(hourly_salary * wh, 2)
-        pl_val = round(budgeted_exp - actual_exp, 2)
+        adj_target = round(applied_ltl * wh, 0)
         total_pcs = float(row.get("Total_Pieces") or 0)
         efficiency = round(total_pcs / adj_target * 100, 1) if adj_target > 0 else 0.0
+        fin = _financial_from_log_row(row, date_str=date_str, kid=kid)
 
         hour_vals = {}
         for hcol, hlbl in zip(HOUR_COLS, HOUR_LBLS):
@@ -698,11 +1099,17 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
 
         report1_rows.append(
             {
+                "Date": str(row.get("Date", date_str) or date_str),
+                "Save_Time": str(row.get("Save_Time", "") or ""),
                 "Karigar_Name": row.get("Karigar_Name", ""),
                 "Karigar_ID": kid,
                 "Challan_No": row.get("Challan_No", ""),
                 "Style": row.get("Style", ""),
                 "Operation": row.get("Operation", ""),
+                "Base_Target": int(base_target),
+                "Formula_LTL": int(float(row.get("Formula_LTL") or 0)),
+                "Applied_LTL": int(applied_ltl),
+                "LTL_Source": str(row.get("LTL_Source", "") or ""),
                 "hours": hour_vals,
                 "Working_Hours": wh,
                 "Total_Pieces": int(total_pcs),
@@ -710,11 +1117,13 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
                 "Efficiency_%": efficiency,
                 "Daily_Salary_Rs": daily_salary,
                 "Hourly_Salary_Rs": hourly_salary,
-                "Budgeted_Expense_Rs": budgeted_exp,
-                "Actual_Expense_Rs": actual_exp,
-                "PL_Rs": pl_val,
+                "Budget_Rate_Per_Piece": fin["budget_rate_per_piece"],
+                "Budgeted_Expense_Rs": fin["budgeted_amount"],
+                "Actual_Rate_Per_Piece": fin["actual_rate_per_piece"],
+                "Actual_Expense_Rs": fin["actual_amount"],
+                "PL_Rs": fin["pl_rs"],
+                "Profit_Loss": fin["pl_rs"],
                 "Saved_By_Name": row.get("Saved_By_Name", ""),
-                "Save_Time": row.get("Save_Time", ""),
             }
         )
 
@@ -724,7 +1133,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         kar_name = str(row.get("Karigar_Name", ""))
         op_name = str(row.get("Operation", ""))
         rate_rs = float(row.get("Rate_Rs") or 0)
-        hourly_target = float(row.get("Target") or 0)
+        applied_ltl = float(row.get("Applied_LTL") or row.get("Target") or 0)
 
         daily_rate = _get_daily_salary(kid, date_str)
         hourly_sal = round(daily_rate / 8, 2)
@@ -736,10 +1145,12 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
             if pcs <= 0:
                 continue
             actual_piece_val = round(pcs * rate_rs, 2)
-            target_piece_val = round(hourly_target * rate_rs, 2)
+            target_piece_val = round(applied_ltl * rate_rs, 2)
             net_pl = round(actual_piece_val - hourly_sal, 2)
             report2_rows.append(
                 {
+                    "Date": str(row.get("Date", date_str) or date_str),
+                    "Save_Time": str(row.get("Save_Time", "") or ""),
                     "Karigar": kar_name,
                     "Karigar_ID": kid,
                     "Challan_No": str(row.get("Challan_No", "")),
@@ -749,7 +1160,8 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
                     "Daily_Salary_Rs": daily_rate,
                     "Hourly_Salary_Rs": hourly_sal,
                     "Pieces_Done": pcs,
-                    "Hourly_Target_Pcs": int(hourly_target),
+                    "Applied_LTL": int(applied_ltl),
+                    "Hourly_Target_Pcs": int(applied_ltl),
                     "Actual_Piece_Val_Rs": actual_piece_val,
                     "Target_Piece_Val_Rs": target_piece_val,
                     "Net_PL_Rs": net_pl,
@@ -764,11 +1176,14 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         r2_sum = (
             r2_df.groupby(["Karigar", "Operation"])
             .agg(
+                Date=("Date", "first"),
+                Save_Time=("Save_Time", "max"),
                 Karigar_ID=("Karigar_ID", "first"),
                 Challan_No=("Challan_No", "first"),
                 Style=("Style", "first"),
                 Hours_Worked=("Hour", "count"),
                 Total_Pieces=("Pieces_Done", "sum"),
+                Applied_LTL=("Applied_LTL", "first"),
                 Hourly_Target_Pcs=("Hourly_Target_Pcs", "first"),
                 Daily_Salary_Rs=("Daily_Salary_Rs", "first"),
                 Total_Salary_Cost=("Hourly_Salary_Rs", "sum"),
@@ -911,6 +1326,7 @@ def update_style_operation(style: str, operation: str, *, target: int | None, ra
 MASTER_KEY_COLS: dict[str, list[str]] = {
     "style_master": ["Style", "Operation"],
     "karigar_master": ["Karigar_ID"],
+    "target_ltl_override": ["Style", "Operation", "Karigar_ID"],
     "employee_master": ["E_Code"],
 }
 

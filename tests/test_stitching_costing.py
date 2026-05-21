@@ -121,6 +121,7 @@ def test_karigar_rate_by_date():
 
 def test_resolve_hour_pieces_sticker_and_pl_sign():
     assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 5, "manual_pieces": False}) == 5
+    assert svc.resolve_hour_pieces({"sticker_in": 10, "sticker_out": 0, "manual_pieces": False}) == 10
     assert svc.resolve_hour_pieces({"sticker_in": 0, "sticker_out": 0, "pieces": 12, "manual_pieces": True}) == 12
     budgeted = 100.0
     actual = 80.0
@@ -261,6 +262,138 @@ def test_style_costing_uses_received_qty_for_party_value():
     assert int(row["Pending"]) == 10
 
 
+def test_compute_financial_audit_sop_examples():
+    fin = svc.compute_financial_audit(100, 110, 520)
+    assert fin["budget_rate_per_piece"] == 4.8
+    assert fin["budgeted_amount"] == 528.0
+    assert fin["actual_amount"] == 520.0
+    assert fin["pl_rs"] == 8.0
+
+    fin_low = svc.compute_financial_audit(100, 70, 520)
+    assert fin_low["budgeted_amount"] == 336.0
+    assert fin_low["pl_rs"] == -184.0
+
+    fin_side = svc.compute_financial_audit(20, 20, 350)
+    assert fin_side["budget_rate_per_piece"] == 24.0
+    assert fin_side["budgeted_amount"] == 480.0
+    assert fin_side["actual_amount"] == 350.0
+    assert fin_side["pl_rs"] == 130.0
+
+
+def test_compute_formula_ltl_sop_examples():
+    assert svc.compute_formula_ltl(100, 520) == 87
+    assert svc.compute_formula_ltl(100, 200) == 33
+    assert svc.compute_formula_ltl(20, 350) == 12
+    assert svc.compute_formula_ltl(20, 500) == 17
+
+
+def test_resolve_applied_ltl_manual_override_precedence():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "1065YKBLL", "Operation": "Gala Piping", "Target": 100, "Rate_Rs": 2.0}]),
+    )
+    save_sheet_df(
+        "karigar_master",
+        pd.DataFrame([{"Karigar_ID": "944", "Name": "Soniya", "Skill": "Stitching", "Daily_Rate_Rs": 200}]),
+    )
+    svc.upsert_ltl_override("1065YKBLL", "Gala Piping", "944", 40)
+    out = svc.resolve_applied_ltl("1065YKBLL", "Gala Piping", "944", as_of_date="2026-05-21", base_target=100)
+    assert out["formula_ltl"] == 33
+    assert out["applied_ltl"] == 40
+    assert out["target_type"] == "Manual Override"
+    svc.upsert_ltl_override("1065YKBLL", "Gala Piping", "944", None)
+
+
+def test_save_production_entry_persists_applied_ltl():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-LTL", "Operation": "Side", "Target": 20, "Rate_Rs": 3.0}]),
+    )
+    save_sheet_df(
+        "karigar_master",
+        pd.DataFrame([{"Karigar_ID": "823", "Name": "Suman", "Skill": "Stitching", "Daily_Rate_Rs": 350}]),
+    )
+    svc.save_production_entry(
+        date_str="2026-05-21",
+        karigar_id="823",
+        karigar_name="Suman",
+        challan_no="CH-LTL",
+        style="SKU-LTL",
+        hour_entries=[{"hour_col": "H_09_10", "operation": "Side", "pieces": 15}],
+    )
+    pl = get_sheet_df("production_log")
+    row = pl.iloc[-1]
+    assert int(row["Applied_LTL"]) == 12
+    assert int(row["Base_Target"]) == 20
+    assert int(row["Formula_LTL"]) == 12
+
+
+def test_save_production_entry_replaces_same_session_on_resave():
+    """Correcting and re-saving must update rows, not append duplicates."""
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-UP", "Operation": "Astin Attach", "Target": 30, "Rate_Rs": 2.0}]),
+    )
+    base = dict(
+        date_str="2026-05-21",
+        karigar_id="K100",
+        karigar_name="Test Worker",
+        challan_no="1107-2627",
+        style="SKU-UP",
+    )
+    svc.save_production_entry(
+        **base,
+        hour_entries=[{"hour_col": "H_09_10", "operation": "Astin Attach", "pieces": 20}],
+    )
+    svc.save_production_entry(
+        **base,
+        hour_entries=[{"hour_col": "H_09_10", "operation": "Astin Attach", "pieces": 30}],
+    )
+    pl = get_sheet_df("production_log")
+    mask = (
+        (pl["Date"].astype(str) == "2026-05-21")
+        & (pl["Karigar_ID"].astype(str) == "K100")
+        & (pl["Challan_No"].astype(str) == "1107-2627")
+        & (pl["Style"].astype(str) == "SKU-UP")
+    )
+    subset = pl[mask]
+    assert len(subset) == 1, f"expected 1 row after resave, got {len(subset)}"
+    assert int(subset.iloc[0]["Total_Pieces"]) == 30
+    assert int(subset.iloc[0]["H_09_10"]) == 30
+
+
+def test_save_production_entry_normalizes_operation_whitespace():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-WS", "Operation": "Cutting", "Target": 10, "Rate_Rs": 1.0}]),
+    )
+    svc.save_production_entry(
+        date_str="2026-05-21",
+        karigar_id="K101",
+        karigar_name="T",
+        challan_no="CH-1",
+        style="SKU-WS",
+        hour_entries=[{"hour_col": "H_09_10", "operation": " Cutting ", "pieces": 5}],
+    )
+    svc.save_production_entry(
+        date_str="2026-05-21",
+        karigar_id="K101",
+        karigar_name="T",
+        challan_no="CH-1",
+        style="SKU-WS",
+        hour_entries=[
+            {"hour_col": "H_09_10", "operation": "cutting", "pieces": 5},
+            {"hour_col": "H_10_11", "operation": "Cutting", "pieces": 7},
+        ],
+    )
+    pl = get_sheet_df("production_log")
+    mask = (pl["Karigar_ID"].astype(str) == "K101") & (pl["Style"].astype(str) == "SKU-WS")
+    assert len(pl[mask]) == 1
+    row = pl[mask].iloc[0]
+    assert int(row["H_09_10"]) == 5
+    assert int(row["H_10_11"]) == 7
+
+
 def test_stitching_production_entry_reports():
     svc.save_production_entry(
         date_str="2026-05-15",
@@ -277,13 +410,21 @@ def test_stitching_production_entry_reports():
     assert len(rep["history"]) >= 1
     assert len(rep["report1"]) >= 1
     r1 = rep["report1"][0]
+    assert r1["Date"] == "2026-05-15"
+    assert r1.get("Save_Time")
     assert r1["Total_Pieces"] >= 20
     assert r1["Style"] == "1894YKDGREEN"
     assert float(r1["Daily_Salary_Rs"]) > 0
     assert float(r1["Hourly_Salary_Rs"]) > 0
+    assert float(r1["Budget_Rate_Per_Piece"]) > 0
+    assert float(r1["Budgeted_Expense_Rs"]) > 0
+    assert float(r1["Actual_Expense_Rs"]) > 0
+    assert "Profit_Loss" in r1
     if rep["report2_summary"]:
         assert rep["report2_summary"][0]["Style"] == "1894YKDGREEN"
         assert float(rep["report2_summary"][0]["Daily_Salary_Rs"]) > 0
     if rep["report2_hourly"]:
+        assert rep["report2_hourly"][0]["Date"] == "2026-05-15"
+        assert rep["report2_hourly"][0].get("Save_Time")
         assert rep["report2_hourly"][0]["Style"] == "1894YKDGREEN"
         assert float(rep["report2_hourly"][0]["Hourly_Salary_Rs"]) > 0
