@@ -653,10 +653,37 @@ def _do_load_warm_cache() -> bool:
 
         # ── Phase 2: GitHub historical cache (network, slow) ──────────────────
         # Provides data for dates not yet in the SQLite daily store.
-        # Acquire _UPLOAD_MEMORY_LOCK so daily-auto ingest (DAILY_UPLOAD_EXECUTOR)
+        #
+        # ── Free Phase-0 data before Phase-2 to prevent OOM ──────────────────
+        # When disk_ok=True, _warm_cache holds the full Phase-0 historical data
+        # (2-4 GB with large MTR). Phase-2 downloads another 2-4 GB on top.
+        # Running both simultaneously exceeds the 7.5 GB container limit.
+        #
+        # Fix: before Phase-2 downloads, swap _warm_cache from Phase-0 (heavy)
+        # to Phase-1 SQLite data (lightweight, ~200 MB). If Phase-1 had no data,
+        # clear _warm_cache entirely. Phase-0 data is dereferenced and freed
+        # before the GitHub download allocates.
+        #
+        # Also acquire _UPLOAD_MEMORY_LOCK so daily-auto ingest (DAILY_UPLOAD_EXECUTOR)
         # never runs its heavy pandas work concurrently with this download.
         import gc as _gc
         _phase2_lock_held = False
+        if disk_ok:
+            if phase1_ok and p1_raw:
+                # Temporarily serve Phase-1 SQLite data while Phase-2 loads
+                _warm_cache = p1
+                _warm_cache_loaded_at = datetime.now(IST)
+                _warm_cache_ready.set()
+                log.info(
+                    "Phase-2 pre-load: swapped Phase-0 → Phase-1 SQLite data "
+                    "to free memory before GitHub download."
+                )
+            else:
+                _warm_cache = {}
+                log.info(
+                    "Phase-2 pre-load: cleared Phase-0 data (no Phase-1 available) "
+                    "to free memory before GitHub download."
+                )
         try:
             del p1_raw, p1
         except Exception:
