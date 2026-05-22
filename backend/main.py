@@ -580,6 +580,16 @@ def _do_load_warm_cache() -> bool:
                 len(disk_data), _warm_cache_generation,
             )
 
+        # ── Acquire upload-memory lock before Phase 1 ─────────────────────────
+        # Phase-0 disk data (~3-4 GB) is live in _warm_cache while Phase-1 SQLite
+        # loads another ~1 GB. If a daily upload (1-2 GB) runs concurrently the
+        # container exceeds its 7.5 GB limit. Hold the lock here — uploads will
+        # queue in DAILY_UPLOAD_EXECUTOR — and release only after the Phase-0 data
+        # has been swapped out (early-return path) or Phase-2 completes.
+        import gc as _gc
+        _UPLOAD_MEMORY_LOCK.acquire()
+        _phase2_lock_held = True
+
         # ── Phase 1: SQLite data (local) ──────────────────────────────────────
         # If Phase 0 disk cache is present, only top-up recent months for speed.
         # If Phase 0 is absent, load full SQLite history so users still get full
@@ -637,6 +647,22 @@ def _do_load_warm_cache() -> bool:
             log.warning("Warm-cache Phase 1 (SQLite) failed: %s — continuing to GitHub", e)
 
         if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
+            # Swap Phase-0 → Phase-1 to free heavy RAM before releasing the lock
+            # so the upload executor never sees Phase-0 + Phase-1 simultaneously.
+            if phase1_ok and p1_raw:
+                _warm_cache = p1
+                _warm_cache_loaded_at = datetime.now(IST)
+                _warm_cache_ready.set()
+                log.info("Phase-1 swap (skip-Phase-2): freed Phase-0 data, now serving Phase-1 SQLite.")
+            try:
+                del p1_raw, p1
+            except Exception:
+                pass
+            disk_data = None
+            _gc.collect()
+            # Release lock — Phase-0 data is now freed; uploads may proceed safely.
+            _UPLOAD_MEMORY_LOCK.release()
+            _phase2_lock_held = False
             log.info(
                 "Warm-cache: fresh disk cache — skipping GitHub Phase 2 "
                 "(set WARM_CACHE_SKIP_PHASE2_WHEN_DISK_FRESH=0 to force full reload)."
@@ -664,10 +690,7 @@ def _do_load_warm_cache() -> bool:
         # clear _warm_cache entirely. Phase-0 data is dereferenced and freed
         # before the GitHub download allocates.
         #
-        # Also acquire _UPLOAD_MEMORY_LOCK so daily-auto ingest (DAILY_UPLOAD_EXECUTOR)
-        # never runs its heavy pandas work concurrently with this download.
-        import gc as _gc
-        _phase2_lock_held = False
+        # _UPLOAD_MEMORY_LOCK is already held (acquired before Phase 1 above).
         if disk_ok:
             if phase1_ok and p1_raw:
                 # Temporarily serve Phase-1 SQLite data while Phase-2 loads
@@ -691,8 +714,7 @@ def _do_load_warm_cache() -> bool:
         if disk_ok and disk_data is not None:
             disk_data = None
         _gc.collect()
-        _UPLOAD_MEMORY_LOCK.acquire()
-        _phase2_lock_held = True
+        # Lock already held since before Phase 1 (acquired above).
         ok, msg, loaded = load_cache_from_drive()
         if not ok or not loaded:
             log.warning("Warm-cache Phase 2 (GitHub) failed: %s", msg)
