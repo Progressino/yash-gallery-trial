@@ -287,7 +287,31 @@ export async function uploadPoReturnsImport(
 export function isUploadGateway502(e: unknown): boolean {
   if (axios.isAxiosError(e) && e.response?.status === 502) return true
   if (e instanceof Error && (e as Error & { gateway502?: boolean }).gateway502) return true
-  return e instanceof Error && e.message.includes('GATEWAY_502_CHUNK_COMPLETE')
+  if (e instanceof Error && e.message.includes('GATEWAY_502_CHUNK_COMPLETE')) return true
+  return (
+    e instanceof Error &&
+    /gateway error \(502\)|status code 502/i.test(e.message)
+  )
+}
+
+async function getCoverageResilient(opts?: {
+  timeout?: number
+  light?: boolean
+}): Promise<CoverageResponse> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      return await getCoverage(opts)
+    } catch (e) {
+      lastErr = e
+      if (isUploadGateway502(e) || (axios.isAxiosError(e) && !e.response)) {
+        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)))
+        continue
+      }
+      throw e
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Coverage refresh failed')
 }
 
 function dailyUploadPendingAfter502(fileCount: number): {
@@ -403,7 +427,7 @@ export async function waitForDailyAutoIngest(
   const start = Date.now()
   let sawRunning = false
   while (Date.now() - start < maxMs) {
-    const cov = await getCoverage({ light: true })
+    const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
     const st = cov.daily_auto_ingest_status ?? 'idle'
     const salesSt = cov.sales_rebuild ?? 'idle'
     if (st === 'running' || salesSt === 'running') {
@@ -441,7 +465,7 @@ export async function waitForInventoryUpload(
 ): Promise<CoverageResponse> {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
-    const cov = await getCoverage({ light: true })
+    const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
     const st = cov.inventory_upload_status ?? 'idle'
     if (st === 'running') {
       onTick?.(cov.inventory_upload_message || 'Parsing inventory…')
@@ -466,7 +490,7 @@ export async function waitForSalesRebuild(
 ): Promise<CoverageResponse> {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
-    const cov = await getCoverage({ light: true })
+    const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
     const st = cov.sales_rebuild ?? 'idle'
     if (st === 'running') {
       onTick?.(cov.sales_rebuild_message || 'Rebuilding combined sales…')

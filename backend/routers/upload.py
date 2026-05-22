@@ -453,6 +453,20 @@ def _clear_stuck_daily_ingest(sess: AppSession, *, force: bool = False) -> bool:
     return True
 
 
+def _mark_daily_auto_ingest_running(sess: AppSession, message: str) -> None:
+    """Set ingest status without waiting on ``_daily_restore_lock``.
+
+    ``chunk/complete`` and ``/daily-auto`` used to call ``_session_lock_apply`` here,
+    which blocked behind an in-flight ingest until Cloudflare returned 502 (~100s).
+    """
+    sess.daily_auto_ingest_status = "running"
+    sess.daily_auto_ingest_started = time.time()
+    sess.daily_auto_ingest_message = message
+    sess.daily_auto_ingest_result = {}
+    sess.sales_rebuild_status = "idle"
+    sess.sales_rebuild_message = ""
+
+
 async def _session_lock_apply(sess, fn: Callable[[], Any]) -> Any:
     """
     Run ``fn`` while holding ``sess._daily_restore_lock`` on a worker thread.
@@ -1623,7 +1637,15 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
         return "myntra"
     if "b2b" in fn:
         return "amazon_b2b"
-    if "b2c" in fn or "mtr" in fn or "merchant" in fn or "tax report" in fn:
+    if (
+        "b2c" in fn
+        or "mtr" in fn
+        or "merchant" in fn
+        or "tax report" in fn
+        or " amazon" in fn
+        or fn.endswith(" amazon.csv")
+        or re.search(r"amazon\s+\d", fn)
+    ):
         return "amazon_b2c"
     if "meesho" in fn:
         return "meesho_csv"
@@ -2130,15 +2152,7 @@ async def upload_daily_auto(
         "Status updates below; you can stay on this page."
     )
 
-    def mark_async_start():
-        sess.daily_auto_ingest_status = "running"
-        sess.daily_auto_ingest_started = time.time()
-        sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
-        sess.daily_auto_ingest_result = {}
-        sess.sales_rebuild_status = "idle"
-        sess.sales_rebuild_message = ""
-
-    await _session_lock_apply(sess, mark_async_start)
+    _mark_daily_auto_ingest_running(sess, "Parsing daily files and merging into session…")
     background_tasks.add_task(_queue_daily_auto_ingest, sid, file_parts)
     return JSONResponse(
         content={
@@ -2407,15 +2421,7 @@ async def _accept_daily_auto_file_parts(
                 "unknown_files": 0,
             }
 
-    def mark_async_start():
-        sess.daily_auto_ingest_status = "running"
-        sess.daily_auto_ingest_started = time.time()
-        sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
-        sess.daily_auto_ingest_result = {}
-        sess.sales_rebuild_status = "idle"
-        sess.sales_rebuild_message = ""
-
-    await _session_lock_apply(sess, mark_async_start)
+    _mark_daily_auto_ingest_running(sess, "Parsing daily files and merging into session…")
     background_tasks.add_task(_queue_daily_auto_ingest, sid, file_parts)
     return {
         "ok": True,
@@ -2478,6 +2484,21 @@ async def chunk_upload_init(request: Request, body: ChunkInitIn):
         return JSONResponse(content={"ok": False, "message": "Upload SKU Mapping first."})
     if not body.files:
         return JSONResponse(content={"ok": False, "message": "No files listed."}, status_code=400)
+    if body.target == "daily-auto":
+        if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+            if not _clear_stuck_daily_ingest(sess, force=False):
+                return JSONResponse(
+                    content={
+                        "ok": False,
+                        "stuck": True,
+                        "message": (
+                            "A daily upload is still processing. Wait for it to finish, "
+                            "or use “Clear stuck upload”, then try again."
+                        ),
+                    },
+                    status_code=409,
+                )
+        _mark_daily_auto_ingest_running(sess, "Receiving daily files…")
     try:
         upload_id, chunk_size = chunk_store.create(
             sid,
@@ -2631,21 +2652,14 @@ async def chunk_upload_complete(
             }
         )
 
-    def mark_assembling():
-        if target == "daily-auto":
-            sess.daily_auto_ingest_status = "running"
-            sess.daily_auto_ingest_started = time.time()
-            sess.daily_auto_ingest_message = "Assembling uploaded files…"
-            sess.daily_auto_ingest_result = {}
-            sess.sales_rebuild_status = "idle"
-            sess.sales_rebuild_message = ""
-        else:
-            sess.inventory_upload_status = "running"
-            sess.inventory_upload_message = "Assembling uploaded files…"
-            sess.inventory_upload_result = {}
+    if target == "daily-auto":
+        _mark_daily_auto_ingest_running(sess, "Assembling uploaded files…")
+    else:
+        sess.inventory_upload_status = "running"
+        sess.inventory_upload_message = "Assembling uploaded files…"
+        sess.inventory_upload_result = {}
 
-    await _session_lock_apply(sess, mark_assembling)
-    background_tasks.add_task(_finalize_chunk_upload, sid, body.upload_id)
+    HEAVY_EXECUTOR.submit(_finalize_chunk_upload_worker, sid, body.upload_id)
 
     if target == "daily-auto":
         return JSONResponse(

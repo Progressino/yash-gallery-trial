@@ -27,7 +27,7 @@ export const CHUNK_UPLOAD_FILE_THRESHOLD = 1.5 * 1024 * 1024
 export const CHUNK_UPLOAD_BATCH_THRESHOLD = 4 * 1024 * 1024
 
 const CHUNK_REQUEST_TIMEOUT_MS = 120_000
-const COMPLETE_TIMEOUT_MS = 45_000
+const COMPLETE_TIMEOUT_MS = 90_000
 const CHUNK_CONCURRENCY = 3
 const CHUNK_RETRY_MAX = 4
 
@@ -226,6 +226,23 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
     }
     return done as T
   } catch (e) {
+    if (isRetryableChunkError(e)) {
+      // Cloudflare may 502 while the server already queued ingest — return pending shape.
+      return {
+        ok: true,
+        ingest_async: true,
+        chunked: true,
+        parsing_pending: true,
+        sales_rebuild: 'pending',
+        message:
+          'All chunks received — server is processing (gateway timed out). Status updates below.',
+        detected_platforms: [],
+        warnings: [],
+        processed_files: files.length,
+        detected_files: 0,
+        unknown_files: files.length,
+      } as T
+    }
     try {
       await chunkApi.delete(`/upload/chunk/${uploadId}`, { timeout: 15_000 })
     } catch {
@@ -233,14 +250,6 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
     }
     if (axios.isAxiosError(e) && e.code === 'ECONNABORTED') {
       throw new Error('Chunk upload timed out. Check connection and try again.')
-    }
-    if (isRetryableChunkError(e)) {
-      const err = new Error(
-        'GATEWAY_502_CHUNK_COMPLETE: Server gateway timed out while finishing upload. '
-        + 'Chunks were likely received — poll server status.',
-      ) as Error & { gateway502?: boolean }
-      err.gateway502 = true
-      throw err
     }
     throw e
   }

@@ -267,14 +267,33 @@ export default function Upload() {
         }
       })
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Upload failed'
-      showToast(
-        'error',
-        /timed out/i.test(msg)
-          ? `${msg} Files may still be on the server — try “Clear stuck upload”, then Load Cache.`
-          : msg,
-        12_000,
-      )
+      const { isUploadGateway502, waitForDailyAutoIngest, waitForSalesRebuild } = await import('../api/client')
+      if (isUploadGateway502(e)) {
+        showToast('success', 'Upload may still be processing on the server…', 6000)
+        try {
+          let cov = await waitForDailyAutoIngest(msg => setBuildingMsg(msg))
+          cov = await waitForSalesRebuild(msg => setBuildingMsg(msg))
+          setBuildingMsg('')
+          finalizeDailyAutoUpload('daily', cov, { ok: true, message: 'Daily upload complete.' })
+          await refresh()
+        } catch (pollErr: unknown) {
+          const msg = pollErr instanceof Error ? pollErr.message : 'Upload status unknown'
+          showToast(
+            'error',
+            `${msg} Try “Clear stuck upload”, wait a minute, then Load Cache.`,
+            12_000,
+          )
+        }
+      } else {
+        const msg = e instanceof Error ? e.message : 'Upload failed'
+        showToast(
+          'error',
+          /timed out/i.test(msg)
+            ? `${msg} Files may still be on the server — try “Clear stuck upload”, then Load Cache.`
+            : msg,
+          12_000,
+        )
+      }
     } finally { setL('daily', false) }
   }
 
