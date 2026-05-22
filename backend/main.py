@@ -595,7 +595,10 @@ def _do_load_warm_cache() -> bool:
         # If Phase 0 is absent, load full SQLite history so users still get full
         # data even when GitHub Phase 2 is slow/unavailable.
         from .services.daily_store import load_platform_data as _load_plat
-        _P1_MONTHS = 4 if disk_ok else None
+        # Always cap Phase-1 at 4 months: Phase-2 (GitHub) covers older history.
+        # Loading ALL history when disk_ok=False would hold 2-4 GB in p1_raw
+        # while Phase-2 simultaneously downloads another 4 GB → OOM.
+        _P1_MONTHS = 4
 
         phase1_ok = False
         try:
@@ -705,6 +708,16 @@ def _do_load_warm_cache() -> bool:
                     "Phase-2 pre-load: cleared Phase-0 data (no Phase-1 available) "
                     "to free memory before GitHub download."
                 )
+        else:
+            # disk_ok=False: _warm_cache may hold Phase-1 SQLite data (set above).
+            # Clear it now so Phase-2 download doesn't stack on top of it.
+            # Users see a loading state for the ~60-90 s Phase-2 takes;
+            # Phase-1 data was already served before this point.
+            _warm_cache = {}
+            log.info(
+                "Phase-2 pre-load: cleared Phase-1 data (no disk cache) "
+                "to free memory before GitHub download."
+            )
         try:
             del p1_raw, p1
         except Exception:
