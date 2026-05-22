@@ -747,8 +747,15 @@ def _do_load_warm_cache() -> bool:
         # the GitHub cache may still carry those stale rows.
         try:
             from .services.daily_store import get_blocked_dates as _get_blocked_dates
-            # Re-read SQLite so we pick up any upload that arrived during Phase 2.
-            daily = load_all_platforms()
+            # Re-read recent SQLite (4-month window) to pick up uploads that
+            # arrived during Phase-2 download. Use the same month cap as Phase-1:
+            # GitHub covers older history; loading all history here would add
+            # ~2 GB on top of the already-loaded GitHub dict and cause OOM.
+            daily = {
+                _p: _df
+                for _p in ("amazon", "myntra", "meesho", "flipkart", "snapdeal")
+                if not (_df := _load_plat(_p, months=4)).empty
+            }
             merged_any = False
             for plat, key in [
                 ("amazon",   "mtr_df"),
