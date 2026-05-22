@@ -647,20 +647,18 @@ def _do_load_warm_cache() -> bool:
             log.warning("Warm-cache Phase 1 (SQLite) failed: %s — continuing to GitHub", e)
 
         if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
-            # Swap Phase-0 → Phase-1 to free heavy RAM before releasing the lock
-            # so the upload executor never sees Phase-0 + Phase-1 simultaneously.
-            if phase1_ok and p1_raw:
-                _warm_cache = p1
-                _warm_cache_loaded_at = datetime.now(IST)
-                _warm_cache_ready.set()
-                log.info("Phase-1 swap (skip-Phase-2): freed Phase-0 data, now serving Phase-1 SQLite.")
+            # Free Phase-1 scratch data (p1_raw / p1) — they are not needed
+            # here since _warm_cache already holds the full Phase-0 disk cache.
+            # Do NOT swap _warm_cache to p1: Phase-0 has full historical data
+            # (2+ years); Phase-1 only has the last 4 months.
             try:
                 del p1_raw, p1
             except Exception:
                 pass
             disk_data = None
             _gc.collect()
-            # Release lock — Phase-0 data is now freed; uploads may proceed safely.
+            # Release lock — Phase-1 RAM is freed; uploads may proceed safely
+            # against the ~3.5 GB Phase-0 warm cache.
             _UPLOAD_MEMORY_LOCK.release()
             _phase2_lock_held = False
             log.info(
