@@ -233,7 +233,7 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
         ingest_async: true,
         chunked: true,
         parsing_pending: true,
-        sales_rebuild: 'pending',
+        sales_rebuild: 'pending' as const,
         message:
           'All chunks received — server is processing (gateway timed out). Status updates below.',
         detected_platforms: [],
@@ -241,7 +241,7 @@ export async function uploadFilesChunked<T extends Record<string, unknown>>(
         processed_files: files.length,
         detected_files: 0,
         unknown_files: files.length,
-      } as T
+      } as unknown as T
     }
     try {
       await chunkApi.delete(`/upload/chunk/${uploadId}`, { timeout: 15_000 })
