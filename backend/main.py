@@ -15,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from .concurrency import run_aux, run_heavy
+from .concurrency import run_aux, run_heavy, _UPLOAD_MEMORY_LOCK
 
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
@@ -546,6 +546,7 @@ def _do_load_warm_cache() -> bool:
     Phase-0/Phase-1 data get the fuller historical view on their next request.
     """
     global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
+    _phase2_lock_held = False   # tracked here so the outer finally can release safely
     try:
         from .services.github_cache import load_cache_from_drive
         from .services.daily_store import load_all_platforms, merge_platform_data as _merge
@@ -652,8 +653,10 @@ def _do_load_warm_cache() -> bool:
 
         # ── Phase 2: GitHub historical cache (network, slow) ──────────────────
         # Provides data for dates not yet in the SQLite daily store.
-        # ── Free Phase-0/Phase-1 intermediates before Phase-2 allocates GitHub data ──
+        # Acquire _UPLOAD_MEMORY_LOCK so daily-auto ingest (DAILY_UPLOAD_EXECUTOR)
+        # never runs its heavy pandas work concurrently with this download.
         import gc as _gc
+        _phase2_lock_held = False
         try:
             del p1_raw, p1
         except Exception:
@@ -661,6 +664,8 @@ def _do_load_warm_cache() -> bool:
         if disk_ok and disk_data is not None:
             disk_data = None
         _gc.collect()
+        _UPLOAD_MEMORY_LOCK.acquire()
+        _phase2_lock_held = True
         ok, msg, loaded = load_cache_from_drive()
         if not ok or not loaded:
             log.warning("Warm-cache Phase 2 (GitHub) failed: %s", msg)
@@ -808,6 +813,12 @@ def _do_load_warm_cache() -> bool:
         # Always signal so waiting code is never blocked forever
         # (no-op if Phase 1 already called set())
         _warm_cache_ready.set()
+        # Release Phase-2 memory lock if it was acquired
+        try:
+            if _phase2_lock_held:
+                _UPLOAD_MEMORY_LOCK.release()
+        except Exception:
+            pass
 
 
 def _copy_warm_cache_to_session(sess) -> bool:

@@ -19,7 +19,7 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from ..concurrency import HEAVY_EXECUTOR, run_heavy
+from ..concurrency import HEAVY_EXECUTOR, DAILY_UPLOAD_EXECUTOR, _UPLOAD_MEMORY_LOCK, run_heavy
 
 from ..session import store, resume_auto_data_restore, AppSession
 from ..models.schemas import UploadResponse
@@ -306,18 +306,33 @@ async def reset_stuck_daily_upload(request: Request):
 
 
 def _queue_daily_auto_ingest(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
-    """Schedule ingest on the heavy executor (keeps asyncio responsive)."""
-    HEAVY_EXECUTOR.submit(_run_daily_auto_ingest_pipeline, session_id, file_parts)
+    """Schedule ingest on the dedicated upload executor (never blocks behind warm-cache)."""
+    DAILY_UPLOAD_EXECUTOR.submit(_run_daily_auto_ingest_pipeline, session_id, file_parts)
 
 
 def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
-    """Parse Tier-3 upload off the request thread, then queue the usual sales rebuild."""
+    """Parse Tier-3 upload off the request thread, then queue the usual sales rebuild.
+
+    Acquires _UPLOAD_MEMORY_LOCK before heavy pandas work so this never runs
+    concurrently with warm-cache Phase 2 (both are memory-intensive on 7.5 GB).
+    """
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
     sess.daily_auto_ingest_status = "running"
     sess.daily_auto_ingest_started = time.time()
-    sess.daily_auto_ingest_message = "Parsing daily files and merging into session…"
+    n = len(file_parts)
+    fnames = ", ".join(name for name, _ in file_parts[:3])
+    sess.daily_auto_ingest_message = (
+        f"Queued: waiting for server resources… ({fnames})"
+        if not _UPLOAD_MEMORY_LOCK.acquire(timeout=0)
+        else None  # got lock immediately, update below
+    )
+    if sess.daily_auto_ingest_message is not None:
+        # Lock was busy — waiting. Keep updating message until acquired.
+        _log.info("daily-auto ingest queued behind another heavy job (session=%s)", session_id[:8])
+        _UPLOAD_MEMORY_LOCK.acquire()  # blocking wait
+    sess.daily_auto_ingest_message = f"Parsing {n} file{'s' if n != 1 else ''}… ({fnames})"
     try:
         payload = _process_daily_auto_sync(sess, file_parts, rebuild_sales=False)
     except Exception as e:
@@ -327,9 +342,9 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
             "message": str(e),
             "detected_platforms": [],
             "warnings": [str(e)],
-            "processed_files": len(file_parts),
+            "processed_files": n,
             "detected_files": 0,
-            "unknown_files": len(file_parts),
+            "unknown_files": n,
         }
         _store_daily_auto_ingest_result(sess, err_payload)
         sess.daily_auto_ingest_status = "error"
@@ -337,6 +352,8 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
         sess.sales_rebuild_status = "error"
         sess.sales_rebuild_message = f"Ingest failed: {e}"
         return
+    finally:
+        _UPLOAD_MEMORY_LOCK.release()
 
     _store_daily_auto_ingest_result(sess, payload)
     if not payload.get("ok"):
@@ -351,7 +368,12 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
     sess.daily_auto_ingest_started = 0.0
 
     if payload.get("sales_rebuild") == "pending":
+        _n_sales = len(getattr(sess, "sales_df", None) or [])
         sess.sales_rebuild_status = "running"
+        sess.sales_rebuild_message = (
+            f"Rebuilding combined sales ({_n_sales:,} rows)…"
+            if _n_sales else "Rebuilding combined sales…"
+        )
         try:
             from ..db.forecast_session_pg import persist_session_bundle_thread_safe
 
@@ -1924,7 +1946,15 @@ def _process_daily_auto_sync(
                 except Exception as e:
                     warnings.append(f"{fname}: {e}")
 
-            for fname, raw in file_parts:
+            n_files = len(file_parts)
+            for _fi, (fname, raw) in enumerate(file_parts):
+                # Live status visible on the frontend poll
+                _short = fname[:40] + "…" if len(fname) > 40 else fname
+                sess.daily_auto_ingest_message = (
+                    f"Parsing file {_fi + 1}/{n_files}: {_short}…"
+                    if n_files > 1
+                    else f"Parsing {_short}…"
+                )
                 try:
                     fl = fname.lower()
                     # RAR archive — extract and process each file inside
@@ -2039,6 +2069,10 @@ def _process_daily_auto_sync(
             sess.daily_sales_sources = list(set(sess.daily_sales_sources + detected))
             sales_rebuild = "inline"
             if rebuild_sales:
+                _n_cur = len(getattr(sess, "sales_df", None) or [])
+                sess.daily_auto_ingest_message = (
+                    f"Rebuilding combined sales ({_n_cur:,} rows)…" if _n_cur else "Rebuilding combined sales…"
+                )
                 ok_rb, rb_msg = _rebuild_sales_sync(sess)
                 if not ok_rb:
                     warnings.append(f"Sales rebuild warning: {rb_msg}")
@@ -2600,8 +2634,8 @@ def _finalize_chunk_upload_worker(session_id: str, upload_id: str) -> None:
 
 
 def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:
-    """Queue chunk finalize on the heavy executor (do not block the asyncio event loop)."""
-    HEAVY_EXECUTOR.submit(_finalize_chunk_upload_worker, session_id, upload_id)
+    """Queue chunk finalize on the dedicated upload executor (never blocks behind warm-cache)."""
+    DAILY_UPLOAD_EXECUTOR.submit(_finalize_chunk_upload_worker, session_id, upload_id)
 
 
 @router.post("/chunk/complete")

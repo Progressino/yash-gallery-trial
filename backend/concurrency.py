@@ -8,14 +8,25 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import threading
 from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
 
-# One heavy job at a time (daily-auto ingest, sales rebuild, warm-cache phase 2).
+# One heavy job at a time (warm-cache phase 2, scheduled sync).
 HEAVY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="erp-heavy",
+)
+
+# Daily upload ingest runs on its own thread so it never queues behind warm-cache
+# Phase 2 (which can hold HEAVY_EXECUTOR for 2-5 min on startup).
+# A shared semaphore prevents them from running CONCURRENTLY (OOM risk on 7.5 GB).
+_UPLOAD_MEMORY_LOCK = threading.Semaphore(1)
+
+DAILY_UPLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="erp-upload",
 )
 
 # PO calculate runs separately so a daily-inventory parse does not queue behind PO math.

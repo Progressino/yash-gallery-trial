@@ -53,6 +53,7 @@ export default function Upload() {
   const [toast, setToast]           = useState<Toast | null>(null)
   const [loading, setLoading]       = useState<Record<string, boolean>>({})
   const [buildingMsg, setBuildingMsg] = useState('')
+  const [chunkProgress, setChunkProgress] = useState<{ pct: number; sent: number; total: number; msg: string } | null>(null)
   const [uploadAlertsBySource, setUploadAlertsBySource] = useState<Record<string, UploadAlert>>({})
   const uploadBegin = useUploadActivity(s => s.begin)
   const uploadEnd = useUploadActivity(s => s.end)
@@ -236,9 +237,24 @@ export default function Upload() {
   const handleDailyAuto = async (files: File[]) => {
     setL('daily', true)
     setBuildingMsg('')
+    setChunkProgress(null)
     try {
       await withUploadGuard(async () => {
-        const res = await uploadDailyAuto(files, p => setBuildingMsg(p.message))
+        const res = await uploadDailyAuto(files, p => {
+          setBuildingMsg(p.message)
+          if (p.bytesTotal > 0) {
+            if (p.phase === 'complete') {
+              setChunkProgress(null)
+            } else {
+              setChunkProgress({
+                pct: Math.min(99, Math.round((p.bytesSent / p.bytesTotal) * 100)),
+                sent: p.bytesSent,
+                total: p.bytesTotal,
+                msg: p.message,
+              })
+            }
+          }
+        })
         if (res.ok) {
           if (res.ingest_async || res.sales_rebuild === 'pending') {
             showToast('success', `${res.message} Processing on server…`, 6000)
@@ -294,7 +310,7 @@ export default function Upload() {
           12_000,
         )
       }
-    } finally { setL('daily', false) }
+    } finally { setL('daily', false); setChunkProgress(null); setBuildingMsg('') }
   }
 
   const handleClearStuckDaily = async () => {
@@ -827,22 +843,30 @@ export default function Upload() {
           </div>
           <DailyDropzone
             uploading={loading['daily'] || loading['daily_reset']}
+            chunkProgress={chunkProgress}
             onReject={(msg) => showToast('error', msg)}
             onUpload={async (files) => { await handleDailyAuto(files); qc.invalidateQueries({ queryKey: ['daily-summary'] }); qc.invalidateQueries({ queryKey: ['daily-uploads'] }) }}
           />
-          {(coverage.daily_auto_ingest_status === 'running' || loading['daily']) && (
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-amber-800">
-                {coverage.daily_auto_ingest_message || buildingMsg || 'Processing daily files on server…'}
-              </span>
-              <button
-                type="button"
-                onClick={handleClearStuckDaily}
-                disabled={loading['daily_reset']}
-                className="px-3 py-1 rounded-lg border border-amber-300 bg-white text-amber-900 hover:bg-amber-50 disabled:opacity-50"
-              >
-                {loading['daily_reset'] ? 'Clearing…' : 'Clear stuck upload'}
-              </button>
+          {/* Server-side processing banner — shown while server parses & rebuilds sales */}
+          {!chunkProgress && (coverage.daily_auto_ingest_status === 'running' || (loading['daily'] && !!buildingMsg)) && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2 text-xs text-amber-800">
+                <svg className="animate-spin h-3 w-3 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <span className="flex-1 truncate">
+                  {coverage.daily_auto_ingest_message || buildingMsg || 'Processing daily files on server…'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleClearStuckDaily}
+                  disabled={loading['daily_reset']}
+                  className="shrink-0 px-2.5 py-0.5 rounded border border-amber-300 bg-white text-amber-900 hover:bg-amber-100 disabled:opacity-50 text-xs"
+                >
+                  {loading['daily_reset'] ? 'Clearing…' : 'Clear stuck'}
+                </button>
+              </div>
             </div>
           )}
           {dailyDetected.length > 0 && (
@@ -1222,8 +1246,15 @@ function Warn({ children }: { children: React.ReactNode }) {
   return <p className="text-xs text-amber-600 bg-amber-50 rounded p-2">{children}</p>
 }
 
-function DailyDropzone({ uploading, onUpload, onReject }: {
+function _fmtBytes(b: number): string {
+  if (b >= 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)} MB`
+  if (b >= 1024) return `${Math.round(b / 1024)} KB`
+  return `${b} B`
+}
+
+function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
   uploading: boolean
+  chunkProgress?: { pct: number; sent: number; total: number; msg: string } | null
   onUpload: (files: File[]) => Promise<void>
   onReject?: (message: string) => void
 }) {
@@ -1279,21 +1310,47 @@ function DailyDropzone({ uploading, onUpload, onReject }: {
     <div className="space-y-2">
       <div
         {...getRootProps()}
-        className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors
+        className={`border-2 border-dashed rounded-lg px-6 py-5 text-center cursor-pointer transition-colors
           ${isDragActive ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-gray-400 bg-white'}
-          ${uploading ? 'opacity-50 cursor-not-allowed' : ''}`}
+          ${uploading ? 'cursor-not-allowed' : ''}`}
       >
         <input {...getInputProps()} />
-        {uploading
-          ? <p className="text-sm text-blue-600 animate-pulse">Uploading & detecting…</p>
-          : isDragActive
-            ? <p className="text-sm text-blue-600">Drop files here</p>
-            : <p className="text-sm text-gray-500">
-                Drag & drop daily report files here, or{' '}
-                <span className="text-blue-600 underline">browse</span>
-                <br />
-                <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .xls / .zip / .rar — platform auto-detected</span>
-              </p>
+        {uploading && chunkProgress && chunkProgress.total > 0
+          ? (
+            <div className="space-y-2 text-left px-1">
+              <div className="flex items-center justify-between text-xs text-blue-700">
+                <span className="font-medium truncate max-w-[70%]">{chunkProgress.msg}</span>
+                <span className="shrink-0 ml-2 tabular-nums">
+                  {_fmtBytes(chunkProgress.sent)} / {_fmtBytes(chunkProgress.total)}
+                </span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${chunkProgress.pct}%` }}
+                />
+              </div>
+              <p className="text-xs text-blue-500 text-right tabular-nums">{chunkProgress.pct}%</p>
+            </div>
+          )
+          : uploading
+            ? (
+              <div className="flex items-center justify-center gap-2 text-sm text-blue-600">
+                <svg className="animate-spin h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <span>Sending to server…</span>
+              </div>
+            )
+            : isDragActive
+              ? <p className="text-sm text-blue-600">Drop files here</p>
+              : <p className="text-sm text-gray-500">
+                  Drag & drop daily report files here, or{' '}
+                  <span className="text-blue-600 underline">browse</span>
+                  <br />
+                  <span className="text-xs text-gray-400">Accepts .csv / .xlsx / .xls / .zip / .rar — platform auto-detected</span>
+                </p>
         }
       </div>
       {queued.length > 0 && (
