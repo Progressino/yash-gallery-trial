@@ -913,7 +913,7 @@ export default function Upload() {
 
         <UploadCard
           title="↩ Returns (for PO)"
-          subtitle="CSV or Excel with return units by SKU — reduces PO qty and net demand. Then run Calculate PO on the PO Engine page."
+          subtitle="Upload Return Data.rar (or CSV/Excel inside) — all marketplaces merged; dashboard net sales update automatically. Run Calculate PO for PO qty."
           loaded={false}
           alert={showImportCompleteness ? uploadAlertsBySource['returns_po'] : undefined}
           onClearAlert={() => clearUploadAlert('returns_po')}
@@ -924,7 +924,9 @@ export default function Upload() {
               'text/csv': ['.csv'],
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
               'application/vnd.ms-excel': ['.xls'],
-              'application/octet-stream': ['.xlsx', '.xls'],
+              'application/octet-stream': ['.xlsx', '.xls', '.rar', '.zip'],
+              'application/x-rar-compressed': ['.rar'],
+              'application/zip': ['.zip'],
             }}
             onUpload={handle('returns_po', async (file: File) => {
               const data = await uploadPoReturnsImport(file)

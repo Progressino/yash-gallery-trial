@@ -641,7 +641,7 @@ async def po_returns_import_file(
     group_by_parent: str = Form("false"),
     replace: str = Form("true"),
 ):
-    """Import return units by SKU (CSV / Excel). Reduces PO qty and feeds Net demand."""
+    """Import return units by SKU (CSV / Excel / RAR / ZIP). Reduces PO qty and feeds Net demand."""
     from ..services.po_return_import import apply_return_overlay_import, parse_return_upload_bytes
 
     sess = request.state.session
@@ -691,7 +691,15 @@ async def po_returns_import_file(
         background_tasks.add_task(_auto_save_cache, sess)
     except Exception:
         logging.getLogger(__name__).exception("auto-save after returns import failed to schedule")
-    out["message"] = f"{out['message']} Run Calculate PO to refresh the table.".strip()
+    if sales_rebuilt:
+        out["message"] = (
+            f"{out['message']} Net sales on the dashboard are updated. "
+            "Run Calculate PO on PO Engine to refresh PO qty columns."
+        ).strip()
+    else:
+        out["message"] = (
+            f"{out['message']} Run Calculate PO on PO Engine to refresh the table."
+        ).strip()
     return out
 
 

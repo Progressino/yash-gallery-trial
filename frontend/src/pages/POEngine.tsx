@@ -1220,7 +1220,7 @@ export default function POEngine() {
                   <input
                     ref={returnFileRef}
                     type="file"
-                    accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    accept=".csv,.xlsx,.xls,.rar,.zip,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/x-rar-compressed,application/zip"
                     className="hidden"
                     onChange={e => {
                       const f = e.target.files?.[0]
@@ -1231,7 +1231,7 @@ export default function POEngine() {
                     type="button"
                     disabled={returnImportBusy}
                     onClick={() => returnFileRef.current?.click()}
-                    title="Upload return report (extract RAR first if needed). Reduces PO qty and Net demand. Same upload is available under Upload → Daily uploads."
+                    title="Upload Return Data.rar or CSV/Excel — merges Amazon, Myntra, Meesho, Flipkart returns; updates dashboard net sales."
                     className="text-xs px-3 py-1.5 rounded border border-orange-300 text-orange-900 hover:bg-orange-50 disabled:opacity-50"
                   >
                     {returnImportBusy ? '…' : '↩ Import returns'}
@@ -1282,7 +1282,7 @@ export default function POEngine() {
                 >
                   {returnImportMsg.text}
                   <span className="block text-[10px] text-gray-500 mt-1">
-                    Extract <strong>Return Data.rar</strong> on your computer, then upload the CSV/Excel inside.
+                    You can upload <strong>Return Data.rar</strong> directly (all marketplace files inside are merged).
                   </span>
                 </div>
               )}

@@ -1,14 +1,22 @@
-"""Parse marketplace return reports (CSV / Excel) for PO return overlay."""
+"""Parse marketplace return reports (CSV / Excel / RAR / ZIP) for PO return overlay."""
 from __future__ import annotations
 
+import logging
+import re
+import zipfile
 from io import BytesIO
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from .po_raise_import import pick_csv_column
 from .po_engine import canonical_oms_key
+from .po_raise_import import pick_csv_column
 
+_log = logging.getLogger(__name__)
+
+_RAR_MAGIC = b"Rar!\x1a\x07"
+_ARCHIVE_EXTS = (".rar", ".zip")
+_DATA_EXTS = (".csv", ".xlsx", ".xls", ".txt")
 
 _SKU_CANDS = (
     "oms_sku",
@@ -16,10 +24,14 @@ _SKU_CANDS = (
     "oms sku",
     "item_sku",
     "seller_sku",
+    "seller_sku_code",
     "asin",
+    "(child) asin",
+    "child asin",
     "style_id",
     "product_id",
     "returned_sku",
+    "myntra_sku_code",
 )
 _QTY_CANDS = (
     "return_units",
@@ -27,10 +39,215 @@ _QTY_CANDS = (
     "returned_qty",
     "return quantity",
     "returns",
+    "units refunded",
+    "units refunded – b2b",
+    "units refunded - b2b",
     "qty",
     "quantity",
     "units",
 )
+
+
+def _strip_flipkart_sku(val: str) -> str:
+    s = str(val or "").strip()
+    if not s or s.lower() in ("nan", "none"):
+        return ""
+    return re.sub(r"^SKU:\s*", "", s, flags=re.IGNORECASE).strip()
+
+
+def _expand_upload_to_member_files(raw: bytes, filename: str) -> List[Tuple[str, bytes]]:
+    """Single data file, or all CSV/Excel members inside a RAR/ZIP archive."""
+    name = (filename or "").lower().strip()
+    if name.endswith(_ARCHIVE_EXTS) or raw[:6] == _RAR_MAGIC or raw[:2] == b"PK":
+        members: List[Tuple[str, bytes]] = []
+        if raw[:6] == _RAR_MAGIC or name.endswith(".rar"):
+            try:
+                from ..routers.upload import _extract_rar_files
+
+                members = _extract_rar_files(raw)
+            except Exception:
+                _log.exception("RAR extract failed for return upload")
+        if not members and (raw[:2] == b"PK" or name.endswith(".zip")):
+            try:
+                with zipfile.ZipFile(BytesIO(raw)) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        inner_name = info.filename.replace("\\", "/")
+                        if not inner_name.lower().endswith(_DATA_EXTS):
+                            continue
+                        members.append((inner_name, zf.read(info)))
+            except Exception:
+                _log.exception("ZIP extract failed for return upload")
+        if members:
+            return [
+                (n, b)
+                for n, b in members
+                if n.lower().endswith(_DATA_EXTS) and not n.split("/")[-1].startswith(".")
+            ]
+        return []
+    return [(filename or "upload.csv", raw)]
+
+
+def _read_tabular(raw: bytes, filename: str) -> Tuple[pd.DataFrame, Optional[str]]:
+    name = (filename or "").lower()
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            return pd.read_excel(BytesIO(raw)), None
+        return pd.read_csv(BytesIO(raw), encoding_errors="replace"), None
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+
+def _parse_meesho_panel_csv(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
+    for skip in range(0, 16):
+        try:
+            df = pd.read_csv(BytesIO(raw), skiprows=skip, encoding_errors="replace")
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        cols = [str(c).strip() for c in df.columns]
+        sku_col = pick_csv_column(cols, ("sku", "seller_sku", "oms_sku"))
+        qty_col = pick_csv_column(cols, ("qty", "quantity", "return_units"))
+        if sku_col and qty_col:
+            return df, None
+    return pd.DataFrame(), "Meesho return CSV: could not find SKU/Qty header row."
+
+
+def _parse_flipkart_returns_xlsx(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
+    try:
+        xl = pd.ExcelFile(BytesIO(raw))
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+    sheet = "Returns" if "Returns" in xl.sheet_names else xl.sheet_names[0]
+    try:
+        df = pd.read_excel(BytesIO(raw), sheet_name=sheet)
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+    if df is None or df.empty:
+        return pd.DataFrame(), "Flipkart Returns sheet is empty."
+    cols = [str(c).strip().lower() for c in df.columns]
+    if "sku" not in cols or "quantity" not in cols:
+        return pd.DataFrame(), "Flipkart Returns sheet missing sku/quantity columns."
+    out = pd.DataFrame()
+    out["OMS_SKU"] = df["sku"].map(_strip_flipkart_sku)
+    out["Return_Units"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0).astype(int)
+    out = out[out["OMS_SKU"].str.len() > 0]
+    out = out[out["Return_Units"] > 0]
+    if out.empty:
+        return pd.DataFrame(), "No positive Flipkart return rows."
+    return out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum(), None
+
+
+def _parse_amazon_business_return(df: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str]]:
+    sku_col = pick_csv_column(list(df.columns), ("(child) asin", "child asin", "asin", "sku"))
+    qty_col = pick_csv_column(
+        list(df.columns),
+        ("units refunded", "units refunded – b2b", "units refunded - b2b"),
+    )
+    if not sku_col or not qty_col:
+        return pd.DataFrame(), None
+    work = df.copy()
+    work["_qty"] = (
+        pd.to_numeric(
+            work[qty_col].astype(str).str.replace(",", "", regex=False),
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+    )
+    work = work[work["_qty"] > 0]
+    if work.empty:
+        return pd.DataFrame(), "No Amazon Units Refunded > 0."
+    out = pd.DataFrame()
+    out["OMS_SKU"] = work[sku_col].astype(str).str.strip()
+    out["Return_Units"] = work["_qty"]
+    return out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum(), None
+
+
+def _parse_generic_return_table(
+    df: pd.DataFrame,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    if df is None or df.empty:
+        return pd.DataFrame(), "No rows in file."
+    sku_col = pick_csv_column(list(df.columns), _SKU_CANDS)
+    qty_col = pick_csv_column(list(df.columns), _QTY_CANDS)
+    if not sku_col:
+        return pd.DataFrame(), "Could not find SKU column (expected SKU / OMS_SKU / seller_sku)."
+    if not qty_col:
+        return pd.DataFrame(), "Could not find return quantity column (expected Return_Qty / Qty / Units)."
+    out = pd.DataFrame()
+    out["OMS_SKU"] = df[sku_col].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+    out["Return_Units"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0).astype(int)
+    out = out[out["OMS_SKU"].str.len() > 0]
+    out = out[out["Return_Units"] > 0]
+    if out.empty:
+        return pd.DataFrame(), "No positive return quantities found."
+    return out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum(), None
+
+
+def _parse_single_return_file(
+    raw: bytes,
+    filename: str,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    if not raw:
+        return pd.DataFrame(), "Empty file."
+    low = (filename or "").lower()
+
+    if "flipkart" in low and low.endswith((".xlsx", ".xls")):
+        partial, err = _parse_flipkart_returns_xlsx(raw)
+        if partial is not None and not partial.empty:
+            if sku_mapping:
+                partial["OMS_SKU"] = partial["OMS_SKU"].map(
+                    lambda s: canonical_oms_key(s, sku_mapping)
+                )
+            return partial, None
+        if err:
+            return pd.DataFrame(), err
+
+    if "meesho" in low and low.endswith(".csv"):
+        df, err = _parse_meesho_panel_csv(raw)
+        if err:
+            return pd.DataFrame(), err
+        return _parse_generic_return_table(df, sku_mapping=sku_mapping)
+
+    df, read_err = _read_tabular(raw, filename)
+    if read_err:
+        return pd.DataFrame(), f"Could not read file: {read_err}"
+    if df is None or df.empty:
+        return pd.DataFrame(), "No rows in file."
+
+    if "amazon" in low or "businessreport" in low.replace(" ", ""):
+        partial, err = _parse_amazon_business_return(df)
+        if partial is not None and not partial.empty:
+            if sku_mapping:
+                partial["OMS_SKU"] = partial["OMS_SKU"].map(
+                    lambda s: canonical_oms_key(s, sku_mapping)
+                )
+            return partial, None
+        if err:
+            return pd.DataFrame(), err
+
+    if low.endswith((".xlsx", ".xls")):
+        try:
+            xl = pd.ExcelFile(BytesIO(raw))
+            if "Returns" in xl.sheet_names:
+                partial, err = _parse_flipkart_returns_xlsx(raw)
+                if partial is not None and not partial.empty:
+                    if sku_mapping:
+                        partial["OMS_SKU"] = partial["OMS_SKU"].map(
+                            lambda s: canonical_oms_key(s, sku_mapping)
+                        )
+                    return partial, None
+        except Exception:
+            pass
+
+    return _parse_generic_return_table(df, sku_mapping=sku_mapping)
 
 
 def parse_return_upload_bytes(
@@ -39,34 +256,44 @@ def parse_return_upload_bytes(
     sku_mapping: Optional[Dict[str, str]] = None,
     group_by_parent: bool = False,
 ) -> Tuple[pd.DataFrame, Optional[str]]:
-    """Return DataFrame with OMS_SKU, Return_Units (summed per SKU)."""
+    """Return DataFrame with OMS_SKU, Return_Units (summed per SKU).
+
+    Accepts a single CSV/Excel, or a RAR/ZIP containing marketplace return exports
+    (Amazon Business Report, Myntra, Meesho, Flipkart, etc.).
+    """
     if not raw:
         return pd.DataFrame(), "Empty file."
-    name = (filename or "").lower()
-    try:
-        if name.endswith((".xlsx", ".xls")):
-            df = pd.read_excel(BytesIO(raw))
-        else:
-            df = pd.read_csv(BytesIO(raw))
-    except Exception as e:
-        return pd.DataFrame(), f"Could not read file: {e}"
-    if df is None or df.empty:
-        return pd.DataFrame(), "No rows in file."
 
-    sku_col = pick_csv_column(list(df.columns), _SKU_CANDS)
-    qty_col = pick_csv_column(list(df.columns), _QTY_CANDS)
-    if not sku_col:
-        return pd.DataFrame(), "Could not find SKU column (expected SKU / OMS_SKU / seller_sku)."
-    if not qty_col:
-        return pd.DataFrame(), "Could not find return quantity column (expected Return_Qty / Qty / Units)."
+    members = _expand_upload_to_member_files(raw, filename)
+    if not members:
+        low = (filename or "").lower()
+        if low.endswith(_ARCHIVE_EXTS) or raw[:6] == _RAR_MAGIC or raw[:2] == b"PK":
+            return (
+                pd.DataFrame(),
+                "Could not extract return files from archive. On the server, install unar, bsdtar, or p7zip — or upload CSV/Excel directly.",
+            )
+        members = [(filename or "upload.csv", raw)]
 
-    out = pd.DataFrame()
-    out["OMS_SKU"] = df[sku_col].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
-    out["Return_Units"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0).astype(int)
-    out = out[out["OMS_SKU"].str.len() > 0]
-    out = out[out["Return_Units"] > 0]
-    if out.empty:
-        return pd.DataFrame(), "No positive return quantities found."
+    frames: List[pd.DataFrame] = []
+    errors: List[str] = []
+    for inner_name, inner_raw in members:
+        base = inner_name.split("/")[-1]
+        if base.lower().startswith("help"):
+            continue
+        part, err = _parse_single_return_file(
+            inner_raw, base, sku_mapping=sku_mapping
+        )
+        if part is not None and not part.empty:
+            frames.append(part)
+        elif err:
+            errors.append(f"{base}: {err}")
+
+    if not frames:
+        detail = "; ".join(errors[:4]) if errors else "No return rows found."
+        return pd.DataFrame(), detail
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum()
 
     if group_by_parent:
         from .helpers import get_parent_sku
@@ -74,8 +301,15 @@ def parse_return_upload_bytes(
         out["OMS_SKU"] = out["OMS_SKU"].map(
             lambda s: str(get_parent_sku(s) or s).strip().upper()
         )
+        out = out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum()
 
-    out = out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum()
+    sources = len(frames)
+    _log.info(
+        "Return import: %d SKU(s), %d units from %d file(s)",
+        len(out),
+        int(out["Return_Units"].sum()),
+        sources,
+    )
     return out, None
 
 
@@ -101,7 +335,7 @@ def apply_return_overlay_import(
         "ok": True,
         "message": (
             f"Return sheet: {n} SKU(s), {units:,} return units. "
-            "These units are merged into unified sales (dashboard net) and PO return overlay."
+            "Dashboard net sales and PO return overlay updated."
         ),
         "skus": n,
         "total_units": units,
