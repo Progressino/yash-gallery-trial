@@ -254,6 +254,74 @@ def _ensure_warm_session_data(sess: AppSession) -> None:
         pass
 
 
+def _restore_inventory_from_warm(sess: AppSession) -> None:
+    """Copy snapshot inventory from in-memory warm cache (fast; no GitHub download)."""
+    if not sess.inventory_df_variant.empty:
+        return
+    try:
+        import backend.main as _main
+        import pandas as pd
+
+        if not _main._warm_cache:
+            return
+        for key in ("inventory_df_variant", "inventory_df_parent"):
+            val = _main._warm_cache.get(key)
+            if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                setattr(sess, key, val)
+        if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
+            sess.sku_mapping = _main._warm_cache["sku_mapping"]
+    except Exception:
+        pass
+
+
+def _session_has_platform_data(sess: AppSession) -> bool:
+    return any(
+        not getattr(sess, attr).empty
+        for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
+    )
+
+
+def _ensure_sales_rebuilt(sess: AppSession) -> None:
+    """Rebuild unified sales when platform history is loaded but sales_df is still empty."""
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
+        return
+    if not sess.sku_mapping or not sess.sales_df.empty:
+        return
+    if not _session_has_platform_data(sess):
+        return
+    try:
+        from ..services.sales import build_sales_df
+
+        sess.sales_df = build_sales_df(
+            mtr_df=sess.mtr_df,
+            myntra_df=sess.myntra_df,
+            meesho_df=sess.meesho_df,
+            flipkart_df=sess.flipkart_df,
+            snapdeal_df=sess.snapdeal_df,
+            sku_mapping=sess.sku_mapping,
+            return_overlay_df=(
+                None
+                if getattr(sess, "po_return_overlay_df", None) is None
+                or getattr(sess.po_return_overlay_df, "empty", True)
+                else sess.po_return_overlay_df
+            ),
+        )
+        sess._quarterly_cache.clear()
+    except Exception:
+        pass
+
+
+def _maybe_restore_daily_for_empty_sales(sess: AppSession) -> None:
+    """When sales is missing but history exists, attempt Tier-3 merge (non-blocking lock)."""
+    if getattr(sess, "pause_auto_data_restore", False):
+        return
+    if not sess.sales_df.empty:
+        return
+    if not _session_has_platform_data(sess) and not get_summary():
+        return
+    _restore_daily_if_needed(sess)
+
+
 # ── Coverage ──────────────────────────────────────────────────
 
 @router.get("/coverage", response_model=CoverageResponse)
@@ -276,6 +344,7 @@ def get_coverage(request: Request, light: bool = False):
             )
     except Exception:
         pass
+    _restore_inventory_from_warm(sess)
     if not light:
         if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
             light = True
@@ -291,6 +360,9 @@ def get_coverage(request: Request, light: bool = False):
         except Exception:
             pass
         _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
+    else:
+        _maybe_restore_daily_for_empty_sales(sess)
+    _ensure_sales_rebuilt(sess)
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
 
@@ -1249,6 +1321,7 @@ def flipkart_analytics(request: Request):
 @router.get("/inventory")
 def get_inventory(request: Request):
     sess = _sess(request)
+    _restore_inventory_from_warm(sess)
     df = sess.inventory_df_variant
     if df.empty:
         return {"loaded": False, "rows": []}

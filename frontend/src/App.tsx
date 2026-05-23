@@ -7,7 +7,7 @@ import KarigarLayout from './components/KarigarLayout'
 import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuards'
 import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
-import api, { cacheHydrateWarm, cacheLoad, getCoverage } from './api/client'
+import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries } from './api/client'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
 
@@ -100,17 +100,23 @@ function ProtectedRoute() {
   const coverageEmpty = (c: Awaited<ReturnType<typeof getCoverage>>) =>
     !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.snapdeal
 
+  /** Server has platform history but unified sales not built yet — dashboard stays blank until fixed. */
+  const sessionNeedsSales = (c: Awaited<ReturnType<typeof getCoverage>>) =>
+    !c.sales && (c.mtr || c.myntra || c.meesho || c.flipkart || c.snapdeal || c.daily_orders)
+
+  const sessionNeedsSync = (c: Awaited<ReturnType<typeof getCoverage>>) =>
+    coverageEmpty(c) || sessionNeedsSales(c)
+
   const { isFetching: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
-        // Light coverage: warm-cache fill only — avoids multi-minute Tier-3 SQLite on login.
-        let coverage = await getCoverage({ light: true, timeout: 45_000 })
+        let coverage = await getCoverage({ timeout: 120_000 })
         setCoverage(coverage)
         if (coverageEmpty(coverage)) {
           try {
             await withTimeout(cacheHydrateWarm(), HYDRATE_WARM_TIMEOUT_MS)
-            coverage = await getCoverage({ light: true, timeout: 45_000 })
+            coverage = await getCoverage({ timeout: 180_000 })
             setCoverage(coverage)
           } catch {
             /* warm cache may still be starting after deploy */
@@ -119,20 +125,23 @@ function ProtectedRoute() {
         if (coverageEmpty(coverage)) {
           try {
             await withTimeout(cacheLoad(), HYDRATE_WARM_TIMEOUT_MS)
-            coverage = await getCoverage({ light: true, timeout: 45_000 })
+            coverage = await getCoverage({ timeout: 180_000 })
             setCoverage(coverage)
           } catch {
             /* GitHub cache optional */
           }
         }
-        // Optional Tier-3 top-up in background (light only — avoids heavy SQLite on the server).
-        if (!coverageEmpty(coverage)) {
-          void getCoverage({ light: true, timeout: 120_000 })
-            .then(c => setCoverage(c))
-            .catch(() => {})
+        // Tier-3 daily uploads merge in background after hydrate-warm — poll until sales ready.
+        for (let i = 0; i < 12 && sessionNeedsSales(coverage); i += 1) {
+          await new Promise(r => setTimeout(r, 15_000))
+          coverage = await getCoverage({ timeout: 180_000 })
+          setCoverage(coverage)
+        }
+        if (!sessionNeedsSync(coverage)) {
+          invalidateDataQueries(qc)
         }
       } catch {
-        /* server busy during upload — coverage polling on Upload page will retry */
+        /* server busy during upload — coverage polling will retry */
       }
       return true
     },
@@ -145,15 +154,16 @@ function ProtectedRoute() {
   useQuery({
     queryKey: ['coverage-empty-retry'],
     queryFn: async () => {
-      const c = await getCoverage({ light: true, timeout: 45_000 })
+      const c = await getCoverage({ timeout: 120_000 })
       setCoverage(c)
+      if (c.sales) invalidateDataQueries(qc)
       return c
     },
     enabled: !!activeUser && !isKarigar && !hrmOnly && !isRestoring,
     refetchInterval: (q) => {
       const c = q.state.data
       if (!c) return 8_000
-      return coverageEmpty(c) ? 30_000 : false
+      return sessionNeedsSync(c) ? 15_000 : false
     },
     retry: 2,
   })

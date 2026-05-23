@@ -53,7 +53,7 @@ function filterNavGroups(user: ReturnType<typeof useAuth.getState>['user']) {
 }
 
 export default function Layout() {
-  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, setCoverage } =
+  const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, inventory, setCoverage } =
     useSession()
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
@@ -262,6 +262,7 @@ export default function Layout() {
           <Badge label="SKU Map"  active={sku_mapping} />
           <Badge label="Amazon"   active={mtr} />
           <Badge label="Sales"    active={sales} />
+          <Badge label="Inventory" active={inventory} />
           <Badge label="Myntra"   active={myntra} />
           <Badge label="Meesho"   active={meesho} />
           <Badge label="Flipkart" active={flipkart} />

@@ -821,10 +821,24 @@ export default function Dashboard() {
 
   /* ── queries ── */
   useQuery({
-    queryKey: ['coverage'],
-    queryFn: async () => { const c = await getCoverage({ light: true }); setCoverage(c); return c },
-    enabled: salesLoaded,
-    staleTime: 300_000,
+    queryKey: ['dashboard-coverage-sync'],
+    queryFn: async () => {
+      const needsFull = !salesLoaded
+      const c = await getCoverage({ timeout: 120_000, light: !needsFull })
+      setCoverage(c)
+      return c
+    },
+    enabled: true,
+    staleTime: 60_000,
+    refetchInterval: (q) => {
+      const c = q.state.data
+      if (!c) return 3_000
+      if (!c.sales && (c.mtr || c.myntra || c.meesho || c.flipkart || c.snapdeal || c.daily_orders)) {
+        return 5_000
+      }
+      if (c.sales_rebuild === 'running' || c.daily_auto_ingest_status === 'running') return 3_000
+      return false
+    },
   })
   const { data: salesSummary } = useQuery<SalesSummary>({
     queryKey: ['sales-summary', dateStart, dateEnd],
