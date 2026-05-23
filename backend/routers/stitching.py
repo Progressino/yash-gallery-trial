@@ -65,7 +65,7 @@ class AttendanceBody(BaseModel):
     Name: str = ""
     In_Punch: str = "09:00"
     Out_Punch: str = "18:00"
-    ot_multiplier: float = 1.5
+    ot_multiplier: float = 1.0
 
 
 class StyleOpBody(BaseModel):
@@ -355,24 +355,51 @@ def update_challan(challan_no: str, body: ChallanUpdateBody):
 
 @router.post("/attendance/karigar")
 def add_karigar_attendance(body: AttendanceBody):
+    from ..services import karigar_attendance as att_svc
+
     em = get_sheet_df("employee_master")
     er = em[em["E_Code"].astype(str) == str(body.E_Code)] if not em.empty else pd.DataFrame()
     daily = svc.get_daily_rate_for_date(str(body.E_Code), body.Date)
     name = body.Name or (str(er["Name"].iloc[0]) if not er.empty else "")
-    calc = svc.calc_salary(body.In_Punch, body.Out_Punch, daily, body.ot_multiplier)
+    calc = att_svc.calc_salary(body.In_Punch, body.Out_Punch, daily, body.ot_multiplier)
     row = {
         "Date": body.Date,
         "E_Code": body.E_Code,
         "Name": name,
         "In_Punch": body.In_Punch,
         "Out_Punch": body.Out_Punch,
+        "Status": "P",
         "Daily_Rate_Rs": daily,
         **calc,
     }
     df = get_sheet_df("karigar_attendance")
+    if not df.empty:
+        mask = (df["Date"].astype(str) == str(body.Date)) & (
+            df["E_Code"].astype(str).map(svc.clean_key) == svc.clean_key(body.E_Code)
+        )
+        df = df[~mask]
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     save_sheet_df("karigar_attendance", df)
     return {"ok": True, "row": row}
+
+
+@router.post("/attendance/karigar/upload")
+async def upload_karigar_attendance(file: UploadFile = File(...)):
+    """Import Daily Attendance IN/OUT Punch Report (.xls / .xlsx)."""
+    from ..services import karigar_attendance as att_svc
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Empty file.")
+    try:
+        out = att_svc.import_karigar_attendance_bytes(raw, file.filename or "attendance.xls")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse attendance file: {e}") from e
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("message", "Import failed"))
+    return out
 
 
 @router.post("/attendance/operating")

@@ -1920,6 +1920,9 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
     e => type === 'karigar' ? e.Type === 'Karigar' : e.Type === 'Operating',
   )
   const [form, setForm] = useState({ Date: todayStr(), E_Code: '', In_Punch: '09:00', Out_Punch: '18:00' })
+  const [uploadMsg, setUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const [uploadBusy, setUploadBusy] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
   const saveMut = useMutation({
     mutationFn: () =>
       api.post(type === 'karigar' ? '/stitching/attendance/karigar' : '/stitching/attendance/operating', form),
@@ -1928,8 +1931,88 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
       refetch()
     },
   })
+  const uploadAttendance = async (file: File) => {
+    if (type !== 'karigar') return
+    setUploadBusy(true)
+    setUploadMsg(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const { data: res } = await api.post<{ ok?: boolean; message?: string; warnings?: string[] }>(
+        '/stitching/attendance/karigar/upload',
+        fd,
+        { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 },
+      )
+      const warn = res.warnings?.length ? ` ${res.warnings.join(' ')}` : ''
+      setUploadMsg({ type: 'ok', text: `${res.message || 'Imported.'}${warn}` })
+      qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
+      qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
+      refetch()
+    } catch (e: unknown) {
+      const msg =
+        axios.isAxiosError(e) && e.response?.data?.detail
+          ? String(e.response.data.detail)
+          : 'Upload failed'
+      setUploadMsg({ type: 'err', text: msg })
+    } finally {
+      setUploadBusy(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+  const karigarCols = [
+    'Date',
+    'E_Code',
+    'Name',
+    'Status',
+    'In_Punch',
+    'Out_Punch',
+    'Payable_Hrs',
+    'OT_Hours',
+    'Hourly_Rate_Rs',
+    'Normal_Pay',
+    'OT_Pay',
+    'Total_Pay',
+  ]
   return (
     <div className="space-y-4">
+      {type === 'karigar' && (
+        <Section title="Upload biometric attendance (IN/OUT punch report)">
+          <p className="text-xs text-gray-500 mb-2">
+            Upload the daily <strong>Daily Attendance IN/OUT Punch Report</strong> (.xls / .xlsx). Workers are matched by{' '}
+            <strong>E. Code</strong> to Master Data. Re-uploading the same day replaces existing rows. Hours: 09:00–18:00,
+            lunch 13:00–13:30, tea 16:00–16:15, OT after 18:00 at the same hourly rate.
+          </p>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0]
+              if (f) void uploadAttendance(f)
+            }}
+          />
+          <button
+            type="button"
+            disabled={uploadBusy}
+            onClick={() => fileRef.current?.click()}
+            className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50"
+          >
+            {uploadBusy ? 'Importing…' : '📤 Upload attendance sheet'}
+          </button>
+          {uploadMsg && (
+            <p
+              className={`mt-2 text-xs rounded-lg px-3 py-2 border ${
+                uploadMsg.type === 'ok'
+                  ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                  : 'bg-red-50 text-red-800 border-red-200'
+              }`}
+            >
+              {uploadMsg.text}
+            </p>
+          )}
+        </Section>
+      )}
       <Section title="Manual entry">
         <div className="grid sm:grid-cols-4 gap-2 text-xs">
           <label>
@@ -1959,7 +2042,10 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
         </button>
       </Section>
       <Section title="Records">
-        <DataTable rows={(data?.rows ?? []).slice(-50)} cols={type === 'karigar' ? ['Date', 'E_Code', 'Name', 'Payable_Hrs', 'Total_Pay'] : ['Date', 'E_Code', 'Name', 'Total_Hours', 'Total_Pay']} />
+        <DataTable
+          rows={(data?.rows ?? []).slice(-80)}
+          cols={type === 'karigar' ? karigarCols : ['Date', 'E_Code', 'Name', 'Total_Hours', 'Total_Pay']}
+        />
       </Section>
     </div>
   )

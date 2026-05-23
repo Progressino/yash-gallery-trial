@@ -511,43 +511,11 @@ def clean_key(val: Any) -> str:
         return str(val).strip()
 
 
-def calc_salary(in_str: str, out_str: str, daily_rate: float, ot_mult: float = 1.5) -> dict:
-    try:
-        fmt = "%H:%M"
-        ti = datetime.strptime(in_str.strip(), fmt)
-        to_ = datetime.strptime(out_str.strip(), fmt)
-        se = datetime.strptime("18:00", fmt)
-        ls = datetime.strptime("13:00", fmt)
-        le = datetime.strptime("14:00", fmt)
-        ph = max(int((to_ - ti).total_seconds()), 0) / 3600
-        ld = 1.0 if (ti < le and to_ > ls) else 0.0
-        py = max(ph - ld, 0.0)
-        hr = daily_rate / 8
-        np_ = round(py * hr, 2)
-        oh = max(int((to_ - se).total_seconds()), 0) / 3600 if to_ > se else 0.0
-        op = round(oh * hr * ot_mult, 2)
-        tp = round(np_ + op, 2)
-        return {
-            "Total_Presence_Hrs": round(ph, 2),
-            "Lunch_Deduction_Hrs": round(ld, 2),
-            "Payable_Hrs": round(py, 2),
-            "Hourly_Rate_Rs": round(hr, 2),
-            "Normal_Pay": np_,
-            "OT_Hours": round(oh, 2),
-            "OT_Pay": op,
-            "Total_Pay": tp,
-        }
-    except Exception:
-        return {
-            "Total_Presence_Hrs": 0.0,
-            "Lunch_Deduction_Hrs": 0.0,
-            "Payable_Hrs": 0.0,
-            "Hourly_Rate_Rs": 0.0,
-            "Normal_Pay": 0.0,
-            "OT_Hours": 0.0,
-            "OT_Pay": 0.0,
-            "Total_Pay": 0.0,
-        }
+def calc_salary(in_str: str, out_str: str, daily_rate: float, ot_mult: float = 1.0) -> dict:
+    """Karigar attendance policy — see ``karigar_attendance`` module."""
+    from .karigar_attendance import calc_salary as _calc
+
+    return _calc(in_str, out_str, daily_rate, ot_mult=ot_mult)
 
 
 def dashboard_summary(planning_date: str | None = None) -> dict:
