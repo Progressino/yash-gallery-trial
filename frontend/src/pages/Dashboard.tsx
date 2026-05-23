@@ -767,7 +767,13 @@ function DsrTable({ data }: { data: DsrSection[] }) {
 export default function Dashboard() {
   const navigate = useNavigate()
   const setCoverage = useSession(s => s.setCoverage)
-  const salesLoaded = useSession(s => s.sales)
+  const salesLoaded = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
+  const jobRunning = useSession(s =>
+    s.inventory_upload_status === 'running' ||
+    s.daily_inventory_upload_status === 'running' ||
+    s.daily_auto_ingest_status === 'running' ||
+    s.sales_rebuild === 'running',
+  )
 
   /* ── state ── */
   const [dateStart,      setDateStart]      = useState(() => daysAgo(90))
@@ -823,8 +829,7 @@ export default function Dashboard() {
   useQuery({
     queryKey: ['dashboard-coverage-sync'],
     queryFn: async () => {
-      const needsFull = !salesLoaded
-      const c = await getCoverage({ timeout: 120_000, light: !needsFull })
+      const c = await getCoverage({ timeout: jobRunning || salesLoaded ? 45_000 : 120_000, light: jobRunning || salesLoaded })
       setCoverage(c)
       return c
     },
@@ -833,10 +838,14 @@ export default function Dashboard() {
     refetchInterval: (q) => {
       const c = q.state.data
       if (!c) return 3_000
-      if (!c.sales && (c.mtr || c.myntra || c.meesho || c.flipkart || c.snapdeal || c.daily_orders)) {
-        return 5_000
+      if (
+        c.inventory_upload_status === 'running' ||
+        c.daily_inventory_upload_status === 'running' ||
+        c.daily_auto_ingest_status === 'running' ||
+        c.sales_rebuild === 'running'
+      ) {
+        return 3_000
       }
-      if (c.sales_rebuild === 'running' || c.daily_auto_ingest_status === 'running') return 3_000
       return false
     },
   })

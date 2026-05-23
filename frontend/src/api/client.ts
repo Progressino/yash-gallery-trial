@@ -97,6 +97,8 @@ export interface CoverageResponse {
   }>
   inventory_upload_sources?: string[]
   inventory_upload_amz_disclaimer?: Record<string, unknown>
+  daily_inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
+  daily_inventory_upload_message?: string
 }
 
 export type DailyAutoIngestSummary = {

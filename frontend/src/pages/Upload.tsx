@@ -79,11 +79,14 @@ export default function Upload() {
   useQuery({
     queryKey: ['coverage'],
     queryFn: async () => {
-      const c = await getCoverage({ timeout: 90_000 })
+      const c = await getCoverage({
+        light: uploadBusy || !!coverage.sales,
+        timeout: uploadBusy ? 45_000 : 90_000,
+      })
       setCoverage(c)
       return c
     },
-    refetchInterval: uploadBusy ? false : coverageEmpty ? 20_000 : 60_000,
+    refetchInterval: uploadBusy ? 3_000 : coverageEmpty ? 20_000 : 60_000,
     retry: 3,
   })
 
@@ -199,9 +202,12 @@ export default function Upload() {
   // slow /data/coverage (queued behind a big upload) doesn't replace the
   // success toast with "timeout of 20000ms exceeded". The polling useQuery
   // below will pick up the fresh coverage on the next 5s tick.
-  const refresh = async () => {
+  const refresh = async (opts?: { light?: boolean }) => {
     try {
-      const c = await getCoverage()
+      const c = await getCoverage({
+        light: opts?.light,
+        timeout: opts?.light ? 45_000 : 90_000,
+      })
       setCoverage(c)
     } catch (err) {
       console.warn('Post-upload coverage refresh failed; polling will retry.', err)
@@ -836,7 +842,13 @@ export default function Upload() {
                             kept: result.skus,
                           })
                           showToast('success', result.message || `Loaded ${(result.rows ?? 0).toLocaleString()} matrix rows.`)
-                          await refresh()
+                          setCoverage({
+                            ...coverage,
+                            daily_inventory_history: true,
+                            daily_inventory_history_rows: result.rows ?? coverage.daily_inventory_history_rows,
+                            daily_inventory_history_skus: result.skus ?? coverage.daily_inventory_history_skus,
+                          })
+                          await refresh({ light: true })
                         } else {
                           showToast('error', result.message || 'Upload failed')
                         }
@@ -960,6 +972,7 @@ export default function Upload() {
                       showToast('success', `${res.message}`, 6000)
                       const cov = await waitForInventoryUpload(msg => setBuildingMsg(msg))
                       setBuildingMsg('')
+                      setCoverage(cov)
                       const results = cov.inventory_upload_file_results ?? []
                       const saved = results.filter(r => r.status === 'loaded').length
                       const skipped = results.filter(r => r.status === 'skipped')
@@ -990,7 +1003,7 @@ export default function Upload() {
                       captureGenericAlert('inv', issues)
                       showToast('success', res.message)
                     }
-                    await refresh()
+                    await refresh({ light: true })
                   } else showToast('error', res.message)
                 })
               } catch (e: unknown) {
@@ -1000,8 +1013,9 @@ export default function Upload() {
                   try {
                     const cov = await waitForInventoryUpload(msg => setBuildingMsg(msg))
                     setBuildingMsg('')
+                    setCoverage(cov)
                     showToast('success', cov.inventory_upload_message || 'Inventory updated.')
-                    await refresh()
+                    await refresh({ light: true })
                   } catch (pollErr: unknown) {
                     showToast('error', pollErr instanceof Error ? pollErr.message : 'Upload status unknown')
                   }

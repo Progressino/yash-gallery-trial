@@ -42,6 +42,8 @@ const empty: CoverageResponse = {
   daily_auto_ingest_message: '',
   inventory_upload_status: 'idle',
   inventory_upload_message: '',
+  daily_inventory_upload_status: 'idle',
+  daily_inventory_upload_message: '',
 }
 
 export const useSession = create<SessionState>((set) => ({

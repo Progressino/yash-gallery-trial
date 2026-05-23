@@ -45,3 +45,14 @@ def test_light_coverage_rebuilds_sales(client, session_for_client):
     body = r.json()
     assert body["sales"] is True
     assert body["sales_rows"] >= 1
+
+
+def test_light_coverage_skips_restore_while_daily_inventory_parsing(client, session_for_client):
+    _, sess = session_for_client
+    sess.daily_inventory_upload_status = "running"
+    sess.daily_inventory_upload_message = "Parsing…"
+
+    r = client.get("/api/data/coverage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["daily_inventory_upload_status"] == "running"

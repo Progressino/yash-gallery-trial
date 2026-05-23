@@ -102,21 +102,29 @@ function ProtectedRoute() {
 
   /** Server has platform history but unified sales not built yet — dashboard stays blank until fixed. */
   const sessionNeedsSales = (c: Awaited<ReturnType<typeof getCoverage>>) =>
-    !c.sales && (c.mtr || c.myntra || c.meesho || c.flipkart || c.snapdeal || c.daily_orders)
+    !c.sales &&
+    (c.mtr || c.myntra || c.meesho || c.flipkart || c.snapdeal) &&
+    (c.sales_rebuild === 'running' || c.daily_auto_ingest_status === 'running')
 
   const sessionNeedsSync = (c: Awaited<ReturnType<typeof getCoverage>>) =>
     coverageEmpty(c) || sessionNeedsSales(c)
+
+  const backgroundJobRunning = (c: Awaited<ReturnType<typeof getCoverage>>) =>
+    c.inventory_upload_status === 'running' ||
+    c.daily_inventory_upload_status === 'running' ||
+    c.daily_auto_ingest_status === 'running' ||
+    c.sales_rebuild === 'running'
 
   const { isFetching: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
-        let coverage = await getCoverage({ timeout: 120_000 })
+        let coverage = await getCoverage({ light: true, timeout: 45_000 })
         setCoverage(coverage)
         if (coverageEmpty(coverage)) {
           try {
             await withTimeout(cacheHydrateWarm(), HYDRATE_WARM_TIMEOUT_MS)
-            coverage = await getCoverage({ timeout: 180_000 })
+            coverage = await getCoverage({ light: true, timeout: 60_000 })
             setCoverage(coverage)
           } catch {
             /* warm cache may still be starting after deploy */
@@ -125,16 +133,13 @@ function ProtectedRoute() {
         if (coverageEmpty(coverage)) {
           try {
             await withTimeout(cacheLoad(), HYDRATE_WARM_TIMEOUT_MS)
-            coverage = await getCoverage({ timeout: 180_000 })
+            coverage = await getCoverage({ timeout: 120_000 })
             setCoverage(coverage)
           } catch {
             /* GitHub cache optional */
           }
-        }
-        // Tier-3 daily uploads merge in background after hydrate-warm — poll until sales ready.
-        for (let i = 0; i < 12 && sessionNeedsSales(coverage); i += 1) {
-          await new Promise(r => setTimeout(r, 15_000))
-          coverage = await getCoverage({ timeout: 180_000 })
+        } else if (sessionNeedsSales(coverage)) {
+          coverage = await getCoverage({ timeout: 120_000 })
           setCoverage(coverage)
         }
         if (!sessionNeedsSync(coverage)) {
@@ -154,7 +159,9 @@ function ProtectedRoute() {
   useQuery({
     queryKey: ['coverage-empty-retry'],
     queryFn: async () => {
-      const c = await getCoverage({ timeout: 120_000 })
+      const prev = qc.getQueryData<Awaited<ReturnType<typeof getCoverage>>>(['coverage-empty-retry'])
+      const useLight = !!prev && !coverageEmpty(prev)
+      const c = await getCoverage({ timeout: useLight ? 45_000 : 120_000, light: useLight })
       setCoverage(c)
       if (c.sales) invalidateDataQueries(qc)
       return c
@@ -163,6 +170,7 @@ function ProtectedRoute() {
     refetchInterval: (q) => {
       const c = q.state.data
       if (!c) return 8_000
+      if (backgroundJobRunning(c)) return 3_000
       return sessionNeedsSync(c) ? 15_000 : false
     },
     retry: 2,

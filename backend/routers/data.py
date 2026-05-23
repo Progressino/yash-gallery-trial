@@ -69,6 +69,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     rows into warm-cache copies without replacing bulk history).
     Also auto-restores SKU mapping from GitHub cache if missing.
     """
+    if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
+        return
     try:
         import backend.main as _main
 
@@ -352,6 +354,8 @@ def get_coverage(request: Request, light: bool = False):
             light = True
         if getattr(sess, "inventory_upload_status", "idle") == "running":
             light = True
+        if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
+            light = True
     if not light:
         try:
             from ..services.po_raise_import import hydrate_session_ledger_from_db
@@ -460,6 +464,8 @@ def get_coverage(request: Request, light: bool = False):
             if getattr(sess, "inventory_upload_result", None)
             else None
         ),
+        daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
+        daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
     )
 
 
