@@ -772,7 +772,7 @@ def save_daily_file(
     platform: str,
     filename: str,
     df: pd.DataFrame,
-) -> Tuple[str, int]:
+) -> Tuple[str, int, Optional[str]]:
     """
     Persist a daily upload.
     - Stamps ``DSR_Segment`` from ``filename`` when it matches
@@ -781,10 +781,10 @@ def save_daily_file(
       overlaps with the new file's actual data date range (prevents duplication
       when re-uploading or uploading wider date-range reports).
     - Auto-trims: only the latest ``DAILY_UPLOADS_MAX_PER_PLATFORM`` entries per platform.
-    Returns (file_date, rows_saved).
+    Returns (file_date, rows_saved, block_reason). ``block_reason`` is set when nothing was saved.
     """
     if df.empty:
-        return str(datetime.date.today()), 0
+        return str(datetime.date.today()), 0, "Empty file — no rows to save"
 
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
     if tail:
@@ -841,7 +841,14 @@ def save_daily_file(
                         )
                     _bc.commit()
                     _bc.close()
-                    return file_date, 0
+                    return (
+                        file_date,
+                        0,
+                        (
+                            f"Not saved: data starts on {date_from} but file/report date is {file_date} "
+                            "(dates look inconsistent — fix filename or report dates)."
+                        ),
+                    )
         except Exception:
             pass  # Never block a save due to a validation bug
 
@@ -878,7 +885,7 @@ def save_daily_file(
     )
     conn.commit()
     conn.close()
-    return file_date, len(df)
+    return file_date, len(df), None
 
 
 def load_platform_data(

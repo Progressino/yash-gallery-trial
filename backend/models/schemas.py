@@ -61,6 +61,9 @@ class CoverageResponse(BaseModel):
     daily_auto_ingest_processed_files: Optional[int] = None
     daily_auto_ingest_detected_files: Optional[int] = None
     daily_auto_ingest_unknown_files: Optional[int] = None
+    daily_auto_ingest_expanded_files: Optional[int] = None
+    daily_auto_ingest_saved_files: Optional[int] = None
+    daily_auto_ingest_file_results: Optional[list[dict]] = None
     # Snapshot inventory-auto background job
     inventory_upload_status: str = "idle"
     inventory_upload_message: str = ""

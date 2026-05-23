@@ -351,6 +351,15 @@ def get_coverage(request: Request, light: bool = False):
         daily_auto_ingest_unknown_files=(
             int(_ingest["unknown_files"]) if _has_ingest else None
         ),
+        daily_auto_ingest_expanded_files=(
+            int(_ingest["expanded_files"]) if _has_ingest and _ingest.get("expanded_files") is not None else None
+        ),
+        daily_auto_ingest_saved_files=(
+            int(_ingest["saved_files"]) if _has_ingest and _ingest.get("saved_files") is not None else None
+        ),
+        daily_auto_ingest_file_results=(
+            list(_ingest.get("file_results") or []) if _has_ingest else None
+        ),
         inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
         inventory_upload_message=getattr(sess, "inventory_upload_message", "") or "",
         inventory_upload_rows=(

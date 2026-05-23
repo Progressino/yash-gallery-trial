@@ -76,6 +76,15 @@ export interface CoverageResponse {
   daily_auto_ingest_processed_files?: number
   daily_auto_ingest_detected_files?: number
   daily_auto_ingest_unknown_files?: number
+  daily_auto_ingest_expanded_files?: number
+  daily_auto_ingest_saved_files?: number
+  daily_auto_ingest_file_results?: Array<{
+    filename: string
+    status: 'saved' | 'skipped'
+    reason?: string
+    platform?: string
+    rows?: number
+  }>
   inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   inventory_upload_message?: string
   inventory_upload_rows?: number
@@ -87,6 +96,9 @@ export type DailyAutoIngestSummary = {
   processed_files: number
   detected_files: number
   unknown_files: number
+  saved_files?: number
+  expanded_files?: number
+  file_results?: CoverageResponse['daily_auto_ingest_file_results']
   message: string
 }
 
@@ -102,6 +114,9 @@ export function dailyAutoSummaryFromCoverage(c: CoverageResponse): DailyAutoInge
     processed_files: c.daily_auto_ingest_processed_files ?? 0,
     detected_files: c.daily_auto_ingest_detected_files ?? 0,
     unknown_files: c.daily_auto_ingest_unknown_files ?? 0,
+    saved_files: c.daily_auto_ingest_saved_files ?? undefined,
+    expanded_files: c.daily_auto_ingest_expanded_files ?? undefined,
+    file_results: c.daily_auto_ingest_file_results ?? undefined,
     message: c.daily_auto_ingest_message ?? '',
   }
 }
@@ -112,6 +127,9 @@ export function dailyAutoSummaryFromUpload(res: {
   processed_files?: number
   detected_files?: number
   unknown_files?: number
+  saved_files?: number
+  expanded_files?: number
+  file_results?: CoverageResponse['daily_auto_ingest_file_results']
   message?: string
 }): DailyAutoIngestSummary {
   return {
@@ -120,6 +138,9 @@ export function dailyAutoSummaryFromUpload(res: {
     processed_files: res.processed_files ?? 0,
     detected_files: res.detected_files ?? 0,
     unknown_files: res.unknown_files ?? 0,
+    saved_files: res.saved_files,
+    expanded_files: res.expanded_files,
+    file_results: res.file_results,
     message: res.message ?? '',
   }
 }
@@ -129,14 +150,14 @@ export function formatDailyAutoCompleteToast(
   s: DailyAutoIngestSummary,
   salesRows?: number,
 ): string {
-  const recognized = s.detected_files || s.detected_platforms.length
-  const total = s.processed_files || recognized + s.unknown_files
+  const recognized = s.saved_files ?? (s.detected_files || s.detected_platforms.length)
+  const total = s.expanded_files ?? (s.processed_files || recognized + s.unknown_files)
   const platforms = [...new Set(s.detected_platforms.map(d => d.split('(')[0].trim()))]
   const parts: string[] = []
-  parts.push(`Upload complete: ${recognized} of ${total} file(s) recognized.`)
+  parts.push(`Upload complete: ${recognized} of ${total} file(s) saved.`)
   if (platforms.length) parts.push(`Parsed: ${platforms.join(', ')}.`)
   if (s.unknown_files > 0) {
-    parts.push(`${s.unknown_files} file(s) not recognized or had no data.`)
+    parts.push(`${s.unknown_files} file(s) skipped — see reasons below.`)
   }
   if (salesRows != null && salesRows > 0) {
     parts.push(`Combined sales: ${salesRows.toLocaleString()} rows.`)
@@ -353,6 +374,9 @@ export async function uploadDailyAutoChunked(
   processed_files?: number
   detected_files?: number
   unknown_files?: number
+  saved_files?: number
+  expanded_files?: number
+  file_results?: CoverageResponse['daily_auto_ingest_file_results']
   sales_rebuild?: 'inline' | 'pending'
 }> {
   try {
@@ -378,6 +402,9 @@ export async function uploadDailyAuto(
   processed_files?: number
   detected_files?: number
   unknown_files?: number
+  saved_files?: number
+  expanded_files?: number
+  file_results?: CoverageResponse['daily_auto_ingest_file_results']
   sales_rebuild?: 'inline' | 'pending'
 }> {
   try {
@@ -729,9 +756,10 @@ export async function buildSales(): Promise<{
   message: string
   rows?: number
   unmapped_skus?: string[]
+  sales_rebuild?: 'pending'
 }> {
   const { data } = await api.post('/upload/build-sales', undefined, {
-    timeout: UPLOAD_TIMEOUT_MS,
+    timeout: 60_000,
   })
   return data
 }

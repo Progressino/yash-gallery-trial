@@ -22,7 +22,7 @@ def test_daily_auto_merge_slice_does_not_call_load_platform_data(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.routers.upload.save_daily_file",
-        lambda *a, **k: None,
+        lambda *a, **k: ("2024-06-01", 1, None),
     )
     monkeypatch.setattr(
         "backend.routers.upload._detect_platform",

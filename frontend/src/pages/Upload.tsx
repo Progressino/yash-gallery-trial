@@ -28,6 +28,7 @@ type UploadAlert = {
   dropped?: number
   droppedReasons: string[]
   validationWarnings: string[]
+  fileResults?: CoverageResponse['daily_auto_ingest_file_results']
 }
 type InventoryAmazonDisclaimer = {
   raw_total_units?: number
@@ -105,9 +106,11 @@ export default function Upload() {
     if (source === 'daily') setDailyDetected(detected)
     if (!pendingOnly) {
       captureGenericAlert(source, warnings, {
-        parsed: summary?.processed_files ?? initialRes?.processed_files,
-        kept: summary?.detected_files ?? initialRes?.detected_files,
+        parsed: summary?.expanded_files ?? summary?.processed_files ?? initialRes?.processed_files,
+        kept: summary?.saved_files ?? summary?.detected_files ?? initialRes?.detected_files,
         dropped: summary?.unknown_files ?? initialRes?.unknown_files,
+        saved: summary?.saved_files ?? initialRes?.saved_files,
+        fileResults: summary?.file_results ?? initialRes?.file_results,
       })
     }
     const toastMsg = summary
@@ -141,20 +144,29 @@ export default function Upload() {
   const captureGenericAlert = (
     source: string,
     warnings: string[] | undefined,
-    info?: { parsed?: number; kept?: number; dropped?: number },
+    info?: { parsed?: number; kept?: number; dropped?: number; saved?: number; fileResults?: CoverageResponse['daily_auto_ingest_file_results'] },
   ) => {
     const issues = warnings ?? []
     const dropped = Number(info?.dropped ?? 0)
     const complete = issues.length === 0 && dropped <= 0
+    const saved = info?.saved ?? info?.kept
+    const parsed = info?.parsed
+    const titleExtra =
+      saved != null && parsed != null
+        ? ` (${saved} of ${parsed} saved)`
+        : ''
     const next: UploadAlert = {
       at: new Date().toLocaleString(),
       complete,
-      title: complete ? 'Import completeness: Complete' : 'Import completeness: Issues found',
+      title: complete
+        ? `Import completeness: Complete${titleExtra}`
+        : `Import completeness: Issues found${titleExtra}`,
       parsed: info?.parsed,
-      kept: info?.kept,
+      kept: saved ?? info?.kept,
       dropped: info?.dropped,
       droppedReasons: [],
       validationWarnings: issues,
+      fileResults: info?.fileResults,
     }
     setUploadAlertsBySource(prev => ({ ...prev, [source]: next }))
   }
@@ -217,6 +229,14 @@ export default function Upload() {
     try {
       await withUploadGuard(async () => {
         const res = await buildSales()
+        if (res.ok && res.sales_rebuild === 'pending') {
+          showToast('success', res.message, 6000)
+          const cov = await waitForSalesRebuild(msg => setBuildingMsg(msg))
+          setSkuMapGaps([])
+          showToast('success', cov.sales_rebuild_message || `Sales rebuilt (${(cov.sales_rows ?? 0).toLocaleString()} rows).`)
+          await refresh()
+          return
+        }
         setSkuMapGaps(res.unmapped_skus ?? [])
         if (res.ok) { showToast('success', res.message); await refresh() }
         else showToast('error', res.message)
@@ -1234,6 +1254,27 @@ function UploadCard({
             <ul className={`mt-1 list-disc list-inside ${alert.complete ? 'text-green-900' : 'text-amber-900'}`}>
               {alert.validationWarnings.map((w, wi) => <li key={`${alert.at}-${wi}`}>{w}</li>)}
             </ul>
+          )}
+          {alert.fileResults && alert.fileResults.some(f => f.status === 'skipped') && (
+            <div className="mt-2 overflow-x-auto">
+              <p className="font-medium text-amber-900 mb-1">Files not saved:</p>
+              <table className="w-full text-[11px] border-collapse">
+                <thead>
+                  <tr className="text-left text-gray-600">
+                    <th className="pr-2 py-0.5">File</th>
+                    <th className="py-0.5">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {alert.fileResults.filter(f => f.status === 'skipped').map((f, i) => (
+                    <tr key={`${f.filename}-${i}`} className="border-t border-amber-100">
+                      <td className="pr-2 py-0.5 font-mono truncate max-w-[200px]" title={f.filename}>{f.filename}</td>
+                      <td className="py-0.5">{f.reason ?? 'Not saved'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}
