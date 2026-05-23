@@ -57,12 +57,32 @@ def normalize_operation_name(name: Any) -> str:
     return " ".join(str(name or "").split())
 
 
+def _style_session_key(style: Any) -> str:
+    """Case-insensitive style key for upsert / load / reports."""
+    return str(style or "").strip().lower()
+
+
+def _resolve_canonical_style(style: str, sm: pd.DataFrame | None = None) -> str:
+    """Persist the spelling from style_master when available."""
+    raw = str(style or "").strip()
+    if not raw:
+        return ""
+    key = _style_session_key(raw)
+    sheet = sm if sm is not None else get_sheet_df("style_master")
+    if not sheet.empty and "Style" in sheet.columns:
+        for candidate in sheet["Style"].astype(str):
+            cand = str(candidate).strip()
+            if cand and _style_session_key(cand) == key:
+                return cand
+    return raw
+
+
 def _production_session_keys(date_str: str, karigar_id: str, challan_no: str, style: str) -> tuple[str, str, str, str]:
     return (
         clean_key(date_str),
         clean_key(karigar_id),
         clean_key(challan_no),
-        clean_key(style),
+        _style_session_key(style),
     )
 
 
@@ -81,7 +101,7 @@ def _drop_production_session_rows(
     work["_ck_date"] = work["Date"].apply(clean_key)
     work["_ck_kar"] = work["Karigar_ID"].apply(clean_key)
     work["_ck_challan"] = work["Challan_No"].apply(clean_key)
-    work["_ck_style"] = work["Style"].apply(clean_key)
+    work["_ck_style"] = work["Style"].apply(_style_session_key)
     keep = ~(
         (work["_ck_date"] == d)
         & (work["_ck_kar"] == k)
@@ -615,12 +635,12 @@ def load_production_entry(date_str: str, karigar_id: str, challan_no: str, style
     pl["_date"] = pl["Date"].apply(clean_key)
     pl["_kar"] = pl["Karigar_ID"].apply(clean_key)
     pl["_challan"] = pl["Challan_No"].apply(clean_key)
-    pl["_style"] = pl["Style"].apply(clean_key)
+    pl["_style"] = pl["Style"].apply(_style_session_key)
     existing = pl[
         (pl["_date"] == clean_key(date_str))
         & (pl["_kar"] == clean_key(karigar_id))
         & (pl["_challan"] == clean_key(challan_no))
-        & (pl["_style"] == clean_key(style))
+        & (pl["_style"] == _style_session_key(style))
     ]
     if existing.empty:
         return {"hours": hours, "found": False}
@@ -674,8 +694,9 @@ def save_production_entry(
 ) -> dict:
     """hour_entries: [{hour_col, operation, pieces, sticker_in, sticker_out, manual_pieces}, ...]"""
     with _PRODUCTION_LOG_LOCK:
+        style = _resolve_canonical_style(style)
         sm = get_sheet_df("style_master")
-        style_ops = sm[sm["Style"] == style] if not sm.empty else pd.DataFrame()
+        style_ops = sm[sm["Style"].astype(str).str.strip().str.lower() == _style_session_key(style)] if not sm.empty else pd.DataFrame()
         op_info: dict[str, dict] = {}
         for _, row in style_ops.iterrows():
             op_key = normalize_operation_name(row["Operation"])
@@ -1391,6 +1412,38 @@ def get_daily_rate_for_date(karigar_id: str, as_of_date: str | None = None) -> f
     return float(build_daily_rate_map(as_of_date).get(kid, 0.0))
 
 
+def _daily_salary_for_row(kid: str, date_str: str, row: pd.Series | None = None) -> float:
+    daily = _get_daily_salary(kid, date_str)
+    if daily <= 0 and row is not None and "Daily_Rate_Rs" in row.index:
+        try:
+            daily = float(row.get("Daily_Rate_Rs") or 0)
+        except (TypeError, ValueError):
+            daily = 0.0
+    return max(float(daily), 0.0)
+
+
+def _production_log_latest_rows(day_pl: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the newest save per karigar/challan/style/operation (hides legacy duplicates)."""
+    if day_pl.empty:
+        return day_pl
+    work = day_pl.copy()
+    work["_ck_date"] = work["Date"].apply(clean_key)
+    work["_ck_kar"] = work["Karigar_ID"].apply(clean_key)
+    work["_ck_challan"] = work["Challan_No"].apply(clean_key)
+    work["_ck_style"] = work["Style"].apply(_style_session_key)
+    work["_op_norm"] = work.get("Operation", pd.Series(dtype=str)).apply(normalize_operation_name)
+    if "Save_Time" in work.columns:
+        work = work.sort_values("Save_Time", ascending=False, na_position="last")
+    work = work.drop_duplicates(
+        subset=["_ck_date", "_ck_kar", "_ck_challan", "_ck_style", "_op_norm"],
+        keep="first",
+    )
+    return work.drop(
+        columns=["_ck_date", "_ck_kar", "_ck_challan", "_ck_style", "_op_norm"],
+        errors="ignore",
+    )
+
+
 def production_entry_reports(date_str: str, karigar_id: str | None = None) -> dict:
     """Day reports + save history (Streamlit Production Entry bottom section)."""
     pl = get_sheet_df("production_log")
@@ -1413,6 +1466,8 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
 
     if day_pl.empty:
         return empty
+
+    day_pl = _production_log_latest_rows(day_pl)
 
     for c in [
         "Total_Pieces",
@@ -1470,7 +1525,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         applied_ltl = float(row.get("Applied_LTL") or row.get("Target") or 0)
         rate = float(row.get("Rate_Rs") or 0)
         kid = str(row.get("Karigar_ID", ""))
-        daily_salary = _get_daily_salary(kid, date_str)
+        daily_salary = _daily_salary_for_row(kid, date_str, row)
         hourly_salary = round(daily_salary / 8, 2)
         adj_target = round(applied_ltl * wh, 0)
         total_pcs = float(row.get("Total_Pieces") or 0)
@@ -1522,7 +1577,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         rate_rs = float(row.get("Rate_Rs") or 0)
         applied_ltl = float(row.get("Applied_LTL") or row.get("Target") or 0)
 
-        daily_rate = _get_daily_salary(kid, date_str)
+        daily_rate = _daily_salary_for_row(kid, date_str, row)
         hourly_sal = round(daily_rate / 8, 2)
 
         for hcol, hlbl in zip(HOUR_COLS, HOUR_LBLS):

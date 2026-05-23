@@ -540,3 +540,76 @@ def test_stitching_production_entry_reports():
         assert rep["report2_hourly"][0].get("Save_Time")
         assert rep["report2_hourly"][0]["Style"] == "1894YKDGREEN"
         assert float(rep["report2_hourly"][0]["Hourly_Salary_Rs"]) > 0
+
+
+def test_save_production_entry_replaces_when_style_case_differs():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "1894YKDGREEN", "Operation": "Cutting", "Target": 30, "Rate_Rs": 2.0}]),
+    )
+    base = dict(
+        date_str="2026-05-21",
+        karigar_id="K200",
+        karigar_name="Case Test",
+        challan_no="CH-200",
+    )
+    svc.save_production_entry(
+        **base,
+        style="1894ykdgreen",
+        hour_entries=[{"hour_col": "H_09_10", "operation": "Cutting", "pieces": 10}],
+    )
+    svc.save_production_entry(
+        **base,
+        style="1894YKDGREEN",
+        hour_entries=[{"hour_col": "H_09_10", "operation": "Cutting", "pieces": 18}],
+    )
+    pl = get_sheet_df("production_log")
+    mask = (pl["Karigar_ID"].astype(str) == "K200") & (
+        pl["Style"].astype(str).str.lower() == "1894ykdgreen"
+    )
+    assert len(pl[mask]) == 1
+    assert int(pl[mask].iloc[0]["Total_Pieces"]) == 18
+
+
+def test_production_entry_reports_dedupes_legacy_duplicate_rows():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-DUP", "Operation": "Op1", "Target": 10, "Rate_Rs": 1.0}]),
+    )
+    save_sheet_df(
+        "production_log",
+        pd.DataFrame(
+            [
+                {
+                    "Date": "2026-05-22",
+                    "Karigar_ID": "K9",
+                    "Karigar_Name": "Dup",
+                    "Challan_No": "C1",
+                    "Style": "SKU-DUP",
+                    "Operation": "Op1",
+                    "H_09_10": 5,
+                    "Total_Pieces": 5,
+                    "Rate_Rs": 1.0,
+                    "Daily_Rate_Rs": 480.0,
+                    "Save_Time": "2026-05-22 09:00:00",
+                },
+                {
+                    "Date": "2026-05-22",
+                    "Karigar_ID": "K9",
+                    "Karigar_Name": "Dup",
+                    "Challan_No": "C1",
+                    "Style": "sku-dup",
+                    "Operation": "Op1",
+                    "H_09_10": 12,
+                    "Total_Pieces": 12,
+                    "Rate_Rs": 1.0,
+                    "Daily_Rate_Rs": 480.0,
+                    "Save_Time": "2026-05-22 11:00:00",
+                },
+            ]
+        ),
+    )
+    rep = svc.production_entry_reports("2026-05-22", "K9")
+    assert len(rep["report1"]) == 1
+    assert int(rep["report1"][0]["Total_Pieces"]) == 12
+    assert float(rep["report2_hourly"][0]["Hourly_Salary_Rs"]) == 60.0

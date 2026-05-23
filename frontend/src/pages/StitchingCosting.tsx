@@ -627,7 +627,7 @@ function ProductionTab({
     enabled: !!entryDate,
   })
 
-  const [showSalaryCols, setShowSalaryCols] = useState(!!karigarId)
+  const [showSalaryCols, setShowSalaryCols] = useState(true)
   useEffect(() => {
     if (karigarId) setShowSalaryCols(true)
   }, [karigarId])
@@ -658,15 +658,14 @@ function ProductionTab({
 
   const report2SummaryCols = useMemo(() => {
     const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']
-    if (showSalary) base.splice(4, 0, 'Daily_Salary_Rs', 'Total_Salary_Cost')
+    base.splice(4, 0, 'Daily_Salary_Rs', 'Total_Salary_Cost')
     return base
-  }, [showSalary])
+  }, [])
 
   const report2HourlyCols = useMemo(() => {
-    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
-    if (showSalary) base.splice(5, 0, 'Daily_Salary_Rs', 'Hourly_Salary_Rs')
+    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Daily_Salary_Rs', 'Hourly_Salary_Rs', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
     return base
-  }, [showSalary])
+  }, [])
 
   const historyCols = useMemo(
     () => [
@@ -3179,7 +3178,9 @@ function ReportTableSection({
 
 function DataTable({ rows, cols }: { rows: Record<string, unknown>[]; cols: string[] }) {
   if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No rows</p>
-  const useCols = cols.length ? cols.filter(c => c in rows[0] || rows[0][c] !== undefined) : Object.keys(rows[0] ?? {})
+  const useCols = cols.length
+    ? cols
+    : Object.keys(rows[0] ?? {})
   return (
     <div className="overflow-x-auto max-h-[min(420px,50vh)]">
       <table className="w-full text-xs">
@@ -3197,7 +3198,7 @@ function DataTable({ rows, cols }: { rows: Record<string, unknown>[]; cols: stri
             <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/80">
               {useCols.map(c => (
                 <td key={c} className="px-2 py-1.5 whitespace-nowrap">
-                  {String(r[c] ?? '')}
+                  {r[c] === 0 || r[c] === '0' ? '0' : String(r[c] ?? '')}
                 </td>
               ))}
             </tr>
