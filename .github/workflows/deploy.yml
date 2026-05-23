@@ -28,6 +28,18 @@ jobs:
           git checkout -f main
           git reset --hard origin/main
           git log -1 --oneline
+          # Build metadata for /api/health version badge
+          _SHA="$(git rev-parse --short HEAD)"
+          _BUILT="$(date -u +%Y-%m-%dT%H:%MZ)"
+          for _KV in "APP_GIT_SHA=${_SHA}" "APP_BUILT_AT=${_BUILT}"; do
+            _K="${_KV%%=*}"
+            _V="${_KV#*=}"
+            if grep -q "^${_K}=" .env 2>/dev/null; then
+              sed -i "s|^${_K}=.*|${_K}=${_V}|" .env
+            else
+              echo "${_K}=${_V}" >> .env
+            fi
+          done
           # Keep session ZIP writes off until disk is stable (warm cache + Tier-3 hold data).
           if grep -q '^SESSION_PG_PERSIST=' .env 2>/dev/null; then
             sed -i 's/^SESSION_PG_PERSIST=.*/SESSION_PG_PERSIST=0/' .env

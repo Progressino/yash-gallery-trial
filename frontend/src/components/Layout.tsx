@@ -71,7 +71,18 @@ export default function Layout() {
             : undefined
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
   const autoLoadAttempted = useRef(false)
+
+  useEffect(() => {
+    api
+      .get<{ label?: string; git_sha?: string; version?: string; built_at?: string }>('/health')
+      .then((r) => {
+        const label = r.data.label || r.data.git_sha || r.data.version
+        if (label) setAppVersion(label)
+      })
+      .catch(() => {})
+  }, [])
 
   // On mount: just refresh badges from server session state.
   // Auto-restore is handled once in ProtectedRoute to avoid duplicate cacheLoad calls.
@@ -330,7 +341,7 @@ export default function Layout() {
       </aside>
 
       {/* Main column */}
-      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
         {/* Mobile top bar */}
         <header className="md:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
           <button
@@ -347,6 +358,15 @@ export default function Layout() {
         <main className="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-6">
           <Outlet />
         </main>
+
+        {appVersion && (
+          <div
+            className="absolute bottom-2 right-3 z-10 rounded bg-white/90 border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 font-mono shadow-sm pointer-events-none select-none"
+            title={`App version ${appVersion}`}
+          >
+            v{appVersion}
+          </div>
+        )}
       </div>
     </div>
   )

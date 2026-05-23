@@ -109,15 +109,12 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         from ..services.daily_store import load_platform_data, merge_platform_data
         from ..services.sales import build_sales_df
 
-        # Auto-restore SKU mapping from GitHub cache if missing (lightweight — JSON only)
-        if not sess.sku_mapping:
-            try:
-                from ..services.github_cache import load_sku_mapping_from_drive
-                mapping = load_sku_mapping_from_drive()
-                if mapping:
-                    sess.sku_mapping = mapping
-            except Exception:
-                pass  # GitHub not configured or network error — skip silently
+        try:
+            from ..services.sku_mapping import restore_sku_mapping_to_session
+
+            restore_sku_mapping_to_session(sess)
+        except Exception:
+            pass
 
         # Default restore should be full history. Operators can opt-in caps via env when
         # they prefer faster startup over completeness.
@@ -263,6 +260,12 @@ def _ensure_warm_session_data(sess: AppSession) -> None:
 def get_coverage(request: Request, light: bool = False):
     """Session coverage flags. ``light=1`` skips SQLite restore / sales rebuild (fast after PO uploads)."""
     sess = _sess(request)
+    try:
+        from ..services.sku_mapping import restore_sku_mapping_to_session
+
+        restore_sku_mapping_to_session(sess)
+    except Exception:
+        pass
     try:
         import backend.main as _main
 

@@ -23,7 +23,7 @@ from ..concurrency import HEAVY_EXECUTOR, DAILY_UPLOAD_EXECUTOR, _UPLOAD_MEMORY_
 
 from ..session import store, resume_auto_data_restore, AppSession
 from ..models.schemas import UploadResponse
-from ..services.sku_mapping import parse_sku_mapping
+from ..services.sku_mapping import parse_sku_mapping, persist_sku_mapping_globally
 from ..services.mtr import load_mtr_from_zip, load_mtr_from_extracted_files, parse_mtr_csv
 from ..services.myntra import load_myntra_from_zip
 from ..services.meesho import (
@@ -386,6 +386,33 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
         sess.sales_rebuild_message = ""
 
 
+def _auto_save_sku_mapping_cache(sess) -> None:
+    """Persist SKU map to disk, GitHub, and PostgreSQL without requiring platform uploads."""
+    mapping = getattr(sess, "sku_mapping", None) or {}
+    if not mapping:
+        return
+    persist_sku_mapping_globally(mapping)
+    try:
+        from ..services.github_cache import save_cache_to_drive
+
+        ok, msg = save_cache_to_drive({"sku_mapping": mapping})
+        if ok:
+            _log.info("SKU mapping GitHub save: %s", msg)
+        else:
+            _log.warning("SKU mapping GitHub save skipped: %s", msg)
+    except Exception:
+        _log.exception("SKU mapping GitHub save failed")
+    sid = getattr(sess, "_persist_sid", None)
+    if sid:
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle
+
+            if persist_session_bundle(sid, sess):
+                _log.info("PostgreSQL session snapshot saved after SKU upload (%s…)", sid[:8])
+        except Exception:
+            _log.exception("PostgreSQL session snapshot failed after SKU upload")
+
+
 def _auto_save_cache(sess) -> None:
     """Run in background after build-sales: silently push session to GitHub Releases."""
     session_data = {
@@ -560,6 +587,7 @@ async def upload_sku_mapping(
             ), had_platform
 
         resp, had_platform = await _session_lock_apply(sess, work)
+        background_tasks.add_task(_auto_save_sku_mapping_cache, sess)
         if had_platform:
             background_tasks.add_task(_auto_save_cache, sess)
         return resp

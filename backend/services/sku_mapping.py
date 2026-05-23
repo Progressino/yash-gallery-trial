@@ -52,18 +52,94 @@ def clear_bundled_sku_mapping_cache() -> None:
     _BUNDLED_SKU_MAP_CACHE = None
 
 
+def sku_mapping_disk_path() -> Path:
+    """Server-wide SKU map on the warm-cache volume (survives container restarts)."""
+    base = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+    return Path(base) / "sku_mapping.json"
+
+
+def load_sku_mapping_from_disk() -> Dict[str, str]:
+    p = sku_mapping_disk_path()
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def persist_sku_mapping_globally(mapping: Dict[str, str]) -> None:
+    """Write SKU map to disk warm-cache and in-memory warm cache (shared across sessions)."""
+    if not mapping:
+        return
+    snap = dict(mapping)
+    try:
+        p = sku_mapping_disk_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        import backend.main as _main
+
+        if not isinstance(_main._warm_cache, dict):
+            _main._warm_cache = {}
+        _main._warm_cache["sku_mapping"] = snap
+    except Exception:
+        pass
+
+
+def restore_sku_mapping_to_session(sess) -> bool:
+    """
+    Fill an empty session SKU map from server caches (warm → disk → GitHub → bundled).
+    Returns True if a map was applied.
+    """
+    if getattr(sess, "sku_mapping", None):
+        return False
+
+    paused = bool(getattr(sess, "pause_auto_data_restore", False))
+
+    try:
+        import backend.main as _main
+
+        wc = _main._warm_cache.get("sku_mapping") if isinstance(_main._warm_cache, dict) else None
+        if isinstance(wc, dict) and wc:
+            sess.sku_mapping = dict(wc)
+            return True
+    except Exception:
+        pass
+
+    disk = load_sku_mapping_from_disk()
+    if disk:
+        sess.sku_mapping = disk
+        persist_sku_mapping_globally(disk)
+        return True
+
+    try:
+        from .github_cache import load_sku_mapping_from_drive
+
+        gh = load_sku_mapping_from_drive()
+        if gh:
+            sess.sku_mapping = gh
+            persist_sku_mapping_globally(gh)
+            return True
+    except Exception:
+        pass
+
+    if paused:
+        return False
+
+    bundled = load_bundled_sku_mapping()
+    if bundled:
+        sess.sku_mapping = bundled
+        return True
+    return False
+
+
 def ensure_default_sku_mapping_from_bundle(sess) -> None:
-    """
-    If the session has no SKU map, load the bundled Yash master sheet.
-    Skipped when pause_auto_data_restore (explicit wipe) is on.
-    """
-    if getattr(sess, "pause_auto_data_restore", False):
-        return
-    if sess.sku_mapping:
-        return
-    b = load_bundled_sku_mapping()
-    if b:
-        sess.sku_mapping = b
+    """Backward-compatible entry: restore from any server source, then bundled master."""
+    restore_sku_mapping_to_session(sess)
 
 
 def _clean(sku) -> str:

@@ -935,6 +935,9 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
     def _warm_cache_has_more() -> bool:
         if not _warm_cache:
             return False
+        wc_sm = _warm_cache.get("sku_mapping")
+        if isinstance(wc_sm, dict) and wc_sm and not getattr(sess, "sku_mapping", None):
+            return True
         for key in [
             "mtr_df", "myntra_df", "meesho_df", "flipkart_df",
             "snapdeal_df", "sales_df", "inventory_df_variant",
@@ -947,6 +950,14 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
             if wc_has_data and not cur_has_data:
                 return True
         return False
+
+    if not getattr(sess, "sku_mapping", None):
+        try:
+            from .services.sku_mapping import restore_sku_mapping_to_session
+
+            restore_sku_mapping_to_session(sess)
+        except Exception:
+            pass
 
     if sess.mtr_df.empty and sess.sales_df.empty:
         if _copy_warm_cache_to_session(sess):
@@ -1338,8 +1349,15 @@ app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketp
 
 @app.get("/api/health")
 def health():
+    from .app_version import get_build_info
+
+    info = get_build_info()
     return {
         "status": "ok",
+        "version": info["version"],
+        "git_sha": info["git_sha"],
+        "built_at": info["built_at"],
+        "label": info["label"],
         "sessions": store.count,
         "warm_cache": bool(_warm_cache),
         "warm_cache_loaded_at": _warm_cache_loaded_at.isoformat() if _warm_cache_loaded_at else None,

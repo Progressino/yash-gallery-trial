@@ -214,3 +214,40 @@ def test_bundled_json_loads(monkeypatch):
     b = load_bundled_sku_mapping()
     assert len(b) > 50_000
     assert "1001PLYKBEIGE-3XL" in b or "1001YKBEIGE-3XL" in b
+
+
+def test_persist_and_restore_sku_mapping_from_disk(tmp_path, monkeypatch):
+    from backend.session import AppSession
+
+    disk = tmp_path / "warm"
+    monkeypatch.setenv("WARM_CACHE_DIR", str(disk))
+    import backend.main as _main
+
+    _main._warm_cache = {}
+    from backend.services import sku_mapping as sm
+
+    sm.persist_sku_mapping_globally({"SELLER1": "OMS-1", "SELLER2": "OMS-2"})
+    assert (disk / "sku_mapping.json").is_file()
+
+    sess = AppSession()
+    assert sm.restore_sku_mapping_to_session(sess) is True
+    assert sess.sku_mapping["SELLER1"] == "OMS-1"
+    assert sm.restore_sku_mapping_to_session(sess) is False
+    _main._warm_cache = {}
+
+
+def test_restore_skips_bundled_when_paused(monkeypatch, tmp_path):
+    from backend.session import AppSession
+
+    monkeypatch.setenv("SKIP_BUNDLED_SKU_MAPPING", "1")
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path / "empty"))
+    import backend.main as _main
+
+    _main._warm_cache = {}
+    from backend.services import sku_mapping as sm
+
+    sm.clear_bundled_sku_mapping_cache()
+    sess = AppSession()
+    sess.pause_auto_data_restore = True
+    assert sm.restore_sku_mapping_to_session(sess) is False
+
