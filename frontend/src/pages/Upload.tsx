@@ -28,7 +28,14 @@ type UploadAlert = {
   dropped?: number
   droppedReasons: string[]
   validationWarnings: string[]
-  fileResults?: CoverageResponse['daily_auto_ingest_file_results']
+  fileResults?: Array<{
+    filename: string
+    status: 'saved' | 'skipped' | 'loaded'
+    reason?: string
+    platform?: string
+    category?: string
+    rows?: number
+  }>
 }
 type InventoryAmazonDisclaimer = {
   raw_total_units?: number
@@ -144,7 +151,13 @@ export default function Upload() {
   const captureGenericAlert = (
     source: string,
     warnings: string[] | undefined,
-    info?: { parsed?: number; kept?: number; dropped?: number; saved?: number; fileResults?: CoverageResponse['daily_auto_ingest_file_results'] },
+    info?: {
+      parsed?: number
+      kept?: number
+      dropped?: number
+      saved?: number
+      fileResults?: UploadAlert['fileResults']
+    },
   ) => {
     const issues = warnings ?? []
     const dropped = Number(info?.dropped ?? 0)
