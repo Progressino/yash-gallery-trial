@@ -59,14 +59,43 @@ def _collect_rar_paths(paths: list[Path]) -> list[Path]:
     return sorted(out, key=lambda x: x.name.lower())
 
 
-def login(sess: requests.Session, base: str, username: str, password: str) -> None:
+def login(
+    sess: requests.Session,
+    base: str,
+    username: str,
+    password: str,
+    *,
+    otp_code: str = "",
+    device_id: str = "upload-script-cli",
+) -> None:
+    headers = {"X-Device-Id": device_id}
     r = sess.post(
         f"{base}/api/auth/login",
         json={"username": username, "password": password},
         timeout=60,
+        headers=headers,
     )
     r.raise_for_status()
     data = r.json()
+    if data.get("otp_required") and data.get("challenge_id"):
+        code = (otp_code or os.environ.get("AUTH_OTP", "")).strip()
+        if not code:
+            raise SystemExit(
+                f"OTP required (sent to {data.get('masked_phone', 'mobile')}). "
+                "Set AUTH_OTP=###### or pass --otp."
+            )
+        vr = sess.post(
+            f"{base}/api/auth/otp/verify",
+            json={
+                "challenge_id": data["challenge_id"],
+                "code": code,
+                "trust_device": True,
+            },
+            timeout=60,
+            headers=headers,
+        )
+        vr.raise_for_status()
+        data = vr.json()
     if not data.get("ok"):
         raise SystemExit(f"Login failed: {data}")
 
@@ -177,6 +206,7 @@ def main() -> None:
     ap.add_argument("rars", nargs="*", type=Path, help="One or more .rar daily bundles")
     ap.add_argument("--username", default=os.environ.get("AUTH_USERNAME", ""))
     ap.add_argument("--password", default=os.environ.get("AUTH_PASSWORD", ""))
+    ap.add_argument("--otp", default=os.environ.get("AUTH_OTP", ""), help="6-digit OTP if login requires it")
     args = ap.parse_args()
     if args.rars:
         paths = _collect_rar_paths(list(args.rars))
@@ -195,7 +225,7 @@ def main() -> None:
     base = args.base_url.rstrip("/")
     sess = requests.Session()
     print(f"Login {base} as {args.username}…", flush=True)
-    login(sess, base, args.username, args.password)
+    login(sess, base, args.username, args.password, otp_code=args.otp)
     print(f"Uploading {len(paths)} file(s) via chunked daily-auto…", flush=True)
     out = upload_chunked(sess, base, paths)
     print("Upload response:", json.dumps(out, indent=2)[:500], flush=True)
