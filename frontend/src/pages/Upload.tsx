@@ -924,22 +924,51 @@ export default function Upload() {
           onClearAlert={() => clearUploadAlert('inv')}
         >
           {!coverage.sku_mapping && <Warn>SKU map must be loaded on the server (ask Admin if missing).</Warn>}
+          {(coverage.inventory_upload_status === 'running' || (loading['inv'] && !!buildingMsg)) && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-center gap-2">
+              <svg className="animate-spin h-3 w-3 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              <span>{buildingMsg || coverage.inventory_upload_message || 'Parsing inventory on server…'}</span>
+            </div>
+          )}
           <InventoryDropzone
-            disabled={!coverage.sku_mapping}
+            disabled={!coverage.sku_mapping || coverage.inventory_upload_status === 'running'}
             uploading={loading['inv']}
             onUpload={async (files) => {
               setL('inv', true)
+              setBuildingMsg('Uploading inventory files…')
               try {
                 await withUploadGuard(async () => {
                   const res = await uploadInventoryAuto(files, p => setBuildingMsg(p.message))
                   if (res.ok) {
                     if (res.ingest_async) {
-                      showToast('success', `${res.message} Processing on server…`, 6000)
-                      await waitForInventoryUpload(msg => setBuildingMsg(msg))
+                      showToast('success', `${res.message}`, 6000)
+                      const cov = await waitForInventoryUpload(msg => setBuildingMsg(msg))
                       setBuildingMsg('')
-                      const cov = await getCoverage()
-                      const doneMsg = cov.inventory_upload_message || 'Inventory updated.'
-                      showToast('success', doneMsg)
+                      const results = cov.inventory_upload_file_results ?? []
+                      const saved = results.filter(r => r.status === 'loaded').length
+                      const skipped = results.filter(r => r.status === 'skipped')
+                      const warnings = [
+                        ...(cov.inventory_upload_warnings ?? []),
+                        ...skipped.map(r => `${r.filename}: ${r.reason ?? 'skipped'}`),
+                      ]
+                      captureGenericAlert('inv', warnings.length ? warnings : undefined, {
+                        parsed: results.length || files.length,
+                        kept: saved || cov.inventory_upload_rows,
+                        dropped: skipped.length,
+                        fileResults: results,
+                      })
+                      const srcLine = (cov.inventory_upload_sources ?? []).join(' · ')
+                      showToast(
+                        'success',
+                        `${cov.inventory_upload_message || 'Inventory updated.'}${srcLine ? ` (${srcLine})` : ''}`,
+                        skipped.length ? 14_000 : 10_000,
+                      )
+                      setInventoryAmzDisclaimer(
+                        (cov.inventory_upload_amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null,
+                      )
                     } else {
                       setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
                       const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
@@ -952,8 +981,21 @@ export default function Upload() {
                   } else showToast('error', res.message)
                 })
               } catch (e: unknown) {
-                showToast('error', e instanceof Error ? e.message : 'Upload failed')
-              } finally { setL('inv', false) }
+                const { isUploadGateway502, waitForInventoryUpload } = await import('../api/client')
+                if (isUploadGateway502(e)) {
+                  showToast('success', 'Upload may still be processing on the server…', 6000)
+                  try {
+                    const cov = await waitForInventoryUpload(msg => setBuildingMsg(msg))
+                    setBuildingMsg('')
+                    showToast('success', cov.inventory_upload_message || 'Inventory updated.')
+                    await refresh()
+                  } catch (pollErr: unknown) {
+                    showToast('error', pollErr instanceof Error ? pollErr.message : 'Upload status unknown')
+                  }
+                } else {
+                  showToast('error', e instanceof Error ? e.message : 'Upload failed')
+                }
+              } finally { setL('inv', false); setBuildingMsg('') }
             }}
           />
           {inventoryAmzDisclaimer && (

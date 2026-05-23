@@ -1240,11 +1240,73 @@ def _classify_inventory_file_parts(
     return oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected
 
 
+def _build_inventory_upload_payload(
+    *,
+    df_variant: pd.DataFrame,
+    debug: dict,
+    detected: list[str],
+    file_parts: list[tuple[str, bytes]],
+    warnings: list[str] | None = None,
+) -> dict:
+    """Structured result for UI: what loaded, what skipped, SKU counts per source."""
+    file_results: list[dict] = list(debug.get("rar_manifest") or [])
+    if not file_results:
+        for fname, _raw in file_parts:
+            file_results.append({
+                "filename": fname,
+                "category": "upload",
+                "status": "loaded" if fname in str(detected) else "loaded",
+            })
+    saved = sum(1 for r in file_results if r.get("status") == "loaded")
+    skipped = sum(1 for r in file_results if r.get("status") == "skipped")
+    sources: list[str] = []
+    for key, label in (
+        ("oms", "OMS"),
+        ("combo_rar", "Combo SKUs"),
+        ("flipkart", "Flipkart"),
+        ("myntra", "Myntra"),
+        ("amz", "Amazon"),
+        ("fba", "FBA in-transit"),
+    ):
+        val = debug.get(key)
+        if val is not None and str(val).strip() and not str(val).strip().startswith("0 SKUs"):
+            sources.append(f"{label}: {val}")
+    rows = len(df_variant)
+    parts = [f"{rows:,} SKUs in snapshot"]
+    if sources:
+        parts.append("Sources — " + "; ".join(sources))
+    if skipped:
+        parts.append(f"{skipped} file(s) inside archive skipped")
+    if warnings:
+        parts.append("; ".join(warnings[:3]))
+    return {
+        "ok": True,
+        "message": " | ".join(parts),
+        "rows": rows,
+        "debug": debug,
+        "detected": detected,
+        "warnings": warnings or [],
+        "file_results": file_results,
+        "processed_files": len(file_parts),
+        "saved_files": saved or len(file_parts),
+        "skipped_files": skipped,
+        "sources_summary": sources,
+        "v": "inv-v10",
+    }
+
+
 async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
     """Parse assembled inventory file bytes on a worker thread."""
-    sess = store._sessions.get(session_id)
+    sess = _resolve_upload_session(session_id)
     if sess is None:
         return
+    fnames = ", ".join(n[:36] + "…" if len(n) > 36 else n for n, _ in file_parts[:3])
+    if len(file_parts) > 3:
+        fnames += f" (+{len(file_parts) - 3} more)"
+    sess.inventory_upload_status = "running"
+    sess.inventory_upload_message = f"Classifying {len(file_parts)} file(s): {fnames}…"
+    sess.inventory_upload_result = {}
+    warnings: list[str] = []
     try:
         oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected = _classify_inventory_file_parts(file_parts)
     except Exception as e:
@@ -1256,15 +1318,23 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
 
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
         sess.inventory_upload_status = "error"
-        sess.inventory_upload_message = "No files provided."
-        sess.inventory_upload_result = {"ok": False, "message": "No files provided."}
+        sess.inventory_upload_message = "No inventory files recognized."
+        sess.inventory_upload_result = {"ok": False, "message": "No inventory files recognized."}
         return
+
+    if amz_bytes and amz_bytes[:6] == _RAR_MAGIC:
+        sess.inventory_upload_message = "Extracting RAR archive and parsing OMS / Flipkart / Myntra / Amazon…"
 
     def work():
         df_variant, debug = load_inventory_consolidated(
             oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
             group_by_parent=False, return_debug=True,
         )
+        if df_variant.empty:
+            warnings.append("No SKUs parsed — check SKU mapping and file formats.")
+        for m in debug.get("rar_manifest") or []:
+            if m.get("status") == "skipped":
+                warnings.append(f"{m.get('filename', '?')}: {m.get('reason', 'skipped')}")
         try:
             from ..services.helpers import get_parent_sku
             df_parent = df_variant.copy()
@@ -1285,30 +1355,36 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
         sess.inventory_df_parent = df_parent
         sess.inventory_debug = debug
         _session_data_changed(sess)
-        parts = [f"{len(df_variant):,} total SKUs"]
-        for src, info in debug.items():
-            parts.append(f"{src}: {info}")
-        payload = {
-            "ok": True,
-            "message": " | ".join(parts),
-            "rows": len(df_variant),
-            "debug": debug,
-            "detected": detected,
-            "v": "inv-v9",
-        }
+        payload = _build_inventory_upload_payload(
+            df_variant=df_variant,
+            debug=debug,
+            detected=detected,
+            file_parts=file_parts,
+            warnings=warnings,
+        )
+        if not df_variant.empty:
+            sess.inventory_upload_status = "done"
+        else:
+            sess.inventory_upload_status = "error"
+            payload["ok"] = False
         sess.inventory_upload_result = payload
-        sess.inventory_upload_status = "done"
         sess.inventory_upload_message = payload["message"]
         return payload
 
     try:
         await asyncio.to_thread(_session_lock_apply_sync, sess, work)
-        _auto_save_cache(sess)
+        if sess.inventory_upload_status == "done":
+            _auto_save_cache(sess)
     except Exception as e:
         _log.exception("inventory-auto parse")
         sess.inventory_upload_status = "error"
         sess.inventory_upload_message = f"Parse error: {e}"
         sess.inventory_upload_result = {"ok": False, "message": f"Parse error: {e}"}
+
+
+def _run_inventory_auto_worker(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
+    """Sync entry for DAILY_UPLOAD_EXECUTOR (chunk finalize + direct upload)."""
+    asyncio.run(_run_inventory_auto_from_parts(session_id, file_parts))
 
 
 _INVENTORY_AUTO_DIRECT_MAX_FILES = int(os.environ.get("INVENTORY_AUTO_DIRECT_MAX_FILES", "3"))
@@ -1368,7 +1444,7 @@ async def upload_inventory_auto(
             sess.inventory_upload_result = {}
 
         await _session_lock_apply(sess, mark_async_start)
-        background_tasks.add_task(_run_inventory_auto_from_parts, sid, file_parts)
+        DAILY_UPLOAD_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
         return JSONResponse(
             content={
                 "ok": True,
@@ -2633,7 +2709,7 @@ async def _accept_inventory_auto_file_parts(
         sess.inventory_upload_result = {}
 
     await _session_lock_apply(sess, mark_async_start)
-    background_tasks.add_task(_run_inventory_auto_from_parts, sid, file_parts)
+    DAILY_UPLOAD_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
     return {
         "ok": True,
         "ingest_async": True,
@@ -2763,14 +2839,7 @@ def _finalize_chunk_upload_worker(session_id: str, upload_id: str) -> None:
         _run_daily_auto_ingest_pipeline(session_id, file_parts)
     else:
         sess.inventory_upload_message = "Parsing inventory files and merging snapshot…"
-        try:
-            asyncio.run(_run_inventory_auto_from_parts(session_id, file_parts))
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(_run_inventory_auto_from_parts(session_id, file_parts))
-            finally:
-                loop.close()
+        _run_inventory_auto_worker(session_id, file_parts)
 
 
 def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:

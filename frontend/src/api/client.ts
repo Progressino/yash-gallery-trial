@@ -88,6 +88,15 @@ export interface CoverageResponse {
   inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   inventory_upload_message?: string
   inventory_upload_rows?: number
+  inventory_upload_warnings?: string[]
+  inventory_upload_file_results?: Array<{
+    filename: string
+    category: string
+    status: 'loaded' | 'skipped'
+    reason?: string
+  }>
+  inventory_upload_sources?: string[]
+  inventory_upload_amz_disclaimer?: Record<string, unknown>
 }
 
 export type DailyAutoIngestSummary = {
@@ -261,6 +270,9 @@ export async function uploadInventoryAuto(
     }
     return data
   } catch (e: unknown) {
+    if (isUploadGateway502(e)) {
+      return { ...dailyUploadPendingAfter502(files.length), ingest_async: true }
+    }
     throw new Error(_errMessage(e, 'Inventory upload failed'))
   }
 }
@@ -503,6 +515,7 @@ export async function waitForInventoryUpload(
       throw new Error(cov.inventory_upload_message || 'Inventory upload failed')
     }
     if (st === 'done') {
+      onTick?.(cov.inventory_upload_message || 'Inventory snapshot updated.')
       return cov
     }
     await new Promise(r => setTimeout(r, 1500))

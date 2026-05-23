@@ -68,6 +68,10 @@ class CoverageResponse(BaseModel):
     inventory_upload_status: str = "idle"
     inventory_upload_message: str = ""
     inventory_upload_rows: Optional[int] = None
+    inventory_upload_warnings: Optional[list[str]] = None
+    inventory_upload_file_results: Optional[list[dict]] = None
+    inventory_upload_sources: Optional[list[str]] = None
+    inventory_upload_amz_disclaimer: Optional[dict] = None
 
 
 class ErrorResponse(BaseModel):

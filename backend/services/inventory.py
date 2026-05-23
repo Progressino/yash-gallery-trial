@@ -46,7 +46,9 @@ def _rar_sniff_csv_kind(base_lower: str, data: bytes) -> Optional[str]:
     Classify a CSV inside an inventory RAR. Returns:
       flipkart | myntra | amazon | combo | oms | None
     """
-    if "flipkart" in base_lower or base_lower.startswith("fk"):
+    if "current inventory" in base_lower:
+        return "myntra"
+    if "flipkart" in base_lower or base_lower.startswith("fk") or "seller_inventory_report" in base_lower:
         return "flipkart"
     if "myntra" in base_lower:
         return "myntra"
@@ -83,16 +85,17 @@ def _append_rar_csv(result: dict, kind: str, data: bytes) -> None:
         result["oms_csvs"].append(data)
 
 
-# ── RAR extraction ────────────────────────────────────────────
+def _manifest_add(manifest: list[dict], filename: str, *, category: str, status: str, reason: str = "") -> None:
+    entry: dict = {"filename": filename, "category": category, "status": status}
+    if reason:
+        entry["reason"] = reason
+    manifest.append(entry)
 
-def _extract_all_from_rar(rar_bytes: bytes) -> dict:
+
+def _extract_all_from_rar(rar_bytes: bytes) -> tuple[dict, list[dict]]:
     """
     Extract all relevant inventory files from a RAR archive.
-    Tries bsdtar subprocess first (always available), then falls back to rarfile.
-    Returns dict with keys:
-      amz_csvs, myntra_csvs, oms_csvs, combo_csvs, flipkart_csvs (lists of bytes),
-      fba_tsvs (list).
-    Every matching CSV is collected — os.walk order no longer drops files.
+    Returns (extracted_dict, manifest) where manifest lists every inner file and outcome.
     """
     result: dict = {
         "amz_csvs":      [],
@@ -102,6 +105,30 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
         "flipkart_csvs": [],
         "fba_tsvs":      [],
     }
+    manifest: list[dict] = []
+
+    def _ingest_file(fname: str, data: bytes) -> None:
+        base = fname.replace("\\", "/").split("/")[-1]
+        base_lower = base.lower()
+        if base_lower.endswith(".tsv"):
+            result["fba_tsvs"].append(data)
+            _manifest_add(manifest, base, category="fba", status="loaded")
+            return
+        if not base_lower.endswith(".csv"):
+            _manifest_add(
+                manifest, base, category="other", status="skipped",
+                reason="Not a CSV/TSV inventory file",
+            )
+            return
+        kind = _rar_sniff_csv_kind(base_lower, data)
+        if kind:
+            _append_rar_csv(result, kind, data)
+            _manifest_add(manifest, base, category=kind, status="loaded")
+        else:
+            _manifest_add(
+                manifest, base, category="unknown", status="skipped",
+                reason="Could not classify inventory CSV (check columns or filename)",
+            )
 
     # ── Try bsdtar subprocess (libarchive-tools — supports RAR4 & RAR5) ──
     bsdtar = shutil.which("bsdtar")
@@ -119,21 +146,13 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
                 for fname in files:
                     if fname == "upload.rar":
                         continue
-                    base = fname.lower()
                     fpath = os.path.join(root, fname)
                     with open(fpath, "rb") as fh:
                         data = fh.read()
-                    if base.endswith(".tsv"):
-                        result["fba_tsvs"].append(data)
-                        continue
-                    if not base.endswith(".csv"):
-                        continue
-                    kind = _rar_sniff_csv_kind(base, data)
-                    if kind:
-                        _append_rar_csv(result, kind, data)
+                    _ingest_file(fname, data)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-        return result
+        return result, manifest
 
     # ── Fallback: rarfile Python module ──────────────────────────────────
     try:
@@ -145,17 +164,17 @@ def _extract_all_from_rar(rar_bytes: bytes) -> dict:
         )
     with rarfile.RarFile(io.BytesIO(rar_bytes)) as rf:
         for name in rf.namelist():
-            base = name.replace("\\", "/").split("/")[-1].lower()
-            if base.endswith(".tsv"):
-                result["fba_tsvs"].append(rf.read(name))
+            if name.endswith("/"):
                 continue
-            if not base.endswith(".csv"):
+            base = name.replace("\\", "/").split("/")[-1]
+            if not base:
                 continue
             data = rf.read(name)
-            kind = _rar_sniff_csv_kind(base, data)
-            if kind:
-                _append_rar_csv(result, kind, data)
-    return result
+            _ingest_file(base, data)
+    return result, manifest
+
+
+# ── RAR extraction ────────────────────────────────────────────
 
 
 # ── Per-source parsers ────────────────────────────────────────
@@ -689,7 +708,8 @@ def load_inventory_consolidated(
     if amz_bytes:
         raw = amz_bytes
         if raw[:6] == _RAR_MAGIC:
-            extracted = _extract_all_from_rar(raw)
+            extracted, rar_manifest = _extract_all_from_rar(raw)
+            debug["rar_manifest"] = rar_manifest
             debug["rar_files"] = {
                 "amz_csvs":      len(extracted["amz_csvs"]),
                 "myntra_csvs":   len(extracted["myntra_csvs"]),

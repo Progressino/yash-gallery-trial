@@ -368,6 +368,26 @@ def get_coverage(request: Request, light: bool = False):
             and sess.inventory_upload_result.get("rows") is not None
             else None
         ),
+        inventory_upload_warnings=(
+            list(sess.inventory_upload_result.get("warnings") or [])
+            if getattr(sess, "inventory_upload_result", None)
+            else None
+        ),
+        inventory_upload_file_results=(
+            list(sess.inventory_upload_result.get("file_results") or [])
+            if getattr(sess, "inventory_upload_result", None)
+            else None
+        ),
+        inventory_upload_sources=(
+            list(sess.inventory_upload_result.get("sources_summary") or [])
+            if getattr(sess, "inventory_upload_result", None)
+            else None
+        ),
+        inventory_upload_amz_disclaimer=(
+            (sess.inventory_upload_result.get("debug") or {}).get("amz_disclaimer")
+            if getattr(sess, "inventory_upload_result", None)
+            else None
+        ),
     )
 
 
