@@ -127,6 +127,18 @@ def test_absent_shift_pays_zero():
     assert out["Payable_Hrs"] == 0.0
 
 
+def test_employee_828_on_time_near_full_day_payable_hrs():
+    """09:00–17:58: block hours 7.97; do not double-deduct lunch on near-full days."""
+    out = att.calc_salary_from_punches(
+        [(time(9, 0), time(17, 58))],
+        330.0,
+        on_date="2026-05-22",
+    )
+    assert out["Payable_Hrs"] == 7.97
+    assert out["Lunch_Deduction_Hrs"] == 0.5
+    assert out["Early_Deduction_Hrs"] == 0.0
+
+
 def test_employee_845_late_arrival_reduces_normal_pay():
     """09:21–18:30 on ₹330/day: late 21m + lunch-through 30m → ~₹295 normal + ₹41.25 OT = ~₹336."""
     out = att.calc_salary_from_punches(

@@ -30,6 +30,9 @@ OT_END = time(21, 0)
 OT_MIN_MINUTES = 25
 OT_BREAK_MINUTES = 15
 STANDARD_PAY_MINUTES = 8 * 60  # salary based on 8 working hours
+EARLY_LEAVE_GRACE_MINUTES = 5  # ignore tiny early-outs (e.g. 17:58 vs 18:00)
+# work_minutes uses WORK_BLOCKS (already excludes lunch/tea slots); near-full days skip extra lunch cut
+NEAR_FULL_BLOCK_MINUTES = STANDARD_PAY_MINUTES - 15
 
 WORK_BLOCKS = (
     (WORK_START, TEA1_START),
@@ -307,6 +310,7 @@ def calc_salary_from_punches(
         early_min = (
             datetime.combine(base, WORK_END) - datetime.combine(base, last_out)
         ).total_seconds() / 60.0
+    early_min_payable = 0.0 if early_min <= EARLY_LEAVE_GRACE_MINUTES else early_min
 
     work_net_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
     block_coverages = []
@@ -316,16 +320,27 @@ def calc_salary_from_punches(
         block_len = (be - bs).total_seconds() / 60.0
         got = sum(_overlap_minutes(s, e, bs, be) for s, e in intervals)
         block_coverages.append(got / block_len if block_len > 0 else 0.0)
-    on_time_full_day = late_min <= 0 and early_min <= 0 and all(c >= 0.85 for c in block_coverages)
+    on_time_full_day = (
+        late_min <= 0
+        and early_min_payable <= 0
+        and all(c >= 0.85 for c in block_coverages)
+    )
 
     if on_time_full_day:
         payable_minutes = float(STANDARD_PAY_MINUTES)
-    else:
+    elif late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
         shift_net_minutes = max(
-            float(STANDARD_PAY_MINUTES) - lunch_penalty - tea_penalty - late_min - early_min,
+            float(STANDARD_PAY_MINUTES)
+            - lunch_penalty
+            - tea_penalty
+            - late_min
+            - early_min_payable,
             0.0,
         )
         payable_minutes = min(shift_net_minutes, work_net_minutes)
+    else:
+        # Near-full day, on-time in: WORK_BLOCKS already exclude scheduled breaks.
+        payable_minutes = max(work_minutes - early_min_payable, 0.0)
     payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
     payable_hrs = round(payable_minutes / 60.0, 2)
     normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
