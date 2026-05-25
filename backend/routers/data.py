@@ -42,8 +42,10 @@ from ..services.sales import (
 from ..services.daily_store import list_uploads, get_summary, delete_upload
 from ..session import AppSession
 from ..services.inventory import (
+    ensure_inventory_snapshot_metadata,
     inventory_marketplace_breakdown,
     inventory_missing_marketplace_warnings,
+    inventory_rows_for_api,
     inventory_snapshot_meta_for_api,
 )
 
@@ -466,20 +468,24 @@ def _ensure_warm_session_data(sess: AppSession) -> None:
 
 def _restore_inventory_from_warm(sess: AppSession) -> None:
     """Copy snapshot inventory from in-memory warm cache (fast; no GitHub download)."""
-    if not sess.inventory_df_variant.empty:
-        return
     try:
         import backend.main as _main
         import pandas as pd
+        from ..services.inventory import apply_inventory_session_meta
 
         if not _main._warm_cache:
             return
-        for key in ("inventory_df_variant", "inventory_df_parent"):
-            val = _main._warm_cache.get(key)
-            if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                setattr(sess, key, val)
+        if sess.inventory_df_variant.empty:
+            for key in ("inventory_df_variant", "inventory_df_parent"):
+                val = _main._warm_cache.get(key)
+                if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
+                    setattr(sess, key, val)
+        meta = _main._warm_cache.get(getattr(_main, "_INVENTORY_META_WARM_KEY", "inventory_session_meta"))
+        if meta:
+            apply_inventory_session_meta(sess, meta)
         if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
             sess.sku_mapping = _main._warm_cache["sku_mapping"]
+        ensure_inventory_snapshot_metadata(sess)
     except Exception:
         pass
 
@@ -1549,17 +1555,29 @@ def flipkart_analytics(request: Request):
 # ── Inventory ─────────────────────────────────────────────────
 
 @router.get("/inventory")
-def get_inventory(request: Request):
+def get_inventory(
+    request: Request,
+    search: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 500,
+):
     sess = _sess(request)
     _restore_inventory_from_warm(sess)
     df = sess.inventory_df_variant
     if df.empty:
-        return {"loaded": False, "rows": []}
+        return {
+            "loaded": False,
+            "rows": [],
+            "total_rows": 0,
+            "offset": 0,
+            "limit": max(1, min(int(limit), 5000)),
+        }
 
     import pandas as pd
+
+    ensure_inventory_snapshot_metadata(sess)
     cols = [c for c in df.columns if c != "OMS_SKU"]
 
-    # Per-source totals for debugging discrepancies
     totals = {}
     for c in cols:
         try:
@@ -1567,13 +1585,19 @@ def get_inventory(request: Request):
         except Exception:
             totals[c] = 0
 
+    rows, total_rows = inventory_rows_for_api(
+        df, search=search or "", offset=offset, limit=limit
+    )
     dbg = getattr(sess, "inventory_debug", {}) or {}
     return {
-        "loaded":   True,
-        "rows":     df.fillna(0).to_dict("records"),
-        "columns":  ["OMS_SKU"] + cols,
-        "totals":   totals,
-        "debug":    dbg,
+        "loaded": True,
+        "rows": rows,
+        "total_rows": total_rows,
+        "offset": max(0, int(offset)),
+        "limit": max(1, min(int(limit), 5000)),
+        "columns": ["OMS_SKU"] + cols,
+        "totals": totals,
+        "debug": dbg,
         "marketplaces": inventory_marketplace_breakdown(df, dbg),
         "missing_marketplace_hints": inventory_missing_marketplace_warnings(dbg),
         **inventory_snapshot_meta_for_api(sess),

@@ -244,8 +244,88 @@ def inventory_missing_marketplace_warnings(debug: dict | None = None) -> list[st
     return warnings
 
 
+def inventory_session_meta_bundle(sess: Any) -> dict[str, Any]:
+    """Serializable inventory snapshot metadata for warm cache / disk."""
+    return {
+        "inventory_debug": dict(getattr(sess, "inventory_debug", None) or {}),
+        "inventory_snapshot_date": str(getattr(sess, "inventory_snapshot_date", "") or ""),
+        "inventory_snapshot_date_label": str(
+            getattr(sess, "inventory_snapshot_date_label", "") or ""
+        ),
+        "inventory_snapshot_date_sources": list(
+            getattr(sess, "inventory_snapshot_date_sources", None) or []
+        ),
+        "inventory_snapshot_uploaded_at": str(
+            getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+        ),
+    }
+
+
+def apply_inventory_session_meta(sess: Any, meta: dict[str, Any] | None) -> None:
+    """Restore snapshot metadata from warm cache."""
+    if not meta:
+        return
+    dbg = meta.get("inventory_debug")
+    if isinstance(dbg, dict):
+        sess.inventory_debug = dbg
+    for key in (
+        "inventory_snapshot_date",
+        "inventory_snapshot_date_label",
+        "inventory_snapshot_uploaded_at",
+    ):
+        if meta.get(key):
+            setattr(sess, key, meta[key])
+    sources = meta.get("inventory_snapshot_date_sources")
+    if sources is not None:
+        sess.inventory_snapshot_date_sources = list(sources)
+
+
+def ensure_inventory_snapshot_metadata(sess: Any) -> None:
+    """Re-derive snapshot date from stored upload debug when session fields were lost."""
+    if (
+        getattr(sess, "inventory_snapshot_date_label", "")
+        or getattr(sess, "inventory_snapshot_date", "")
+    ):
+        return
+    dbg = getattr(sess, "inventory_debug", None) or {}
+    if not dbg:
+        return
+    meta = infer_inventory_snapshot_date(None, dbg)
+    if not meta.get("snapshot_date"):
+        return
+    merged = dict(dbg)
+    merged.update(meta)
+    sess.inventory_debug = merged
+    sess.inventory_snapshot_date = meta["snapshot_date"]
+    sess.inventory_snapshot_date_label = meta["snapshot_date_label"]
+    sess.inventory_snapshot_date_sources = list(meta["snapshot_date_sources"])
+
+
+def inventory_rows_for_api(
+    df: pd.DataFrame,
+    *,
+    search: str = "",
+    offset: int = 0,
+    limit: int = 500,
+) -> tuple[list[dict], int]:
+    """Filter/slice inventory for API (avoid shipping 6k+ rows in one JSON blob)."""
+    if df.empty:
+        return [], 0
+    work = df
+    q = (search or "").strip().lower()
+    if q:
+        skus = work["OMS_SKU"].astype(str)
+        work = work[skus.str.lower().str.contains(q, na=False, regex=False)]
+    total = int(len(work))
+    off = max(0, int(offset))
+    lim = max(1, min(int(limit), 5000))
+    page = work.iloc[off : off + lim]
+    return page.fillna(0).to_dict("records"), total
+
+
 def inventory_snapshot_meta_for_api(sess: Any) -> dict[str, Any]:
     """Fields for /data/inventory and coverage API responses."""
+    ensure_inventory_snapshot_metadata(sess)
     dbg = getattr(sess, "inventory_debug", None) or {}
     snap = (
         getattr(sess, "inventory_snapshot_date", "")

@@ -275,6 +275,7 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
 
 
 _INVENTORY_WARM_KEYS = ("inventory_df_variant", "inventory_df_parent")
+_INVENTORY_META_WARM_KEY = "inventory_session_meta"
 
 
 def merge_inventory_into_warm_cache(sess) -> None:
@@ -296,6 +297,12 @@ def merge_inventory_into_warm_cache(sess) -> None:
             _warm_cache[key] = pd.DataFrame()
         else:
             _warm_cache[key] = df.copy()
+    try:
+        from .services.inventory import inventory_session_meta_bundle
+
+        _warm_cache[_INVENTORY_META_WARM_KEY] = inventory_session_meta_bundle(sess)
+    except Exception:
+        pass
     _warm_cache_loaded_at = datetime.now(IST)
 
 
@@ -360,6 +367,11 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                 with open(path, "w") as f:
                     json.dump(val if isinstance(val, dict) else {}, f)
                 saved.append(key)
+            elif key == _INVENTORY_META_WARM_KEY and isinstance(val, dict):
+                path = os.path.join(_DISK_CACHE_DIR, "inventory_session_meta.json")
+                with open(path, "w") as f:
+                    json.dump(val, f, default=str)
+                saved.append(key)
             elif hasattr(val, "to_parquet") and hasattr(val, "empty") and not val.empty:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 val.to_parquet(path, index=False)
@@ -416,6 +428,11 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                 if os.path.exists(path):
                     with open(path) as f:
                         loaded["sku_mapping"] = json.load(f)
+            elif key == _INVENTORY_META_WARM_KEY:
+                path = os.path.join(_DISK_CACHE_DIR, "inventory_session_meta.json")
+                if os.path.exists(path):
+                    with open(path) as f:
+                        loaded[key] = json.load(f)
             else:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 if os.path.exists(path):
@@ -940,6 +957,15 @@ def _copy_warm_cache_to_session(sess) -> bool:
             except Exception:
                 pass
         setattr(sess, key, val)
+    meta = _warm_cache.get(_INVENTORY_META_WARM_KEY)
+    if meta:
+        try:
+            from .services.inventory import apply_inventory_session_meta, ensure_inventory_snapshot_metadata
+
+            apply_inventory_session_meta(sess, meta)
+            ensure_inventory_snapshot_metadata(sess)
+        except Exception:
+            pass
     sess._quarterly_cache.clear()
     # Warm cache already contains rebuilt sales + merged platform history.
     # Mark restored to avoid triggering a heavy synchronous SQLite restore on first
