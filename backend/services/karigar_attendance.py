@@ -1,6 +1,7 @@
 """Karigar attendance policy, punch parsing, and biometric sheet import."""
 from __future__ import annotations
 
+import json
 import math
 import re
 from datetime import date, datetime, time, timedelta
@@ -17,8 +18,13 @@ WORK_START = time(9, 0)
 WORK_END = time(18, 0)
 LUNCH_START = time(13, 0)
 LUNCH_END = time(13, 30)
-TEA_START = time(16, 0)
-TEA_END = time(16, 15)
+TEA1_START = time(11, 0)
+TEA1_END = time(11, 15)
+TEA2_START = time(16, 0)
+TEA2_END = time(16, 15)
+TEA_BREAK_MINUTES_EACH = 15
+DEFAULT_LUNCH_BREAK_MINUTES = 30
+DEFAULT_TEA_BREAK_MINUTES = TEA_BREAK_MINUTES_EACH * 2  # two tea breaks × 15 min
 OT_START = time(18, 0)
 OT_END = time(21, 0)
 OT_MIN_MINUTES = 25
@@ -26,9 +32,10 @@ OT_BREAK_MINUTES = 15
 STANDARD_PAY_MINUTES = 8 * 60  # salary based on 8 working hours
 
 WORK_BLOCKS = (
-    (WORK_START, LUNCH_START),
-    (LUNCH_END, TEA_START),
-    (TEA_END, WORK_END),
+    (WORK_START, TEA1_START),
+    (TEA1_END, LUNCH_START),
+    (LUNCH_END, TEA2_START),
+    (TEA2_END, WORK_END),
 )
 
 
@@ -79,17 +86,70 @@ def _overlap_minutes(a_start: datetime, a_end: datetime, b_start: datetime, b_en
     return (end - start).total_seconds() / 60.0
 
 
+def _column_lookup(columns: list[str]) -> dict[str, str]:
+    """Map normalized header (IN1, OUT2, …) to actual column name."""
+    colmap: dict[str, str] = {}
+    for c in columns:
+        norm = re.sub(r"[^A-Z0-9]", "", str(c).strip().upper())
+        if norm:
+            colmap[norm] = c
+    return colmap
+
+
 def extract_punch_pairs(row: pd.Series, columns: list[str]) -> list[tuple[time, time | None]]:
     """Read IN-1/OUT-1 … IN-5/OUT-5 from a biometric export row."""
     pairs: list[tuple[time, time | None]] = []
-    colmap = {str(c).strip().upper().replace(" ", ""): c for c in columns}
+    colmap = _column_lookup(columns)
     for n in range(1, 6):
-        in_key = f"IN-{n}"
-        out_key = f"OUT-{n}"
-        if in_key not in colmap:
+        tin = tout = None
+        for in_key in (f"IN{n}", f"IN-{n}"):
+            if in_key.replace("-", "") in colmap:
+                tin = _parse_clock(row.get(colmap[in_key.replace("-", "")]))
+                break
+        for out_key in (f"OUT{n}", f"OUT-{n}"):
+            norm = out_key.replace("-", "")
+            if norm in colmap:
+                tout = _parse_clock(row.get(colmap[norm]))
+                break
+        if tin is not None:
+            pairs.append((tin, tout))
+    return pairs
+
+
+def serialize_punch_pairs(pairs: list[tuple[time, time | None]]) -> str:
+    """JSON list of [in, out] strings for storage on attendance rows."""
+    payload = []
+    for tin, tout in pairs:
+        payload.append(
+            [
+                tin.strftime("%H:%M") if tin else "",
+                tout.strftime("%H:%M") if tout else "",
+            ]
+        )
+    return json.dumps(payload)
+
+
+def deserialize_punch_pairs(raw: Any) -> list[tuple[time, time | None]]:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return []
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s or s in ("[]", "nan"):
+            return []
+        try:
+            data = json.loads(s)
+        except json.JSONDecodeError:
+            return []
+    elif isinstance(raw, list):
+        data = raw
+    else:
+        return []
+    pairs: list[tuple[time, time | None]] = []
+    for item in data:
+        if not isinstance(item, (list, tuple)) or len(item) < 1:
             continue
-        tin = _parse_clock(row.get(colmap[in_key]))
-        tout = _parse_clock(row.get(colmap[out_key])) if out_key in colmap else None
+        tin = _parse_clock(item[0])
+        tout = _parse_clock(item[1]) if len(item) > 1 and item[1] else None
         if tin is not None:
             pairs.append((tin, tout))
     return pairs
@@ -113,7 +173,7 @@ def _intervals_from_pairs(pairs: list[tuple[time, time | None]], base: date) -> 
 
 def _left_before_lunch_return_at_tea(intervals: list[tuple[datetime, datetime]], base: date) -> bool:
     lunch = _dt_on(base, LUNCH_START)
-    tea = _dt_on(base, TEA_START)
+    tea = _dt_on(base, TEA2_START)
     left_before_lunch = any(end <= lunch for _, end in intervals)
     returned_at_tea = any(start >= tea for start, _ in intervals)
     return left_before_lunch and returned_at_tea
@@ -124,12 +184,10 @@ def _present_during(intervals: list[tuple[datetime, datetime]], start: datetime,
 
 
 def needs_miss_punch(punch_pairs: list[tuple[time, time | None]]) -> bool:
-    """True when biometric row has no usable OUT (or no punches)."""
+    """True when any IN punch is missing its OUT (or row has no punches)."""
     if not punch_pairs:
         return True
-    if all(tout is None for _, tout in punch_pairs):
-        return True
-    return len(punch_pairs) == 1 and punch_pairs[0][1] is None
+    return any(tout is None for _, tout in punch_pairs)
 
 
 def calc_salary_from_punches(
@@ -192,50 +250,43 @@ def calc_salary_from_punches(
     lunch_penalty = 0.0
     tea_penalty = 0.0
     special_break_penalty = _left_before_lunch_return_at_tea(intervals, base)
-    lunch_present = _present_during(
-        intervals, _dt_on(base, LUNCH_START), _dt_on(base, LUNCH_END)
-    )
-    tea_present = _present_during(
-        intervals, _dt_on(base, TEA_START), _dt_on(base, TEA_END)
-    )
+    lunch_window = (_dt_on(base, LUNCH_START), _dt_on(base, LUNCH_END))
+    tea1_window = (_dt_on(base, TEA1_START), _dt_on(base, TEA1_END))
+    tea2_window = (_dt_on(base, TEA2_START), _dt_on(base, TEA2_END))
+    # Lunch: deduct if they stayed clocked in through lunch (no break). Tea: deduct if absent from floor.
+    worked_through_lunch = _present_during(intervals, *lunch_window)
+    tea1_absent = not _present_during(intervals, *tea1_window)
+    tea2_absent = not _present_during(intervals, *tea2_window)
 
     if waive_lunch_break:
         lunch_penalty = 0.0
     elif lunch_break_minutes is not None:
         lunch_penalty = max(0.0, float(lunch_break_minutes))
     elif special_break_penalty:
-        lunch_penalty = 30.0
-    elif not lunch_present:
-        lunch_penalty = 30.0
+        lunch_penalty = float(DEFAULT_LUNCH_BREAK_MINUTES)
+    elif worked_through_lunch:
+        lunch_penalty = float(DEFAULT_LUNCH_BREAK_MINUTES)
 
     if waive_tea_break:
         tea_penalty = 0.0
     elif tea_break_minutes is not None:
         tea_penalty = max(0.0, float(tea_break_minutes))
     elif special_break_penalty:
-        tea_penalty = 15.0
-    elif not tea_present:
-        tea_penalty = 15.0
+        tea_penalty = float(DEFAULT_TEA_BREAK_MINUTES)
+    else:
+        if tea1_absent:
+            tea_penalty += float(TEA_BREAK_MINUTES_EACH)
+        if tea2_absent:
+            tea_penalty += float(TEA_BREAK_MINUTES_EACH)
 
-    payable_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
-
-    # Full-day: all three work blocks substantially covered → 8 payable hours.
-    block_coverages = []
-    for block_start, block_end in WORK_BLOCKS:
-        bs = _dt_on(base, block_start)
-        be = _dt_on(base, block_end)
-        block_len = (be - bs).total_seconds() / 60.0
-        got = sum(_overlap_minutes(s, e, bs, be) for s, e in intervals)
-        block_coverages.append(got / block_len if block_len > 0 else 0.0)
-    if all(c >= 0.85 for c in block_coverages):
-        payable_minutes = float(STANDARD_PAY_MINUTES)
-
-    payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
-    payable_hrs = round(payable_minutes / 60.0, 2)
-    normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
-
+    first_in = min(s for s, _ in intervals).time()
+    last_out = max(e for _, e in intervals).time()
+    late_min = 0.0
+    if first_in > WORK_START:
+        late_min = (
+            datetime.combine(base, first_in) - datetime.combine(base, WORK_START)
+        ).total_seconds() / 60.0
     # Overtime: after 18:00 until actual out (cap 21:00), same hourly rate as regular (daily/8).
-    # Billable OT hours round up to the next whole hour (e.g. 18:00–20:59 → 3h × hourly).
     last_out_dt = max(e for _, e in intervals)
     ot_start = _dt_on(base, OT_START)
     ot_end_cap = min(last_out_dt, _dt_on(base, OT_END))
@@ -251,18 +302,38 @@ def calc_salary_from_punches(
     ot_hrs = ot_hrs_bill
     ot_pay = round(ot_hrs_bill * hourly, 2)
 
-    first_in = min(s for s, _ in intervals).time()
-    last_out = max(e for _, e in intervals).time()
-    late_min = 0.0
-    if first_in > WORK_START:
-        late_min = (
-            datetime.combine(base, first_in) - datetime.combine(base, WORK_START)
-        ).total_seconds() / 60.0
     early_min = 0.0
     if last_out < WORK_END and ot_minutes <= 0:
         early_min = (
             datetime.combine(base, WORK_END) - datetime.combine(base, last_out)
         ).total_seconds() / 60.0
+
+    work_net_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
+    block_coverages = []
+    for block_start, block_end in WORK_BLOCKS:
+        bs = _dt_on(base, block_start)
+        be = _dt_on(base, block_end)
+        block_len = (be - bs).total_seconds() / 60.0
+        got = sum(_overlap_minutes(s, e, bs, be) for s, e in intervals)
+        block_coverages.append(got / block_len if block_len > 0 else 0.0)
+    on_time_full_day = late_min <= 0 and early_min <= 0 and all(c >= 0.85 for c in block_coverages)
+
+    if on_time_full_day:
+        payable_minutes = float(STANDARD_PAY_MINUTES)
+    else:
+        shift_net_minutes = max(
+            float(STANDARD_PAY_MINUTES) - lunch_penalty - tea_penalty - late_min - early_min,
+            0.0,
+        )
+        payable_minutes = min(shift_net_minutes, work_net_minutes)
+    payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
+    payable_hrs = round(payable_minutes / 60.0, 2)
+    normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
+
+    punch_pairs_json = serialize_punch_pairs(punch_pairs)
+
+    late_deduction_rs = round((late_min / 60.0) * hourly, 2)
+    early_deduction_rs = round((early_min / 60.0) * hourly, 2)
 
     return {
         "Status": status,
@@ -276,19 +347,53 @@ def calc_salary_from_punches(
         "Lunch_Deduction_Hrs": round(lunch_penalty / 60.0, 2),
         "Tea_Deduction_Hrs": round(tea_penalty / 60.0, 2),
         "Break_Penalty_Hrs": round((lunch_penalty + tea_penalty) / 60.0, 2),
+        "Late_Deduction_Hrs": round(late_min / 60.0, 2),
+        "Early_Deduction_Hrs": round(early_min / 60.0, 2),
+        "Late_Deduction_Rs": late_deduction_rs,
+        "Early_Deduction_Rs": early_deduction_rs,
         "Late_Early_Deduction_Hrs": round((late_min + early_min) / 60.0, 2),
         "In_Punch": first_in.strftime("%H:%M"),
         "Out_Punch": last_out.strftime("%H:%M"),
+        "Punch_Pairs": punch_pairs_json,
+        "Punch_Count": len(punch_pairs),
         "Needs_Miss_Punch": needs_miss_punch(punch_pairs),
     }
+
+
+def punch_pairs_from_request(items: list[dict[str, str]]) -> list[tuple[time, time | None]]:
+    """Build punch pairs from API payload [{in_time, out_time}, …]."""
+    pairs: list[tuple[time, time | None]] = []
+    for item in items:
+        tin = _parse_clock(item.get("in_time") or item.get("In_Punch"))
+        tout = _parse_clock(item.get("out_time") or item.get("Out_Punch"))
+        if tin is not None:
+            pairs.append((tin, tout))
+    return pairs
+
+
+def _pairs_from_patch(
+    punch_pairs: list[tuple[time, time | None]] | None,
+    in_punch: str,
+    out_punch: str,
+) -> list[tuple[time, time | None]] | None:
+    if punch_pairs:
+        if not any(tin is not None for tin, _ in punch_pairs):
+            return None
+        return punch_pairs
+    tin = _parse_clock(in_punch)
+    tout = _parse_clock(out_punch)
+    if tin is None:
+        return None
+    return [(tin, tout)]
 
 
 def update_karigar_attendance_row(
     *,
     on_date: str,
     e_code: str,
-    in_punch: str,
-    out_punch: str,
+    in_punch: str = "",
+    out_punch: str = "",
+    punch_pairs: list[tuple[time, time | None]] | None = None,
     waive_lunch_break: bool = False,
     waive_tea_break: bool = False,
     lunch_break_minutes: float | None = None,
@@ -299,11 +404,11 @@ def update_karigar_attendance_row(
     daily = master_rate or get_daily_rate_for_date(e_code, on_date)
     if daily <= 0:
         return {"ok": False, "message": f"No daily rate for E_Code {e_code}."}
-    tin = _parse_clock(in_punch)
-    tout = _parse_clock(out_punch)
-    if tin is None:
+    pairs = _pairs_from_patch(punch_pairs, in_punch, out_punch)
+    if pairs is None:
         return {"ok": False, "message": "Valid In punch required."}
-    pairs = [(tin, tout)]
+    if needs_miss_punch(pairs):
+        return {"ok": False, "message": "Each In punch needs an Out time before saving."}
     calc = calc_salary_from_punches(
         pairs,
         daily,

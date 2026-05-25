@@ -74,12 +74,73 @@ def test_overtime_manoj_807_9_to_2059():
 def test_needs_miss_punch_single_in():
     assert att.needs_miss_punch([(time(9, 0), None)]) is True
     assert att.needs_miss_punch([(time(9, 0), time(18, 0))]) is False
+    assert att.needs_miss_punch([(time(9, 0), time(12, 0)), (time(13, 0), None)]) is True
+
+
+def test_multiple_punch_pairs_tracked():
+    """Biometric IN-1…OUT-3 style day — hours from all segments."""
+    pairs = [
+        (time(9, 3), time(12, 28)),
+        (time(13, 7), time(15, 53)),
+        (time(16, 18), time(20, 48)),
+    ]
+    out = att.calc_salary_from_punches(pairs, 520.0, on_date="2026-05-22")
+    assert out["Punch_Count"] == 3
+    assert out["Needs_Miss_Punch"] is False
+    assert out["Total_Presence_Hrs"] > 8.0
+    assert out["OT_Hours"] >= 2.0
+    assert out["In_Punch"] == "09:03"
+    assert out["Out_Punch"] == "20:48"
+    stored = att.deserialize_punch_pairs(out["Punch_Pairs"])
+    assert len(stored) == 3
+
+
+def test_two_tea_breaks_15_min_each_when_not_taken():
+    pairs = [
+        (time(9, 0), time(11, 0)),
+        (time(12, 0), time(15, 30)),
+        (time(17, 0), time(18, 0)),
+    ]
+    out = att.calc_salary_from_punches(pairs, 480.0, on_date="2026-05-20")
+    assert out["Lunch_Deduction_Hrs"] == 0.5
+    assert out["Tea_Deduction_Hrs"] == 0.5
+
+
+def test_update_row_rejects_incomplete_pairs():
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame(
+            [{"E_Code": "921", "Name": "Worker 921", "Type": "Karigar", "Daily_Rate_Rs": 520, "Hourly_Rate_Rs": 65}]
+        ),
+    )
+    out = att.update_karigar_attendance_row(
+        on_date="2026-05-22",
+        e_code="921",
+        punch_pairs=[(time(9, 0), None)],
+    )
+    assert out["ok"] is False
 
 
 def test_absent_shift_pays_zero():
     out = att.calc_salary_from_punches([], 460.0, on_date="2026-05-20", status="A")
     assert out["Total_Pay"] == 0.0
     assert out["Payable_Hrs"] == 0.0
+
+
+def test_employee_845_late_arrival_reduces_normal_pay():
+    """09:21–18:30 on ₹330/day: late 21m + lunch-through 30m → ~₹295 normal + ₹41.25 OT = ~₹336."""
+    out = att.calc_salary_from_punches(
+        [(time(9, 21), time(18, 30))],
+        330.0,
+        on_date="2026-05-20",
+    )
+    assert out["Hourly_Rate_Rs"] == 41.25
+    assert out["Late_Deduction_Hrs"] == 0.35
+    assert out["Late_Deduction_Rs"] == 14.44
+    assert out["Normal_Pay"] == 294.94
+    assert out["OT_Pay"] == 41.25
+    assert out["Total_Pay"] == 336.19
+    assert out["Payable_Hrs"] == 7.15
 
 
 def test_calc_salary_wrapper():

@@ -114,6 +114,274 @@ def _drop_production_session_rows(
     )
 
 
+KARIGAR_EXPENSE_WORK_TYPES = (
+    "Part Change",
+    "Alter",
+    "Trainee",
+    "Other Task",
+    "Helper",
+    "Other",
+)
+
+
+def _mask_production_log(
+    log_df: pd.DataFrame,
+    *,
+    date_str: str,
+    karigar_id: str,
+    challan_no: str | None = None,
+    style: str | None = None,
+    operation: str | None = None,
+) -> pd.Series:
+    """Boolean mask for production_log rows to update or delete."""
+    if log_df.empty:
+        return pd.Series(dtype=bool)
+    work = log_df.copy()
+    d, k, c, s = _production_session_keys(
+        date_str,
+        karigar_id,
+        challan_no or "",
+        style or "",
+    )
+    work["_ck_date"] = work["Date"].apply(clean_key)
+    work["_ck_kar"] = work["Karigar_ID"].apply(clean_key)
+    mask = (work["_ck_date"] == d) & (work["_ck_kar"] == k)
+    if challan_no:
+        work["_ck_challan"] = work["Challan_No"].apply(clean_key)
+        mask = mask & (work["_ck_challan"] == c)
+    if style:
+        work["_ck_style"] = work["Style"].apply(_style_session_key)
+        mask = mask & (work["_ck_style"] == s)
+    if operation:
+        op = normalize_operation_name(operation)
+        work["_op_norm"] = work.get("Operation", pd.Series(dtype=str)).apply(normalize_operation_name)
+        mask = mask & (work["_op_norm"] == op)
+    return mask
+
+
+def delete_production_entries(
+    *,
+    date_str: str,
+    karigar_id: str,
+    challan_no: str = "",
+    style: str = "",
+    operation: str = "",
+) -> dict:
+    """
+    Remove rows from production_log. All four production reports read from this sheet,
+    so one delete updates history, Report 1, Report 2 summary, and hour-wise detail.
+    """
+    with _PRODUCTION_LOG_LOCK:
+        log_df = get_sheet_df("production_log")
+        if log_df.empty:
+            return {"ok": False, "message": "No production entries to delete.", "removed": 0}
+        mask = _mask_production_log(
+            log_df,
+            date_str=date_str,
+            karigar_id=karigar_id,
+            challan_no=challan_no or None,
+            style=style or None,
+            operation=operation or None,
+        )
+        removed = int(mask.sum())
+        if removed <= 0:
+            scope = operation or (f"{challan_no}/{style}" if challan_no and style else "all sessions")
+            return {
+                "ok": False,
+                "message": f"No matching production rows for {karigar_id} on {date_str} ({scope}).",
+                "removed": 0,
+            }
+        log_df = log_df[~mask].reset_index(drop=True)
+        save_sheet_df("production_log", log_df)
+        scope = (
+            f"operation {operation}"
+            if operation
+            else (f"challan {challan_no} / {style}" if challan_no and style else f"all entries for {karigar_id}")
+        )
+        return {
+            "ok": True,
+            "message": f"Deleted {removed} production row(s) — {scope}. All reports refreshed.",
+            "removed": removed,
+        }
+
+
+def list_production_sessions_admin(
+    date_str: str,
+    karigar_id: str | None = None,
+) -> list[dict]:
+    """Flat list of production sessions for admin edit/delete (one row per operation, latest save)."""
+    pl = get_sheet_df("production_log")
+    if pl.empty:
+        return []
+    day = pl[pl["Date"].apply(clean_key) == clean_key(date_str)].copy()
+    if karigar_id:
+        day = day[day["Karigar_ID"].apply(clean_key) == clean_key(karigar_id)]
+    if day.empty:
+        return []
+    day = _production_log_latest_rows(day)
+    rows: list[dict] = []
+    for _, r in day.iterrows():
+        rows.append(
+            {
+                "Date": str(r.get("Date", date_str)),
+                "Karigar_ID": str(r.get("Karigar_ID", "")),
+                "Karigar_Name": str(r.get("Karigar_Name", "")),
+                "Challan_No": str(r.get("Challan_No", "")),
+                "Style": str(r.get("Style", "")),
+                "Operation": str(r.get("Operation", "")),
+                "Total_Pieces": int(safe_num(pd.Series([r.get("Total_Pieces", 0)])).iloc[0]),
+                "Save_Time": str(r.get("Save_Time", "") or ""),
+                "Efficiency_%": float(safe_num(pd.Series([r.get("Efficiency_%", 0)])).iloc[0]),
+            }
+        )
+    return rows
+
+
+def get_ltl_setup_table() -> dict:
+    """Manual LTL overrides + formula preview for admin LTL Setup tab."""
+    df = get_sheet_df("target_ltl_override")
+    overrides: list[dict] = []
+    if not df.empty:
+        for _, row in df.iterrows():
+            st = str(row.get("Style", "")).strip()
+            op = normalize_operation_name(row.get("Operation", ""))
+            kid = clean_key(row.get("Karigar_ID", ""))
+            manual = int(float(row.get("Manual_LTL") or 0))
+            applied = resolve_applied_ltl(st, op, kid, base_target=None)
+            overrides.append(
+                {
+                    "Style": st,
+                    "Operation": op,
+                    "Karigar_ID": kid,
+                    "Manual_LTL": manual,
+                    "Formula_LTL": applied["formula_ltl"],
+                    "Final_Applied_LTL": applied["applied_ltl"],
+                    "LTL_Source": applied["ltl_source"],
+                    "Notes": str(row.get("Notes", "") or ""),
+                    "Updated_At": str(row.get("Updated_At", "") or ""),
+                }
+            )
+    preview = target_control_preview(str(date.today()))
+    return {
+        "ok": True,
+        "tolerance_bands": preview.get("tolerance_bands", []),
+        "overrides": overrides,
+        "preview_rows": preview.get("rows", [])[:200],
+    }
+
+
+def _new_expense_id() -> str:
+    import uuid
+
+    return uuid.uuid4().hex[:12]
+
+
+def upsert_karigar_expense(
+    *,
+    date_str: str,
+    karigar_id: str,
+    work_type: str,
+    challan_no: str = "",
+    style: str = "",
+    amount_rs: float,
+    hours: float = 0,
+    notes: str = "",
+    expense_id: str = "",
+) -> dict:
+    """Record non-production work (part change, alter, trainee, etc.) against a challan for payroll."""
+    wt = str(work_type or "").strip()
+    if wt not in KARIGAR_EXPENSE_WORK_TYPES:
+        return {
+            "ok": False,
+            "message": f"Work type must be one of: {', '.join(KARIGAR_EXPENSE_WORK_TYPES)}",
+        }
+    kid = clean_key(karigar_id)
+    if not kid:
+        return {"ok": False, "message": "Karigar_ID is required."}
+    amt = round(float(amount_rs or 0), 2)
+    if amt <= 0 and float(hours or 0) <= 0:
+        return {"ok": False, "message": "Enter Amount_Rs or Hours."}
+    daily = get_daily_rate_for_date(kid, date_str)
+    hourly = round(daily / 8, 2) if daily > 0 else 0.0
+    if amt <= 0 and hours > 0 and hourly > 0:
+        amt = round(float(hours) * hourly, 2)
+    km = get_sheet_df("karigar_master")
+    kname = kid
+    if not km.empty and "Karigar_ID" in km.columns:
+        hit = km[km["Karigar_ID"].astype(str).map(clean_key) == kid]
+        if not hit.empty:
+            kname = str(hit.iloc[0].get("Name", kid))
+    resolved_style = _resolve_canonical_style(style) if style else ""
+    if challan_no and not resolved_style:
+        ch = get_sheet_df("challan_master")
+        if not ch.empty and "Challan_No" in ch.columns:
+            hit = ch[ch["Challan_No"].astype(str).map(clean_key) == clean_key(challan_no)]
+            if not hit.empty:
+                resolved_style = str(hit.iloc[0].get("Style", "")).strip()
+    row = {
+        "Expense_ID": expense_id.strip() or _new_expense_id(),
+        "Date": date_str[:10],
+        "Karigar_ID": kid,
+        "Karigar_Name": kname,
+        "Work_Type": wt,
+        "Challan_No": str(challan_no or "").strip(),
+        "Style": resolved_style,
+        "Hours": round(float(hours or 0), 2),
+        "Amount_Rs": amt,
+        "Daily_Rate_Rs": daily,
+        "Hourly_Rate_Rs": hourly,
+        "Notes": str(notes or "").strip(),
+        "Updated_At": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    df = get_sheet_df("karigar_expenses")
+    if df.empty:
+        df = pd.DataFrame(columns=list(row.keys()))
+    if expense_id:
+        mask = df["Expense_ID"].astype(str) == expense_id.strip()
+        if not mask.any():
+            return {"ok": False, "message": f"Expense {expense_id} not found."}
+        idx = df[mask].index[0]
+        for k, v in row.items():
+            df.at[idx, k] = v
+        msg = "Expense updated."
+    else:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        msg = "Expense added."
+    save_sheet_df("karigar_expenses", df)
+    return {"ok": True, "message": msg, "row": row}
+
+
+def delete_karigar_expense(expense_id: str) -> dict:
+    df = get_sheet_df("karigar_expenses")
+    if df.empty or "Expense_ID" not in df.columns:
+        return {"ok": False, "message": "Expense not found."}
+    mask = df["Expense_ID"].astype(str) == str(expense_id).strip()
+    if not mask.any():
+        return {"ok": False, "message": "Expense not found."}
+    df = df[~mask].reset_index(drop=True)
+    save_sheet_df("karigar_expenses", df)
+    return {"ok": True, "message": "Expense deleted."}
+
+
+def list_karigar_expenses(
+    date_from: str,
+    date_to: str,
+    karigar_id: str | None = None,
+) -> list[dict]:
+    df = get_sheet_df("karigar_expenses")
+    if df.empty:
+        return []
+    work = df.copy()
+    work["Date_dt"] = pd.to_datetime(work["Date"], errors="coerce")
+    work = work[
+        (work["Date_dt"] >= pd.Timestamp(date_from))
+        & (work["Date_dt"] <= pd.Timestamp(date_to))
+    ]
+    if karigar_id:
+        work = work[work["Karigar_ID"].apply(clean_key) == clean_key(karigar_id)]
+    return work.fillna("").to_dict(orient="records")
+
+
 def _karigar_pieces_on_date(
     log_df: pd.DataFrame,
     date_str: str,
@@ -1267,32 +1535,104 @@ def efficiency_report(date_from: str, date_to: str, styles: list[str] | None = N
 
 
 def payroll_report(date_from: str, date_to: str) -> dict:
+    """Attendance pay + other-work expenses (part change, alter, trainee, etc.)."""
     att = get_sheet_df("karigar_attendance")
-    if att.empty:
-        return {"rows": [], "total_payroll": 0}
-    ap = att.copy()
-    ap["Date_dt"] = pd.to_datetime(ap["Date"])
-    ap = ap[(ap["Date_dt"] >= pd.Timestamp(date_from)) & (ap["Date_dt"] <= pd.Timestamp(date_to))]
-    if ap.empty:
-        return {"rows": [], "total_payroll": 0}
-    for c in ["Payable_Hrs", "Normal_Pay", "OT_Hours", "OT_Pay", "Total_Pay"]:
-        if c in ap.columns:
-            ap[c] = safe_num(ap[c])
-    pr = (
-        ap.groupby("E_Code")
-        .agg(
-            Name=("Name", "first"),
-            Days=("Date", "nunique"),
-            Hrs=("Payable_Hrs", "sum"),
-            Normal=("Normal_Pay", "sum"),
-            OT_Hrs=("OT_Hours", "sum"),
-            OT_Pay=("OT_Pay", "sum"),
-            Total=("Total_Pay", "sum"),
-        )
-        .round(2)
-        .reset_index()
+    exp = get_sheet_df("karigar_expenses")
+    if att.empty and exp.empty:
+        return {"rows": [], "total_payroll": 0, "total_attendance": 0, "total_other_work": 0}
+
+    frames: list[pd.DataFrame] = []
+    if not att.empty:
+        ap = att.copy()
+        ap["Date_dt"] = pd.to_datetime(ap["Date"], errors="coerce")
+        ap = ap[(ap["Date_dt"] >= pd.Timestamp(date_from)) & (ap["Date_dt"] <= pd.Timestamp(date_to))]
+        if not ap.empty:
+            for c in ["Payable_Hrs", "Normal_Pay", "OT_Hours", "OT_Pay", "Total_Pay"]:
+                if c in ap.columns:
+                    ap[c] = safe_num(ap[c])
+            pr = (
+                ap.groupby("E_Code")
+                .agg(
+                    Name=("Name", "first"),
+                    Days=("Date", "nunique"),
+                    Hrs=("Payable_Hrs", "sum"),
+                    Normal=("Normal_Pay", "sum"),
+                    OT_Hrs=("OT_Hours", "sum"),
+                    OT_Pay=("OT_Pay", "sum"),
+                    Attendance_Total=("Total_Pay", "sum"),
+                )
+                .round(2)
+                .reset_index()
+            )
+            pr = pr.rename(columns={"E_Code": "Karigar_ID"})
+            frames.append(pr)
+
+    if not exp.empty:
+        ex = exp.copy()
+        ex["Date_dt"] = pd.to_datetime(ex["Date"], errors="coerce")
+        ex = ex[(ex["Date_dt"] >= pd.Timestamp(date_from)) & (ex["Date_dt"] <= pd.Timestamp(date_to))]
+        if not ex.empty:
+            for c in ["Hours", "Amount_Rs"]:
+                if c in ex.columns:
+                    ex[c] = safe_num(ex[c])
+            er = (
+                ex.groupby("Karigar_ID")
+                .agg(
+                    Name=("Karigar_Name", "first"),
+                    Expense_Days=("Date", "nunique"),
+                    Other_Hours=("Hours", "sum"),
+                    Other_Work_Pay=("Amount_Rs", "sum"),
+                )
+                .round(2)
+                .reset_index()
+            )
+            frames.append(er)
+
+    if not frames:
+        return {"rows": [], "total_payroll": 0, "total_attendance": 0, "total_other_work": 0}
+
+    merged = frames[0]
+    for extra in frames[1:]:
+        merged = merged.merge(extra, on="Karigar_ID", how="outer", suffixes=("", "_y"))
+    if "Name_y" in merged.columns:
+        merged["Name"] = merged["Name"].combine_first(merged["Name_y"])
+        merged = merged.drop(columns=["Name_y"], errors="ignore")
+    merged = merged.fillna(0)
+    for col in ("Days", "Hrs", "Normal", "OT_Hrs", "OT_Pay", "Attendance_Total", "Expense_Days", "Other_Hours", "Other_Work_Pay"):
+        if col not in merged.columns:
+            merged[col] = 0
+    merged["Days"] = merged[["Days", "Expense_Days"]].max(axis=1)
+    merged["Total_Payroll"] = (
+        safe_num(merged["Attendance_Total"]) + safe_num(merged["Other_Work_Pay"])
+    ).round(2)
+    merged = merged.rename(
+        columns={
+            "Attendance_Total": "Attendance_Pay",
+            "OT_Pay": "OT_Pay",
+            "Normal": "Normal",
+            "Total_Payroll": "Total",
+        }
     )
-    return {"rows": pr.to_dict(orient="records"), "total_payroll": float(pr["Total"].sum())}
+    out_cols = [
+        "Karigar_ID",
+        "Name",
+        "Days",
+        "Hrs",
+        "Normal",
+        "OT_Hrs",
+        "OT_Pay",
+        "Attendance_Pay",
+        "Other_Hours",
+        "Other_Work_Pay",
+        "Total",
+    ]
+    rows = merged[[c for c in out_cols if c in merged.columns]].fillna("").to_dict(orient="records")
+    return {
+        "rows": rows,
+        "total_payroll": float(safe_num(merged["Total"]).sum()),
+        "total_attendance": float(safe_num(merged.get("Attendance_Pay", 0)).sum()),
+        "total_other_work": float(safe_num(merged.get("Other_Work_Pay", 0)).sum()),
+    }
 
 
 def export_all_zip_bytes() -> bytes:
@@ -1795,6 +2135,7 @@ MASTER_KEY_COLS: dict[str, list[str]] = {
     "target_ltl_override": ["Style", "Operation", "Karigar_ID"],
     "employee_master": ["E_Code"],
     "challan_master": CHALLAN_KEY_COLS,
+    "karigar_expenses": ["Expense_ID"],
 }
 
 MASTER_EDITABLE_KEYS = frozenset(MASTER_KEY_COLS.keys())

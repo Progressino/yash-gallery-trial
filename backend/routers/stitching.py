@@ -68,11 +68,17 @@ class AttendanceBody(BaseModel):
     ot_multiplier: float = 1.0
 
 
+class PunchPairBody(BaseModel):
+    in_time: str
+    out_time: str = ""
+
+
 class AttendancePatchBody(BaseModel):
     Date: str
     E_Code: str
-    In_Punch: str
-    Out_Punch: str
+    In_Punch: str = ""
+    Out_Punch: str = ""
+    punch_pairs: list[PunchPairBody] = Field(default_factory=list)
     Waive_Lunch_Break: bool = False
     Waive_Tea_Break: bool = False
     Lunch_Break_Minutes: Optional[float] = None
@@ -130,6 +136,28 @@ class LtlOverrideBody(BaseModel):
     Karigar_ID: str
     Manual_LTL: Optional[int] = None
     Notes: str = ""
+    admin_password: str = ""
+
+
+class ProductionDeleteBody(BaseModel):
+    date: str
+    karigar_id: str
+    challan_no: str = ""
+    style: str = ""
+    operation: str = ""
+    admin_password: str = ""
+
+
+class KarigarExpenseBody(BaseModel):
+    Date: str
+    Karigar_ID: str
+    Work_Type: str
+    Challan_No: str = ""
+    Style: str = ""
+    Amount_Rs: float = 0
+    Hours: float = 0
+    Notes: str = ""
+    Expense_ID: str = ""
     admin_password: str = ""
 
 
@@ -214,6 +242,77 @@ def save_entry(body: ProductionEntryBody):
         saved_by=body.saved_by,
         saved_by_name=body.saved_by_name,
     )
+
+
+@router.get("/production-entry/admin/sessions")
+def production_admin_sessions(date: str, karigar_id: str = ""):
+    return {
+        "sessions": svc.list_production_sessions_admin(date, karigar_id or None),
+        "work_types": list(svc.KARIGAR_EXPENSE_WORK_TYPES),
+    }
+
+
+@router.post("/production-entry/admin/delete")
+def production_admin_delete(body: ProductionDeleteBody):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required")
+    out = svc.delete_production_entries(
+        date_str=body.date,
+        karigar_id=body.karigar_id,
+        challan_no=body.challan_no,
+        style=body.style,
+        operation=body.operation,
+    )
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Delete failed"))
+    return out
+
+
+@router.get("/ltl-setup")
+def ltl_setup():
+    return svc.get_ltl_setup_table()
+
+
+@router.get("/expenses")
+def list_expenses(date_from: str = "", date_to: str = "", karigar_id: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return {
+        "rows": svc.list_karigar_expenses(date_from, date_to, karigar_id or None),
+        "work_types": list(svc.KARIGAR_EXPENSE_WORK_TYPES),
+    }
+
+
+@router.post("/expenses")
+def upsert_expense(body: KarigarExpenseBody):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required")
+    out = svc.upsert_karigar_expense(
+        date_str=body.Date,
+        karigar_id=body.Karigar_ID,
+        work_type=body.Work_Type,
+        challan_no=body.Challan_No,
+        style=body.Style,
+        amount_rs=body.Amount_Rs,
+        hours=body.Hours,
+        notes=body.Notes,
+        expense_id=body.Expense_ID,
+    )
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("message", "Save failed"))
+    return out
+
+
+@router.delete("/expenses/{expense_id}")
+def remove_expense(expense_id: str, admin_password: str = ""):
+    if not verify_admin_password(admin_password):
+        raise HTTPException(403, "Admin password required")
+    out = svc.delete_karigar_expense(expense_id)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Not found"))
+    return out
 
 
 @router.get("/target-control/preview")
@@ -400,11 +499,18 @@ def patch_karigar_attendance(body: AttendancePatchBody):
     from ..services import karigar_attendance as att_svc
 
     try:
+        pairs = None
+        if body.punch_pairs:
+            parsed = att_svc.punch_pairs_from_request(
+                [{"in_time": p.in_time, "out_time": p.out_time} for p in body.punch_pairs]
+            )
+            pairs = parsed or None
         return att_svc.update_karigar_attendance_row(
             on_date=body.Date,
             e_code=body.E_Code,
             in_punch=body.In_Punch,
             out_punch=body.Out_Punch,
+            punch_pairs=pairs,
             waive_lunch_break=body.Waive_Lunch_Break,
             waive_tea_break=body.Waive_Tea_Break,
             lunch_break_minutes=body.Lunch_Break_Minutes,

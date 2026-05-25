@@ -20,6 +20,8 @@ type TabId =
   | 'dashboard'
   | 'production'
   | 'target_control'
+  | 'ltl_setup'
+  | 'expenses'
   | 'challan'
   | 'style'
   | 'efficiency'
@@ -37,6 +39,8 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '🏠 Dashboard' },
   { id: 'production', label: '📋 Production Entry' },
   { id: 'target_control', label: '🎯 Target Control' },
+  { id: 'ltl_setup', label: '📐 LTL Setup' },
+  { id: 'expenses', label: '💸 Karigar Expenses' },
   { id: 'challan', label: '🧾 Challans' },
   { id: 'style', label: '💎 Style Costing' },
   { id: 'efficiency', label: '📊 Efficiency' },
@@ -154,6 +158,8 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
       {!karigarOnly && tab === 'target_control' && (
         <TargetControlTab admin={admin} onFlash={flash} />
       )}
+      {!karigarOnly && tab === 'ltl_setup' && <LtlSetupTab admin={admin} onFlash={flash} />}
+      {!karigarOnly && tab === 'expenses' && <KarigarExpensesTab admin={admin} onFlash={flash} />}
       {!karigarOnly && tab === 'challan' && <ChallanTab onFlash={flash} />}
       {!karigarOnly && tab === 'style' && <StyleCostingTab />}
       {!karigarOnly && tab === 'efficiency' && <EfficiencyTab />}
@@ -1233,6 +1239,24 @@ function ProductionTab({
         </div>
       )}
 
+      {admin.unlocked && !karigarOnly && (
+        <AdminProductionPanel
+          entryDate={entryDate}
+          karigarId={karigarId}
+          admin={admin}
+          onEdit={row => {
+            setEntryDate(String(row.Date || entryDate))
+            setKarigarId(String(row.Karigar_ID || ''))
+            setChallanNo(String(row.Challan_No || ''))
+            setStyle(String(row.Style || ''))
+          }}
+          onDeleted={() => {
+            void refetchReports()
+            qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })
+          }}
+        />
+      )}
+
       {(entryReports?.recent_saves?.length > 0 || entryReports?.history?.length > 0) && (
         <ReportTableSection
           title={karigarId ? "Today's saves — this karigar" : "Today's saves"}
@@ -1891,6 +1915,18 @@ function PayrollTab() {
     queryFn: () => api.get('/stitching/payroll', { params: { date_from: from, date_to: to } }).then(r => r.data),
     enabled: false,
   })
+  const payrollCols = [
+    'Karigar_ID',
+    'Name',
+    'Days',
+    'Hrs',
+    'Normal',
+    'OT_Pay',
+    'Attendance_Pay',
+    'Other_Hours',
+    'Other_Work_Pay',
+    'Total',
+  ]
   return (
     <div className="space-y-4">
       <div className="flex gap-2 items-end">
@@ -1907,13 +1943,649 @@ function PayrollTab() {
       {isFetching && <p className="text-sm text-gray-500">Calculating…</p>}
       {data && (
         <>
-          <p className="text-lg font-bold text-[#2c5aa0]">Total payroll: ₹{Number(data.total_payroll).toLocaleString()}</p>
-          <DataTable rows={data.rows ?? []} cols={['E_Code', 'Name', 'Days', 'Hrs', 'Normal', 'OT_Pay', 'Total']} />
+          <div className="flex flex-wrap gap-4 text-sm">
+            <p className="text-lg font-bold text-[#2c5aa0]">
+              Total payroll: ₹{Number(data.total_payroll).toLocaleString()}
+            </p>
+            {data.total_attendance != null && (
+              <p className="text-gray-600">Attendance: ₹{Number(data.total_attendance).toLocaleString()}</p>
+            )}
+            {data.total_other_work != null && (
+              <p className="text-gray-600">Other work: ₹{Number(data.total_other_work).toLocaleString()}</p>
+            )}
+          </div>
+          <p className="text-xs text-gray-500">
+            Includes attendance pay plus karigar expenses (part change, alter, trainee, etc.) from the Karigar Expenses tab.
+          </p>
+          <DataTable rows={data.rows ?? []} cols={payrollCols} />
         </>
       )}
     </div>
   )
 }
+
+type ProductionSessionRow = {
+  Date: string
+  Karigar_ID: string
+  Karigar_Name: string
+  Challan_No: string
+  Style: string
+  Operation: string
+  Total_Pieces: number
+}
+
+function AdminProductionPanel({
+  entryDate,
+  karigarId,
+  admin,
+  onEdit,
+  onDeleted,
+}: {
+  entryDate: string
+  karigarId: string
+  admin: AdminApi
+  onEdit: (row: ProductionSessionRow) => void
+  onDeleted: () => void
+}) {
+  const [busy, setBusy] = useState('')
+  const { data, refetch } = useQuery({
+    queryKey: ['stitching-admin-sessions', entryDate, karigarId],
+    queryFn: () =>
+      api
+        .get('/stitching/production-entry/admin/sessions', {
+          params: { date: entryDate, karigar_id: karigarId || undefined },
+        })
+        .then(r => r.data),
+    enabled: admin.unlocked,
+  })
+  const sessions = (data?.sessions ?? []) as ProductionSessionRow[]
+
+  const doDelete = async (row: ProductionSessionRow, scope: 'operation' | 'session') => {
+    const pw = admin.adminPassword()
+    if (!pw) {
+      alert('Unlock admin first')
+      return
+    }
+    const label =
+      scope === 'operation'
+        ? `${row.Operation} on ${row.Challan_No}`
+        : `all operations on challan ${row.Challan_No} / ${row.Style}`
+    if (!window.confirm(`Delete ${label} for ${row.Karigar_Name}? This removes it from all four production reports.`)) {
+      return
+    }
+    const key = `${row.Karigar_ID}-${row.Challan_No}-${scope}`
+    setBusy(key)
+    try {
+      await api.post('/stitching/production-entry/admin/delete', {
+        date: row.Date || entryDate,
+        karigar_id: row.Karigar_ID,
+        challan_no: row.Challan_No,
+        style: row.Style,
+        operation: scope === 'operation' ? row.Operation : '',
+        admin_password: pw,
+      })
+      await refetch()
+      onDeleted()
+    } catch (e: unknown) {
+      alert(axios.isAxiosError(e) ? String(e.response?.data?.detail || 'Delete failed') : 'Delete failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <Section title="Admin — edit or delete production (all reports)">
+      <p className="text-xs text-gray-600 mb-2">
+        Deleting here removes rows from production log — history, Report 1, and both Report 2 views update together.
+      </p>
+      {!sessions.length ? (
+        <p className="text-sm text-gray-400">No production rows for this date{karigarId ? ' / karigar' : ''}.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50 border-b">
+              <tr>
+                <th className="text-left px-2 py-2">Karigar</th>
+                <th className="text-left px-2 py-2">Challan</th>
+                <th className="text-left px-2 py-2">Style</th>
+                <th className="text-left px-2 py-2">Operation</th>
+                <th className="text-right px-2 py-2">Pcs</th>
+                <th className="text-right px-2 py-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.map((row, i) => {
+                const key = `${row.Karigar_ID}-${row.Challan_No}-${row.Operation}-${i}`
+                return (
+                  <tr key={key} className="border-b border-gray-50">
+                    <td className="px-2 py-1.5">{row.Karigar_Name || row.Karigar_ID}</td>
+                    <td className="px-2 py-1.5">{row.Challan_No}</td>
+                    <td className="px-2 py-1.5">{row.Style}</td>
+                    <td className="px-2 py-1.5">{row.Operation}</td>
+                    <td className="px-2 py-1.5 text-right">{row.Total_Pieces}</td>
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap space-x-1">
+                      <button
+                        type="button"
+                        className="px-2 py-0.5 rounded border text-[#002B5B]"
+                        onClick={() => onEdit(row)}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy === key}
+                        className="px-2 py-0.5 rounded border text-amber-800"
+                        onClick={() => void doDelete(row, 'operation')}
+                      >
+                        Del op
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy === key}
+                        className="px-2 py-0.5 rounded border text-red-700"
+                        onClick={() => void doDelete(row, 'session')}
+                      >
+                        Del session
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  )
+}
+
+function LtlSetupTab({
+  admin,
+  onFlash,
+}: {
+  admin: AdminApi
+  onFlash: (type: 'ok' | 'err', text: string) => void
+}) {
+  const qc = useQueryClient()
+  const [style, setStyle] = useState('')
+  const [operation, setOperation] = useState('')
+  const [karigarId, setKarigarId] = useState('')
+  const [manualLtl, setManualLtl] = useState('')
+  const [notes, setNotes] = useState('')
+
+  const { data: setup, refetch } = useQuery({
+    queryKey: ['stitching-ltl-setup'],
+    queryFn: () => api.get('/stitching/ltl-setup').then(r => r.data),
+  })
+
+  const { data: styleSheet } = useQuery({
+    queryKey: ['stitching-sheet', 'style_master'],
+    queryFn: () => api.get('/stitching/sheets/style_master').then(r => r.data),
+  })
+  const { data: karSheet } = useQuery({
+    queryKey: ['stitching-sheet', 'karigar_master'],
+    queryFn: () => api.get('/stitching/sheets/karigar_master').then(r => r.data),
+  })
+
+  const styles = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of (styleSheet?.rows ?? []) as { Style: string }[]) {
+      if (r.Style) s.add(String(r.Style))
+    }
+    return [...s].sort()
+  }, [styleSheet])
+
+  const operations = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of (styleSheet?.rows ?? []) as { Style: string; Operation: string }[]) {
+      if (!style || r.Style === style) if (r.Operation) s.add(String(r.Operation))
+    }
+    return [...s].sort()
+  }, [styleSheet, style])
+
+  const saveOverride = async () => {
+    const pw = admin.adminPassword()
+    if (!pw) {
+      onFlash('err', 'Unlock admin to set manual LTL')
+      return
+    }
+    if (!style || !operation || !karigarId) {
+      onFlash('err', 'Style, operation, and karigar are required')
+      return
+    }
+    const manual = manualLtl === '' ? null : Math.max(0, parseInt(manualLtl, 10) || 0)
+    try {
+      const { data } = await api.put('/stitching/target-control/override', {
+        Style: style,
+        Operation: operation,
+        Karigar_ID: karigarId,
+        Manual_LTL: manual,
+        Notes: notes,
+        admin_password: pw,
+      })
+      onFlash('ok', data.message || 'LTL override saved')
+      setManualLtl('')
+      setNotes('')
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['stitching-pe-reports'] })
+      qc.invalidateQueries({ queryKey: ['stitching-target-control'] })
+    } catch (e: unknown) {
+      onFlash('err', axios.isAxiosError(e) ? String(e.response?.data?.detail || 'Save failed') : 'Save failed')
+    }
+  }
+
+  const overrides = (setup?.overrides ?? []) as Record<string, unknown>[]
+
+  return (
+    <div className="space-y-4">
+      <Section title="LTL Setup — manual overrides">
+        <p className="text-xs text-gray-600 mb-3">
+          Set manual LTL per style / operation / karigar. Production entry and costing use the applied LTL automatically.
+          Clear manual LTL (leave blank) to revert to formula.
+        </p>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+          <label>
+            Style
+            <select className="block w-full border rounded mt-1 px-2 py-1.5" value={style} onChange={e => setStyle(e.target.value)}>
+              <option value="">—</option>
+              {styles.map(s => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Operation
+            <select
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={operation}
+              onChange={e => setOperation(e.target.value)}
+            >
+              <option value="">—</option>
+              {operations.map(o => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Karigar
+            <select
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={karigarId}
+              onChange={e => setKarigarId(e.target.value)}
+            >
+              <option value="">—</option>
+              {((karSheet?.rows ?? []) as { Karigar_ID: string; Name: string }[]).map(k => (
+                <option key={k.Karigar_ID} value={k.Karigar_ID}>
+                  {k.Name || k.Karigar_ID}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Manual LTL (pcs/hr)
+            <input
+              type="number"
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={manualLtl}
+              onChange={e => setManualLtl(e.target.value)}
+              placeholder="Blank = formula only"
+            />
+          </label>
+          <label className="sm:col-span-2">
+            Notes
+            <input
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+            />
+          </label>
+        </div>
+        <button
+          type="button"
+          onClick={() => void saveOverride()}
+          className="mt-3 px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm"
+        >
+          Save LTL override
+        </button>
+      </Section>
+
+      {setup?.tolerance_bands?.length > 0 && (
+        <p className="text-xs text-gray-600 px-1">
+          Tolerance bands (by daily rate):{' '}
+          {(setup.tolerance_bands as { from_rs: number; to_rs: number; tolerance_pct: number }[])
+            .map(b => `₹${b.from_rs}–${b.to_rs}: ${b.tolerance_pct}%`)
+            .join(' · ')}
+        </p>
+      )}
+
+      <Section title="Saved manual LTL overrides">
+        <DataTable
+          rows={overrides}
+          cols={[
+            'Style',
+            'Operation',
+            'Karigar_ID',
+            'Manual_LTL',
+            'Formula_LTL',
+            'Final_Applied_LTL',
+            'LTL_Source',
+            'Notes',
+          ]}
+        />
+      </Section>
+    </div>
+  )
+}
+
+function KarigarExpensesTab({
+  admin,
+  onFlash,
+}: {
+  admin: AdminApi
+  onFlash: (type: 'ok' | 'err', text: string) => void
+}) {
+  const qc = useQueryClient()
+  const [from, setFrom] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 6)
+    return d.toISOString().slice(0, 10)
+  })
+  const [to, setTo] = useState(todayStr())
+  const [form, setForm] = useState({
+    Date: todayStr(),
+    Karigar_ID: '',
+    Work_Type: 'Part Change',
+    Challan_No: '',
+    Style: '',
+    Hours: '',
+    Amount_Rs: '',
+    Notes: '',
+    Expense_ID: '',
+  })
+
+  const { data: karSheet } = useQuery({
+    queryKey: ['stitching-sheet', 'karigar_master'],
+    queryFn: () => api.get('/stitching/sheets/karigar_master').then(r => r.data),
+  })
+  const { data: challanSheet } = useQuery({
+    queryKey: ['stitching-sheet', 'challan_master'],
+    queryFn: () => api.get('/stitching/sheets/challan_master').then(r => r.data),
+  })
+
+  const { data: expenseData, refetch } = useQuery({
+    queryKey: ['stitching-expenses', from, to],
+    queryFn: () =>
+      api.get('/stitching/expenses', { params: { date_from: from, date_to: to } }).then(r => r.data),
+  })
+
+  const workTypes = (expenseData?.work_types ?? []) as string[]
+  const rows = (expenseData?.rows ?? []) as Record<string, unknown>[]
+
+  const challans = useMemo(() => {
+    return ((challanSheet?.rows ?? []) as { Challan_No: string; Style: string }[]).map(c => ({
+      no: String(c.Challan_No),
+      style: String(c.Style || ''),
+    }))
+  }, [challanSheet])
+
+  const saveExpense = async () => {
+    const pw = admin.adminPassword()
+    if (!pw) {
+      onFlash('err', 'Unlock admin to add expenses')
+      return
+    }
+    if (!form.Karigar_ID) {
+      onFlash('err', 'Select a karigar')
+      return
+    }
+    try {
+      const { data } = await api.post('/stitching/expenses', {
+        ...form,
+        Hours: parseFloat(form.Hours) || 0,
+        Amount_Rs: parseFloat(form.Amount_Rs) || 0,
+        admin_password: pw,
+      })
+      onFlash('ok', data.message || 'Saved')
+      setForm(f => ({
+        ...f,
+        Hours: '',
+        Amount_Rs: '',
+        Notes: '',
+        Expense_ID: '',
+        Challan_No: '',
+        Style: '',
+      }))
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
+    } catch (e: unknown) {
+      onFlash('err', axios.isAxiosError(e) ? String(e.response?.data?.detail || 'Save failed') : 'Save failed')
+    }
+  }
+
+  const editRow = (r: Record<string, unknown>) => {
+    setForm({
+      Date: String(r.Date || todayStr()),
+      Karigar_ID: String(r.Karigar_ID || ''),
+      Work_Type: String(r.Work_Type || 'Other'),
+      Challan_No: String(r.Challan_No || ''),
+      Style: String(r.Style || ''),
+      Hours: String(r.Hours ?? ''),
+      Amount_Rs: String(r.Amount_Rs ?? ''),
+      Notes: String(r.Notes || ''),
+      Expense_ID: String(r.Expense_ID || ''),
+    })
+  }
+
+  const removeExpense = async (expenseId: string) => {
+    const pw = admin.adminPassword()
+    if (!pw) return
+    if (!window.confirm('Delete this expense?')) return
+    try {
+      await api.delete(`/stitching/expenses/${expenseId}`, { params: { admin_password: pw } })
+      onFlash('ok', 'Expense deleted')
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
+    } catch {
+      onFlash('err', 'Delete failed')
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Section title="Karigar expenses — other work on challans">
+        <p className="text-xs text-gray-600 mb-3">
+          Record part change, alter, trainee, or other tasks tied to a challan. Amounts roll into Payroll with attendance pay.
+        </p>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+          <label>
+            Date
+            <input
+              type="date"
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Date}
+              onChange={e => setForm(f => ({ ...f, Date: e.target.value }))}
+            />
+          </label>
+          <label>
+            Karigar
+            <select
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Karigar_ID}
+              onChange={e => setForm(f => ({ ...f, Karigar_ID: e.target.value }))}
+            >
+              <option value="">—</option>
+              {((karSheet?.rows ?? []) as { Karigar_ID: string; Name: string }[]).map(k => (
+                <option key={k.Karigar_ID} value={k.Karigar_ID}>
+                  {k.Name || k.Karigar_ID}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Work type
+            <select
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Work_Type}
+              onChange={e => setForm(f => ({ ...f, Work_Type: e.target.value }))}
+            >
+              {(workTypes.length ? workTypes : ['Part Change', 'Alter', 'Trainee', 'Other Task']).map(w => (
+                <option key={w} value={w}>
+                  {w}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Challan
+            <select
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Challan_No}
+              onChange={e => {
+                const no = e.target.value
+                const hit = challans.find(c => c.no === no)
+                setForm(f => ({ ...f, Challan_No: no, Style: hit?.style || f.Style }))
+              }}
+            >
+              <option value="">— optional —</option>
+              {challans.map(c => (
+                <option key={c.no} value={c.no}>
+                  {c.no} · {c.style}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Style
+            <input
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Style}
+              onChange={e => setForm(f => ({ ...f, Style: e.target.value }))}
+            />
+          </label>
+          <label>
+            Hours
+            <input
+              type="number"
+              step="0.5"
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Hours}
+              onChange={e => setForm(f => ({ ...f, Hours: e.target.value }))}
+            />
+          </label>
+          <label>
+            Amount ₹
+            <input
+              type="number"
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Amount_Rs}
+              onChange={e => setForm(f => ({ ...f, Amount_Rs: e.target.value }))}
+            />
+          </label>
+          <label className="sm:col-span-2">
+            Notes
+            <input
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Notes}
+              onChange={e => setForm(f => ({ ...f, Notes: e.target.value }))}
+            />
+          </label>
+        </div>
+        <button
+          type="button"
+          onClick={() => void saveExpense()}
+          className="mt-3 px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm"
+        >
+          {form.Expense_ID ? 'Update expense' : 'Add expense'}
+        </button>
+        {form.Expense_ID && (
+          <button
+            type="button"
+            className="mt-3 ml-2 px-4 py-2 border rounded-lg text-sm"
+            onClick={() =>
+              setForm({
+                Date: todayStr(),
+                Karigar_ID: '',
+                Work_Type: 'Part Change',
+                Challan_No: '',
+                Style: '',
+                Hours: '',
+                Amount_Rs: '',
+                Notes: '',
+                Expense_ID: '',
+              })
+            }
+          >
+            Cancel edit
+          </button>
+        )}
+      </Section>
+
+      <Section title="Expense list">
+        <div className="flex gap-2 items-end mb-3 text-xs">
+          <label>
+            From
+            <input type="date" className="block border rounded mt-1 px-2 py-1" value={from} onChange={e => setFrom(e.target.value)} />
+          </label>
+          <label>
+            To
+            <input type="date" className="block border rounded mt-1 px-2 py-1" value={to} onChange={e => setTo(e.target.value)} />
+          </label>
+          <button type="button" onClick={() => void refetch()} className="px-3 py-1.5 bg-[#002B5B] text-white rounded-lg">
+            Refresh
+          </button>
+        </div>
+        <div className="overflow-x-auto max-h-96">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-gray-50 border-b">
+              <tr>
+                {['Date', 'Karigar_Name', 'Work_Type', 'Challan_No', 'Style', 'Hours', 'Amount_Rs', 'Notes', ''].map(
+                  h => (
+                    <th key={h || 'act'} className="text-left px-2 py-2 whitespace-nowrap">
+                      {h || 'Actions'}
+                    </th>
+                  ),
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={String(r.Expense_ID || i)} className="border-b">
+                  <td className="px-2 py-1">{String(r.Date)}</td>
+                  <td className="px-2 py-1">{String(r.Karigar_Name || r.Karigar_ID)}</td>
+                  <td className="px-2 py-1">{String(r.Work_Type)}</td>
+                  <td className="px-2 py-1">{String(r.Challan_No)}</td>
+                  <td className="px-2 py-1">{String(r.Style)}</td>
+                  <td className="px-2 py-1">{String(r.Hours)}</td>
+                  <td className="px-2 py-1">₹{String(r.Amount_Rs)}</td>
+                  <td className="px-2 py-1 max-w-[120px] truncate">{String(r.Notes)}</td>
+                  <td className="px-2 py-1 whitespace-nowrap">
+                    <button type="button" className="text-[#002B5B] mr-2" onClick={() => editRow(r)}>
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="text-red-700"
+                      onClick={() => void removeExpense(String(r.Expense_ID))}
+                    >
+                      Del
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!rows.length && <p className="text-sm text-gray-400 py-4 text-center">No expenses in range</p>}
+        </div>
+      </Section>
+    </div>
+  )
+}
+
+type PunchPairDraft = { in_time: string; out_time: string }
 
 type MissPunchDraft = {
   Date: string
@@ -1921,10 +2593,28 @@ type MissPunchDraft = {
   Name: string
   In_Punch: string
   Out_Punch: string
+  punch_pairs: PunchPairDraft[]
   Waive_Lunch_Break: boolean
   Waive_Tea_Break: boolean
   Lunch_Break_Minutes: string
   Tea_Break_Minutes: string
+}
+
+function parsePunchPairsFromRow(r: Record<string, unknown>): PunchPairDraft[] {
+  const raw = r.Punch_Pairs
+  if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+    try {
+      const arr = JSON.parse(raw) as [string, string][]
+      if (Array.isArray(arr) && arr.length) {
+        return arr.map(([inn, out]) => ({ in_time: inn || '', out_time: out || '' }))
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  const inn = String(r.In_Punch ?? '09:00')
+  const out = String(r.Out_Punch ?? '18:00')
+  return [{ in_time: inn, out_time: out }]
 }
 
 function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
@@ -1959,17 +2649,22 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
     },
   })
   const patchMissMut = useMutation({
-    mutationFn: (body: MissPunchDraft) =>
-      api.patch('/stitching/attendance/karigar', {
+    mutationFn: (body: MissPunchDraft) => {
+      const pairs = body.punch_pairs.filter(p => p.in_time.trim())
+      const first = pairs[0]
+      const last = pairs[pairs.length - 1]
+      return api.patch('/stitching/attendance/karigar', {
         Date: body.Date,
         E_Code: body.E_Code,
-        In_Punch: body.In_Punch,
-        Out_Punch: body.Out_Punch,
+        In_Punch: first?.in_time ?? body.In_Punch,
+        Out_Punch: last?.out_time ?? body.Out_Punch,
+        punch_pairs: pairs,
         Waive_Lunch_Break: body.Waive_Lunch_Break,
         Waive_Tea_Break: body.Waive_Tea_Break,
         Lunch_Break_Minutes: body.Lunch_Break_Minutes.trim() === '' ? null : Number(body.Lunch_Break_Minutes),
         Tea_Break_Minutes: body.Tea_Break_Minutes.trim() === '' ? null : Number(body.Tea_Break_Minutes),
-      }),
+      })
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
       qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
@@ -2007,14 +2702,16 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   const missPunchKey = (r: Record<string, unknown>) => `${r.Date}::${r.E_Code}`
   const openMissPunch = (r: Record<string, unknown>) => {
     const key = missPunchKey(r)
+    const pairs = parsePunchPairsFromRow(r)
     setMissDrafts(d => ({
       ...d,
       [key]: d[key] ?? {
         Date: String(r.Date ?? ''),
         E_Code: String(r.E_Code ?? ''),
         Name: String(r.Name ?? ''),
-        In_Punch: String(r.In_Punch ?? '09:00'),
-        Out_Punch: String(r.Out_Punch ?? '18:00'),
+        In_Punch: pairs[0]?.in_time ?? '09:00',
+        Out_Punch: pairs[pairs.length - 1]?.out_time ?? '18:00',
+        punch_pairs: pairs,
         Waive_Lunch_Break: false,
         Waive_Tea_Break: false,
         Lunch_Break_Minutes: '',
@@ -2028,9 +2725,12 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
     'Name',
     'Status',
     'Needs_Miss_Punch',
+    'Punch_Count',
     'In_Punch',
     'Out_Punch',
     'Payable_Hrs',
+    'Late_Deduction_Hrs',
+    'Late_Deduction_Rs',
     'OT_Hours',
     'Hourly_Rate_Rs',
     'Normal_Pay',
@@ -2045,7 +2745,9 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
           <ol className="list-decimal list-inside space-y-0.5">
             <li>Upload the biometric IN/OUT sheet (matched by <strong>E. Code</strong>).</li>
             <li>Fix any <strong>miss punch</strong> rows (single IN only) and set break time if needed.</li>
-            <li>Payroll is calculated in the records below (8h regular + OT after 18:00 at daily÷8).</li>
+            <li>
+              Payroll uses 8h regular pay minus <strong>late minutes</strong> (after 09:00 in) and break deductions, plus OT after 18:00.
+            </li>
             <li>Use <strong>Performance</strong> tab to find karigars in payroll but not in production costing.</li>
           </ol>
         </div>
@@ -2055,7 +2757,8 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
           <p className="text-xs text-gray-500 mb-2">
             Upload the daily <strong>Daily Attendance IN/OUT Punch Report</strong> (.xls / .xlsx). Workers are matched by{' '}
             <strong>E. Code</strong> to Master Data. Re-uploading the same day replaces existing rows. Regular 09:00–18:00 (8h pay),
-            lunch 13:00–13:30, tea 16:00–16:15. OT after 18:00 is paid at the same hourly rate (daily÷8), rounded up to whole hours
+            lunch 13:00–13:30 (30 min), tea 11:00–11:15 and 16:00–16:15 (15 min each). All IN/OUT pairs on the sheet are summed.
+            OT after 18:00 is paid at the same hourly rate (daily÷8), rounded up to whole hours
             (e.g. out 20:59 → 3h OT).
           </p>
           <input
@@ -2092,8 +2795,9 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
       {type === 'karigar' && needsMissPunch.length > 0 && (
         <Section title={`Miss punch / break fixes (${needsMissPunch.length})`}>
           <p className="text-xs text-gray-500 mb-3">
-            These rows need a valid <strong>Out</strong> punch (or manual times). Check &quot;Took lunch/tea&quot; if break was taken;
-            or enter custom break minutes to deduct.
+            These rows need a valid <strong>Out</strong> for every <strong>In</strong> (e.g. employee 921 with multiple segments).
+            Standard breaks: <strong>30 min lunch</strong> + <strong>2×15 min tea</strong> (deducted if not present during break windows).
+            Check &quot;Took lunch/tea&quot; if breaks were taken; or enter custom minutes.
           </p>
           <div className="space-y-3">
             {needsMissPunch.slice(0, 40).map(r => {
@@ -2113,16 +2817,61 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
                   </div>
                   {draft && (
                     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                      <label>
-                        In
-                        <input className="w-full border rounded mt-1 px-2 py-1" value={draft.In_Punch}
-                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, In_Punch: e.target.value } }))} />
-                      </label>
-                      <label>
-                        Out
-                        <input className="w-full border rounded mt-1 px-2 py-1" value={draft.Out_Punch}
-                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Out_Punch: e.target.value } }))} />
-                      </label>
+                      <div className="sm:col-span-2 lg:col-span-4 space-y-2">
+                        <p className="font-medium text-gray-700">IN / OUT pairs (from biometric)</p>
+                        {draft.punch_pairs.map((pair, idx) => (
+                          <div key={idx} className="flex flex-wrap gap-2 items-end">
+                            <label className="flex-1 min-w-[100px]">
+                              In {idx + 1}
+                              <input
+                                className="w-full border rounded mt-1 px-2 py-1"
+                                value={pair.in_time}
+                                onChange={e => {
+                                  const next = [...draft.punch_pairs]
+                                  next[idx] = { ...pair, in_time: e.target.value }
+                                  setMissDrafts(d => ({ ...d, [key]: { ...draft, punch_pairs: next } }))
+                                }}
+                              />
+                            </label>
+                            <label className="flex-1 min-w-[100px]">
+                              Out {idx + 1}
+                              <input
+                                className="w-full border rounded mt-1 px-2 py-1"
+                                value={pair.out_time}
+                                onChange={e => {
+                                  const next = [...draft.punch_pairs]
+                                  next[idx] = { ...pair, out_time: e.target.value }
+                                  setMissDrafts(d => ({ ...d, [key]: { ...draft, punch_pairs: next } }))
+                                }}
+                              />
+                            </label>
+                            {draft.punch_pairs.length > 1 && (
+                              <button
+                                type="button"
+                                className="text-red-700 text-xs pb-1"
+                                onClick={() => {
+                                  const next = draft.punch_pairs.filter((_, i) => i !== idx)
+                                  setMissDrafts(d => ({ ...d, [key]: { ...draft, punch_pairs: next.length ? next : [{ in_time: '', out_time: '' }] } }))
+                                }}
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          className="text-xs text-[#002B5B] underline"
+                          onClick={() =>
+                            setMissDrafts(d => ({
+                              ...d,
+                              [key]: { ...draft, punch_pairs: [...draft.punch_pairs, { in_time: '', out_time: '' }] },
+                            }))
+                          }
+                        >
+                          + Add punch pair
+                        </button>
+                      </div>
                       <label className="flex items-end gap-2 pb-1">
                         <input type="checkbox" checked={draft.Waive_Lunch_Break}
                           onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Waive_Lunch_Break: e.target.checked } }))} />
@@ -2131,16 +2880,16 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
                       <label className="flex items-end gap-2 pb-1">
                         <input type="checkbox" checked={draft.Waive_Tea_Break}
                           onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Waive_Tea_Break: e.target.checked } }))} />
-                        Took tea (no 15m deduct)
+                        Took both teas (no 2×15m deduct)
                       </label>
                       <label>
                         Custom lunch break (min)
-                        <input className="w-full border rounded mt-1 px-2 py-1" placeholder="30" value={draft.Lunch_Break_Minutes}
+                        <input className="w-full border rounded mt-1 px-2 py-1" placeholder="30 default" value={draft.Lunch_Break_Minutes}
                           onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Lunch_Break_Minutes: e.target.value } }))} />
                       </label>
                       <label>
-                        Custom tea break (min)
-                        <input className="w-full border rounded mt-1 px-2 py-1" placeholder="15" value={draft.Tea_Break_Minutes}
+                        Custom tea total (min)
+                        <input className="w-full border rounded mt-1 px-2 py-1" placeholder="30 = 2×15 default" value={draft.Tea_Break_Minutes}
                           onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Tea_Break_Minutes: e.target.value } }))} />
                       </label>
                       <div className="sm:col-span-2 flex gap-2 items-end">
