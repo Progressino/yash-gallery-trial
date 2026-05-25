@@ -3,6 +3,7 @@ Upload router — all file ingestion endpoints.
 """
 import asyncio
 import gc
+import threading
 import io
 import os
 import re
