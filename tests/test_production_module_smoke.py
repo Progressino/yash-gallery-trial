@@ -413,6 +413,77 @@ def test_jo_auto_creates_bom_issue_note(isolated_module_dbs, client):
     assert any(n["in_number"] == note["in_number"] for n in listed)
 
 
+def test_receive_pieces_per_line_cutting_jo(isolated_module_dbs, client):
+    """Line-level receive on a multi-size cutting JO (cutting challan / Rec button)."""
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-05-22",
+            "so_number": "SO-0006",
+            "sku": "7100YKTEAL-S",
+            "process": "Cutting",
+            "planned_qty": 40,
+            "fabric_code": "P308",
+            "fabric_qty": 100,
+            "lines": [
+                {"sku": "7100YKTEAL-S", "style": "S", "planned_qty": 10},
+                {"sku": "7100YKTEAL-M", "style": "M", "planned_qty": 20},
+                {"sku": "7100YKTEAL-L", "style": "L", "planned_qty": 10},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    jo = client.get("/api/production/orders").json()
+    jo = next(o for o in jo if o["jo_number"] == r.json()["jo_number"])
+    line_s = next(ln for ln in jo["lines"] if ln["style"] == "S")
+    rec = client.post(
+        f"/api/production/orders/{jo['id']}/receive-pieces",
+        json={
+            "received_qty": 10,
+            "process": "Cutting",
+            "sku": line_s["sku"],
+            "jo_line_id": line_s["id"],
+        },
+    )
+    assert rec.status_code == 200, rec.text
+    refreshed = client.get(f"/api/production/orders/{jo['id']}").json()
+    line_after = next(ln for ln in refreshed["lines"] if ln["id"] == line_s["id"])
+    assert line_after["received_qty"] == 10
+    assert line_after["balance_qty"] == 0
+    assert refreshed["received_qty"] == 10
+
+
+def test_init_db_adds_jo_lines_received_qty_column(tmp_path):
+    """Older production DBs lacked jo_lines.received_qty — migration must add it."""
+    import os
+    import sqlite3
+
+    from backend.db import production_db
+
+    legacy_path = str(tmp_path / "legacy_production.db")
+    lconn = sqlite3.connect(legacy_path)
+    lconn.execute(
+        """CREATE TABLE jo_lines (
+        id INTEGER PRIMARY KEY, jo_id INTEGER, sku TEXT, planned_qty INTEGER DEFAULT 0,
+        issued_qty INTEGER DEFAULT 0, rejected_qty INTEGER DEFAULT 0, balance_qty INTEGER DEFAULT 0)"""
+    )
+    lconn.commit()
+    lconn.close()
+
+    saved = production_db._DB
+    production_db._DB = legacy_path
+    try:
+        production_db.init_db()
+        lconn = sqlite3.connect(legacy_path)
+        cols = {r[1] for r in lconn.execute("PRAGMA table_info(jo_lines)").fetchall()}
+        lconn.close()
+        assert "received_qty" in cols
+    finally:
+        production_db._DB = saved
+        if os.path.exists(legacy_path):
+            os.remove(legacy_path)
+
+
 def _seed_parent_with_bom(item_db_path: str, parent_code: str = "STYLE-1"):
     """Insert a parent item with a single-RM default BOM. Returns the parent id."""
     import sqlite3

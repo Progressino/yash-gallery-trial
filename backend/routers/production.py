@@ -449,6 +449,8 @@ def post_receive_pieces(joid: int, body: PieceReceiptIn):
         receive_pieces(joid, body.model_dump())
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Receive failed: {e}")
     return {"ok": True}
 
 @router.post("/orders/{joid}/add-cost")

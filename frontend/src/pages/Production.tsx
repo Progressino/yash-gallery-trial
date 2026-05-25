@@ -1,6 +1,18 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import axios from 'axios'
 import api from '../api/client'
+
+function apiErrorMessage(err: unknown, fallback: string): string {
+  if (!axios.isAxiosError(err)) return fallback
+  const detail = err.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail)) {
+    return detail.map((d: { msg?: string }) => d?.msg || String(d)).join('\n') || fallback
+  }
+  if (err.message) return err.message
+  return fallback
+}
 
 type ModalType = 'issue-fabric' | 'return-fabric' | 'receive' | 'issue-pieces' | 'add-cost' | 'new-jo' | null
 
@@ -573,7 +585,7 @@ export default function Production() {
         alert(`Job order created. Material issue note ${inNum} generated from BOM.`)
       }
     },
-    onError: (e: any) => alert(e.response?.data?.detail || 'Error creating JO'),
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Error creating JO')),
   })
   const updateJOMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/production/orders/${id}`, data),
@@ -582,7 +594,7 @@ export default function Production() {
   const issueFabricMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-fabric`, data),
     onSuccess: () => { invalidateAll(); setModal(null) },
-    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
   })
   const returnFabricMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/return-fabric`, data),
@@ -591,12 +603,12 @@ export default function Production() {
   const receiveMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/receive-pieces`, data),
     onSuccess: () => { invalidateAll(); setModal(null) },
-    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
   })
   const issuePiecesMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-pieces`, data),
     onSuccess: () => { invalidateAll(); setModal(null) },
-    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
   })
   const addCostMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/add-cost`, data),
@@ -605,7 +617,7 @@ export default function Production() {
   const nextProcessMut = useMutation({
     mutationFn: (id: number) => api.post(`/production/orders/${id}/next-process`, {}),
     onSuccess: (res) => { invalidateAll(); alert(`✅ Next process JO created: ${res.data.jo_number} — ${res.data.process}`) },
-    onError: (e: any) => alert(e.response?.data?.detail || 'Error'),
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
   })
 
   const openModal = (type: ModalType, jo: JO, lineId?: number) => {
@@ -1355,7 +1367,18 @@ export default function Production() {
               ))}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => receiveMut.mutate({ id: activeJO.id, data: { ...receiveForm, process: activeJO.process, sku: activeJO.sku, jo_line_id: activeLineId } })}
+              <button onClick={() => {
+                const line = activeLineId ? activeJO.lines.find(l => l.id === activeLineId) : null
+                receiveMut.mutate({
+                  id: activeJO.id,
+                  data: {
+                    ...receiveForm,
+                    process: activeJO.process,
+                    sku: line?.sku || activeJO.sku,
+                    jo_line_id: activeLineId ?? undefined,
+                  },
+                })
+              }}
                 disabled={receiveMut.isPending || !receiveForm.received_qty}
                 className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
                 {receiveMut.isPending ? 'Saving…' : '✅ Confirm Receipt'}

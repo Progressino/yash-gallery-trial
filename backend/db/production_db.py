@@ -226,6 +226,7 @@ def init_db():
         ("job_orders", "updated_at", "TEXT DEFAULT (datetime('now'))"),
         ("jo_lines", "so_number", "TEXT DEFAULT ''"),
         ("jo_lines", "style", "TEXT DEFAULT ''"),
+        ("jo_lines", "received_qty", "INTEGER DEFAULT 0"),
         ("jo_lines", "issued_qty", "INTEGER DEFAULT 0"),
         ("jo_lines", "rejected_qty", "INTEGER DEFAULT 0"),
         ("jo_lines", "balance_qty", "INTEGER DEFAULT 0"),
@@ -323,16 +324,16 @@ def get_all_process_stocks(so_number: str, sku: str) -> dict:
 
 
 def _update_process_stock(conn, so_number: str, sku: str, process: str, qty_in: int = 0, qty_out: int = 0):
+    delta = int(qty_in) - int(qty_out)
     conn.execute("""
         INSERT INTO process_stock(so_number, sku, process, available_qty, total_in, total_out, updated_at)
         VALUES(?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(so_number, sku, process) DO UPDATE SET
-            available_qty = MAX(0, available_qty + ? - ?),
-            total_in = total_in + ?,
-            total_out = total_out + ?,
+            available_qty = MAX(0, available_qty + excluded.available_qty),
+            total_in = total_in + excluded.total_in,
+            total_out = total_out + excluded.total_out,
             updated_at = datetime('now')
-    """, (so_number, sku, process, qty_in - qty_out, qty_in, qty_out,
-          qty_in - qty_out, qty_in, qty_out))
+    """, (so_number, sku, process, delta, int(qty_in), int(qty_out)))
 
 
 # ── Ready to Process Lists ─────────────────────────────────────────────────────
@@ -737,26 +738,48 @@ def receive_pieces(joid: int, data: dict):
         conn.close()
         raise ValueError("JO not found")
     received = int(data.get('received_qty', 0))
+    if received <= 0:
+        conn.close()
+        raise ValueError("Received qty must be greater than 0")
     rejected = int(data.get('rejected_qty', 0))
     jo_line_id = data.get('jo_line_id')
-    process = data.get('process') or jo.get('process','Cutting')
-    so_number = jo.get('so_number','')
-    sku = data.get('sku') or jo.get('sku','')
+    process = data.get('process') or jo.get('process', 'Cutting')
+    so_number = jo.get('so_number', '')
+    sku = data.get('sku') or jo.get('sku', '')
+    if jo_line_id:
+        line = conn.execute(
+            "SELECT id, sku, planned_qty FROM jo_lines WHERE id=? AND jo_id=?",
+            (jo_line_id, joid),
+        ).fetchone()
+        if not line:
+            conn.close()
+            raise ValueError("JO line not found for this job order")
+        line = dict(line)
+        sku = (line.get('sku') or sku).strip()
+        already = conn.execute(
+            "SELECT COALESCE(SUM(received_qty),0) FROM jo_piece_receipts WHERE jo_line_id=?",
+            (jo_line_id,),
+        ).fetchone()[0]
+        balance = int(line.get('planned_qty') or 0) - int(already)
+        if received > balance:
+            conn.close()
+            raise ValueError(f"Cannot receive {received} pcs — only {max(0, balance)} remaining on this line")
     conn.execute("""INSERT INTO jo_piece_receipts(jo_id,jo_line_id,process,so_number,sku,receipt_date,received_qty,rejected_qty,received_by,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (joid, jo_line_id, process, so_number, sku,
          data.get('receipt_date') or datetime.now().strftime('%Y-%m-%d'),
-         received, rejected, data.get('received_by',''), data.get('remarks','')))
+         received, rejected, data.get('received_by', ''), data.get('remarks', '')))
     conn.execute("""UPDATE job_orders SET
         received_qty = COALESCE(received_qty,0) + ?,
         output_qty = COALESCE(output_qty,0) + ?,
+        status = CASE WHEN status='Created' THEN 'In Progress' ELSE status END,
         updated_at = datetime('now') WHERE id=?""", (received, received, joid))
     if jo_line_id:
         conn.execute("""UPDATE jo_lines SET
             received_qty = COALESCE(received_qty,0) + ?,
             rejected_qty = COALESCE(rejected_qty,0) + ?,
             balance_qty = planned_qty - (COALESCE(received_qty,0) + ?)
-            WHERE id=?""", (received, rejected, received, jo_line_id))
+            WHERE id=? AND jo_id=?""", (received, rejected, received, jo_line_id, joid))
     _update_process_stock(conn, so_number, sku, process, qty_in=received)
     conn.commit()
     conn.close()
