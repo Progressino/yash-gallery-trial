@@ -1,6 +1,7 @@
 """Karigar attendance policy, punch parsing, and biometric sheet import."""
 from __future__ import annotations
 
+import math
 import re
 from datetime import date, datetime, time, timedelta
 from io import BytesIO
@@ -122,12 +123,25 @@ def _present_during(intervals: list[tuple[datetime, datetime]], start: datetime,
     return any(_overlap_minutes(s, e, start, end) > 0 for s, e in intervals)
 
 
+def needs_miss_punch(punch_pairs: list[tuple[time, time | None]]) -> bool:
+    """True when biometric row has no usable OUT (or no punches)."""
+    if not punch_pairs:
+        return True
+    if all(tout is None for _, tout in punch_pairs):
+        return True
+    return len(punch_pairs) == 1 and punch_pairs[0][1] is None
+
+
 def calc_salary_from_punches(
     punch_pairs: list[tuple[time, time | None]],
     daily_rate: float,
     *,
     on_date: str | None = None,
     status: str = "P",
+    waive_lunch_break: bool = False,
+    waive_tea_break: bool = False,
+    lunch_break_minutes: float | None = None,
+    tea_break_minutes: float | None = None,
 ) -> dict[str, Any]:
     """
     Apply karigar attendance / OT policy to clock-in/out punches.
@@ -185,14 +199,23 @@ def calc_salary_from_punches(
         intervals, _dt_on(base, TEA_START), _dt_on(base, TEA_END)
     )
 
-    if special_break_penalty:
+    if waive_lunch_break:
+        lunch_penalty = 0.0
+    elif lunch_break_minutes is not None:
+        lunch_penalty = max(0.0, float(lunch_break_minutes))
+    elif special_break_penalty:
         lunch_penalty = 30.0
+    elif not lunch_present:
+        lunch_penalty = 30.0
+
+    if waive_tea_break:
+        tea_penalty = 0.0
+    elif tea_break_minutes is not None:
+        tea_penalty = max(0.0, float(tea_break_minutes))
+    elif special_break_penalty:
         tea_penalty = 15.0
-    else:
-        if not lunch_present:
-            lunch_penalty = 30.0
-        if not tea_present:
-            tea_penalty = 15.0
+    elif not tea_present:
+        tea_penalty = 15.0
 
     payable_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
 
@@ -211,20 +234,22 @@ def calc_salary_from_punches(
     payable_hrs = round(payable_minutes / 60.0, 2)
     normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
 
-    # Overtime: after 18:00, >25 min to qualify, max 3h, 15 min OT break, same hourly rate.
+    # Overtime: after 18:00 until actual out (cap 21:00), same hourly rate as regular (daily/8).
+    # Billable OT hours round up to the next whole hour (e.g. 18:00–20:59 → 3h × hourly).
+    last_out_dt = max(e for _, e in intervals)
     ot_start = _dt_on(base, OT_START)
-    ot_end = _dt_on(base, OT_END)
+    ot_end_cap = min(last_out_dt, _dt_on(base, OT_END))
     ot_minutes = 0.0
-    for s, e in intervals:
-        ot_minutes += _overlap_minutes(s, e, ot_start, ot_end)
+    if ot_end_cap > ot_start:
+        ot_minutes = (ot_end_cap - ot_start).total_seconds() / 60.0
     if ot_minutes <= OT_MIN_MINUTES:
         ot_minutes = 0.0
+        ot_hrs_bill = 0.0
     else:
         ot_minutes = min(ot_minutes, 180.0)
-        if ot_minutes > OT_BREAK_MINUTES:
-            ot_minutes -= OT_BREAK_MINUTES
-    ot_hrs = round(ot_minutes / 60.0, 2)
-    ot_pay = round(ot_hrs * hourly, 2)
+        ot_hrs_bill = float(math.ceil(ot_minutes / 60.0 - 1e-9))
+    ot_hrs = ot_hrs_bill
+    ot_pay = round(ot_hrs_bill * hourly, 2)
 
     first_in = min(s for s, _ in intervals).time()
     last_out = max(e for _, e in intervals).time()
@@ -254,7 +279,60 @@ def calc_salary_from_punches(
         "Late_Early_Deduction_Hrs": round((late_min + early_min) / 60.0, 2),
         "In_Punch": first_in.strftime("%H:%M"),
         "Out_Punch": last_out.strftime("%H:%M"),
+        "Needs_Miss_Punch": needs_miss_punch(punch_pairs),
     }
+
+
+def update_karigar_attendance_row(
+    *,
+    on_date: str,
+    e_code: str,
+    in_punch: str,
+    out_punch: str,
+    waive_lunch_break: bool = False,
+    waive_tea_break: bool = False,
+    lunch_break_minutes: float | None = None,
+    tea_break_minutes: float | None = None,
+) -> dict[str, Any]:
+    """Recalculate one attendance row after miss-punch / break corrections."""
+    e_code, name, master_rate = match_employee_code(e_code, "")
+    daily = master_rate or get_daily_rate_for_date(e_code, on_date)
+    if daily <= 0:
+        return {"ok": False, "message": f"No daily rate for E_Code {e_code}."}
+    tin = _parse_clock(in_punch)
+    tout = _parse_clock(out_punch)
+    if tin is None:
+        return {"ok": False, "message": "Valid In punch required."}
+    pairs = [(tin, tout)]
+    calc = calc_salary_from_punches(
+        pairs,
+        daily,
+        on_date=on_date,
+        status="P",
+        waive_lunch_break=waive_lunch_break,
+        waive_tea_break=waive_tea_break,
+        lunch_break_minutes=lunch_break_minutes,
+        tea_break_minutes=tea_break_minutes,
+    )
+    row = {
+        "Date": on_date,
+        "E_Code": e_code,
+        "Name": name,
+        "Status": "P",
+        "Daily_Rate_Rs": daily,
+        **calc,
+    }
+    df = get_sheet_df("karigar_attendance")
+    if df.empty:
+        df = pd.DataFrame([row])
+    else:
+        mask = (df["Date"].astype(str) == str(on_date)) & (
+            df["E_Code"].astype(str).map(clean_key) == clean_key(e_code)
+        )
+        df = df[~mask]
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    save_sheet_df("karigar_attendance", df)
+    return {"ok": True, "message": "Attendance updated and payroll recalculated.", "row": row}
 
 
 def calc_salary(in_str: str, out_str: str, daily_rate: float, ot_mult: float = 1.0) -> dict:
@@ -397,6 +475,7 @@ def import_karigar_attendance_bytes(raw: bytes, filename: str = "") -> dict[str,
             status = "A"
             calc = calc_salary_from_punches([], daily, on_date=report_date, status=status)
 
+        miss = needs_miss_punch(pairs)
         rows.append(
             {
                 "Date": report_date,
@@ -406,6 +485,7 @@ def import_karigar_attendance_bytes(raw: bytes, filename: str = "") -> dict[str,
                 "Shift": shift,
                 "Status": status,
                 "Daily_Rate_Rs": daily,
+                "Needs_Miss_Punch": miss,
                 **calc,
             }
         )

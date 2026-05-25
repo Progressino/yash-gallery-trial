@@ -591,6 +591,7 @@ def dashboard_summary(planning_date: str | None = None) -> dict:
 
 def load_production_entry(date_str: str, karigar_id: str, challan_no: str, style: str) -> dict:
     """Load existing hour-wise entry for composite key."""
+    style = _resolve_canonical_style(style)
     pl = get_sheet_df("production_log")
     hours: dict[str, dict] = {
         h: {"operation": "", "pieces": 0, "sticker_in": 0, "sticker_out": 0, "manual_pieces": False}
@@ -1697,6 +1698,9 @@ def performance_report(date_from: str, date_to: str) -> dict:
     perf["Piece_Value"] = perf["Piece_Value"].round(2)
     perf["Salary"] = perf["Salary"].round(2)
     perf["Surplus"] = (perf["Piece_Value"] - perf["Salary"]).round(2)
+    perf["In_Production"] = perf["Total_Pieces"] > 0
+    perf["In_Payroll"] = perf["Salary"] > 0
+    perf["Payroll_Only_Expense"] = perf["In_Payroll"] & ~perf["In_Production"]
     perf["ROI_%"] = (perf["Piece_Value"] / perf["Salary"].replace(0, 1) * 100).round(1)
     perf["Avg_Eff"] = perf["Avg_Eff"].round(1)
     perf["Grade"] = perf["Avg_Eff"].apply(

@@ -68,6 +68,17 @@ class AttendanceBody(BaseModel):
     ot_multiplier: float = 1.0
 
 
+class AttendancePatchBody(BaseModel):
+    Date: str
+    E_Code: str
+    In_Punch: str
+    Out_Punch: str
+    Waive_Lunch_Break: bool = False
+    Waive_Tea_Break: bool = False
+    Lunch_Break_Minutes: Optional[float] = None
+    Tea_Break_Minutes: Optional[float] = None
+
+
 class StyleOpBody(BaseModel):
     Style: str
     Operation: str
@@ -381,6 +392,26 @@ def add_karigar_attendance(body: AttendanceBody):
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     save_sheet_df("karigar_attendance", df)
     return {"ok": True, "row": row}
+
+
+@router.patch("/attendance/karigar")
+def patch_karigar_attendance(body: AttendancePatchBody):
+    """Fix miss punch / break time after biometric import; recalculates payroll."""
+    from ..services import karigar_attendance as att_svc
+
+    try:
+        return att_svc.update_karigar_attendance_row(
+            on_date=body.Date,
+            e_code=body.E_Code,
+            in_punch=body.In_Punch,
+            out_punch=body.Out_Punch,
+            waive_lunch_break=body.Waive_Lunch_Break,
+            waive_tea_break=body.Waive_Tea_Break,
+            lunch_break_minutes=body.Lunch_Break_Minutes,
+            tea_break_minutes=body.Tea_Break_Minutes,
+        )
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.post("/attendance/karigar/upload")

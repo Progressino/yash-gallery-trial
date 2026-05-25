@@ -50,9 +50,30 @@ def test_overtime_same_hourly_rate_after_grace():
         on_date="2026-05-20",
         status="P",
     )
-    assert out["OT_Hours"] > 0
-    assert out["OT_Pay"] == round(out["OT_Hours"] * 57.5, 2)
+    assert out["OT_Hours"] == 1.0
+    assert out["OT_Pay"] == 57.5
     assert out["Total_Pay"] == round(out["Normal_Pay"] + out["OT_Pay"], 2)
+
+
+def test_overtime_manoj_807_9_to_2059():
+    """09:00–20:59 → 8h regular (520) + 3h OT at hourly (520/8) = 715."""
+    out = att.calc_salary_from_punches(
+        [(time(9, 0), time(20, 59))],
+        520.0,
+        on_date="2026-05-22",
+        status="P",
+    )
+    assert out["Normal_Pay"] == 520.0
+    assert out["Payable_Hrs"] == 8.0
+    assert out["OT_Hours"] == 3.0
+    assert out["OT_Pay"] == 195.0
+    assert out["Total_Pay"] == 715.0
+    assert out["Hourly_Rate_Rs"] == 65.0
+
+
+def test_needs_miss_punch_single_in():
+    assert att.needs_miss_punch([(time(9, 0), None)]) is True
+    assert att.needs_miss_punch([(time(9, 0), time(18, 0))]) is False
 
 
 def test_absent_shift_pays_zero():

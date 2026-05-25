@@ -472,12 +472,18 @@ function ProductionTab({
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [saveMessage, setSaveMessage] = useState('')
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(true)
-  const skipAutoSaveRef = useRef(false)
+  const skipAutoSaveRef = useRef(true)
+  const loadInProgressRef = useRef(false)
   const qc = useQueryClient()
 
   useEffect(() => {
     if (lockedKarigarId) setKarigarId(lockedKarigarId)
   }, [lockedKarigarId])
+
+  useEffect(() => {
+    skipAutoSaveRef.current = true
+    loadInProgressRef.current = true
+  }, [entryDate, karigarId, challanNo, style])
 
   const { data: karigarSheet } = useQuery({
     queryKey: ['stitching-sheet', 'karigar_master'],
@@ -601,15 +607,21 @@ function ProductionTab({
 
   const loadEntry = useCallback(async () => {
     if (!karigarId || !challanNo || !style) return
-    const { data } = await api.get('/stitching/production-entry/load', {
-      params: { date: entryDate, karigar_id: karigarId, challan_no: challanNo, style },
-    })
-    const next: Record<string, HourEntryState> = {}
-    for (const h of hours) {
-      next[h.col] = normalizeLoadedHourEntry(data.hours?.[h.col] ?? {})
-    }
+    loadInProgressRef.current = true
     skipAutoSaveRef.current = true
-    setHourState(next)
+    try {
+      const { data } = await api.get('/stitching/production-entry/load', {
+        params: { date: entryDate, karigar_id: karigarId, challan_no: challanNo, style },
+      })
+      const next: Record<string, HourEntryState> = {}
+      for (const h of hours) {
+        next[h.col] = normalizeLoadedHourEntry(data.hours?.[h.col] ?? {})
+      }
+      setHourState(next)
+    } finally {
+      loadInProgressRef.current = false
+      skipAutoSaveRef.current = true
+    }
   }, [entryDate, karigarId, challanNo, style, hours])
 
   useEffect(() => {
@@ -811,10 +823,7 @@ function ProductionTab({
   )
 
   useEffect(() => {
-    if (!autoSaveEnabled || skipAutoSaveRef.current) {
-      skipAutoSaveRef.current = false
-      return
-    }
+    if (!autoSaveEnabled || skipAutoSaveRef.current || loadInProgressRef.current) return
     if (!karigarId || !challanNo || !style || saveBlockReason) return
     const t = setTimeout(() => void doSave(true), 2000)
     return () => clearTimeout(t)
@@ -825,6 +834,7 @@ function ProductionTab({
   })
 
   const setHour = (col: string, patch: Partial<HourEntryState>) => {
+    skipAutoSaveRef.current = false
     setHourState(prev => {
       const merged = { ...prev, [col]: applyHourEntryPatch(prev[col], patch) }
       const sessionPcs = resolveSessionHourPieces(hours, merged)
@@ -1905,6 +1915,18 @@ function PayrollTab() {
   )
 }
 
+type MissPunchDraft = {
+  Date: string
+  E_Code: string
+  Name: string
+  In_Punch: string
+  Out_Punch: string
+  Waive_Lunch_Break: boolean
+  Waive_Tea_Break: boolean
+  Lunch_Break_Minutes: string
+  Tea_Break_Minutes: string
+}
+
 function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   const qc = useQueryClient()
   const sheet = type === 'karigar' ? 'karigar_attendance' : 'operating_attendance'
@@ -1922,12 +1944,35 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   const [form, setForm] = useState({ Date: todayStr(), E_Code: '', In_Punch: '09:00', Out_Punch: '18:00' })
   const [uploadMsg, setUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [uploadBusy, setUploadBusy] = useState(false)
+  const [missDrafts, setMissDrafts] = useState<Record<string, MissPunchDraft>>({})
   const fileRef = useRef<HTMLInputElement>(null)
+  const allRows = (data?.rows ?? []) as Record<string, unknown>[]
+  const needsMissPunch = type === 'karigar'
+    ? allRows.filter(r => r.Needs_Miss_Punch === true || r.Needs_Miss_Punch === 'true')
+    : []
   const saveMut = useMutation({
     mutationFn: () =>
       api.post(type === 'karigar' ? '/stitching/attendance/karigar' : '/stitching/attendance/operating', form),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
+      refetch()
+    },
+  })
+  const patchMissMut = useMutation({
+    mutationFn: (body: MissPunchDraft) =>
+      api.patch('/stitching/attendance/karigar', {
+        Date: body.Date,
+        E_Code: body.E_Code,
+        In_Punch: body.In_Punch,
+        Out_Punch: body.Out_Punch,
+        Waive_Lunch_Break: body.Waive_Lunch_Break,
+        Waive_Tea_Break: body.Waive_Tea_Break,
+        Lunch_Break_Minutes: body.Lunch_Break_Minutes.trim() === '' ? null : Number(body.Lunch_Break_Minutes),
+        Tea_Break_Minutes: body.Tea_Break_Minutes.trim() === '' ? null : Number(body.Tea_Break_Minutes),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
+      qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
       refetch()
     },
   })
@@ -1959,11 +2004,30 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
       if (fileRef.current) fileRef.current.value = ''
     }
   }
+  const missPunchKey = (r: Record<string, unknown>) => `${r.Date}::${r.E_Code}`
+  const openMissPunch = (r: Record<string, unknown>) => {
+    const key = missPunchKey(r)
+    setMissDrafts(d => ({
+      ...d,
+      [key]: d[key] ?? {
+        Date: String(r.Date ?? ''),
+        E_Code: String(r.E_Code ?? ''),
+        Name: String(r.Name ?? ''),
+        In_Punch: String(r.In_Punch ?? '09:00'),
+        Out_Punch: String(r.Out_Punch ?? '18:00'),
+        Waive_Lunch_Break: false,
+        Waive_Tea_Break: false,
+        Lunch_Break_Minutes: '',
+        Tea_Break_Minutes: '',
+      },
+    }))
+  }
   const karigarCols = [
     'Date',
     'E_Code',
     'Name',
     'Status',
+    'Needs_Miss_Punch',
     'In_Punch',
     'Out_Punch',
     'Payable_Hrs',
@@ -1976,11 +2040,23 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   return (
     <div className="space-y-4">
       {type === 'karigar' && (
+        <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-xs text-blue-950 space-y-1">
+          <p className="font-semibold text-[#002B5B]">Workflow</p>
+          <ol className="list-decimal list-inside space-y-0.5">
+            <li>Upload the biometric IN/OUT sheet (matched by <strong>E. Code</strong>).</li>
+            <li>Fix any <strong>miss punch</strong> rows (single IN only) and set break time if needed.</li>
+            <li>Payroll is calculated in the records below (8h regular + OT after 18:00 at daily÷8).</li>
+            <li>Use <strong>Performance</strong> tab to find karigars in payroll but not in production costing.</li>
+          </ol>
+        </div>
+      )}
+      {type === 'karigar' && (
         <Section title="Upload biometric attendance (IN/OUT punch report)">
           <p className="text-xs text-gray-500 mb-2">
             Upload the daily <strong>Daily Attendance IN/OUT Punch Report</strong> (.xls / .xlsx). Workers are matched by{' '}
-            <strong>E. Code</strong> to Master Data. Re-uploading the same day replaces existing rows. Hours: 09:00–18:00,
-            lunch 13:00–13:30, tea 16:00–16:15, OT after 18:00 at the same hourly rate.
+            <strong>E. Code</strong> to Master Data. Re-uploading the same day replaces existing rows. Regular 09:00–18:00 (8h pay),
+            lunch 13:00–13:30, tea 16:00–16:15. OT after 18:00 is paid at the same hourly rate (daily÷8), rounded up to whole hours
+            (e.g. out 20:59 → 3h OT).
           </p>
           <input
             ref={fileRef}
@@ -2011,6 +2087,77 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
               {uploadMsg.text}
             </p>
           )}
+        </Section>
+      )}
+      {type === 'karigar' && needsMissPunch.length > 0 && (
+        <Section title={`Miss punch / break fixes (${needsMissPunch.length})`}>
+          <p className="text-xs text-gray-500 mb-3">
+            These rows need a valid <strong>Out</strong> punch (or manual times). Check &quot;Took lunch/tea&quot; if break was taken;
+            or enter custom break minutes to deduct.
+          </p>
+          <div className="space-y-3">
+            {needsMissPunch.slice(0, 40).map(r => {
+              const key = missPunchKey(r)
+              const draft = missDrafts[key]
+              return (
+                <div key={key} className="border rounded-lg p-3 bg-amber-50/50 text-xs space-y-2">
+                  <div className="flex flex-wrap justify-between gap-2">
+                    <span className="font-semibold text-[#002B5B]">
+                      {String(r.E_Code)} — {String(r.Name)} · {String(r.Date)}
+                    </span>
+                    {!draft && (
+                      <button type="button" onClick={() => openMissPunch(r)} className="text-blue-700 underline font-medium">
+                        Fix punch
+                      </button>
+                    )}
+                  </div>
+                  {draft && (
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                      <label>
+                        In
+                        <input className="w-full border rounded mt-1 px-2 py-1" value={draft.In_Punch}
+                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, In_Punch: e.target.value } }))} />
+                      </label>
+                      <label>
+                        Out
+                        <input className="w-full border rounded mt-1 px-2 py-1" value={draft.Out_Punch}
+                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Out_Punch: e.target.value } }))} />
+                      </label>
+                      <label className="flex items-end gap-2 pb-1">
+                        <input type="checkbox" checked={draft.Waive_Lunch_Break}
+                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Waive_Lunch_Break: e.target.checked } }))} />
+                        Took lunch (no 30m deduct)
+                      </label>
+                      <label className="flex items-end gap-2 pb-1">
+                        <input type="checkbox" checked={draft.Waive_Tea_Break}
+                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Waive_Tea_Break: e.target.checked } }))} />
+                        Took tea (no 15m deduct)
+                      </label>
+                      <label>
+                        Custom lunch break (min)
+                        <input className="w-full border rounded mt-1 px-2 py-1" placeholder="30" value={draft.Lunch_Break_Minutes}
+                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Lunch_Break_Minutes: e.target.value } }))} />
+                      </label>
+                      <label>
+                        Custom tea break (min)
+                        <input className="w-full border rounded mt-1 px-2 py-1" placeholder="15" value={draft.Tea_Break_Minutes}
+                          onChange={e => setMissDrafts(d => ({ ...d, [key]: { ...draft, Tea_Break_Minutes: e.target.value } }))} />
+                      </label>
+                      <div className="sm:col-span-2 flex gap-2 items-end">
+                        <button type="button" disabled={patchMissMut.isPending}
+                          onClick={() => patchMissMut.mutate(draft)}
+                          className="px-3 py-2 bg-[#002B5B] text-white rounded-lg text-xs font-medium disabled:opacity-50">
+                          {patchMissMut.isPending ? 'Saving…' : 'Save & recalc payroll'}
+                        </button>
+                        <button type="button" onClick={() => setMissDrafts(d => { const n = { ...d }; delete n[key]; return n })}
+                          className="px-3 py-2 border rounded-lg text-xs">Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         </Section>
       )}
       <Section title="Manual entry">
@@ -3164,7 +3311,8 @@ function PerformanceTab() {
     <div className="space-y-4">
       <Section title="Employee performance — piece value vs salary">
         <p className="text-xs text-gray-600 mb-3">
-          Compares production piece-value to karigar attendance pay over the selected period. Requires both production log and attendance with salary.
+          Compares production piece-value to karigar attendance pay. Rows flagged <strong>Payroll only</strong> are in attendance payroll but
+          have no production costing for the period — treat their salary as expense to capture.
         </p>
         <div className="flex flex-wrap gap-2 items-end mb-4">
           <label className="text-xs">
@@ -3200,10 +3348,33 @@ function PerformanceTab() {
           </div>
         )}
         {data?.ok && (data.rows?.length ?? 0) > 0 && (
-          <DataTable
-            rows={data.rows}
-            cols={['E_Code', 'Name', 'Days', 'Hrs', 'Salary', 'Total_Pieces', 'Piece_Value', 'Surplus', 'ROI_%', 'Avg_Eff', 'Grade']}
-          />
+          <>
+            {(data.rows as Record<string, unknown>[]).some(r => r.Payroll_Only_Expense) && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                Highlighted rows: paid in payroll but missing from production costing — mark as expense.
+              </p>
+            )}
+            <DataTable
+              rows={(data.rows as Record<string, unknown>[]).map(r => ({
+                ...r,
+                Payroll_Only_Expense: r.Payroll_Only_Expense ? 'Yes — expense' : '',
+              }))}
+              cols={[
+                'E_Code',
+                'Name',
+                'Days',
+                'Hrs',
+                'Salary',
+                'Total_Pieces',
+                'Piece_Value',
+                'Surplus',
+                'Payroll_Only_Expense',
+                'ROI_%',
+                'Avg_Eff',
+                'Grade',
+              ]}
+            />
+          </>
         )}
       </Section>
     </div>
