@@ -244,8 +244,10 @@ def get_printed_fabric_unchecked():
 
 @router.post("/printed-fabric/qc")
 def post_printed_fabric_qc(body: PrintedFabricQCIn):
-    gdb.do_printed_fabric_qc(body.model_dump())
-    return {"ok": True}
+    try:
+        return gdb.do_printed_fabric_qc(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.get("/printed-fabric/checked")

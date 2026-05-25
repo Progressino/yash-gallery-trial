@@ -276,13 +276,21 @@ export default function GreyFabric() {
   })
   const printedFabricQCMut = useMutation({
     mutationFn: (b: object) => api.post('/grey/printed-fabric/qc', b),
-    onSuccess: () => {
+    onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['printed-fabric-unchecked'] })
       qc.invalidateQueries({ queryKey: ['printed-fabric-checked'] })
       qc.invalidateQueries({ queryKey: ['printed-ready-to-cut'] })
       setShowPFQCForm(false)
       setPFQCTarget(null)
-    }
+      const pending = Number(res?.data?.pending_qty ?? 0)
+      if (pending > 0.01) {
+        alert(`QC saved. ${pending.toFixed(1)} m still pending in Unchecked for this JWO.`)
+      }
+    },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      alert(msg || 'QC could not be saved')
+    },
   })
   const pfCheckedAvailable = (pfReserveOptions?.fabrics ?? []) as {
     fabric_code: string
@@ -1238,9 +1246,18 @@ export default function GreyFabric() {
                     <input type="date" value={pfQCForm.qc_date} onChange={e => setPFQCForm(f => ({ ...f, qc_date: e.target.value }))} className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
                 </div>
                 {pfQCForm.passed_qty + pfQCForm.failed_qty > 0 && (
-                  <div className={`text-xs px-3 py-2 rounded-lg ${Math.abs((pfQCForm.passed_qty + pfQCForm.failed_qty) - pfQCTarget.qty) < 0.01 ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
-                    Pass + Fail = {pfQCForm.passed_qty + pfQCForm.failed_qty}m
-                    {Math.abs((pfQCForm.passed_qty + pfQCForm.failed_qty) - pfQCTarget.qty) < 0.01 ? ' ✅ Match!' : ` ⚠️ Total should be ${pfQCTarget.qty}m`}
+                  <div className={`text-xs px-3 py-2 rounded-lg ${
+                    pfQCForm.passed_qty + pfQCForm.failed_qty > pfQCTarget.qty + 0.01
+                      ? 'bg-red-50 text-red-700'
+                      : 'bg-amber-50 text-amber-700'
+                  }`}>
+                    Pending in Unchecked: <b>{pfQCTarget.qty} m</b> · This QC: <b>{pfQCForm.passed_qty + pfQCForm.failed_qty} m</b>
+                    {pfQCForm.passed_qty + pfQCForm.failed_qty <= pfQCTarget.qty + 0.01 && (
+                      <> · After submit: <b>{Math.max(0, pfQCTarget.qty - pfQCForm.passed_qty - pfQCForm.failed_qty).toFixed(1)} m</b> stays in Unchecked</>
+                    )}
+                    {pfQCForm.passed_qty + pfQCForm.failed_qty > pfQCTarget.qty + 0.01 && (
+                      <> · Cannot exceed pending qty</>
+                    )}
                   </div>
                 )}
                 <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">

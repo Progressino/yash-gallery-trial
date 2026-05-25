@@ -186,6 +186,7 @@ def init_db():
     ]:
         _add_col(conn, "fabric_checked_stock", name, decl)
 
+    _repair_printed_fabric_partial_qc_rows(conn)
     conn.commit()
     conn.close()
 
@@ -812,16 +813,20 @@ def list_ready_to_cut():
 # ── Printed Fabric (JWO GRN ke baad aata hai) ─────────────────────────────────
 
 def list_printed_fabric_unchecked():
-    """Printed fabric jo abhi tak check nahi hua."""
+    """Printed fabric jo abhi tak check nahi hua (pending qty > 0)."""
     conn = _connect()
     try:
+        _repair_printed_fabric_partial_qc_rows(conn)
+        conn.commit()
         rows = conn.execute("""
             SELECT fabric_code, fabric_name, printer,
-            SUM(qty) as qty, jwo_ref, grn_ref,
+            SUM(qty) as qty, jwo_ref,
+            MAX(grn_ref) as grn_ref,
             MAX(receive_date) as receive_date
             FROM printed_fabric_stock
-            WHERE status = 'Unchecked'
+            WHERE status = 'Unchecked' AND COALESCE(qty, 0) > 0.001
             GROUP BY fabric_code, jwo_ref
+            HAVING SUM(qty) > 0.001
             ORDER BY receive_date DESC
         """).fetchall()
         conn.close()
@@ -831,33 +836,130 @@ def list_printed_fabric_unchecked():
         return []
 
 
-def do_printed_fabric_qc(data: dict):
-    """Printed fabric QC — pass hone pe printed_fabric_checked_stock mein jaao."""
-    conn = _connect()
-    # Update printed_fabric_stock status
+def _repair_printed_fabric_partial_qc_rows(conn) -> None:
+    """Rows wrongly marked QC Done while qty still pending (legacy full-line close bug)."""
     conn.execute(
-        """UPDATE printed_fabric_stock SET
-        status = 'QC Done', passed_qty = ?, failed_qty = ?, qc_by = ?, qc_date = ?
-        WHERE fabric_code = ? AND jwo_ref = ? AND status = 'Unchecked'""",
-        (float(data.get('passed_qty', 0)), float(data.get('failed_qty', 0)),
-         data.get('qc_by', ''), data.get('qc_date', datetime.now().strftime('%Y-%m-%d')),
-         data.get('fabric_code', ''), data.get('jwo_ref', ''))
+        """UPDATE printed_fabric_stock SET status = 'Unchecked'
+           WHERE status = 'QC Done' AND COALESCE(qty, 0) > 0.001"""
     )
-    # Passed qty → printed_fabric_checked_stock (ALAG table)
-    if float(data.get('passed_qty', 0)) > 0:
-        conn.execute(
-            """INSERT INTO printed_fabric_checked_stock(fabric_code, fabric_name, checked_qty, passed_qty, available_qty)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT(fabric_code) DO UPDATE SET
-            checked_qty = checked_qty + excluded.checked_qty,
-            passed_qty = passed_qty + excluded.passed_qty,
-            available_qty = available_qty + excluded.passed_qty""",
-            (data.get('fabric_code', ''), data.get('fabric_name', ''),
-             float(data.get('passed_qty', 0)), float(data.get('passed_qty', 0)),
-             float(data.get('passed_qty', 0)))
-        )
+
+
+def insert_printed_fabric_unchecked(
+    fabric_code: str,
+    qty: float,
+    *,
+    fabric_name: str = "",
+    printer: str = "",
+    jwo_ref: str = "",
+    grn_ref: str = "",
+    receive_date: str | None = None,
+) -> int:
+    """Add JWO GRN receipt into printed-fabric unchecked warehouse."""
+    conn = _connect()
+    cur = conn.execute(
+        """INSERT INTO printed_fabric_stock(
+            fabric_code, fabric_name, printer, qty, jwo_ref, grn_ref, receive_date, status)
+           VALUES (?,?,?,?,?,?,?,'Unchecked')""",
+        (
+            fabric_code.strip(),
+            fabric_name or "",
+            printer or "",
+            float(qty or 0),
+            jwo_ref or "",
+            grn_ref or "",
+            receive_date or datetime.now().strftime("%Y-%m-%d"),
+        ),
+    )
+    row_id = int(cur.lastrowid)
     conn.commit()
     conn.close()
+    return row_id
+
+
+def do_printed_fabric_qc(data: dict) -> dict:
+    """Printed fabric QC — partial pass/fail reduces unchecked qty; remainder stays in Unchecked."""
+    fabric_code = (data.get("fabric_code") or "").strip()
+    jwo_ref = (data.get("jwo_ref") or "").strip()
+    passed = float(data.get("passed_qty", 0) or 0)
+    failed = float(data.get("failed_qty", 0) or 0)
+    processed = passed + failed
+    if not fabric_code or not jwo_ref:
+        raise ValueError("Fabric code and JWO reference are required")
+    if processed <= 0:
+        raise ValueError("Pass + Fail qty must be greater than 0")
+
+    conn = _connect()
+    _repair_printed_fabric_partial_qc_rows(conn)
+
+    rows = conn.execute(
+        """SELECT id, qty FROM printed_fabric_stock
+           WHERE fabric_code = ? AND jwo_ref = ? AND status = 'Unchecked' AND COALESCE(qty, 0) > 0.001
+           ORDER BY id ASC""",
+        (fabric_code, jwo_ref),
+    ).fetchall()
+    pending = sum(float(r["qty"] or 0) for r in rows)
+    if pending <= 0:
+        conn.close()
+        raise ValueError(f"No unchecked qty pending for {fabric_code} / {jwo_ref}")
+    if processed > pending + 0.001:
+        conn.close()
+        raise ValueError(f"Cannot QC {processed} m — only {pending:.3f} m pending in Unchecked")
+
+    qc_by = data.get("qc_by", "") or ""
+    qc_date = data.get("qc_date") or datetime.now().strftime("%Y-%m-%d")
+    remaining = processed
+    for row in rows:
+        if remaining <= 0.001:
+            break
+        rid = int(row["id"])
+        row_qty = float(row["qty"] or 0)
+        take = min(row_qty, remaining)
+        share_pass = passed * (take / processed) if processed else 0.0
+        share_fail = take - share_pass
+        new_qty = round(row_qty - take, 3)
+        new_status = "Unchecked" if new_qty > 0.001 else "QC Done"
+        conn.execute(
+            """UPDATE printed_fabric_stock SET
+               qty = ?,
+               passed_qty = COALESCE(passed_qty, 0) + ?,
+               failed_qty = COALESCE(failed_qty, 0) + ?,
+               qc_by = ?, qc_date = ?, status = ?
+               WHERE id = ?""",
+            (new_qty, share_pass, share_fail, qc_by, qc_date, new_status, rid),
+        )
+        remaining = round(remaining - take, 3)
+
+    if passed > 0:
+        conn.execute(
+            """INSERT INTO printed_fabric_checked_stock(
+                fabric_code, fabric_name, checked_qty, passed_qty, available_qty)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(fabric_code) DO UPDATE SET
+               checked_qty = checked_qty + excluded.checked_qty,
+               passed_qty = passed_qty + excluded.passed_qty,
+               available_qty = available_qty + excluded.passed_qty""",
+            (
+                fabric_code,
+                data.get("fabric_name", "") or "",
+                passed,
+                passed,
+                passed,
+            ),
+        )
+    conn.commit()
+    pending_after = conn.execute(
+        """SELECT COALESCE(SUM(qty), 0) FROM printed_fabric_stock
+           WHERE fabric_code = ? AND jwo_ref = ? AND status = 'Unchecked'""",
+        (fabric_code, jwo_ref),
+    ).fetchone()[0]
+    conn.close()
+    return {
+        "ok": True,
+        "processed_qty": processed,
+        "passed_qty": passed,
+        "failed_qty": failed,
+        "pending_qty": float(pending_after or 0),
+    }
 
 
 def list_printed_fabric_checked():

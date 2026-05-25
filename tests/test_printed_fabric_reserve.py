@@ -20,6 +20,7 @@ def isolated_grey_sales(tmp_path, monkeypatch):
 
 
 def test_reserve_options_only_checked_available():
+    grey_db.insert_printed_fabric_unchecked("P308", 100, fabric_name="Print A", jwo_ref="J1", grn_ref="GRN-1")
     grey_db.do_printed_fabric_qc(
         {"fabric_code": "P308", "fabric_name": "Print A", "jwo_ref": "J1", "passed_qty": 100, "qc_by": "QC"}
     )
@@ -54,6 +55,7 @@ def test_reserve_options_include_open_so_lines():
             "lines": [{"sku": "1894GREEN", "sku_name": "Green Kurti", "qty": 50}],
         }
     )
+    grey_db.insert_printed_fabric_unchecked("P999", 200, fabric_name="Test", jwo_ref="J2", grn_ref="GRN-2")
     grey_db.do_printed_fabric_qc(
         {"fabric_code": "P999", "fabric_name": "Test", "jwo_ref": "J2", "passed_qty": 200, "qc_by": "QC"}
     )
