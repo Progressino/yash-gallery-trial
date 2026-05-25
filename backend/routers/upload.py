@@ -34,7 +34,10 @@ from ..services.meesho import (
 )
 from ..services.flipkart import load_flipkart_from_zip
 from ..services.snapdeal import load_snapdeal_from_zip
-from ..services.inventory import load_inventory_consolidated
+from ..services.inventory import (
+    apply_inventory_snapshot_metadata,
+    load_inventory_consolidated,
+)
 from ..services.sales import build_sales_df, list_sku_mapping_gaps
 from ..services.existing_po import parse_existing_po
 from ..services.github_cache import save_cache_to_drive
@@ -1311,7 +1314,10 @@ def _build_inventory_upload_payload(
         if val is not None and str(val).strip() and not str(val).strip().startswith("0 SKUs"):
             sources.append(f"{label}: {val}")
     rows = len(df_variant)
+    snap_label = debug.get("snapshot_date_label") or debug.get("snapshot_date") or ""
     parts = [f"{rows:,} SKUs in snapshot"]
+    if snap_label:
+        parts.insert(0, f"Snapshot as of {snap_label}")
     if sources:
         parts.append("Sources — " + "; ".join(sources))
     if skipped:
@@ -1401,12 +1407,12 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
         _set_inventory_upload_progress(sess, 80, "Building parent-SKU rollup…")
         sess.inventory_df_variant = df_variant
         sess.inventory_df_parent = df_parent
-        sess.inventory_debug = debug
+        apply_inventory_snapshot_metadata(sess, file_parts, debug)
         _session_data_changed(sess)
         _set_inventory_upload_progress(sess, 95, "Finalizing snapshot…")
         payload = _build_inventory_upload_payload(
             df_variant=df_variant,
-            debug=debug,
+            debug=sess.inventory_debug,
             detected=detected,
             file_parts=file_parts,
             warnings=warnings,
@@ -1533,9 +1539,11 @@ async def upload_inventory_auto(
     myntra_bytes_list: list[bytes] = []
     amz_bytes = None
     detected: list[str] = []
+    direct_file_parts: list[tuple[str, bytes]] = []
     for file in files:
         raw = await file.read()
         fname = file.filename or ""
+        direct_file_parts.append((fname or "upload", raw))
         inv_type = _detect_inventory_type(fname, raw)
         if inv_type == "rar":
             amz_bytes = raw
@@ -1582,17 +1590,24 @@ async def upload_inventory_auto(
                 df_parent = df_variant
             sess.inventory_df_variant = df_variant
             sess.inventory_df_parent = df_parent
-            sess.inventory_debug = debug
+            apply_inventory_snapshot_metadata(sess, direct_file_parts, debug)
             _session_data_changed(sess)
             parts = [f"{len(df_variant):,} total SKUs"]
-            for src, info in debug.items():
+            snap = sess.inventory_snapshot_date_label or sess.inventory_snapshot_date
+            if snap:
+                parts.insert(0, f"Snapshot as of {snap}")
+            for src, info in sess.inventory_debug.items():
+                if src in ("snapshot_date", "snapshot_date_label", "snapshot_date_sources", "snapshot_uploaded_at"):
+                    continue
                 parts.append(f"{src}: {info}")
             return {
                 "ok": True,
                 "message": " | ".join(parts),
                 "rows": len(df_variant),
-                "debug": debug,
+                "debug": sess.inventory_debug,
                 "detected": detected,
+                "snapshot_date": sess.inventory_snapshot_date,
+                "snapshot_date_label": sess.inventory_snapshot_date_label,
                 "v": "inv-v8",
             }
 

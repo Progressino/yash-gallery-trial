@@ -35,6 +35,7 @@ def test_inventory_rar_loads_flipkart_and_myntra_columns():
     assert "Flipkart_Inventory" in df.columns
     assert int(df["Flipkart_Inventory"].sum()) > 0
     assert debug.get("flipkart", "").startswith("0 SKUs") is False
+    assert debug.get("snapshot_date") == "2026-05-25"
     # 25-May-26 bundle has Flipkart warehouse + PPMP files; Myntra PPMP may be absent
     if int(df.get("Myntra_Other_Inventory", pd.Series(dtype=float)).sum() or 0) > 0:
         assert "Myntra_Other_Inventory" in df.columns

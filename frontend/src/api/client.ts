@@ -98,6 +98,10 @@ export interface CoverageResponse {
   }>
   inventory_upload_sources?: string[]
   inventory_upload_amz_disclaimer?: Record<string, unknown>
+  inventory_snapshot_date?: string | null
+  inventory_snapshot_date_label?: string | null
+  inventory_snapshot_date_sources?: string[] | null
+  inventory_snapshot_uploaded_at?: string | null
   daily_inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   daily_inventory_upload_message?: string
 }

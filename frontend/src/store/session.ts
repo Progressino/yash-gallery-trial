@@ -43,6 +43,10 @@ const empty: CoverageResponse = {
   inventory_upload_status: 'idle',
   inventory_upload_message: '',
   inventory_upload_progress: 0,
+  inventory_snapshot_date: undefined,
+  inventory_snapshot_date_label: undefined,
+  inventory_snapshot_date_sources: undefined,
+  inventory_snapshot_uploaded_at: undefined,
   daily_inventory_upload_status: 'idle',
   daily_inventory_upload_message: '',
 }

@@ -956,12 +956,31 @@ export default function Upload() {
         </div>
 
         <UploadCard
-          title="📦 Snapshot inventory (today)"
+          title="📦 Snapshot inventory"
           subtitle="OMS CSV/XLSX, Flipkart, Myntra, Amazon RAR/CSV — auto-detected. Replaces the current snapshot; server saves automatically."
           loaded={coverage.inventory}
           alert={showImportCompleteness ? uploadAlertsBySource['inv'] : undefined}
           onClearAlert={() => clearUploadAlert('inv')}
         >
+          {coverage.inventory && coverage.inventory_snapshot_date_label && (
+            <p className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+              <span className="font-semibold">Current snapshot date: </span>
+              {coverage.inventory_snapshot_date_label}
+              {coverage.inventory_snapshot_uploaded_at && (
+                <span className="text-blue-700/80">
+                  {' '}
+                  · last updated{' '}
+                  {new Date(coverage.inventory_snapshot_uploaded_at).toLocaleString(undefined, {
+                    day: 'numeric',
+                    month: 'short',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+              )}
+            </p>
+          )}
           {!coverage.sku_mapping && <Warn>SKU map must be loaded on the server (ask Admin if missing).</Warn>}
           {(coverage.inventory_upload_status === 'running' || invProgress || (loading['inv'] && !!buildingMsg)) && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1.5">

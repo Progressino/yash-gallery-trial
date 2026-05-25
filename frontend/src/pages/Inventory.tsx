@@ -9,6 +9,27 @@ interface InventoryData {
   columns: string[]
   totals?: Record<string, number>
   debug?: Record<string, unknown>
+  snapshot_date?: string | null
+  snapshot_date_label?: string | null
+  snapshot_date_sources?: string[] | null
+  snapshot_uploaded_at?: string | null
+}
+
+function formatSnapshotUploadedAt(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return null
+    return d.toLocaleString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return null
+  }
 }
 
 export default function Inventory() {
@@ -42,6 +63,9 @@ export default function Inventory() {
   const totalSkus = data.rows.length
   const zeroStock = data.rows.filter(r => Number(r['Total_Inventory'] ?? 0) <= 0).length
   const amzDisclaimer = (data.debug?.amz_disclaimer as Record<string, unknown> | undefined) ?? undefined
+  const snapshotLabel = data.snapshot_date_label || data.snapshot_date || null
+  const uploadedLabel = formatSnapshotUploadedAt(data.snapshot_uploaded_at)
+  const snapshotSources = data.snapshot_date_sources ?? []
 
   const exportExcel = () => {
     const exportRows = filtered.map(r => {
@@ -57,10 +81,34 @@ export default function Inventory() {
 
   return (
     <div className="p-6 space-y-5">
-      <div>
-        <h2 className="text-2xl font-bold text-[#002B5B]">📦 Inventory</h2>
-        <p className="text-gray-400 text-sm mt-1">{totalSkus.toLocaleString()} active SKUs</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold text-[#002B5B]">📦 Inventory</h2>
+          <p className="text-gray-400 text-sm mt-1">{totalSkus.toLocaleString()} active SKUs</p>
+        </div>
+        {snapshotLabel && (
+          <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950 min-w-[220px]">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-blue-700">Snapshot as of</p>
+            <p className="text-lg font-bold text-[#002B5B] mt-0.5">{snapshotLabel}</p>
+            {uploadedLabel && (
+              <p className="text-xs text-blue-800/80 mt-1">Updated in app: {uploadedLabel}</p>
+            )}
+          </div>
+        )}
       </div>
+
+      {snapshotLabel && snapshotSources.length > 0 && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+          <span className="font-medium text-gray-700">Date from: </span>
+          {snapshotSources.join(' · ')}
+        </div>
+      )}
+
+      {!snapshotLabel && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          Snapshot date unknown — re-upload the daily inventory bundle (e.g. OMS or Inventory RAR with a date in the filename).
+        </div>
+      )}
 
       {/* KPIs */}
       <div className="grid grid-cols-3 gap-4">

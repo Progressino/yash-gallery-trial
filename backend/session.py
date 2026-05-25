@@ -54,6 +54,10 @@ class AppSession:
     # ── Parse diagnostics ────────────────────────────────────
     snapdeal_parse_info: dict = field(default_factory=dict)  # raw cols + detected fields per file
     inventory_debug: dict = field(default_factory=dict)      # debug info from last inventory upload
+    inventory_snapshot_date: str = ""                      # ISO date (YYYY-MM-DD) for current snapshot
+    inventory_snapshot_date_label: str = ""                # e.g. 25 May 2026
+    inventory_snapshot_date_sources: list = field(default_factory=list)
+    inventory_snapshot_uploaded_at: str = ""                 # UTC ISO when snapshot last applied
 
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session
@@ -128,6 +132,10 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.load_warnings = []
     sess.snapdeal_parse_info = {}
     sess.inventory_debug = {}
+    sess.inventory_snapshot_date = ""
+    sess.inventory_snapshot_date_label = ""
+    sess.inventory_snapshot_date_sources = []
+    sess.inventory_snapshot_uploaded_at = ""
     sess.daily_restored = False
     sess.sales_rebuild_status = "idle"
     sess.sales_rebuild_message = ""

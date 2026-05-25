@@ -1,6 +1,7 @@
 """
 Inventory loader — consolidated from all sources.
 """
+import calendar
 import hashlib
 import io
 import os
@@ -9,7 +10,8 @@ import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -26,6 +28,181 @@ except Exception:
 
 _RAR_MAGIC = b"Rar!\x1a\x07"
 _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
+
+_RE_DATE_DMY = re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\b")
+_RE_DATE_DMONY = re.compile(r"\b(\d{1,2})[-\s]([A-Za-z]{3,9})[-\s](\d{2,4})\b", re.I)
+_RE_DATE_ISO = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
+
+_MONTH_NAME_TO_NUM = {
+    m.lower(): i
+    for i, m in enumerate(calendar.month_abbr)
+    if m
+}
+_MONTH_NAME_TO_NUM.update(
+    {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
+)
+
+
+def _normalize_year(y: int) -> int:
+    if y < 100:
+        return 2000 + y if y < 70 else 1900 + y
+    return y
+
+
+def _dates_in_text(text: str) -> list[date]:
+    found: list[date] = []
+    for m in _RE_DATE_ISO.finditer(text):
+        try:
+            found.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except ValueError:
+            continue
+    for m in _RE_DATE_DMY.finditer(text):
+        try:
+            d, mo, y = int(m.group(1)), int(m.group(2)), _normalize_year(int(m.group(3)))
+            found.append(date(y, mo, d))
+        except ValueError:
+            continue
+    for m in _RE_DATE_DMONY.finditer(text):
+        mon = _MONTH_NAME_TO_NUM.get(m.group(2).lower()[:3])
+        if not mon:
+            continue
+        try:
+            d, y = int(m.group(1)), _normalize_year(int(m.group(3)))
+            found.append(date(y, mon, d))
+        except ValueError:
+            continue
+    return found
+
+
+def infer_inventory_snapshot_date(
+    file_parts: list[tuple[str, bytes]] | None = None,
+    debug: dict | None = None,
+) -> dict[str, Any]:
+    """
+    Best-effort snapshot as-of date from upload filenames and Amazon ledger metadata.
+    Returns snapshot_date (ISO), snapshot_date_label, snapshot_date_sources.
+    """
+    dbg = debug or {}
+    candidates: list[tuple[date, str, int]] = []
+
+    def _add(d: date, source: str, priority: int) -> None:
+        candidates.append((d, source, priority))
+
+    for fname, _raw in file_parts or []:
+        base = (fname or "").replace("\\", "/").split("/")[-1]
+        if not base:
+            continue
+        low = base.lower()
+        pri = 2
+        if low.startswith("oms") or " oms" in low:
+            pri = 0
+        elif "inventory" in low and low.endswith((".rar", ".zip")):
+            pri = 1
+        for d in _dates_in_text(base):
+            _add(d, base, pri)
+
+    for entry in dbg.get("rar_manifest") or []:
+        if entry.get("status") != "loaded":
+            continue
+        fn = str(entry.get("filename") or "")
+        low = fn.lower()
+        pri = 3
+        if low.startswith("oms"):
+            pri = 0
+        elif "seller_inventory_report" in low or "current inventory" in low:
+            pri = 4
+        for d in _dates_in_text(fn):
+            _add(d, fn, pri)
+
+    amz = dbg.get("amz_disclaimer") or {}
+    amz_day = str(amz.get("latest_report_date") or "").strip()[:10]
+    if amz_day:
+        try:
+            _add(date.fromisoformat(amz_day), "Amazon ledger (latest report day)", 5)
+        except ValueError:
+            pass
+
+    if not candidates:
+        return {
+            "snapshot_date": "",
+            "snapshot_date_label": "",
+            "snapshot_date_sources": [],
+        }
+
+    candidates.sort(key=lambda x: (x[2], x[0]))
+    primary = candidates[0][0]
+    iso = primary.isoformat()
+    label = primary.strftime("%d %b %Y")
+    sources: list[str] = []
+    seen: set[str] = set()
+    for d, src, _pri in sorted(candidates, key=lambda x: (x[2], x[1])):
+        if d != primary:
+            note = f"{src} ({d.strftime('%d %b %Y')})"
+        else:
+            note = src
+        if note not in seen:
+            sources.append(note)
+            seen.add(note)
+    return {
+        "snapshot_date": iso,
+        "snapshot_date_label": label,
+        "snapshot_date_sources": sources[:8],
+    }
+
+
+def apply_inventory_snapshot_metadata(
+    sess: Any,
+    file_parts: list[tuple[str, bytes]] | None,
+    debug: dict | None,
+) -> dict:
+    """Store snapshot date on session + debug after a successful inventory parse."""
+    meta = infer_inventory_snapshot_date(file_parts, debug)
+    merged_debug = dict(debug or {})
+    merged_debug.update(meta)
+    sess.inventory_debug = merged_debug
+    sess.inventory_snapshot_date = meta["snapshot_date"]
+    sess.inventory_snapshot_date_label = meta["snapshot_date_label"]
+    sess.inventory_snapshot_date_sources = list(meta["snapshot_date_sources"])
+    sess.inventory_snapshot_uploaded_at = (
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    return meta
+
+
+def inventory_snapshot_meta_for_api(sess: Any) -> dict[str, Any]:
+    """Fields for /data/inventory and coverage API responses."""
+    dbg = getattr(sess, "inventory_debug", None) or {}
+    snap = (
+        getattr(sess, "inventory_snapshot_date", "")
+        or dbg.get("snapshot_date")
+        or ""
+    )
+    label = (
+        getattr(sess, "inventory_snapshot_date_label", "")
+        or dbg.get("snapshot_date_label")
+        or ""
+    )
+    sources = (
+        getattr(sess, "inventory_snapshot_date_sources", None)
+        or dbg.get("snapshot_date_sources")
+        or []
+    )
+    uploaded = (
+        getattr(sess, "inventory_snapshot_uploaded_at", "")
+        or dbg.get("snapshot_uploaded_at")
+        or ""
+    )
+    if snap and not label:
+        try:
+            label = date.fromisoformat(str(snap)[:10]).strftime("%d %b %Y")
+        except ValueError:
+            label = str(snap)
+    return {
+        "snapshot_date": str(snap) if snap else None,
+        "snapshot_date_label": str(label) if label else None,
+        "snapshot_date_sources": list(sources) if sources else None,
+        "snapshot_uploaded_at": str(uploaded) if uploaded else None,
+    }
 
 
 def _dedupe_identical_byte_payloads(payloads: List[bytes]) -> Tuple[List[bytes], int]:

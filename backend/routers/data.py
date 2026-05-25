@@ -41,6 +41,7 @@ from ..services.sales import (
 )
 from ..services.daily_store import list_uploads, get_summary, delete_upload
 from ..session import AppSession
+from ..services.inventory import inventory_snapshot_meta_for_api
 
 router = APIRouter()
 
@@ -469,6 +470,19 @@ def get_coverage(request: Request, light: bool = False):
             if getattr(sess, "inventory_upload_result", None)
             else None
         ),
+        inventory_snapshot_date=(
+            getattr(sess, "inventory_snapshot_date", "") or None
+        ) or None,
+        inventory_snapshot_date_label=(
+            getattr(sess, "inventory_snapshot_date_label", "") or None
+        ) or None,
+        inventory_snapshot_date_sources=(
+            list(getattr(sess, "inventory_snapshot_date_sources", None) or [])
+            or None
+        ),
+        inventory_snapshot_uploaded_at=(
+            getattr(sess, "inventory_snapshot_uploaded_at", "") or None
+        ) or None,
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
     )
@@ -1354,6 +1368,7 @@ def get_inventory(request: Request):
         "columns":  ["OMS_SKU"] + cols,
         "totals":   totals,
         "debug":    getattr(sess, "inventory_debug", {}),
+        **inventory_snapshot_meta_for_api(sess),
     }
 
 
