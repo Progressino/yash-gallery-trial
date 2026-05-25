@@ -74,6 +74,8 @@ class AppSession:
     daily_auto_ingest_result: dict = field(default_factory=dict)
     # Platforms saved in the last daily-auto ingest (fast path rebuild uses bounded SQLite only).
     _daily_auto_platforms_touched: set = field(default_factory=set, repr=False, compare=False)
+    # Parsed platform frames from the current upload only (incremental sales rebuild).
+    _daily_auto_parsed_buffers: dict = field(default_factory=dict, repr=False, compare=False)
 
     # Async PO calculate (large catalogs exceed reverse-proxy timeouts).
     po_calculate_status: str = "idle"   # idle | running | done | error

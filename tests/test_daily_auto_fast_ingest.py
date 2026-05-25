@@ -92,6 +92,8 @@ def test_fast_ingest_sales_rar_completes_under_two_minutes(monkeypatch, tmp_path
     assert ingest_sec < 120, f"ingest took {ingest_sec:.0f}s"
     assert len(sess._daily_auto_platforms_touched) >= 4
 
+    assert "amazon" in sess._daily_auto_parsed_buffers
+
     t1 = time.monotonic()
     ok, msg = upload_router._rebuild_sales_sync(
         sess,
@@ -101,5 +103,7 @@ def test_fast_ingest_sales_rar_completes_under_two_minutes(monkeypatch, tmp_path
     rebuild_sec = time.monotonic() - t1
 
     assert ok is True
-    assert rebuild_sec < 180, f"rebuild took {rebuild_sec:.0f}s"
+    assert "updated" in msg.lower() or "rebuilt" in msg.lower()
+    assert rebuild_sec < 60, f"incremental rebuild took {rebuild_sec:.0f}s"
     assert len(sess.sales_df) > 3000, msg
+    assert not sess._daily_auto_parsed_buffers

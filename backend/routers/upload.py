@@ -255,6 +255,107 @@ def _track_daily_auto_platform(sess: AppSession, platform: str) -> None:
     touched.add(platform)
 
 
+def _buffer_daily_auto_parsed(sess: AppSession, platform: str, df: pd.DataFrame) -> None:
+    """Keep parsed rows from this upload in RAM for incremental sales rebuild (small)."""
+    if df is None or df.empty:
+        return
+    buf = getattr(sess, "_daily_auto_parsed_buffers", None)
+    if not isinstance(buf, dict):
+        buf = {}
+        sess._daily_auto_parsed_buffers = buf
+    buf.setdefault(platform, []).append(df.copy())
+
+
+def _combine_buffered_platform_df(sess: AppSession, platform: str) -> pd.DataFrame:
+    from ..services.daily_store import _dedup_platform_df, merge_platform_data
+
+    chunks = (getattr(sess, "_daily_auto_parsed_buffers", None) or {}).get(platform) or []
+    if not chunks:
+        return pd.DataFrame()
+    combined = chunks[0]
+    for chunk in chunks[1:]:
+        combined = merge_platform_data(combined, chunk, platform)
+    return _dedup_platform_df(combined, platform)
+
+
+def _incremental_sales_rebuild_from_buffers(
+    sess: AppSession,
+    platforms_touched: set[str] | list[str],
+) -> tuple[bool, str]:
+    """
+    Build sales only from this upload's parsed buffers (~thousands of rows),
+    patch into existing sales_df — no 6-month SQLite reload, no full rebuild.
+    """
+    from ..services.platform_session_window import trim_session_platform_frames
+    from ..services.sales import (
+        build_sales_df,
+        patch_sales_df_after_daily_upload,
+        sales_date_window_from_platform_dfs,
+    )
+
+    plats = set(platforms_touched)
+    buffers = getattr(sess, "_daily_auto_parsed_buffers", None) or {}
+    plat_frames: dict[str, pd.DataFrame] = {}
+    for plat in plats:
+        combined = _combine_buffered_platform_df(sess, plat)
+        if not combined.empty:
+            plat_frames[plat] = combined
+
+    if not plat_frames:
+        return False, "No parsed data in upload buffers."
+
+    d0, d1 = sales_date_window_from_platform_dfs(plat_frames)
+    if d0 is None or d1 is None:
+        return False, "Could not determine upload date window."
+
+    mtr = plat_frames.get("amazon", pd.DataFrame())
+    myntra = plat_frames.get("myntra", pd.DataFrame())
+    meesho = plat_frames.get("meesho", pd.DataFrame())
+    flipkart = plat_frames.get("flipkart", pd.DataFrame())
+    snapdeal = plat_frames.get("snapdeal", pd.DataFrame())
+
+    fresh = build_sales_df(
+        mtr_df=mtr,
+        myntra_df=myntra,
+        meesho_df=meesho,
+        flipkart_df=flipkart,
+        snapdeal_df=snapdeal,
+        sku_mapping=sess.sku_mapping,
+        return_overlay_df=_sess_return_overlay(sess),
+    )
+
+    existing = getattr(sess, "sales_df", None)
+    if existing is None:
+        existing = pd.DataFrame()
+    sess.sales_df = patch_sales_df_after_daily_upload(
+        existing, fresh, plats, d0, d1,
+    )
+
+    attrs = {
+        "amazon": "mtr_df",
+        "myntra": "myntra_df",
+        "meesho": "meesho_df",
+        "flipkart": "flipkart_df",
+        "snapdeal": "snapdeal_df",
+    }
+    for plat, attr in attrs.items():
+        if plat not in plats:
+            continue
+        combined = plat_frames.get(plat)
+        if combined is None or combined.empty:
+            continue
+        cur = getattr(sess, attr)
+        setattr(sess, attr, _merge_platform_data(cur, combined, plat, source_filename=None))
+
+    trim_session_platform_frames(sess)
+    sess._quarterly_cache.clear()
+    _session_data_changed(sess)
+    sess.daily_restored = False
+    sess._daily_auto_parsed_buffers = {}
+    rows = len(sess.sales_df)
+    return True, f"Sales updated ({rows:,} rows) from upload."
+
+
 def _replace_touched_platforms_from_sqlite(
     sess: AppSession,
     platforms: set[str] | list[str],
@@ -311,6 +412,13 @@ def _rebuild_sales_sync(
         from ..services.platform_session_window import trim_session_platform_frames
 
         if platforms_touched and _daily_auto_fast_ingest_enabled():
+            buffers = getattr(sess, "_daily_auto_parsed_buffers", None) or {}
+            if buffers and any(buffers.get(p) for p in platforms_touched):
+                ok_inc, msg_inc = _incremental_sales_rebuild_from_buffers(
+                    sess, platforms_touched,
+                )
+                if ok_inc:
+                    return ok_inc, msg_inc
             _replace_touched_platforms_from_sqlite(sess, platforms_touched)
         elif refresh_sqlite:
             _sync_session_platforms_from_sqlite(sess)
@@ -381,7 +489,10 @@ def _run_sales_rebuild_worker(
     sess.sales_rebuild_status = "running"
     if touched and _daily_auto_fast_ingest_enabled():
         plats = ", ".join(sorted(touched))
-        sess.sales_rebuild_message = f"Rebuilding sales ({plats})…"
+        if getattr(sess, "_daily_auto_parsed_buffers", None):
+            sess.sales_rebuild_message = f"Updating sales ({plats})…"
+        else:
+            sess.sales_rebuild_message = f"Rebuilding sales ({plats})…"
     else:
         sess.sales_rebuild_message = "Rebuilding combined sales…"
     try:
@@ -2098,6 +2209,7 @@ def _save_daily_file_tracked(
     warnings: list[str],
     file_results: list[dict],
     detected_label: str,
+    sess: AppSession | None = None,
 ) -> bool:
     """Persist to Tier-3 SQLite and record outcome. Returns True when saved."""
     if df is None or df.empty:
@@ -2117,7 +2229,15 @@ def _save_daily_file_tracked(
         }
     )
     detected.append(detected_label)
+    if sess is not None:
+        _after_daily_file_saved(sess, platform, df)
     return True
+
+
+def _after_daily_file_saved(sess: AppSession, platform: str, df: pd.DataFrame) -> None:
+    if _daily_auto_fast_ingest_enabled():
+        _track_daily_auto_platform(sess, platform)
+        _buffer_daily_auto_parsed(sess, platform, df)
 
 
 def _merge_slice_into_session(
@@ -2194,6 +2314,7 @@ def _process_daily_auto_sync(
             expanded_files = 0
             fast_ingest = _daily_auto_fast_ingest_enabled()
             sess._daily_auto_platforms_touched = set()
+            sess._daily_auto_parsed_buffers = {}
 
             def _apply_parsed_slice(
                 p: str,
@@ -2202,7 +2323,6 @@ def _process_daily_auto_sync(
                 defer_queue: Optional[List[_DeferredSlice]] = None,
             ) -> None:
                 if fast_ingest:
-                    _track_daily_auto_platform(sess, p)
                     return
                 if defer_queue is not None:
                     defer_queue.append((p, df, src_fname))
@@ -2225,6 +2345,7 @@ def _process_daily_auto_sync(
                             "amazon", fname, df_mtr,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Amazon MTR ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("amazon", df_mtr, fname, defer_queue)
                             if sk_mtr:
@@ -2236,6 +2357,7 @@ def _process_daily_auto_sync(
                             "amazon", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Amazon ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("amazon", df, fname, defer_queue)
                             if msg != "OK":
@@ -2247,6 +2369,7 @@ def _process_daily_auto_sync(
                             "amazon", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Amazon B2B ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("amazon", df, fname, defer_queue)
                             if msg != "OK":
@@ -2261,6 +2384,7 @@ def _process_daily_auto_sync(
                             "myntra", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Myntra ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("myntra", df, fname, defer_queue)
                             if msg != "OK":
@@ -2272,6 +2396,7 @@ def _process_daily_auto_sync(
                             "meesho", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Meesho ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("meesho", df, fname, defer_queue)
                             if _skipped:
@@ -2286,6 +2411,7 @@ def _process_daily_auto_sync(
                             "meesho", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Meesho ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("meesho", df, fname, defer_queue)
                             if msg != "OK":
@@ -2299,6 +2425,7 @@ def _process_daily_auto_sync(
                             "meesho", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Meesho order export ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("meesho", df, fname, defer_queue)
                             if msg != "OK":
@@ -2313,6 +2440,7 @@ def _process_daily_auto_sync(
                             "snapdeal", fname, df_sd,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Snapdeal ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("snapdeal", df_sd, fname, defer_queue)
                             if skipped_sd:
@@ -2359,6 +2487,7 @@ def _process_daily_auto_sync(
                             "flipkart", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Flipkart ({fname})",
+                            sess=sess,
                         ):
                             _apply_parsed_slice("flipkart", df, fname, defer_queue)
 
@@ -2420,6 +2549,7 @@ def _process_daily_auto_sync(
                                         "flipkart", fname, df_fk,
                                         detected=detected, warnings=warnings, file_results=file_results,
                                         detected_label=f"Flipkart ZIP ({fname}, {n_fc} file(s))",
+                                        sess=sess,
                                     ):
                                         _merge_slice_into_session(
                                             sess, "flipkart", df_fk, source_filename=fname,

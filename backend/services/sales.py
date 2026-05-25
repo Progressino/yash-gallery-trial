@@ -587,6 +587,76 @@ def build_sales_df(
     return _downcast_sales(result)
 
 
+_PLATFORM_DB_TO_SOURCE = {
+    "amazon": "Amazon",
+    "myntra": "Myntra",
+    "meesho": "Meesho",
+    "flipkart": "Flipkart",
+    "snapdeal": "Snapdeal",
+}
+
+
+def sales_date_window_from_platform_dfs(
+    platform_dfs: dict[str, pd.DataFrame],
+    *,
+    date_col_candidates: tuple[str, ...] = ("Date", "TxnDate", "_Date"),
+) -> tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+    """Min/max calendar day across parsed platform upload buffers."""
+    mins: list[pd.Timestamp] = []
+    maxs: list[pd.Timestamp] = []
+    for df in platform_dfs.values():
+        if df is None or df.empty:
+            continue
+        col = next((c for c in date_col_candidates if c in df.columns), None)
+        if not col:
+            continue
+        t = txn_reporting_naive_ist(pd.to_datetime(df[col], errors="coerce")).dropna()
+        if t.empty:
+            continue
+        mins.append(t.min().normalize())
+        maxs.append(t.max().normalize())
+    if not mins:
+        return None, None
+    return min(mins), max(maxs)
+
+
+def patch_sales_df_after_daily_upload(
+    existing: pd.DataFrame,
+    fresh_slice: pd.DataFrame,
+    platforms: set[str] | list[str],
+    date_min: pd.Timestamp,
+    date_max: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    Replace unified-sales rows for uploaded channels inside the upload's date window,
+    then append the freshly built slice (avoids rebuilding 1M+ historical rows).
+    """
+    if fresh_slice.empty and (existing is None or existing.empty):
+        return fresh_slice if fresh_slice is not None else pd.DataFrame()
+
+    sources = {_PLATFORM_DB_TO_SOURCE.get(p, p.title()) for p in platforms}
+    kept = existing
+    if kept is not None and not kept.empty and "Source" in kept.columns and "TxnDate" in kept.columns:
+        t = txn_reporting_naive_ist(kept["TxnDate"])
+        src = kept["Source"].astype(str).str.strip()
+        in_src = src.isin(sources)
+        in_range = t.notna() & (t >= date_min.normalize()) & (t <= date_max.normalize())
+        kept = kept.loc[~(in_src & in_range)].copy()
+
+    parts = [df for df in (kept, fresh_slice) if df is not None and not df.empty]
+    if not parts:
+        return pd.DataFrame()
+    out = pd.concat(parts, ignore_index=True)
+    _cols = [
+        c
+        for c in ("Sku", "TxnDate", "Transaction Type", "Quantity", "Source", "OrderId")
+        if c in out.columns
+    ]
+    if _cols:
+        out = out.drop_duplicates(subset=_cols, keep="last")
+    return _downcast_sales(out)
+
+
 def get_sales_summary(
     sales_df: pd.DataFrame,
     months: int = 3,
