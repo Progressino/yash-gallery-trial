@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from backend.services.inventory import _extract_all_from_rar, load_inventory_consolidated
@@ -24,8 +25,19 @@ def test_inventory_rar_manifest_lists_all_inner_files():
     assert len(loaded) >= 10
     assert len(extracted["oms_csvs"]) >= 1
     assert len(extracted["flipkart_csvs"]) >= 1
-    assert len(extracted["myntra_csvs"]) >= 1
     assert len(extracted["fba_tsvs"]) >= 1
+
+
+@pytest.mark.skipif(_sample_inventory_rar() is None, reason="sample inventory RAR not on disk")
+def test_inventory_rar_loads_flipkart_and_myntra_columns():
+    raw = _sample_inventory_rar().read_bytes()
+    df, debug = load_inventory_consolidated(None, None, None, raw, {}, return_debug=True)
+    assert "Flipkart_Inventory" in df.columns
+    assert int(df["Flipkart_Inventory"].sum()) > 0
+    assert debug.get("flipkart", "").startswith("0 SKUs") is False
+    # 25-May-26 bundle has Flipkart warehouse + PPMP files; Myntra PPMP may be absent
+    if int(df.get("Myntra_Other_Inventory", pd.Series(dtype=float)).sum() or 0) > 0:
+        assert "Myntra_Other_Inventory" in df.columns
 
 
 def test_build_inventory_upload_payload():

@@ -41,17 +41,44 @@ def _dedupe_identical_byte_payloads(payloads: List[bytes]) -> Tuple[List[bytes],
     return out, len(payloads) - len(out)
 
 
+def _content_sniff_csv_kind(data: bytes) -> Optional[str]:
+    """Classify by column headers (filename alone is unreliable for PPMP exports)."""
+    df = read_csv_safe(data)
+    if df.empty:
+        text = data[:8000].decode("utf-8", errors="ignore").lower()
+    else:
+        text = " ".join(str(c).lower() for c in df.columns)
+    if "flipkart selling price" in text or (
+        "live on website" in text and "listing id" in text and "fsn" in text
+    ):
+        return "flipkart"
+    if "seller sku code" in text and "inventory count" in text:
+        if "warehouse id" in text and "po_type" in text:
+            return "flipkart"
+        if "myntra sku" in text or ("style id" in text and "flipkart" not in text):
+            return "myntra"
+        return "flipkart"
+    if "item skucode" in text or "buffer stock" in text:
+        return "oms"
+    if "combo sku code" in text:
+        return "combo"
+    if "msku" in text and "ending warehouse balance" in text:
+        return "amazon"
+    return None
+
+
 def _rar_sniff_csv_kind(base_lower: str, data: bytes) -> Optional[str]:
     """
     Classify a CSV inside an inventory RAR. Returns:
       flipkart | myntra | amazon | combo | oms | None
     """
+    by_content = _content_sniff_csv_kind(data)
     if "current inventory" in base_lower:
-        return "myntra"
+        return by_content or "flipkart"
     if "flipkart" in base_lower or base_lower.startswith("fk") or "seller_inventory_report" in base_lower:
         return "flipkart"
     if "myntra" in base_lower:
-        return "myntra"
+        return by_content or "myntra"
     if "amz" in base_lower or "amazon" in base_lower:
         return "amazon"
     if "combo" in base_lower:
@@ -459,47 +486,86 @@ _FK_STOCK_COLS = [
 ]
 
 
+def _resolve_seller_style_sku(raw: str, mapping: Dict[str, str]) -> str:
+    """Map marketplace seller SKU / style id to OMS SKU (PL prefix stripped)."""
+    cleaned = str(raw).strip().upper()
+    if not cleaned or cleaned == "NAN":
+        return ""
+    if cleaned in mapping:
+        return mapping[cleaned]
+    stripped = _PL_RE.sub(r"\1\2", cleaned)
+    if stripped in mapping:
+        return mapping[stripped]
+    return stripped
+
+
+def _parse_fk_ppmp_inventory(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
+    """
+    Flipkart PPMP Seller Inventory Report (seller sku code + inventory/sellable count).
+    Same shape as Myntra PPMP — must not be parsed as Myntra_Other_Inventory.
+    """
+    df = read_csv_safe(csv_bytes)
+    if df.empty:
+        return pd.DataFrame()
+    if any("flipkart selling price" in str(c).lower() for c in df.columns):
+        return pd.DataFrame()
+    sku_col = next((c for c in df.columns if "seller sku" in c.lower()), None)
+    if sku_col is None:
+        return pd.DataFrame()
+    inv_col = next((c for c in df.columns if c.lower().strip() == "inventory count"), None)
+    if inv_col is None:
+        inv_col = next(
+            (c for c in df.columns if c.lower().strip() == "sellable inventory count"),
+            None,
+        )
+    if inv_col is None:
+        inv_col = next((c for c in df.columns if "inventory" in c.lower() and "count" in c.lower()), None)
+    if inv_col is None:
+        return pd.DataFrame()
+    df[inv_col] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
+
+    def _resolve(row) -> str:
+        val = str(row.get(sku_col, "")).strip()
+        if val and val.lower() not in ("nan", "") and not val.isdigit():
+            return _resolve_seller_style_sku(val, mapping)
+        return ""
+
+    df["OMS_SKU"] = df.apply(_resolve, axis=1)
+    df = df[df["OMS_SKU"].str.strip() != ""]
+    return (
+        df.groupby("OMS_SKU")[inv_col].sum()
+        .reset_index()
+        .rename(columns={inv_col: "Flipkart_Inventory"})
+    )
+
+
 def _parse_fk_inventory_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """
-    Flipkart warehouse inventory CSV (Current Inventory export).
-    Sums all usable stock columns (Live on Website + reserved + receiving + dispatching).
-    Strips PL prefix from SKUs (e.g. 1388PLYKMAROON-XL → 1388YKMAROON-XL).
+    Flipkart warehouse inventory CSV (Current Inventory export) or PPMP seller report.
     Returns OMS_SKU, Flipkart_Inventory.
     """
     df = read_csv_safe(csv_bytes)
-    if df.empty or "SKU" not in df.columns:
+    if df.empty:
         return pd.DataFrame()
 
-    # Build stock total from whichever stock columns exist
-    present = [c for c in _FK_STOCK_COLS if c in df.columns]
-    if not present:
-        # Fallback: any column named "Live on Website" only
-        if "Live on Website" not in df.columns:
-            return pd.DataFrame()
-        present = ["Live on Website"]
+    if "SKU" in df.columns:
+        present = [c for c in _FK_STOCK_COLS if c in df.columns]
+        if not present and "Live on Website" in df.columns:
+            present = ["Live on Website"]
+        if present:
+            for c in present:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+            df["_total"] = df[present].sum(axis=1)
+            df["OMS_SKU"] = df["SKU"].apply(lambda r: _resolve_seller_style_sku(r, mapping))
+            df = df[df["OMS_SKU"].str.strip() != ""]
+            if not df.empty:
+                return (
+                    df.groupby("OMS_SKU")["_total"].sum()
+                    .reset_index()
+                    .rename(columns={"_total": "Flipkart_Inventory"})
+                )
 
-    for c in present:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    df["_total"] = df[present].sum(axis=1)
-
-    def _resolve_fk_sku(raw) -> str:
-        cleaned = str(raw).strip().upper()
-        if not cleaned or cleaned == "NAN":
-            return ""
-        if cleaned in mapping:
-            return mapping[cleaned]
-        stripped = _PL_RE.sub(r"\1\2", cleaned)
-        if stripped in mapping:
-            return mapping[stripped]
-        return stripped
-
-    df["OMS_SKU"] = df["SKU"].apply(_resolve_fk_sku)
-    df = df[df["OMS_SKU"].str.strip() != ""]
-    return (
-        df.groupby("OMS_SKU")["_total"].sum()
-        .reset_index()
-        .rename(columns={"_total": "Flipkart_Inventory"})
-    )
+    return _parse_fk_ppmp_inventory(csv_bytes, mapping)
 
 
 def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
@@ -513,6 +579,8 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
     df = read_csv_safe(csv_bytes)
     if df.empty:
         return pd.DataFrame()
+    if any("flipkart selling price" in str(c).lower() for c in df.columns):
+        return pd.DataFrame()
     sku_col   = next((c for c in df.columns if "seller sku" in c.lower()), None)
     style_col = next((c for c in df.columns if "style" in c.lower() and "id" in c.lower()), None)
     # Use "inventory count" (total warehouse stock) — matches OMS Myntra Other Warehouse figure.
@@ -525,28 +593,13 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
 
     df[inv_col] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
 
-    def _resolve_seller_sku(raw: str) -> str:
-        """Map a non-numeric Myntra seller SKU to OMS SKU, handling PL prefix."""
-        cleaned = raw.strip().upper()
-        if not cleaned or cleaned == "NAN":
-            return ""
-        # Try direct mapping first
-        if cleaned in mapping:
-            return mapping[cleaned]
-        # Strip PL prefix (1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL) and try again
-        stripped = _PL_RE.sub(r"\1\2", cleaned)
-        if stripped in mapping:
-            return mapping[stripped]
-        # Use PL-stripped version as-is (it IS the OMS SKU)
-        return stripped
-
     def _resolve(row) -> str:
         # Primary: seller sku code — only use if it's a real seller SKU (non-numeric)
         # Myntra sometimes puts their internal sku_id (pure number) here, skip those
         if sku_col:
             val = str(row.get(sku_col, "")).strip()
             if val and val.lower() not in ("nan", "") and not val.isdigit():
-                return _resolve_seller_sku(val)
+                return _resolve_seller_style_sku(val, mapping)
         # Fallback: style id → mapped via SKU mapping sheet (MYNTRA sheet adds style_id→OMS)
         if style_col:
             val = str(row.get(style_col, "")).strip()
@@ -597,6 +650,9 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
         ("Myntra_Other_Inventory", [
             "myntra other warehouse", "myntra other wh", "myntra other", "myntra inventory",
             "myntra_other_inventory", "myntra_inventory", "myntra",
+        ]),
+        ("Meesho_Inventory", [
+            "meesho inventory", "meesho_inventory", "meesho other warehouse", "meesho",
         ]),
     ]
 
@@ -849,7 +905,10 @@ def load_inventory_consolidated(
     # ── Combine all OMS parts → single OMS_Inventory + Buffer_Stock (+ marketplace cols) ──
     if oms_parts:
         combined_oms = pd.concat(oms_parts, ignore_index=True)
-        _all_src = ["OMS_Inventory", "Buffer_Stock", "Amazon_Inventory", "Flipkart_Inventory", "Myntra_Other_Inventory"]
+        _all_src = [
+            "OMS_Inventory", "Buffer_Stock", "Amazon_Inventory", "Flipkart_Inventory",
+            "Myntra_Other_Inventory", "Meesho_Inventory",
+        ]
         agg_cols = [c for c in _all_src if c in combined_oms.columns]
         oms_part = combined_oms.groupby("OMS_SKU")[agg_cols].sum().reset_index()
         inv_dfs.insert(0, oms_part)
@@ -857,8 +916,12 @@ def load_inventory_consolidated(
 
         # If OMS CSV provides marketplace columns, they are authoritative (same source as OMS UI).
         # Remove those columns from separately parsed sources to avoid double-counting.
-        oms_mkt_cols = {c for c in ["Amazon_Inventory", "Flipkart_Inventory", "Myntra_Other_Inventory"]
-                        if c in oms_part.columns and oms_part[c].sum() > 0}
+        oms_mkt_cols = {
+            c for c in [
+                "Amazon_Inventory", "Flipkart_Inventory", "Myntra_Other_Inventory", "Meesho_Inventory",
+            ]
+            if c in oms_part.columns and oms_part[c].sum() > 0
+        }
         if oms_mkt_cols:
             debug["oms_provides_marketplace"] = sorted(oms_mkt_cols)
             for i in range(1, len(inv_dfs)):
