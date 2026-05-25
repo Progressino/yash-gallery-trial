@@ -43,8 +43,6 @@ const qc = new QueryClient({
   },
 })
 
-const HYDRATE_WARM_TIMEOUT_MS = 300_000
-
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let t: ReturnType<typeof setTimeout> | undefined
   try {
@@ -116,7 +114,7 @@ function ProtectedRoute() {
     c.daily_auto_ingest_status === 'running' ||
     c.sales_rebuild === 'running'
 
-  const { isFetching: isRestoring } = useQuery({
+  const { isPending: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
@@ -143,9 +141,11 @@ function ProtectedRoute() {
             /* warm cache may still be loading after deploy */
           }
         }
-        if (coverageEmpty(coverage)) {
+        const hasAnyPlatform =
+          coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart || coverage.snapdeal
+        if (coverageEmpty(coverage) && !hasAnyPlatform) {
           try {
-            await withTimeout(cacheHydrateWarm(), HYDRATE_WARM_TIMEOUT_MS)
+            await withTimeout(cacheHydrateWarm(), 90_000)
             coverage = await getCoverage({ light: true, timeout: 60_000 })
             setCoverage(coverage)
             if (coverage.inventory_upload_status === 'running') return true
@@ -153,16 +153,16 @@ function ProtectedRoute() {
             /* warm cache may still be starting after deploy */
           }
         }
-        if (coverageEmpty(coverage)) {
+        if (coverageEmpty(coverage) && !hasAnyPlatform) {
           try {
-            await withTimeout(cacheLoad(), HYDRATE_WARM_TIMEOUT_MS)
-            coverage = await getCoverage({ timeout: 120_000 })
+            await withTimeout(cacheLoad(), 90_000)
+            coverage = await getCoverage({ timeout: 90_000 })
             setCoverage(coverage)
           } catch {
             /* GitHub cache optional */
           }
         } else if (sessionNeedsSales(coverage)) {
-          coverage = await getCoverage({ timeout: 120_000 })
+          coverage = await getCoverage({ timeout: 90_000 })
           setCoverage(coverage)
         }
         if (!sessionNeedsSync(coverage)) {

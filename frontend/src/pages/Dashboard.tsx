@@ -863,9 +863,13 @@ export default function Dashboard() {
   })
   const { data: platformSummary, isLoading: loadingPlatforms } = useQuery<PlatformSummaryItem[]>({
     queryKey: ['platform-summary', dateStart, dateEnd],
-    queryFn: async () => { const { data } = await api.get(`/data/platform-summary?${summaryParams}`); return data },
+    queryFn: async () => {
+      const { data } = await api.get(`/data/platform-summary?${summaryParams}`, { timeout: 120_000 })
+      return data
+    },
     enabled: salesLoaded,
     staleTime: 300_000,
+    retry: 1,
   })
   const { data: anomalies } = useQuery<AnomalyItem[]>({
     queryKey: ['anomalies', dateStart, dateEnd],
@@ -991,7 +995,6 @@ export default function Dashboard() {
 
   const intelligenceLoading =
     !salesLoaded ||
-    loadingPlatforms ||
     (showDsr && loadingDsr) ||
     (salesLoaded && loadingDsrBrands) ||
     exportingSales ||
@@ -1000,6 +1003,7 @@ export default function Dashboard() {
 
   const intelligenceLoadLabel = useMemo(() => {
     if (!salesLoaded) return 'Syncing your data…'
+    if (loadingPlatforms) return 'Loading marketplace breakdown…'
     if (exportingSales) return 'Preparing sales export…'
     if (exportingDsr) return 'Exporting DSR…'
     if (exportingDsrMonthly) return 'Exporting brand monthly…'

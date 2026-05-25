@@ -62,6 +62,52 @@ def test_platform_summary_falls_back_to_raw_when_unified_missing_window():
     assert row["total_units"] == 96
 
 
+def test_daily_restored_allows_tier3_topup_when_session_behind_sqlite(monkeypatch):
+    """Regression: daily_restored=True must not skip merge when SQLite is newer."""
+    from backend.services import daily_store
+
+    sess = AppSession()
+    sess.daily_restored = True
+    sess.sku_mapping = {"A": "OMS-A"}
+    sess.meesho_df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-05-20"]),
+            "OMS_SKU": ["OMS-A"],
+            "TxnType": ["Shipment"],
+            "Quantity": [1],
+            "OrderId": ["O1"],
+            "LineKey": [""],
+        }
+    )
+    monkeypatch.setattr(
+        daily_store,
+        "get_summary",
+        lambda: {"meesho": {"file_count": 2, "max_date": "2026-05-24", "total_rows": 50}},
+    )
+    monkeypatch.setattr(
+        daily_store,
+        "load_platform_data",
+        lambda platform, months=None, dedup=True, max_files=None: pd.DataFrame(
+            {
+                "Date": pd.to_datetime(["2026-05-23", "2026-05-24"]),
+                "OMS_SKU": ["OMS-A", "OMS-A"],
+                "TxnType": ["Shipment", "Shipment"],
+                "Quantity": [10, 20],
+                "OrderId": ["O2", "O3"],
+                "LineKey": ["", ""],
+            }
+        )
+        if platform == "meesho"
+        else pd.DataFrame(),
+    )
+    monkeypatch.setattr(daily_store, "merge_platform_data", lambda cur, df, plat: pd.concat([cur, df], ignore_index=True))
+    assert data_router._tier3_session_needs_topup(sess) is True
+    assert sess.daily_restored is True
+    changed = data_router._merge_tier3_light(sess, only_platforms=["meesho"])
+    assert changed is True
+    assert len(sess.meesho_df) == 3
+
+
 def test_tier3_topup_needed_when_session_platform_empty(monkeypatch):
     from backend.services import daily_store
 

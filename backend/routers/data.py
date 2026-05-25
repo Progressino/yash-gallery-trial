@@ -101,10 +101,11 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
 
     if getattr(sess, "pause_auto_data_restore", False) and not needs_data:
         return
+    needs_tier3_refresh = _tier3_session_needs_topup(sess) or _session_sales_stale_vs_platforms(sess)
     if sess.daily_restored and not needs_data:
-        if not (_tier3_session_needs_topup(sess) or _session_sales_stale_vs_platforms(sess)):
+        if not needs_tier3_refresh:
             return
-    if needs_data:
+    if needs_data or needs_tier3_refresh:
         sess.daily_restored = False
 
     # Never block coverage/login behind a multi-minute Tier-3 upload on the same lock.
@@ -112,7 +113,7 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         return
 
     try:
-        if sess.daily_restored:
+        if sess.daily_restored and not needs_tier3_refresh:
             return
 
         import pandas as pd
@@ -350,10 +351,77 @@ def _rebuild_session_sales(sess: AppSession) -> None:
         pass
 
 
+def _intelligence_tier3_months() -> int:
+    try:
+        return max(1, int((os.environ.get("INTELLIGENCE_TIER3_MONTHS") or "6").strip()))
+    except ValueError:
+        return 6
+
+
+def _intelligence_tier3_max_files() -> int:
+    try:
+        v = int((os.environ.get("INTELLIGENCE_TIER3_MAX_FILES") or "60").strip())
+        return max(5, v)
+    except ValueError:
+        return 60
+
+
+def _merge_tier3_light(sess: AppSession, *, only_platforms: list[str] | None = None) -> bool:
+    """
+    Bounded Tier-3 merge for dashboard APIs — recent uploads only, no full-history scan.
+    """
+    from ..services.daily_store import load_platform_data, merge_platform_data
+
+    months = _intelligence_tier3_months()
+    max_files = _intelligence_tier3_max_files()
+    changed = False
+    for platform, attr in _PLATFORM_ATTRS:
+        if only_platforms is not None and platform not in only_platforms:
+            continue
+        df = load_platform_data(
+            platform,
+            months=months,
+            dedup=False,
+            max_files=max_files,
+        )
+        if df.empty:
+            continue
+        cur = getattr(sess, attr)
+        merged = merge_platform_data(cur, df, platform)
+        if len(merged) != len(cur) or (cur.empty and not merged.empty):
+            setattr(sess, attr, merged)
+            changed = True
+    return changed
+
+
+def _platforms_needing_tier3_topup(sess: AppSession) -> list[str]:
+    out: list[str] = []
+    try:
+        from ..services.daily_store import get_summary
+
+        summary = get_summary()
+    except Exception:
+        return out
+    for plat, attr in _PLATFORM_ATTRS:
+        plat_sum = summary.get(plat) or {}
+        if int(plat_sum.get("file_count") or 0) <= 0:
+            continue
+        cur = getattr(sess, attr, None)
+        if cur is None or not hasattr(cur, "empty") or cur.empty:
+            out.append(plat)
+            continue
+        tier_max = str(plat_sum.get("max_date") or "")[:10]
+        sess_max = _platform_df_max_iso(cur) or ""
+        if tier_max and (not sess_max or tier_max > sess_max):
+            out.append(plat)
+    return out
+
+
 def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
     """
-    Intelligence dashboard reads must see Tier-3 daily uploads and a unified sales_df
-    that includes every loaded marketplace — not a stale warm-cache sales slice.
+    Fast path for Intelligence GET handlers: rebuild sales from session frames,
+    optionally merge **recent** Tier-3 rows (non-blocking lock). Never run a full
+    multi-minute ``_restore_daily_if_needed`` on the request thread.
     """
     if getattr(sess, "pause_auto_data_restore", False):
         return
@@ -370,10 +438,17 @@ def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
             _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
     except Exception:
         pass
-    if _tier3_session_needs_topup(sess) or not getattr(sess, "daily_restored", False):
-        _restore_daily_if_needed(sess)
-    elif _session_sales_stale_vs_platforms(sess):
+
+    if _session_sales_stale_vs_platforms(sess):
         _rebuild_session_sales(sess)
+
+    need_plat = _platforms_needing_tier3_topup(sess)
+    if need_plat and sess._daily_restore_lock.acquire(blocking=False):
+        try:
+            if _merge_tier3_light(sess, only_platforms=need_plat):
+                _rebuild_session_sales(sess)
+        finally:
+            sess._daily_restore_lock.release()
     else:
         _ensure_sales_rebuilt(sess)
 
