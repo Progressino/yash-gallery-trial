@@ -79,6 +79,31 @@ def save_archive(session_id: str, raised_date: pd.Timestamp, content: bytes) -> 
     return gpath
 
 
+def delete_archives_for_date(
+    raised_date: str,
+    session_id: str | None = None,
+) -> bool:
+    """Remove org-wide and session CSV archives so Calculate PO won't re-import this day."""
+    try:
+        day = pd.Timestamp(pd.to_datetime(str(raised_date).strip()[:10]).normalize())
+    except Exception:
+        return False
+    removed = False
+    gpath = global_archive_path(day)
+    if gpath.is_file():
+        gpath.unlink()
+        removed = True
+    if session_id:
+        try:
+            spath = archive_path(session_id, day)
+            if spath.is_file():
+                spath.unlink()
+                removed = True
+        except ValueError:
+            pass
+    return removed
+
+
 def load_archive(session_id: str, day: pd.Timestamp) -> Optional[bytes]:
     """Prefer org-wide global archive, then per-session file."""
     d = pd.Timestamp(day).normalize()
@@ -203,15 +228,21 @@ def try_auto_import_recent_ledgers(
     ledger = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
 
     days_to_try: list[pd.Timestamp] = []
+    from ..db.po_raised_db import is_raise_date_suppressed
+
     for i in range(1, lb + 1):
         d = (plan - timedelta(days=i)).normalize()
         if ledger_has_positive_qty_on_day(ledger, d):
+            continue
+        if is_raise_date_suppressed(str(d.date())):
             continue
         if load_archive(session_id, d) is not None:
             days_to_try.append(d)
 
     for d in list_global_archive_dates(window_start, plan - timedelta(days=1)):
         if ledger_has_positive_qty_on_day(ledger, d):
+            continue
+        if is_raise_date_suppressed(str(d.date())):
             continue
         if d not in days_to_try:
             days_to_try.append(d)

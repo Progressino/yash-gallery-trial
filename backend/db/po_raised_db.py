@@ -33,6 +33,18 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_suppressed_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS po_raise_suppressed (
+            raised_date   TEXT PRIMARY KEY,
+            suppressed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            note          TEXT DEFAULT ''
+        )
+        """
+    )
+
+
 def init_db() -> None:
     """Create the ledger table on app startup."""
     conn = _connect()
@@ -54,6 +66,7 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_po_raised_sku_date "
             "ON po_raised(oms_sku, raised_date)"
         )
+        _ensure_suppressed_table(conn)
         conn.commit()
     finally:
         conn.close()
@@ -263,6 +276,63 @@ def clear_older_than_days(days: int) -> int:
         cur = conn.execute("DELETE FROM po_raised WHERE raised_date < ?", (cutoff,))
         conn.commit()
         return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def suppress_raise_date(raised_date: str, note: str = "") -> None:
+    """Block auto-import from archives for this calendar day (user removed bad raise)."""
+    day = str(raised_date).strip()[:10]
+    if not day:
+        return
+    conn = _connect()
+    try:
+        _ensure_suppressed_table(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO po_raise_suppressed (raised_date, note) VALUES (?, ?)",
+            (day, (note or "user deleted")[:512]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_raise_date_suppression(raised_date: str) -> None:
+    """Allow auto-import again after an explicit manual import for this day."""
+    day = str(raised_date).strip()[:10]
+    if not day:
+        return
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM po_raise_suppressed WHERE raised_date = ?", (day,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is_raise_date_suppressed(raised_date: str) -> bool:
+    day = str(raised_date).strip()[:10]
+    if not day:
+        return False
+    conn = _connect()
+    try:
+        _ensure_suppressed_table(conn)
+        cur = conn.execute(
+            "SELECT 1 FROM po_raise_suppressed WHERE raised_date = ? LIMIT 1",
+            (day,),
+        )
+        return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def list_suppressed_raise_dates() -> list[str]:
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT raised_date FROM po_raise_suppressed ORDER BY raised_date DESC"
+        )
+        return [str(r[0]) for r in cur.fetchall()]
     finally:
         conn.close()
 

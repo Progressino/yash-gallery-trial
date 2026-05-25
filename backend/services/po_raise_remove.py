@@ -10,25 +10,39 @@ def _norm_day(day: str) -> pd.Timestamp:
     return pd.Timestamp(pd.to_datetime(str(day).strip()[:10]).normalize())
 
 
-def remove_raise_ledger_day(sess, raised_date: str) -> dict:
-    """Drop all ledger lines for one calendar day from session and DB."""
+def remove_raise_ledger_day(
+    sess,
+    raised_date: str,
+    *,
+    session_id: str | None = None,
+) -> dict:
+    """Drop all ledger lines for one calendar day from session, DB, and archives."""
     day = str(raised_date).strip()[:10]
     if not day:
         return {"ok": False, "message": "raised_date is required (YYYY-MM-DD).", "removed": 0}
 
-    from ..db.po_raised_db import delete_raises_for_date
+    from ..db.po_raised_db import delete_raises_for_date, suppress_raise_date
+    from ..services.po_raise_archive import delete_archives_for_date
 
     removed_db = delete_raises_for_date(day)
     removed_sess = _remove_day_from_session_df(sess, day)
+    suppress_raise_date(day, note="removed via PO dashboard")
+    archive_removed = delete_archives_for_date(day, session_id)
     sess._quarterly_cache.clear()
+    parts = [
+        f"Removed raise ledger for {day} ({max(removed_sess, removed_db):,} line(s) cleared)."
+    ]
+    if archive_removed:
+        parts.append("Archived export for that day was deleted — Calculate PO will not auto-import it again.")
+    else:
+        parts.append("Auto-import from archive is blocked for that day.")
     return {
         "ok": True,
-        "message": (
-            f"Removed raise ledger for {day} "
-            f"({max(removed_sess, removed_db):,} line(s) cleared)."
-        ),
+        "message": " ".join(parts),
         "removed": max(removed_sess, removed_db),
         "raised_date": day,
+        "archive_removed": archive_removed,
+        "suppressed": True,
     }
 
 

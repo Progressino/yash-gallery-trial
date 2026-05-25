@@ -1,4 +1,6 @@
 """PO raise ledger removal (session + SQLite)."""
+from pathlib import Path
+
 import pandas as pd
 
 from backend.db import po_raised_db
@@ -63,6 +65,51 @@ def test_remove_raise_ledger_skus_admin_path(tmp_path, monkeypatch):
     assert out["ok"] is True
     assert len(sess.po_raise_ledger_df) == 1
     assert str(sess.po_raise_ledger_df.iloc[0]["OMS_SKU"]) == "SKU-B"
+
+
+def test_remove_raise_ledger_day_blocks_auto_import(tmp_path, monkeypatch):
+    import backend.services.po_raise_archive as arch
+    from backend.services.po_raise_archive import save_archive, try_auto_import_recent_ledgers
+
+    archive_root = tmp_path / "arch"
+    archive_root.mkdir()
+    monkeypatch.setattr(arch, "_ARCHIVE_DIR", str(archive_root))
+    arch._resolved_archive_root = None
+
+    db = tmp_path / "po_raised_sup.db"
+    monkeypatch.setattr(po_raised_db, "DB_PATH", str(db))
+    po_raised_db.init_db()
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "po_recommendation_16-5-26.csv"
+    if not fixture.is_file():
+        import pytest
+
+        pytest.skip("fixture missing")
+
+    day = "2026-05-22"
+    save_archive(
+        "sess-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        pd.Timestamp(day),
+        fixture.read_bytes(),
+    )
+
+    sess = AppSession()
+    out = remove_raise_ledger_day(sess, day, session_id="sess-bbbb-cccc-dddd-eeee-ffffffffff")
+    assert out["ok"] is True
+    assert out.get("suppressed") is True
+    assert po_raised_db.is_raise_date_suppressed(day)
+
+    fresh = AppSession()
+    auto = try_auto_import_recent_ledgers(
+        fresh,
+        "sess-cccc-dddd-eeee-ffff-gggggggggggg",
+        "2026-05-25",
+        lookback_days=14,
+    )
+    assert auto is None or day not in (auto.get("imported_days") or [])
+    if not fresh.po_raise_ledger_df.empty:
+        rd = pd.to_datetime(fresh.po_raise_ledger_df["Raised_Date"], errors="coerce").dt.normalize()
+        assert day not in {str(pd.Timestamp(d).date()) for d in rd.dropna().unique()}
 
 
 def test_clear_raise_ledger_all(tmp_path, monkeypatch):

@@ -748,7 +748,8 @@ def po_delete_raise_ledger_day(request: Request, raised_date: str = ""):
         return {"ok": False, "message": "No session"}
     from ..services.po_raise_remove import remove_raise_ledger_day
 
-    out = remove_raise_ledger_day(sess, raised_date)
+    sid = getattr(request.state, "session_id", None)
+    out = remove_raise_ledger_day(sess, raised_date, session_id=sid)
     if out.get("ok"):
         _sync_po_sidecars_to_durable_storage(request, sess)
     return out

@@ -48,10 +48,23 @@ def hydrate_session_ledger_from_db(
             plan = pd.Timestamp.now().normalize()
         lb = max(1, int(lookback_days))
         start = plan - pd.Timedelta(days=lb)
+        from ..db.po_raised_db import is_raise_date_suppressed
+
         db_df = ledger_rows_as_dataframe(
             start_date=str(start.date()),
             end_date=str(plan.date()),
         )
+        if db_df.empty:
+            return False
+        if "Raised_Date" in db_df.columns:
+            rd = pd.to_datetime(db_df["Raised_Date"], errors="coerce").dt.normalize()
+            suppressed_days = {
+                pd.Timestamp(d)
+                for d in rd.dropna().unique()
+                if is_raise_date_suppressed(str(pd.Timestamp(d).date()))
+            }
+            if suppressed_days:
+                db_df = db_df[~rd.isin(suppressed_days)].reset_index(drop=True)
         if db_df.empty:
             return False
 
@@ -256,6 +269,12 @@ def apply_ledger_import(
     n = int(len(sess.po_raise_ledger_df))
     tot_units = int(sum(accum.values()))
     sync_ledger_to_durable_db(sess, raised_date)
+    try:
+        from ..db.po_raised_db import clear_raise_date_suppression
+
+        clear_raise_date_suppression(str(pd.Timestamp(raised_date).normalize().date()))
+    except Exception:
+        pass
     return {
         "ok": True,
         "ledger_rows": n,
