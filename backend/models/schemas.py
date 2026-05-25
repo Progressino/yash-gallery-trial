@@ -67,6 +67,7 @@ class CoverageResponse(BaseModel):
     # Snapshot inventory-auto background job
     inventory_upload_status: str = "idle"
     inventory_upload_message: str = ""
+    inventory_upload_progress: Optional[int] = None
     inventory_upload_rows: Optional[int] = None
     inventory_upload_warnings: Optional[list[str]] = None
     inventory_upload_file_results: Optional[list[dict]] = None

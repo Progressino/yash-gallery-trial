@@ -1240,6 +1240,44 @@ def _classify_inventory_file_parts(
     return oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected
 
 
+def _set_inventory_upload_progress(sess: AppSession, pct: int, message: str) -> None:
+    sess.inventory_upload_progress = max(0, min(100, int(pct)))
+    sess.inventory_upload_message = message
+
+
+def _clear_stuck_inventory_upload(sess: AppSession, *, force: bool = False) -> bool:
+    """Reset a session stuck in inventory_upload_status=running."""
+    if getattr(sess, "inventory_upload_status", "idle") != "running":
+        return False
+    started = float(getattr(sess, "inventory_upload_started", 0) or 0)
+    age = time.time() - started if started > 0 else 999999
+    stuck_sec = int(os.environ.get("INVENTORY_UPLOAD_STUCK_SEC", "900"))
+    if not force and age < stuck_sec:
+        return False
+    msg = (
+        "Previous inventory upload did not finish (timed out or server was busy). "
+        "Try uploading again, or use Clear stuck if the job is frozen."
+    )
+    sess.inventory_upload_status = "error"
+    sess.inventory_upload_progress = 0
+    sess.inventory_upload_started = 0.0
+    sess.inventory_upload_message = msg
+    sess.inventory_upload_result = {"ok": False, "message": msg, "warnings": [msg]}
+    return True
+
+
+def _schedule_inventory_cache_save(sess: AppSession) -> None:
+    """GitHub/Postgres cache save can take minutes — never block the upload worker on it."""
+
+    def _run() -> None:
+        try:
+            _auto_save_cache(sess)
+        except Exception:
+            _log.exception("background inventory cache save failed")
+
+    threading.Thread(target=_run, name="inv-cache-save", daemon=True).start()
+
+
 def _build_inventory_upload_payload(
     *,
     df_variant: pd.DataFrame,
@@ -1304,7 +1342,8 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
     if len(file_parts) > 3:
         fnames += f" (+{len(file_parts) - 3} more)"
     sess.inventory_upload_status = "running"
-    sess.inventory_upload_message = f"Classifying {len(file_parts)} file(s): {fnames}…"
+    sess.inventory_upload_started = time.time()
+    _set_inventory_upload_progress(sess, 5, f"Classifying {len(file_parts)} file(s): {fnames}…")
     sess.inventory_upload_result = {}
     warnings: list[str] = []
     try:
@@ -1312,20 +1351,27 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
     except Exception as e:
         _log.exception("inventory-auto classify files")
         sess.inventory_upload_status = "error"
+        sess.inventory_upload_progress = 0
         sess.inventory_upload_message = str(e)
         sess.inventory_upload_result = {"ok": False, "message": str(e)}
         return
 
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
         sess.inventory_upload_status = "error"
+        sess.inventory_upload_progress = 0
         sess.inventory_upload_message = "No inventory files recognized."
         sess.inventory_upload_result = {"ok": False, "message": "No inventory files recognized."}
         return
 
     if amz_bytes and amz_bytes[:6] == _RAR_MAGIC:
-        sess.inventory_upload_message = "Extracting RAR archive and parsing OMS / Flipkart / Myntra / Amazon…"
+        _set_inventory_upload_progress(
+            sess, 20, "Extracting RAR archive and reading inner CSV files…",
+        )
+    else:
+        _set_inventory_upload_progress(sess, 25, "Parsing marketplace inventory files…")
 
     def work():
+        _set_inventory_upload_progress(sess, 45, "Merging OMS, Flipkart, Myntra, and Amazon stock…")
         df_variant, debug = load_inventory_consolidated(
             oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
             group_by_parent=False, return_debug=True,
@@ -1351,10 +1397,12 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
             )
         except Exception:
             df_parent = df_variant
+        _set_inventory_upload_progress(sess, 80, "Building parent-SKU rollup…")
         sess.inventory_df_variant = df_variant
         sess.inventory_df_parent = df_parent
         sess.inventory_debug = debug
         _session_data_changed(sess)
+        _set_inventory_upload_progress(sess, 95, "Finalizing snapshot…")
         payload = _build_inventory_upload_payload(
             df_variant=df_variant,
             debug=debug,
@@ -1364,20 +1412,25 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
         )
         if not df_variant.empty:
             sess.inventory_upload_status = "done"
+            _set_inventory_upload_progress(sess, 100, payload["message"])
         else:
             sess.inventory_upload_status = "error"
+            sess.inventory_upload_progress = 0
             payload["ok"] = False
         sess.inventory_upload_result = payload
         sess.inventory_upload_message = payload["message"]
+        sess.inventory_upload_started = 0.0
         return payload
 
     try:
         await asyncio.to_thread(_session_lock_apply_sync, sess, work)
         if sess.inventory_upload_status == "done":
-            _auto_save_cache(sess)
+            _schedule_inventory_cache_save(sess)
     except Exception as e:
         _log.exception("inventory-auto parse")
         sess.inventory_upload_status = "error"
+        sess.inventory_upload_progress = 0
+        sess.inventory_upload_started = 0.0
         sess.inventory_upload_message = f"Parse error: {e}"
         sess.inventory_upload_result = {"ok": False, "message": f"Parse error: {e}"}
 
@@ -1388,6 +1441,23 @@ def _run_inventory_auto_worker(session_id: str, file_parts: list[tuple[str, byte
 
 
 _INVENTORY_AUTO_DIRECT_MAX_FILES = int(os.environ.get("INVENTORY_AUTO_DIRECT_MAX_FILES", "3"))
+
+
+@router.post("/inventory-auto/reset-stuck")
+async def reset_stuck_inventory_upload(request: Request):
+    """Clear a session stuck on inventory_upload_status=running (e.g. after a long wait)."""
+    sess = _get_session(request)
+    cleared = _clear_stuck_inventory_upload(sess, force=True)
+    return {
+        "ok": True,
+        "cleared": cleared,
+        "message": (
+            "Cleared stuck inventory upload — you can upload again."
+            if cleared
+            else "No stuck inventory upload to clear (or still within the grace period)."
+        ),
+        "inventory_upload_status": getattr(sess, "inventory_upload_status", "idle"),
+    }
 
 
 @router.post("/inventory-auto")
@@ -1440,7 +1510,8 @@ async def upload_inventory_auto(
 
         def mark_async_start():
             sess.inventory_upload_status = "running"
-            sess.inventory_upload_message = "Parsing inventory files and merging snapshot…"
+            sess.inventory_upload_started = time.time()
+            _set_inventory_upload_progress(sess, 2, "Upload received — starting parse…")
             sess.inventory_upload_result = {}
 
         await _session_lock_apply(sess, mark_async_start)
@@ -1528,7 +1599,7 @@ async def upload_inventory_auto(
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
 
-    background_tasks.add_task(_auto_save_cache, sess)
+    background_tasks.add_task(_schedule_inventory_cache_save, sess)
     return JSONResponse(content=data)
 
 
@@ -1580,7 +1651,7 @@ async def upload_inventory(
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
 
-    background_tasks.add_task(_auto_save_cache, sess)
+    background_tasks.add_task(_schedule_inventory_cache_save, sess)
     return JSONResponse(content=data)
 
 
@@ -2705,7 +2776,8 @@ async def _accept_inventory_auto_file_parts(
 
     def mark_async_start():
         sess.inventory_upload_status = "running"
-        sess.inventory_upload_message = "Parsing inventory files and merging snapshot…"
+        sess.inventory_upload_started = time.time()
+        _set_inventory_upload_progress(sess, 2, "Chunks assembled — starting parse…")
         sess.inventory_upload_result = {}
 
     await _session_lock_apply(sess, mark_async_start)
@@ -2888,18 +2960,25 @@ async def chunk_upload_complete(
                 )
             _log.info("Cleared stuck daily ingest before new chunk upload session=%s", sid[:8])
     elif getattr(sess, "inventory_upload_status", "idle") == "running":
-        return JSONResponse(
-            content={
-                "ok": False,
-                "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
-            }
-        )
+        if not _clear_stuck_inventory_upload(sess, force=False):
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "stuck": True,
+                    "message": (
+                        "An inventory upload is still processing. Wait for it to finish, "
+                        "or use “Clear stuck upload”, then try again."
+                    ),
+                }
+            )
+        _log.info("Cleared stuck inventory upload before new chunk upload session=%s", sid[:8])
 
     if target == "daily-auto":
         _mark_daily_auto_ingest_running(sess, "Assembling uploaded files…")
     else:
         sess.inventory_upload_status = "running"
-        sess.inventory_upload_message = "Assembling uploaded files…"
+        sess.inventory_upload_started = time.time()
+        _set_inventory_upload_progress(sess, 1, "Assembling uploaded chunks…")
         sess.inventory_upload_result = {}
 
     HEAVY_EXECUTOR.submit(_finalize_chunk_upload_worker, sid, body.upload_id)

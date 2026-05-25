@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
-  uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, buildSales, getCoverage,
+  uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile,
   waitForDailyAutoIngest, waitForSalesRebuild,
@@ -62,11 +62,12 @@ export default function Upload() {
   const [loading, setLoading]       = useState<Record<string, boolean>>({})
   const [buildingMsg, setBuildingMsg] = useState('')
   const [chunkProgress, setChunkProgress] = useState<{ pct: number; sent: number; total: number; msg: string } | null>(null)
+  const [invProgress, setInvProgress] = useState<{ pct: number; msg: string; phase: 'upload' | 'parse' } | null>(null)
   const [uploadAlertsBySource, setUploadAlertsBySource] = useState<Record<string, UploadAlert>>({})
   const uploadBegin = useUploadActivity(s => s.begin)
   const uploadEnd = useUploadActivity(s => s.end)
   const uploadBusy =
-    Object.values(loading).some(Boolean) || !!buildingMsg
+    Object.values(loading).some(Boolean) || !!buildingMsg || !!invProgress
 
   const coverageEmpty =
     !coverage.mtr &&
@@ -363,6 +364,19 @@ export default function Upload() {
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Could not reset')
     } finally { setL('daily_reset', false) }
+  }
+
+  const handleClearStuckInventory = async () => {
+    setL('inv_reset', true)
+    try {
+      const res = await resetStuckInventoryUpload()
+      showToast('success', res.message)
+      setBuildingMsg('')
+      setInvProgress(null)
+      await refresh()
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Could not reset')
+    } finally { setL('inv_reset', false) }
   }
 
   const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
@@ -949,13 +963,45 @@ export default function Upload() {
           onClearAlert={() => clearUploadAlert('inv')}
         >
           {!coverage.sku_mapping && <Warn>SKU map must be loaded on the server (ask Admin if missing).</Warn>}
-          {(coverage.inventory_upload_status === 'running' || (loading['inv'] && !!buildingMsg)) && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-center gap-2">
-              <svg className="animate-spin h-3 w-3 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-              </svg>
-              <span>{buildingMsg || coverage.inventory_upload_message || 'Parsing inventory on server…'}</span>
+          {(coverage.inventory_upload_status === 'running' || invProgress || (loading['inv'] && !!buildingMsg)) && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2 text-xs text-amber-800">
+                <svg className="animate-spin h-3 w-3 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <span className="flex-1 truncate">
+                  {invProgress?.msg || buildingMsg || coverage.inventory_upload_message || 'Parsing inventory on server…'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleClearStuckInventory}
+                  disabled={loading['inv_reset']}
+                  className="shrink-0 px-2.5 py-0.5 rounded border border-amber-300 bg-white text-amber-900 hover:bg-amber-100 disabled:opacity-50 text-xs"
+                >
+                  {loading['inv_reset'] ? 'Clearing…' : 'Clear stuck'}
+                </button>
+              </div>
+              {(() => {
+                const pct = invProgress?.phase === 'upload'
+                  ? invProgress.pct
+                  : Math.max(
+                      invProgress?.pct ?? 0,
+                      coverage.inventory_upload_progress ?? 0,
+                    )
+                if (pct <= 0) return null
+                return (
+                  <div className="space-y-0.5">
+                    <div className="h-2 rounded-full bg-amber-100 overflow-hidden">
+                      <div
+                        className="h-full bg-amber-500 transition-all duration-300"
+                        style={{ width: `${Math.min(100, pct)}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-amber-600 text-right tabular-nums">{pct}%</p>
+                  </div>
+                )
+              })()}
             </div>
           )}
           <InventoryDropzone
@@ -964,14 +1010,33 @@ export default function Upload() {
             onUpload={async (files) => {
               setL('inv', true)
               setBuildingMsg('Uploading inventory files…')
+              setInvProgress({ pct: 0, msg: 'Uploading inventory files…', phase: 'upload' })
               try {
                 await withUploadGuard(async () => {
-                  const res = await uploadInventoryAuto(files, p => setBuildingMsg(p.message))
+                  const res = await uploadInventoryAuto(files, p => {
+                    setBuildingMsg(p.message)
+                    if (p.bytesTotal > 0 && p.phase !== 'complete') {
+                      setInvProgress({
+                        pct: Math.min(40, Math.round((p.bytesSent / p.bytesTotal) * 40)),
+                        msg: p.message,
+                        phase: 'upload',
+                      })
+                    }
+                  })
                   if (res.ok) {
                     if (res.ingest_async) {
                       showToast('success', `${res.message}`, 6000)
-                      const cov = await waitForInventoryUpload(msg => setBuildingMsg(msg))
+                      setInvProgress({ pct: 42, msg: 'Upload complete — parsing on server…', phase: 'parse' })
+                      const cov = await waitForInventoryUpload((msg, pct) => {
+                        setBuildingMsg(msg)
+                        setInvProgress({
+                          pct: Math.max(42, pct ?? 42),
+                          msg,
+                          phase: 'parse',
+                        })
+                      })
                       setBuildingMsg('')
+                      setInvProgress(null)
                       setCoverage(cov)
                       const results = cov.inventory_upload_file_results ?? []
                       const saved = results.filter(r => r.status === 'loaded').length
@@ -1010,19 +1075,29 @@ export default function Upload() {
                 const { isUploadGateway502, waitForInventoryUpload } = await import('../api/client')
                 if (isUploadGateway502(e)) {
                   showToast('success', 'Upload may still be processing on the server…', 6000)
+                  setInvProgress({ pct: 45, msg: 'Checking server status…', phase: 'parse' })
                   try {
-                    const cov = await waitForInventoryUpload(msg => setBuildingMsg(msg))
+                    const cov = await waitForInventoryUpload((msg, pct) => {
+                      setBuildingMsg(msg)
+                      setInvProgress({ pct: pct ?? 50, msg, phase: 'parse' })
+                    })
                     setBuildingMsg('')
+                    setInvProgress(null)
                     setCoverage(cov)
                     showToast('success', cov.inventory_upload_message || 'Inventory updated.')
                     await refresh({ light: true })
                   } catch (pollErr: unknown) {
-                    showToast('error', pollErr instanceof Error ? pollErr.message : 'Upload status unknown')
+                    showToast(
+                      'error',
+                      pollErr instanceof Error
+                        ? `${pollErr.message} Try “Clear stuck” below, then upload again.`
+                        : 'Upload status unknown',
+                    )
                   }
                 } else {
                   showToast('error', e instanceof Error ? e.message : 'Upload failed')
                 }
-              } finally { setL('inv', false); setBuildingMsg('') }
+              } finally { setL('inv', false); setBuildingMsg(''); setInvProgress(null) }
             }}
           />
           {inventoryAmzDisclaimer && (

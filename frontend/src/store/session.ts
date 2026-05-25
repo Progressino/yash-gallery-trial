@@ -42,6 +42,7 @@ const empty: CoverageResponse = {
   daily_auto_ingest_message: '',
   inventory_upload_status: 'idle',
   inventory_upload_message: '',
+  inventory_upload_progress: 0,
   daily_inventory_upload_status: 'idle',
   daily_inventory_upload_message: '',
 }

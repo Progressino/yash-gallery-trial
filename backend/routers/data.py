@@ -71,6 +71,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     """
     if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
         return
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return
     try:
         import backend.main as _main
 
@@ -285,6 +287,8 @@ def _session_has_platform_data(sess: AppSession) -> bool:
 
 def _ensure_sales_rebuilt(sess: AppSession) -> None:
     """Rebuild unified sales when platform history is loaded but sales_df is still empty."""
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return
     if getattr(sess, "sales_rebuild_status", "idle") == "running":
         return
     if not sess.sku_mapping or not sess.sales_df.empty:
@@ -438,6 +442,7 @@ def get_coverage(request: Request, light: bool = False):
         ),
         inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
         inventory_upload_message=getattr(sess, "inventory_upload_message", "") or "",
+        inventory_upload_progress=int(getattr(sess, "inventory_upload_progress", 0) or 0),
         inventory_upload_rows=(
             int(sess.inventory_upload_result["rows"])
             if getattr(sess, "inventory_upload_result", None)

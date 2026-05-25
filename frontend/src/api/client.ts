@@ -87,6 +87,7 @@ export interface CoverageResponse {
   }>
   inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   inventory_upload_message?: string
+  inventory_upload_progress?: number
   inventory_upload_rows?: number
   inventory_upload_warnings?: string[]
   inventory_upload_file_results?: Array<{
@@ -500,8 +501,17 @@ export async function waitForDailyAutoIngest(
 }
 
 /** Poll until snapshot inventory-auto finishes parsing. */
+export async function resetStuckInventoryUpload(): Promise<{
+  ok: boolean
+  cleared: boolean
+  message: string
+}> {
+  const { data } = await api.post('/upload/inventory-auto/reset-stuck', {}, { timeout: 30_000 })
+  return data
+}
+
 export async function waitForInventoryUpload(
-  onTick?: (message: string) => void,
+  onTick?: (message: string, progressPct?: number) => void,
   maxMs = UPLOAD_TIMEOUT_MS,
 ): Promise<CoverageResponse> {
   const start = Date.now()
@@ -509,8 +519,9 @@ export async function waitForInventoryUpload(
     const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
     const st = cov.inventory_upload_status ?? 'idle'
     if (st === 'running') {
-      onTick?.(cov.inventory_upload_message || 'Parsing inventory…')
-      await new Promise(r => setTimeout(r, 2000))
+      const pct = cov.inventory_upload_progress ?? 0
+      onTick?.(cov.inventory_upload_message || 'Parsing inventory…', pct)
+      await new Promise(r => setTimeout(r, 1500))
       continue
     }
     if (st === 'error') {

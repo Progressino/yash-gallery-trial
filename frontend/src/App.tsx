@@ -61,6 +61,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 function ProtectedRoute() {
   const setCoverage = useSession(s => s.setCoverage)
+  const invUploadRunning = useSession(s => s.inventory_upload_status === 'running')
   const setUser = useAuth(s => s.setUser)
   const cachedUser = useAuth(s => s.user)
 
@@ -121,11 +122,21 @@ function ProtectedRoute() {
       try {
         let coverage = await getCoverage({ light: true, timeout: 45_000 })
         setCoverage(coverage)
+        if (coverage.inventory_upload_status === 'running') {
+          return true
+        }
+        const inventoryOnly =
+          coverage.inventory && coverageEmpty(coverage) && !sessionNeedsSales(coverage)
+        if (inventoryOnly) {
+          if (!sessionNeedsSync(coverage)) invalidateDataQueries(qc)
+          return true
+        }
         if (coverageEmpty(coverage)) {
           try {
             await withTimeout(cacheHydrateWarm(), HYDRATE_WARM_TIMEOUT_MS)
             coverage = await getCoverage({ light: true, timeout: 60_000 })
             setCoverage(coverage)
+            if (coverage.inventory_upload_status === 'running') return true
           } catch {
             /* warm cache may still be starting after deploy */
           }
@@ -224,7 +235,7 @@ function ProtectedRoute() {
           </button>
         </div>
       )}
-      {isRestoring && !isKarigar && (
+      {isRestoring && !isKarigar && !invUploadRunning && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />

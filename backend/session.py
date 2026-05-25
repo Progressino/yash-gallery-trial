@@ -83,6 +83,8 @@ class AppSession:
     # Async snapshot inventory upload (inventory-auto).
     inventory_upload_status: str = "idle"  # idle | running | done | error
     inventory_upload_message: str = ""
+    inventory_upload_progress: int = 0  # 0–100 for UI progress bar
+    inventory_upload_started: float = 0.0
     inventory_upload_result: dict = field(default_factory=dict)
 
     # After "Clear all app data", block warm-cache copy, Tier-3 SQLite restore, and
@@ -142,6 +144,8 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.daily_inventory_upload_result = {}
     sess.inventory_upload_status = "idle"
     sess.inventory_upload_message = ""
+    sess.inventory_upload_progress = 0
+    sess.inventory_upload_started = 0.0
     sess.inventory_upload_result = {}
     sess.pause_auto_data_restore = True
     sess._quarterly_cache.clear()

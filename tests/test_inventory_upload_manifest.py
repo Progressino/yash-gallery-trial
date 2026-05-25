@@ -7,12 +7,17 @@ import pytest
 from backend.services.inventory import _extract_all_from_rar, load_inventory_consolidated
 
 
-@pytest.mark.skipif(
-    not Path("/Users/samraisinghani/Downloads/Inventory 23-May-26.rar").is_file(),
-    reason="sample inventory RAR not on disk",
-)
+def _sample_inventory_rar() -> Path | None:
+    for name in ("Inventory 25-May-26.rar", "Inventory 23-May-26.rar"):
+        p = Path("/Users/samraisinghani/Downloads") / name
+        if p.is_file():
+            return p
+    return None
+
+
+@pytest.mark.skipif(_sample_inventory_rar() is None, reason="sample inventory RAR not on disk")
 def test_inventory_rar_manifest_lists_all_inner_files():
-    raw = Path("/Users/samraisinghani/Downloads/Inventory 23-May-26.rar").read_bytes()
+    raw = _sample_inventory_rar().read_bytes()
     extracted, manifest = _extract_all_from_rar(raw)
     assert len(manifest) >= 10
     loaded = [m for m in manifest if m["status"] == "loaded"]
