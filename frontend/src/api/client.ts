@@ -777,7 +777,7 @@ export async function waitForPoCalculate(
           raise_ledger_rows: page.raise_ledger_rows ?? meta.raise_ledger_rows,
           ledger_auto_import: page.ledger_auto_import ?? meta.ledger_auto_import,
         }
-        const total = page.total ?? expectedTotal || allRows.length
+        const total = (page.total ?? expectedTotal) || allRows.length
         const loaded = Math.min(allRows.length, total)
         const loadPct =
           total > 0 ? 92 + Math.round((loaded / total) * 8) : 95
