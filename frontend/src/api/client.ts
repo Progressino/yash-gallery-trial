@@ -658,24 +658,46 @@ async function _sleep(ms: number): Promise<void> {
   await new Promise(r => setTimeout(r, ms))
 }
 
+const PO_RESULT_PAGE_SIZE = 400
+
+function _rowsFromPoResultPage(
+  page: {
+    columns?: string[]
+    rows?: Record<string, unknown>[]
+    rows_matrix?: unknown[][]
+  },
+  columns: string[] | undefined,
+): { rows: Record<string, unknown>[]; columns: string[] | undefined } {
+  const cols = columns?.length ? columns : page.columns
+  if (page.rows_matrix?.length && cols?.length) {
+    const rows = page.rows_matrix.map(row =>
+      Object.fromEntries(cols.map((c, i) => [c, row[i] ?? ''])),
+    )
+    return { rows, columns: cols }
+  }
+  if (page.rows?.length) {
+    return { rows: page.rows, columns: cols ?? page.columns }
+  }
+  return { rows: [], columns: cols }
+}
+
 /** Poll after POST /po/calculate (runs in background on the server). */
 export async function waitForPoCalculate(
   onTick?: (message: string, progress?: number) => void,
   maxMs = 900_000,
 ): Promise<POCalculateResult> {
   const start = Date.now()
-  let gatewayRetries = 0
+  let statusGatewayRetries = 0
   while (Date.now() - start < maxMs) {
-    let data: POCalculateResult & { row_count?: number; progress?: number }
+    let data: POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
     try {
-      ;({ data } = await api.get<POCalculateResult & { row_count?: number; progress?: number }>(
-        '/po/calculate/status',
-        { timeout: POLL_TIMEOUT_MS },
-      ))
+      ;({ data } = await api.get<
+        POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
+      >('/po/calculate/status', { timeout: POLL_TIMEOUT_MS }))
     } catch (e: unknown) {
-      if (_isGateway502(e) && gatewayRetries < 40) {
-        gatewayRetries += 1
-        onTick?.('Server busy (502) — still calculating…')
+      if (_isGateway502(e) && statusGatewayRetries < 40) {
+        statusGatewayRetries += 1
+        onTick?.('Server busy (502) — still calculating…', 90)
         await _sleep(3000)
         continue
       }
@@ -695,16 +717,19 @@ export async function waitForPoCalculate(
       throw new Error(data.message || 'PO calculation failed')
     }
     if (st === 'done') {
-      const pageSize = 1200
+      const pageSize = PO_RESULT_PAGE_SIZE
       let offset = 0
-      let columns: string[] | undefined
+      let columns: string[] | undefined = data.columns?.length ? [...data.columns] : undefined
       const allRows: Record<string, unknown>[] = []
-      let meta: POCalculateResult = { ok: true }
+      let meta: POCalculateResult = { ok: true, columns }
+      let resultGatewayRetries = 0
+      const expectedTotal = data.row_count ?? 0
       while (true) {
         let page: POCalculateResult & {
           offset?: number
           total?: number
           has_more?: boolean
+          rows_matrix?: unknown[][]
         }
         try {
           ;({ data: page } = await api.get<
@@ -712,16 +737,28 @@ export async function waitForPoCalculate(
               offset?: number
               total?: number
               has_more?: boolean
+              rows_matrix?: unknown[][]
             }
           >('/po/calculate/result', {
-            params: { offset, limit: pageSize },
+            params: { offset, limit: pageSize, compact: 1 },
             timeout: PO_RESULT_TIMEOUT_MS,
           }))
+          resultGatewayRetries = 0
         } catch (e: unknown) {
-          if (_isGateway502(e) && gatewayRetries < 40) {
-            gatewayRetries += 1
-            onTick?.('Server busy (502) — loading results…')
-            await _sleep(3000)
+          if (_isGateway502(e) && resultGatewayRetries < 60) {
+            resultGatewayRetries += 1
+            const total = expectedTotal || allRows.length + pageSize
+            const loadPct =
+              total > 0
+                ? 92 + Math.round((Math.min(allRows.length, total) / total) * 8)
+                : 95
+            const pageNum = Math.floor(offset / pageSize) + 1
+            const pageTotal = total > 0 ? Math.ceil(total / pageSize) : '?'
+            onTick?.(
+              `Server busy (502) — retrying results page ${pageNum}/${pageTotal} (attempt ${resultGatewayRetries})…`,
+              loadPct,
+            )
+            await _sleep(2500)
             continue
           }
           throw e
@@ -729,8 +766,9 @@ export async function waitForPoCalculate(
         if (!page.ok) {
           throw new Error(page.message || 'Failed to load PO results')
         }
-        if (!columns?.length && page.columns?.length) columns = page.columns
-        if (page.rows?.length) allRows.push(...page.rows)
+        const batch = _rowsFromPoResultPage(page, columns)
+        if (batch.columns?.length) columns = batch.columns
+        if (batch.rows.length) allRows.push(...batch.rows)
         meta = {
           ok: true,
           columns: columns ?? page.columns,
@@ -739,7 +777,7 @@ export async function waitForPoCalculate(
           raise_ledger_rows: page.raise_ledger_rows ?? meta.raise_ledger_rows,
           ledger_auto_import: page.ledger_auto_import ?? meta.ledger_auto_import,
         }
-        const total = page.total ?? allRows.length
+        const total = page.total ?? expectedTotal || allRows.length
         const loaded = Math.min(allRows.length, total)
         const loadPct =
           total > 0 ? 92 + Math.round((loaded / total) * 8) : 95

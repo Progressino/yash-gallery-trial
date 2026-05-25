@@ -61,6 +61,7 @@ services:
       # seller DSR (Myntra Seller Hub reports are dispatch-date filtered).
       # The 60-day lag cap in the parser prevents future dispatch-date artifacts.
       - MYNTRA_USE_DISPATCH_DATE=1
+      - PO_RESULT_SPILL_DIR=/data/po_results
     volumes:
       - ${APP_DATA_DIR:-/root/app-data}/finance:/data
     expose:

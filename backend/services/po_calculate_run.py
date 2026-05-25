@@ -238,9 +238,10 @@ def execute_po_calculate(
     if ledger_auto_import and ledger_auto_import.get("ok"):
         auto_msg = ledger_auto_import.get("message")
 
+    cols = list(po_df.columns)
     return {
         "ok": True,
-        "columns": list(po_df.columns),
+        "columns": cols,
         "total_rows": int(len(po_df)),
         "sales_through": sales_through,
         "planning_date": planning_out,
@@ -261,6 +262,12 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         return
 
     sess.po_calculate_progress = 2
+    try:
+        from .po_result_spill import clear_spill
+
+        clear_spill(session_id)
+    except Exception:
+        pass
     set_po_job(
         session_id,
         status="running",
@@ -294,6 +301,16 @@ def background_po_calculate(session_id: str, body: dict) -> None:
             sess.po_calculate_status = "done"
             n = int(result.get("total_rows") or 0)
             msg = f"PO calculation complete ({n:,} rows)."
+            try:
+                from .po_result_spill import spill_df
+
+                po_df = getattr(sess, "po_calculate_result_df", None)
+                if po_df is not None and not getattr(po_df, "empty", True):
+                    spill_df(session_id, po_df)
+                    if sess.po_calculate_result:
+                        sess.po_calculate_result["columns"] = list(po_df.columns)
+            except Exception:
+                logger.exception("spill_po_result_df after calculate")
             _set_po_calculate_progress(sess, session_id, 100, msg)
             set_po_job(
                 session_id,

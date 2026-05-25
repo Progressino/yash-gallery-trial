@@ -933,8 +933,15 @@ def po_calculate_status(request: Request):
             po_df = getattr(sess, "po_calculate_result_df", None)
             if po_df is not None and hasattr(po_df, "__len__") and not getattr(po_df, "empty", True):
                 out["row_count"] = int(len(po_df))
+                out["columns"] = list(po_df.columns)
             else:
                 out["row_count"] = len(result.get("rows") or []) or int(result.get("total_rows") or 0)
+                if result.get("columns"):
+                    out["columns"] = list(result["columns"])
+        if sess is not None and "columns" not in out:
+            result = getattr(sess, "po_calculate_result", None) or {}
+            if result.get("columns"):
+                out["columns"] = list(result["columns"])
     else:
         out["ok"] = True
     return out
@@ -944,9 +951,12 @@ def po_calculate_status(request: Request):
 def po_calculate_result(
     request: Request,
     offset: int = 0,
-    limit: int = 1200,
+    limit: int = 0,
+    compact: int = 1,
 ):
-    """PO table page after ``status`` is ``done`` (paginated to stay under CDN/proxy limits)."""
+    """PO table page after ``status`` is ``done`` (paginated; compact matrix JSON by default)."""
+    from ..services.po_calculate_result_api import build_result_page, default_page_size
+
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
@@ -961,30 +971,18 @@ def po_calculate_result(
     meta = getattr(sess, "po_calculate_result", None) or {}
     if not meta:
         return {"ok": False, "message": "PO result missing."}
+    sid = getattr(request.state, "session_id", None)
     po_df = getattr(sess, "po_calculate_result_df", None)
-    if po_df is None or not hasattr(po_df, "empty") or po_df.empty:
-        # Legacy sessions may still have inline rows on the meta dict.
-        rows = meta.get("rows") or []
-        return {**meta, "ok": True, "rows": rows, "offset": 0, "limit": len(rows), "total": len(rows), "has_more": False}
-
-    total = int(len(po_df))
-    off = max(0, int(offset))
-    lim = max(1, min(int(limit), 2500))
-    end = min(off + lim, total)
-    chunk = po_df.iloc[off:end]
-    return {
-        "ok": True,
-        "columns": list(po_df.columns),
-        "rows": chunk.to_dict("records"),
-        "offset": off,
-        "limit": lim,
-        "total": total,
-        "has_more": end < total,
-        "sales_through": meta.get("sales_through"),
-        "planning_date": meta.get("planning_date"),
-        "raise_ledger_rows": meta.get("raise_ledger_rows"),
-        "ledger_auto_import": meta.get("ledger_auto_import"),
-    }
+    lim = int(limit) if int(limit or 0) > 0 else default_page_size()
+    use_compact = str(compact).strip().lower() not in ("0", "false", "no", "off")
+    return build_result_page(
+        session_id=sid,
+        po_df=po_df,
+        meta=meta,
+        offset=offset,
+        limit=lim,
+        compact=use_compact,
+    )
 
 
 @router.post("/calculate")
@@ -1011,6 +1009,12 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
 
     sess.po_calculate_status = "running"
     sess.po_calculate_progress = 2
+    try:
+        from ..services.po_result_spill import clear_spill
+
+        clear_spill(sid)
+    except Exception:
+        pass
     _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
     if _inv_n > 500_000:
         sess.po_calculate_message = (
