@@ -92,7 +92,7 @@ export interface PODashboardPanelProps {
   /** When true, omit standalone page chrome (used inside PO Engine). */
   embedded?: boolean
   canDeleteRaiseSkus?: boolean
-  onRaiseLedgerChanged?: () => void | Promise<void>
+  onRaiseLedgerChanged?: (message?: string) => void | Promise<void>
 }
 
 export function PODashboardPanel({
@@ -233,8 +233,8 @@ export function PODashboardPanel({
       <RaiseLedgerDailyHistory
         summary={ledgerSummary}
         canDeleteSkus={canDeleteRaiseSkus}
-        onLedgerChanged={async () => {
-          await onRaiseLedgerChanged?.()
+        onLedgerChanged={async (msg) => {
+          await onRaiseLedgerChanged?.(msg)
           void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-summary'] })
           void ledgerQ.refetch()
         }}

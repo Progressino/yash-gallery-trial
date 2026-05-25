@@ -461,12 +461,35 @@ export default function POEngine() {
     }
   }
 
-  const refreshRaiseLedger = useCallback(async () => {
-    const c = await getCoverage()
-    setCoverage(c)
-    void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-summary'] })
-    void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-dates'] })
-  }, [queryClient, setCoverage])
+  const markPoTableStaleAfterLedgerChange = useCallback((serverMessage?: string) => {
+    if (result?.ok && (result.rows?.length ?? 0) > 0) {
+      setResult({
+        ok: false,
+        message:
+          serverMessage ??
+          'Raise ledger changed. Click Calculate PO to refresh PO Qty, pipeline, and In Production columns.',
+      })
+    }
+    setEditedQty({})
+    setSelected(new Set())
+    setLedgerImportMsg({
+      type: 'ok',
+      text:
+        serverMessage ??
+        'Raise ledger updated. Click Calculate PO — the table still shows the previous run until you recalculate.',
+    })
+  }, [result])
+
+  const refreshRaiseLedger = useCallback(
+    async (serverMessage?: string) => {
+      const c = await getCoverage()
+      setCoverage(c)
+      void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-summary'] })
+      void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-dates'] })
+      markPoTableStaleAfterLedgerChange(serverMessage)
+    },
+    [queryClient, setCoverage, markPoTableStaleAfterLedgerChange, result],
+  )
 
   const run = async () => {
     const seq = ++poRunSeqRef.current
@@ -562,10 +585,8 @@ export default function POEngine() {
     if (!ok) return
     setClearLedgerBusy(true)
     try {
-      await api.delete('/po/raise-ledger')
-      const c = await getCoverage()
-      setCoverage(c)
-      if (result?.ok) await run()
+      const { data } = await api.delete<{ ok?: boolean; message?: string }>('/po/raise-ledger')
+      await refreshRaiseLedger(data?.message)
     } catch (e: unknown) {
       console.warn('[PO] clear raise ledger failed:', e)
     } finally {
@@ -1935,7 +1956,7 @@ export default function POEngine() {
         <PODashboardPanel
           embedded
           canDeleteRaiseSkus={canDeleteRaiseSkus}
-          onRaiseLedgerChanged={refreshRaiseLedger}
+          onRaiseLedgerChanged={(msg) => refreshRaiseLedger(msg)}
         />
       )}
 

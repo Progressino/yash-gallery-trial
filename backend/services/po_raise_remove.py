@@ -10,6 +10,29 @@ def _norm_day(day: str) -> pd.Timestamp:
     return pd.Timestamp(pd.to_datetime(str(day).strip()[:10]).normalize())
 
 
+def invalidate_po_calculate_result(sess) -> None:
+    """Drop cached PO table — pipeline columns are stale after ledger edits."""
+    import pandas as pd
+
+    sess.po_calculate_status = "idle"
+    sess.po_calculate_message = ""
+    sess.po_calculate_progress = 0
+    sess.po_calculate_result = {}
+    sess.po_calculate_result_df = pd.DataFrame()
+    sess._quarterly_cache.clear()
+    try:
+        from .po_calculate_jobs import clear_po_job
+
+        sid = getattr(sess, "_persist_sid", None)
+        if sid:
+            clear_po_job(sid)
+    except Exception:
+        pass
+
+
+_RECALC_HINT = " Click Calculate PO to refresh PO Qty and pipeline columns."
+
+
 def remove_raise_ledger_day(
     sess,
     raised_date: str,
@@ -28,7 +51,7 @@ def remove_raise_ledger_day(
     removed_sess = _remove_day_from_session_df(sess, day)
     suppress_raise_date(day, note="removed via PO dashboard")
     archive_removed = delete_archives_for_date(day, session_id)
-    sess._quarterly_cache.clear()
+    invalidate_po_calculate_result(sess)
     parts = [
         f"Removed raise ledger for {day} ({max(removed_sess, removed_db):,} line(s) cleared)."
     ]
@@ -36,6 +59,7 @@ def remove_raise_ledger_day(
         parts.append("Archived export for that day was deleted — Calculate PO will not auto-import it again.")
     else:
         parts.append("Auto-import from archive is blocked for that day.")
+    parts.append(_RECALC_HINT.strip())
     return {
         "ok": True,
         "message": " ".join(parts),
@@ -43,6 +67,7 @@ def remove_raise_ledger_day(
         "raised_date": day,
         "archive_removed": archive_removed,
         "suppressed": True,
+        "recalculate_required": True,
     }
 
 
@@ -59,12 +84,13 @@ def remove_raise_ledger_skus(sess, raised_date: str, oms_skus: Iterable[str]) ->
 
     removed_db = delete_raises_for_date_skus(day, skus)
     removed_sess = _remove_skus_from_session_df(sess, day, skus)
-    sess._quarterly_cache.clear()
+    invalidate_po_calculate_result(sess)
     return {
         "ok": True,
-        "message": f"Removed {len(skus)} SKU line(s) for {day}.",
+        "message": f"Removed {len(skus)} SKU line(s) for {day}.{_RECALC_HINT}",
         "removed": max(removed_sess, removed_db),
         "raised_date": day,
+        "recalculate_required": True,
     }
 
 
@@ -77,11 +103,12 @@ def clear_raise_ledger_all(sess) -> dict:
     n_sess = int(len(getattr(sess, "po_raise_ledger_df", pd.DataFrame())))
     n_db = clear_all()
     sess.po_raise_ledger_df = pd.DataFrame()
-    sess._quarterly_cache.clear()
+    invalidate_po_calculate_result(sess)
     return {
         "ok": True,
-        "message": f"PO raise ledger cleared ({max(n_sess, n_db):,} row(s) removed).",
+        "message": f"PO raise ledger cleared ({max(n_sess, n_db):,} row(s) removed).{_RECALC_HINT}",
         "removed": max(n_sess, n_db),
+        "recalculate_required": True,
     }
 
 

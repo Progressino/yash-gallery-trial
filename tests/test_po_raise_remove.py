@@ -12,6 +12,19 @@ from backend.services.po_raise_remove import (
 from backend.session import AppSession
 
 
+def test_invalidate_po_calculate_clears_stale_table():
+    from backend.services.po_raise_remove import invalidate_po_calculate_result
+
+    sess = AppSession()
+    sess.po_calculate_status = "done"
+    sess.po_calculate_result = {"ok": True, "total_rows": 10}
+    sess.po_calculate_result_df = pd.DataFrame({"OMS_SKU": ["A"], "PO_Qty": [5]})
+    invalidate_po_calculate_result(sess)
+    assert sess.po_calculate_status == "idle"
+    assert sess.po_calculate_result == {}
+    assert sess.po_calculate_result_df.empty
+
+
 def test_remove_raise_ledger_day_session_and_db(tmp_path, monkeypatch):
     db = tmp_path / "po_raised_test.db"
     monkeypatch.setattr(po_raised_db, "DB_PATH", str(db))
@@ -36,6 +49,7 @@ def test_remove_raise_ledger_day_session_and_db(tmp_path, monkeypatch):
 
     out = remove_raise_ledger_day(sess, "2026-05-20")
     assert out["ok"] is True
+    assert out.get("recalculate_required") is True
     assert out["removed"] >= 1
     assert len(sess.po_raise_ledger_df) == 1
     assert str(sess.po_raise_ledger_df.iloc[0]["OMS_SKU"]) == "SKU-B"

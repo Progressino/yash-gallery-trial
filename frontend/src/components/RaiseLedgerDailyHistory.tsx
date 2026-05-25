@@ -31,7 +31,7 @@ export function RaiseLedgerDailyHistory({
   summary: RaiseLedgerSummary | null | undefined
   /** Admin / Super Admin — can remove individual mistaken SKU lines. */
   canDeleteSkus?: boolean
-  onLedgerChanged?: () => void | Promise<void>
+  onLedgerChanged?: (message?: string) => void | Promise<void>
 }) {
   const daily = summary?.daily_totals ?? []
   const byDay = summary?.by_day ?? {}
@@ -53,9 +53,9 @@ export function RaiseLedgerDailyHistory({
   const effectiveDay = selectedDay && byDay[selectedDay] !== undefined ? selectedDay : defaultDay
   const dayRows = effectiveDay ? (byDay[effectiveDay] ?? []) : []
 
-  const afterChange = async () => {
+  const afterChange = async (message?: string) => {
     setDeleteErr(null)
-    await onLedgerChanged?.()
+    await onLedgerChanged?.(message)
   }
 
   const handleDeleteDay = async (day: string) => {
@@ -73,7 +73,7 @@ export function RaiseLedgerDailyHistory({
         setDeleteErr(res.message || 'Delete failed')
         return
       }
-      await afterChange()
+      await afterChange(res.message)
     } catch (e: unknown) {
       setDeleteErr(e instanceof Error ? e.message : 'Delete failed')
     } finally {
@@ -93,7 +93,7 @@ export function RaiseLedgerDailyHistory({
         setDeleteErr(res.message || 'Delete failed')
         return
       }
-      await afterChange()
+      await afterChange(res.message)
     } catch (e: unknown) {
       setDeleteErr(e instanceof Error ? e.message : 'Delete failed')
     } finally {
