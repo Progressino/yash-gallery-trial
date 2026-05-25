@@ -72,6 +72,8 @@ class AppSession:
     daily_auto_ingest_started: float = 0.0  # monotonic time when ingest/rebuild started
     # Last Tier-3 ingest outcome (for UI after async ingest; survives sales-rebuild idle reset).
     daily_auto_ingest_result: dict = field(default_factory=dict)
+    # Platforms saved in the last daily-auto ingest (fast path rebuild uses bounded SQLite only).
+    _daily_auto_platforms_touched: set = field(default_factory=set, repr=False, compare=False)
 
     # Async PO calculate (large catalogs exceed reverse-proxy timeouts).
     po_calculate_status: str = "idle"   # idle | running | done | error

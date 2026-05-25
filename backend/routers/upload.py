@@ -227,12 +227,92 @@ def _extract_rar_files(rar_bytes: bytes) -> list[tuple[str, bytes]]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _rebuild_sales_sync(sess, *, refresh_sqlite: bool = False) -> tuple[bool, str]:
+def _daily_auto_fast_ingest_enabled() -> bool:
+    """Skip merging each file into huge in-memory platform frames during ingest (SQLite only)."""
+    v = (os.environ.get("DAILY_AUTO_FAST_INGEST") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _daily_rebuild_sqlite_months() -> int:
+    try:
+        return max(1, int((os.environ.get("DAILY_REBUILD_SQLITE_MONTHS") or "6").strip()))
+    except ValueError:
+        return 6
+
+
+def _daily_rebuild_max_files() -> int:
+    try:
+        return max(5, int((os.environ.get("DAILY_REBUILD_MAX_FILES") or "80").strip()))
+    except ValueError:
+        return 80
+
+
+def _track_daily_auto_platform(sess: AppSession, platform: str) -> None:
+    touched = getattr(sess, "_daily_auto_platforms_touched", None)
+    if touched is None:
+        touched = set()
+        sess._daily_auto_platforms_touched = touched
+    touched.add(platform)
+
+
+def _replace_touched_platforms_from_sqlite(
+    sess: AppSession,
+    platforms: set[str] | list[str],
+) -> None:
+    """Reload only uploaded marketplaces from Tier-3 (bounded window) — avoids 1M-row concat."""
+    from ..services.daily_store import load_platform_data, merge_platform_data
+
+    months = _daily_rebuild_sqlite_months()
+    max_files = _daily_rebuild_max_files()
+    attrs = {
+        "amazon": "mtr_df",
+        "myntra": "myntra_df",
+        "meesho": "meesho_df",
+        "flipkart": "flipkart_df",
+        "snapdeal": "snapdeal_df",
+    }
+    for plat in platforms:
+        attr = attrs.get(plat)
+        if not attr:
+            continue
+        recent = load_platform_data(
+            plat,
+            months=months,
+            dedup=False,
+            max_files=max_files,
+        )
+        if recent.empty:
+            continue
+        cur = getattr(sess, attr)
+        setattr(sess, attr, merge_platform_data(cur, recent, plat))
+    sess.daily_restored = True
+
+
+def _schedule_sales_cache_save(sess: AppSession) -> None:
+    """GitHub/Postgres cache save can take minutes — never block sales rebuild on it."""
+
+    def _run() -> None:
+        try:
+            _auto_save_cache(sess)
+        except Exception:
+            _log.exception("background sales cache save failed")
+
+    threading.Thread(target=_run, name="sales-cache-save", daemon=True).start()
+
+
+def _rebuild_sales_sync(
+    sess,
+    *,
+    refresh_sqlite: bool = False,
+    platforms_touched: set[str] | None = None,
+) -> tuple[bool, str]:
     """Rebuild combined sales_df from platform frames. Caller should hold ``_daily_restore_lock``."""
     try:
         from ..services.platform_session_window import trim_session_platform_frames
 
-        if refresh_sqlite:
+        if platforms_touched and _daily_auto_fast_ingest_enabled():
+            _replace_touched_platforms_from_sqlite(sess, platforms_touched)
+        elif refresh_sqlite:
             _sync_session_platforms_from_sqlite(sess)
         trim_session_platform_frames(sess)
         sess.sales_df = build_sales_df(
@@ -287,20 +367,34 @@ def _sync_session_platforms_from_sqlite(sess, *, months: int = 4) -> None:
     sess.daily_restored = True
 
 
-def _run_sales_rebuild_worker(session_id: str, *, refresh_sqlite: bool = False) -> None:
+def _run_sales_rebuild_worker(
+    session_id: str,
+    *,
+    refresh_sqlite: bool = False,
+    platforms_touched: set[str] | None = None,
+) -> None:
     """Background sales rebuild (daily-auto or manual ↻ Rebuild)."""
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
+    touched = platforms_touched or getattr(sess, "_daily_auto_platforms_touched", None) or None
     sess.sales_rebuild_status = "running"
-    sess.sales_rebuild_message = "Rebuilding combined sales…"
+    if touched and _daily_auto_fast_ingest_enabled():
+        plats = ", ".join(sorted(touched))
+        sess.sales_rebuild_message = f"Rebuilding sales ({plats})…"
+    else:
+        sess.sales_rebuild_message = "Rebuilding combined sales…"
     try:
         with sess._daily_restore_lock:
-            ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=refresh_sqlite)
+            ok, msg = _rebuild_sales_sync(
+                sess,
+                refresh_sqlite=refresh_sqlite,
+                platforms_touched=touched if touched else None,
+            )
         if ok:
             sess.sales_rebuild_status = "done"
             sess.sales_rebuild_message = msg
-            _auto_save_cache(sess)
+            _schedule_sales_cache_save(sess)
         else:
             sess.sales_rebuild_status = "error"
             sess.sales_rebuild_message = msg
@@ -316,8 +410,14 @@ def _run_sales_rebuild_worker(session_id: str, *, refresh_sqlite: bool = False) 
 
 
 def _run_daily_auto_sales_rebuild(session_id: str) -> None:
-    """Background task: rebuild sales after Tier-3 ingest returned HTTP 200."""
-    _run_sales_rebuild_worker(session_id, refresh_sqlite=True)
+    """Background task: rebuild sales after Tier-3 ingest (bounded SQLite, no full re-merge)."""
+    sess = _resolve_upload_session(session_id)
+    touched = getattr(sess, "_daily_auto_platforms_touched", None) if sess else None
+    _run_sales_rebuild_worker(
+        session_id,
+        refresh_sqlite=False,
+        platforms_touched=touched if touched else None,
+    )
 
 
 @router.post("/daily-auto/reset-stuck")
@@ -2026,9 +2126,13 @@ def _merge_slice_into_session(
     df_slice: pd.DataFrame,
     *,
     source_filename: Optional[str] = None,
+    skip_session_merge: bool = False,
 ) -> None:
     """Merge one parsed upload slice into session — avoids reloading full Tier-3 SQLite."""
     if df_slice is None or df_slice.empty:
+        return
+    if skip_session_merge:
+        _track_daily_auto_platform(sess, platform)
         return
     if platform == "amazon":
         sess.mtr_df = _merge_platform_data(
@@ -2088,6 +2192,8 @@ def _process_daily_auto_sync(
             warnings: list[str] = []
             file_results: list[dict] = []
             expanded_files = 0
+            fast_ingest = _daily_auto_fast_ingest_enabled()
+            sess._daily_auto_platforms_touched = set()
 
             def _apply_parsed_slice(
                 p: str,
@@ -2095,6 +2201,9 @@ def _process_daily_auto_sync(
                 src_fname: str,
                 defer_queue: Optional[List[_DeferredSlice]] = None,
             ) -> None:
+                if fast_ingest:
+                    _track_daily_auto_platform(sess, p)
+                    return
                 if defer_queue is not None:
                     defer_queue.append((p, df, src_fname))
                 else:
@@ -2395,12 +2504,20 @@ def _process_daily_auto_sync(
                 sess.daily_auto_ingest_message = (
                     f"Rebuilding combined sales ({_n_cur:,} rows)…" if _n_cur else "Rebuilding combined sales…"
                 )
-                ok_rb, rb_msg = _rebuild_sales_sync(sess)
+                touched = getattr(sess, "_daily_auto_platforms_touched", None) or None
+                ok_rb, rb_msg = _rebuild_sales_sync(
+                    sess,
+                    refresh_sqlite=not (fast_ingest and touched),
+                    platforms_touched=touched if fast_ingest and touched else None,
+                )
                 if not ok_rb:
                     warnings.append(f"Sales rebuild warning: {rb_msg}")
             else:
                 sales_rebuild = "pending"
                 _session_data_changed(sess)
+
+            if fast_ingest and getattr(sess, "_daily_auto_platforms_touched", None):
+                sess.daily_restored = False
 
             msg_parts = [f"Loaded {len(detected)} file(s): {', '.join(d.split('(')[0].strip() for d in detected)}."]
             if rebuild_sales and not sess.sales_df.empty:

@@ -10,6 +10,7 @@ def test_daily_auto_merge_slice_does_not_call_load_platform_data(monkeypatch):
     """Regression: per-file touch must not reload all Tier-3 blobs from SQLite."""
     from backend.routers import upload as upload_router
 
+    monkeypatch.setenv("DAILY_AUTO_FAST_INGEST", "0")
     calls: list[str] = []
 
     def _boom_load(platform, **kwargs):
