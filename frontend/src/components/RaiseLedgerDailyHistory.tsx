@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { deleteRaiseLedgerDay, deleteRaiseLedgerSkus } from '../api/client'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
 
 export interface RaiseLedgerDayTotal {
@@ -22,9 +23,20 @@ export interface RaiseLedgerSummary {
   planning_date?: string | null
 }
 
-export function RaiseLedgerDailyHistory({ summary }: { summary: RaiseLedgerSummary | null | undefined }) {
+export function RaiseLedgerDailyHistory({
+  summary,
+  canDeleteSkus = false,
+  onLedgerChanged,
+}: {
+  summary: RaiseLedgerSummary | null | undefined
+  /** Admin / Super Admin — can remove individual mistaken SKU lines. */
+  canDeleteSkus?: boolean
+  onLedgerChanged?: () => void | Promise<void>
+}) {
   const daily = summary?.daily_totals ?? []
   const byDay = summary?.by_day ?? {}
+  const [busy, setBusy] = useState<string | null>(null)
+  const [deleteErr, setDeleteErr] = useState<string | null>(null)
 
   const defaultDay = useMemo(() => {
     if (daily.length === 0) return ''
@@ -40,6 +52,54 @@ export function RaiseLedgerDailyHistory({ summary }: { summary: RaiseLedgerSumma
 
   const effectiveDay = selectedDay && byDay[selectedDay] !== undefined ? selectedDay : defaultDay
   const dayRows = effectiveDay ? (byDay[effectiveDay] ?? []) : []
+
+  const afterChange = async () => {
+    setDeleteErr(null)
+    await onLedgerChanged?.()
+  }
+
+  const handleDeleteDay = async (day: string) => {
+    const d = daily.find(x => x.raised_date === day)
+    const ok = window.confirm(
+      `Delete all PO raises for ${day}?\n\n` +
+        `${d?.sku_count?.toLocaleString() ?? '?'} SKU(s), ${d?.total_units?.toLocaleString() ?? '?'} units will be removed from the raise ledger. ` +
+        'The next Calculate PO will no longer treat them as pipeline.',
+    )
+    if (!ok) return
+    setBusy(`day:${day}`)
+    try {
+      const res = await deleteRaiseLedgerDay(day)
+      if (!res.ok) {
+        setDeleteErr(res.message || 'Delete failed')
+        return
+      }
+      await afterChange()
+    } catch (e: unknown) {
+      setDeleteErr(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleDeleteSku = async (day: string, sku: string, qty: number) => {
+    const ok = window.confirm(
+      `Remove mistaken raise for ${sku} on ${day} (${qty.toLocaleString()} units)?`,
+    )
+    if (!ok) return
+    setBusy(`sku:${sku}`)
+    try {
+      const res = await deleteRaiseLedgerSkus(day, [sku])
+      if (!res.ok) {
+        setDeleteErr(res.message || 'Delete failed')
+        return
+      }
+      await afterChange()
+    } catch (e: unknown) {
+      setDeleteErr(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setBusy(null)
+    }
+  }
 
   if (!summary?.ledger_loaded || daily.length === 0) {
     return (
@@ -62,7 +122,19 @@ export function RaiseLedgerDailyHistory({ summary }: { summary: RaiseLedgerSumma
           {summary.total_skus?.toLocaleString()} SKU-day lines · {summary.total_units?.toLocaleString()} units in last{' '}
           {summary.lookback_days ?? 30} days · planning day {summary.planning_date ?? calendarDateIST()} (IST)
         </p>
+        <p className="text-[11px] text-violet-800/90 mt-1">
+          Delete a whole day if the import was wrong.{' '}
+          {canDeleteSkus ? (
+            <>Admins can remove individual SKU lines from the detail table below.</>
+          ) : (
+            <>Contact Admin to remove individual mistaken SKU lines.</>
+          )}
+        </p>
       </div>
+
+      {deleteErr ? (
+        <p className="text-xs text-red-700 bg-red-50 border-b border-red-100 px-4 py-2">{deleteErr}</p>
+      ) : null}
 
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
@@ -71,13 +143,14 @@ export function RaiseLedgerDailyHistory({ summary }: { summary: RaiseLedgerSumma
               <th className="text-left px-4 py-2 font-semibold text-gray-600">Raise date</th>
               <th className="text-right px-4 py-2 font-semibold text-gray-600">SKUs</th>
               <th className="text-right px-4 py-2 font-semibold text-gray-600">Units raised</th>
-              <th className="text-center px-4 py-2 font-semibold text-gray-600 w-24">Detail</th>
+              <th className="text-center px-4 py-2 font-semibold text-gray-600 w-40">Actions</th>
             </tr>
           </thead>
           <tbody>
             {daily.map(d => {
               const isSel = d.raised_date === effectiveDay
               const isYesterday = d.raised_date === yesterdayIST()
+              const dayBusy = busy === `day:${d.raised_date}`
               return (
                 <tr
                   key={d.raised_date}
@@ -94,17 +167,28 @@ export function RaiseLedgerDailyHistory({ summary }: { summary: RaiseLedgerSumma
                     {d.total_units.toLocaleString()}
                   </td>
                   <td className="px-4 py-2 text-center">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedDay(d.raised_date)}
-                      className={`text-[11px] px-2 py-0.5 rounded border ${
-                        isSel
-                          ? 'border-violet-600 bg-violet-600 text-white'
-                          : 'border-violet-300 text-violet-800 hover:bg-violet-100'
-                      }`}
-                    >
-                      View
-                    </button>
+                    <div className="flex flex-wrap justify-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedDay(d.raised_date)}
+                        className={`text-[11px] px-2 py-0.5 rounded border ${
+                          isSel
+                            ? 'border-violet-600 bg-violet-600 text-white'
+                            : 'border-violet-300 text-violet-800 hover:bg-violet-100'
+                        }`}
+                      >
+                        View
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() => void handleDeleteDay(d.raised_date)}
+                        className="text-[11px] px-2 py-0.5 rounded border border-red-300 text-red-800 hover:bg-red-50 disabled:opacity-50"
+                        title="Remove all raises for this date"
+                      >
+                        {dayBusy ? '…' : 'Delete day'}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               )
@@ -115,14 +199,32 @@ export function RaiseLedgerDailyHistory({ summary }: { summary: RaiseLedgerSumma
 
       {effectiveDay ? (
         <div className="border-t border-violet-100 bg-white/80">
-          <RaiseLedgerDayTable day={effectiveDay} rows={dayRows} />
+          <RaiseLedgerDayTable
+            day={effectiveDay}
+            rows={dayRows}
+            canDeleteSkus={canDeleteSkus}
+            busy={busy}
+            onDeleteSku={handleDeleteSku}
+          />
         </div>
       ) : null}
     </section>
   )
 }
 
-function RaiseLedgerDayTable({ day, rows }: { day: string; rows: RaiseLedgerSkuLine[] }) {
+function RaiseLedgerDayTable({
+  day,
+  rows,
+  canDeleteSkus,
+  busy,
+  onDeleteSku,
+}: {
+  day: string
+  rows: RaiseLedgerSkuLine[]
+  canDeleteSkus: boolean
+  busy: string | null
+  onDeleteSku: (day: string, sku: string, qty: number) => void | Promise<void>
+}) {
   const [filter, setFilter] = useState('')
 
   const filtered = useMemo(() => {
@@ -155,6 +257,9 @@ function RaiseLedgerDayTable({ day, rows }: { day: string; rows: RaiseLedgerSkuL
             <tr>
               <th className="text-left px-4 py-2 font-semibold text-gray-600">OMS SKU</th>
               <th className="text-right px-4 py-2 font-semibold text-gray-600">Raised qty</th>
+              {canDeleteSkus ? (
+                <th className="text-center px-4 py-2 font-semibold text-gray-600 w-24">Delete</th>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -164,6 +269,19 @@ function RaiseLedgerDayTable({ day, rows }: { day: string; rows: RaiseLedgerSkuL
                 <td className="px-4 py-1.5 text-right tabular-nums font-semibold text-violet-900">
                   {r.raised_qty.toLocaleString()}
                 </td>
+                {canDeleteSkus ? (
+                  <td className="px-4 py-1.5 text-center">
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      onClick={() => void onDeleteSku(day, r.oms_sku, r.raised_qty)}
+                      className="text-[11px] px-2 py-0.5 rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                      title="Admin: remove this mistaken raise"
+                    >
+                      {busy === `sku:${r.oms_sku}` ? '…' : 'Remove'}
+                    </button>
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>

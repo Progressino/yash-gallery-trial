@@ -1,8 +1,9 @@
 import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 import { api, getCoverage, startPoCalculate } from '../api/client'
 import { useSession } from '../store/session'
+import { useAuth, mayResetSharedData } from '../store/auth'
 import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
@@ -235,6 +236,9 @@ function postPoCoverDays(row: PORow, finalPoQty: number): number {
 }
 
 export default function POEngine() {
+  const queryClient = useQueryClient()
+  const authUser = useAuth(s => s.user)
+  const canDeleteRaiseSkus = mayResetSharedData(authUser)
   const setCoverage = useSession(s => s.setCoverage)
   const skuStatusLoaded = useSession(s => s.sku_status_lead ?? false)
   const skuStatusRows = useSession(s => s.sku_status_lead_rows ?? 0)
@@ -378,6 +382,7 @@ export default function POEngine() {
   // ephemeral UI state (no need to persist across navigation)
   const [loading, setLoading] = useState(false)
   const [poProgress, setPoProgress] = useState('')
+  const [poProgressPct, setPoProgressPct] = useState<number | null>(null)
 
   useEffect(() => {
     if (loading) return
@@ -456,10 +461,18 @@ export default function POEngine() {
     }
   }
 
+  const refreshRaiseLedger = useCallback(async () => {
+    const c = await getCoverage()
+    setCoverage(c)
+    void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-summary'] })
+    void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-dates'] })
+  }, [queryClient, setCoverage])
+
   const run = async () => {
     const seq = ++poRunSeqRef.current
     setLoading(true)
     setPoProgress('Starting PO calculation…')
+    setPoProgressPct(2)
     setEditedQty({})
     setSelected(new Set())
     let poRes: POResult | null = null
@@ -471,8 +484,10 @@ export default function POEngine() {
           raise_view_date: ledgerImportDate,
           raise_ledger_lookback_days: 14,
         },
-        msg => {
-          if (seq === poRunSeqRef.current) setPoProgress(msg)
+        (msg, pct) => {
+          if (seq !== poRunSeqRef.current) return
+          setPoProgress(msg)
+          if (pct != null && Number.isFinite(pct)) setPoProgressPct(pct)
         },
       )) as POResult
       if (seq !== poRunSeqRef.current) return
@@ -489,6 +504,7 @@ export default function POEngine() {
       if (seq === poRunSeqRef.current) {
         setLoading(false)
         setPoProgress('')
+        setPoProgressPct(null)
       }
     }
 
@@ -539,8 +555,8 @@ export default function POEngine() {
   const clearRaiseLedger = async () => {
     if (clearLedgerBusy) return
     const ok = window.confirm(
-      `Clear the PO raise ledger (${raiseLedgerRows.toLocaleString()} SKU-day row${raiseLedgerRows === 1 ? '' : 's'})?\n\n` +
-      'This removes the in-app record of recently confirmed POs. The next Calculate PO ' +
+      `Clear the entire PO raise ledger (${raiseLedgerRows.toLocaleString()} SKU-day row${raiseLedgerRows === 1 ? '' : 's'})?\n\n` +
+      'This removes confirmed raises from the app and the server database. The next Calculate PO ' +
       'will no longer treat those quantities as extra pipeline and may re-recommend them.',
     )
     if (!ok) return
@@ -954,7 +970,12 @@ export default function POEngine() {
 
   return (
     <div className="p-6 space-y-6">
-      <PageLoadingStripe active={poPageBusy} label={poPageBusyLabel} className="sticky top-0 z-30 -mt-2 mb-2" />
+      <PageLoadingStripe
+        active={poPageBusy}
+        label={loading ? poProgress || poPageBusyLabel : poPageBusyLabel}
+        percent={loading ? poProgressPct : null}
+        className="sticky top-0 z-30 -mt-2 mb-2"
+      />
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">🎯 PO Engine</h2>
         <p className="text-gray-400 text-sm mt-1">Calculate purchase orders with quarterly history inline.</p>
@@ -1089,9 +1110,22 @@ export default function POEngine() {
                 {loading ? '⏳ Running PO…' : '🎯 Calculate PO'}
               </button>
               {loading && (
-                <p className="text-xs text-gray-500">
-                  {poProgress || 'Computing recommendations from sales and inventory (may take 1–3 minutes).'}
-                </p>
+                <div className="mt-2 space-y-1 max-w-md">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                    <div
+                      className="h-full rounded-full bg-[#002B5B] transition-[width] duration-300"
+                      style={{ width: `${poProgressPct ?? 5}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 flex justify-between gap-2">
+                    <span>
+                      {poProgress || 'Computing recommendations from sales and inventory (may take 1–3 minutes).'}
+                    </span>
+                    {poProgressPct != null ? (
+                      <span className="tabular-nums text-slate-600 shrink-0">{poProgressPct}%</span>
+                    ) : null}
+                  </p>
+                </div>
               )}
             </div>
 
@@ -1248,7 +1282,7 @@ export default function POEngine() {
                       type="button"
                       onClick={() => void clearRaiseLedger()}
                       disabled={clearLedgerBusy}
-                      title="Remove the in-app record of confirmed PO raises so the next Calculate PO does not treat them as extra pipeline."
+                      title="Clear all confirmed PO raises (session + server database). Use PO Dashboard → Delete day for one date only."
                       className="text-xs px-3 py-1.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {clearLedgerBusy
@@ -1898,7 +1932,11 @@ export default function POEngine() {
 
       {/* ── PO Dashboard Tab ── */}
       {activeTab === 'dashboard' && (
-        <PODashboardPanel embedded />
+        <PODashboardPanel
+          embedded
+          canDeleteRaiseSkus={canDeleteRaiseSkus}
+          onRaiseLedgerChanged={refreshRaiseLedger}
+        />
       )}
 
       {/* ── Quarterly History Tab ── */}

@@ -10,6 +10,21 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _set_po_calculate_progress(
+    sess,
+    session_id: Optional[str],
+    pct: int,
+    message: str,
+) -> None:
+    p = max(0, min(100, int(pct)))
+    sess.po_calculate_progress = p
+    sess.po_calculate_message = message
+    if session_id:
+        from .po_calculate_jobs import set_po_job
+
+        set_po_job(session_id, status="running", ok=True, progress=p, message=message)
+
+
 def _dedupe_column_names(df: pd.DataFrame) -> pd.DataFrame:
     seen: dict[str, int] = {}
     out: list[str] = []
@@ -34,6 +49,7 @@ def execute_po_calculate(
     sync_sidecars: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     """Run full PO engine math and return the same payload as the legacy sync endpoint."""
+    _set_po_calculate_progress(sess, session_id, 5, "Validating sales and inventory…")
     if sess.sales_df.empty:
         return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
     if sess.inventory_df_variant.empty:
@@ -47,6 +63,7 @@ def execute_po_calculate(
     from ..services.po_raise_import import hydrate_session_ledger_from_db
 
     lookback = max(int(body.get("raise_ledger_lookback_days") or 14), 14)
+    _set_po_calculate_progress(sess, session_id, 12, "Loading raise ledger…")
     hydrate_session_ledger_from_db(sess, body.get("planning_date"), lookback_days=lookback)
 
     ledger_auto_import = None
@@ -89,6 +106,7 @@ def execute_po_calculate(
     if _raw_ih is not None and not _raw_ih.empty:
         from .daily_inventory_upload_run import _MAX_HISTORY_DAYS, _trim_history_to_recent
 
+        _set_po_calculate_progress(sess, session_id, 22, "Preparing daily inventory history…")
         # Stage 1: migrate oversized sessions (warm-cache restore with old data).
         if len(_raw_ih) > (_MAX_HISTORY_DAYS + 10) * 500:
             # threshold ~ _MAX_HISTORY_DAYS days × 500 SKUs (very conservative)
@@ -130,6 +148,12 @@ def execute_po_calculate(
         del _inv_dates
         _gc.collect()
 
+    _set_po_calculate_progress(
+        sess,
+        session_id,
+        35,
+        "Running PO calculation engine (this step may take 1–3 minutes)…",
+    )
     try:
         po_df = calculate_po_base(
             sales_df=sess.sales_df,
@@ -167,6 +191,7 @@ def execute_po_calculate(
     if po_df is None or po_df.empty:
         return {"ok": False, "message": "PO result is empty."}
 
+    _set_po_calculate_progress(sess, session_id, 88, "Formatting PO results…")
     po_df = po_df.copy()
     po_df = _dedupe_column_names(po_df)
     for c in ["Suggest_Close_SKU", "PO_Block_Reason", "SKU_Sheet_Status"]:
@@ -235,10 +260,12 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         set_po_job(session_id, status="error", ok=False, message="Session not found.")
         return
 
+    sess.po_calculate_progress = 2
     set_po_job(
         session_id,
         status="running",
         ok=True,
+        progress=2,
         message="Calculating PO recommendations…",
     )
 
@@ -260,19 +287,19 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
         if _inv_n > 500_000:
             msg = f"Calculating PO (trimmed inventory window, {_inv_n:,} baseline rows)…"
-            sess.po_calculate_message = msg
-            set_po_job(session_id, status="running", ok=True, message=msg)
+            _set_po_calculate_progress(sess, session_id, 8, msg)
         result = execute_po_calculate(sess, body, session_id=session_id, sync_sidecars=None)
         sess.po_calculate_result = result
         if result.get("ok"):
             sess.po_calculate_status = "done"
             n = int(result.get("total_rows") or 0)
             msg = f"PO calculation complete ({n:,} rows)."
-            sess.po_calculate_message = msg
+            _set_po_calculate_progress(sess, session_id, 100, msg)
             set_po_job(
                 session_id,
                 status="done",
                 ok=True,
+                progress=100,
                 message=msg,
                 total_rows=n,
                 sales_through=result.get("sales_through"),
@@ -288,12 +315,14 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         else:
             msg = result.get("message") or "PO calculation failed."
             sess.po_calculate_status = "error"
+            sess.po_calculate_progress = 0
             sess.po_calculate_message = msg
-            set_po_job(session_id, status="error", ok=False, message=msg)
+            set_po_job(session_id, status="error", ok=False, progress=0, message=msg)
     except Exception as e:
         logger.exception("background_po_calculate failed")
         msg = str(e)
         sess.po_calculate_status = "error"
+        sess.po_calculate_progress = 0
         sess.po_calculate_message = msg
         sess.po_calculate_result = {"ok": False, "message": msg}
-        set_po_job(session_id, status="error", ok=False, message=msg)
+        set_po_job(session_id, status="error", ok=False, progress=0, message=msg)

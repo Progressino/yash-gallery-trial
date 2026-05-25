@@ -92,6 +92,11 @@ class RaiseConfirmItem(BaseModel):
     qty: int
 
 
+class RaiseLedgerDeleteSkusBody(BaseModel):
+    raised_date: str
+    oms_skus: List[str]
+
+
 class RaiseConfirmBody(BaseModel):
     rows: List[RaiseConfirmItem]
     raised_date: Optional[str] = None
@@ -730,18 +735,57 @@ def po_clear_returns_overlay(request: Request):
     return {"ok": True, "message": f"Return sheet cleared. {sales_note}".strip()}
 
 
-@router.delete("/raise-ledger")
-def po_clear_raise_ledger(request: Request):
-    import logging
-    import pandas as _pd
+def _request_role(request: Request) -> str:
+    auth = getattr(request.state, "auth", None) or {}
+    return str(auth.get("role") or "Admin")
 
+
+@router.delete("/raise-ledger/day")
+def po_delete_raise_ledger_day(request: Request, raised_date: str = ""):
+    """Remove all raises recorded for one calendar day (session + durable DB)."""
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-    sess.po_raise_ledger_df = _pd.DataFrame()
-    sess._quarterly_cache.clear()
+    from ..services.po_raise_remove import remove_raise_ledger_day
+
+    out = remove_raise_ledger_day(sess, raised_date)
+    if out.get("ok"):
+        _sync_po_sidecars_to_durable_storage(request, sess)
+    return out
+
+
+@router.post("/raise-ledger/delete-skus")
+def po_delete_raise_ledger_skus(request: Request, body: RaiseLedgerDeleteSkusBody):
+    """Admin-only: remove specific SKU lines for one raise date (mistaken PO)."""
+    from ..services.upload_policy import may_reset_shared_data
+
+    role = _request_role(request)
+    if not may_reset_shared_data(role):
+        return {
+            "ok": False,
+            "message": "Removing individual raised PO lines is Admin-only.",
+        }
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    from ..services.po_raise_remove import remove_raise_ledger_skus
+
+    out = remove_raise_ledger_skus(sess, body.raised_date, body.oms_skus)
+    if out.get("ok"):
+        _sync_po_sidecars_to_durable_storage(request, sess)
+    return out
+
+
+@router.delete("/raise-ledger")
+def po_clear_raise_ledger(request: Request):
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    from ..services.po_raise_remove import clear_raise_ledger_all
+
+    out = clear_raise_ledger_all(sess)
     _sync_po_sidecars_to_durable_storage(request, sess)
-    return {"ok": True, "message": "PO raise ledger cleared."}
+    return out
 
 
 class PODashboardRequest(PORequest):
@@ -864,7 +908,13 @@ def po_calculate_status(request: Request):
         or (getattr(sess, "po_calculate_message", "") if sess is not None else "")
         or ""
     )
-    out: dict = {"status": st, "message": msg}
+    progress = int(
+        job.get("progress")
+        if job.get("progress") is not None
+        else (getattr(sess, "po_calculate_progress", 0) if sess is not None else 0)
+        or 0
+    )
+    out: dict = {"status": st, "message": msg, "progress": max(0, min(100, progress))}
     if st == "error":
         out["ok"] = bool(job.get("ok", False))
         if job.get("message"):
@@ -960,6 +1010,7 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
         }
 
     sess.po_calculate_status = "running"
+    sess.po_calculate_progress = 2
     _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
     if _inv_n > 500_000:
         sess.po_calculate_message = (
@@ -981,6 +1032,7 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
         sid,
         status="running",
         ok=True,
+        progress=2,
         message=sess.po_calculate_message,
     )
     # Fire-and-forget — must not await (large catalogs run several minutes).

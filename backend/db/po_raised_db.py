@@ -267,6 +267,41 @@ def clear_older_than_days(days: int) -> int:
         conn.close()
 
 
+def delete_raises_for_date(raised_date: str) -> int:
+    """Delete all ledger rows for one calendar day (YYYY-MM-DD)."""
+    day = str(raised_date).strip()[:10]
+    if not day:
+        return 0
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM po_raised WHERE raised_date = ?", (day,))
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def delete_raises_for_date_skus(raised_date: str, oms_skus: Iterable[str]) -> int:
+    """Delete specific SKU lines for one calendar day."""
+    day = str(raised_date).strip()[:10]
+    skus = [str(s).strip() for s in oms_skus if str(s).strip()]
+    if not day or not skus:
+        return 0
+    conn = _connect()
+    try:
+        total = 0
+        for sku in skus:
+            cur = conn.execute(
+                "DELETE FROM po_raised WHERE raised_date = ? AND oms_sku = ?",
+                (day, sku),
+            )
+            total += cur.rowcount or 0
+        conn.commit()
+        return total
+    finally:
+        conn.close()
+
+
 def delete_by_ids(ids: Iterable[int]) -> int:
     id_list = [int(i) for i in ids if i is not None]
     if not id_list:

@@ -660,15 +660,15 @@ async function _sleep(ms: number): Promise<void> {
 
 /** Poll after POST /po/calculate (runs in background on the server). */
 export async function waitForPoCalculate(
-  onTick?: (message: string) => void,
+  onTick?: (message: string, progress?: number) => void,
   maxMs = 900_000,
 ): Promise<POCalculateResult> {
   const start = Date.now()
   let gatewayRetries = 0
   while (Date.now() - start < maxMs) {
-    let data: POCalculateResult & { row_count?: number }
+    let data: POCalculateResult & { row_count?: number; progress?: number }
     try {
-      ;({ data } = await api.get<POCalculateResult & { row_count?: number }>(
+      ;({ data } = await api.get<POCalculateResult & { row_count?: number; progress?: number }>(
         '/po/calculate/status',
         { timeout: POLL_TIMEOUT_MS },
       ))
@@ -683,7 +683,11 @@ export async function waitForPoCalculate(
     }
     const st = data.status ?? 'idle'
     if (st === 'running') {
-      onTick?.(data.message || 'Calculating PO recommendations…')
+      const prog =
+        typeof data.progress === 'number' && Number.isFinite(data.progress)
+          ? Math.max(0, Math.min(100, Math.round(data.progress)))
+          : undefined
+      onTick?.(data.message || 'Calculating PO recommendations…', prog)
       await new Promise(r => setTimeout(r, 2000))
       continue
     }
@@ -736,7 +740,13 @@ export async function waitForPoCalculate(
           ledger_auto_import: page.ledger_auto_import ?? meta.ledger_auto_import,
         }
         const total = page.total ?? allRows.length
-        onTick?.(`Loading PO results… ${Math.min(allRows.length, total).toLocaleString()} / ${total.toLocaleString()}`)
+        const loaded = Math.min(allRows.length, total)
+        const loadPct =
+          total > 0 ? 92 + Math.round((loaded / total) * 8) : 95
+        onTick?.(
+          `Loading PO results… ${loaded.toLocaleString()} / ${total.toLocaleString()}`,
+          loadPct,
+        )
         if (!page.has_more) break
         offset += pageSize
       }
@@ -748,9 +758,27 @@ export async function waitForPoCalculate(
 }
 
 /** Start PO calculate; if the POST times out or 502s, poll anyway (server may still be running). */
+export async function deleteRaiseLedgerDay(raisedDate: string): Promise<{ ok: boolean; message: string }> {
+  const { data } = await api.delete<{ ok: boolean; message: string }>('/po/raise-ledger/day', {
+    params: { raised_date: raisedDate },
+  })
+  return data
+}
+
+export async function deleteRaiseLedgerSkus(
+  raisedDate: string,
+  omsSkus: string[],
+): Promise<{ ok: boolean; message: string }> {
+  const { data } = await api.post<{ ok: boolean; message: string }>('/po/raise-ledger/delete-skus', {
+    raised_date: raisedDate,
+    oms_skus: omsSkus,
+  })
+  return data
+}
+
 export async function startPoCalculate(
   body: Record<string, unknown>,
-  onTick?: (message: string) => void,
+  onTick?: (message: string, progress?: number) => void,
 ): Promise<POCalculateResult> {
   try {
     const { data } = await api.post<POCalculateResult & { status?: string }>(

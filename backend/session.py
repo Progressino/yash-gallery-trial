@@ -80,6 +80,7 @@ class AppSession:
     # Async PO calculate (large catalogs exceed reverse-proxy timeouts).
     po_calculate_status: str = "idle"   # idle | running | done | error
     po_calculate_message: str = ""
+    po_calculate_progress: int = 0  # 0–100 for UI progress bar
     po_calculate_result: dict = field(default_factory=dict)
     po_calculate_result_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -149,6 +150,7 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.daily_auto_ingest_result = {}
     sess.po_calculate_status = "idle"
     sess.po_calculate_message = ""
+    sess.po_calculate_progress = 0
     sess.po_calculate_result = {}
     sess.po_calculate_result_df = pd.DataFrame()
     sess.daily_inventory_upload_status = "idle"

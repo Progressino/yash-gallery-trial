@@ -4,6 +4,7 @@ import api from '../api/client'
 import { usePOStore } from '../store/po'
 import { PageLoadingStripe } from './LoadingProgressBar'
 import { RaiseLedgerDailyHistory, type RaiseLedgerSummary } from './RaiseLedgerDailyHistory'
+import { useAuth, mayResetSharedData } from '../store/auth'
 import { calendarDateIST } from '../lib/dates'
 
 /** Full PO-engine run; nginx `/api` allows up to 900s — keep client in sync so axios does not abort first. */
@@ -90,9 +91,17 @@ function SectionTable({
 export interface PODashboardPanelProps {
   /** When true, omit standalone page chrome (used inside PO Engine). */
   embedded?: boolean
+  canDeleteRaiseSkus?: boolean
+  onRaiseLedgerChanged?: () => void | Promise<void>
 }
 
-export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
+export function PODashboardPanel({
+  embedded = false,
+  canDeleteRaiseSkus: canDeleteRaiseSkusProp,
+  onRaiseLedgerChanged,
+}: PODashboardPanelProps) {
+  const authUser = useAuth(s => s.user)
+  const canDeleteRaiseSkus = canDeleteRaiseSkusProp ?? mayResetSharedData(authUser)
   const params = usePOStore(s => s.params)
   const [tuning, setTuning] = useState({
     recent_days: 7,
@@ -221,7 +230,15 @@ export function PODashboardPanel({ embedded = false }: PODashboardPanelProps) {
         </div>
       </div>
 
-      <RaiseLedgerDailyHistory summary={ledgerSummary} />
+      <RaiseLedgerDailyHistory
+        summary={ledgerSummary}
+        canDeleteSkus={canDeleteRaiseSkus}
+        onLedgerChanged={async () => {
+          await onRaiseLedgerChanged?.()
+          void queryClient.invalidateQueries({ queryKey: ['po-raise-ledger-summary'] })
+          void ledgerQ.refetch()
+        }}
+      />
       {ledgerQ.isFetching && !ledgerSummary?.ledger_loaded ? (
         <p className="text-xs text-gray-500 -mt-4">Loading raise history…</p>
       ) : null}
