@@ -274,6 +274,31 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
         log.exception("persist_po_sidecars_to_disk after merge failed")
 
 
+_INVENTORY_WARM_KEYS = ("inventory_df_variant", "inventory_df_parent")
+
+
+def merge_inventory_into_warm_cache(sess) -> None:
+    """Mirror inventory snapshot into shared warm cache (same pattern as PO sidecars).
+
+    Inventory uploads used to save only to the in-memory session and (later) GitHub/PostgreSQL
+    in a background thread. ``_warm_cache`` was never updated, so after refresh or a new worker
+    ``_restore_inventory_from_warm`` had nothing to copy and the Inventory page looked empty until
+    a manual Load Cache or re-upload.
+    """
+    import pandas as pd
+
+    global _warm_cache, _warm_cache_loaded_at
+    if not _warm_cache:
+        _warm_cache = {}
+    for key in _INVENTORY_WARM_KEYS:
+        df = getattr(sess, key, None)
+        if df is None or not hasattr(df, "empty") or df.empty:
+            _warm_cache[key] = pd.DataFrame()
+        else:
+            _warm_cache[key] = df.copy()
+    _warm_cache_loaded_at = datetime.now(IST)
+
+
 import os as _os_main
 _DISK_CACHE_DIR     = _os_main.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
 _DISK_CACHE_MAX_AGE = int(_os_main.environ.get("WARM_CACHE_MAX_AGE_HOURS", "24"))

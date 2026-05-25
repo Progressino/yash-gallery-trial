@@ -1191,6 +1191,21 @@ def _unified_platform_summary_one(
     """
     loaded = not raw_df.empty
     if s.empty:
+        if loaded and (start_date or end_date):
+            # Unified sales_df can lag Tier-3 session frames (warm cache + daily_restored).
+            # Show saved upload totals from raw platform data for the requested window.
+            if platform_name == "Amazon":
+                mtr = raw_df.copy()
+                if not mtr.empty and "Date" in mtr.columns:
+                    mtr["_Date"] = mtr["Date"]
+                return _compute_platform_metrics(
+                    mtr, platform_name, "SKU", "Transaction_Type",
+                    start_date=start_date, end_date=end_date,
+                )
+            return _compute_platform_metrics(
+                raw_df, platform_name, "OMS_SKU", "TxnType",
+                start_date=start_date, end_date=end_date,
+            )
         out = _unified_platform_stub(platform_name, loaded)
         return out
 

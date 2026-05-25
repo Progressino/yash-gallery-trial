@@ -102,7 +102,8 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     if getattr(sess, "pause_auto_data_restore", False) and not needs_data:
         return
     if sess.daily_restored and not needs_data:
-        return
+        if not (_tier3_session_needs_topup(sess) or _session_sales_stale_vs_platforms(sess)):
+            return
     if needs_data:
         sess.daily_restored = False
 
@@ -252,8 +253,133 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
         sess._daily_restore_lock.release()
 
 
+_PLATFORM_ATTRS = (
+    ("amazon", "mtr_df"),
+    ("myntra", "myntra_df"),
+    ("meesho", "meesho_df"),
+    ("flipkart", "flipkart_df"),
+    ("snapdeal", "snapdeal_df"),
+)
+
+_SOURCE_BY_ATTR = {
+    "mtr_df": "Amazon",
+    "myntra_df": "Myntra",
+    "meesho_df": "Meesho",
+    "flipkart_df": "Flipkart",
+    "snapdeal_df": "Snapdeal",
+}
+
+
+def _platform_df_max_iso(df) -> Optional[str]:
+    import pandas as pd
+
+    if df is None or not hasattr(df, "empty") or df.empty:
+        return None
+    for col in ("Date", "TxnDate", "_Date"):
+        if col not in df.columns:
+            continue
+        d = pd.to_datetime(df[col], errors="coerce").max()
+        if pd.notna(d):
+            return str(pd.Timestamp(d).date())
+    return None
+
+
+def _tier3_session_needs_topup(sess: AppSession) -> bool:
+    """True when SQLite has newer/more daily uploads than the in-memory platform frame."""
+    try:
+        from ..services.daily_store import get_summary
+
+        summary = get_summary()
+    except Exception:
+        return False
+    for plat, attr in _PLATFORM_ATTRS:
+        plat_sum = summary.get(plat) or {}
+        if int(plat_sum.get("file_count") or 0) <= 0:
+            continue
+        cur = getattr(sess, attr, None)
+        if cur is None or not hasattr(cur, "empty") or cur.empty:
+            return True
+        tier_max = str(plat_sum.get("max_date") or "")[:10]
+        sess_max = _platform_df_max_iso(cur) or ""
+        if tier_max and (not sess_max or tier_max > sess_max):
+            return True
+    return False
+
+
+def _session_sales_stale_vs_platforms(sess: AppSession) -> bool:
+    """True when a non-empty platform frame is missing from unified sales_df."""
+    sales = getattr(sess, "sales_df", None)
+    sources: set[str] = set()
+    if sales is not None and not sales.empty and "Source" in sales.columns:
+        sources = set(sales["Source"].astype(str).str.strip())
+    for attr, src in _SOURCE_BY_ATTR.items():
+        raw = getattr(sess, attr, None)
+        if raw is not None and hasattr(raw, "empty") and not raw.empty and src not in sources:
+            return True
+    return sales is None or (hasattr(sales, "empty") and sales.empty and _session_has_platform_data(sess))
+
+
+def _rebuild_session_sales(sess: AppSession) -> None:
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
+        return
+    if not sess.sku_mapping:
+        return
+    if not _session_has_platform_data(sess):
+        return
+    try:
+        from ..services.sales import build_sales_df
+
+        sess.sales_df = build_sales_df(
+            mtr_df=sess.mtr_df,
+            myntra_df=sess.myntra_df,
+            meesho_df=sess.meesho_df,
+            flipkart_df=sess.flipkart_df,
+            snapdeal_df=sess.snapdeal_df,
+            sku_mapping=sess.sku_mapping,
+            return_overlay_df=(
+                None
+                if getattr(sess, "po_return_overlay_df", None) is None
+                or getattr(sess.po_return_overlay_df, "empty", True)
+                else sess.po_return_overlay_df
+            ),
+        )
+        sess._quarterly_cache.clear()
+    except Exception:
+        pass
+
+
+def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
+    """
+    Intelligence dashboard reads must see Tier-3 daily uploads and a unified sales_df
+    that includes every loaded marketplace — not a stale warm-cache sales slice.
+    """
+    if getattr(sess, "pause_auto_data_restore", False):
+        return
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return
+    if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+        return
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
+        return
+    try:
+        import backend.main as _main
+
+        if _main.session_needs_operational_data(sess):
+            _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
+    except Exception:
+        pass
+    if _tier3_session_needs_topup(sess) or not getattr(sess, "daily_restored", False):
+        _restore_daily_if_needed(sess)
+    elif _session_sales_stale_vs_platforms(sess):
+        _rebuild_session_sales(sess)
+    else:
+        _ensure_sales_rebuilt(sess)
+
+
 def _ensure_warm_session_data(sess: AppSession) -> None:
-    """Fast path for dashboard reads — warm cache only, no Tier-3 SQLite scan."""
+    """Warm cache fill for empty sessions; Intelligence routes use ``_ensure_intelligence_session_fresh``."""
     try:
         import backend.main as _main
 
@@ -574,7 +700,7 @@ def sales_summary(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
-    _ensure_warm_session_data(sess)
+    _ensure_intelligence_session_fresh(sess)
     return get_sales_summary(sess.sales_df, months=months, start_date=start_date, end_date=end_date)
 
 
@@ -682,7 +808,7 @@ def top_skus(
 ):
     """``basis=gross`` (default): rank by shipment quantity. ``basis=net``: by ``Units_Effective`` sum."""
     sess = _sess(request)
-    _ensure_warm_session_data(sess)
+    _ensure_intelligence_session_fresh(sess)
     return get_top_skus(
         sess.sales_df,
         limit=limit,
@@ -1554,7 +1680,7 @@ def platform_summary(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
-    _ensure_warm_session_data(sess)
+    _ensure_intelligence_session_fresh(sess)
     return get_platform_summary(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,
@@ -1570,7 +1696,7 @@ def anomalies_endpoint(
     end_date: Optional[str] = None,
 ):
     sess = _sess(request)
-    _ensure_warm_session_data(sess)
+    _ensure_intelligence_session_fresh(sess)
     return get_anomalies(
         sess.mtr_df, sess.myntra_df, sess.meesho_df,
         sess.flipkart_df, sess.snapdeal_df,

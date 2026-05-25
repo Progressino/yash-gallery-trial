@@ -56,6 +56,10 @@ _META_JSON_FIELDS = (
     "load_warnings",
     "snapdeal_parse_info",
     "inventory_debug",
+    "inventory_snapshot_date",
+    "inventory_snapshot_date_label",
+    "inventory_snapshot_date_sources",
+    "inventory_snapshot_uploaded_at",
     "daily_restored",
     "pause_auto_data_restore",
 )
@@ -183,7 +187,11 @@ def _hydrate_session_from_bundle(data: bytes):
                         setattr(sess, name, int(val) if val is not None else 0)
                     except (TypeError, ValueError):
                         setattr(sess, name, 0)
-                elif name in ("daily_sales_sources", "load_warnings"):
+                elif name in (
+                    "daily_sales_sources",
+                    "load_warnings",
+                    "inventory_snapshot_date_sources",
+                ):
                     setattr(sess, name, list(val or []))
                 else:
                     setattr(sess, name, val)

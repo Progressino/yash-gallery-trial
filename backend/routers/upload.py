@@ -1271,16 +1271,41 @@ def _clear_stuck_inventory_upload(sess: AppSession, *, force: bool = False) -> b
     return True
 
 
-def _schedule_inventory_cache_save(sess: AppSession) -> None:
-    """GitHub/Postgres cache save can take minutes — never block the upload worker on it."""
+def _persist_inventory_after_upload(sess: AppSession, session_id: str | None = None) -> None:
+    """Update warm cache + PostgreSQL immediately so reload/login sees the snapshot."""
+    try:
+        import backend.main as _main
+
+        _main.merge_inventory_into_warm_cache(sess)
+    except Exception:
+        _log.exception("merge_inventory_into_warm_cache failed")
+    sid = (session_id or getattr(sess, "_persist_sid", None) or "").strip() or None
+    if sid:
+        setattr(sess, "_persist_sid", sid)
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+
+            persist_session_bundle_thread_safe(sid, sess)
+        except Exception:
+            _log.exception("PostgreSQL persist after inventory upload")
+
+
+def _schedule_inventory_github_cache_save(sess: AppSession) -> None:
+    """GitHub cache save can take minutes — never block the upload response on it."""
 
     def _run() -> None:
         try:
             _auto_save_cache(sess)
         except Exception:
-            _log.exception("background inventory cache save failed")
+            _log.exception("background inventory GitHub cache save failed")
 
     threading.Thread(target=_run, name="inv-cache-save", daemon=True).start()
+
+
+def _finish_inventory_server_save(sess: AppSession, session_id: str | None = None) -> None:
+    """Sync warm + PG, then background GitHub (call after every successful inventory parse)."""
+    _persist_inventory_after_upload(sess, session_id)
+    _schedule_inventory_github_cache_save(sess)
 
 
 def _build_inventory_upload_payload(
@@ -1435,7 +1460,7 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
     try:
         await asyncio.to_thread(_session_lock_apply_sync, sess, work)
         if sess.inventory_upload_status == "done":
-            _schedule_inventory_cache_save(sess)
+            _finish_inventory_server_save(sess, session_id)
     except Exception as e:
         _log.exception("inventory-auto parse")
         sess.inventory_upload_status = "error"
@@ -1618,7 +1643,8 @@ async def upload_inventory_auto(
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
 
-    background_tasks.add_task(_schedule_inventory_cache_save, sess)
+    sid = getattr(request.state, "session_id", None)
+    _finish_inventory_server_save(sess, sid)
     return JSONResponse(content=data)
 
 
@@ -1670,7 +1696,8 @@ async def upload_inventory(
     except Exception as e:
         return JSONResponse(content={"ok": False, "message": f"Parse error: {e}"})
 
-    background_tasks.add_task(_schedule_inventory_cache_save, sess)
+    sid = getattr(request.state, "session_id", None)
+    _finish_inventory_server_save(sess, sid)
     return JSONResponse(content=data)
 
 

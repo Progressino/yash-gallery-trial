@@ -131,6 +131,18 @@ function ProtectedRoute() {
           if (!sessionNeedsSync(coverage)) invalidateDataQueries(qc)
           return true
         }
+        // Sales loaded from PG but inventory only in warm cache — coverage already restores it.
+        if (!coverage.inventory && !coverageEmpty(coverage)) {
+          try {
+            coverage = await getCoverage({ light: true, timeout: 60_000 })
+            setCoverage(coverage)
+            if (coverage.inventory && !sessionNeedsSync(coverage)) {
+              invalidateDataQueries(qc)
+            }
+          } catch {
+            /* warm cache may still be loading after deploy */
+          }
+        }
         if (coverageEmpty(coverage)) {
           try {
             await withTimeout(cacheHydrateWarm(), HYDRATE_WARM_TIMEOUT_MS)
