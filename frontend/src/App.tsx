@@ -8,6 +8,7 @@ import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuar
 import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries } from './api/client'
+import { canSkipHeavyServerRestore, readLocalSessionHint } from './lib/localSessionHint'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
 
@@ -120,6 +121,11 @@ function ProtectedRoute() {
       try {
         let coverage = await getCoverage({ light: true, timeout: 45_000 })
         setCoverage(coverage)
+        const localHint = readLocalSessionHint()
+        if (canSkipHeavyServerRestore(coverage, localHint)) {
+          if (!sessionNeedsSync(coverage)) invalidateDataQueries(qc)
+          return true
+        }
         if (coverage.inventory_upload_status === 'running') {
           return true
         }

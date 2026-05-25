@@ -4,6 +4,7 @@
  */
 import { create } from 'zustand'
 import type { CoverageResponse } from '../api/client'
+import { persistLocalSessionHint } from '../lib/localSessionHint'
 
 interface SessionState extends CoverageResponse {
   setCoverage: (c: CoverageResponse) => void
@@ -53,5 +54,8 @@ const empty: CoverageResponse = {
 
 export const useSession = create<SessionState>((set) => ({
   ...empty,
-  setCoverage: (c) => set(c),
+  setCoverage: (c) => {
+    set(c)
+    persistLocalSessionHint(c)
+  },
 }))

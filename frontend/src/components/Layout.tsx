@@ -7,6 +7,7 @@ import api from '../api/client'
 import { useAuth, mayResetSharedData, mayUploadHistorical, canAccessModule, isHrmOnlyUser } from '../store/auth'
 import type { ModuleKey } from '../lib/modules'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
+import { clearLocalSessionHint, formatLocalHintAge, readLocalSessionHint } from '../lib/localSessionHint'
 
 type NavItem = { to: string; label: string; module: ModuleKey }
 
@@ -73,6 +74,7 @@ export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const autoLoadAttempted = useRef(false)
+  const localHint = readLocalSessionHint()
 
   useEffect(() => {
     api
@@ -179,6 +181,7 @@ export default function Layout() {
     setCacheLoading('delete')
     try {
       const res = await resetAllAppData({ clearTier3Sqlite: true, clearWarmCache: true, clearGithubCache: true })
+      clearLocalSessionHint()
       if (res.ok) {
         const c = await getCoverage()
         setCoverage(c)
@@ -326,6 +329,11 @@ export default function Layout() {
               Shared history is read-only for your role. Use Upload → Tier 3 for daily sales files.
             </p>
           )}
+          <p className="text-[10px] text-gray-500 leading-snug">
+            Sales and inventory stay on the server (and GitHub when you Save Cache). This browser only
+            remembers load status{localHint ? ` (${formatLocalHintAge(localHint)})` : ''} so return visits
+            can skip a slow re-download when your session is still warm.
+          </p>
           {cacheMsg && (
             <p className={`text-xs leading-tight ${cacheMsg.type === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
               {cacheMsg.text}
