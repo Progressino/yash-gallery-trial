@@ -39,11 +39,26 @@ def test_marketplace_breakdown_flags_missing_myntra():
     assert any("Myntra" in h for h in hints)
 
 
-def test_rar_only_has_flipkart_not_myntra():
+def test_rar_classifies_seller_inventory_report_as_myntra():
+    p = Path("/Users/samraisinghani/Downloads/Inventory 25-May-26.rar")
+    if not p.is_file():
+        return
+    from backend.services.inventory import _extract_all_from_rar
+
+    _, man = _extract_all_from_rar(p.read_bytes())
+    sir = [m for m in man if "seller_inventory_report" in m["filename"].lower()]
+    assert sir
+    assert all(m["category"] == "myntra" for m in sir)
+
+
+def test_rar_loads_myntra_and_flipkart_columns():
     p = Path("/Users/samraisinghani/Downloads/Inventory 25-May-26.rar")
     if not p.is_file():
         return
     df, dbg = load_inventory_consolidated(None, None, None, p.read_bytes(), {}, return_debug=True)
     assert "Flipkart_Inventory" in df.columns
-    assert "Myntra_Other_Inventory" not in df.columns or int(df["Myntra_Other_Inventory"].sum()) == 0
-    assert "no myntra" in str(dbg.get("myntra", "")).lower()
+    assert int(df["Flipkart_Inventory"].sum()) > 0
+    assert "Myntra_Other_Inventory" in df.columns
+    assert int(df["Myntra_Other_Inventory"].sum()) > 0
+    assert dbg.get("flipkart", "").startswith("0 SKUs") is False
+    assert dbg.get("myntra", "").startswith("0 SKUs") is False

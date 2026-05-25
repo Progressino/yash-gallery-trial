@@ -230,8 +230,8 @@ def inventory_missing_marketplace_warnings(debug: dict | None = None) -> list[st
         )
     if _empty("flipkart") and not _empty("oms"):
         warnings.append(
-            "Flipkart inventory not parsed — include Flipkart Current Inventory and/or "
-            "Seller Inventory Report CSVs inside the RAR."
+            "Flipkart inventory not parsed — include Flipkart “Current Inventory” CSVs "
+            "(SKU + Live on Website) inside the RAR."
         )
     oms_mkt = set(dbg.get("oms_provides_marketplace") or [])
     if has_partial and "Meesho_Inventory" not in oms_mkt:
@@ -305,6 +305,8 @@ def _content_sniff_csv_kind(data: bytes) -> Optional[str]:
     ):
         return "flipkart"
     if "seller sku code" in text and "inventory count" in text:
+        # Myntra PPMP Seller Inventory Report (seller id + style id + inventory count).
+        # Flipkart uses "Current Inventory" exports with SKU + Live on Website instead.
         if not df.empty:
             wh_col = next(
                 (c for c in df.columns if str(c).strip().lower() == "warehouse name"),
@@ -314,13 +316,7 @@ def _content_sniff_csv_kind(data: bytes) -> Optional[str]:
                 wh = df[wh_col].astype(str).str.lower()
                 if wh.str.contains("myntra", na=False).any():
                     return "myntra"
-        if "warehouse id" in text and "po_type" in text:
-            return "flipkart"
-        if "myntra" in text and "flipkart" not in text:
-            return "myntra"
-        if "myntra sku" in text or ("style id" in text and "flipkart" not in text):
-            return "myntra"
-        return "flipkart"
+        return "myntra"
     if "item skucode" in text or "buffer stock" in text:
         return "oms"
     if "combo sku code" in text:
@@ -338,8 +334,10 @@ def _rar_sniff_csv_kind(base_lower: str, data: bytes) -> Optional[str]:
     by_content = _content_sniff_csv_kind(data)
     if "current inventory" in base_lower:
         return by_content or "flipkart"
-    if "flipkart" in base_lower or base_lower.startswith("fk") or "seller_inventory_report" in base_lower:
-        return "flipkart"
+    if "seller_inventory_report" in base_lower or "seller_orders_report" in base_lower:
+        return by_content or "myntra"
+    if "flipkart" in base_lower or base_lower.startswith("fk"):
+        return by_content or "flipkart"
     if "myntra" in base_lower:
         return by_content or "myntra"
     if "amz" in base_lower or "amazon" in base_lower:
