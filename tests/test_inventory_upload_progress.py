@@ -24,6 +24,17 @@ def test_clear_stuck_inventory_upload_not_young_without_force():
     assert sess.inventory_upload_status == "running"
 
 
+def test_mark_inventory_upload_running_without_lock():
+    from backend.session import AppSession
+
+    sess = AppSession()
+    upload_router._mark_inventory_upload_running(sess, "Upload received — starting parse…")
+    assert sess.inventory_upload_status == "running"
+    assert sess.inventory_upload_progress == 2
+    assert sess.inventory_upload_message == "Upload received — starting parse…"
+    assert sess.inventory_upload_result == {}
+
+
 def test_set_inventory_upload_progress_clamps():
     sess = AppSession()
     upload_router._set_inventory_upload_progress(sess, 150, "Done")

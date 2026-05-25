@@ -760,6 +760,18 @@ def _mark_daily_auto_ingest_running(sess: AppSession, message: str) -> None:
     sess.sales_rebuild_message = ""
 
 
+def _mark_inventory_upload_running(sess: AppSession, message: str, *, progress: int = 2) -> None:
+    """Set inventory ingest status without waiting on ``_daily_restore_lock``.
+
+    ``/inventory-auto`` and chunked finalize used ``_session_lock_apply`` here, which
+    blocked behind a long RAR parse until the gateway returned 502 (~100s).
+    """
+    sess.inventory_upload_status = "running"
+    sess.inventory_upload_started = time.time()
+    _set_inventory_upload_progress(sess, progress, message)
+    sess.inventory_upload_result = {}
+
+
 async def _session_lock_apply(sess, fn: Callable[[], Any]) -> Any:
     """
     Run ``fn`` while holding ``sess._daily_restore_lock`` on a worker thread.
@@ -1579,6 +1591,93 @@ def _build_inventory_upload_payload(
     }
 
 
+def _inventory_parse_heavy(
+    sess: AppSession,
+    *,
+    oms_bytes_list: list[bytes],
+    fk_bytes: list[bytes] | None,
+    myntra_bytes: list[bytes] | None,
+    amz_bytes: bytes | None,
+    sku_mapping: dict,
+    warnings: list[str],
+) -> tuple[Any, Any, dict]:
+    """CPU/RAM-heavy inventory parse — no session lock (progress fields updated on sess)."""
+    _set_inventory_upload_progress(sess, 45, "Merging OMS, Flipkart, Myntra, and Amazon stock…")
+    df_variant, debug = load_inventory_consolidated(
+        oms_bytes_list or None,
+        fk_bytes,
+        myntra_bytes,
+        amz_bytes,
+        sku_mapping,
+        group_by_parent=False,
+        return_debug=True,
+    )
+    if df_variant.empty:
+        warnings.append("No SKUs parsed — check SKU mapping and file formats.")
+    for m in debug.get("rar_manifest") or []:
+        if m.get("status") == "skipped":
+            warnings.append(f"{m.get('filename', '?')}: {m.get('reason', 'skipped')}")
+    try:
+        from ..services.helpers import get_parent_sku
+
+        df_parent = df_variant.copy()
+        inv_cols = [
+            c
+            for c in df_parent.columns
+            if c.endswith("_Inventory")
+            or c.endswith("_Live")
+            or c.endswith("_InTransit")
+            or c in ("Buffer_Stock", "Marketplace_Total", "Total_Inventory")
+        ]
+        df_parent["Parent_SKU"] = df_parent["OMS_SKU"].apply(get_parent_sku)
+        df_parent = (
+            df_parent.groupby("Parent_SKU")[inv_cols]
+            .sum()
+            .reset_index()
+            .rename(columns={"Parent_SKU": "OMS_SKU"})
+        )
+    except Exception:
+        df_parent = df_variant
+    _set_inventory_upload_progress(sess, 80, "Building parent-SKU rollup…")
+    return df_variant, df_parent, debug
+
+
+def _inventory_apply_parse_result(
+    sess: AppSession,
+    *,
+    df_variant: Any,
+    df_parent: Any,
+    debug: dict,
+    file_parts: list[tuple[str, bytes]],
+    detected: list[str],
+    warnings: list[str],
+) -> dict:
+    """Commit parsed inventory to the session (brief lock)."""
+    _set_inventory_upload_progress(sess, 95, "Finalizing snapshot…")
+    sess.inventory_df_variant = df_variant
+    sess.inventory_df_parent = df_parent
+    apply_inventory_snapshot_metadata(sess, file_parts, debug)
+    _session_data_changed(sess)
+    payload = _build_inventory_upload_payload(
+        df_variant=df_variant,
+        debug=sess.inventory_debug,
+        detected=detected,
+        file_parts=file_parts,
+        warnings=warnings,
+    )
+    if not df_variant.empty:
+        sess.inventory_upload_status = "done"
+        _set_inventory_upload_progress(sess, 100, payload["message"])
+    else:
+        sess.inventory_upload_status = "error"
+        sess.inventory_upload_progress = 0
+        payload["ok"] = False
+    sess.inventory_upload_result = payload
+    sess.inventory_upload_message = payload["message"]
+    sess.inventory_upload_started = 0.0
+    return payload
+
+
 async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
     """Parse assembled inventory file bytes on a worker thread."""
     sess = _resolve_upload_session(session_id)
@@ -1587,10 +1686,9 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
     fnames = ", ".join(n[:36] + "…" if len(n) > 36 else n for n, _ in file_parts[:3])
     if len(file_parts) > 3:
         fnames += f" (+{len(file_parts) - 3} more)"
-    sess.inventory_upload_status = "running"
-    sess.inventory_upload_started = time.time()
-    _set_inventory_upload_progress(sess, 5, f"Classifying {len(file_parts)} file(s): {fnames}…")
-    sess.inventory_upload_result = {}
+    _mark_inventory_upload_running(
+        sess, f"Classifying {len(file_parts)} file(s): {fnames}…", progress=5,
+    )
     warnings: list[str] = []
     try:
         oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected = _classify_inventory_file_parts(file_parts)
@@ -1616,62 +1714,43 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
     else:
         _set_inventory_upload_progress(sess, 25, "Parsing marketplace inventory files…")
 
-    def work():
-        _set_inventory_upload_progress(sess, 45, "Merging OMS, Flipkart, Myntra, and Amazon stock…")
-        df_variant, debug = load_inventory_consolidated(
-            oms_bytes_list or None, fk_bytes, myntra_bytes, amz_bytes, sess.sku_mapping,
-            group_by_parent=False, return_debug=True,
-        )
-        if df_variant.empty:
-            warnings.append("No SKUs parsed — check SKU mapping and file formats.")
-        for m in debug.get("rar_manifest") or []:
-            if m.get("status") == "skipped":
-                warnings.append(f"{m.get('filename', '?')}: {m.get('reason', 'skipped')}")
+    sku_mapping = dict(sess.sku_mapping or {})
+
+    def parse_work() -> tuple[Any, Any, dict]:
+        if not _UPLOAD_MEMORY_LOCK.acquire(timeout=0):
+            _set_inventory_upload_progress(sess, 8, "Queued — waiting for server memory…")
+            _log.info("inventory-auto queued behind another heavy job (session=%s)", session_id[:8])
+            _UPLOAD_MEMORY_LOCK.acquire()
         try:
-            from ..services.helpers import get_parent_sku
-            df_parent = df_variant.copy()
-            inv_cols = [
-                c for c in df_parent.columns
-                if c.endswith("_Inventory") or c.endswith("_Live") or c.endswith("_InTransit")
-                   or c in ("Buffer_Stock", "Marketplace_Total", "Total_Inventory")
-            ]
-            df_parent["Parent_SKU"] = df_parent["OMS_SKU"].apply(get_parent_sku)
-            df_parent = (
-                df_parent.groupby("Parent_SKU")[inv_cols].sum()
-                .reset_index()
-                .rename(columns={"Parent_SKU": "OMS_SKU"})
+            return _inventory_parse_heavy(
+                sess,
+                oms_bytes_list=oms_bytes_list,
+                fk_bytes=fk_bytes,
+                myntra_bytes=myntra_bytes,
+                amz_bytes=amz_bytes,
+                sku_mapping=sku_mapping,
+                warnings=warnings,
             )
-        except Exception:
-            df_parent = df_variant
-        _set_inventory_upload_progress(sess, 80, "Building parent-SKU rollup…")
-        sess.inventory_df_variant = df_variant
-        sess.inventory_df_parent = df_parent
-        apply_inventory_snapshot_metadata(sess, file_parts, debug)
-        _session_data_changed(sess)
-        _set_inventory_upload_progress(sess, 95, "Finalizing snapshot…")
-        payload = _build_inventory_upload_payload(
-            df_variant=df_variant,
-            debug=sess.inventory_debug,
-            detected=detected,
-            file_parts=file_parts,
-            warnings=warnings,
-        )
-        if not df_variant.empty:
-            sess.inventory_upload_status = "done"
-            _set_inventory_upload_progress(sess, 100, payload["message"])
-        else:
-            sess.inventory_upload_status = "error"
-            sess.inventory_upload_progress = 0
-            payload["ok"] = False
-        sess.inventory_upload_result = payload
-        sess.inventory_upload_message = payload["message"]
-        sess.inventory_upload_started = 0.0
-        return payload
+        finally:
+            _UPLOAD_MEMORY_LOCK.release()
 
     try:
-        await asyncio.to_thread(_session_lock_apply_sync, sess, work)
+        df_variant, df_parent, debug = await asyncio.to_thread(parse_work)
+
+        def apply_work() -> dict:
+            return _inventory_apply_parse_result(
+                sess,
+                df_variant=df_variant,
+                df_parent=df_parent,
+                debug=debug,
+                file_parts=file_parts,
+                detected=detected,
+                warnings=warnings,
+            )
+
+        await asyncio.to_thread(_session_lock_apply_sync, sess, apply_work)
         if sess.inventory_upload_status == "done":
-            _finish_inventory_server_save(sess, session_id)
+            await asyncio.to_thread(_finish_inventory_server_save, sess, session_id)
     except Exception as e:
         _log.exception("inventory-auto parse")
         sess.inventory_upload_status = "error"
@@ -1754,13 +1833,7 @@ async def upload_inventory_auto(
     sid = getattr(request.state, "session_id", None)
     if sid:
 
-        def mark_async_start():
-            sess.inventory_upload_status = "running"
-            sess.inventory_upload_started = time.time()
-            _set_inventory_upload_progress(sess, 2, "Upload received — starting parse…")
-            sess.inventory_upload_result = {}
-
-        await _session_lock_apply(sess, mark_async_start)
+        _mark_inventory_upload_running(sess, "Upload received — starting parse…")
         DAILY_UPLOAD_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
         return JSONResponse(
             content={
@@ -3067,13 +3140,7 @@ async def _accept_inventory_auto_file_parts(
             "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
         }
 
-    def mark_async_start():
-        sess.inventory_upload_status = "running"
-        sess.inventory_upload_started = time.time()
-        _set_inventory_upload_progress(sess, 2, "Chunks assembled — starting parse…")
-        sess.inventory_upload_result = {}
-
-    await _session_lock_apply(sess, mark_async_start)
+    _mark_inventory_upload_running(sess, "Chunks assembled — starting parse…")
     DAILY_UPLOAD_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
     return {
         "ok": True,
@@ -3269,10 +3336,7 @@ async def chunk_upload_complete(
     if target == "daily-auto":
         _mark_daily_auto_ingest_running(sess, "Assembling uploaded files…")
     else:
-        sess.inventory_upload_status = "running"
-        sess.inventory_upload_started = time.time()
-        _set_inventory_upload_progress(sess, 1, "Assembling uploaded chunks…")
-        sess.inventory_upload_result = {}
+        _mark_inventory_upload_running(sess, "Assembling uploaded chunks…", progress=1)
 
     HEAVY_EXECUTOR.submit(_finalize_chunk_upload_worker, sid, body.upload_id)
 
