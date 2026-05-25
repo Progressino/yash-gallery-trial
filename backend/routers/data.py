@@ -41,7 +41,11 @@ from ..services.sales import (
 )
 from ..services.daily_store import list_uploads, get_summary, delete_upload
 from ..session import AppSession
-from ..services.inventory import inventory_snapshot_meta_for_api
+from ..services.inventory import (
+    inventory_marketplace_breakdown,
+    inventory_missing_marketplace_warnings,
+    inventory_snapshot_meta_for_api,
+)
 
 router = APIRouter()
 
@@ -1362,12 +1366,15 @@ def get_inventory(request: Request):
         except Exception:
             totals[c] = 0
 
+    dbg = getattr(sess, "inventory_debug", {}) or {}
     return {
         "loaded":   True,
         "rows":     df.fillna(0).to_dict("records"),
         "columns":  ["OMS_SKU"] + cols,
         "totals":   totals,
-        "debug":    getattr(sess, "inventory_debug", {}),
+        "debug":    dbg,
+        "marketplaces": inventory_marketplace_breakdown(df, dbg),
+        "missing_marketplace_hints": inventory_missing_marketplace_warnings(dbg),
         **inventory_snapshot_meta_for_api(sess),
     }
 

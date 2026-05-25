@@ -3,12 +3,23 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
 import * as XLSX from 'xlsx'
 
+type MarketplaceRow = {
+  key: string
+  label: string
+  included: boolean
+  units: number
+  skus: number
+  parse_status?: string
+}
+
 interface InventoryData {
   loaded: boolean
   rows: Array<Record<string, number | string>>
   columns: string[]
   totals?: Record<string, number>
   debug?: Record<string, unknown>
+  marketplaces?: MarketplaceRow[]
+  missing_marketplace_hints?: string[]
   snapshot_date?: string | null
   snapshot_date_label?: string | null
   snapshot_date_sources?: string[] | null
@@ -101,6 +112,45 @@ export default function Inventory() {
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
           <span className="font-medium text-gray-700">Date from: </span>
           {snapshotSources.join(' · ')}
+        </div>
+      )}
+
+      {data.marketplaces && data.marketplaces.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+          <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-3">
+            Marketplaces in this snapshot
+          </p>
+          <p className="text-xs text-gray-500 mb-3">
+            Green = stock loaded from your upload. Gray = not in the RAR/OMS bundle (sidebar “loaded” badges are for sales data, not inventory).
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {data.marketplaces
+              .filter(m => !['Buffer_Stock', 'OMS_Inventory'].includes(m.key))
+              .map(m => (
+                <div
+                  key={m.key}
+                  className={`rounded-lg border px-3 py-2 text-xs min-w-[120px] ${
+                    m.included
+                      ? 'border-green-200 bg-green-50 text-green-900'
+                      : 'border-gray-200 bg-gray-50 text-gray-500'
+                  }`}
+                >
+                  <p className="font-semibold">{m.label}</p>
+                  <p className="mt-0.5 tabular-nums">
+                    {m.included
+                      ? `${m.units.toLocaleString()} units · ${m.skus.toLocaleString()} SKUs`
+                      : 'Not in upload'}
+                  </p>
+                </div>
+              ))}
+          </div>
+          {(data.missing_marketplace_hints?.length ?? 0) > 0 && (
+            <ul className="mt-3 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 space-y-1 list-disc list-inside">
+              {(data.missing_marketplace_hints ?? []).map((h, i) => (
+                <li key={i}>{h}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

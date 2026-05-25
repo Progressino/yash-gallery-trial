@@ -36,6 +36,7 @@ from ..services.flipkart import load_flipkart_from_zip
 from ..services.snapdeal import load_snapdeal_from_zip
 from ..services.inventory import (
     apply_inventory_snapshot_metadata,
+    inventory_missing_marketplace_warnings,
     load_inventory_consolidated,
 )
 from ..services.sales import build_sales_df, list_sku_mapping_gaps
@@ -1324,13 +1325,15 @@ def _build_inventory_upload_payload(
         parts.append(f"{skipped} file(s) inside archive skipped")
     if warnings:
         parts.append("; ".join(warnings[:3]))
+    missing_mkt = inventory_missing_marketplace_warnings(debug)
+    all_warnings = list(dict.fromkeys([*(warnings or []), *missing_mkt]))
     return {
         "ok": True,
         "message": " | ".join(parts),
         "rows": rows,
         "debug": debug,
         "detected": detected,
-        "warnings": warnings or [],
+        "warnings": all_warnings,
         "file_results": file_results,
         "processed_files": len(file_parts),
         "saved_files": saved or len(file_parts),

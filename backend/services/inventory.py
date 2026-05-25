@@ -169,6 +169,81 @@ def apply_inventory_snapshot_metadata(
     return meta
 
 
+_SNAPSHOT_MARKETPLACE_COLS = (
+    ("OMS_Inventory", "OMS warehouse"),
+    ("Buffer_Stock", "Buffer stock"),
+    ("Amazon_Inventory", "Amazon"),
+    ("FBA_InTransit", "FBA in-transit"),
+    ("Flipkart_Inventory", "Flipkart"),
+    ("Myntra_Other_Inventory", "Myntra"),
+    ("Meesho_Inventory", "Meesho"),
+)
+
+
+def inventory_marketplace_breakdown(df: pd.DataFrame, debug: dict | None = None) -> list[dict[str, Any]]:
+    """Per-channel totals for UI; ``included`` means column present with stock > 0."""
+    dbg = debug or {}
+    rows: list[dict[str, Any]] = []
+    for col, label in _SNAPSHOT_MARKETPLACE_COLS:
+        units = 0
+        skus = 0
+        if not df.empty and col in df.columns:
+            series = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            units = int(series.sum())
+            skus = int((series > 0).sum())
+        rows.append({
+            "key": col,
+            "label": label,
+            "included": units > 0,
+            "units": units,
+            "skus": skus,
+        })
+    # Parse-status hints from last upload debug
+    parse_hints = {
+        "Flipkart_Inventory": dbg.get("flipkart"),
+        "Myntra_Other_Inventory": dbg.get("myntra"),
+        "Meesho_Inventory": dbg.get("meesho"),
+        "Amazon_Inventory": dbg.get("amz"),
+    }
+    for row in rows:
+        hint = parse_hints.get(row["key"])
+        if hint is not None:
+            row["parse_status"] = str(hint)
+    return rows
+
+
+def inventory_missing_marketplace_warnings(debug: dict | None = None) -> list[str]:
+    """Actionable hints when expected marketplace files were not in the last upload."""
+    dbg = debug or {}
+    warnings: list[str] = []
+
+    def _empty(key: str) -> bool:
+        val = str(dbg.get(key) or "")
+        return not val or val.startswith("0 SKUs") or "no " in val.lower()
+
+    has_partial = not (_empty("oms") and _empty("flipkart") and _empty("amz"))
+    if has_partial and _empty("myntra"):
+        warnings.append(
+            "Myntra inventory not in this upload — add the Myntra PPMP Seller Inventory CSV "
+            "(columns: seller sku code, inventory count, warehouse name with “Myntra”), "
+            "or include Myntra columns on the OMS export."
+        )
+    if _empty("flipkart") and not _empty("oms"):
+        warnings.append(
+            "Flipkart inventory not parsed — include Flipkart Current Inventory and/or "
+            "Seller Inventory Report CSVs inside the RAR."
+        )
+    oms_mkt = set(dbg.get("oms_provides_marketplace") or [])
+    if has_partial and "Meesho_Inventory" not in oms_mkt:
+        warnings.append(
+            "Meesho inventory not in this upload — add a Meesho column on the OMS CSV "
+            "(e.g. “Meesho inventory”) or upload a Meesho stock file separately."
+        )
+    if not dbg.get("oms") or str(dbg.get("oms", "")).startswith("0"):
+        warnings.append("OMS inventory CSV missing or empty inside the bundle.")
+    return warnings
+
+
 def inventory_snapshot_meta_for_api(sess: Any) -> dict[str, Any]:
     """Fields for /data/inventory and coverage API responses."""
     dbg = getattr(sess, "inventory_debug", None) or {}
@@ -230,8 +305,19 @@ def _content_sniff_csv_kind(data: bytes) -> Optional[str]:
     ):
         return "flipkart"
     if "seller sku code" in text and "inventory count" in text:
+        if not df.empty:
+            wh_col = next(
+                (c for c in df.columns if str(c).strip().lower() == "warehouse name"),
+                None,
+            )
+            if wh_col is not None:
+                wh = df[wh_col].astype(str).str.lower()
+                if wh.str.contains("myntra", na=False).any():
+                    return "myntra"
         if "warehouse id" in text and "po_type" in text:
             return "flipkart"
+        if "myntra" in text and "flipkart" not in text:
+            return "myntra"
         if "myntra sku" in text or ("style id" in text and "flipkart" not in text):
             return "myntra"
         return "flipkart"

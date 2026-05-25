@@ -957,7 +957,7 @@ export default function Upload() {
 
         <UploadCard
           title="📦 Snapshot inventory"
-          subtitle="OMS CSV/XLSX, Flipkart, Myntra, Amazon RAR/CSV — auto-detected. Replaces the current snapshot; server saves automatically."
+          subtitle="Drop the daily RAR plus any separate files. Include OMS CSV, Amazon, Flipkart & Myntra PPMP inventory CSVs inside the bundle for full marketplace stock."
           loaded={coverage.inventory}
           alert={showImportCompleteness ? uploadAlertsBySource['inv'] : undefined}
           onClearAlert={() => clearUploadAlert('inv')}
@@ -1088,6 +1088,7 @@ export default function Upload() {
                       showToast('success', res.message)
                     }
                     await refresh({ light: true })
+                    qc.invalidateQueries({ queryKey: ['inventory'] })
                   } else showToast('error', res.message)
                 })
               } catch (e: unknown) {
@@ -1105,6 +1106,7 @@ export default function Upload() {
                     setCoverage(cov)
                     showToast('success', cov.inventory_upload_message || 'Inventory updated.')
                     await refresh({ light: true })
+                    qc.invalidateQueries({ queryKey: ['inventory'] })
                   } catch (pollErr: unknown) {
                     showToast(
                       'error',
