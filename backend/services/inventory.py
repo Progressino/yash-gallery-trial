@@ -244,6 +244,84 @@ def inventory_missing_marketplace_warnings(debug: dict | None = None) -> list[st
     return warnings
 
 
+def oms_loaded_in_debug(debug: dict | None) -> bool:
+    """True when the last parse loaded OMS warehouse stock."""
+    val = str((debug or {}).get("oms") or "").strip()
+    return bool(val) and not val.startswith("0 SKUs")
+
+
+def upload_bundle_expects_oms(file_parts: list[tuple[str, bytes]] | None) -> bool:
+    """Daily RAR/ZIP bundles should include an OMS inventory CSV."""
+    for fname, _raw in file_parts or []:
+        low = (fname or "").lower()
+        if low.endswith((".rar", ".zip")):
+            return True
+        if "oms" in low and low.endswith((".csv", ".xlsx", ".xls")):
+            return True
+    return False
+
+
+def inventory_column_totals(df: pd.DataFrame) -> dict[str, int]:
+    """Sum numeric inventory columns once per snapshot (API cache)."""
+    if df.empty:
+        return {}
+    totals: dict[str, int] = {}
+    for col in df.columns:
+        if col == "OMS_SKU":
+            continue
+        try:
+            totals[col] = int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+        except Exception:
+            totals[col] = 0
+    return totals
+
+
+def refresh_inventory_api_cache(sess: Any) -> None:
+    """Cache totals + marketplace cards so GET /inventory stays fast."""
+    df = getattr(sess, "inventory_df_variant", None)
+    if df is None or getattr(df, "empty", True):
+        sess.inventory_api_totals = {}
+        sess.inventory_api_marketplaces = []
+        return
+    dbg = getattr(sess, "inventory_debug", None) or {}
+    sess.inventory_api_totals = inventory_column_totals(df)
+    sess.inventory_api_marketplaces = inventory_marketplace_breakdown(df, dbg)
+
+
+def backup_inventory_before_upload(sess: Any) -> None:
+    """Keep previous snapshot if a bundle upload fails to include OMS."""
+    df = getattr(sess, "inventory_df_variant", None)
+    if df is None or getattr(df, "empty", True):
+        sess._inventory_pre_upload_backup = None
+        return
+    parent = getattr(sess, "inventory_df_parent", None)
+    sess._inventory_pre_upload_backup = {
+        "variant": df.copy(),
+        "parent": parent.copy() if parent is not None and not getattr(parent, "empty", True) else parent,
+        "meta": inventory_session_meta_bundle(sess),
+    }
+
+
+def restore_inventory_upload_backup(sess: Any) -> bool:
+    """Restore pre-upload inventory after a rejected bundle parse."""
+    bak = getattr(sess, "_inventory_pre_upload_backup", None)
+    if not bak:
+        return False
+    variant = bak.get("variant")
+    if variant is None or getattr(variant, "empty", True):
+        return False
+    sess.inventory_df_variant = variant
+    parent = bak.get("parent")
+    if parent is not None and not getattr(parent, "empty", True):
+        sess.inventory_df_parent = parent
+    meta = bak.get("meta")
+    if isinstance(meta, dict):
+        apply_inventory_session_meta(sess, meta)
+    refresh_inventory_api_cache(sess)
+    sess._inventory_pre_upload_backup = None
+    return True
+
+
 def inventory_session_meta_bundle(sess: Any) -> dict[str, Any]:
     """Serializable inventory snapshot metadata for warm cache / disk."""
     return {

@@ -47,6 +47,7 @@ from ..services.inventory import (
     inventory_missing_marketplace_warnings,
     inventory_rows_for_api,
     inventory_snapshot_meta_for_api,
+    refresh_inventory_api_cache,
 )
 
 router = APIRouter()
@@ -468,6 +469,8 @@ def _ensure_warm_session_data(sess: AppSession) -> None:
 
 def _restore_inventory_from_warm(sess: AppSession) -> None:
     """Copy snapshot inventory from in-memory warm cache (fast; no GitHub download)."""
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return
     try:
         import backend.main as _main
         import pandas as pd
@@ -486,6 +489,8 @@ def _restore_inventory_from_warm(sess: AppSession) -> None:
         if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
             sess.sku_mapping = _main._warm_cache["sku_mapping"]
         ensure_inventory_snapshot_metadata(sess)
+        if not sess.inventory_df_variant.empty:
+            refresh_inventory_api_cache(sess)
     except Exception:
         pass
 
@@ -1562,6 +1567,20 @@ def get_inventory(
     limit: int = 500,
 ):
     sess = _sess(request)
+    inv_status = getattr(sess, "inventory_upload_status", "idle") or "idle"
+    if inv_status == "running":
+        return {
+            "loaded": False,
+            "upload_in_progress": True,
+            "inventory_upload_status": "running",
+            "inventory_upload_message": getattr(sess, "inventory_upload_message", "") or "",
+            "inventory_upload_progress": int(getattr(sess, "inventory_upload_progress", 0) or 0),
+            "rows": [],
+            "total_rows": 0,
+            "offset": 0,
+            "limit": max(1, min(int(limit), 5000)),
+        }
+
     _restore_inventory_from_warm(sess)
     df = sess.inventory_df_variant
     if df.empty:
@@ -1573,22 +1592,25 @@ def get_inventory(
             "limit": max(1, min(int(limit), 5000)),
         }
 
-    import pandas as pd
-
     ensure_inventory_snapshot_metadata(sess)
     cols = [c for c in df.columns if c != "OMS_SKU"]
 
-    totals = {}
-    for c in cols:
-        try:
-            totals[c] = int(pd.to_numeric(df[c], errors="coerce").fillna(0).sum())
-        except Exception:
-            totals[c] = 0
+    totals = getattr(sess, "inventory_api_totals", None) or {}
+    if not totals or set(totals.keys()) != set(c for c in cols):
+        refresh_inventory_api_cache(sess)
+        totals = getattr(sess, "inventory_api_totals", None) or {}
 
     rows, total_rows = inventory_rows_for_api(
         df, search=search or "", offset=offset, limit=limit
     )
     dbg = getattr(sess, "inventory_debug", {}) or {}
+    marketplaces = getattr(sess, "inventory_api_marketplaces", None)
+    if not marketplaces:
+        marketplaces = inventory_marketplace_breakdown(df, dbg)
+    upload_warnings: list[str] = []
+    inv_result = getattr(sess, "inventory_upload_result", None) or {}
+    if isinstance(inv_result, dict):
+        upload_warnings = list(inv_result.get("warnings") or [])
     return {
         "loaded": True,
         "rows": rows,
@@ -1598,8 +1620,9 @@ def get_inventory(
         "columns": ["OMS_SKU"] + cols,
         "totals": totals,
         "debug": dbg,
-        "marketplaces": inventory_marketplace_breakdown(df, dbg),
+        "marketplaces": marketplaces,
         "missing_marketplace_hints": inventory_missing_marketplace_warnings(dbg),
+        "inventory_upload_warnings": upload_warnings,
         **inventory_snapshot_meta_for_api(sess),
     }
 

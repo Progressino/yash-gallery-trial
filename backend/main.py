@@ -298,9 +298,10 @@ def merge_inventory_into_warm_cache(sess) -> None:
         else:
             _warm_cache[key] = df.copy()
     try:
-        from .services.inventory import inventory_session_meta_bundle
+        from .services.inventory import inventory_session_meta_bundle, refresh_inventory_api_cache
 
         _warm_cache[_INVENTORY_META_WARM_KEY] = inventory_session_meta_bundle(sess)
+        refresh_inventory_api_cache(sess)
     except Exception:
         pass
     _warm_cache_loaded_at = datetime.now(IST)

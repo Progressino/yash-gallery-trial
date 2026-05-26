@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api/client'
+import { useState, useMemo, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, getCoverage } from '../api/client'
 import { useSession } from '../store/session'
 import * as XLSX from 'xlsx'
 
@@ -15,6 +15,11 @@ type MarketplaceRow = {
 
 interface InventoryData {
   loaded: boolean
+  upload_in_progress?: boolean
+  inventory_upload_status?: string
+  inventory_upload_message?: string
+  inventory_upload_progress?: number
+  inventory_upload_warnings?: string[]
   rows: Array<Record<string, number | string>>
   columns: string[]
   totals?: Record<string, number>
@@ -51,8 +56,27 @@ const PAGE_SIZE = 500
 
 export default function Inventory() {
   const coverage = useSession()
+  const setCoverage = useSession(s => s.setCoverage)
+  const qc = useQueryClient()
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+
+  const invUploadRunning =
+    coverage.inventory_upload_status === 'running'
+
+  useQuery({
+    queryKey: ['coverage', 'inventory-upload-poll'],
+    queryFn: async () => {
+      const cov = await getCoverage({ light: true })
+      setCoverage(cov)
+      if (cov.inventory_upload_status === 'done') {
+        void qc.invalidateQueries({ queryKey: ['inventory'] })
+      }
+      return cov
+    },
+    enabled: invUploadRunning,
+    refetchInterval: invUploadRunning ? 2000 : false,
+  })
 
   const { data, isLoading, isError, error, isFetching, refetch } = useQuery<InventoryData>({
     queryKey: ['inventory', search, page],
@@ -64,10 +88,12 @@ export default function Inventory() {
             offset: page * PAGE_SIZE,
             limit: PAGE_SIZE,
           },
+          timeout: 120_000,
         })
         .then(r => r.data),
     retry: 1,
     staleTime: 30_000,
+    enabled: !invUploadRunning,
   })
 
   const snapshotLabel =
@@ -84,15 +110,88 @@ export default function Inventory() {
     coverage.inventory_snapshot_date_sources ||
     []
 
+  const rows = data?.rows ?? []
+  const totalRows = data?.total_rows ?? rows.length
+  const invCols = (data?.columns ?? []).filter(c => c !== 'OMS_SKU')
+  const totalInventory = useMemo(() => {
+    const fromTotals = Object.entries(data?.totals ?? {}).reduce(
+      (s, [k, v]) => (k === 'Total_Inventory' ? s + Number(v) : s),
+      0,
+    )
+    if (fromTotals > 0) return fromTotals
+    return rows.reduce((s, r) => s + Number(r['Total_Inventory'] ?? 0), 0)
+  }, [data?.totals, rows])
+
   const hasInventory = Boolean(data?.loaded && (data.total_rows ?? data.rows.length) > 0)
   const expectsInventory = Boolean(coverage.inventory)
+  const uploadWarnings = [
+    ...(data?.inventory_upload_warnings ?? []),
+    ...(data?.missing_marketplace_hints ?? []),
+    ...(coverage.inventory_upload_warnings ?? []),
+  ]
+  const uniqueWarnings = [...new Set(uploadWarnings.filter(Boolean))]
+
+  const totalSkus = totalRows
+  const zeroStock = rows.filter(r => Number(r['Total_Inventory'] ?? 0) <= 0).length
+  const amzDisclaimer = (data?.debug?.amz_disclaimer as Record<string, unknown> | undefined) ?? undefined
+
+  useEffect(() => {
+    if (!invUploadRunning) return
+    setPage(0)
+  }, [invUploadRunning])
+
+  const exportExcel = async () => {
+    const { data: full } = await api.get<InventoryData>('/data/inventory', {
+      params: { search: search.trim() || undefined, offset: 0, limit: 5000 },
+      timeout: 180_000,
+    })
+    const exportRows = (full?.rows ?? []).map(r => {
+      const out: Record<string, string | number> = { 'OMS SKU': String(r['OMS_SKU'] ?? '') }
+      invCols.forEach(col => {
+        out[col] = Number(r[col] ?? 0)
+      })
+      return out
+    })
+    const ws = XLSX.utils.json_to_sheet(exportRows)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Inventory')
+    const datePart = snapshotLabel ? String(snapshotLabel).replace(/\s+/g, '-') : new Date().toISOString().slice(0, 10)
+    XLSX.writeFile(wb, `Inventory_${datePart}.xlsx`)
+  }
+
+  const pageCount = Math.max(1, Math.ceil(totalRows / PAGE_SIZE))
+
+  if (invUploadRunning || data?.upload_in_progress) {
+    const pct = coverage.inventory_upload_progress ?? data?.inventory_upload_progress ?? 0
+    const msg =
+      coverage.inventory_upload_message ||
+      data?.inventory_upload_message ||
+      'Parsing inventory snapshot on server…'
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4 text-center p-8 max-w-lg mx-auto">
+        <p className="text-5xl">📦</p>
+        <h2 className="text-xl font-bold text-[#002B5B]">Updating inventory</h2>
+        <p className="text-sm text-gray-600">{msg}</p>
+        <div className="w-full max-w-xs h-2 rounded-full bg-gray-200 overflow-hidden">
+          <div
+            className="h-full bg-[#002B5B] transition-all duration-500"
+            style={{ width: `${Math.max(8, pct)}%` }}
+          />
+        </div>
+        <p className="text-xs text-gray-400 tabular-nums">{pct}%</p>
+        <p className="text-xs text-gray-500">
+          Large RAR bundles can take 1–3 minutes. This page refreshes automatically when parsing finishes.
+        </p>
+      </div>
+    )
+  }
 
   if (isLoading && !data) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-500 p-8">
         <p className="text-sm">Loading inventory snapshot…</p>
         {expectsInventory && (
-          <p className="text-xs text-gray-400">Restoring from server cache — this can take a few seconds.</p>
+          <p className="text-xs text-gray-400">Reading snapshot from server cache…</p>
         )}
       </div>
     )
@@ -153,37 +252,6 @@ export default function Inventory() {
     )
   }
 
-  const rows = data?.rows ?? []
-  const totalRows = data?.total_rows ?? rows.length
-  const invCols = (data?.columns ?? []).filter(c => c !== 'OMS_SKU')
-  const totalInventory = useMemo(
-    () => Object.entries(data?.totals ?? {}).reduce((s, [k, v]) => (k === 'Total_Inventory' ? s + Number(v) : s), 0),
-    [data?.totals],
-  ) || rows.reduce((s, r) => s + Number(r['Total_Inventory'] ?? 0), 0)
-  const totalSkus = totalRows
-  const zeroStock = rows.filter(r => Number(r['Total_Inventory'] ?? 0) <= 0).length
-  const amzDisclaimer = (data?.debug?.amz_disclaimer as Record<string, unknown> | undefined) ?? undefined
-
-  const exportExcel = async () => {
-    const { data: full } = await api.get<InventoryData>('/data/inventory', {
-      params: { search: search.trim() || undefined, offset: 0, limit: 5000 },
-    })
-    const exportRows = (full?.rows ?? []).map(r => {
-      const out: Record<string, string | number> = { 'OMS SKU': String(r['OMS_SKU'] ?? '') }
-      invCols.forEach(col => {
-        out[col] = Number(r[col] ?? 0)
-      })
-      return out
-    })
-    const ws = XLSX.utils.json_to_sheet(exportRows)
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Inventory')
-    const datePart = snapshotLabel ? String(snapshotLabel).replace(/\s+/g, '-') : new Date().toISOString().slice(0, 10)
-    XLSX.writeFile(wb, `Inventory_${datePart}.xlsx`)
-  }
-
-  const pageCount = Math.max(1, Math.ceil(totalRows / PAGE_SIZE))
-
   return (
     <div className="p-6 space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -209,6 +277,14 @@ export default function Inventory() {
           </div>
         )}
       </div>
+
+      {uniqueWarnings.length > 0 && (
+        <ul className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 space-y-1 list-disc list-inside">
+          {uniqueWarnings.map((w, i) => (
+            <li key={i}>{w}</li>
+          ))}
+        </ul>
+      )}
 
       {snapshotLabel && snapshotSources.length > 0 && (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
@@ -246,13 +322,6 @@ export default function Inventory() {
                 </div>
               ))}
           </div>
-          {(data.missing_marketplace_hints?.length ?? 0) > 0 && (
-            <ul className="mt-3 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 space-y-1 list-disc list-inside">
-              {(data.missing_marketplace_hints ?? []).map((h, i) => (
-                <li key={i}>{h}</li>
-              ))}
-            </ul>
-          )}
         </div>
       )}
 

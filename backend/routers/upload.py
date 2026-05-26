@@ -36,8 +36,13 @@ from ..services.flipkart import load_flipkart_from_zip
 from ..services.snapdeal import load_snapdeal_from_zip
 from ..services.inventory import (
     apply_inventory_snapshot_metadata,
+    backup_inventory_before_upload,
     inventory_missing_marketplace_warnings,
     load_inventory_consolidated,
+    oms_loaded_in_debug,
+    refresh_inventory_api_cache,
+    restore_inventory_upload_backup,
+    upload_bundle_expects_oms,
 )
 from ..services.sales import build_sales_df, list_sku_mapping_gaps
 from ..services.existing_po import parse_existing_po
@@ -766,6 +771,8 @@ def _mark_inventory_upload_running(sess: AppSession, message: str, *, progress: 
     ``/inventory-auto`` and chunked finalize used ``_session_lock_apply`` here, which
     blocked behind a long RAR parse until the gateway returned 502 (~100s).
     """
+    if getattr(sess, "inventory_upload_status", "idle") != "running":
+        backup_inventory_before_upload(sess)
     sess.inventory_upload_status = "running"
     sess.inventory_upload_started = time.time()
     _set_inventory_upload_progress(sess, progress, message)
@@ -1654,9 +1661,34 @@ def _inventory_apply_parse_result(
 ) -> dict:
     """Commit parsed inventory to the session (brief lock)."""
     _set_inventory_upload_progress(sess, 95, "Finalizing snapshot…")
+    missing_oms = upload_bundle_expects_oms(file_parts) and not oms_loaded_in_debug(debug)
+    if missing_oms:
+        warnings.append("OMS inventory CSV missing or empty inside the bundle.")
+        if restore_inventory_upload_backup(sess):
+            msg = (
+                "Upload rejected — OMS inventory file was not found in the bundle. "
+                "Your previous snapshot was kept. Include the OMS CSV inside the RAR "
+                "(or upload it separately) and try again."
+            )
+            sess.inventory_upload_status = "error"
+            sess.inventory_upload_progress = 0
+            payload = {
+                "ok": False,
+                "message": msg,
+                "rows": int(len(sess.inventory_df_variant)),
+                "warnings": list(dict.fromkeys(warnings)),
+                "debug": dict(getattr(sess, "inventory_debug", None) or debug),
+            }
+            sess.inventory_upload_result = payload
+            sess.inventory_upload_message = msg
+            sess.inventory_upload_started = 0.0
+            return payload
+
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent = df_parent
     apply_inventory_snapshot_metadata(sess, file_parts, debug)
+    refresh_inventory_api_cache(sess)
+    sess._inventory_pre_upload_backup = None
     _session_data_changed(sess)
     payload = _build_inventory_upload_payload(
         df_variant=df_variant,
@@ -1903,6 +1935,7 @@ async def upload_inventory_auto(
             sess.inventory_df_variant = df_variant
             sess.inventory_df_parent = df_parent
             apply_inventory_snapshot_metadata(sess, direct_file_parts, debug)
+            refresh_inventory_api_cache(sess)
             _session_data_changed(sess)
             parts = [f"{len(df_variant):,} total SKUs"]
             snap = sess.inventory_snapshot_date_label or sess.inventory_snapshot_date
@@ -1965,6 +1998,8 @@ async def upload_inventory(
             )
             sess.inventory_df_variant = df_variant
             sess.inventory_df_parent = df_parent
+            apply_inventory_snapshot_metadata(sess, [], debug)
+            refresh_inventory_api_cache(sess)
             _session_data_changed(sess)
             parts = [f"{len(df_variant):,} total SKUs"]
             for src, info in debug.items():

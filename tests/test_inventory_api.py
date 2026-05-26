@@ -66,6 +66,53 @@ def test_inventory_api_endpoint(client, inv_sess, monkeypatch):
     assert body["snapshot_date_label"]
 
 
+def test_inventory_api_cache_totals(inv_sess):
+    from backend.services.inventory import inventory_column_totals, refresh_inventory_api_cache
+
+    refresh_inventory_api_cache(inv_sess)
+    assert inv_sess.inventory_api_totals.get("Total_Inventory") == 1200
+    assert inv_sess.inventory_api_totals == inventory_column_totals(inv_sess.inventory_df_variant)
+
+
+def test_get_inventory_running_blocks_stale_warm(client, inv_sess, monkeypatch):
+    from backend.routers import data as data_router
+
+    inv_sess.inventory_upload_status = "running"
+    inv_sess.inventory_upload_message = "Parsing RAR…"
+    inv_sess.inventory_upload_progress = 42
+
+    def _fake_sess(_request):
+        return inv_sess
+
+    monkeypatch.setattr(data_router, "_sess", _fake_sess)
+    monkeypatch.setattr(data_router, "_restore_inventory_from_warm", lambda _s: None)
+
+    r = client.get("/api/data/inventory")
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("upload_in_progress") is True
+    assert body.get("loaded") is False
+    assert body.get("inventory_upload_progress") == 42
+
+
+def test_restore_backup_after_missing_oms(inv_sess):
+    from backend.services.inventory import (
+        backup_inventory_before_upload,
+        refresh_inventory_api_cache,
+        restore_inventory_upload_backup,
+    )
+
+    inv_sess.inventory_df_variant = inv_sess.inventory_df_variant.copy()
+    inv_sess.inventory_debug = {"oms": "120 SKUs"}
+    refresh_inventory_api_cache(inv_sess)
+    backup_inventory_before_upload(inv_sess)
+
+    inv_sess.inventory_df_variant = inv_sess.inventory_df_variant.iloc[:10].copy()
+    inv_sess.inventory_debug = {"oms": "0 SKUs"}
+    assert restore_inventory_upload_backup(inv_sess) is True
+    assert len(inv_sess.inventory_df_variant) == 120
+
+
 def test_inventory_session_meta_roundtrip(inv_sess):
     meta = inventory_session_meta_bundle(inv_sess)
     from backend.session import AppSession
