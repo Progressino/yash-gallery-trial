@@ -139,6 +139,36 @@ def test_employee_828_on_time_near_full_day_payable_hrs():
     assert out["Early_Deduction_Hrs"] == 0.0
 
 
+def test_employee_804_on_time_near_full_and_late():
+    """Sohan E804 @ ₹460/day — on-time near-full uses block hours; late keeps lunch+late cuts."""
+    near_full = att.calc_salary_from_punches(
+        [(time(9, 0), time(17, 58))],
+        460.0,
+        on_date="2026-05-20",
+    )
+    assert near_full["Payable_Hrs"] == 7.97
+    assert near_full["Lunch_Deduction_Hrs"] == 0.5
+    assert near_full["Late_Deduction_Hrs"] == 0.0
+    assert near_full["Normal_Pay"] == 458.08
+
+    full = att.calc_salary_from_punches(
+        [(time(9, 0), time(18, 0))],
+        460.0,
+        on_date="2026-05-20",
+    )
+    assert full["Payable_Hrs"] == 8.0
+    assert full["Normal_Pay"] == 460.0
+
+    late = att.calc_salary_from_punches(
+        [(time(9, 21), time(18, 0))],
+        460.0,
+        on_date="2026-05-20",
+    )
+    assert late["Payable_Hrs"] == 7.15
+    assert late["Late_Deduction_Hrs"] == 0.35
+    assert late["Lunch_Deduction_Hrs"] == 0.5
+
+
 def test_employee_845_late_arrival_reduces_normal_pay():
     """09:21–18:30 on ₹330/day: late 21m + lunch-through 30m → ~₹295 normal + ₹41.25 OT = ~₹336."""
     out = att.calc_salary_from_punches(

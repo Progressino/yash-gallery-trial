@@ -313,22 +313,8 @@ def calc_salary_from_punches(
     early_min_payable = 0.0 if early_min <= EARLY_LEAVE_GRACE_MINUTES else early_min
 
     work_net_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
-    block_coverages = []
-    for block_start, block_end in WORK_BLOCKS:
-        bs = _dt_on(base, block_start)
-        be = _dt_on(base, block_end)
-        block_len = (be - bs).total_seconds() / 60.0
-        got = sum(_overlap_minutes(s, e, bs, be) for s, e in intervals)
-        block_coverages.append(got / block_len if block_len > 0 else 0.0)
-    on_time_full_day = (
-        late_min <= 0
-        and early_min_payable <= 0
-        and all(c >= 0.85 for c in block_coverages)
-    )
 
-    if on_time_full_day:
-        payable_minutes = float(STANDARD_PAY_MINUTES)
-    elif late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
+    if late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
         shift_net_minutes = max(
             float(STANDARD_PAY_MINUTES)
             - lunch_penalty
@@ -348,7 +334,7 @@ def calc_salary_from_punches(
     punch_pairs_json = serialize_punch_pairs(punch_pairs)
 
     late_deduction_rs = round((late_min / 60.0) * hourly, 2)
-    early_deduction_rs = round((early_min / 60.0) * hourly, 2)
+    early_deduction_rs = round((early_min_payable / 60.0) * hourly, 2)
 
     return {
         "Status": status,
@@ -363,7 +349,7 @@ def calc_salary_from_punches(
         "Tea_Deduction_Hrs": round(tea_penalty / 60.0, 2),
         "Break_Penalty_Hrs": round((lunch_penalty + tea_penalty) / 60.0, 2),
         "Late_Deduction_Hrs": round(late_min / 60.0, 2),
-        "Early_Deduction_Hrs": round(early_min / 60.0, 2),
+        "Early_Deduction_Hrs": round(early_min_payable / 60.0, 2),
         "Late_Deduction_Rs": late_deduction_rs,
         "Early_Deduction_Rs": early_deduction_rs,
         "Late_Early_Deduction_Hrs": round((late_min + early_min) / 60.0, 2),
