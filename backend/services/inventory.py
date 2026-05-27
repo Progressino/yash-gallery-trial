@@ -302,6 +302,68 @@ def backup_inventory_before_upload(sess: Any) -> None:
     }
 
 
+def inventory_snapshot_upload_epoch(uploaded_at: str) -> float:
+    """Parse ``inventory_snapshot_uploaded_at`` (UTC ISO) for comparisons."""
+    raw = str(uploaded_at or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def sync_inventory_snapshot_from_warm(sess: Any) -> None:
+    """
+    Keep session and in-memory warm cache on the newest inventory snapshot.
+
+    Fixes Inventory tab showing stale stock when the session already had an older
+    frame loaded but a newer upload was saved to warm cache / another worker.
+    """
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return
+    try:
+        import backend.main as _main
+        import pandas as pd
+    except Exception:
+        return
+
+    warm = getattr(_main, "_warm_cache", None) or {}
+    meta_key = getattr(_main, "_INVENTORY_META_WARM_KEY", "inventory_session_meta")
+    warm_meta = warm.get(meta_key) if isinstance(warm.get(meta_key), dict) else {}
+    warm_at = inventory_snapshot_upload_epoch(
+        str((warm_meta or {}).get("inventory_snapshot_uploaded_at") or "")
+    )
+    sess_at = inventory_snapshot_upload_epoch(
+        getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+    )
+
+    warm_variant = warm.get("inventory_df_variant")
+    warm_has = (
+        warm_variant is not None
+        and hasattr(warm_variant, "empty")
+        and not warm_variant.empty
+    )
+    sess_df = getattr(sess, "inventory_df_variant", None)
+    sess_has = sess_df is not None and hasattr(sess_df, "empty") and not sess_df.empty
+
+    if warm_has and (not sess_has or warm_at > sess_at + 1e-6):
+        for key in ("inventory_df_variant", "inventory_df_parent"):
+            val = warm.get(key)
+            if val is not None and hasattr(val, "empty") and not val.empty:
+                setattr(sess, key, val.copy() if hasattr(val, "copy") else val)
+        if warm_meta:
+            apply_inventory_session_meta(sess, warm_meta)
+        refresh_inventory_api_cache(sess)
+        return
+
+    if sess_has and (not warm_has or sess_at > warm_at + 1e-6):
+        try:
+            _main.merge_inventory_into_warm_cache(sess)
+        except Exception:
+            pass
+
+
 def restore_inventory_upload_backup(sess: Any) -> bool:
     """Restore pre-upload inventory after a rejected bundle parse."""
     bak = getattr(sess, "_inventory_pre_upload_backup", None)

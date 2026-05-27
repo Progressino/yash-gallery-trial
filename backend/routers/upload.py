@@ -702,20 +702,41 @@ def _get_session(request: Request):
 
 
 def _resolve_upload_session(session_id: str) -> AppSession | None:
-    """Session for background chunk finalize — must not silently skip ingest."""
+    """Session for background inventory ingest — reuse PG/warm state, never a blank frame."""
     if not session_id:
         return None
     sess = store._sessions.get(session_id)
     if sess is not None:
         sess.last_accessed = time.time()
         return sess
+    try:
+        from ..db.forecast_session_pg import load_session_from_pg, pg_session_persist_enabled
+
+        if pg_session_persist_enabled():
+            loaded = load_session_from_pg(session_id)
+            if loaded is not None:
+                loaded.last_accessed = time.time()
+                store._sessions[session_id] = loaded
+                _log.info(
+                    "Upload session %s… restored from PostgreSQL for background ingest",
+                    session_id[:8],
+                )
+                return loaded
+    except Exception:
+        _log.exception("PostgreSQL restore for upload session %s", session_id[:8])
     _log.warning(
-        "Upload session %s… missing from RAM — attaching empty session for background ingest",
+        "Upload session %s… missing from RAM — creating session and syncing warm cache",
         session_id[:8],
     )
     sess = AppSession()
     sess.last_accessed = time.time()
     store._sessions[session_id] = sess
+    try:
+        from ..services.inventory import sync_inventory_snapshot_from_warm
+
+        sync_inventory_snapshot_from_warm(sess)
+    except Exception:
+        pass
     return sess
 
 
@@ -1501,7 +1522,7 @@ def _clear_stuck_inventory_upload(sess: AppSession, *, force: bool = False) -> b
     return True
 
 
-def _persist_inventory_after_upload(sess: AppSession, session_id: str | None = None) -> None:
+def _persist_inventory_after_upload(sess: AppSession, session_id: str | None = None) -> bool:
     """Update warm cache + PostgreSQL immediately so reload/login sees the snapshot."""
     try:
         import backend.main as _main
@@ -1510,14 +1531,22 @@ def _persist_inventory_after_upload(sess: AppSession, session_id: str | None = N
     except Exception:
         _log.exception("merge_inventory_into_warm_cache failed")
     sid = (session_id or getattr(sess, "_persist_sid", None) or "").strip() or None
-    if sid:
-        setattr(sess, "_persist_sid", sid)
-        try:
-            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+    if not sid:
+        return False
+    setattr(sess, "_persist_sid", sid)
+    try:
+        from ..db.forecast_session_pg import persist_session_bundle
 
-            persist_session_bundle_thread_safe(sid, sess)
-        except Exception:
-            _log.exception("PostgreSQL persist after inventory upload")
+        ok = persist_session_bundle(sid, sess)
+        if not ok:
+            _log.warning(
+                "PostgreSQL persist after inventory upload returned false (session %s…)",
+                sid[:8],
+            )
+        return ok
+    except Exception:
+        _log.exception("PostgreSQL persist after inventory upload")
+        return False
 
 
 def _schedule_inventory_github_cache_save(sess: AppSession) -> None:
@@ -1534,7 +1563,19 @@ def _schedule_inventory_github_cache_save(sess: AppSession) -> None:
 
 def _finish_inventory_server_save(sess: AppSession, session_id: str | None = None) -> None:
     """Sync warm + PG, then background GitHub (call after every successful inventory parse)."""
-    _persist_inventory_after_upload(sess, session_id)
+    pg_ok = _persist_inventory_after_upload(sess, session_id)
+    if not pg_ok and session_id:
+        warn = (
+            "Inventory parsed but server save was delayed — open Inventory again in a few seconds "
+            "or click Load Cache if totals look stale."
+        )
+        prev = getattr(sess, "inventory_upload_result", None) or {}
+        if isinstance(prev, dict):
+            merged = dict(prev)
+            merged.setdefault("warnings", [])
+            if isinstance(merged["warnings"], list):
+                merged["warnings"] = list(dict.fromkeys([*merged["warnings"], warn]))
+            sess.inventory_upload_result = merged
     _schedule_inventory_github_cache_save(sess)
 
 
@@ -1664,11 +1705,29 @@ def _inventory_apply_parse_result(
     missing_oms = upload_bundle_expects_oms(file_parts) and not oms_loaded_in_debug(debug)
     if missing_oms:
         warnings.append("OMS inventory CSV missing or empty inside the bundle.")
-        if restore_inventory_upload_backup(sess):
+        # Do NOT blindly reject (keep old snapshot) when OMS parsing fails:
+        # other marketplace stock layers may still be present and yield a usable
+        # Total_Inventory. In that case, it is better to show the updated
+        # marketplace-based snapshot than keep stale data.
+        #
+        # Only reject when the parsed snapshot is effectively empty/zero.
+        parsed_non_zero = False
+        try:
+            if hasattr(df_variant, "empty") and not df_variant.empty and "Total_Inventory" in getattr(df_variant, "columns", []):
+                import pandas as pd
+
+                s = pd.to_numeric(df_variant["Total_Inventory"], errors="coerce").fillna(0).sum()
+                parsed_non_zero = float(s) > 0
+            elif hasattr(df_variant, "empty") and not df_variant.empty:
+                # Fallback: if we parsed rows at all, treat as usable.
+                parsed_non_zero = True
+        except Exception:
+            parsed_non_zero = False
+
+        if not parsed_non_zero and restore_inventory_upload_backup(sess):
             msg = (
-                "Upload rejected — OMS inventory file was not found in the bundle. "
-                "Your previous snapshot was kept. Include the OMS CSV inside the RAR "
-                "(or upload it separately) and try again."
+                "Upload rejected — OMS inventory file was not found in the bundle (and the parsed snapshot is empty). "
+                "Your previous snapshot was kept. Include the OMS CSV inside the RAR (or upload it separately) and try again."
             )
             sess.inventory_upload_status = "error"
             sess.inventory_upload_progress = 0

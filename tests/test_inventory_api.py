@@ -95,21 +95,90 @@ def test_get_inventory_running_blocks_stale_warm(client, inv_sess, monkeypatch):
     assert body.get("inventory_upload_progress") == 42
 
 
+def test_sync_inventory_prefers_newer_warm(inv_sess):
+    from backend.services.inventory import (
+        apply_inventory_snapshot_metadata,
+        inventory_snapshot_upload_epoch,
+        sync_inventory_snapshot_from_warm,
+    )
+    import backend.main as main
+
+    inv_sess.inventory_snapshot_uploaded_at = "2026-05-20T08:00:00Z"
+    old_total = int(inv_sess.inventory_df_variant["OMS_Inventory"].sum())
+
+    newer = inv_sess.inventory_df_variant.copy()
+    newer["OMS_Inventory"] = newer["OMS_Inventory"] + 100
+    main._warm_cache = {
+        "inventory_df_variant": newer,
+        "inventory_df_parent": newer,
+        "inventory_session_meta": {
+            "inventory_debug": {"oms": "120 SKUs"},
+            "inventory_snapshot_uploaded_at": "2026-05-26T12:00:00Z",
+            "inventory_snapshot_date": "2026-05-26",
+            "inventory_snapshot_date_label": "26 May 2026",
+            "inventory_snapshot_date_sources": [],
+        },
+    }
+    sync_inventory_snapshot_from_warm(inv_sess)
+    assert int(inv_sess.inventory_df_variant["OMS_Inventory"].sum()) == old_total + 12000
+    assert inventory_snapshot_upload_epoch(inv_sess.inventory_snapshot_uploaded_at) > inventory_snapshot_upload_epoch(
+        "2026-05-20T08:00:00Z"
+    )
+
+
 def test_restore_backup_after_missing_oms(inv_sess):
+    """Backup/restore utility still works; but upload finalize now prefers
+    marketplace-based snapshot when Total_Inventory > 0."""
     from backend.services.inventory import (
         backup_inventory_before_upload,
         refresh_inventory_api_cache,
-        restore_inventory_upload_backup,
     )
+    from backend.routers.upload import _inventory_apply_parse_result
 
+    # Pre-upload snapshot (backup source)
     inv_sess.inventory_df_variant = inv_sess.inventory_df_variant.copy()
+    old_df = inv_sess.inventory_df_variant.copy()
     inv_sess.inventory_debug = {"oms": "120 SKUs"}
     refresh_inventory_api_cache(inv_sess)
     backup_inventory_before_upload(inv_sess)
 
-    inv_sess.inventory_df_variant = inv_sess.inventory_df_variant.iloc[:10].copy()
-    inv_sess.inventory_debug = {"oms": "0 SKUs"}
-    assert restore_inventory_upload_backup(inv_sess) is True
+    # Simulate a new parse where OMS is missing in debug, but marketplace stock exists
+    # (Total_Inventory > 0). This should NOT restore the old snapshot.
+    df_new = inv_sess.inventory_df_variant.iloc[:10].copy()
+    df_new["OMS_Inventory"] = 0
+    df_new["Total_Inventory"] = 5
+    df_new["Marketplace_Total"] = 5  # optional column (used by UI totals only)
+    debug_missing_oms = {"oms": "0 SKUs"}
+
+    payload = _inventory_apply_parse_result(
+        inv_sess,
+        df_variant=df_new,
+        df_parent=df_new,
+        debug=debug_missing_oms,
+        file_parts=[("OMS_Inventory_25-05-2026.rar", b"x")],
+        detected=["Amazon (RAR)"],
+        warnings=[],
+    )
+    assert payload["ok"] is True
+    assert len(inv_sess.inventory_df_variant) == 10
+
+    # Now simulate a parse that yields zero Total_Inventory => we should restore backup.
+    inv_sess.inventory_df_variant = old_df.copy()
+    inv_sess.inventory_debug = {"oms": "120 SKUs"}
+    backup_inventory_before_upload(inv_sess)
+    df_zero = inv_sess.inventory_df_variant.iloc[:3].copy()
+    df_zero["OMS_Inventory"] = 0
+    df_zero["Total_Inventory"] = 0
+    payload2 = _inventory_apply_parse_result(
+        inv_sess,
+        df_variant=df_zero,
+        df_parent=df_zero,
+        debug=debug_missing_oms,
+        file_parts=[("OMS_Inventory_25-05-2026.rar", b"x")],
+        detected=["Amazon (RAR)"],
+        warnings=[],
+    )
+    assert payload2["ok"] is False
     assert len(inv_sess.inventory_df_variant) == 120
 
 

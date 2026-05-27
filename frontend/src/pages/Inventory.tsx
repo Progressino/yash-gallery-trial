@@ -63,6 +63,10 @@ export default function Inventory() {
 
   const invUploadRunning =
     coverage.inventory_upload_status === 'running'
+  const snapshotToken =
+    coverage.inventory_snapshot_uploaded_at ||
+    coverage.inventory_snapshot_date ||
+    ''
 
   useQuery({
     queryKey: ['coverage', 'inventory-upload-poll'],
@@ -79,7 +83,7 @@ export default function Inventory() {
   })
 
   const { data, isLoading, isError, error, isFetching, refetch } = useQuery<InventoryData>({
-    queryKey: ['inventory', search, page],
+    queryKey: ['inventory', snapshotToken, search, page],
     queryFn: () =>
       api
         .get('/data/inventory', {
@@ -92,9 +96,18 @@ export default function Inventory() {
         })
         .then(r => r.data),
     retry: 1,
-    staleTime: 30_000,
+    staleTime: 0,
+    refetchOnMount: 'always',
     enabled: !invUploadRunning,
   })
+
+  useEffect(() => {
+    if (invUploadRunning) return
+    void getCoverage({ light: true }).then(cov => {
+      setCoverage(cov)
+      void qc.invalidateQueries({ queryKey: ['inventory'] })
+    })
+  }, [invUploadRunning, setCoverage, qc])
 
   const snapshotLabel =
     data?.snapshot_date_label ||

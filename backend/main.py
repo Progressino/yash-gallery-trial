@@ -305,6 +305,16 @@ def merge_inventory_into_warm_cache(sess) -> None:
     except Exception:
         pass
     _warm_cache_loaded_at = datetime.now(IST)
+    try:
+        inv_sidecar = {
+            k: _warm_cache[k]
+            for k in (*_INVENTORY_WARM_KEYS, _INVENTORY_META_WARM_KEY)
+            if k in _warm_cache
+        }
+        if inv_sidecar:
+            _save_warm_cache_to_disk(inv_sidecar)
+    except Exception:
+        log.exception("inventory warm-cache disk sidecar save failed")
 
 
 import os as _os_main
@@ -935,7 +945,32 @@ def _copy_warm_cache_to_session(sess) -> bool:
     """Copy _warm_cache into an AppSession. Returns True if data was available."""
     if not _warm_cache:
         return False
+    try:
+        from .services.inventory import inventory_snapshot_upload_epoch
+    except Exception:
+        inventory_snapshot_upload_epoch = lambda _x: 0.0  # type: ignore
+    warm_meta = _warm_cache.get(_INVENTORY_META_WARM_KEY)
+    if not isinstance(warm_meta, dict):
+        warm_meta = {}
+    warm_at = inventory_snapshot_upload_epoch(
+        str(warm_meta.get("inventory_snapshot_uploaded_at") or "")
+    )
+    sess_at = inventory_snapshot_upload_epoch(
+        getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+    )
+    cur_inv = getattr(sess, "inventory_df_variant", None)
+    sess_inv_newer = (
+        cur_inv is not None
+        and hasattr(cur_inv, "empty")
+        and not cur_inv.empty
+        and sess_at >= warm_at
+    )
+    _inv_keys = frozenset(
+        {*_INVENTORY_WARM_KEYS, _INVENTORY_META_WARM_KEY}
+    )
     for key, val in _warm_cache.items():
+        if sess_inv_newer and key in _inv_keys:
+            continue
         # Trim daily_inventory_history_df to _MAX_HISTORY_DAYS when copying from
         # warm cache — prevents OOM if the cached version predates upload-time trimming.
         if key == "daily_inventory_history_df" and val is not None and hasattr(val, "empty") and not val.empty:

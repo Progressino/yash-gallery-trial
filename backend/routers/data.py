@@ -48,6 +48,7 @@ from ..services.inventory import (
     inventory_rows_for_api,
     inventory_snapshot_meta_for_api,
     refresh_inventory_api_cache,
+    sync_inventory_snapshot_from_warm,
 )
 
 router = APIRouter()
@@ -468,29 +469,14 @@ def _ensure_warm_session_data(sess: AppSession) -> None:
 
 
 def _restore_inventory_from_warm(sess: AppSession) -> None:
-    """Copy snapshot inventory from in-memory warm cache (fast; no GitHub download)."""
-    if getattr(sess, "inventory_upload_status", "idle") == "running":
-        return
+    """Sync snapshot inventory with warm cache (newest ``uploaded_at`` wins)."""
     try:
         import backend.main as _main
-        import pandas as pd
-        from ..services.inventory import apply_inventory_session_meta
 
-        if not _main._warm_cache:
-            return
-        if sess.inventory_df_variant.empty:
-            for key in ("inventory_df_variant", "inventory_df_parent"):
-                val = _main._warm_cache.get(key)
-                if val is not None and not (isinstance(val, pd.DataFrame) and val.empty):
-                    setattr(sess, key, val)
-        meta = _main._warm_cache.get(getattr(_main, "_INVENTORY_META_WARM_KEY", "inventory_session_meta"))
-        if meta:
-            apply_inventory_session_meta(sess, meta)
-        if not sess.sku_mapping and _main._warm_cache.get("sku_mapping"):
+        sync_inventory_snapshot_from_warm(sess)
+        if not sess.sku_mapping and _main._warm_cache and _main._warm_cache.get("sku_mapping"):
             sess.sku_mapping = _main._warm_cache["sku_mapping"]
         ensure_inventory_snapshot_metadata(sess)
-        if not sess.inventory_df_variant.empty:
-            refresh_inventory_api_cache(sess)
     except Exception:
         pass
 
