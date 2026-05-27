@@ -2939,7 +2939,23 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
       </Section>
       <Section title="Records">
         <DataTable
-          rows={(data?.rows ?? []).slice(-80)}
+          rows={(() => {
+            const all = (data?.rows ?? []) as Record<string, unknown>[]
+            const toNum = (v: unknown) => {
+              const n = Number(String(v ?? '').trim())
+              return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY
+            }
+            // Show the most recent attendance day first; within the day sort by E_Code ascending.
+            // Cap to 250 rows to avoid huge renders.
+            return [...all]
+              .sort((a, b) => {
+                const da = String(a.Date ?? '')
+                const db = String(b.Date ?? '')
+                if (da !== db) return db.localeCompare(da) // newest date first
+                return toNum(a.E_Code) - toNum(b.E_Code)
+              })
+              .slice(0, 250)
+          })()}
           cols={type === 'karigar' ? karigarCols : ['Date', 'E_Code', 'Name', 'Total_Hours', 'Total_Pay']}
         />
       </Section>
