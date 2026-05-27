@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 
-type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass'
+type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass' | 'audit'
 type PRSubTab = 'list' | 'new' | 'from-mrp'
 
 interface Stats { open_prs: number; open_pos: number; open_jwos: number; pending_grns: number; total_suppliers: number; total_processors: number }
@@ -13,7 +13,7 @@ interface PR { id: number; pr_number: string; pr_date: string; requested_by: str
 interface PO { id: number; po_number: string; po_date: string; supplier_name: string; status: string; total: number; delivery_date: string; pr_reference: string; so_reference: string; payment_terms?: string; lines: POLine[] }
 interface POLine { id: number; material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number; amount: number }
 interface JWO { id: number; jwo_number: string; jwo_date: string; processor_name: string; processor_id?: number; status: string; total: number; expected_return_date: string; pr_reference?: string; so_reference?: string; issued_by?: string; remarks?: string; lines: JWOLine[] }
-interface JWOLine { id: number; input_material: string; input_qty?: number; output_material: string; output_qty: number; process_type: string; rate: number; amount: number; unit?: string }
+interface JWOLine { id: number; input_material: string; input_qty?: number; output_material: string; output_qty: number; output_unit?: string; process_type: string; rate: number; amount: number; unit?: string }
 interface MINLine {
   id?: number
   material_code: string
@@ -557,6 +557,9 @@ export default function Purchase() {
   const [grnAutoRef, setGrnAutoRef] = useState('')
   const [grnAutoLoading, setGrnAutoLoading] = useState(false)
   const [grnAutoError, setGrnAutoError] = useState('')
+  const [auditSO, setAuditSO] = useState('')
+  const [auditData, setAuditData] = useState<{ so_number: string; materials: unknown[] } | null>(null)
+  const [auditLoading, setAuditLoading] = useState(false)
 
   // PO / JWO / GRN forms
   const [showPOForm, setShowPOForm] = useState(false)
@@ -639,6 +642,7 @@ export default function Purchase() {
     ['grn', '📦 GRN'],
     ['min', '📋 Issue Notes'],
     ['gate-pass', '🚪 Gate Pass'],
+    ['audit', '🔗 Document Audit'],
   ]
 
   // ── From MRP helpers ──────────────────────────────────────────────────────
@@ -822,10 +826,9 @@ export default function Purchase() {
             setGrnAutoLoading(false)
             return
           }
-          const byCode = Object.fromEntries((bal.data.lines || []).map((bl: { material_code: string; balance_qty: number; grn_accepted_qty: number }) => [bl.material_code, bl]))
+          const byCode = Object.fromEntries((bal.data.lines || []).map((bl: { material_code: string; balance_qty: number }) => [bl.material_code, bl.balance_qty]))
           lines = po.lines.map(l => {
-            const b = byCode[l.material_code]
-            const accept = b ? Math.max(0, b.balance_qty ?? 0) : l.po_qty
+            const accept = byCode[l.material_code] != null ? Math.max(0, byCode[l.material_code]) : l.po_qty
             return {
               material_code: l.material_code, material_name: l.material_name,
               received_qty: accept, accepted_qty: accept, rejected_qty: 0,
@@ -837,11 +840,29 @@ export default function Purchase() {
       } else {
         const jwo = doc as JWO
         setGRNForm(f => ({ ...f, grn_type: 'JWO Receipt', reference_number: jwo.jwo_number, party_name: jwo.processor_name }))
-        setGRNLines(jwo.lines.map(l => ({
+        let jLines = jwo.lines.map(l => ({
           material_code: l.output_material, material_name: l.output_material,
           received_qty: l.output_qty, accepted_qty: l.output_qty, rejected_qty: 0,
-          unit: l.unit || 'PCS', rate: l.rate, qc_status: 'Pending'
-        })))
+          unit: l.output_unit || 'MTR', rate: l.rate, qc_status: 'Pending'
+        }))
+        try {
+          const bal = await api.get(`/purchase/jwo/${encodeURIComponent(jwo.jwo_number)}/receive-balance`)
+          if (bal.data?.grn_blocked) {
+            setGrnAutoError(`JWO ${jwo.jwo_number} is ${bal.data.status} — GRN blocked`)
+            setGrnAutoLoading(false)
+            return
+          }
+          const byCode = Object.fromEntries((bal.data.lines || []).map((bl: { material_code: string; balance_qty: number }) => [bl.material_code, bl.balance_qty]))
+          jLines = jwo.lines.map(l => {
+            const accept = byCode[l.output_material] != null ? Math.max(0, byCode[l.output_material]) : l.output_qty
+            return {
+              material_code: l.output_material, material_name: l.output_material,
+              received_qty: accept, accepted_qty: accept, rejected_qty: 0,
+              unit: l.output_unit || 'MTR', rate: l.rate, qc_status: 'Pending'
+            }
+          })
+        } catch { /* fallback */ }
+        setGRNLines(jLines)
       }
       setShowGRNForm(true)
     } catch { setGrnAutoError('Failed to fetch document. Check the reference number.') }
@@ -1842,6 +1863,15 @@ export default function Purchase() {
                       <button onClick={e => { e.stopPropagation(); verifyGRNMut.mutate({ id: grn.id, status: 'Verified' }) }}
                         className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded hover:bg-green-100">Verify</button>
                     )}
+                    {!['Cancelled', 'Rejected'].includes(grn.status) && (
+                      <button onClick={e => {
+                        e.stopPropagation()
+                        if (confirm(`Cancel ${grn.grn_number}? Stock will be reversed if already posted.`)) {
+                          verifyGRNMut.mutate({ id: grn.id, status: 'Cancelled' })
+                        }
+                      }}
+                        className="text-xs px-2 py-0.5 bg-red-50 text-red-700 rounded hover:bg-red-100">Cancel</button>
+                    )}
                     <span className="text-gray-400 text-xs">{expanded === grn.id ? '▲' : '▼'}</span>
                   </div>
                 </div>
@@ -1971,6 +2001,80 @@ export default function Purchase() {
             )})}
             {mins.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No material issue notes found.</p>}
           </div>
+        </div>
+      )}
+
+      {tab === 'audit' && (
+        <div className="bg-white rounded-xl border p-4 space-y-4 max-w-4xl">
+          <h3 className="font-semibold text-gray-800">Document chain audit</h3>
+          <p className="text-xs text-gray-500">Trace MRP commitments → PO / JWO → GRN → grey fabric ledger for one sales order.</p>
+          <div className="flex flex-wrap gap-2 items-end">
+            <div>
+              <label className="text-xs text-gray-500">SO number</label>
+              <input className="block border rounded px-2 py-1.5 text-sm mt-0.5 w-48" value={auditSO}
+                onChange={e => setAuditSO(e.target.value)} placeholder="SO-0001" />
+            </div>
+            <button
+              disabled={!auditSO.trim() || auditLoading}
+              onClick={async () => {
+                setAuditLoading(true)
+                try {
+                  const res = await api.get(`/purchase/audit/document-chain?so_number=${encodeURIComponent(auditSO.trim())}`)
+                  setAuditData(res.data)
+                } catch {
+                  setAuditData(null)
+                  alert('Failed to load audit chain')
+                }
+                setAuditLoading(false)
+              }}
+              className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50"
+            >
+              {auditLoading ? 'Loading…' : 'Load'}
+            </button>
+          </div>
+          {(auditData?.materials as {
+            material_code: string
+            mrp_qty: number
+            po_committed_qty: number
+            jo_committed_qty: number
+            remaining_qty: number
+            pos: { po_number: string; status: string }[]
+            grns: { grn_number: string; accepted_qty: number; status: string }[]
+            job_orders: { jo_number: string }[]
+            grey_trackers: { tracker_key: string; status: string }[]
+            grey_ledger: { entry_date: string; transaction_type: string; qty: number; from_location: string; to_location: string }[]
+          }[] | undefined)?.map((m) => (
+            <div key={m.material_code} className="border rounded-lg p-3 text-sm">
+              <p className="font-mono font-bold text-[#002B5B]">{m.material_code}</p>
+              <p className="text-xs text-gray-500 mb-2">
+                MRP {m.mrp_qty} · PO {m.po_committed_qty} · JO fabric {m.jo_committed_qty} · Remaining {m.remaining_qty}
+              </p>
+              <ul className="text-xs text-gray-600 space-y-0.5">
+                <li><b>POs:</b> {(m.pos || []).map(p => `${p.po_number} (${p.status})`).join(', ') || '—'}</li>
+                <li><b>GRNs:</b> {(m.grns || []).map(g => `${g.grn_number}: ${g.accepted_qty} [${g.status}]`).join(', ') || '—'}</li>
+                <li><b>Job orders:</b> {(m.job_orders || []).map(j => j.jo_number).join(', ') || '—'}</li>
+                <li><b>Grey trackers:</b> {(m.grey_trackers || []).map(t => `${t.tracker_key} (${t.status})`).join(', ') || '—'}</li>
+              </ul>
+              {(m.grey_ledger || []).length > 0 && (
+                <table className="w-full text-xs mt-2 border-t">
+                  <thead><tr className="text-gray-400"><th className="text-left py-1">Date</th><th>Type</th><th className="text-right">Qty</th><th>Route</th></tr></thead>
+                  <tbody>
+                    {m.grey_ledger.map((l, i) => (
+                      <tr key={i} className="border-t border-gray-50">
+                        <td className="py-1">{l.entry_date}</td>
+                        <td>{l.transaction_type}</td>
+                        <td className="text-right">{l.qty}</td>
+                        <td>{l.from_location} → {l.to_location}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ))}
+          {auditData && auditData.materials?.length === 0 && (
+            <p className="text-sm text-gray-400">No linked documents for this SO.</p>
+          )}
         </div>
       )}
     </div>

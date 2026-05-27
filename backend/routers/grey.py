@@ -68,6 +68,10 @@ class ArriveTransportIn(BaseModel):
     qty: Optional[float] = None
 
 
+class ReverseQtyIn(BaseModel):
+    qty: Optional[float] = None
+
+
 class TransferIn(BaseModel):
     to_location: str = Field(..., description="'factory' or 'printer'")
     qty: float = 0
@@ -437,6 +441,30 @@ def post_arrive_transport(gid: int, body: ArriveTransportIn):
         raise HTTPException(404, "Tracker not found")
     row = gdb.get_grey(gid) or {}
     return {"ok": True, "status": row.get("status", "At Transport Location")}
+
+
+@router.post("/{gid}/reverse-arrive-transport")
+def post_reverse_arrive_transport(gid: int, body: ReverseQtyIn):
+    try:
+        ok = gdb.reverse_arrive_transport(gid, body.qty)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not ok:
+        raise HTTPException(404, "Tracker not found")
+    row = gdb.get_grey(gid) or {}
+    return {"ok": True, "status": row.get("status")}
+
+
+@router.post("/{gid}/reverse-vendor-dispatch")
+def post_reverse_vendor_dispatch(gid: int):
+    try:
+        ok = gdb.reverse_vendor_dispatch(gid)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not ok:
+        raise HTTPException(404, "Tracker not found")
+    row = gdb.get_grey(gid) or {}
+    return {"ok": True, "status": row.get("status", "PO Created")}
 
 
 @router.post("/{gid}/transfer")

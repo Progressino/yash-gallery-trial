@@ -365,6 +365,84 @@ def arrive_at_transport(gid: int, qty: Optional[float] = None):
     return True
 
 
+def reverse_arrive_transport(gid: int, qty: Optional[float] = None):
+    """Reverse transport receive — move qty from transport back to in-transit."""
+    conn = _connect()
+    row = conn.execute("SELECT * FROM grey_tracker WHERE id=?", (gid,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    transport_qty = float(row["transport_qty"] or 0)
+    if transport_qty <= 0:
+        conn.close()
+        raise ValueError("No transport stock to reverse")
+    factory_qty = float(row["factory_qty"] or 0)
+    printer_qty = float(row["printer_qty"] or 0)
+    if factory_qty > 0 or printer_qty > 0:
+        conn.close()
+        raise ValueError(
+            "Cannot reverse transport receive — material already transferred to factory/printer. "
+            "Reverse those transfers first."
+        )
+    move = float(qty if qty is not None else transport_qty)
+    if move <= 0:
+        conn.close()
+        raise ValueError("Reverse quantity must be greater than zero")
+    if move > transport_qty + 1e-9:
+        conn.close()
+        raise ValueError(f"Cannot reverse {move} MTR — only {transport_qty} MTR at transport")
+    new_trans = transport_qty - move
+    new_it = float(row["in_transit_qty"] or 0) + move
+    new_status = "In Transit" if new_it > 0 else "PO Created"
+    if new_trans > 0:
+        new_status = "At Transport Location"
+    conn.execute(
+        "UPDATE grey_tracker SET transport_qty=?, in_transit_qty=?, status=?, updated_at=? WHERE id=?",
+        (new_trans, new_it, new_status, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), gid),
+    )
+    _add_ledger_entry(
+        conn, gid, row["material_code"], row["material_name"],
+        "Reverse: At Transport Location", move, "MTR",
+        "Transport Location", "In Transit", "", f"Reversed {move} MTR",
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def reverse_vendor_dispatch(gid: int):
+    """Reverse vendor dispatch — return in-transit qty to PO Created (no factory/transport stock)."""
+    conn = _connect()
+    row = conn.execute("SELECT * FROM grey_tracker WHERE id=?", (gid,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    in_transit = float(row["in_transit_qty"] or 0)
+    transport_qty = float(row["transport_qty"] or 0)
+    if transport_qty > 0:
+        conn.close()
+        raise ValueError("Reverse transport receive before cancelling vendor dispatch")
+    if in_transit <= 0:
+        conn.close()
+        raise ValueError("Nothing in transit to reverse")
+    if float(row["factory_qty"] or 0) > 0 or float(row["printer_qty"] or 0) > 0:
+        conn.close()
+        raise ValueError("Cannot reverse dispatch — stock already at factory/printer")
+    conn.execute(
+        """UPDATE grey_tracker SET in_transit_qty=0, dispatched_qty=0, bilty_no='', transporter='',
+        dispatch_date='', expected_arrival='', vehicle_no='', status='PO Created', updated_at=? WHERE id=?""",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), gid),
+    )
+    _add_ledger_entry(
+        conn, gid, row["material_code"], row["material_name"],
+        "Reverse: Vendor Dispatch", in_transit, "MTR",
+        "In Transit", "Supplier", row.get("bilty_no") or "", "Dispatch cancelled",
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def transfer_qty(gid: int, to_location: str, qty: float):
     to_location = to_location.strip().lower()
     if to_location not in ("factory", "printer"):

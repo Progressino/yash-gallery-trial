@@ -573,6 +573,11 @@ def validate_jo_creation(process: str, so_number: str, sku: str, planned_qty: in
 
 
 def create_jo(data: dict) -> str:
+    so_number = (data.get("so_number") or "").strip()
+    fabric_code = (data.get("fabric_code") or "").strip()
+    fabric_qty = float(data.get("fabric_qty") or 0)
+    if so_number and fabric_code and fabric_qty > 0:
+        check_mrp_commitment(so_number, fabric_code, fabric_qty)
     conn = _connect()
     num = _next_jo(conn)
     process = data.get('process') or data.get('stage') or 'Cutting'
@@ -624,17 +629,30 @@ def create_jo(data: dict) -> str:
         create_issue_note_for_jo(joid, num, jo_snapshot, line_snapshots)
     except Exception:
         pass
+    if so_number and fabric_code and fabric_qty > 0:
+        record_mrp_jo_commitment(so_number, fabric_code, fabric_qty)
     return num
 
 
 def update_jo(joid: int, data: dict):
+    conn = _connect()
+    prev = conn.execute("SELECT so_number, fabric_code, fabric_qty, status FROM job_orders WHERE id=?", (joid,)).fetchone()
+    conn.close()
     allowed = ['status','output_qty','received_qty','rejected_qty','balance_qty',
                'completed_date','remarks','issued_to','exec_type','vendor_name',
                'vendor_rate','fabric_issued_qty','fabric_received_qty',
                'fabric_consumption','process_cost','total_cost','next_stage_jo_id']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
-    if not sets: return
+    if not sets:
+        return
+    new_status = data.get("status")
+    if prev and new_status == "Cancelled" and (prev["status"] or "") != "Cancelled":
+        release_mrp_jo_commitment(
+            prev["so_number"] or "",
+            prev["fabric_code"] or "",
+            float(prev["fabric_qty"] or 0),
+        )
     vals += [datetime.now().strftime('%Y-%m-%d %H:%M:%S'), joid]
     conn = _connect()
     conn.execute(f"UPDATE job_orders SET {sets}, updated_at=? WHERE id=?", vals)
@@ -1073,13 +1091,13 @@ def sync_mrp_commitments_from_run(so_numbers: list, materials: dict) -> None:
     conn.close()
 
 
-def check_mrp_po_commitment(so_number: str, material_code: str, qty: float) -> None:
-    if not (so_number or "").strip():
+def check_mrp_commitment(so_number: str, material_code: str, qty: float) -> None:
+    if not (so_number or "").strip() or not (material_code or "").strip():
         return
     conn = _connect()
     row = conn.execute(
         "SELECT mrp_qty, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
-        (so_number.strip(), material_code),
+        (so_number.strip(), material_code.strip()),
     ).fetchone()
     conn.close()
     if not row:
@@ -1092,6 +1110,10 @@ def check_mrp_po_commitment(so_number: str, material_code: str, qty: float) -> N
             f"MRP limit for {material_code} on {so_number}: need {qty}, only {max(0, remaining):.3f} remaining "
             f"(MRP {mrp:.3f}, already committed PO+JO {committed:.3f})"
         )
+
+
+def check_mrp_po_commitment(so_number: str, material_code: str, qty: float) -> None:
+    check_mrp_commitment(so_number, material_code, qty)
 
 
 def record_mrp_po_commitment(so_number: str, lines: list, *, doc_ref: str = "") -> None:
@@ -1132,6 +1154,59 @@ def record_mrp_po_commitment(so_number: str, lines: list, *, doc_ref: str = "") 
                     "Fully Processed",
                 ),
             )
+    conn.commit()
+    conn.close()
+
+
+def record_mrp_jo_commitment(so_number: str, fabric_code: str, fabric_qty: float) -> None:
+    if not (so_number or "").strip() or not (fabric_code or "").strip():
+        return
+    qty = float(fabric_qty or 0)
+    if qty <= 0:
+        return
+    conn = _connect()
+    row = conn.execute(
+        "SELECT id, mrp_qty, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
+        (so_number.strip(), fabric_code.strip()),
+    ).fetchone()
+    if row:
+        new_jo = float(row["jo_committed_qty"] or 0) + qty
+        mrp = float(row["mrp_qty"] or 0)
+        conn.execute(
+            """UPDATE mrp_material_commitments SET jo_committed_qty=?, status=?, updated_at=datetime('now')
+            WHERE id=?""",
+            (new_jo, _commitment_status(mrp, row["po_committed_qty"], new_jo), row["id"]),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO mrp_material_commitments
+            (so_number, material_code, unit, mrp_qty, jo_committed_qty, status)
+            VALUES(?,?,?,?,?,?)""",
+            (so_number.strip(), fabric_code.strip(), "MTR", qty, qty, "Fully Processed"),
+        )
+    conn.commit()
+    conn.close()
+
+
+def release_mrp_jo_commitment(so_number: str, fabric_code: str, fabric_qty: float) -> None:
+    if not (so_number or "").strip() or not (fabric_code or "").strip():
+        return
+    qty = float(fabric_qty or 0)
+    if qty <= 0:
+        return
+    conn = _connect()
+    row = conn.execute(
+        "SELECT id, mrp_qty, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
+        (so_number.strip(), fabric_code.strip()),
+    ).fetchone()
+    if row:
+        new_jo = max(0.0, float(row["jo_committed_qty"] or 0) - qty)
+        mrp = float(row["mrp_qty"] or 0)
+        conn.execute(
+            """UPDATE mrp_material_commitments SET jo_committed_qty=?, status=?, updated_at=datetime('now')
+            WHERE id=?""",
+            (new_jo, _commitment_status(mrp, row["po_committed_qty"], new_jo), row["id"]),
+        )
     conn.commit()
     conn.close()
 

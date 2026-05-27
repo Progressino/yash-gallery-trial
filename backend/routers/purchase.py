@@ -8,7 +8,7 @@ from ..db.purchase_db import (
     list_prs, create_pr, approve_pr, reject_pr, update_pr_status, create_pos_from_pr, mark_pr_lines_ordered,
     list_pos, create_po, update_po_status, update_po,
     list_jwos, create_jwo, update_jwo_status, update_jwo, get_po_by_number, get_jwo_by_number,
-    list_grns, create_grn, update_grn_status, get_po_receive_balance,
+    list_grns, create_grn, update_grn_status, get_po_receive_balance, get_jwo_receive_balance,
     list_mins, create_min, update_min_status, get_min_by_number,
     list_gate_passes, create_gate_pass, get_gate_pass_by_number,
     get_purchase_stats,
@@ -379,6 +379,24 @@ def po_receive_balance(po_number: str):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="PO not found")
     return bal
+
+
+@router.get("/jwo/{jwo_number}/receive-balance")
+def jwo_receive_balance(jwo_number: str):
+    bal = get_jwo_receive_balance(jwo_number)
+    if not bal:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="JWO not found")
+    return bal
+
+
+@router.get("/audit/document-chain")
+def document_chain_audit(so_number: str = ""):
+    from ..services.document_chain_audit import get_document_chain_audit
+    from fastapi import HTTPException
+    if not so_number.strip():
+        raise HTTPException(400, detail="so_number is required")
+    return get_document_chain_audit(so_number.strip())
 
 @router.get("/jwo/by-number/{jwo_number}")
 def get_jwo_by_num(jwo_number: str):

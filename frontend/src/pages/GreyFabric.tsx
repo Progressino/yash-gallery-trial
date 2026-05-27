@@ -239,6 +239,22 @@ export default function GreyFabric() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); qc.invalidateQueries({ queryKey: ['grey-stats'] }); setEditEntry(null) },
     onError: (err: unknown) => { console.error('arrive-transport failed', err) },
   })
+  const reverseArriveMut = useMutation({
+    mutationFn: (id: number) => api.post(`/grey/${id}/reverse-arrive-transport`, {}),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); qc.invalidateQueries({ queryKey: ['grey-stats'] }) },
+    onError: (err: unknown) => {
+      const e = err as { response?: { data?: { detail?: string } } }
+      alert(e?.response?.data?.detail || 'Reverse failed')
+    },
+  })
+  const reverseDispatchMut = useMutation({
+    mutationFn: (id: number) => api.post(`/grey/${id}/reverse-vendor-dispatch`, {}),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); qc.invalidateQueries({ queryKey: ['grey-stats'] }) },
+    onError: (err: unknown) => {
+      const e = err as { response?: { data?: { detail?: string } } }
+      alert(e?.response?.data?.detail || 'Reverse failed')
+    },
+  })
   const transferMut = useMutation({
     mutationFn: ({ id, body }: { id: number; body: object }) => api.post(`/grey/${id}/transfer`, body),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); qc.invalidateQueries({ queryKey: ['grey-stats'] }); setTransferModal(null) },
@@ -549,6 +565,24 @@ export default function GreyFabric() {
                 <button onClick={() => { setQcModal(editEntry); setQcForm(f => ({ ...f, received_qty: editEntry.received_qty || editEntry.ordered_qty || 0, checked_qty: editEntry.checked_qty || 0, passed_qty: editEntry.passed_qty ?? 0, rejected_qty: editEntry.rejected_qty || 0, rework_qty: editEntry.rework_qty || 0 })) }} className="px-3 py-2 bg-amber-600 text-white rounded-lg text-xs font-medium">Record QC</button>
                 <button onClick={() => { setPrinterModal(editEntry); setPrinterForm(f => ({ ...f, issue_qty: editEntry.transport_qty || editEntry.printer_qty || 0 })) }} className="px-3 py-2 bg-orange-600 text-white rounded-lg text-xs font-medium">Issue to printer</button>
                 <button onClick={() => { setReturnModal(editEntry); setReturnForm(r => ({ ...r, return_qty: editEntry.rejected_qty || 0 })) }} className="px-3 py-2 bg-red-700 text-white rounded-lg text-xs font-medium">Return to vendor (DN)</button>
+                {(editEntry.transport_qty ?? 0) > 0 && (editEntry.factory_qty ?? 0) <= 0 && (editEntry.printer_qty ?? 0) <= 0 && (
+                  <button
+                    onClick={() => { if (confirm('Reverse transport receive? Stock moves back to in-transit.')) reverseArriveMut.mutate(editEntry.id) }}
+                    disabled={reverseArriveMut.isPending}
+                    className="px-3 py-2 bg-rose-100 text-rose-800 border border-rose-200 rounded-lg text-xs font-medium disabled:opacity-50"
+                  >
+                    Cancel transport receive
+                  </button>
+                )}
+                {editEntry.status === 'In Transit' && (editEntry.in_transit_qty ?? 0) > 0 && (editEntry.transport_qty ?? 0) <= 0 && (
+                  <button
+                    onClick={() => { if (confirm('Cancel vendor dispatch?')) reverseDispatchMut.mutate(editEntry.id) }}
+                    disabled={reverseDispatchMut.isPending}
+                    className="px-3 py-2 bg-rose-100 text-rose-800 border border-rose-200 rounded-lg text-xs font-medium disabled:opacity-50"
+                  >
+                    Cancel dispatch
+                  </button>
+                )}
                 <button onClick={() => setEditEntry(null)} className="px-4 py-2 border rounded-lg text-sm text-gray-600">Close</button>
               </div>
             </div>

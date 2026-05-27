@@ -397,12 +397,19 @@ const printJO = (jo: JO) => {
   win.document.close()
 }
 
-function MRPTab() {
+type MRPTabProps = {
+  onCreateJO?: (p: { so_number: string; fabric_code: string; fabric_name: string; fabric_qty: number }) => void
+}
+
+function MRPTab({ onCreateJO }: MRPTabProps) {
   const qc = useQueryClient()
   const [selectedSOs, setSelectedSOs] = useState<string[]>([])
   const [mrpResult, setMrpResult] = useState<any>(null)
   const [running, setRunning] = useState(false)
   const [expandedMat, setExpandedMat] = useState<string | null>(null)
+  const [auditSO, setAuditSO] = useState('')
+  const [auditData, setAuditData] = useState<any>(null)
+  const [auditLoading, setAuditLoading] = useState(false)
 
   const { data: openSOs = [] } = useQuery({
     queryKey: ['mrp-open-sos'],
@@ -412,6 +419,35 @@ function MRPTab() {
     queryKey: ['mrp-last'],
     queryFn: () => api.get('/production/mrp/last').then(r => r.data),
   })
+
+  const activeSONumbers: string[] = mrpResult?.so_numbers || lastMRP?.so_numbers || []
+  const { data: commitByKey = {} } = useQuery<Record<string, number>>({
+    queryKey: ['mrp-commit-map', activeSONumbers.join('|')],
+    queryFn: async () => {
+      const out: Record<string, number> = {}
+      for (const so of activeSONumbers) {
+        const rows = await api.get(`/production/mrp/commitments?so_number=${encodeURIComponent(so)}`).then(r => r.data)
+        for (const c of rows as { material_code: string; remaining_qty: number }[]) {
+          out[`${so}|${c.material_code}`] = c.remaining_qty
+        }
+      }
+      return out
+    },
+    enabled: activeSONumbers.length > 0,
+  })
+
+  const loadAudit = async () => {
+    if (!auditSO.trim()) return
+    setAuditLoading(true)
+    try {
+      const res = await api.get(`/production/mrp/audit-chain?so_number=${encodeURIComponent(auditSO.trim())}`)
+      setAuditData(res.data)
+    } catch {
+      setAuditData(null)
+      alert('Could not load document chain')
+    }
+    setAuditLoading(false)
+  }
 
   const runMRP = async () => {
     if (!selectedSOs.length) { alert('Select at least one SO'); return }
@@ -495,11 +531,18 @@ function MRPTab() {
                 <th className="text-right px-4 py-2">Stock</th>
                 <th className="text-right px-4 py-2">Available</th>
                 <th className="text-right px-4 py-2">Net Req</th>
+                <th className="text-right px-4 py-2">Remaining</th>
                 <th className="text-left px-4 py-2">Unit</th>
+                <th className="text-right px-4 py-2">Action</th>
               </tr>
             </thead>
             <tbody>
-              {materials.sort((a,b) => (b[1].net_req||0) - (a[1].net_req||0)).map(([code, mat]) => (
+              {materials.sort((a,b) => (b[1].net_req||0) - (a[1].net_req||0)).map(([code, mat]) => {
+                const firstSo = (mat.breakdown?.[0]?.so_no as string) || activeSONumbers[0] || ''
+                const remaining = firstSo ? (commitByKey[`${firstSo}|${code}`] ?? mat.net_req ?? 0) : (mat.net_req ?? 0)
+                const isFabric = (mat.unit || '').toUpperCase() === 'MTR' || ['GF', 'RM', 'SFG', 'Fabric'].some(t => (mat.type || '').toUpperCase().includes(t))
+                const canJO = isFabric && remaining > 0 && !!onCreateJO && !!firstSo
+                return (
                 <>
                   <tr key={code} className="border-t hover:bg-gray-50 cursor-pointer" onClick={() => setExpandedMat(expandedMat === code ? null : code)}>
                     <td className="px-4 py-2">
@@ -517,12 +560,32 @@ function MRPTab() {
                     <td className={`px-4 py-2 text-right font-bold ${(mat.net_req||0) > 0 ? 'text-red-600' : 'text-green-600'}`}>
                       {mat.net_req || 0}
                     </td>
+                    <td className={`px-4 py-2 text-right font-semibold ${remaining > 0 ? 'text-amber-700' : 'text-gray-400'}`}>
+                      {activeSONumbers.length ? remaining : '—'}
+                    </td>
                     <td className="px-4 py-2 text-gray-500 text-xs">{mat.unit}</td>
+                    <td className="px-4 py-2 text-right" onClick={e => e.stopPropagation()}>
+                      {isFabric && onCreateJO && (
+                        <button
+                          type="button"
+                          disabled={!canJO}
+                          title={remaining <= 0 ? 'MRP qty fully committed — no remaining fabric' : `Create Cutting JO for ${firstSo}`}
+                          onClick={() => onCreateJO({
+                            so_number: firstSo,
+                            fabric_code: code,
+                            fabric_name: mat.name || code,
+                            fabric_qty: Math.max(0, remaining),
+                          })}
+                          className="text-xs px-2 py-1 bg-[#002B5B] text-white rounded disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Create JO
+                        </button>
+                      )}
+                    </td>
                   </tr>
-                  {/* Breakdown rows */}
                   {expandedMat === code && mat.breakdown && (
                     <tr key={`${code}-breakdown`}>
-                      <td colSpan={6} className="px-4 py-0 bg-blue-50">
+                      <td colSpan={8} className="px-4 py-0 bg-blue-50">
                         <div className="py-2 space-y-1">
                           <p className="text-xs font-semibold text-gray-500 uppercase mb-1">Breakdown — Kahan lag raha hai:</p>
                           <table className="w-full text-xs">
@@ -548,9 +611,59 @@ function MRPTab() {
                     </tr>
                   )}
                 </>
-              ))}
+              )})}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {activeSONumbers.length > 0 && (
+        <div className="bg-white rounded-xl border p-4 space-y-3">
+          <h3 className="font-semibold text-gray-700">Document chain audit (MRP → PO → GRN → Grey ledger)</h3>
+          <div className="flex flex-wrap gap-2 items-end">
+            <div>
+              <label className="text-xs text-gray-500">SO number</label>
+              <select className="block border rounded px-2 py-1.5 text-sm mt-0.5" value={auditSO} onChange={e => setAuditSO(e.target.value)}>
+                <option value="">Select SO…</option>
+                {activeSONumbers.map(so => <option key={so} value={so}>{so}</option>)}
+              </select>
+            </div>
+            <button onClick={loadAudit} disabled={!auditSO || auditLoading}
+              className="px-3 py-2 bg-slate-700 text-white rounded-lg text-sm disabled:opacity-50">
+              {auditLoading ? 'Loading…' : 'Load chain'}
+            </button>
+          </div>
+          {auditData?.materials?.length > 0 && (
+            <div className="space-y-3 max-h-[420px] overflow-y-auto">
+              {auditData.materials.map((m: any) => (
+                <div key={m.material_code} className="border rounded-lg p-3 text-xs">
+                  <p className="font-mono font-bold text-[#002B5B]">{m.material_code}</p>
+                  <p className="text-gray-500 mb-2">
+                    MRP {m.mrp_qty} · PO committed {m.po_committed_qty} · JO fabric {m.jo_committed_qty} · Remaining {m.remaining_qty}
+                  </p>
+                  <div className="grid md:grid-cols-2 gap-2 text-gray-600">
+                    <div><span className="font-semibold">POs:</span> {(m.pos || []).map((p: any) => p.po_number).join(', ') || '—'}</div>
+                    <div><span className="font-semibold">GRNs:</span> {(m.grns || []).map((g: any) => `${g.grn_number}(${g.accepted_qty})`).join(', ') || '—'}</div>
+                    <div><span className="font-semibold">JOs:</span> {(m.job_orders || []).map((j: any) => j.jo_number).join(', ') || '—'}</div>
+                    <div><span className="font-semibold">Grey:</span> {(m.grey_trackers || []).map((t: any) => `${t.tracker_key}:${t.status}`).join(', ') || '—'}</div>
+                  </div>
+                  {(m.grey_ledger || []).length > 0 && (
+                    <table className="w-full mt-2 border-t pt-2">
+                      <thead><tr className="text-gray-400"><th className="text-left">Date</th><th className="text-left">Type</th><th className="text-right">Qty</th><th className="text-left">From→To</th></tr></thead>
+                      <tbody>
+                        {m.grey_ledger.slice(0, 8).map((l: any, i: number) => (
+                          <tr key={i} className="border-t border-gray-100">
+                            <td>{l.entry_date}</td><td>{l.transaction_type}</td><td className="text-right">{l.qty}</td>
+                            <td>{l.from_location} → {l.to_location}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -678,6 +791,7 @@ export default function Production() {
     mutationFn: (b: object) => api.post('/production/orders', b),
     onSuccess: (res) => {
       invalidateAll()
+      qc.invalidateQueries({ queryKey: ['mrp-commit-map'] })
       setModal(null)
       setNewLines([])
       const inNum = res?.data?.issue_note?.in_number
@@ -1228,7 +1342,21 @@ export default function Production() {
 
       {/* MRP TAB */}
       {tab === 'mrp' && (
-        <MRPTab />
+        <MRPTab
+          onCreateJO={(p) => {
+            setNewForm(f => ({
+              ...f,
+              so_number: p.so_number,
+              fabric_code: p.fabric_code,
+              fabric_qty: p.fabric_qty,
+              process: 'Cutting',
+              sku_name: p.fabric_name,
+            }))
+            setActiveProcess('Cutting')
+            setTab('process')
+            setModal('new-jo')
+          }}
+        />
       )}
 
       {/* ── NEW JO MODAL ─────────────────────────────────────────────────────── */}

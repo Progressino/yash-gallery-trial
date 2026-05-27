@@ -12,7 +12,7 @@ from ..db.production_db import (
     get_item_routing, get_next_process, get_all_routing_steps,
     get_process_report, get_production_stats,
     save_mrp_result, get_last_mrp_result,
-    sync_mrp_commitments_from_run, get_mrp_commitments_for_so,
+    sync_mrp_commitments_from_run, get_mrp_commitments_for_so, check_mrp_commitment,
     soft_reserve_all, release_so_reservations,
     list_soft_reservations_v2, get_soft_reserved_by_material,
     list_reservations, create_reservation, release_reservation, get_reserved_qty,
@@ -419,7 +419,17 @@ def post_jo(body: JOIn):
         v = validate_jo_creation(process, so_number, sku, planned_qty)
         if not v['ok']:
             raise HTTPException(400, v['message'])
-    num = create_jo(data)
+    fabric_code = (data.get("fabric_code") or "").strip()
+    fabric_qty = float(data.get("fabric_qty") or 0)
+    if so_number and fabric_code and fabric_qty > 0:
+        try:
+            check_mrp_commitment(so_number, fabric_code, fabric_qty)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    try:
+        num = create_jo(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
     issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
     return {"jo_number": num, "ok": True, "issue_note": issue_note}
@@ -663,6 +673,14 @@ def mrp_commitments(so_number: str = ''):
     if not so_number:
         raise HTTPException(400, 'so_number is required')
     return get_mrp_commitments_for_so(so_number)
+
+
+@router.get("/mrp/audit-chain")
+def mrp_audit_chain(so_number: str = ''):
+    from ..services.document_chain_audit import get_document_chain_audit
+    if not so_number.strip():
+        raise HTTPException(400, 'so_number is required')
+    return get_document_chain_audit(so_number.strip())
 
 @router.post("/mrp/soft-reserve-all")
 def mrp_soft_reserve_all():

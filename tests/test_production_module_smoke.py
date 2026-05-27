@@ -1112,3 +1112,117 @@ def test_mrp_po_commitment_limits_duplicate_po_qty(isolated_module_dbs, client):
     commits = production_db.get_mrp_commitments_for_so("SO-COMMIT-1")
     fab = next(c for c in commits if c["material_code"] == "FAB-A")
     assert float(fab["remaining_qty"]) == 30.0
+
+
+def test_grey_reverse_arrive_transport(isolated_module_dbs, client):
+    tracker, _ = _seed_grey_tracker(client, qty=80.0)
+    tid = tracker["id"]
+    client.post(
+        f"/api/grey/{tid}/vendor-dispatch",
+        json={
+            "bilty_no": "REV-1",
+            "transporter": "T",
+            "dispatch_date": "2026-05-12",
+            "expected_arrival": "",
+            "dispatched_qty": 80,
+            "vehicle_no": "",
+        },
+    )
+    client.post(f"/api/grey/{tid}/arrive-transport", json={"qty": 80})
+    r = client.post(f"/api/grey/{tid}/reverse-arrive-transport", json={})
+    assert r.status_code == 200, r.text
+    snap = next(t for t in client.get("/api/grey").json() if t["id"] == tid)
+    assert float(snap["transport_qty"]) == 0.0
+    assert float(snap["in_transit_qty"]) == 80.0
+
+
+def test_mrp_jo_fabric_commitment(isolated_module_dbs, client):
+    from backend.db import production_db
+
+    production_db.sync_mrp_commitments_from_run(
+        ["SO-JO-FAB"],
+        {
+            "GF-ROLL-1": {
+                "name": "Grey Roll",
+                "unit": "MTR",
+                "type": "GF",
+                "breakdown": [{"so_no": "SO-JO-FAB", "sku": "SKU-A", "qty_req": 200}],
+            }
+        },
+    )
+    body = {
+        "jo_date": "2026-05-12",
+        "so_number": "SO-JO-FAB",
+        "sku": "SKU-A",
+        "process": "Cutting",
+        "planned_qty": 10,
+        "fabric_code": "GF-ROLL-1",
+        "fabric_qty": 150,
+        "fabric_unit": "MTR",
+    }
+    assert client.post("/api/production/orders", json=body).status_code == 200
+    over = {**body, "fabric_qty": 60}
+    blocked = client.post("/api/production/orders", json=over)
+    assert blocked.status_code == 400, blocked.text
+    commits = production_db.get_mrp_commitments_for_so("SO-JO-FAB")
+    row = next(c for c in commits if c["material_code"] == "GF-ROLL-1")
+    assert float(row["jo_committed_qty"]) == 150.0
+    assert float(row["remaining_qty"]) == 50.0
+
+
+def test_jwo_grn_tolerance(isolated_module_dbs, client):
+    jwo_body = {
+        "jwo_date": "2026-05-12",
+        "processor_name": "Printer Co",
+        "so_reference": "SO-JWO-1",
+        "lines": [
+            {
+                "input_material": "GF-IN",
+                "input_qty": 100,
+                "output_material": "PF-OUT",
+                "output_qty": 1000,
+                "output_unit": "MTR",
+                "process_type": "Printing",
+                "rate": 5,
+            }
+        ],
+    }
+    jwo_num = client.post("/api/purchase/jwo", json=jwo_body).json()["jwo_number"]
+    grn1 = {
+        "grn_type": "JWO Receipt",
+        "reference_number": jwo_num,
+        "party_name": "Printer Co",
+        "lines": [
+            {
+                "material_code": "PF-OUT",
+                "accepted_qty": 1000,
+                "received_qty": 1000,
+                "rejected_qty": 0,
+                "unit": "MTR",
+                "rate": 5,
+            }
+        ],
+    }
+    assert client.post("/api/purchase/grn", json=grn1).status_code == 200
+    grn2 = {**grn1, "lines": [{**grn1["lines"][0], "accepted_qty": 60, "received_qty": 60}]}
+    assert client.post("/api/purchase/grn", json=grn2).status_code == 400, client.post("/api/purchase/grn", json=grn2).text
+
+
+def test_document_chain_audit_api(isolated_module_dbs, client):
+    from backend.db import production_db
+
+    production_db.sync_mrp_commitments_from_run(
+        ["SO-AUDIT"],
+        {
+            "FAB-X": {
+                "name": "Fabric X",
+                "unit": "MTR",
+                "breakdown": [{"so_no": "SO-AUDIT", "sku": "S1", "qty_req": 50}],
+            }
+        },
+    )
+    r = client.get("/api/purchase/audit/document-chain?so_number=SO-AUDIT")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["so_number"] == "SO-AUDIT"
+    assert any(m["material_code"] == "FAB-X" for m in data["materials"])
