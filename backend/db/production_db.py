@@ -827,13 +827,15 @@ def create_next_process_jo(parent_joid: int) -> dict:
     num = _next_jo(conn)
     conn.execute("""INSERT INTO job_orders(
         jo_number, jo_date, so_number, sku, sku_name, process, stage,
-        exec_type, so_qty, planned_qty, balance_qty, status,
+        exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty, status,
         expected_completion, fabric_code, parent_jo_id, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (num, datetime.now().strftime('%Y-%m-%d'),
          so_number, sku, parent.get('sku_name',''),
          next_process, next_process,
          parent.get('exec_type','Inhouse'),
+         parent.get('vendor_name',''),
+         float(parent.get('vendor_rate') or 0),
          parent.get('so_qty',0), available, available,
          'Created', parent.get('expected_completion',''),
          parent.get('fabric_code',''), parent_joid))

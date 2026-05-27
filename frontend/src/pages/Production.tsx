@@ -221,6 +221,97 @@ const PROCESS_ICONS: Record<string, string> = {
 const fmt = (n: number) => Math.round(n || 0).toLocaleString('en-IN')
 const fmtR = (n: number) => '₹' + Math.round(n || 0).toLocaleString('en-IN')
 
+const EXEC_TYPE_OPTIONS = [
+  { value: 'Inhouse', label: 'In-house' },
+  { value: 'Outsource', label: 'Outsource' },
+] as const
+
+function isOutsourceExec(execType: string) {
+  return String(execType || '').trim().toLowerCase() === 'outsource'
+}
+
+function execTypeLabel(execType: string) {
+  return isOutsourceExec(execType) ? 'Outsource' : 'In-house'
+}
+
+function VendorExecutionEditor({
+  jo,
+  vendorSuggestions,
+  saving,
+  onSave,
+}: {
+  jo: JO
+  vendorSuggestions: string[]
+  saving: boolean
+  onSave: (data: { exec_type: string; vendor_name: string }) => void
+}) {
+  const [execType, setExecType] = useState(jo.exec_type || 'Inhouse')
+  const [vendorName, setVendorName] = useState(jo.vendor_name || '')
+
+  useEffect(() => {
+    setExecType(jo.exec_type || 'Inhouse')
+    setVendorName(jo.vendor_name || '')
+  }, [jo.id, jo.exec_type, jo.vendor_name])
+
+  return (
+    <div className="bg-white rounded-lg border p-3 space-y-3">
+      <p className="text-xs font-semibold text-gray-500 uppercase">Execution / Vendor</p>
+      <div className="grid sm:grid-cols-3 gap-3">
+        <div>
+          <label className="text-xs text-gray-500">Execution type</label>
+          <select
+            value={execType}
+            onChange={e => {
+              const v = e.target.value
+              setExecType(v)
+              if (!isOutsourceExec(v)) setVendorName('')
+            }}
+            className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+          >
+            {EXEC_TYPE_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        {isOutsourceExec(execType) && (
+          <div className="sm:col-span-2">
+            <label className="text-xs text-gray-500">Vendor name *</label>
+            <input
+              list="jo-vendor-suggestions"
+              value={vendorName}
+              onChange={e => setVendorName(e.target.value)}
+              placeholder="Outsource vendor / party name"
+              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+            />
+            <datalist id="jo-vendor-suggestions">
+              {vendorSuggestions.map(v => (
+                <option key={v} value={v} />
+              ))}
+            </datalist>
+          </div>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={saving || (isOutsourceExec(execType) && !vendorName.trim())}
+          onClick={() => onSave({
+            exec_type: execType,
+            vendor_name: isOutsourceExec(execType) ? vendorName.trim() : '',
+          })}
+          className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg font-medium disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save vendor'}
+        </button>
+        <span className="text-xs text-gray-500">
+          Current: <b>{execTypeLabel(jo.exec_type)}</b>
+          {isOutsourceExec(jo.exec_type) && jo.vendor_name ? ` · ${jo.vendor_name}` : ''}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 // ── Print JO ──────────────────────────────────────────────────────────────────
 const printJO = (jo: JO) => {
   const totalCost = jo.lines.reduce((s, l) => s + (l.planned_qty * l.vendor_rate), 0)
@@ -265,8 +356,8 @@ const printJO = (jo: JO) => {
   </div>
   <div class="info-grid">
     <div class="info-box"><div class="info-label">Process</div><div class="info-value">${jo.process}</div>
-      <div class="info-label" style="margin-top:8px">Exec Type</div><div class="info-value">${jo.exec_type}</div></div>
-    <div class="info-box"><div class="info-label">Vendor / Party</div><div class="info-value">${jo.vendor_name || '—'}</div>
+      <div class="info-label" style="margin-top:8px">Execution</div><div class="info-value">${execTypeLabel(jo.exec_type)}</div></div>
+    <div class="info-box"><div class="info-label">Vendor / Party</div><div class="info-value">${isOutsourceExec(jo.exec_type) ? (jo.vendor_name || '—') : 'In-house'}</div>
       <div class="info-label" style="margin-top:8px">SO Number</div><div class="info-value">${jo.so_number || '—'}</div></div>
     <div class="info-box"><div class="info-label">JO Date</div><div class="info-value">${jo.jo_date}</div>
       <div class="info-label" style="margin-top:8px">Expected Completion</div><div class="info-value">${jo.expected_completion || '—'}</div></div>
@@ -556,6 +647,16 @@ export default function Production() {
     queryFn: () => api.get(`/production/item-routing/${encodeURIComponent(newForm.sku)}`).then(r => r.data),
     enabled: !!newForm.sku,
   })
+  const { data: processors = [] } = useQuery<{ processor_name?: string }[]>({
+    queryKey: ['purchase-processors'],
+    queryFn: () => api.get('/purchase/processors').then(r => r.data),
+  })
+  const vendorSuggestions = [...new Set(
+    (processors || [])
+      .map(p => String(p.processor_name || '').trim())
+      .filter(Boolean),
+  )].sort((a, b) => a.localeCompare(b))
+
   const { data: joValidation } = useQuery({
     queryKey: ['jo-validate', newForm.process, newForm.so_number, newForm.sku, newForm.planned_qty],
     queryFn: () => api.get(`/production/orders/validate?process=${newForm.process}&so_number=${newForm.so_number}&sku=${newForm.sku}&planned_qty=${newForm.planned_qty}`).then(r => r.data),
@@ -671,7 +772,15 @@ export default function Production() {
                 {PROCESS_ICONS[jo.process] || ''} {jo.process}
               </span>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[jo.status] || ''}`}>{jo.status}</span>
-              {jo.exec_type === 'Outsource' && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">🏭 {jo.vendor_name}</span>}
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                isOutsourceExec(jo.exec_type)
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'bg-slate-100 text-slate-700'
+              }`}>
+                {isOutsourceExec(jo.exec_type)
+                  ? `🏭 Outsource · ${jo.vendor_name || '—'}`
+                  : '🏠 In-house'}
+              </span>
             </div>
             <p className="text-sm text-gray-600">SO: <b>{jo.so_number || '—'}</b> · SKU: <b>{jo.sku}</b> {jo.sku_name ? `— ${jo.sku_name}` : ''}</p>
             {/* Routing bar */}
@@ -720,6 +829,13 @@ export default function Production() {
                 </div>
               ))}
             </div>
+
+            <VendorExecutionEditor
+              jo={jo}
+              vendorSuggestions={vendorSuggestions}
+              saving={updateJOMut.isPending}
+              onSave={data => updateJOMut.mutate({ id: jo.id, data })}
+            />
 
             {/* Process stock visibility */}
             {jo.process_stocks && Object.keys(jo.process_stocks).length > 0 && (
@@ -1156,19 +1272,41 @@ export default function Production() {
                   {allProcesses.map(p => <option key={p}>{p}</option>)}
                 </select>
               </div>
-              {/* Exec type */}
-              <div><label className="text-xs text-gray-500">Exec Type</label>
-                <select value={newForm.exec_type} onChange={e => setNewForm(f => ({ ...f, exec_type: e.target.value }))}
-                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
-                  {['Inhouse','Outsource'].map(t => <option key={t}>{t}</option>)}
+              {/* Execution / vendor */}
+              <div><label className="text-xs text-gray-500">Execution type</label>
+                <select
+                  value={newForm.exec_type}
+                  onChange={e => {
+                    const v = e.target.value
+                    setNewForm(f => ({
+                      ...f,
+                      exec_type: v,
+                      vendor_name: isOutsourceExec(v) ? f.vendor_name : '',
+                    }))
+                  }}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                >
+                  {EXEC_TYPE_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
                 </select>
               </div>
-              {newForm.exec_type === 'Outsource' && (
-                <>
-                  <div><label className="text-xs text-gray-500">Vendor Name</label>
-                    <input value={newForm.vendor_name} onChange={e => setNewForm(f => ({ ...f, vendor_name: e.target.value }))}
-                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
-                </>
+              {isOutsourceExec(newForm.exec_type) && (
+                <div className="md:col-span-2">
+                  <label className="text-xs text-gray-500">Vendor name *</label>
+                  <input
+                    list="new-jo-vendor-suggestions"
+                    value={newForm.vendor_name}
+                    onChange={e => setNewForm(f => ({ ...f, vendor_name: e.target.value }))}
+                    placeholder="Outsource vendor / party name"
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                  <datalist id="new-jo-vendor-suggestions">
+                    {vendorSuggestions.map(v => (
+                      <option key={v} value={v} />
+                    ))}
+                  </datalist>
+                </div>
               )}
               {[['expected_completion','Expected Date'],['remarks','Remarks']].map(([k,l]) => (
                 <div key={k}><label className="text-xs text-gray-500">{l}</label>
@@ -1270,7 +1408,12 @@ export default function Production() {
                 planned_qty: newLines.reduce((s,l) => s+l.planned_qty, 0) || newForm.planned_qty,
                 lines: newLines,
               })}
-                disabled={createJOMut.isPending || !newForm.so_number || (newForm.process !== 'Cutting' && joValidation && !joValidation?.ok)}
+                disabled={
+                  createJOMut.isPending
+                  || !newForm.so_number
+                  || (isOutsourceExec(newForm.exec_type) && !newForm.vendor_name.trim())
+                  || (newForm.process !== 'Cutting' && joValidation && !joValidation?.ok)
+                }
                 className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
                 {createJOMut.isPending ? 'Creating…' : `Create ${newForm.process} JO`}
               </button>

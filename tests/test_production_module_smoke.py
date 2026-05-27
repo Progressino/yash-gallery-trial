@@ -413,6 +413,42 @@ def test_jo_auto_creates_bom_issue_note(isolated_module_dbs, client):
     assert any(n["in_number"] == note["in_number"] for n in listed)
 
 
+def test_jo_outsource_requires_vendor_name(isolated_module_dbs, client):
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-05-26",
+            "so_number": "SO-0001",
+            "sku": "TEST-SKU",
+            "process": "Cutting",
+            "exec_type": "Outsource",
+            "vendor_name": "",
+            "planned_qty": 10,
+        },
+    )
+    assert r.status_code == 400
+    assert "vendor" in r.json()["detail"].lower()
+
+
+def test_jo_outsource_stores_vendor_name(isolated_module_dbs, client):
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-05-26",
+            "so_number": "SO-0001",
+            "sku": "TEST-SKU",
+            "process": "Cutting",
+            "exec_type": "Outsource",
+            "vendor_name": "ABC Stitching Unit",
+            "planned_qty": 10,
+        },
+    )
+    assert r.status_code == 200, r.text
+    jo = next(o for o in client.get("/api/production/orders").json() if o["jo_number"] == r.json()["jo_number"])
+    assert jo["exec_type"] == "Outsource"
+    assert jo["vendor_name"] == "ABC Stitching Unit"
+
+
 def test_receive_pieces_per_line_cutting_jo(isolated_module_dbs, client):
     """Line-level receive on a multi-size cutting JO (cutting challan / Rec button)."""
     r = client.post(

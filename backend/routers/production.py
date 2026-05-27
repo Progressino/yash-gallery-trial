@@ -404,6 +404,12 @@ def get_jo_detail(joid: int):
 @router.post("/orders")
 def post_jo(body: JOIn):
     data = body.model_dump()
+    exec_type = str(data.get("exec_type") or "Inhouse").strip()
+    vendor_name = str(data.get("vendor_name") or "").strip()
+    if exec_type.lower() == "outsource" and not vendor_name:
+        raise HTTPException(400, "Vendor name is required when execution type is Outsource.")
+    data["exec_type"] = exec_type
+    data["vendor_name"] = vendor_name
     process = data.get('process','Cutting')
     so_number = data.get('so_number','')
     sku = data.get('sku','')
@@ -419,7 +425,24 @@ def post_jo(body: JOIn):
 
 @router.patch("/orders/{joid}")
 def patch_jo(joid: int, body: JOUpdate):
-    update_jo(joid, {k: v for k, v in body.model_dump().items() if v is not None})
+    jo = get_jo(joid)
+    if not jo:
+        raise HTTPException(404, "Job order not found")
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "exec_type" in data:
+        data["exec_type"] = str(data["exec_type"] or "Inhouse").strip()
+    if "vendor_name" in data:
+        data["vendor_name"] = str(data["vendor_name"] or "").strip()
+    eff_exec = str(data.get("exec_type") or jo.get("exec_type") or "Inhouse").strip()
+    eff_vendor = str(
+        data["vendor_name"] if "vendor_name" in data else jo.get("vendor_name") or ""
+    ).strip()
+    if ("exec_type" in data or "vendor_name" in data):
+        if eff_exec.lower() == "outsource" and not eff_vendor:
+            raise HTTPException(400, "Vendor name is required when execution type is Outsource.")
+        if eff_exec.lower() == "inhouse":
+            data["vendor_name"] = ""
+    update_jo(joid, data)
     return {"ok": True}
 
 @router.post("/orders/{joid}/issue-fabric")
