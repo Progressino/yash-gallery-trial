@@ -416,19 +416,27 @@ def patch_grey(gid: int, body: GreyUpdateIn):
 
 @router.post("/{gid}/vendor-dispatch")
 def post_vendor_dispatch(gid: int, body: VendorDispatchIn):
-    ok = gdb.vendor_dispatch(gid, body.bilty_no, body.transporter, body.dispatch_date,
-                              body.expected_arrival, body.dispatched_qty, body.vehicle_no)
+    try:
+        ok = gdb.vendor_dispatch(gid, body.bilty_no, body.transporter, body.dispatch_date,
+                                  body.expected_arrival, body.dispatched_qty, body.vehicle_no)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     if not ok:
         raise HTTPException(404, "Tracker not found")
-    return {"ok": True, "status": "In Transit"}
+    row = gdb.get_grey(gid) or {}
+    return {"ok": True, "status": row.get("status", "In Transit")}
 
 
 @router.post("/{gid}/arrive-transport")
 def post_arrive_transport(gid: int, body: ArriveTransportIn):
-    ok = gdb.arrive_at_transport(gid, body.qty)
+    try:
+        ok = gdb.arrive_at_transport(gid, body.qty)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     if not ok:
-        raise HTTPException(400, "Tracker not found or invalid qty")
-    return {"ok": True, "status": "At Transport Location"}
+        raise HTTPException(404, "Tracker not found")
+    row = gdb.get_grey(gid) or {}
+    return {"ok": True, "status": row.get("status", "At Transport Location")}
 
 
 @router.post("/{gid}/transfer")

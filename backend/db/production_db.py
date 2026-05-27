@@ -203,6 +203,20 @@ def init_db():
         so_numbers  TEXT NOT NULL,
         result_json TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS mrp_material_commitments (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        so_number       TEXT NOT NULL,
+        material_code   TEXT NOT NULL,
+        material_name   TEXT DEFAULT '',
+        unit            TEXT DEFAULT 'PCS',
+        mrp_qty         REAL NOT NULL DEFAULT 0,
+        po_committed_qty REAL DEFAULT 0,
+        jo_committed_qty REAL DEFAULT 0,
+        status          TEXT DEFAULT 'Open',
+        updated_at      TEXT DEFAULT (datetime('now')),
+        UNIQUE(so_number, material_code)
+    );
     """)
 
     # Migrations for existing DB
@@ -732,11 +746,16 @@ def issue_pieces(joid: int, data: dict):
 # ── Receive Pieces ─────────────────────────────────────────────────────────────
 
 def receive_pieces(joid: int, data: dict):
+    from ..services.document_qty_control import max_allowed_receive
+
     conn = _connect()
     jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
     if not jo:
         conn.close()
         raise ValueError("JO not found")
+    if (jo.get("status") or "") == "Closed":
+        conn.close()
+        raise ValueError("Job order is closed — further receive not allowed")
     received = int(data.get('received_qty', 0))
     if received <= 0:
         conn.close()
@@ -746,6 +765,7 @@ def receive_pieces(joid: int, data: dict):
     process = data.get('process') or jo.get('process', 'Cutting')
     so_number = jo.get('so_number', '')
     sku = data.get('sku') or jo.get('sku', '')
+    jo_tol = 0.0
     if jo_line_id:
         line = conn.execute(
             "SELECT id, sku, planned_qty FROM jo_lines WHERE id=? AND jo_id=?",
@@ -756,14 +776,28 @@ def receive_pieces(joid: int, data: dict):
             raise ValueError("JO line not found for this job order")
         line = dict(line)
         sku = (line.get('sku') or sku).strip()
-        already = conn.execute(
+        already = int(conn.execute(
             "SELECT COALESCE(SUM(received_qty),0) FROM jo_piece_receipts WHERE jo_line_id=?",
             (jo_line_id,),
-        ).fetchone()[0]
-        balance = int(line.get('planned_qty') or 0) - int(already)
-        if received > balance:
+        ).fetchone()[0])
+        planned = int(line.get('planned_qty') or 0)
+        cap = int(max_allowed_receive(planned, jo_tol) + 0.999)
+        if already + received > cap:
             conn.close()
-            raise ValueError(f"Cannot receive {received} pcs — only {max(0, balance)} remaining on this line")
+            raise ValueError(
+                f"Cannot receive {received} pcs — max {cap} allowed on this line "
+                f"(planned {planned}, already {already})"
+            )
+    else:
+        already = int(jo.get("received_qty") or 0)
+        planned = int(jo.get("planned_qty") or 0)
+        cap = int(max_allowed_receive(planned, jo_tol) + 0.999)
+        if already + received > cap:
+            conn.close()
+            raise ValueError(
+                f"Cannot receive {received} pcs — max {cap} allowed "
+                f"(planned {planned}, already {already})"
+            )
     conn.execute("""INSERT INTO jo_piece_receipts(jo_id,jo_line_id,process,so_number,sku,receipt_date,received_qty,rejected_qty,received_by,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (joid, jo_line_id, process, so_number, sku,
@@ -781,6 +815,14 @@ def receive_pieces(joid: int, data: dict):
             balance_qty = planned_qty - (COALESCE(received_qty,0) + ?)
             WHERE id=? AND jo_id=?""", (received, rejected, received, jo_line_id, joid))
     _update_process_stock(conn, so_number, sku, process, qty_in=received)
+    from ..services.document_qty_control import jo_should_auto_close
+
+    jo_after = dict(conn.execute("SELECT planned_qty, received_qty, status FROM job_orders WHERE id=?", (joid,)).fetchone())
+    if jo_after and jo_should_auto_close(int(jo_after["planned_qty"] or 0), int(jo_after["received_qty"] or 0), jo_tol):
+        conn.execute(
+            """UPDATE job_orders SET status='Closed', completed_date=?, updated_at=datetime('now') WHERE id=?""",
+            (datetime.now().strftime("%Y-%m-%d"), joid),
+        )
     conn.commit()
     conn.close()
 
@@ -975,3 +1017,140 @@ def get_soft_reserved_by_material(material_code: str) -> float:
     conn = _connect()
     row = conn.execute("SELECT COALESCE(SUM(qty),0) FROM mrp_soft_reservations WHERE material_code=? AND status='Active'", (material_code,)).fetchone()
     conn.close(); return float(row[0])
+
+
+def _commitment_status(mrp_qty: float, po_qty: float, jo_qty: float) -> str:
+    committed = float(po_qty or 0) + float(jo_qty or 0)
+    mrp = float(mrp_qty or 0)
+    if mrp <= 0:
+        return "Open"
+    if committed <= 0:
+        return "Open"
+    if committed >= mrp - 1e-9:
+        return "Fully Processed"
+    return "Partially Processed"
+
+
+def sync_mrp_commitments_from_run(so_numbers: list, materials: dict) -> None:
+    """Upsert per-SO material requirements from normalized MRP payload."""
+    conn = _connect()
+    for mat_code, mat in (materials or {}).items():
+        for bd in mat.get("breakdown") or []:
+            so_no = (bd.get("so_no") or "").strip()
+            if so_no and so_numbers and so_no not in so_numbers:
+                continue
+            if not so_no:
+                continue
+            qty = float(bd.get("qty_req") or 0)
+            if qty <= 0:
+                continue
+            row = conn.execute(
+                "SELECT id, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
+                (so_no, mat_code),
+            ).fetchone()
+            if row:
+                po_c = float(row["po_committed_qty"] or 0)
+                jo_c = float(row["jo_committed_qty"] or 0)
+                conn.execute(
+                    """UPDATE mrp_material_commitments SET material_name=?, unit=?, mrp_qty=?,
+                    status=?, updated_at=datetime('now') WHERE id=?""",
+                    (
+                        mat.get("name", mat_code),
+                        mat.get("unit", "PCS"),
+                        qty,
+                        _commitment_status(qty, po_c, jo_c),
+                        row["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO mrp_material_commitments
+                    (so_number, material_code, material_name, unit, mrp_qty, status)
+                    VALUES(?,?,?,?,?,?)""",
+                    (so_no, mat_code, mat.get("name", mat_code), mat.get("unit", "PCS"), qty, "Open"),
+                )
+    conn.commit()
+    conn.close()
+
+
+def check_mrp_po_commitment(so_number: str, material_code: str, qty: float) -> None:
+    if not (so_number or "").strip():
+        return
+    conn = _connect()
+    row = conn.execute(
+        "SELECT mrp_qty, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
+        (so_number.strip(), material_code),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return
+    mrp = float(row["mrp_qty"] or 0)
+    committed = float(row["po_committed_qty"] or 0) + float(row["jo_committed_qty"] or 0)
+    remaining = mrp - committed
+    if float(qty or 0) > remaining + 1e-9:
+        raise ValueError(
+            f"MRP limit for {material_code} on {so_number}: need {qty}, only {max(0, remaining):.3f} remaining "
+            f"(MRP {mrp:.3f}, already committed PO+JO {committed:.3f})"
+        )
+
+
+def record_mrp_po_commitment(so_number: str, lines: list, *, doc_ref: str = "") -> None:
+    if not (so_number or "").strip():
+        return
+    conn = _connect()
+    for ln in lines or []:
+        code = (ln.get("material_code") or "").strip()
+        if not code:
+            continue
+        qty = float(ln.get("po_qty") or ln.get("required_qty") or ln.get("qty") or 0)
+        if qty <= 0:
+            continue
+        row = conn.execute(
+            "SELECT id, mrp_qty, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
+            (so_number.strip(), code),
+        ).fetchone()
+        if row:
+            new_po = float(row["po_committed_qty"] or 0) + qty
+            mrp = float(row["mrp_qty"] or 0)
+            conn.execute(
+                """UPDATE mrp_material_commitments SET po_committed_qty=?, status=?, updated_at=datetime('now')
+                WHERE id=?""",
+                (new_po, _commitment_status(mrp, new_po, row["jo_committed_qty"]), row["id"]),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO mrp_material_commitments
+                (so_number, material_code, material_name, unit, mrp_qty, po_committed_qty, status)
+                VALUES(?,?,?,?,?,?,?)""",
+                (
+                    so_number.strip(),
+                    code,
+                    ln.get("material_name", ""),
+                    ln.get("unit", "PCS"),
+                    qty,
+                    qty,
+                    "Fully Processed",
+                ),
+            )
+    conn.commit()
+    conn.close()
+
+
+def get_mrp_commitments_for_so(so_number: str) -> list:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM mrp_material_commitments WHERE so_number=? ORDER BY material_code",
+        (so_number.strip(),),
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        mrp = float(d.get("mrp_qty") or 0)
+        po_c = float(d.get("po_committed_qty") or 0)
+        jo_c = float(d.get("jo_committed_qty") or 0)
+        d["remaining_qty"] = round(max(0.0, mrp - po_c - jo_c), 6)
+        d["can_create_po"] = d["remaining_qty"] > 1e-9
+        d["can_create_jo"] = d["remaining_qty"] > 1e-9
+        out.append(d)
+    return out

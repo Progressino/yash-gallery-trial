@@ -386,6 +386,8 @@ def init_db():
         "ALTER TABLE pr_headers ADD COLUMN source TEXT DEFAULT 'Manual'",
         "ALTER TABLE pr_headers ADD COLUMN required_by_date TEXT",
         "ALTER TABLE pr_lines ADD COLUMN po_qty REAL DEFAULT 0",
+        "ALTER TABLE po_lines ADD COLUMN grn_accepted_qty REAL DEFAULT 0",
+        "ALTER TABLE grn_headers ADD COLUMN inventory_posted INTEGER DEFAULT 0",
     ]:
         try: conn.execute(sql)
         except: pass
@@ -509,6 +511,12 @@ def create_pos_from_pr(pr_id: int, lines_data: list, delivery_date: str = '', pa
     if not pr:
         conn.close(); return []
     pr = dict(pr)
+    so_ref = (pr.get("so_reference") or "").strip()
+    if so_ref:
+        from ..db.production_db import check_mrp_po_commitment
+
+        for ld in lines_data:
+            check_mrp_po_commitment(so_ref, ld.get("material_code", ""), float(ld.get("qty") or 0))
     po_numbers = []
     for (sup_id, sup_name), lines in by_supplier.items():
         num = _next_num(conn, 'po_headers', 'po_number', 'PO')
@@ -540,7 +548,16 @@ def create_pos_from_pr(pr_id: int, lines_data: list, delivery_date: str = '', pa
     all_lines = conn.execute("SELECT required_qty, po_qty FROM pr_lines WHERE pr_id=?", (pr_id,)).fetchall()
     all_covered = all((l['po_qty'] or 0) >= (l['required_qty'] or 0) for l in all_lines)
     conn.execute("UPDATE pr_headers SET status=? WHERE id=?", ('PO Created' if all_covered else 'Partial PO', pr_id))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
+    if so_ref:
+        from ..db.production_db import record_mrp_po_commitment
+
+        po_lines = [
+            {"material_code": ld.get("material_code"), "material_name": ld.get("material_name", ""), "po_qty": ld.get("qty", 0), "unit": ld.get("unit", "PCS")}
+            for ld in lines_data
+        ]
+        record_mrp_po_commitment(so_ref, po_lines)
     return po_numbers
 
 # ── Purchase Orders ───────────────────────────────────────────────────────────
@@ -556,9 +573,15 @@ def list_pos(status=None):
     conn.close(); return result
 
 def create_po(data: dict):
+    so_ref = (data.get("so_reference") or "").strip()
+    lines = data.get("lines", [])
+    if so_ref:
+        from ..db.production_db import check_mrp_po_commitment, record_mrp_po_commitment
+
+        for ln in lines:
+            check_mrp_po_commitment(so_ref, ln.get("material_code", ""), float(ln.get("po_qty") or 0))
     conn = _connect()
     num = _next_num(conn, 'po_headers', 'po_number', 'PO')
-    lines = data.get('lines', [])
 
     def _line_amount(l: dict) -> float:
         amt = l.get('amount')
@@ -590,7 +613,13 @@ def create_po(data: dict):
         so_reference=data.get("so_reference", "") or "",
         delivery_location=data.get("delivery_location", "") or "",
     )
-    conn.commit(); conn.close(); return num
+    conn.commit()
+    conn.close()
+    if so_ref:
+        from ..db.production_db import record_mrp_po_commitment
+
+        record_mrp_po_commitment(so_ref, lines, doc_ref=num)
+    return num
 
 def update_po_status(poid: int, status: str):
     conn = _connect(); conn.execute("UPDATE po_headers SET status=? WHERE id=?", (status, poid))
@@ -883,6 +912,243 @@ def update_jwo(jwoid: int, data: dict):
             pass
     return
 
+# ── GRN quantity control ──────────────────────────────────────────────────────
+
+def _grn_accepted_for_po_line(conn, po_number: str, material_code: str, exclude_grn_id: int | None = None) -> float:
+    sql = """SELECT COALESCE(SUM(gl.accepted_qty),0) FROM grn_lines gl
+        JOIN grn_headers gh ON gh.id = gl.grn_id
+        WHERE gh.reference_number=? AND gl.material_code=?
+        AND gh.status NOT IN ('Cancelled','Rejected')"""
+    params: list = [po_number, material_code]
+    if exclude_grn_id:
+        sql += " AND gh.id != ?"
+        params.append(exclude_grn_id)
+    row = conn.execute(sql, params).fetchone()
+    return float(row[0] if row else 0)
+
+
+def _validate_po_grn(conn, po_number: str, lines: list, exclude_grn_id: int | None = None) -> None:
+    from ..services.document_qty_control import tolerance_pct, validate_receive_qty
+
+    po = conn.execute("SELECT * FROM po_headers WHERE po_number=?", (po_number,)).fetchone()
+    if not po:
+        raise ValueError(f"PO {po_number} not found")
+    if (po["status"] or "") in ("Closed", "Cancelled"):
+        raise ValueError(f"PO {po_number} is {po['status']} — further GRN not allowed")
+    po_lines = {
+        r["material_code"]: dict(r)
+        for r in conn.execute("SELECT * FROM po_lines WHERE po_id=?", (po["id"],)).fetchall()
+    }
+    for ln in lines or []:
+        code = ln.get("material_code", "")
+        if code not in po_lines:
+            raise ValueError(f"Material {code} is not on PO {po_number}")
+        pl = po_lines[code]
+        ordered = float(pl.get("po_qty") or 0)
+        already = _grn_accepted_for_po_line(conn, po_number, code, exclude_grn_id)
+        tol = tolerance_pct(pl.get("material_type", ""), code)
+        incoming = float(ln.get("accepted_qty") or ln.get("received_qty") or 0)
+        validate_receive_qty(
+            ordered, already, incoming, tol, doc_label=f"PO {po_number} / {code}"
+        )
+
+
+def _apply_po_grn_accepted(conn, po_number: str, lines: list, *, subtract: bool = False) -> None:
+    po = conn.execute("SELECT id, status FROM po_headers WHERE po_number=?", (po_number,)).fetchone()
+    if not po:
+        return
+    sign = -1 if subtract else 1
+    for ln in lines or []:
+        code = ln.get("material_code", "")
+        qty = float(ln.get("accepted_qty") or ln.get("received_qty") or 0) * sign
+        conn.execute(
+            "UPDATE po_lines SET grn_accepted_qty = MAX(0, COALESCE(grn_accepted_qty,0) + ?) WHERE po_id=? AND material_code=?",
+            (qty, po["id"], code),
+        )
+
+
+def _maybe_close_po_after_grn(conn, po_number: str) -> None:
+    from ..services.document_qty_control import po_should_auto_close, tolerance_pct
+
+    po = conn.execute("SELECT * FROM po_headers WHERE po_number=?", (po_number,)).fetchone()
+    if not po:
+        return
+    lines = conn.execute("SELECT * FROM po_lines WHERE po_id=?", (po["id"],)).fetchall()
+    if not lines:
+        return
+    all_done = True
+    has_qty_line = False
+    for pl in lines:
+        ordered = float(pl["po_qty"] or 0)
+        if ordered <= 0:
+            continue
+        has_qty_line = True
+        received = float(pl["grn_accepted_qty"] or 0)
+        tol = tolerance_pct(pl["material_type"] or "", pl["material_code"] or "")
+        if not po_should_auto_close(ordered, received, tol):
+            all_done = False
+            break
+    if all_done and has_qty_line:
+        conn.execute("UPDATE po_headers SET status='Closed' WHERE id=?", (po["id"],))
+
+
+def _post_grn_inventory_sync(conn, grn_id: int, grn_number: str, data: dict) -> None:
+    """Grey / printed stock sync — runs once per GRN (inventory_posted guard)."""
+    row = conn.execute("SELECT inventory_posted FROM grn_headers WHERE id=?", (grn_id,)).fetchone()
+    if row and int(row["inventory_posted"] or 0):
+        return
+    lines = data.get("lines", [])
+    # ── PO Receipt → Grey Tracker sync ────────────────────────────────────────
+    if data.get("grn_type") == "PO Receipt":
+        try:
+            gconn = sqlite3.connect(_grey_db_path())
+            gconn.row_factory = sqlite3.Row
+            ref = data.get("reference_number", "")
+            for ln in lines:
+                mat_code = ln.get("material_code", "")
+                tracker = gconn.execute(
+                    """SELECT id, material_code, material_name FROM grey_tracker
+                    WHERE po_number=? AND material_code=? ORDER BY id DESC LIMIT 1""",
+                    (ref, mat_code),
+                ).fetchone()
+                if tracker:
+                    accepted = float(ln.get("accepted_qty", 0))
+                    gconn.execute(
+                        """UPDATE grey_tracker SET
+                        factory_qty = COALESCE(factory_qty,0) + ?,
+                        received_qty = COALESCE(received_qty,0) + ?,
+                        status = 'At Factory', updated_at = ? WHERE id=?""",
+                        (accepted, accepted, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tracker["id"]),
+                    )
+                    gconn.execute(
+                        """INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
+                        material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            datetime.now().strftime("%Y-%m-%d"),
+                            tracker["id"],
+                            tracker["material_code"],
+                            tracker["material_name"],
+                            "GRN - Received at Factory",
+                            accepted,
+                            "MTR",
+                            "Supplier",
+                            "Factory",
+                            grn_number,
+                            f"GRN: {grn_number}",
+                        ),
+                    )
+            gconn.commit()
+            gconn.close()
+        except Exception as e:
+            _log.warning("PO GRN sync error: %s", e)
+
+    if data.get("grn_type") == "JWO Receipt":
+        try:
+            gconn = sqlite3.connect(_grey_db_path())
+            gconn.row_factory = sqlite3.Row
+            ref = data.get("reference_number", "")
+            gconn.execute(
+                """CREATE TABLE IF NOT EXISTS printed_fabric_stock (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fabric_code TEXT NOT NULL, fabric_name TEXT DEFAULT '',
+                printer TEXT DEFAULT '', qty REAL DEFAULT 0,
+                jwo_ref TEXT DEFAULT '', grn_ref TEXT DEFAULT '',
+                receive_date TEXT DEFAULT '', status TEXT DEFAULT 'Unchecked',
+                created_at TEXT DEFAULT (datetime('now')))"""
+            )
+            for ln in lines:
+                mat_code = ln.get("material_code", "")
+                tracker = gconn.execute(
+                    """SELECT id, material_code, material_name FROM grey_tracker
+                    WHERE job_work_order_no=? OR material_code=?
+                    ORDER BY id DESC LIMIT 1""",
+                    (ref, mat_code),
+                ).fetchone()
+                if tracker:
+                    gconn.execute(
+                        """UPDATE grey_tracker SET
+                        printed_fabric_qty = COALESCE(printed_fabric_qty,0) + ?,
+                        status='Printed Fabric Received', updated_at=? WHERE id=?""",
+                        (
+                            float(ln.get("accepted_qty", 0)),
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            tracker["id"],
+                        ),
+                    )
+                    gconn.execute(
+                        """INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
+                        material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            datetime.now().strftime("%Y-%m-%d"),
+                            tracker["id"],
+                            tracker["material_code"],
+                            tracker["material_name"],
+                            "Printed Fabric Received",
+                            float(ln.get("accepted_qty", 0)),
+                            "MTR",
+                            "Printer",
+                            "Checking Warehouse",
+                            grn_number,
+                            f"GRN: {grn_number}",
+                        ),
+                    )
+                gconn.execute(
+                    """INSERT INTO printed_fabric_stock
+                    (fabric_code, fabric_name, printer, qty, jwo_ref, grn_ref, receive_date)
+                    VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        ln.get("material_code", ""),
+                        ln.get("material_name", ""),
+                        data.get("party_name", ""),
+                        float(ln.get("accepted_qty", 0)),
+                        ref,
+                        grn_number,
+                        datetime.now().strftime("%Y-%m-%d"),
+                    ),
+                )
+            gconn.commit()
+            gconn.close()
+        except Exception as e:
+            _log.warning("JWO GRN sync error: %s", e)
+
+    conn.execute("UPDATE grn_headers SET inventory_posted=1 WHERE id=?", (grn_id,))
+
+
+def get_po_receive_balance(po_number: str) -> dict | None:
+    from ..services.document_qty_control import max_allowed_receive, tolerance_pct
+
+    conn = _connect()
+    po = conn.execute("SELECT * FROM po_headers WHERE po_number=?", (po_number,)).fetchone()
+    if not po:
+        conn.close()
+        return None
+    lines_out = []
+    for pl in conn.execute("SELECT * FROM po_lines WHERE po_id=?", (po["id"],)).fetchall():
+        pl = dict(pl)
+        ordered = float(pl.get("po_qty") or 0)
+        accepted = float(pl.get("grn_accepted_qty") or 0)
+        if accepted <= 0:
+            accepted = _grn_accepted_for_po_line(conn, po_number, pl["material_code"])
+        tol = tolerance_pct(pl.get("material_type", ""), pl["material_code"])
+        cap = max_allowed_receive(ordered, tol)
+        lines_out.append({
+            **pl,
+            "grn_accepted_qty": accepted,
+            "max_receive_qty": cap,
+            "balance_qty": round(max(0.0, cap - accepted), 6),
+            "tolerance_pct": tol,
+        })
+    conn.close()
+    return {
+        "po_number": po_number,
+        "status": po["status"],
+        "lines": lines_out,
+        "grn_blocked": (po["status"] or "") in ("Closed", "Cancelled"),
+    }
+
+
 # ── GRN ───────────────────────────────────────────────────────────────────────
 def list_grns(status=None):
     conn = _connect()
@@ -897,114 +1163,93 @@ def list_grns(status=None):
 
 def create_grn(data: dict):
     conn = _connect()
-    num = _next_num(conn, 'grn_headers', 'grn_number', 'GRN')
-    lines = data.get('lines', [])
-    total = sum(l.get('amount', l.get('accepted_qty',0)*l.get('rate',0)) for l in lines)
-    conn.execute("""INSERT INTO grn_headers(grn_number,grn_date,grn_type,reference_number,party_name,challan_no,
-        invoice_no,invoice_date,vehicle_no,transporter,warehouse,so_reference,total_value,status,remarks)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (num, data.get('grn_date') or datetime.now().strftime('%Y-%m-%d'),
-        data.get('grn_type') or 'PO Receipt', data.get('reference_number') or '',
-        data.get('party_name') or '', data.get('challan_no') or '',
-        data.get('invoice_no') or '', data.get('invoice_date') or '',
-        data.get('vehicle_no') or '', data.get('transporter') or '',
-        data.get('warehouse') or '', data.get('so_reference') or '',
-        total, 'Draft', data.get('remarks') or ''))
+    lines = data.get("lines", [])
+    ref = (data.get("reference_number") or "").strip()
+    if data.get("grn_type") == "PO Receipt" and ref:
+        _validate_po_grn(conn, ref, lines)
+    num = _next_num(conn, "grn_headers", "grn_number", "GRN")
+    total = sum(
+        float(l.get("amount") or 0)
+        if l.get("amount") not in (None, "")
+        else float(l.get("accepted_qty") or 0) * float(l.get("rate") or 0)
+        for l in lines
+    )
+    conn.execute(
+        """INSERT INTO grn_headers(grn_number,grn_date,grn_type,reference_number,party_name,challan_no,
+        invoice_no,invoice_date,vehicle_no,transporter,warehouse,so_reference,total_value,status,remarks,inventory_posted)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+        (
+            num,
+            data.get("grn_date") or datetime.now().strftime("%Y-%m-%d"),
+            data.get("grn_type") or "PO Receipt",
+            ref,
+            data.get("party_name") or "",
+            data.get("challan_no") or "",
+            data.get("invoice_no") or "",
+            data.get("invoice_date") or "",
+            data.get("vehicle_no") or "",
+            data.get("transporter") or "",
+            data.get("warehouse") or "",
+            data.get("so_reference") or "",
+            total,
+            "Draft",
+            data.get("remarks") or "",
+        ),
+    )
     grnid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in lines:
-        amt = ln.get('amount', ln.get('accepted_qty',0)*ln.get('rate',0))
-        conn.execute("""INSERT INTO grn_lines(grn_id,material_code,material_name,material_type,po_qty,received_qty,accepted_qty,rejected_qty,unit,rate,amount,qc_status,rejection_reason)
+        amt = ln.get("amount", ln.get("accepted_qty", 0) * ln.get("rate", 0))
+        conn.execute(
+            """INSERT INTO grn_lines(grn_id,material_code,material_name,material_type,po_qty,received_qty,accepted_qty,rejected_qty,unit,rate,amount,qc_status,rejection_reason)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (grnid, ln['material_code'], ln.get('material_name',''), ln.get('material_type','RM'),
-            ln.get('po_qty',0), ln.get('received_qty',0), ln.get('accepted_qty',0),
-            ln.get('rejected_qty',0), ln.get('unit','PCS'), ln.get('rate',0), amt,
-            ln.get('qc_status','Pending'), ln.get('rejection_reason','')))
+            (
+                grnid,
+                ln["material_code"],
+                ln.get("material_name", ""),
+                ln.get("material_type", "RM"),
+                ln.get("po_qty", 0),
+                ln.get("received_qty", 0),
+                ln.get("accepted_qty", 0),
+                ln.get("rejected_qty", 0),
+                ln.get("unit", "PCS"),
+                ln.get("rate", 0),
+                amt,
+                ln.get("qc_status", "Pending"),
+                ln.get("rejection_reason", ""),
+            ),
+        )
+    if data.get("grn_type") == "PO Receipt" and ref:
+        _apply_po_grn_accepted(conn, ref, lines)
+        _maybe_close_po_after_grn(conn, ref)
+    _post_grn_inventory_sync(conn, grnid, num, data)
+    conn.commit()
+    conn.close()
+    return num
 
-    # ── PO Receipt → Grey Tracker sync ────────────────────────────────────────
-    if data.get('grn_type') == 'PO Receipt':
-        try:
-            import os as _os
-            _grey_db = _os.environ.get("GREY_DB_PATH",
-                _os.path.join(_os.path.dirname(__file__), "..", "grey.db"))
-            gconn = sqlite3.connect(_grey_db)
-            gconn.row_factory = sqlite3.Row
-            ref = data.get('reference_number', '')
-            for ln in lines:
-                mat_code = ln.get('material_code', '')
-                tracker = gconn.execute("""SELECT id, material_code, material_name
-                    FROM grey_tracker WHERE po_number=? AND material_code=?
-                    ORDER BY id DESC LIMIT 1""", (ref, mat_code)).fetchone()
-                if tracker:
-                    accepted = float(ln.get('accepted_qty', 0))
-                    gconn.execute("""UPDATE grey_tracker SET
-                        factory_qty = COALESCE(factory_qty,0) + ?,
-                        received_qty = COALESCE(received_qty,0) + ?,
-                        status = 'At Factory', updated_at = ? WHERE id=?""",
-                        (accepted, accepted, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), tracker['id']))
-                    gconn.execute("""INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
-                        material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                        (datetime.now().strftime('%Y-%m-%d'), tracker['id'],
-                        tracker['material_code'], tracker['material_name'],
-                        'GRN - Received at Factory', accepted,
-                        'MTR', 'Supplier', 'Factory', num, f"GRN: {num}"))
-            gconn.commit(); gconn.close()
-        except Exception as e:
-            print(f"PO GRN sync error: {e}")
 
-    # ── JWO Receipt → Printed Fabric Stock sync ───────────────────────────────
-    if data.get('grn_type') == 'JWO Receipt':
-        try:
-            import os as _os
-            _grey_db = _os.environ.get("GREY_DB_PATH",
-                _os.path.join(_os.path.dirname(__file__), "..", "grey.db"))
-            gconn = sqlite3.connect(_grey_db)
-            gconn.row_factory = sqlite3.Row
-            ref = data.get('reference_number','')
-            # Create table once before loop
-            gconn.execute("""CREATE TABLE IF NOT EXISTS printed_fabric_stock (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fabric_code TEXT NOT NULL, fabric_name TEXT DEFAULT '',
-                printer TEXT DEFAULT '', qty REAL DEFAULT 0,
-                jwo_ref TEXT DEFAULT '', grn_ref TEXT DEFAULT '',
-                receive_date TEXT DEFAULT '', status TEXT DEFAULT 'Unchecked',
-                created_at TEXT DEFAULT (datetime('now')))""")
-            for ln in lines:
-                mat_code = ln.get('material_code','')
-                tracker = gconn.execute("""SELECT id, material_code, material_name FROM grey_tracker
-                    WHERE job_work_order_no=? OR material_code=?
-                    ORDER BY id DESC LIMIT 1""", (ref, mat_code)).fetchone()
-                if tracker:
-                    gconn.execute("""UPDATE grey_tracker SET
-                        printed_fabric_qty = COALESCE(printed_fabric_qty,0) + ?,
-                        status='Printed Fabric Received', updated_at=? WHERE id=?""",
-                        (float(ln.get('accepted_qty',0)),
-                        datetime.now().strftime('%Y-%m-%d %H:%M:%S'), tracker['id']))
-                    gconn.execute("""INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
-                        material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                        (datetime.now().strftime('%Y-%m-%d'), tracker['id'],
-                        tracker['material_code'], tracker['material_name'],
-                        'Printed Fabric Received', float(ln.get('accepted_qty',0)),
-                        'MTR', 'Printer', 'Checking Warehouse', num, f"GRN: {num}"))
-                # Insert to printed_fabric_stock for EVERY line (outside if tracker)
-                gconn.execute("""INSERT INTO printed_fabric_stock
-                    (fabric_code, fabric_name, printer, qty, jwo_ref, grn_ref, receive_date)
-                    VALUES (?,?,?,?,?,?,?)""",
-                    (ln.get('material_code',''), ln.get('material_name',''),
-                    data.get('party_name',''), float(ln.get('accepted_qty',0)),
-                    ref, num, datetime.now().strftime('%Y-%m-%d')))
-            gconn.commit(); gconn.close()
-        except Exception as e:
-            print(f"JWO GRN sync error: {e}")
-
-    conn.commit(); conn.close(); return num
-
-def update_grn_status(grnid: int, status: str, qc_by: str = ''):
+def update_grn_status(grnid: int, status: str, qc_by: str = ""):
     conn = _connect()
-    conn.execute("UPDATE grn_headers SET status=?,qc_checked_by=?,qc_date=? WHERE id=?",
-        (status, qc_by, datetime.now().strftime('%Y-%m-%d'), grnid))
-    conn.commit(); conn.close()
+    hdr = conn.execute("SELECT * FROM grn_headers WHERE id=?", (grnid,)).fetchone()
+    if not hdr:
+        conn.close()
+        return
+    prev_status = hdr["status"] or ""
+    lines = [dict(l) for l in conn.execute("SELECT * FROM grn_lines WHERE grn_id=?", (grnid,)).fetchall()]
+    ref = (hdr["reference_number"] or "").strip()
+    if status in ("Cancelled", "Rejected") and prev_status not in ("Cancelled", "Rejected"):
+        if hdr["grn_type"] == "PO Receipt" and ref:
+            _apply_po_grn_accepted(conn, ref, lines, subtract=True)
+        conn.execute("UPDATE grn_headers SET inventory_posted=0 WHERE id=?", (grnid,))
+    conn.execute(
+        "UPDATE grn_headers SET status=?,qc_checked_by=?,qc_date=? WHERE id=?",
+        (status, qc_by, datetime.now().strftime("%Y-%m-%d"), grnid),
+    )
+    if status in ("Posted", "Verified") and int(hdr["inventory_posted"] or 0) == 0:
+        data = dict(hdr)
+        data["lines"] = lines
+        _post_grn_inventory_sync(conn, grnid, hdr["grn_number"], data)
+    conn.commit()
+    conn.close()
 
 def get_purchase_stats():
     conn = _connect()

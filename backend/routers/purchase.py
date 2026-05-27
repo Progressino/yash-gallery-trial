@@ -8,7 +8,7 @@ from ..db.purchase_db import (
     list_prs, create_pr, approve_pr, reject_pr, update_pr_status, create_pos_from_pr, mark_pr_lines_ordered,
     list_pos, create_po, update_po_status, update_po,
     list_jwos, create_jwo, update_jwo_status, update_jwo, get_po_by_number, get_jwo_by_number,
-    list_grns, create_grn, update_grn_status,
+    list_grns, create_grn, update_grn_status, get_po_receive_balance,
     list_mins, create_min, update_min_status, get_min_by_number,
     list_gate_passes, create_gate_pass, get_gate_pass_by_number,
     get_purchase_stats,
@@ -242,12 +242,16 @@ def post_mark_pr_ordered(prid: int, body: MarkOrderedIn):
 
 @router.post("/po/from-pr")
 def post_po_from_pr(body: POFromPRIn):
-    po_numbers = create_pos_from_pr(
-        body.pr_id,
-        [l.model_dump() for l in body.lines],
-        body.delivery_date or '',
-        body.payment_terms or 'Immediate',
-    )
+    try:
+        po_numbers = create_pos_from_pr(
+            body.pr_id,
+            [l.model_dump() for l in body.lines],
+            body.delivery_date or '',
+            body.payment_terms or 'Immediate',
+        )
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"po_numbers": po_numbers, "count": len(po_numbers)}
 
 # ── Purchase Orders ───────────────────────────────────────────────────────────
@@ -257,7 +261,11 @@ def get_pos(status: Optional[str] = None):
 
 @router.post("/po")
 def post_po(body: POIn):
-    num = create_po(body.model_dump())
+    try:
+        num = create_po(body.model_dump())
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"po_number": num}
 
 @router.patch("/po/{poid}/status")
@@ -363,6 +371,15 @@ def get_po_by_num(po_number: str):
         raise HTTPException(status_code=404, detail="PO not found")
     return doc
 
+
+@router.get("/po/{po_number}/receive-balance")
+def po_receive_balance(po_number: str):
+    bal = get_po_receive_balance(po_number)
+    if not bal:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="PO not found")
+    return bal
+
 @router.get("/jwo/by-number/{jwo_number}")
 def get_jwo_by_num(jwo_number: str):
     doc = get_jwo_by_number(jwo_number)
@@ -401,7 +418,11 @@ def get_grns(status: Optional[str] = None):
 
 @router.post("/grn")
 def post_grn(body: GRNIn):
-    num = create_grn(body.model_dump())
+    try:
+        num = create_grn(body.model_dump())
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"grn_number": num}
 
 @router.patch("/grn/{grnid}/verify")

@@ -202,8 +202,19 @@ def _next_key(conn, po_number, material_code):
     return f"GT-{int(row[0]) + 1:04d}"
 
 
+def _ledger_exists(conn, tracker_id: int, txn_type: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM grey_ledger WHERE tracker_id=? AND transaction_type=? LIMIT 1",
+        (tracker_id, txn_type),
+    ).fetchone()
+    return row is not None
+
+
 def _add_ledger_entry(conn, tracker_id, material_code, material_name,
-                       txn_type, qty, unit, from_loc, to_loc, ref, remarks):
+                       txn_type, qty, unit, from_loc, to_loc, ref, remarks, *, once: bool = False):
+    """Append ledger row. If once=True, skip when same tracker_id + transaction_type exists."""
+    if once and _ledger_exists(conn, tracker_id, txn_type):
+        return False
     conn.execute(
         """INSERT INTO grey_ledger(entry_date,tracker_id,material_code,material_name,
         transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
@@ -211,6 +222,7 @@ def _add_ledger_entry(conn, tracker_id, material_code, material_name,
         (datetime.now().strftime("%Y-%m-%d"), tracker_id, material_code, material_name,
          txn_type, qty, unit, from_loc, to_loc, ref, remarks),
     )
+    return True
 
 
 def list_grey(status=None):
@@ -282,6 +294,21 @@ def vendor_dispatch(gid, bilty_no, transporter, dispatch_date, expected_arrival,
         conn.close()
         return False
     q = float(dispatched_qty or 0)
+    if q <= 0:
+        conn.close()
+        raise ValueError("Dispatched quantity must be greater than zero")
+    in_transit = float(row["in_transit_qty"] or 0)
+    status = (row["status"] or "").strip()
+    # Idempotent: same bilty already dispatched — do not post inventory again
+    if status == "In Transit" and in_transit > 0 and (row["bilty_no"] or "").strip() == (bilty_no or "").strip():
+        conn.close()
+        return True
+    if status not in ("PO Created", "Vendor Dispatch", ""):
+        conn.close()
+        raise ValueError(
+            f"Cannot dispatch — tracker is already '{status}'. "
+            "Use cancel/reverse workflow instead of dispatching again."
+        )
     conn.execute(
         """UPDATE grey_tracker SET bilty_no=?, transporter=?, dispatch_date=?, expected_arrival=?,
         vehicle_no=?, dispatched_qty=?, in_transit_qty=?, status=?, updated_at=? WHERE id=?""",
@@ -290,7 +317,7 @@ def vendor_dispatch(gid, bilty_no, transporter, dispatch_date, expected_arrival,
     )
     _add_ledger_entry(conn, gid, row["material_code"], row["material_name"],
                        "Vendor Dispatch / In Transit", q, "MTR", "Supplier", "In Transit",
-                       bilty_no, f"Transporter: {transporter}")
+                       bilty_no, f"Transporter: {transporter}", once=True)
     conn.commit()
     conn.close()
     return True
@@ -302,15 +329,37 @@ def arrive_at_transport(gid: int, qty: Optional[float] = None):
     if not row:
         conn.close()
         return False
-    move = float(qty if qty is not None else row["in_transit_qty"] or row["dispatched_qty"] or 0)
-    new_trans = float(row["transport_qty"] or 0) + move
-    new_it = max(float(row["in_transit_qty"] or 0) - move, 0)
+    in_transit = float(row["in_transit_qty"] or 0)
+    transport_qty = float(row["transport_qty"] or 0)
+    status = (row["status"] or "").strip()
+    if in_transit <= 0:
+        conn.close()
+        if transport_qty > 0 and status in ("At Transport Location", "Sent to Factory", "Sent to Printer"):
+            raise ValueError(
+                "Already received at transport — inventory was posted. "
+                "Use cancel/reverse instead of receiving again."
+            )
+        raise ValueError("Nothing in transit to receive at transport hub")
+    if status not in ("In Transit", "Vendor Dispatch"):
+        conn.close()
+        raise ValueError(f"Cannot receive at transport while status is '{status}'")
+    move = float(qty if qty is not None else in_transit)
+    if move <= 0:
+        conn.close()
+        raise ValueError("Receive quantity must be greater than zero")
+    if move > in_transit + 1e-9:
+        conn.close()
+        raise ValueError(f"Cannot receive {move} MTR — only {in_transit} MTR in transit")
+    new_trans = transport_qty + move
+    new_it = max(in_transit - move, 0)
+    new_status = "At Transport Location" if new_it <= 0 else "In Transit"
     conn.execute(
         "UPDATE grey_tracker SET transport_qty=?, in_transit_qty=?, status=?, updated_at=? WHERE id=?",
-        (new_trans, new_it, "At Transport Location", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), gid),
+        (new_trans, new_it, new_status, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), gid),
     )
     _add_ledger_entry(conn, gid, row["material_code"], row["material_name"],
-                       "At Transport Location", move, "MTR", "In Transit", "Transport Location", "", "Arrived")
+                       "At Transport Location", move, "MTR", "In Transit", "Transport Location", "", "Arrived",
+                       once=(new_it <= 0))
     conn.commit()
     conn.close()
     return True

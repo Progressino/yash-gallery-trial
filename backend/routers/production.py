@@ -12,6 +12,7 @@ from ..db.production_db import (
     get_item_routing, get_next_process, get_all_routing_steps,
     get_process_report, get_production_stats,
     save_mrp_result, get_last_mrp_result,
+    sync_mrp_commitments_from_run, get_mrp_commitments_for_so,
     soft_reserve_all, release_so_reservations,
     list_soft_reservations_v2, get_soft_reserved_by_material,
     list_reservations, create_reservation, release_reservation, get_reserved_qty,
@@ -599,6 +600,7 @@ def run_mrp_full(body: MRPRunBody):
     payload = calculate_mrp(body.so_numbers)
     save_mrp_result(body.so_numbers, payload)
     norm = _normalize_mrp_payload(payload)
+    sync_mrp_commitments_from_run(body.so_numbers, norm['materials'])
     return {
         'run_time': datetime.now().isoformat(),
         'so_numbers': body.so_numbers,
@@ -633,17 +635,34 @@ def get_mrp_lines_for_so(so_number: str = ''):
     so_numbers = data.get('so_numbers', [])
     if so_number and so_number not in so_numbers:
         return {'purchase_items': [], 'sfg_items': [], 'warning': f'{so_number} not in last MRP run'}
+    commitments = {c['material_code']: c for c in get_mrp_commitments_for_so(so_number)} if so_number else {}
     purchase_items, sfg_items = [], []
     for code, mat in result.items():
         so_qty = (sum(bd['qty_req'] for bd in mat.get('breakdown',[]) if bd.get('so_no')==so_number) if so_number else mat['total_req'])
         if so_qty <= 0: continue
+        commit = commitments.get(code, {})
+        remaining = commit.get('remaining_qty', so_qty)
         item_data = {'material_code': code, 'material_name': mat['name'], 'material_type': mat.get('type','RM'),
-                     'required_qty': round(so_qty,3), 'unit': mat['unit'], 'net_req': mat.get('net_req_with_soft', so_qty)}
+                     'required_qty': round(so_qty,3), 'unit': mat['unit'], 'net_req': mat.get('net_req_with_soft', so_qty),
+                     'mrp_qty': round(float(commit.get('mrp_qty') or so_qty), 3),
+                     'po_committed_qty': round(float(commit.get('po_committed_qty') or 0), 3),
+                     'jo_committed_qty': round(float(commit.get('jo_committed_qty') or 0), 3),
+                     'remaining_qty': round(float(remaining), 3),
+                     'can_create_po': bool(commit.get('can_create_po', remaining > 0)),
+                     'can_create_jo': bool(commit.get('can_create_jo', remaining > 0)),
+                     'commitment_status': commit.get('status', 'Open')}
         if mat.get('type','').upper() == 'SFG':
             sfg_items.append(item_data)
         else:
             purchase_items.append(item_data)
     return {'so_number': so_number, 'purchase_items': sorted(purchase_items, key=lambda x: x['material_type']), 'sfg_items': sfg_items}
+
+
+@router.get("/mrp/commitments")
+def mrp_commitments(so_number: str = ''):
+    if not so_number:
+        raise HTTPException(400, 'so_number is required')
+    return get_mrp_commitments_for_so(so_number)
 
 @router.post("/mrp/soft-reserve-all")
 def mrp_soft_reserve_all():

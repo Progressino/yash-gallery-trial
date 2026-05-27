@@ -236,7 +236,8 @@ export default function GreyFabric() {
   })
   const arriveMut = useMutation({
     mutationFn: ({ id, qty }: { id: number; qty?: number }) => api.post(`/grey/${id}/arrive-transport`, { qty }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); qc.invalidateQueries({ queryKey: ['grey-stats'] }) },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); qc.invalidateQueries({ queryKey: ['grey-stats'] }); setEditEntry(null) },
+    onError: (err: unknown) => { console.error('arrive-transport failed', err) },
   })
   const transferMut = useMutation({
     mutationFn: ({ id, body }: { id: number; body: object }) => api.post(`/grey/${id}/transfer`, body),
@@ -532,7 +533,18 @@ export default function GreyFabric() {
                     vehicle_no: editEntry.vehicle_no || '',
                   })
                 }} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-medium">Vendor dispatch → In transit</button>
-                <button onClick={() => arriveMut.mutate({ id: editEntry.id })} className="px-3 py-2 bg-cyan-600 text-white rounded-lg text-xs font-medium">Arrive transport hub</button>
+                <button
+                  onClick={() => arriveMut.mutate({ id: editEntry.id })}
+                  disabled={arriveMut.isPending || editEntry.status !== 'In Transit' || (editEntry.in_transit_qty ?? 0) <= 0}
+                  title={
+                    editEntry.status !== 'In Transit' || (editEntry.in_transit_qty ?? 0) <= 0
+                      ? 'Already received at transport or nothing in transit'
+                      : 'Receive at transport (one-time stock post)'
+                  }
+                  className="px-3 py-2 bg-cyan-600 text-white rounded-lg text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {arriveMut.isPending ? 'Receiving…' : editEntry.status === 'At Transport Location' ? 'At transport ✓' : 'Arrive transport hub'}
+                </button>
                 <button onClick={() => { setTransferModal(editEntry); setTransferForm({ to_location: 'factory', qty: editEntry.transport_qty || 0 }) }} className="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs font-medium">Transfer from transport…</button>
                 <button onClick={() => { setQcModal(editEntry); setQcForm(f => ({ ...f, received_qty: editEntry.received_qty || editEntry.ordered_qty || 0, checked_qty: editEntry.checked_qty || 0, passed_qty: editEntry.passed_qty ?? 0, rejected_qty: editEntry.rejected_qty || 0, rework_qty: editEntry.rework_qty || 0 })) }} className="px-3 py-2 bg-amber-600 text-white rounded-lg text-xs font-medium">Record QC</button>
                 <button onClick={() => { setPrinterModal(editEntry); setPrinterForm(f => ({ ...f, issue_qty: editEntry.transport_qty || editEntry.printer_qty || 0 })) }} className="px-3 py-2 bg-orange-600 text-white rounded-lg text-xs font-medium">Issue to printer</button>

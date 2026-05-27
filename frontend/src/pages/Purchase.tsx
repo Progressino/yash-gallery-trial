@@ -43,7 +43,13 @@ interface IssueNote {
 }
 interface GRN { id: number; grn_number: string; grn_date: string; grn_type: string; party_name: string; status: string; total_value: number; reference_number?: string; challan_no?: string; invoice_no?: string; lines: GRNLine[] }
 interface GRNLine { id: number; material_code: string; material_name?: string; received_qty: number; accepted_qty: number; rejected_qty: number; qc_status: string; rate: number; amount: number; unit?: string }
-interface MRPLineItem { material_code: string; material_name: string; material_type: string; required_qty: number; net_req: number; unit: string; inputs?: { material_code: string; material_name: string; quantity: number; unit: string }[] }
+interface MRPLineItem {
+  material_code: string; material_name: string; material_type: string
+  required_qty: number; net_req: number; unit: string
+  mrp_qty?: number; po_committed_qty?: number; jo_committed_qty?: number
+  remaining_qty?: number; can_create_po?: boolean; can_create_jo?: boolean
+  inputs?: { material_code: string; material_name: string; quantity: number; unit: string }[]
+}
 interface MRPLinesResult { so_number: string; purchase_items: MRPLineItem[]; sfg_items: MRPLineItem[]; error?: string; warning?: string }
 interface POFromPRLine { supplier_id?: number; supplier_name: string; processor_id?: number; processor_name?: string; qty: number; rate: number; gst_pct: number; order_type?: 'PO' | 'JWO' }
 
@@ -656,7 +662,13 @@ export default function Purchase() {
     setGeneratingPRs(true); setGeneratedPRs([])
     const created: string[] = []
     try {
-      const toLine = (i: MRPLineItem) => ({ material_code: i.material_code, material_name: i.material_name, material_type: i.material_type, required_qty: i.net_req || i.required_qty, unit: i.unit })
+      const toLine = (i: MRPLineItem) => ({
+        material_code: i.material_code,
+        material_name: i.material_name,
+        material_type: i.material_type,
+        required_qty: (i.remaining_qty != null && i.remaining_qty > 0) ? i.remaining_qty : (i.net_req || i.required_qty),
+        unit: i.unit,
+      })
       const purchaseLines = mrpLinesData.purchase_items.filter(i => selectedPurchaseItems.has(i.material_code)).map(toLine)
       const jwLines = mrpLinesData.sfg_items.filter(i => selectedSFGItems.has(i.material_code)).map(toLine)
       if (purchaseLines.length > 0) {
@@ -798,11 +810,30 @@ export default function Purchase() {
       if (isPO) {
         const po = doc as PO
         setGRNForm(f => ({ ...f, grn_type: 'PO Receipt', reference_number: po.po_number, party_name: po.supplier_name }))
-        setGRNLines(po.lines.map(l => ({
+        let lines = po.lines.map(l => ({
           material_code: l.material_code, material_name: l.material_name,
           received_qty: l.po_qty, accepted_qty: l.po_qty, rejected_qty: 0,
           unit: l.unit || 'PCS', rate: l.rate, qc_status: 'Pending'
-        })))
+        }))
+        try {
+          const bal = await api.get(`/purchase/po/${encodeURIComponent(po.po_number)}/receive-balance`)
+          if (bal.data?.grn_blocked) {
+            setGrnAutoError(`PO ${po.po_number} is ${bal.data.status} — GRN blocked`)
+            setGrnAutoLoading(false)
+            return
+          }
+          const byCode = Object.fromEntries((bal.data.lines || []).map((bl: { material_code: string; balance_qty: number; grn_accepted_qty: number }) => [bl.material_code, bl]))
+          lines = po.lines.map(l => {
+            const b = byCode[l.material_code]
+            const accept = b ? Math.max(0, b.balance_qty ?? 0) : l.po_qty
+            return {
+              material_code: l.material_code, material_name: l.material_name,
+              received_qty: accept, accepted_qty: accept, rejected_qty: 0,
+              unit: l.unit || 'PCS', rate: l.rate, qc_status: 'Pending'
+            }
+          })
+        } catch { /* use full PO qty fallback */ }
+        setGRNLines(lines)
       } else {
         const jwo = doc as JWO
         setGRNForm(f => ({ ...f, grn_type: 'JWO Receipt', reference_number: jwo.jwo_number, party_name: jwo.processor_name }))
@@ -1256,20 +1287,22 @@ export default function Purchase() {
                                     onChange={e => setSelectedPurchaseItems(e.target.checked ? new Set(mrpLinesData.purchase_items.map(i => i.material_code)) : new Set())} />
                                 </th>
                                 <th className="px-3 py-2 text-left">Code</th><th className="px-3 py-2 text-left">Name</th>
-                                <th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-right">Net Required</th><th className="px-3 py-2 text-right">Unit</th>
+                                <th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-right">MRP Qty</th><th className="px-3 py-2 text-right">Committed</th><th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2 text-right">Unit</th>
                               </tr>
                             </thead>
                             <tbody>
                               {mrpLinesData.purchase_items.map(item => (
                                 <tr key={item.material_code} className="border-t border-gray-50 hover:bg-gray-50">
                                   <td className="px-3 py-2">
-                                    <input type="checkbox" checked={selectedPurchaseItems.has(item.material_code)}
+                                    <input type="checkbox" checked={selectedPurchaseItems.has(item.material_code)} disabled={(item.remaining_qty ?? 1) <= 0}
                                       onChange={e => setSelectedPurchaseItems(prev => { const n = new Set(prev); e.target.checked ? n.add(item.material_code) : n.delete(item.material_code); return n })} />
                                   </td>
                                   <td className="px-3 py-2 font-medium text-gray-800">{item.material_code}</td>
                                   <td className="px-3 py-2 text-gray-600">{item.material_name}</td>
                                   <td className="px-3 py-2"><span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{item.material_type}</span></td>
-                                  <td className="px-3 py-2 text-right font-semibold text-gray-800">{item.net_req || item.required_qty}</td>
+                                  <td className="px-3 py-2 text-right text-gray-700">{item.mrp_qty ?? item.required_qty}</td>
+                                  <td className="px-3 py-2 text-right text-amber-700">{(item.po_committed_qty ?? 0) + (item.jo_committed_qty ?? 0)}</td>
+                                  <td className="px-3 py-2 text-right font-semibold text-green-700">{item.remaining_qty ?? item.required_qty}</td>
                                   <td className="px-3 py-2 text-right text-gray-500">{item.unit}</td>
                                 </tr>
                               ))}

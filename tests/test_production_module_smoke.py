@@ -1000,3 +1000,115 @@ def test_jwo_create_keeps_explicit_input_when_distinct_from_output(isolated_modu
     line = j["lines"][0]
     assert line["input_material"] == "GF-RAYON-OPERATOR-PICK"
     assert float(line["input_qty"]) == 220.0
+
+
+def test_grey_arrive_transport_blocks_duplicate_receive(isolated_module_dbs, client):
+    """Second 'Receive at transport' click must not inflate transport_qty again."""
+    tracker, _ = _seed_grey_tracker(client, qty=100.0)
+    tid = tracker["id"]
+    client.post(
+        f"/api/grey/{tid}/vendor-dispatch",
+        json={
+            "bilty_no": "DUP-1",
+            "transporter": "T",
+            "dispatch_date": "2026-05-12",
+            "expected_arrival": "",
+            "dispatched_qty": 100,
+            "vehicle_no": "",
+        },
+    )
+    assert client.post(f"/api/grey/{tid}/arrive-transport", json={"qty": 100}).status_code == 200
+    snap = next(t for t in client.get("/api/grey").json() if t["id"] == tid)
+    assert float(snap["transport_qty"]) == 100.0
+    dup = client.post(f"/api/grey/{tid}/arrive-transport", json={"qty": 100})
+    assert dup.status_code == 400, dup.text
+    snap2 = next(t for t in client.get("/api/grey").json() if t["id"] == tid)
+    assert float(snap2["transport_qty"]) == 100.0
+
+
+def test_po_grn_respects_tolerance_and_blocks_over_receive(isolated_module_dbs, client):
+    from backend.db import purchase_db
+
+    po_body = {
+        "po_date": "2026-05-12",
+        "supplier_name": "Test Supplier",
+        "so_reference": "",
+        "lines": [
+            {
+                "material_code": "GF-TEST-GRN",
+                "material_name": "Grey Test",
+                "material_type": "GF",
+                "po_qty": 1000,
+                "unit": "MTR",
+                "rate": 10,
+                "gst_pct": 0,
+            }
+        ],
+    }
+    po_num = client.post("/api/purchase/po", json=po_body).json()["po_number"]
+    base_line = {
+        "material_code": "GF-TEST-GRN",
+        "material_name": "Grey Test",
+        "material_type": "GF",
+        "po_qty": 1000,
+        "unit": "MTR",
+        "rate": 10,
+    }
+    grn1 = {
+        "grn_type": "PO Receipt",
+        "reference_number": po_num,
+        "party_name": "Test Supplier",
+        "lines": [{**base_line, "received_qty": 900, "accepted_qty": 900, "rejected_qty": 0}],
+    }
+    assert client.post("/api/purchase/grn", json=grn1).status_code == 200
+    grn2 = {
+        **grn1,
+        "lines": [{**base_line, "received_qty": 150, "accepted_qty": 150, "rejected_qty": 0}],
+    }
+    assert client.post("/api/purchase/grn", json=grn2).status_code == 200
+    over = client.post(
+        "/api/purchase/grn",
+        json={**grn1, "lines": [{**base_line, "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0}]},
+    )
+    assert over.status_code == 400, over.text
+    bal = purchase_db.get_po_receive_balance(po_num)
+    assert bal is not None
+    assert float(bal["lines"][0]["grn_accepted_qty"]) == 1050.0
+
+
+def test_mrp_po_commitment_limits_duplicate_po_qty(isolated_module_dbs, client):
+    from backend.db import production_db
+
+    production_db.sync_mrp_commitments_from_run(
+        ["SO-COMMIT-1"],
+        {
+            "FAB-A": {
+                "name": "Fabric A",
+                "unit": "MTR",
+                "type": "RM",
+                "breakdown": [{"so_no": "SO-COMMIT-1", "sku": "SKU1", "qty_req": 100}],
+            }
+        },
+    )
+    line = {
+        "material_code": "FAB-A",
+        "material_name": "Fabric A",
+        "material_type": "RM",
+        "po_qty": 70,
+        "unit": "MTR",
+        "rate": 1,
+        "gst_pct": 0,
+    }
+    po1 = {
+        "po_date": "2026-05-12",
+        "supplier_name": "Sup",
+        "so_reference": "SO-COMMIT-1",
+        "lines": [line],
+    }
+    assert client.post("/api/purchase/po", json=po1).status_code == 200
+    po2 = {**po1, "lines": [{**line, "po_qty": 40}]}
+    blocked = client.post("/api/purchase/po", json=po2)
+    assert blocked.status_code == 400, blocked.text
+    commits = production_db.get_mrp_commitments_for_so("SO-COMMIT-1")
+    fab = next(c for c in commits if c["material_code"] == "FAB-A")
+    assert float(fab["remaining_qty"]) == 30.0
