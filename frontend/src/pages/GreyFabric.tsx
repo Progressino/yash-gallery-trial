@@ -152,16 +152,23 @@ export default function GreyFabric() {
   const { data: stats } = useQuery<GreyStats>({
     queryKey: ['grey-stats'],
     queryFn: () => api.get('/grey/stats').then(r => r.data),
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   })
   const { data: locData } = useQuery({
     queryKey: ['grey-locations'],
     queryFn: () => api.get('/grey/locations').then(r => r.data),
     enabled: tab === 'locations' || tab === 'dashboard',
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   })
   const { data: entries = [] } = useQuery<GreyEntry[]>({
     queryKey: ['grey', filterStatus],
     queryFn: () => api.get('/grey' + (filterStatus ? `?status=${encodeURIComponent(filterStatus)}` : '')).then(r => r.data),
     enabled: tab === 'tracker' || tab === 'dashboard' || tab === 'jobwork',
+    staleTime: 10_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: false,
   })
   const { data: ledger = [] } = useQuery<LedgerEntry[]>({
     queryKey: ['grey-ledger'],
@@ -192,6 +199,9 @@ export default function GreyFabric() {
     queryKey: ['grey-printer-issues'],
     queryFn: () => api.get('/grey/printer-issue/list').then(r => r.data),
     enabled: tab === 'jobwork',
+    staleTime: 10_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: false,
   })
   const { data: qcEvents = [] } = useQuery({
     queryKey: ['grey-qc-events'],
@@ -200,14 +210,20 @@ export default function GreyFabric() {
   })
   // Printed Fabric queries
   const { data: printedFabricUnchecked = [] } = useQuery({
-    queryKey: ['printed-fabric-unchecked'],
+    queryKey: ['printed-fabric-unchecked', tab, pfSubTab],
     queryFn: () => api.get('/grey/printed-fabric/unchecked').then(r => r.data),
-    enabled: tab === 'printed-fabric',
+    enabled: tab === 'printed-fabric' && pfSubTab === 'unchecked',
+    staleTime: 5_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: false,
   })
   const { data: printedFabricChecked = [] } = useQuery({
-    queryKey: ['printed-fabric-checked'],
+    queryKey: ['printed-fabric-checked', tab, pfSubTab],
     queryFn: () => api.get('/grey/printed-fabric/checked').then(r => r.data),
     enabled: tab === 'printed-fabric' && pfSubTab === 'checked',
+    staleTime: 10_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: false,
   })
   const { data: pfReserveOptions } = useQuery({
     queryKey: ['printed-fabric-reserve-options'],
@@ -215,9 +231,12 @@ export default function GreyFabric() {
     enabled: tab === 'printed-fabric' && (pfSubTab === 'ready-to-cut' || showPFReserveForm),
   })
   const { data: printedReadyToCut = [] } = useQuery({
-    queryKey: ['printed-ready-to-cut'],
+    queryKey: ['printed-ready-to-cut', tab, pfSubTab],
     queryFn: () => api.get('/grey/printed-fabric/ready-to-cut').then(r => r.data),
     enabled: tab === 'printed-fabric' && pfSubTab === 'ready-to-cut',
+    staleTime: 10_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: false,
   })
 
   // ── Mutations ─────────────────────────────────────────────────────────────────

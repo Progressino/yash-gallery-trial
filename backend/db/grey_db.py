@@ -8,10 +8,26 @@ _DB = os.environ.get("GREY_DB_PATH", os.path.join(os.path.dirname(__file__), "..
 
 
 def _connect():
-    conn = sqlite3.connect(_DB)
+    conn = sqlite3.connect(_DB, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
     return conn
+
+
+def _fetchall_retry(conn: sqlite3.Connection, query: str, params: tuple = (), *, retries: int = 2):
+    last_err = None
+    for _ in range(retries + 1):
+        try:
+            return conn.execute(query, params).fetchall()
+        except sqlite3.OperationalError as e:
+            # Transient sqlite lock/contention; retry quickly before failing.
+            last_err = e
+    if last_err:
+        raise last_err
+    return []
 
 
 def _table_cols(conn, table: str) -> set:
@@ -187,6 +203,15 @@ def init_db():
         _add_col(conn, "fabric_checked_stock", name, decl)
 
     _repair_printed_fabric_partial_qc_rows(conn)
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_grey_tracker_status ON grey_tracker(status);
+        CREATE INDEX IF NOT EXISTS idx_grey_tracker_material ON grey_tracker(material_code);
+        CREATE INDEX IF NOT EXISTS idx_grey_ledger_material ON grey_ledger(material_code, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_printed_stock_unchecked ON printed_fabric_stock(status, fabric_code, jwo_ref, receive_date);
+        CREATE INDEX IF NOT EXISTS idx_printed_reserve_active ON printed_fabric_reservations(status, so_number, fabric_code);
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -945,7 +970,7 @@ def list_printed_fabric_unchecked():
     try:
         _repair_printed_fabric_partial_qc_rows(conn)
         conn.commit()
-        rows = conn.execute("""
+        rows = _fetchall_retry(conn, """
             SELECT fabric_code, fabric_name, printer,
             SUM(qty) as qty, jwo_ref,
             MAX(grn_ref) as grn_ref,
@@ -955,10 +980,10 @@ def list_printed_fabric_unchecked():
             GROUP BY fabric_code, jwo_ref
             HAVING SUM(qty) > 0.001
             ORDER BY receive_date DESC
-        """).fetchall()
+        """)
         conn.close()
         return [dict(r) for r in rows]
-    except Exception:
+    except sqlite3.Error:
         conn.close()
         return []
 
@@ -1093,10 +1118,10 @@ def list_printed_fabric_checked():
     """Printed fabric jo QC pass ho gaya."""
     conn = _connect()
     try:
-        rows = conn.execute("SELECT * FROM printed_fabric_checked_stock ORDER BY fabric_code").fetchall()
+        rows = _fetchall_retry(conn, "SELECT * FROM printed_fabric_checked_stock ORDER BY fabric_code")
         conn.close()
         return [dict(r) for r in rows]
-    except Exception:
+    except sqlite3.Error:
         conn.close()
         return []
 
@@ -1206,7 +1231,7 @@ def list_printed_fabric_ready_to_cut():
     """Printed fabric jo reserve ho gaya SO ke against — Ready to Cut."""
     conn = _connect()
     try:
-        rows = conn.execute("""
+        rows = _fetchall_retry(conn, """
             SELECT r.so_number, r.sku, r.fabric_code, r.fabric_name,
                    r.qty as reserved_qty, s.available_qty,
                    CASE WHEN s.available_qty >= 0 THEN 'Ready to Cut' ELSE 'Shortage' END as cut_status
@@ -1214,9 +1239,9 @@ def list_printed_fabric_ready_to_cut():
             LEFT JOIN printed_fabric_checked_stock s ON s.fabric_code = r.fabric_code
             WHERE r.status = 'Active'
             ORDER BY r.so_number
-        """).fetchall()
+        """)
         conn.close()
         return [dict(r) for r in rows]
-    except Exception:
+    except sqlite3.Error:
         conn.close()
         return []
