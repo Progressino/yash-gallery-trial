@@ -17,7 +17,7 @@ HOUR_LBLS = [
     "14-15", "15-16", "16-17", "17-18", "18-19", "19-20", "20-21",
 ]
 
-_PRODUCTION_LOG_LOCK = threading.Lock()
+_PRODUCTION_LOG_LOCK = threading.RLock()
 
 # Factory SOP — benchmark karigar ₹480/day; LTL tolerance % by daily-rate band.
 BENCHMARK_DAILY_RATE_RS = 480.0
@@ -265,6 +265,7 @@ def get_ltl_setup_table() -> dict:
     return {
         "ok": True,
         "tolerance_bands": preview.get("tolerance_bands", []),
+        "period_defaults": {"daily": 1, "weekly": 6, "monthly": 26},
         "overrides": overrides,
         "preview_rows": preview.get("rows", [])[:200],
     }
@@ -561,14 +562,19 @@ def target_control_preview(
     style: str = "",
     karigar_id: str = "",
     operation: str = "",
+    period: str = "daily",
 ) -> dict:
     """Central Target Control ledger — style matrix × karigar with formula + overrides."""
+    period_key = str(period or "daily").strip().lower()
+    period_days = {"daily": 1, "weekly": 6, "monthly": 26}.get(period_key, 1)
     sm = get_sheet_df("style_master")
     km = get_sheet_df("karigar_master")
     if sm.empty or km.empty:
         return {
             "date": date_str,
             "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
+            "period": period_key,
+            "period_days": period_days,
             "tolerance_bands": [
                 {"from_rs": lo, "to_rs": hi, "tolerance_pct": pct}
                 for lo, hi, pct in LTL_TOLERANCE_BANDS
@@ -579,6 +585,9 @@ def target_control_preview(
     sm = sm.copy()
     sm["Style"] = sm["Style"].astype(str).str.strip()
     sm["Operation"] = sm["Operation"].astype(str).str.strip()
+    if "Operation_Type" not in sm.columns:
+        sm["Operation_Type"] = "Medium"
+    sm["Operation_Type"] = sm["Operation_Type"].astype(str).str.strip().replace("", "Medium")
     if style:
         sm = sm[sm["Style"] == style.strip()]
     if operation:
@@ -608,6 +617,7 @@ def target_control_preview(
                 {
                     "Style": st,
                     "Operation": op,
+                    "Operation_Type": str(srow.get("Operation_Type", "Medium") or "Medium"),
                     "Karigar_ID": kid,
                     "Karigar_Name": km_names.get(clean_key(kid), ""),
                     "Daily_Rate_Rs": info["daily_rate_rs"],
@@ -616,6 +626,9 @@ def target_control_preview(
                     "Formula_LTL": info["formula_ltl"],
                     "Manual_Override": info["manual_override"] if info["manual_override"] else "",
                     "Final_Applied_LTL": info["applied_ltl"],
+                    "Final_Applied_LTL_Period": int(info["applied_ltl"] * period_days),
+                    "Target_For_Period": int(info["base_target"] * period_days),
+                    "Period": period_key,
                     "Target_Type": info["target_type"],
                     "LTL_Source": info["ltl_source"],
                 }
@@ -624,6 +637,8 @@ def target_control_preview(
     rows.sort(key=lambda r: (r["Style"], r["Operation"], r["Karigar_ID"]))
     return {
         "date": date_str,
+        "period": period_key,
+        "period_days": period_days,
         "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
         "tolerance_bands": [
             {"from_rs": lo, "to_rs": hi, "tolerance_pct": pct}
@@ -2054,14 +2069,52 @@ def performance_report(date_from: str, date_to: str) -> dict:
         "total_salary": float(perf["Salary"].sum()),
         "net_surplus": float(perf["Surplus"].sum()),
     }
+    op_type_breakup: list[dict[str, Any]] = []
+    try:
+        if not pl3.empty and "Style" in pl3.columns and "Operation" in pl3.columns:
+            sm = get_sheet_df("style_master")
+            if not sm.empty:
+                sm2 = sm.copy()
+                if "Operation_Type" not in sm2.columns:
+                    sm2["Operation_Type"] = "Medium"
+                sm2["Operation"] = sm2["Operation"].map(normalize_operation_name)
+                sm2["Style"] = sm2["Style"].astype(str).str.strip()
+                sm2["Operation_Type"] = sm2["Operation_Type"].astype(str).str.strip().replace("", "Medium")
+                p3 = pl3.copy()
+                p3["Operation"] = p3["Operation"].map(normalize_operation_name)
+                p3["Style"] = p3["Style"].astype(str).str.strip()
+                pm = p3.merge(sm2[["Style", "Operation", "Operation_Type"]], on=["Style", "Operation"], how="left")
+                pm["Operation_Type"] = pm["Operation_Type"].fillna("Medium")
+                ot = (
+                    pm.groupby("Operation_Type")
+                    .agg(
+                        Count=("Operation", "count"),
+                        Pieces=("Total_Pieces", "sum"),
+                        Piece_Value=("Piece_Value_Rs", "sum"),
+                        Avg_Eff=("Efficiency_%", "mean"),
+                    )
+                    .reset_index()
+                    .round(2)
+                )
+                op_type_breakup = ot.to_dict(orient="records")
+    except Exception:
+        op_type_breakup = []
     return {
         "ok": True,
         "rows": perf.fillna("").to_dict(orient="records"),
         "summary": summary,
+        "operation_type_breakup": op_type_breakup,
     }
 
 
-def update_style_operation(style: str, operation: str, *, target: int | None, rate_rs: float | None) -> dict:
+def update_style_operation(
+    style: str,
+    operation: str,
+    *,
+    target: int | None,
+    rate_rs: float | None,
+    operation_type: str | None = None,
+) -> dict:
     df = get_sheet_df("style_master")
     if df.empty:
         return {"ok": False, "message": "Style master empty"}
@@ -2073,6 +2126,13 @@ def update_style_operation(style: str, operation: str, *, target: int | None, ra
         df.at[idx, "Target"] = int(target)
     if rate_rs is not None:
         df.at[idx, "Rate_Rs"] = float(rate_rs)
+    if operation_type is not None:
+        ot = str(operation_type).strip().title()
+        if ot not in ("Easy", "Medium", "Hard"):
+            return {"ok": False, "message": "Operation type must be Easy, Medium, or Hard"}
+        if "Operation_Type" not in df.columns:
+            df["Operation_Type"] = "Medium"
+        df.at[idx, "Operation_Type"] = ot
     save_sheet_df("style_master", df)
     return {"ok": True, "message": "Updated"}
 
@@ -2274,7 +2334,14 @@ def _sync_employee_from_karigar(
     save_sheet_df("employee_master", dedupe_sheet("employee_master", em))
 
 
-def add_style_operation_row(style: str, operation: str, target: int, rate_rs: float) -> dict:
+def add_style_operation_row(
+    style: str,
+    operation: str,
+    target: int,
+    rate_rs: float,
+    *,
+    operation_type: str = "Medium",
+) -> dict:
     style_s = str(style).strip()
     op_s = str(operation).strip()
     if not style_s or not op_s:
@@ -2286,12 +2353,133 @@ def add_style_operation_row(style: str, operation: str, target: int, rate_rs: fl
         )
         if dup.any():
             return {"ok": False, "message": f"{style_s} / {op_s} already exists — edit or delete the duplicate first"}
+    operation_type = str(operation_type or "Medium").strip().title()
+    if operation_type not in ("Easy", "Medium", "Hard"):
+        return {"ok": False, "message": "Operation type must be Easy, Medium, or Hard"}
     df = pd.concat(
-        [df, pd.DataFrame([{"Style": style_s, "Operation": op_s, "Target": int(target), "Rate_Rs": float(rate_rs)}])],
+        [
+            df,
+            pd.DataFrame(
+                [
+                    {
+                        "Style": style_s,
+                        "Operation": op_s,
+                        "Target": int(target),
+                        "Rate_Rs": float(rate_rs),
+                        "Operation_Type": operation_type,
+                    }
+                ]
+            ),
+        ],
         ignore_index=True,
     )
     save_sheet_df("style_master", dedupe_sheet("style_master", df))
     return {"ok": True, "message": "Style operation added"}
+
+
+def delete_production_hour_entry(
+    *,
+    date_str: str,
+    karigar_id: str,
+    challan_no: str,
+    style: str,
+    operation: str,
+    hour_label: str,
+) -> dict:
+    """Delete one hour from production and purge related hourly aggregates if it becomes empty."""
+    if hour_label not in HOUR_LBLS:
+        return {"ok": False, "message": f"Unknown hour {hour_label}"}
+    hour_col = HOUR_COLS[HOUR_LBLS.index(hour_label)]
+    with _PRODUCTION_LOG_LOCK:
+        pl = get_sheet_df("production_log")
+        if pl.empty:
+            return {"ok": False, "message": "No production entries to delete."}
+        work = pl.copy()
+        mask = _mask_production_log(
+            work,
+            date_str=date_str,
+            karigar_id=karigar_id,
+            challan_no=challan_no,
+            style=style,
+            operation=operation,
+        )
+        if int(mask.sum()) <= 0:
+            return {"ok": False, "message": "No matching operation row found"}
+        idx = work[mask].index[0]
+        work.at[idx, hour_col] = 0
+        work.at[idx, sticker_in_col(hour_col)] = 0
+        work.at[idx, sticker_out_col(hour_col)] = 0
+        # If all hours are now zero, drop entire operation row.
+        remaining = 0
+        for hc in HOUR_COLS:
+            if hc == "H_13_14":
+                continue
+            remaining += int(safe_num(pd.Series([work.at[idx, hc]])).iloc[0])
+        if remaining <= 0:
+            work = work.drop(index=idx).reset_index(drop=True)
+            save_sheet_df("production_log", work)
+            return {
+                "ok": True,
+                "message": f"Deleted hour {hour_label}; operation row removed (no remaining pieces). Related reports updated.",
+                "removed": 1,
+                "hour_deleted": hour_label,
+            }
+        # Rebuild session using existing helper to keep all derived fields accurate.
+        row = work.loc[idx]
+        session_mask = _mask_production_log(
+            work,
+            date_str=str(row.get("Date", date_str)),
+            karigar_id=str(row.get("Karigar_ID", karigar_id)),
+            challan_no=str(row.get("Challan_No", challan_no)),
+            style=str(row.get("Style", style)),
+        )
+        session_rows = work[session_mask]
+        hour_entries: list[dict[str, Any]] = []
+        for _, srow in session_rows.iterrows():
+            op_name = normalize_operation_name(srow.get("Operation", ""))
+            for hc in HOUR_COLS:
+                if hc == "H_13_14":
+                    continue
+                pcs = int(safe_num(pd.Series([srow.get(hc, 0)])).iloc[0])
+                sin = int(safe_num(pd.Series([srow.get(sticker_in_col(hc), 0)])).iloc[0])
+                sout = int(safe_num(pd.Series([srow.get(sticker_out_col(hc), 0)])).iloc[0])
+                if pcs > 0 or sin > 0 or sout > 0:
+                    hour_entries.append(
+                        {
+                            "hour_col": hc,
+                            "operation": op_name,
+                            "pieces": pcs,
+                            "sticker_in": sin,
+                            "sticker_out": sout,
+                            "manual_pieces": sin == 0 and sout == 0,
+                        }
+                    )
+        # Remove old session rows first, then save fresh session.
+        work = _drop_production_session_rows(
+            work,
+            str(row.get("Date", date_str)),
+            str(row.get("Karigar_ID", karigar_id)),
+            str(row.get("Challan_No", challan_no)),
+            str(row.get("Style", style)),
+        )
+        save_sheet_df("production_log", work)
+        if hour_entries:
+            save_production_entry(
+                date_str=str(row.get("Date", date_str)),
+                karigar_id=str(row.get("Karigar_ID", karigar_id)),
+                karigar_name=str(row.get("Karigar_Name", "")),
+                challan_no=str(row.get("Challan_No", challan_no)),
+                style=str(row.get("Style", style)),
+                hour_entries=hour_entries,
+                saved_by="admin",
+                saved_by_name="hour-delete",
+            )
+        return {
+            "ok": True,
+            "message": f"Deleted hour {hour_label} and recalculated related session/report rows.",
+            "removed": 1,
+            "hour_deleted": hour_label,
+        }
 
 
 def add_karigar_master(

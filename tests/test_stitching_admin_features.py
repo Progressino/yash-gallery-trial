@@ -118,3 +118,35 @@ def test_ltl_setup_lists_overrides():
     table = svc.get_ltl_setup_table()
     assert table["ok"] is True
     assert any(o["Manual_LTL"] == 42 for o in table["overrides"])
+
+
+def test_delete_single_hour_recalculates_related_rows():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-HR", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    svc.save_production_entry(
+        date_str="2026-05-25",
+        karigar_id="K300",
+        karigar_name="Test",
+        challan_no="CH-300",
+        style="SKU-HR",
+        hour_entries=[
+            {"hour_col": "H_09_10", "operation": "Stitch", "pieces": 12},
+            {"hour_col": "H_10_11", "operation": "Stitch", "pieces": 8},
+        ],
+    )
+    out = svc.delete_production_hour_entry(
+        date_str="2026-05-25",
+        karigar_id="K300",
+        challan_no="CH-300",
+        style="SKU-HR",
+        operation="Stitch",
+        hour_label="9-10",
+    )
+    assert out["ok"] is True
+    rep = svc.production_entry_reports("2026-05-25", "K300")
+    assert rep["report2_hourly"]
+    hours = [str(r["Hour"]) for r in rep["report2_hourly"]]
+    assert "9-10" not in hours
+    assert "10-11" in hours

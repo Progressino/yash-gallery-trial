@@ -389,6 +389,37 @@ def test_compute_formula_ltl_sop_examples():
     assert svc.compute_formula_ltl(20, 500) == 18
 
 
+def test_target_control_preview_supports_weekly_monthly_period():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-P", "Operation": "Stitch", "Target": 100, "Rate_Rs": 3.0, "Operation_Type": "Hard"}]),
+    )
+    save_sheet_df(
+        "karigar_master",
+        pd.DataFrame([{"Karigar_ID": "K999", "Name": "P", "Skill": "Stitching", "Daily_Rate_Rs": 300}]),
+    )
+    weekly = svc.target_control_preview("2026-05-25", style="SKU-P", karigar_id="K999", period="weekly")
+    assert weekly["period"] == "weekly"
+    assert weekly["period_days"] == 6
+    assert weekly["rows"]
+    row = weekly["rows"][0]
+    assert row["Operation_Type"] == "Hard"
+    assert int(row["Final_Applied_LTL_Period"]) == int(row["Final_Applied_LTL"]) * 6
+
+    monthly = svc.target_control_preview("2026-05-25", style="SKU-P", karigar_id="K999", period="monthly")
+    assert monthly["period"] == "monthly"
+    assert monthly["period_days"] == 26
+
+
+def test_add_style_operation_accepts_operation_type():
+    out = svc.add_style_operation_row("SKU-OT", "Press", 60, 2.0, operation_type="Easy")
+    assert out["ok"] is True
+    sm = get_sheet_df("style_master")
+    hit = sm[(sm["Style"].astype(str) == "SKU-OT") & (sm["Operation"].astype(str) == "Press")]
+    assert not hit.empty
+    assert str(hit.iloc[0].get("Operation_Type", "")) == "Easy"
+
+
 def test_delete_challan():
     save_sheet_df(
         "challan_master",

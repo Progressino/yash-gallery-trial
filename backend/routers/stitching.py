@@ -90,6 +90,7 @@ class StyleOpBody(BaseModel):
     Operation: str
     Target: int
     Rate_Rs: float
+    Operation_Type: str = "Medium"
 
 
 class KarigarBody(BaseModel):
@@ -127,6 +128,7 @@ class StyleOpUpdateBody(BaseModel):
     Operation: str
     Target: Optional[int] = None
     Rate_Rs: Optional[float] = None
+    Operation_Type: Optional[str] = None
     admin_password: str
 
 
@@ -321,12 +323,14 @@ def target_control_preview(
     style: str = "",
     karigar_id: str = "",
     operation: str = "",
+    period: str = "daily",
 ):
     return svc.target_control_preview(
         date or str(date.today()),
         style=style,
         karigar_id=karigar_id,
         operation=operation,
+        period=period,
     )
 
 
@@ -407,10 +411,10 @@ def master_style_report(
 def patch_style_operation(body: StyleOpUpdateBody):
     if not verify_admin_password(body.admin_password):
         raise HTTPException(403, "Admin password required to edit targets and rates")
-    if body.Target is None and body.Rate_Rs is None:
-        raise HTTPException(400, "Provide Target and/or Rate_Rs")
+    if body.Target is None and body.Rate_Rs is None and body.Operation_Type is None:
+        raise HTTPException(400, "Provide Target, Rate_Rs and/or Operation_Type")
     return svc.update_style_operation(
-        body.Style, body.Operation, target=body.Target, rate_rs=body.Rate_Rs
+        body.Style, body.Operation, target=body.Target, rate_rs=body.Rate_Rs, operation_type=body.Operation_Type
     )
 
 
@@ -577,9 +581,42 @@ def add_operating_attendance(body: AttendanceBody):
 
 @router.post("/master/style-operation")
 def add_style_operation(body: StyleOpBody):
-    out = svc.add_style_operation_row(body.Style, body.Operation, body.Target, body.Rate_Rs)
+    out = svc.add_style_operation_row(
+        body.Style,
+        body.Operation,
+        body.Target,
+        body.Rate_Rs,
+        operation_type=body.Operation_Type,
+    )
     if not out.get("ok"):
         raise HTTPException(409, out.get("message", "Duplicate"))
+    return out
+
+
+class HourlyDeleteBody(BaseModel):
+    date: str
+    karigar_id: str
+    challan_no: str
+    style: str
+    operation: str
+    hour: str
+    admin_password: str = ""
+
+
+@router.post("/production-entry/admin/delete-hour")
+def production_admin_delete_hour(body: HourlyDeleteBody):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required")
+    out = svc.delete_production_hour_entry(
+        date_str=body.date,
+        karigar_id=body.karigar_id,
+        challan_no=body.challan_no,
+        style=body.style,
+        operation=body.operation,
+        hour_label=body.hour,
+    )
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Delete failed"))
     return out
 
 

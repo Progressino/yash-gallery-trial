@@ -478,6 +478,7 @@ function ProductionTab({
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [saveMessage, setSaveMessage] = useState('')
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(true)
+  const [hourDeleteBusyKey, setHourDeleteBusyKey] = useState('')
   const skipAutoSaveRef = useRef(true)
   const loadInProgressRef = useRef(false)
   const qc = useQueryClient()
@@ -684,6 +685,41 @@ function ProductionTab({
     const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Daily_Salary_Rs', 'Hourly_Salary_Rs', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
     return base
   }, [])
+
+  const deleteHourRow = async (row: Report2HourlyRow) => {
+    const pw = admin.adminPassword()
+    if (!pw) {
+      alert('Unlock admin first')
+      return
+    }
+    if (
+      !window.confirm(
+        `Delete ${row.Hour} entry for ${row.Karigar} / ${row.Operation}? Related summary rows will auto-update.`,
+      )
+    ) {
+      return
+    }
+    const busyKey = `${row.Date}::${row.Karigar_ID}::${row.Challan_No}::${row.Style}::${row.Operation}::${row.Hour}`
+    setHourDeleteBusyKey(busyKey)
+    try {
+      await api.post('/stitching/production-entry/admin/delete-hour', {
+        date: row.Date,
+        karigar_id: row.Karigar_ID,
+        challan_no: row.Challan_No,
+        style: row.Style,
+        operation: row.Operation,
+        hour: row.Hour,
+        admin_password: pw,
+      })
+      await refetchReports()
+      await refetchStyles()
+      await refetchChallans()
+    } catch (e: unknown) {
+      alert(axios.isAxiosError(e) ? String(e.response?.data?.detail || 'Delete failed') : 'Delete failed')
+    } finally {
+      setHourDeleteBusyKey('')
+    }
+  }
 
   const historyCols = useMemo(
     () => [
@@ -1328,7 +1364,42 @@ function ProductionTab({
               Show hour-wise rows ({entryReports.report2_hourly.length})
             </summary>
             <div className="mt-2 max-h-64 overflow-auto">
-              <DataTable rows={entryReports.report2_hourly} cols={report2HourlyCols} />
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-gray-50 border-b">
+                    {report2HourlyCols.map(c => (
+                      <th key={c} className="text-left px-2 py-1.5 whitespace-nowrap">
+                        {c.replace(/_/g, ' ')}
+                      </th>
+                    ))}
+                    <th className="text-left px-2 py-1.5 whitespace-nowrap">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(entryReports.report2_hourly as Report2HourlyRow[]).map((r, i) => {
+                    const busyKey = `${r.Date}::${r.Karigar_ID}::${r.Challan_No}::${r.Style}::${r.Operation}::${r.Hour}`
+                    return (
+                      <tr key={`${busyKey}-${i}`} className="border-b">
+                        {report2HourlyCols.map(c => (
+                          <td key={c} className="px-2 py-1.5 whitespace-nowrap">
+                            {String((r as Record<string, unknown>)[c] ?? '')}
+                          </td>
+                        ))}
+                        <td className="px-2 py-1.5 whitespace-nowrap">
+                          <button
+                            type="button"
+                            disabled={hourDeleteBusyKey === busyKey}
+                            className="px-2 py-1 rounded border border-red-300 text-red-700 disabled:opacity-50"
+                            onClick={() => void deleteHourRow(r)}
+                          >
+                            Delete hour
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
             </div>
           </details>
         </ReportTableSection>
@@ -1972,6 +2043,16 @@ type ProductionSessionRow = {
   Style: string
   Operation: string
   Total_Pieces: number
+}
+
+type Report2HourlyRow = {
+  Date: string
+  Karigar_ID: string
+  Karigar: string
+  Challan_No: string
+  Style: string
+  Operation: string
+  Hour: string
 }
 
 function AdminProductionPanel({
@@ -2975,13 +3056,18 @@ function masterRowKey(sheet: MasterSheetKey, row: Record<string, unknown>): stri
 type TargetControlRow = {
   Style: string
   Operation: string
+  Operation_Type?: string
   Karigar_ID: string
   Karigar_Name?: string
   Daily_Rate_Rs: number
   Base_Target: number
+  'Tolerance_%'?: number
   Formula_LTL: number
   Manual_Override: number | string
   Final_Applied_LTL: number
+  Final_Applied_LTL_Period?: number
+  Target_For_Period?: number
+  Period?: string
   Target_Type: string
   LTL_Source: string
 }
@@ -2998,6 +3084,7 @@ function TargetControlTab({
   const [styleFilter, setStyleFilter] = useState('')
   const [karFilter, setKarFilter] = useState('')
   const [opFilter, setOpFilter] = useState('')
+  const [period, setPeriod] = useState<'daily' | 'weekly' | 'monthly'>('daily')
   const [overrideEdits, setOverrideEdits] = useState<Record<string, string>>({})
 
   const { data: styleSheet } = useQuery({
@@ -3034,7 +3121,7 @@ function TargetControlTab({
   }, [styleSheet, styleFilter])
 
   const { data: preview, isFetching, refetch } = useQuery({
-    queryKey: ['stitching-target-control', planDate, styleFilter, karFilter, opFilter],
+    queryKey: ['stitching-target-control', planDate, styleFilter, karFilter, opFilter, period],
     queryFn: () =>
       api
         .get('/stitching/target-control/preview', {
@@ -3043,6 +3130,7 @@ function TargetControlTab({
             style: styleFilter || undefined,
             karigar_id: karFilter || undefined,
             operation: opFilter || undefined,
+            period,
           },
         })
         .then(r => r.data),
@@ -3083,6 +3171,7 @@ function TargetControlTab({
   const cols = [
     'Style',
     'Operation',
+    'Operation_Type',
     'Karigar_ID',
     'Karigar_Name',
     'Daily_Rate_Rs',
@@ -3091,6 +3180,8 @@ function TargetControlTab({
     'Formula_LTL',
     'Manual_Override',
     'Final_Applied_LTL',
+    'Final_Applied_LTL_Period',
+    'Target_For_Period',
     'Target_Type',
   ]
 
@@ -3112,7 +3203,7 @@ function TargetControlTab({
           ))}
           . Production uses <strong>Final Applied LTL</strong> (manual override if set, else formula).
         </p>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5 mb-4">
           <label className="text-xs block">
             <span className="font-semibold text-gray-700">Planning date</span>
             <input
@@ -3146,6 +3237,18 @@ function TargetControlTab({
               {karigars.map(k => (
                 <option key={k.id} value={k.id}>{k.id} — {k.name}</option>
               ))}
+            </select>
+          </label>
+          <label className="text-xs block">
+            <span className="font-semibold text-gray-700">Rate mode</span>
+            <select
+              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+              value={period}
+              onChange={e => setPeriod(e.target.value as 'daily' | 'weekly' | 'monthly')}
+            >
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
             </select>
           </label>
           <label className="text-xs block">
@@ -3496,7 +3599,13 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
     qc.invalidateQueries({ queryKey: ['stitching-pe-reports'] })
   }
 
-  const [styleForm, setStyleForm] = useState({ Style: '', Operation: '', Target: 80, Rate_Rs: 3 })
+  const [styleForm, setStyleForm] = useState({
+    Style: '',
+    Operation: '',
+    Operation_Type: 'Medium',
+    Target: 80,
+    Rate_Rs: 3,
+  })
   const [karForm, setKarForm] = useState({
     Karigar_ID: '',
     Name: '',
@@ -3509,7 +3618,7 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
     mutationFn: () => api.post('/stitching/master/style-operation', styleForm),
     onSuccess: () => {
       onFlash('ok', 'Style operation added.')
-      setStyleForm({ Style: '', Operation: '', Target: 80, Rate_Rs: 3 })
+      setStyleForm({ Style: '', Operation: '', Operation_Type: 'Medium', Target: 80, Rate_Rs: 3 })
       invalidateSheet()
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
@@ -3626,13 +3735,25 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
         />
       )}
       {active === 'style_master' && (
-        <div className="grid sm:grid-cols-4 gap-2 text-xs mb-3">
+        <div className="grid sm:grid-cols-5 gap-2 text-xs mb-3">
           {(['Style', 'Operation'] as const).map(k => (
             <label key={k}>
               {k}
               <input className="w-full border rounded mt-1 px-2 py-1" value={styleForm[k]} onChange={e => setStyleForm(f => ({ ...f, [k]: e.target.value }))} />
             </label>
           ))}
+          <label>
+            Type
+            <select
+              className="w-full border rounded mt-1 px-2 py-1"
+              value={styleForm.Operation_Type}
+              onChange={e => setStyleForm(f => ({ ...f, Operation_Type: e.target.value }))}
+            >
+              <option value="Easy">Easy</option>
+              <option value="Medium">Medium</option>
+              <option value="Hard">Hard</option>
+            </select>
+          </label>
           <label>
             Target
             <input type="number" className="w-full border rounded mt-1 px-2 py-1" value={styleForm.Target} onChange={e => setStyleForm(f => ({ ...f, Target: +e.target.value }))} />
@@ -4071,6 +4192,17 @@ function PerformanceTab() {
     queryFn: () => api.get('/stitching/performance', { params: { date_from: from, date_to: to } }).then(r => r.data),
     enabled: false,
   })
+  const opTypeRows = ((data?.operation_type_breakup ?? []) as Record<string, unknown>[])
+    .map(r => ({
+      Operation_Type: String(r.Operation_Type ?? 'Medium'),
+      Count: Number(r.Count ?? 0),
+      Pieces: Number(r.Pieces ?? 0),
+      Piece_Value: Number(r.Piece_Value ?? 0),
+    }))
+    .sort((a, b) => {
+      const order = { Easy: 1, Medium: 2, Hard: 3 } as Record<string, number>
+      return (order[a.Operation_Type] ?? 99) - (order[b.Operation_Type] ?? 99)
+    })
 
   return (
     <div className="space-y-4">
@@ -4109,6 +4241,35 @@ function PerformanceTab() {
               <p className={`text-lg font-bold ${Number(data.summary.net_surplus) >= 0 ? 'text-green-700' : 'text-red-600'}`}>
                 ₹{Number(data.summary.net_surplus).toLocaleString()}
               </p>
+            </div>
+          </div>
+        )}
+        {data?.ok && opTypeRows.length > 0 && (
+          <div className="mb-4 border rounded-lg bg-slate-50/70 p-3">
+            <p className="text-xs font-semibold text-gray-700 mb-2">Operation Type summary</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {opTypeRows.map(r => {
+                const tone =
+                  r.Operation_Type === 'Easy'
+                    ? 'bg-green-50 border-green-200'
+                    : r.Operation_Type === 'Hard'
+                      ? 'bg-rose-50 border-rose-200'
+                      : 'bg-amber-50 border-amber-200'
+                const titleTone =
+                  r.Operation_Type === 'Easy'
+                    ? 'text-green-700'
+                    : r.Operation_Type === 'Hard'
+                      ? 'text-rose-700'
+                      : 'text-amber-700'
+                return (
+                <div key={r.Operation_Type} className={`border rounded-lg px-3 py-2 ${tone}`}>
+                  <p className={`text-xs font-semibold ${titleTone}`}>{r.Operation_Type}</p>
+                  <p className="text-[11px] text-gray-600">Count: {r.Count.toLocaleString()}</p>
+                  <p className="text-[11px] text-gray-600">Pieces: {r.Pieces.toLocaleString()}</p>
+                  <p className="text-[11px] text-gray-600">Value: ₹{r.Piece_Value.toLocaleString()}</p>
+                </div>
+                )
+              })}
             </div>
           </div>
         )}
