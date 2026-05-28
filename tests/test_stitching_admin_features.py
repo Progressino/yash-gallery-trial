@@ -120,6 +120,86 @@ def test_ltl_setup_lists_overrides():
     assert any(o["Manual_LTL"] == 42 for o in table["overrides"])
 
 
+def test_list_karigar_directory_merges_sources():
+    save_sheet_df(
+        "karigar_master",
+        pd.DataFrame([{"Karigar_ID": "K1", "Name": "Master One"}]),
+    )
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame(
+            [
+                {"E_Code": "K2", "Name": "Employee Karigar", "Type": "Karigar"},
+                {"E_Code": "E9", "Name": "Office Staff", "Type": "Admin"},
+            ]
+        ),
+    )
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-P", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    save_sheet_df(
+        "production_log",
+        pd.DataFrame(
+            [
+                {
+                    "Date": "2026-05-20",
+                    "Karigar_ID": "K3",
+                    "Karigar_Name": "From Production",
+                    "Challan_No": "CH-P",
+                    "Style": "SKU-P",
+                    "Operation": "Stitch",
+                    "H_09_10": 1,
+                    "Save_Time": "2026-05-20 10:00:00",
+                }
+            ]
+        ),
+    )
+
+    directory = svc.list_karigar_directory()
+    ids = {d["Karigar_ID"] for d in directory}
+    assert ids == {"K1", "K2", "K3"}
+    by_id = {d["Karigar_ID"]: d["Name"] for d in directory}
+    assert by_id["K3"] == "From Production"
+
+
+def test_delete_hour_uses_latest_duplicate_production_row():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-DUP", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    svc.save_production_entry(
+        date_str="2026-05-26",
+        karigar_id="K400",
+        karigar_name="Dup",
+        challan_no="CH-400",
+        style="SKU-DUP",
+        hour_entries=[
+            {"hour_col": "H_09_10", "operation": "Stitch", "pieces": 20},
+            {"hour_col": "H_10_11", "operation": "Stitch", "pieces": 10},
+        ],
+    )
+    pl = get_sheet_df("production_log")
+    dup = pl.iloc[-1].copy()
+    dup["Save_Time"] = "2099-01-01 00:00:00"
+    dup["H_09_10"] = 99
+    save_sheet_df("production_log", pd.concat([pl, pd.DataFrame([dup])], ignore_index=True))
+
+    out = svc.delete_production_hour_entry(
+        date_str="2026-05-26",
+        karigar_id="K400",
+        challan_no="CH-400",
+        style="SKU-DUP",
+        operation="Stitch",
+        hour_label="9-10",
+    )
+    assert out["ok"] is True
+    rep = svc.production_entry_reports("2026-05-26", "K400")
+    hours = [str(r["Hour"]) for r in rep["report2_hourly"]]
+    assert "9-10" not in hours
+    assert "10-11" in hours
+
+
 def test_delete_single_hour_recalculates_related_rows():
     save_sheet_df(
         "style_master",

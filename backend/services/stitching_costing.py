@@ -132,6 +132,7 @@ def _mask_production_log(
     challan_no: str | None = None,
     style: str | None = None,
     operation: str | None = None,
+    require_karigar: bool = True,
 ) -> pd.Series:
     """Boolean mask for production_log rows to update or delete."""
     if log_df.empty:
@@ -145,7 +146,9 @@ def _mask_production_log(
     )
     work["_ck_date"] = work["Date"].apply(clean_key)
     work["_ck_kar"] = work["Karigar_ID"].apply(clean_key)
-    mask = (work["_ck_date"] == d) & (work["_ck_kar"] == k)
+    mask = work["_ck_date"] == d
+    if require_karigar and k:
+        mask = mask & (work["_ck_kar"] == k)
     if challan_no:
         work["_ck_challan"] = work["Challan_No"].apply(clean_key)
         mask = mask & (work["_ck_challan"] == c)
@@ -157,6 +160,85 @@ def _mask_production_log(
         work["_op_norm"] = work.get("Operation", pd.Series(dtype=str)).apply(normalize_operation_name)
         mask = mask & (work["_op_norm"] == op)
     return mask
+
+
+def _latest_production_row_index(
+    log_df: pd.DataFrame,
+    *,
+    date_str: str,
+    karigar_id: str,
+    challan_no: str = "",
+    style: str = "",
+    operation: str = "",
+) -> int | None:
+    """Pick the newest save for this session/operation (matches report dedupe)."""
+    if log_df.empty:
+        return None
+    attempts = [
+        dict(
+            date_str=date_str,
+            karigar_id=karigar_id,
+            challan_no=challan_no or None,
+            style=style or None,
+            operation=operation or None,
+            require_karigar=True,
+        ),
+    ]
+    if karigar_id and challan_no and style and operation:
+        attempts.append(
+            dict(
+                date_str=date_str,
+                karigar_id="",
+                challan_no=challan_no,
+                style=style,
+                operation=operation,
+                require_karigar=False,
+            )
+        )
+    for kwargs in attempts:
+        mask = _mask_production_log(log_df, **kwargs)
+        if not mask.any():
+            continue
+        subset = log_df.loc[mask].copy()
+        if "Save_Time" in subset.columns:
+            subset = subset.sort_values("Save_Time", ascending=False, na_position="last")
+        return int(subset.index[0])
+    return None
+
+
+def list_karigar_directory() -> list[dict[str, str]]:
+    """Karigars for expense/production dropdowns — master + employees + recent production."""
+    out: dict[str, dict[str, str]] = {}
+
+    def _add(kid: Any, name: Any = "") -> None:
+        key = clean_key(kid)
+        if not key:
+            return
+        nm = str(name or "").strip() or key
+        if key not in out:
+            out[key] = {"Karigar_ID": key, "Name": nm}
+        elif len(nm) > len(out[key]["Name"]):
+            out[key]["Name"] = nm
+
+    km = get_sheet_df("karigar_master")
+    if not km.empty and "Karigar_ID" in km.columns:
+        for _, row in km.iterrows():
+            _add(row.get("Karigar_ID"), row.get("Name", ""))
+
+    em = get_sheet_df("employee_master")
+    if not em.empty and "E_Code" in em.columns:
+        for _, row in em.iterrows():
+            typ = str(row.get("Type", "") or "").strip().lower()
+            if typ not in ("karigar", "stitching"):
+                continue
+            _add(row.get("E_Code"), row.get("Name", ""))
+
+    pl = get_sheet_df("production_log")
+    if not pl.empty and "Karigar_ID" in pl.columns:
+        for _, row in pl.iterrows():
+            _add(row.get("Karigar_ID"), row.get("Karigar_Name", ""))
+
+    return sorted(out.values(), key=lambda r: (r["Name"].lower(), r["Karigar_ID"]))
 
 
 def delete_production_entries(
@@ -2395,7 +2477,7 @@ def delete_production_hour_entry(
         if pl.empty:
             return {"ok": False, "message": "No production entries to delete."}
         work = pl.copy()
-        mask = _mask_production_log(
+        idx = _latest_production_row_index(
             work,
             date_str=date_str,
             karigar_id=karigar_id,
@@ -2403,20 +2485,43 @@ def delete_production_hour_entry(
             style=style,
             operation=operation,
         )
-        if int(mask.sum()) <= 0:
+        if idx is None:
             return {"ok": False, "message": "No matching operation row found"}
-        idx = work[mask].index[0]
-        work.at[idx, hour_col] = 0
-        work.at[idx, sticker_in_col(hour_col)] = 0
-        work.at[idx, sticker_out_col(hour_col)] = 0
-        # If all hours are now zero, drop entire operation row.
+        latest_row = work.loc[idx].copy()
+        resolved_kid = str(latest_row.get("Karigar_ID", karigar_id))
+        dup_mask = _mask_production_log(
+            work,
+            date_str=date_str,
+            karigar_id=resolved_kid,
+            challan_no=challan_no,
+            style=style,
+            operation=operation,
+            require_karigar=bool(clean_key(resolved_kid)),
+        )
+        work = work[~dup_mask].reset_index(drop=True)
+
+        latest_row[hour_col] = 0
+        latest_row[sticker_in_col(hour_col)] = 0
+        latest_row[sticker_out_col(hour_col)] = 0
         remaining = 0
         for hc in HOUR_COLS:
             if hc == "H_13_14":
                 continue
-            remaining += int(safe_num(pd.Series([work.at[idx, hc]])).iloc[0])
-        if remaining <= 0:
-            work = work.drop(index=idx).reset_index(drop=True)
+            remaining += int(safe_num(pd.Series([latest_row.get(hc, 0)])).iloc[0])
+
+        session_mask = _mask_production_log(
+            work,
+            date_str=str(latest_row.get("Date", date_str)),
+            karigar_id=resolved_kid,
+            challan_no=str(latest_row.get("Challan_No", challan_no)),
+            style=str(latest_row.get("Style", style)),
+            require_karigar=bool(clean_key(resolved_kid)),
+        )
+        session_rows = work[session_mask].copy()
+        if remaining > 0:
+            session_rows = pd.concat([session_rows, pd.DataFrame([latest_row])], ignore_index=True)
+
+        if remaining <= 0 and session_rows.empty:
             save_sheet_df("production_log", work)
             return {
                 "ok": True,
@@ -2424,16 +2529,7 @@ def delete_production_hour_entry(
                 "removed": 1,
                 "hour_deleted": hour_label,
             }
-        # Rebuild session using existing helper to keep all derived fields accurate.
-        row = work.loc[idx]
-        session_mask = _mask_production_log(
-            work,
-            date_str=str(row.get("Date", date_str)),
-            karigar_id=str(row.get("Karigar_ID", karigar_id)),
-            challan_no=str(row.get("Challan_No", challan_no)),
-            style=str(row.get("Style", style)),
-        )
-        session_rows = work[session_mask]
+
         hour_entries: list[dict[str, Any]] = []
         for _, srow in session_rows.iterrows():
             op_name = normalize_operation_name(srow.get("Operation", ""))
@@ -2454,22 +2550,22 @@ def delete_production_hour_entry(
                             "manual_pieces": sin == 0 and sout == 0,
                         }
                     )
-        # Remove old session rows first, then save fresh session.
+
         work = _drop_production_session_rows(
             work,
-            str(row.get("Date", date_str)),
-            str(row.get("Karigar_ID", karigar_id)),
-            str(row.get("Challan_No", challan_no)),
-            str(row.get("Style", style)),
+            str(latest_row.get("Date", date_str)),
+            resolved_kid,
+            str(latest_row.get("Challan_No", challan_no)),
+            str(latest_row.get("Style", style)),
         )
         save_sheet_df("production_log", work)
         if hour_entries:
             save_production_entry(
-                date_str=str(row.get("Date", date_str)),
-                karigar_id=str(row.get("Karigar_ID", karigar_id)),
-                karigar_name=str(row.get("Karigar_Name", "")),
-                challan_no=str(row.get("Challan_No", challan_no)),
-                style=str(row.get("Style", style)),
+                date_str=str(latest_row.get("Date", date_str)),
+                karigar_id=resolved_kid,
+                karigar_name=str(latest_row.get("Karigar_Name", "")),
+                challan_no=str(latest_row.get("Challan_No", challan_no)),
+                style=str(latest_row.get("Style", style)),
                 hour_entries=hour_entries,
                 saved_by="admin",
                 saved_by_name="hour-delete",

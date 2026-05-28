@@ -689,7 +689,19 @@ function ProductionTab({
   const deleteHourRow = async (row: Report2HourlyRow) => {
     const pw = admin.adminPassword()
     if (!pw) {
-      alert('Unlock admin first')
+      alert('Unlock admin first (Admin unlock panel at top of Stitching Costing page).')
+      return
+    }
+    let resolvedKarigarId = String(row.Karigar_ID || '').trim()
+    if (!resolvedKarigarId && row.Karigar) {
+      const hit = karigars.find(
+        k =>
+          String(k.Name || '').trim().toLowerCase() === String(row.Karigar).trim().toLowerCase(),
+      )
+      resolvedKarigarId = hit ? String(hit.Karigar_ID) : ''
+    }
+    if (!resolvedKarigarId) {
+      alert('Could not resolve karigar ID for this row. Try deleting from Admin — edit or delete production.')
       return
     }
     if (
@@ -699,12 +711,12 @@ function ProductionTab({
     ) {
       return
     }
-    const busyKey = `${row.Date}::${row.Karigar_ID}::${row.Challan_No}::${row.Style}::${row.Operation}::${row.Hour}`
+    const busyKey = `${row.Date}::${resolvedKarigarId}::${row.Challan_No}::${row.Style}::${row.Operation}::${row.Hour}`
     setHourDeleteBusyKey(busyKey)
     try {
       await api.post('/stitching/production-entry/admin/delete-hour', {
         date: row.Date,
-        karigar_id: row.Karigar_ID,
+        karigar_id: resolvedKarigarId,
         challan_no: row.Challan_No,
         style: row.Style,
         operation: row.Operation,
@@ -712,8 +724,14 @@ function ProductionTab({
         admin_password: pw,
       })
       await refetchReports()
-      await refetchStyles()
-      await refetchChallans()
+      if (
+        resolvedKarigarId === karigarId &&
+        entryDate === row.Date &&
+        challanNo === row.Challan_No &&
+        normStyleKey(style) === normStyleKey(row.Style)
+      ) {
+        await loadEntry()
+      }
     } catch (e: unknown) {
       alert(axios.isAxiosError(e) ? String(e.response?.data?.detail || 'Delete failed') : 'Delete failed')
     } finally {
@@ -1359,6 +1377,11 @@ function ProductionTab({
           cols={report2HourlyCols}
           downloadName={`production-hourly-${entryDate}${karigarId ? `-${karigarId}` : ''}.csv`}
         >
+          {!admin.unlocked && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2">
+              Unlock admin (panel at top of page) to use <strong>Delete hour</strong>.
+            </p>
+          )}
           <details className="text-xs">
             <summary className="cursor-pointer py-3 font-medium text-[#2c5aa0] touch-manipulation min-h-[44px]">
               Show hour-wise rows ({entryReports.report2_hourly.length})
@@ -2405,6 +2428,19 @@ function KarigarExpensesTab({
 
   const workTypes = (expenseData?.work_types ?? []) as string[]
   const rows = (expenseData?.rows ?? []) as Record<string, unknown>[]
+  const karigarOptions = useMemo(() => {
+    const fromApi = (expenseData?.karigars ?? []) as { Karigar_ID: string; Name: string }[]
+    if (fromApi.length) {
+      return fromApi.map(k => ({
+        id: String(k.Karigar_ID),
+        name: String(k.Name || k.Karigar_ID),
+      }))
+    }
+    return ((karSheet?.rows ?? []) as { Karigar_ID: string; Name: string }[]).map(k => ({
+      id: String(k.Karigar_ID),
+      name: String(k.Name || k.Karigar_ID),
+    }))
+  }, [expenseData, karSheet])
 
   const challans = useMemo(() => {
     return ((challanSheet?.rows ?? []) as { Challan_No: string; Style: string }[]).map(c => ({
@@ -2481,6 +2517,16 @@ function KarigarExpensesTab({
         <p className="text-xs text-gray-600 mb-3">
           Record part change, alter, trainee, or other tasks tied to a challan. Amounts roll into Payroll with attendance pay.
         </p>
+        {!admin.unlocked && (
+          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+            Unlock admin at the top of this page to add or delete karigar expenses.
+          </p>
+        )}
+        {!karigarOptions.length && (
+          <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 mb-3">
+            No karigars found — add them in Master Data → karigar master, or ensure employee master has Type = Karigar.
+          </p>
+        )}
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
           <label>
             Date
@@ -2498,10 +2544,10 @@ function KarigarExpensesTab({
               value={form.Karigar_ID}
               onChange={e => setForm(f => ({ ...f, Karigar_ID: e.target.value }))}
             >
-              <option value="">—</option>
-              {((karSheet?.rows ?? []) as { Karigar_ID: string; Name: string }[]).map(k => (
-                <option key={k.Karigar_ID} value={k.Karigar_ID}>
-                  {k.Name || k.Karigar_ID}
+              <option value="">— select karigar —</option>
+              {karigarOptions.map(k => (
+                <option key={k.id} value={k.id}>
+                  {k.id} — {k.name}
                 </option>
               ))}
             </select>

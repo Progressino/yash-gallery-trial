@@ -284,6 +284,7 @@ def list_expenses(date_from: str = "", date_to: str = "", karigar_id: str = ""):
     return {
         "rows": svc.list_karigar_expenses(date_from, date_to, karigar_id or None),
         "work_types": list(svc.KARIGAR_EXPENSE_WORK_TYPES),
+        "karigars": svc.list_karigar_directory(),
     }
 
 
