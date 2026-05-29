@@ -700,17 +700,21 @@ def _run_with_restore_heartbeat(sess: AppSession, step_id: str, label: str, fn):
 
 
 def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
-    """Download GitHub Release cache and merge into session (keeps larger history)."""
+    """Load history: local server cache first, then selective GitHub; merge into session."""
     import pandas as pd
 
     from ..services.daily_store import merge_platform_data
-    from ..services.github_cache import load_cache_from_drive
+    from ..services.github_cache import load_history_for_restore
     from backend.routers.cache import (
         _merge_disk_warm_cache_into_loaded,
         _sanitize_snapdeal_in_loaded,
     )
 
-    _set_restore_step(sess, "github_download", "Downloading GitHub cache (priority — full MTR history)…")
+    _set_restore_step(
+        sess,
+        "github_download",
+        "Loading history (server disk first — GitHub only if needed)…",
+    )
 
     def _gh_progress(done: int, total: int, msg: str) -> None:
         span = max(1, total)
@@ -719,8 +723,12 @@ def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
         sess.session_restore_step = "github_download"
         sess.session_restore_message = f"{msg} ({done}/{total})"
 
-    ok, _, loaded = load_cache_from_drive(progress_callback=_gh_progress)
-    if not ok:
+    ok, summary, loaded, _used_github = load_history_for_restore(progress_callback=_gh_progress)
+    if summary:
+        sess.session_restore_message = summary
+    if not ok and not loaded:
+        return False
+    if not loaded:
         return False
     _sanitize_snapdeal_in_loaded(loaded)
     loaded, _disk_note = _merge_disk_warm_cache_into_loaded(loaded)

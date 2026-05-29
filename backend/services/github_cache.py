@@ -37,6 +37,30 @@ _CACHE_FILES = {
     "po_return_overlay_df": "po_return_overlay_df.parquet",
 }
 
+# Restore-full: skip huge / rebuilt assets; download only platform bulk + SKU + inventory.
+RESTORE_DOWNLOAD_KEYS = frozenset({
+    "mtr_df",
+    "myntra_df",
+    "meesho_df",
+    "flipkart_df",
+    "sku_mapping",
+    "inventory_df_variant",
+    "inventory_df_parent",
+})
+
+RESTORE_SKIP_DOWNLOAD_KEYS = frozenset({
+    "sales_df",  # rebuilt from platform frames after restore
+    "snapdeal_df",
+    "existing_po_df",
+    "daily_inventory_history_df",
+    "sku_status_lead_df",
+    "po_raise_ledger_df",
+    "po_return_overlay_df",
+})
+
+_GITHUB_BLOB_CACHE_DIR = os.environ.get("GITHUB_BLOB_CACHE_DIR", "/data/github_cache")
+_GITHUB_DOWNLOAD_WORKERS = max(4, min(16, int(os.environ.get("GITHUB_DOWNLOAD_WORKERS", "12"))))
+
 
 def _gh_headers() -> Optional[Dict[str, str]]:
     token = os.environ.get("GITHUB_TOKEN")
@@ -157,9 +181,49 @@ def _gh_upload_asset(
 def _gh_download_asset(url: str) -> bytes:
     headers = _gh_headers() or {}
     headers["Accept"] = "application/octet-stream"
-    r = requests.get(url, headers=headers, timeout=300)
+    r = requests.get(url, headers=headers, timeout=300, stream=True)
     r.raise_for_status()
-    return r.content
+    # Stream into buffer — avoids duplicate large allocations on some requests versions.
+    buf = io.BytesIO()
+    for chunk in r.iter_content(chunk_size=1024 * 1024):
+        if chunk:
+            buf.write(chunk)
+    return buf.getvalue()
+
+
+def _github_blob_cache_path(manifest_saved_at: str, filename: str):
+    from pathlib import Path
+
+    safe = (manifest_saved_at or "unknown").replace(":", "-").replace("/", "-")
+    return Path(_GITHUB_BLOB_CACHE_DIR) / safe / filename
+
+
+def _read_github_blob_cache(manifest_saved_at: str, filename: str) -> Optional[bytes]:
+    try:
+        path = _github_blob_cache_path(manifest_saved_at, filename)
+        if path.is_file():
+            return path.read_bytes()
+    except Exception:
+        pass
+    return None
+
+
+def _write_github_blob_cache(manifest_saved_at: str, filename: str, data: bytes) -> None:
+    try:
+        path = _github_blob_cache_path(manifest_saved_at, filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    except Exception as ex:
+        _log.warning("github blob cache write %s: %s", filename, ex)
+
+
+def _fetch_asset_bytes(url: str, *, manifest_saved_at: str, filename: str) -> bytes:
+    cached = _read_github_blob_cache(manifest_saved_at, filename)
+    if cached is not None:
+        return cached
+    raw = _gh_download_asset(url)
+    _write_github_blob_cache(manifest_saved_at, filename, raw)
+    return raw
 
 
 def save_cache_to_drive(
@@ -233,9 +297,14 @@ def save_cache_to_drive(
 
 def load_cache_from_drive(
     progress_callback: Optional[Callable] = None,
+    *,
+    only_keys: Optional[set[str] | frozenset[str]] = None,
+    skip_keys: Optional[set[str] | frozenset[str]] = None,
 ) -> Tuple[bool, str, dict]:
     """
     Download parquet/JSON assets from GitHub Release.
+    ``only_keys`` / ``skip_keys`` limit which assets are fetched (restore-fast path).
+    Uses on-disk blob cache under ``GITHUB_BLOB_CACHE_DIR`` keyed by manifest ``saved_at``.
     Returns (ok, message, loaded_data_dict).
     """
     _, assets, err = _get_gh_release()
@@ -244,10 +313,16 @@ def load_cache_from_drive(
     if _CACHE_MANIFEST_NAME not in assets:
         return False, "No cache found. Run Load All Data first.", {}
     try:
-        raw      = _gh_download_asset(assets[_CACHE_MANIFEST_NAME][1])
+        raw      = _fetch_asset_bytes(
+            assets[_CACHE_MANIFEST_NAME][1],
+            manifest_saved_at="manifest",
+            filename=_CACHE_MANIFEST_NAME,
+        )
         manifest = json.loads(raw.decode("utf-8"))
     except Exception as e:
         return False, f"Could not read manifest: {e}", {}
+
+    manifest_saved_at = str(manifest.get("saved_at") or manifest.get("saved_at_display") or "unknown")
 
     # Platform keys → canonical platform name for dedup
     _PLATFORM_DEDUP_MAP = {
@@ -259,17 +334,26 @@ def load_cache_from_drive(
     }
 
     items = list(_CACHE_FILES.items())
+    if only_keys is not None:
+        items = [(k, v) for k, v in items if k in only_keys]
+    if skip_keys:
+        items = [(k, v) for k, v in items if k not in skip_keys]
     to_fetch = [(ss_key, filename, assets[filename][1]) for ss_key, filename in items if filename in assets]
 
     # Parallel downloads: sequential GitHub pulls often exceed nginx / Cloudflare proxy
     # limits (e.g. 60–300s) when many large parquet assets exist.
     blobs: Dict[str, Tuple[str, bytes]] = {}
     if to_fetch:
-        n_workers = min(6, len(to_fetch))
+        n_workers = min(_GITHUB_DOWNLOAD_WORKERS, len(to_fetch))
         try:
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 future_map = {
-                    pool.submit(_gh_download_asset, url): (ss_key, filename)
+                    pool.submit(
+                        _fetch_asset_bytes,
+                        url,
+                        manifest_saved_at=manifest_saved_at,
+                        filename=filename,
+                    ): (ss_key, filename)
                     for ss_key, filename, url in to_fetch
                 }
                 for n_done, fut in enumerate(as_completed(future_map), start=1):
@@ -320,6 +404,132 @@ def load_cache_from_drive(
     )
     msg = f"Loaded from GitHub ({manifest.get('saved_at_display', '?')}). {summary}."
     return True, msg, loaded
+
+
+def _union_history_dicts(*parts: dict) -> dict:
+    """Keep the largest platform frame from each source (local disk / warm / GitHub)."""
+    import pandas as pd
+
+    out: dict = {}
+    platform_keys = (
+        "mtr_df",
+        "myntra_df",
+        "meesho_df",
+        "flipkart_df",
+        "snapdeal_df",
+        "sales_df",
+        "inventory_df_variant",
+        "inventory_df_parent",
+    )
+    for key in platform_keys:
+        best = pd.DataFrame()
+        for part in parts:
+            if not part:
+                continue
+            df = part.get(key)
+            if isinstance(df, pd.DataFrame) and len(df) > len(best):
+                best = df
+        if not best.empty:
+            out[key] = best
+    for part in parts:
+        if not part:
+            continue
+        sm = part.get("sku_mapping")
+        if isinstance(sm, dict) and sm:
+            cur = out.get("sku_mapping")
+            if not isinstance(cur, dict) or len(sm) > len(cur):
+                out["sku_mapping"] = sm
+    return out
+
+
+def _keys_needing_github_download(loaded: dict, manifest: Optional[dict]) -> list[str]:
+    """Return cache keys still smaller than GitHub manifest row counts."""
+    if not manifest:
+        return list(RESTORE_DOWNLOAD_KEYS)
+    row_counts = manifest.get("row_counts") or {}
+    need: list[str] = []
+    import pandas as pd
+
+    for key in RESTORE_DOWNLOAD_KEYS:
+        if key == "sku_mapping":
+            sm = loaded.get("sku_mapping")
+            want = int(row_counts.get("sku_mapping") or 0)
+            have = len(sm) if isinstance(sm, dict) else 0
+            if want > 0 and have < want * 0.9:
+                need.append(key)
+            elif have == 0 and want > 0:
+                need.append(key)
+            continue
+        df = loaded.get(key)
+        have = len(df) if isinstance(df, pd.DataFrame) and not df.empty else 0
+        want = int(row_counts.get(key) or 0)
+        if want <= 0:
+            continue
+        if have < want * 0.9:
+            need.append(key)
+    return need
+
+
+def load_history_for_restore(
+    progress_callback: Optional[Callable] = None,
+) -> Tuple[bool, str, dict, bool]:
+    """
+    Fast restore path: in-memory warm cache + local disk first; GitHub only for gaps.
+    Returns (ok, message, loaded_dict, used_github_network).
+    """
+    import backend.main as main
+
+    parts: list[dict] = []
+    notes: list[str] = []
+
+    if main._warm_cache:
+        parts.append(main._warm_cache)
+        notes.append("memory warm cache")
+
+    disk_ok, disk_data = main._load_warm_cache_from_disk(ignore_age=True)
+    if disk_ok and disk_data:
+        parts.append(disk_data)
+        notes.append("disk warm cache")
+
+    try:
+        rec = main.warm_cache_disk_recovery_dict()
+        if rec:
+            parts.append(rec)
+            notes.append("disk recovery")
+    except Exception:
+        pass
+
+    loaded = _union_history_dicts(*parts) if parts else {}
+    manifest = get_cache_manifest()
+    need_keys = _keys_needing_github_download(loaded, manifest)
+
+    if progress_callback and loaded:
+        progress_callback(0, 1, f"Local server cache ready ({', '.join(notes)})…")
+
+    if not need_keys:
+        if loaded:
+            msg = f"Using server cache only ({', '.join(notes)}) — no GitHub download needed."
+            return True, msg, loaded, False
+        # Nothing local — fall back to selective GitHub download
+        need_keys = list(RESTORE_DOWNLOAD_KEYS)
+
+    if progress_callback:
+        progress_callback(0, len(need_keys), f"GitHub: fetching {len(need_keys)} file(s)…")
+
+    ok, gh_msg, gh_loaded = load_cache_from_drive(
+        progress_callback=progress_callback,
+        only_keys=frozenset(need_keys),
+        skip_keys=RESTORE_SKIP_DOWNLOAD_KEYS,
+    )
+    if not ok and not loaded:
+        return False, gh_msg, {}, True
+    if ok and gh_loaded:
+        loaded = _union_history_dicts(loaded, gh_loaded)
+        msg = f"{gh_msg} (merged with {', '.join(notes) or 'local'})."
+        return True, msg, loaded, True
+    if loaded:
+        return True, f"Partial local restore ({', '.join(notes)}). GitHub: {gh_msg}", loaded, False
+    return False, gh_msg, {}, True
 
 
 def load_sku_mapping_from_drive() -> dict:
