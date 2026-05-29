@@ -71,6 +71,8 @@ export interface CoverageResponse {
   /** Background full restore (Upload → Restore all from server) */
   session_restore_status?: 'idle' | 'running' | 'done' | 'error'
   session_restore_message?: string
+  session_restore_step?: string
+  session_restore_progress?: number
   daily_auto_ingest_status?: 'idle' | 'running' | 'done' | 'error'
   daily_auto_ingest_message?: string
   /** Set after background daily-auto ingest finishes (see session.daily_auto_ingest_result). */
@@ -896,18 +898,38 @@ export type RestoreFullResponse = CoverageResponse & {
   restore_async?: boolean
 }
 
+export type RestoreProgressTick = {
+  message: string
+  progress: number
+  step: string
+}
+
+function restoreTickFromCoverage(cov: CoverageResponse): RestoreProgressTick {
+  const st = cov.session_restore_status ?? 'idle'
+  let progress = cov.session_restore_progress ?? 0
+  let step = cov.session_restore_step ?? ''
+  let message = cov.session_restore_message || 'Restoring from server…'
+  if (st === 'done' && (cov.sales_rebuild ?? 'idle') === 'running') {
+    progress = Math.max(progress, 96)
+    step = step || 'sales'
+    message = cov.sales_rebuild_message || message
+  }
+  return { message, progress, step }
+}
+
 /** Poll until background restore (+ optional sales rebuild) finishes. */
 export async function waitForSessionRestore(
-  onTick?: (msg: string) => void,
+  onTick?: (tick: RestoreProgressTick) => void,
 ): Promise<RestoreFullResponse> {
   const deadline = Date.now() + 20 * 60_000
   while (Date.now() < deadline) {
     const cov = await getCoverageResilient({ light: true, timeout: 60_000 })
+    const tick = restoreTickFromCoverage(cov)
+    onTick?.(tick)
     const st = cov.session_restore_status ?? 'idle'
     const salesSt = cov.sales_rebuild ?? 'idle'
     if (st === 'running') {
-      onTick?.(cov.session_restore_message || 'Restoring from server…')
-      await new Promise(r => setTimeout(r, 4000))
+      await new Promise(r => setTimeout(r, 2500))
       continue
     }
     if (st === 'error') {
@@ -915,8 +937,7 @@ export async function waitForSessionRestore(
     }
     if (st === 'done') {
       if (salesSt === 'running') {
-        onTick?.(cov.sales_rebuild_message || 'Rebuilding combined sales…')
-        await new Promise(r => setTimeout(r, 4000))
+        await new Promise(r => setTimeout(r, 2500))
         continue
       }
       if (salesSt === 'error') {
@@ -948,20 +969,24 @@ export async function waitForSessionRestore(
 }
 
 export async function restoreFullFromServer(
-  onTick?: (msg: string) => void,
+  onTick?: (tick: RestoreProgressTick) => void,
 ): Promise<RestoreFullResponse> {
   try {
     const { data } = await api.post<RestoreFullResponse>('/data/restore-full', undefined, {
       timeout: 90_000,
     })
     if (data.restore_async || data.session_restore_status === 'running') {
-      onTick?.(data.message || 'Restore started…')
+      onTick?.(restoreTickFromCoverage(data))
       return waitForSessionRestore(onTick)
     }
     return data
   } catch (e: unknown) {
     if (isUploadGateway502(e) || (axios.isAxiosError(e) && !e.response)) {
-      onTick?.('Gateway timed out — checking if restore is still running…')
+      onTick?.({
+        message: 'Gateway timed out — restore may still be running on the server…',
+        progress: 5,
+        step: 'queued',
+      })
       return waitForSessionRestore(onTick)
     }
     throw new Error(_errMessage(e, 'Full restore from server failed'))

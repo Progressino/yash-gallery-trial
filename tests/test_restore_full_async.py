@@ -7,4 +7,7 @@ def test_restore_full_async_returns_immediately(client, session_for_client):
     assert r.status_code == 200
     body = r.json()
     assert body.get("restore_async") is True
+    assert isinstance(body.get("session_restore_progress"), int)
+    assert body.get("session_restore_step")
     assert sess.session_restore_status in ("running", "done")
+    assert sess.session_restore_progress >= 0

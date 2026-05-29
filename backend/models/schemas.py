@@ -83,6 +83,8 @@ class CoverageResponse(BaseModel):
     # Background full session restore (Upload → Restore all from server)
     session_restore_status: str = "idle"
     session_restore_message: str = ""
+    session_restore_step: str = ""
+    session_restore_progress: int = 0
 
 
 class RestoreFullResponse(CoverageResponse):

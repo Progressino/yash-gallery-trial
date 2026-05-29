@@ -69,6 +69,8 @@ class AppSession:
     # Background "Restore all from server" (warm + disk + Tier-3 + GitHub — avoids proxy 502).
     session_restore_status: str = "idle"  # idle | running | done | error
     session_restore_message: str = ""
+    session_restore_step: str = ""  # machine id for UI checklist
+    session_restore_progress: int = 0  # 0–100
     session_restore_result: dict = field(default_factory=dict)
 
     # Async Tier-3 ingest (RAR extract + daily SQLite) — avoids 502 while proxy waits.
@@ -151,6 +153,8 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.sales_rebuild_message = ""
     sess.session_restore_status = "idle"
     sess.session_restore_message = ""
+    sess.session_restore_step = ""
+    sess.session_restore_progress = 0
     sess.session_restore_result = {}
     sess.daily_auto_ingest_status = "idle"
     sess.daily_auto_ingest_message = ""

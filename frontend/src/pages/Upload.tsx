@@ -2,6 +2,8 @@ import { useState, useCallback } from 'react'
 import { useDropzone, type FileRejection } from 'react-dropzone'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
+import RestoreProgressPanel from '../components/RestoreProgressPanel'
+import type { RestoreProgressTick } from '../api/client'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
@@ -64,11 +66,16 @@ export default function Upload() {
   const [chunkProgress, setChunkProgress] = useState<{ pct: number; sent: number; total: number; msg: string } | null>(null)
   const [invProgress, setInvProgress] = useState<{ pct: number; msg: string; phase: 'upload' | 'parse' } | null>(null)
   const [uploadAlertsBySource, setUploadAlertsBySource] = useState<Record<string, UploadAlert>>({})
-  const [restoreProgressMsg, setRestoreProgressMsg] = useState('')
+  const [restoreProgress, setRestoreProgress] = useState<RestoreProgressTick>({
+    message: '',
+    progress: 0,
+    step: '',
+  })
   const uploadBegin = useUploadActivity(s => s.begin)
   const uploadEnd = useUploadActivity(s => s.end)
-  const restoreBusy =
-    coverage.session_restore_status === 'running' || coverage.sales_rebuild === 'running'
+  const restoreBusy = coverage.session_restore_status === 'running'
+  const showRestorePanel =
+    loading['refresh_all'] || restoreBusy || (restoreProgress.progress > 0 && restoreProgress.progress < 100)
   const uploadBusy =
     Object.values(loading).some(Boolean) ||
     !!buildingMsg ||
@@ -101,10 +108,15 @@ export default function Upload() {
 
   const handleRefreshAllData = async () => {
     setL('refresh_all', true)
-    setRestoreProgressMsg('')
+    setRestoreProgress({ message: 'Starting restore…', progress: 0, step: 'queued' })
     try {
-      const c = await restoreFullFromServer(msg => setRestoreProgressMsg(msg))
+      const c = await restoreFullFromServer(tick => setRestoreProgress(tick))
       setCoverage(c)
+      setRestoreProgress({
+        message: c.message || 'Restore complete',
+        progress: 100,
+        step: 'done',
+      })
       invalidateDataQueries(qc)
       const loaded = [
         c.sku_mapping && 'SKU map',
@@ -137,7 +149,6 @@ export default function Upload() {
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Restore failed')
     } finally {
-      setRestoreProgressMsg('')
       setL('refresh_all', false)
     }
   }
@@ -516,7 +527,15 @@ export default function Upload() {
         </div>
       </div>
 
-      {uploadBusy && (
+      {showRestorePanel && (
+        <RestoreProgressPanel
+          message={restoreProgress.message || coverage.session_restore_message || 'Restoring…'}
+          progress={restoreProgress.progress || coverage.session_restore_progress || 0}
+          step={restoreProgress.step || coverage.session_restore_step || 'queued'}
+        />
+      )}
+
+      {uploadBusy && !showRestorePanel && (
         <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 flex items-center gap-2">
           <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -582,8 +601,8 @@ export default function Upload() {
           disabled={loading['refresh_all'] || uploadBusy}
           className="text-xs px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] font-semibold hover:bg-blue-50 disabled:opacity-50"
         >
-          {loading['refresh_all']
-            ? (restoreProgressMsg ? `Restoring… ${restoreProgressMsg}` : 'Restoring…')
+          {loading['refresh_all'] || restoreBusy
+            ? `Restoring… ${restoreProgress.progress || coverage.session_restore_progress || 0}%`
             : '↻ Restore all from server'}
         </button>
       </div>

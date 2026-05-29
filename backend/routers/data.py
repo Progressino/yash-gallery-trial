@@ -615,10 +615,43 @@ def _maybe_restore_daily_for_empty_sales(sess: AppSession) -> None:
     _restore_daily_if_needed(sess)
 
 
-def _restore_progress(sess: AppSession, msg: str, cb=None) -> None:
-    sess.session_restore_message = msg
-    if cb:
-        cb(msg)
+# (step_id, progress 0–100, default label for UI)
+_RESTORE_STEP_DEFS: tuple[tuple[str, int, str], ...] = (
+    ("queued", 0, "Queued"),
+    ("waiting", 2, "Waiting for other heavy jobs"),
+    ("sku", 8, "SKU mapping"),
+    ("warm", 20, "Warm cache — Amazon, platforms, sales"),
+    ("disk", 30, "On-disk backup snapshot"),
+    ("inventory", 34, "Inventory snapshot"),
+    ("tier3", 58, "Tier-3 daily history (SQLite)"),
+    ("github_download", 62, "Downloading GitHub cache"),
+    ("github_amazon", 68, "GitHub — Amazon (MTR)"),
+    ("github_myntra", 72, "GitHub — Myntra"),
+    ("github_meesho", 76, "GitHub — Meesho"),
+    ("github_flipkart", 80, "GitHub — Flipkart"),
+    ("github_snapdeal", 82, "GitHub — Snapdeal"),
+    ("github_inventory", 84, "GitHub — inventory"),
+    ("daily_store", 90, "Daily upload store"),
+    ("publish", 92, "Saving warm cache"),
+    ("sales_queue", 94, "Queuing combined sales rebuild"),
+    ("sales", 98, "Rebuilding combined sales"),
+    ("done", 100, "Complete"),
+)
+_RESTORE_STEP_PCT = {s[0]: s[1] for s in _RESTORE_STEP_DEFS}
+_RESTORE_STEP_LABEL = {s[0]: s[2] for s in _RESTORE_STEP_DEFS}
+_GITHUB_STEP_BY_PLATFORM = {
+    "amazon": "github_amazon",
+    "myntra": "github_myntra",
+    "meesho": "github_meesho",
+    "flipkart": "github_flipkart",
+    "snapdeal": "github_snapdeal",
+}
+
+
+def _set_restore_step(sess: AppSession, step_id: str, detail: str | None = None) -> None:
+    sess.session_restore_step = step_id
+    sess.session_restore_progress = int(_RESTORE_STEP_PCT.get(step_id, 0))
+    sess.session_restore_message = detail or _RESTORE_STEP_LABEL.get(step_id, step_id)
 
 
 def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
@@ -632,7 +665,7 @@ def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
         _sanitize_snapdeal_in_loaded,
     )
 
-    _restore_progress(sess, "Downloading GitHub cache (full history)…", progress)
+    _set_restore_step(sess, "github_download")
     ok, _, loaded = load_cache_from_drive()
     if not ok:
         return False
@@ -643,6 +676,9 @@ def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
         gh = loaded.get(attr)
         if not isinstance(gh, pd.DataFrame) or gh.empty:
             continue
+        step_id = _GITHUB_STEP_BY_PLATFORM.get(_plat, "github_download")
+        n_rows = len(gh)
+        _set_restore_step(sess, step_id, f"{_RESTORE_STEP_LABEL[step_id]} ({n_rows:,} rows)…")
         cur = getattr(sess, attr, None)
         if not isinstance(cur, pd.DataFrame):
             cur = pd.DataFrame()
@@ -657,6 +693,7 @@ def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
     for inv_key in ("inventory_df_variant", "inventory_df_parent"):
         iv = loaded.get(inv_key)
         if isinstance(iv, pd.DataFrame) and not iv.empty:
+            _set_restore_step(sess, "github_inventory", f"GitHub — inventory ({len(iv):,} rows)…")
             cur_iv = getattr(sess, inv_key, None)
             if not isinstance(cur_iv, pd.DataFrame) or cur_iv.empty or len(iv) > len(cur_iv):
                 setattr(sess, inv_key, iv)
@@ -667,7 +704,6 @@ def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
 def full_restore_session(
     sess: AppSession,
     *,
-    progress=None,
     defer_sales_rebuild: bool = False,
 ) -> tuple[list[str], list[str], str]:
     """
@@ -682,7 +718,7 @@ def full_restore_session(
     resume_auto_data_restore(sess)
     sess.daily_restored = False
 
-    _restore_progress(sess, "Loading SKU mapping…", progress)
+    _set_restore_step(sess, "sku")
     try:
         from ..services.sku_mapping import restore_sku_mapping_to_session
 
@@ -690,7 +726,7 @@ def full_restore_session(
     except Exception:
         pass
 
-    _restore_progress(sess, "Loading warm cache…", progress)
+    _set_restore_step(sess, "warm")
     try:
         _main.restore_po_sidecars_from_warm(sess)
         _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
@@ -698,23 +734,24 @@ def full_restore_session(
     except Exception:
         pass
 
-    _restore_progress(sess, "Merging on-disk snapshot…", progress)
+    _set_restore_step(sess, "disk")
     if _merge_disk_warm_into_session(sess).strip():
         steps.append("disk")
 
+    _set_restore_step(sess, "inventory")
     _restore_inventory_from_warm(sess)
-    _restore_progress(sess, "Merging Tier-3 daily history (may take several minutes)…", progress)
+    _set_restore_step(sess, "tier3", "Tier-3 daily history — may take several minutes…")
     _restore_daily_if_needed(sess, force=True, lock_timeout=600.0)
     if "tier3" not in steps:
         steps.append("tier3")
 
     try:
-        if _merge_github_bulk_into_session(sess, progress=progress):
+        if _merge_github_bulk_into_session(sess):
             steps.append("github")
     except Exception:
         pass
 
-    _restore_progress(sess, "Merging daily upload store…", progress)
+    _set_restore_step(sess, "daily_store")
     try:
         from backend.routers.cache import _merge_daily_store_into_session
 
@@ -724,10 +761,11 @@ def full_restore_session(
     except Exception:
         pass
 
+    _set_restore_step(sess, "publish")
     if defer_sales_rebuild:
-        _restore_progress(sess, "Queuing combined sales rebuild…", progress)
+        _set_restore_step(sess, "sales_queue")
     else:
-        _restore_progress(sess, "Rebuilding combined sales…", progress)
+        _set_restore_step(sess, "sales")
         _rebuild_session_sales(sess)
     try:
         _main.publish_warm_cache_from_session(sess)
@@ -868,6 +906,8 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
         session_restore_message=getattr(sess, "session_restore_message", "") or "",
+        session_restore_step=getattr(sess, "session_restore_step", "") or "",
+        session_restore_progress=int(getattr(sess, "session_restore_progress", 0) or 0),
     )
 
 
@@ -886,17 +926,13 @@ def _run_session_restore_worker(session_id: str) -> None:
     acquired = False
     try:
         sess.session_restore_status = "running"
-        sess.session_restore_message = "Starting full restore…"
+        _set_restore_step(sess, "queued")
         if not _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
-            sess.session_restore_message = "Waiting for other heavy jobs to finish…"
+            _set_restore_step(sess, "waiting")
             _UPLOAD_MEMORY_LOCK.acquire()
         acquired = True
 
-        missing, steps, msg = full_restore_session(
-            sess,
-            progress=lambda m: None,
-            defer_sales_rebuild=True,
-        )
+        missing, steps, msg = full_restore_session(sess, defer_sales_rebuild=True)
         essential_missing = _essential_missing_platforms(missing)
         sess.session_restore_result = {
             "missing_platforms": missing,
@@ -904,28 +940,51 @@ def _run_session_restore_worker(session_id: str) -> None:
             "message": msg,
             "essential_missing": essential_missing,
         }
-        sess.session_restore_message = msg
-        sess.session_restore_status = "done"
 
         if _session_has_platform_data(sess) and sess.sku_mapping:
             from .upload import DAILY_UPLOAD_EXECUTOR, _run_sales_rebuild_worker
 
+            _set_restore_step(sess, "sales", "Rebuilding combined sales (large history)…")
             sess.sales_rebuild_status = "running"
-            sess.sales_rebuild_message = "Rebuilding combined sales (large history)…"
+            sess.sales_rebuild_message = sess.session_restore_message
             DAILY_UPLOAD_EXECUTOR.submit(
-                _run_sales_rebuild_worker,
+                _run_session_restore_sales_worker,
                 session_id,
-                refresh_sqlite=True,
             )
         else:
             _rebuild_session_sales(sess)
+            _set_restore_step(sess, "done", msg)
+            sess.session_restore_status = "done"
     except Exception as e:
         _log.exception("background session restore failed")
         sess.session_restore_status = "error"
         sess.session_restore_message = str(e)[:500]
+        sess.session_restore_progress = 0
     finally:
         if acquired:
             _UPLOAD_MEMORY_LOCK.release()
+
+
+def _run_session_restore_sales_worker(session_id: str) -> None:
+    """Finish restore after async sales rebuild."""
+    import logging
+
+    from ..session import store
+    from .upload import _run_sales_rebuild_worker
+
+    _log = logging.getLogger(__name__)
+    sess = store.get(session_id)
+    if sess is None:
+        return
+    try:
+        _run_sales_rebuild_worker(session_id, refresh_sqlite=True)
+        msg = (sess.session_restore_result or {}).get("message") or "Full restore complete."
+        _set_restore_step(sess, "done", msg)
+        sess.session_restore_status = "done"
+    except Exception as e:
+        _log.exception("restore sales worker failed")
+        sess.session_restore_status = "error"
+        sess.session_restore_message = str(e)[:500]
 
 
 # ── Coverage ──────────────────────────────────────────────────
@@ -1023,7 +1082,11 @@ def restore_full(request: Request, sync: bool = False):
         )
 
     sess.session_restore_status = "running"
-    sess.session_restore_message = "Queued full restore from server…"
+    _set_restore_step(
+        sess,
+        "queued",
+        "Queued full restore from server — large Amazon history may take 10–15 minutes.",
+    )
     sess.session_restore_result = {}
     HEAVY_EXECUTOR.submit(_run_session_restore_worker, sid)
     cov = _build_coverage_response(sess)
