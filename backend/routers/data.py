@@ -117,13 +117,21 @@ def _merge_disk_warm_into_session(sess: AppSession) -> str:
         dsk = disk_data.get(attr)
         if not isinstance(dsk, pd.DataFrame) or dsk.empty:
             continue
+        label = _RESTORE_STEP_LABEL.get(_GITHUB_STEP_BY_PLATFORM.get(plat, ""), plat)
+        _set_restore_step(sess, "disk", f"Disk backup — {label or plat}…")
+
+        def _merge_one(cur_df, dsk_df=dsk, platform=plat, attribute=attr):
+            merged = merge_platform_data(cur_df, dsk_df, platform)
+            setattr(sess, attribute, merged)
+            return len(merged)
+
         cur = getattr(sess, attr)
         if not isinstance(cur, pd.DataFrame):
             cur = pd.DataFrame()
         before = len(cur) if not cur.empty else 0
-        merged = merge_platform_data(cur, dsk, plat)
-        after = len(merged)
-        setattr(sess, attr, merged)
+        after = _run_with_restore_heartbeat(
+            sess, "disk", f"Disk — {plat}", lambda c=cur: _merge_one(c)
+        )
         if after > before:
             notes.append(f"{attr} +{after - before:,}")
     dm = disk_data.get("sku_mapping")
@@ -140,6 +148,8 @@ def _restore_daily_if_needed(
     *,
     force: bool = False,
     lock_timeout: float | None = None,
+    restore_full_mode: bool = False,
+    skip_sales_rebuild: bool = False,
 ) -> None:
     """
     On first coverage check per session, merge any persisted daily SQLite data
@@ -250,9 +260,8 @@ def _restore_daily_if_needed(
             ("snapdeal", "snapdeal_df"),
         ]
         for platform, attr in platform_attrs:
-            # Merge Tier-3 SQLite into whatever the session already holds (warm cache,
-            # prior uploads). Replacing only when empty allowed a small SQLite slice to
-            # leave stale partial session data from an earlier bug path.
+            if restore_full_mode:
+                _set_restore_step(sess, "tier3", f"Tier-3 — loading {platform}…")
             df = load_platform_data(
                 platform,
                 months=_auto_months,
@@ -261,13 +270,26 @@ def _restore_daily_if_needed(
             )
             if not df.empty:
                 cur = getattr(sess, attr)
-                setattr(sess, attr, merge_platform_data(cur, df, platform))
+
+                def _merge_t3(cur_df=cur, new_df=df, plat=platform, attribute=attr):
+                    merged = merge_platform_data(cur_df, new_df, plat)
+                    setattr(sess, attribute, merged)
+                    return len(merged)
+
+                if restore_full_mode:
+                    _run_with_restore_heartbeat(
+                        sess,
+                        "tier3",
+                        f"Tier-3 merge {platform}",
+                        _merge_t3,
+                    )
+                else:
+                    setattr(sess, attr, merge_platform_data(cur, df, platform))
                 changed = True
 
         # Safety net: if bounded restore found nothing, do one full-history pass.
-        # This prevents "all data missing" after restart when the useful history sits
-        # outside the bounded month/file window.
-        if not changed:
+        # Skip unbounded full-history scan during restore-full (GitHub already loaded bulk).
+        if not changed and not restore_full_mode:
             for _p, _a in platform_attrs:
                 if not getattr(sess, _a).empty:
                     changed = True
@@ -275,18 +297,20 @@ def _restore_daily_if_needed(
         if not changed:
             for platform, attr in platform_attrs:
                 if getattr(sess, attr).empty:
+                    if restore_full_mode:
+                        _set_restore_step(sess, "tier3", f"Tier-3 — full load {platform} (empty only)…")
                     df = load_platform_data(
                         platform,
-                        months=None,
+                        months=None if not restore_full_mode else _auto_months,
                         dedup=False,
-                        max_files=None,
+                        max_files=None if not restore_full_mode else _auto_max_files,
                     )
                     if not df.empty:
                         cur = getattr(sess, attr)
                         setattr(sess, attr, merge_platform_data(cur, df, platform))
                         changed = True
 
-        if changed:
+        if changed and not skip_sales_rebuild:
             try:
                 sess.sales_df = build_sales_df(
                     mtr_df=sess.mtr_df,
@@ -615,22 +639,22 @@ def _maybe_restore_daily_for_empty_sales(sess: AppSession) -> None:
     _restore_daily_if_needed(sess)
 
 
-# (step_id, progress 0–100, default label for UI)
+# (step_id, progress 0–100, default label for UI) — GitHub before disk/Tier-3 (full MTR priority).
 _RESTORE_STEP_DEFS: tuple[tuple[str, int, str], ...] = (
     ("queued", 1, "Queued"),
     ("waiting", 3, "Waiting for server memory (warm cache or upload)"),
-    ("sku", 8, "SKU mapping"),
-    ("warm", 20, "Warm cache — Amazon, platforms, sales"),
-    ("disk", 30, "On-disk backup snapshot"),
-    ("inventory", 34, "Inventory snapshot"),
-    ("tier3", 58, "Tier-3 daily history (SQLite)"),
-    ("github_download", 62, "Downloading GitHub cache"),
-    ("github_amazon", 68, "GitHub — Amazon (MTR)"),
-    ("github_myntra", 72, "GitHub — Myntra"),
-    ("github_meesho", 76, "GitHub — Meesho"),
-    ("github_flipkart", 80, "GitHub — Flipkart"),
-    ("github_snapdeal", 82, "GitHub — Snapdeal"),
-    ("github_inventory", 84, "GitHub — inventory"),
+    ("sku", 6, "SKU mapping"),
+    ("warm", 12, "Warm cache — Amazon, platforms, sales"),
+    ("github_download", 18, "Downloading GitHub cache"),
+    ("github_amazon", 32, "GitHub — Amazon (MTR)"),
+    ("github_myntra", 42, "GitHub — Myntra"),
+    ("github_meesho", 52, "GitHub — Meesho"),
+    ("github_flipkart", 62, "GitHub — Flipkart"),
+    ("github_snapdeal", 66, "GitHub — Snapdeal"),
+    ("github_inventory", 70, "GitHub — inventory"),
+    ("disk", 74, "On-disk backup snapshot"),
+    ("inventory", 76, "Inventory snapshot"),
+    ("tier3", 84, "Tier-3 daily history (SQLite)"),
     ("daily_store", 90, "Daily upload store"),
     ("publish", 92, "Saving warm cache"),
     ("sales_queue", 94, "Queuing combined sales rebuild"),
@@ -654,6 +678,27 @@ def _set_restore_step(sess: AppSession, step_id: str, detail: str | None = None)
     sess.session_restore_message = detail or _RESTORE_STEP_LABEL.get(step_id, step_id)
 
 
+def _run_with_restore_heartbeat(sess: AppSession, step_id: str, label: str, fn):
+    """Keep UI progress alive during long CPU/IO (merge of millions of rows)."""
+    import threading
+
+    stop = threading.Event()
+
+    def _beat() -> None:
+        elapsed = 0
+        while not stop.wait(3.0):
+            elapsed += 3
+            _set_restore_step(sess, step_id, f"{label} ({elapsed}s)…")
+
+    t = threading.Thread(target=_beat, daemon=True)
+    t.start()
+    try:
+        return fn()
+    finally:
+        stop.set()
+        t.join(timeout=1.0)
+
+
 def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
     """Download GitHub Release cache and merge into session (keeps larger history)."""
     import pandas as pd
@@ -665,8 +710,16 @@ def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
         _sanitize_snapdeal_in_loaded,
     )
 
-    _set_restore_step(sess, "github_download")
-    ok, _, loaded = load_cache_from_drive()
+    _set_restore_step(sess, "github_download", "Downloading GitHub cache (priority — full MTR history)…")
+
+    def _gh_progress(done: int, total: int, msg: str) -> None:
+        span = max(1, total)
+        pct = 18 + int(14 * min(done, span) / span)
+        sess.session_restore_progress = pct
+        sess.session_restore_step = "github_download"
+        sess.session_restore_message = f"{msg} ({done}/{total})"
+
+    ok, _, loaded = load_cache_from_drive(progress_callback=_gh_progress)
     if not ok:
         return False
     _sanitize_snapdeal_in_loaded(loaded)
@@ -682,9 +735,18 @@ def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
         cur = getattr(sess, attr, None)
         if not isinstance(cur, pd.DataFrame):
             cur = pd.DataFrame()
-        merged = merge_platform_data(cur, gh, _plat)
-        if len(merged) != len(cur) or (cur.empty and not merged.empty):
-            setattr(sess, attr, merged)
+        def _merge_gh(cur_df=cur, gh_df=gh, plat=_plat, attribute=attr):
+            merged = merge_platform_data(cur_df, gh_df, plat)
+            setattr(sess, attribute, merged)
+            return len(merged)
+
+        after = _run_with_restore_heartbeat(
+            sess,
+            step_id,
+            f"GitHub merge { _plat }",
+            _merge_gh,
+        )
+        if after > len(cur) or (cur.empty and after > 0):
             changed = True
     gm = loaded.get("sku_mapping")
     if isinstance(gm, dict) and gm and len(gm) > len(sess.sku_mapping or {}):
@@ -707,7 +769,7 @@ def full_restore_session(
     defer_sales_rebuild: bool = False,
 ) -> tuple[list[str], list[str], str]:
     """
-    Operator restore: warm cache → disk snapshot → blocking Tier-3 → GitHub bulk merge.
+  Operator restore: warm → **GitHub bulk (priority)** → disk → Tier-3 → daily store.
     Unlike GET coverage, this may download GitHub assets and rebuild sales (defer for async).
     """
     import backend.main as _main
@@ -734,22 +796,29 @@ def full_restore_session(
     except Exception:
         pass
 
-    _set_restore_step(sess, "disk")
-    if _merge_disk_warm_into_session(sess).strip():
-        steps.append("disk")
-
-    _set_restore_step(sess, "inventory")
-    _restore_inventory_from_warm(sess)
-    _set_restore_step(sess, "tier3", "Tier-3 daily history — may take several minutes…")
-    _restore_daily_if_needed(sess, force=True, lock_timeout=600.0)
-    if "tier3" not in steps:
-        steps.append("tier3")
-
     try:
         if _merge_github_bulk_into_session(sess):
             steps.append("github")
     except Exception:
         pass
+
+    _set_restore_step(sess, "disk")
+    disk_note = _merge_disk_warm_into_session(sess)
+    if disk_note.strip():
+        steps.append("disk")
+
+    _set_restore_step(sess, "inventory")
+    _restore_inventory_from_warm(sess)
+    _set_restore_step(sess, "tier3", "Tier-3 daily history — merging recent uploads…")
+    _restore_daily_if_needed(
+        sess,
+        force=True,
+        lock_timeout=600.0,
+        restore_full_mode=True,
+        skip_sales_rebuild=defer_sales_rebuild,
+    )
+    if "tier3" not in steps:
+        steps.append("tier3")
 
     _set_restore_step(sess, "daily_store")
     try:

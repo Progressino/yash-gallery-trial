@@ -10,11 +10,11 @@ def test_set_restore_step_updates_progress():
     assert sess.session_restore_step == "queued"
 
     _set_restore_step(sess, "tier3", "Merging SQLite…")
-    assert sess.session_restore_progress == 58
+    assert sess.session_restore_progress == 84
     assert "SQLite" in sess.session_restore_message
 
     _set_restore_step(sess, "github_amazon", "GitHub — Amazon (1,200,000 rows)…")
-    assert sess.session_restore_progress == 68
+    assert sess.session_restore_progress == 32
     assert "Amazon" in sess.session_restore_message
 
     _set_restore_step(sess, "done", "All done")

@@ -1,20 +1,21 @@
 /** Progress UI for Upload → Restore all from server (polls coverage session_restore_*). */
 
+/** Order matches backend restore priority (GitHub before disk / Tier-3). */
 export const RESTORE_UI_STEPS: { id: string; label: string }[] = [
   { id: 'queued', label: 'Queued' },
   { id: 'waiting', label: 'Waiting for server' },
   { id: 'sku', label: 'SKU mapping' },
   { id: 'warm', label: 'Warm cache (platforms + sales)' },
-  { id: 'disk', label: 'On-disk backup' },
-  { id: 'inventory', label: 'Inventory snapshot' },
-  { id: 'tier3', label: 'Tier-3 daily history' },
-  { id: 'github_download', label: 'GitHub — downloading' },
+  { id: 'github_download', label: 'GitHub — downloading (priority)' },
   { id: 'github_amazon', label: 'GitHub — Amazon (MTR)' },
   { id: 'github_myntra', label: 'GitHub — Myntra' },
   { id: 'github_meesho', label: 'GitHub — Meesho' },
   { id: 'github_flipkart', label: 'GitHub — Flipkart' },
   { id: 'github_snapdeal', label: 'GitHub — Snapdeal' },
   { id: 'github_inventory', label: 'GitHub — inventory' },
+  { id: 'disk', label: 'On-disk backup' },
+  { id: 'inventory', label: 'Inventory snapshot' },
+  { id: 'tier3', label: 'Tier-3 daily history' },
   { id: 'daily_store', label: 'Daily upload store' },
   { id: 'publish', label: 'Saving warm cache' },
   { id: 'sales_queue', label: 'Queuing sales rebuild' },
@@ -62,9 +63,9 @@ export default function RestoreProgressPanel({ message, progress, step }: Props)
           aria-valuemax={100}
         />
       </div>
-      <p className="text-xs text-slate-700 mb-3">{message}</p>
+      <p className="text-xs text-slate-700 mb-3 font-medium">{message}</p>
       <p className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5">Steps</p>
-      <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 max-h-40 overflow-y-auto text-xs">
+      <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 max-h-44 overflow-y-auto text-xs">
         {RESTORE_UI_STEPS.filter(s => s.id !== 'done').map(s => {
           const st = stepStatus(s.id, current)
           return (
@@ -87,7 +88,8 @@ export default function RestoreProgressPanel({ message, progress, step }: Props)
         })}
       </ul>
       <p className="mt-2 text-[10px] text-slate-500">
-        Large Amazon history can take 10–15 minutes. Stay on this page — the bar will keep moving.
+        Full Amazon (MTR) loads from GitHub first. Large history can take 10–15 minutes — the timer
+        in the message updates every few seconds while each step runs.
       </p>
     </div>
   )
