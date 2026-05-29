@@ -27,6 +27,7 @@ DATA_KEYS = (
     "challan_master",
     "production_log",
     "target_ltl_override",
+    "ltl_tolerance_bands",
     "employee_master",
     "karigar_attendance",
     "operating_attendance",
@@ -114,6 +115,10 @@ DEFAULT_SHEETS: dict[str, list[dict]] = {
     "challan_master": _default_challan_master(),
     "production_log": [],
     "target_ltl_override": [],
+    "ltl_tolerance_bands": [
+        {"Min_Rs": 200, "Max_Rs": 300, "Tolerance_Pct": 35},
+        {"Min_Rs": 300, "Max_Rs": 400, "Tolerance_Pct": 12},
+    ],
     "employee_master": _default_employee_master(),
     "karigar_attendance": [],
     "operating_attendance": [],

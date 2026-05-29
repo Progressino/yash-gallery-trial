@@ -21,36 +21,87 @@ _PRODUCTION_LOG_LOCK = threading.RLock()
 
 # Factory SOP — benchmark karigar ₹480/day; LTL tolerance % by daily-rate band.
 BENCHMARK_DAILY_RATE_RS = 480.0
-# (min_daily_rate_inclusive, max_daily_rate_exclusive, tolerance_percent)
-LTL_TOLERANCE_BANDS: list[tuple[float, float, float]] = [
+# Default bands if sheet empty: (min inclusive, max exclusive, tolerance %)
+_DEFAULT_LTL_TOLERANCE_BANDS: list[tuple[float, float, float]] = [
     (200.0, 300.0, 35.0),
     (300.0, 400.0, 12.0),
 ]
-# Below ₹200/day uses the ₹200–300 band (35%). ₹400+ uses the 12% band.
-LTL_TOLERANCE_FACTOR = 1.0 - (LTL_TOLERANCE_BANDS[0][2] / 100.0)
+
+
+def _default_ltl_bands_rows() -> list[dict[str, float]]:
+    return [
+        {"Min_Rs": lo, "Max_Rs": hi, "Tolerance_Pct": pct}
+        for lo, hi, pct in _DEFAULT_LTL_TOLERANCE_BANDS
+    ]
+
+
+def load_ltl_tolerance_bands() -> list[tuple[float, float, float]]:
+    """Salary-range LTL tolerance bands from sheet (min inclusive, max exclusive, %)."""
+    df = get_sheet_df("ltl_tolerance_bands")
+    bands: list[tuple[float, float, float]] = []
+    if not df.empty:
+        for _, row in df.iterrows():
+            try:
+                lo = float(row.get("Min_Rs", 0) or 0)
+                hi = float(row.get("Max_Rs", 0) or 0)
+                pct = float(row.get("Tolerance_Pct", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if hi > lo and pct >= 0:
+                bands.append((lo, hi, pct))
+    if not bands:
+        return list(_DEFAULT_LTL_TOLERANCE_BANDS)
+    return sorted(bands, key=lambda b: b[0])
+
+
+def save_ltl_tolerance_bands(bands: list[dict[str, Any]]) -> dict:
+    rows: list[dict[str, float]] = []
+    for b in bands:
+        try:
+            lo = float(b.get("Min_Rs", b.get("from_rs", 0)) or 0)
+            hi = float(b.get("Max_Rs", b.get("to_rs", 0)) or 0)
+            pct = float(b.get("Tolerance_Pct", b.get("tolerance_pct", 0)) or 0)
+        except (TypeError, ValueError):
+            continue
+        if hi <= lo or pct < 0:
+            continue
+        rows.append({"Min_Rs": lo, "Max_Rs": hi, "Tolerance_Pct": pct})
+    if not rows:
+        return {"ok": False, "message": "At least one valid band (Min < Max, tolerance %) is required"}
+    save_sheet_df("ltl_tolerance_bands", pd.DataFrame(rows))
+    return {"ok": True, "message": f"Saved {len(rows)} tolerance band(s)", "bands": rows}
+
+
+def ltl_tolerance_bands_for_api() -> list[dict[str, float]]:
+    return [
+        {"from_rs": lo, "to_rs": hi, "tolerance_pct": pct}
+        for lo, hi, pct in load_ltl_tolerance_bands()
+    ]
 
 
 def ltl_tolerance_factor(daily_rate: float) -> float:
     """Return multiplier applied to base target (1 − tolerance %)."""
     dr = float(daily_rate or 0)
-    for lo, hi, pct in LTL_TOLERANCE_BANDS:
+    bands = load_ltl_tolerance_bands()
+    for lo, hi, pct in bands:
         if lo <= dr < hi:
             return 1.0 - (pct / 100.0)
-    if dr >= LTL_TOLERANCE_BANDS[-1][0]:
-        return 1.0 - (LTL_TOLERANCE_BANDS[-1][2] / 100.0)
-    if dr >= LTL_TOLERANCE_BANDS[0][0]:
-        return 1.0 - (LTL_TOLERANCE_BANDS[0][2] / 100.0)
-    return 1.0 - (LTL_TOLERANCE_BANDS[0][2] / 100.0)
+    if dr >= bands[-1][0]:
+        return 1.0 - (bands[-1][2] / 100.0)
+    if bands and dr < bands[0][0]:
+        return 1.0 - (bands[0][2] / 100.0)
+    return 1.0 - (bands[0][2] / 100.0) if bands else 0.65
 
 
 def ltl_tolerance_pct_for_rate(daily_rate: float) -> float:
     dr = float(daily_rate or 0)
-    for lo, hi, pct in LTL_TOLERANCE_BANDS:
+    bands = load_ltl_tolerance_bands()
+    for lo, hi, pct in bands:
         if lo <= dr < hi:
             return pct
-    if dr >= LTL_TOLERANCE_BANDS[-1][0]:
-        return LTL_TOLERANCE_BANDS[-1][2]
-    return LTL_TOLERANCE_BANDS[0][2]
+    if dr >= bands[-1][0]:
+        return bands[-1][2]
+    return bands[0][2] if bands else 35.0
 
 
 def normalize_operation_name(name: Any) -> str:
@@ -344,9 +395,12 @@ def get_ltl_setup_table() -> dict:
                 }
             )
     preview = target_control_preview(str(date.today()))
+    band_df = get_sheet_df("ltl_tolerance_bands")
+    band_rows = band_df.fillna("").to_dict(orient="records") if not band_df.empty else _default_ltl_bands_rows()
     return {
         "ok": True,
-        "tolerance_bands": preview.get("tolerance_bands", []),
+        "tolerance_bands": preview.get("tolerance_bands", ltl_tolerance_bands_for_api()),
+        "tolerance_band_rows": band_rows,
         "period_defaults": {"daily": 1, "weekly": 6, "monthly": 26},
         "overrides": overrides,
         "preview_rows": preview.get("rows", [])[:200],
@@ -365,10 +419,13 @@ def upsert_karigar_expense(
     karigar_id: str,
     work_type: str,
     challan_no: str = "",
+    challan_nos: list[str] | None = None,
     style: str = "",
     amount_rs: float,
     hours: float = 0,
     notes: str = "",
+    operation: str = "",
+    output: str = "",
     expense_id: str = "",
 ) -> dict:
     """Record non-production work (part change, alter, trainee, etc.) against a challan for payroll."""
@@ -394,44 +451,83 @@ def upsert_karigar_expense(
         hit = km[km["Karigar_ID"].astype(str).map(clean_key) == kid]
         if not hit.empty:
             kname = str(hit.iloc[0].get("Name", kid))
-    resolved_style = _resolve_canonical_style(style) if style else ""
-    if challan_no and not resolved_style:
+    challans_list = [str(c).strip() for c in (challan_nos or []) if str(c).strip()]
+    if not challans_list and challan_no:
+        challans_list = [str(challan_no).strip()]
+    combined_challan = ", ".join(challans_list)
+
+    def _style_for_challan(cn: str) -> str:
+        if style:
+            return _resolve_canonical_style(style)
+        if not cn:
+            return ""
         ch = get_sheet_df("challan_master")
         if not ch.empty and "Challan_No" in ch.columns:
-            hit = ch[ch["Challan_No"].astype(str).map(clean_key) == clean_key(challan_no)]
+            hit = ch[ch["Challan_No"].astype(str).map(clean_key) == clean_key(cn)]
             if not hit.empty:
-                resolved_style = str(hit.iloc[0].get("Style", "")).strip()
-    row = {
-        "Expense_ID": expense_id.strip() or _new_expense_id(),
+                return str(hit.iloc[0].get("Style", "")).strip()
+        return ""
+
+    resolved_style = _style_for_challan(challans_list[0] if challans_list else "") or (
+        _resolve_canonical_style(style) if style else ""
+    )
+    op_name = normalize_operation_name(operation)
+    output_text = str(output or "").strip()
+    note_parts = [str(notes or "").strip()]
+    if output_text:
+        note_parts.append(f"Output: {output_text}")
+    combined_notes = " | ".join(p for p in note_parts if p)
+
+    base_row = {
         "Date": date_str[:10],
         "Karigar_ID": kid,
         "Karigar_Name": kname,
         "Work_Type": wt,
-        "Challan_No": str(challan_no or "").strip(),
+        "Challan_No": combined_challan,
         "Style": resolved_style,
+        "Operation": op_name,
+        "Output": output_text,
         "Hours": round(float(hours or 0), 2),
         "Amount_Rs": amt,
         "Daily_Rate_Rs": daily,
         "Hourly_Rate_Rs": hourly,
-        "Notes": str(notes or "").strip(),
+        "Notes": combined_notes,
         "Updated_At": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
     }
     df = get_sheet_df("karigar_expenses")
     if df.empty:
-        df = pd.DataFrame(columns=list(row.keys()))
+        df = pd.DataFrame()
+    for col in ("Operation", "Output"):
+        if col not in df.columns:
+            df[col] = ""
+
     if expense_id:
+        row = {**base_row, "Expense_ID": expense_id.strip()}
         mask = df["Expense_ID"].astype(str) == expense_id.strip()
         if not mask.any():
             return {"ok": False, "message": f"Expense {expense_id} not found."}
         idx = df[mask].index[0]
         for k, v in row.items():
             df.at[idx, k] = v
-        msg = "Expense updated."
-    else:
+        save_sheet_df("karigar_expenses", df)
+        return {"ok": True, "message": "Expense updated.", "row": row}
+
+    targets = challans_list if challans_list else [""]
+    per_amt = round(amt / len(targets), 2) if len(targets) > 1 and amt > 0 else amt
+    added: list[dict] = []
+    for cn in targets:
+        row = {
+            **base_row,
+            "Expense_ID": _new_expense_id(),
+            "Challan_No": cn,
+            "Style": _style_for_challan(cn) or resolved_style,
+            "Amount_Rs": per_amt,
+        }
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        msg = "Expense added."
+        added.append(row)
     save_sheet_df("karigar_expenses", df)
-    return {"ok": True, "message": msg, "row": row}
+    msg = f"Expense added ({len(added)} row(s))." if len(added) > 1 else "Expense added."
+    return {"ok": True, "message": msg, "rows": added, "row": added[0] if added else base_row}
 
 
 def delete_karigar_expense(expense_id: str) -> dict:
@@ -657,10 +753,7 @@ def target_control_preview(
             "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
             "period": period_key,
             "period_days": period_days,
-            "tolerance_bands": [
-                {"from_rs": lo, "to_rs": hi, "tolerance_pct": pct}
-                for lo, hi, pct in LTL_TOLERANCE_BANDS
-            ],
+            "tolerance_bands": ltl_tolerance_bands_for_api(),
             "rows": [],
         }
 
@@ -722,10 +815,7 @@ def target_control_preview(
         "period": period_key,
         "period_days": period_days,
         "benchmark_daily_rate_rs": BENCHMARK_DAILY_RATE_RS,
-        "tolerance_bands": [
-            {"from_rs": lo, "to_rs": hi, "tolerance_pct": pct}
-            for lo, hi, pct in LTL_TOLERANCE_BANDS
-        ],
+        "tolerance_bands": ltl_tolerance_bands_for_api(),
         "rows": rows,
     }
 
@@ -787,6 +877,73 @@ def upsert_ltl_override(
         "message": f"Manual LTL {int(manual_ltl)} saved for {st} / {op} / {kid}",
         "applied_ltl": applied["applied_ltl"],
     }
+
+
+def bulk_upsert_ltl_override_all_styles(
+    operation: str,
+    karigar_id: str,
+    manual_ltl: int | None,
+    *,
+    notes: str = "",
+) -> dict:
+    """Apply manual LTL override to every style that has this operation."""
+    op = normalize_operation_name(operation)
+    kid = clean_key(karigar_id)
+    if not op or not kid:
+        return {"ok": False, "message": "Operation and Karigar_ID are required"}
+    sm = get_sheet_df("style_master")
+    if sm.empty:
+        return {"ok": False, "message": "Style master empty"}
+    styles = sorted(
+        {
+            str(s).strip()
+            for s in sm.loc[
+                sm["Operation"].astype(str).str.strip().str.lower() == op.lower(), "Style"
+            ].astype(str)
+            if str(s).strip()
+        }
+    )
+    if not styles:
+        return {"ok": False, "message": f"No styles found for operation {op}"}
+    count = 0
+    for st in styles:
+        out = upsert_ltl_override(st, op, kid, manual_ltl, notes=notes)
+        if out.get("ok"):
+            count += 1
+    action = "cleared" if manual_ltl is None or int(manual_ltl or 0) <= 0 else f"set to {int(manual_ltl)}"
+    return {
+        "ok": True,
+        "message": f"Manual LTL {action} for {count} style(s), operation {op}, karigar {kid}",
+        "styles_updated": count,
+    }
+
+
+def list_karigar_challans_for_expense(karigar_id: str, *, days_back: int = 90) -> list[dict[str, str]]:
+    """Challans this karigar has worked on recently (for expense multi-select)."""
+    kid = clean_key(karigar_id)
+    if not kid:
+        return []
+    pl = get_sheet_df("production_log")
+    if pl.empty:
+        return []
+    cutoff = (date.today() - timedelta(days=max(1, days_back))).isoformat()
+    work = pl.copy()
+    work["_kar"] = work["Karigar_ID"].apply(clean_key)
+    work["_date"] = work["Date"].astype(str).str[:10]
+    work = work[(work["_kar"] == kid) & (work["_date"] >= cutoff)]
+    if work.empty:
+        return []
+    work = _production_log_latest_rows(work)
+    out: dict[str, dict[str, str]] = {}
+    for _, r in work.iterrows():
+        cn = str(r.get("Challan_No", "")).strip()
+        if not cn:
+            continue
+        st = str(r.get("Style", "")).strip()
+        key = clean_key(cn)
+        if key not in out:
+            out[key] = {"Challan_No": cn, "Style": st, "Last_Date": str(r.get("Date", ""))[:10]}
+    return sorted(out.values(), key=lambda x: (x["Last_Date"], x["Challan_No"]), reverse=True)
 
 
 def _resolve_style_operation(name: str, op_info: dict[str, dict]) -> str | None:
@@ -1013,6 +1170,122 @@ def load_production_entry(date_str: str, karigar_id: str, challan_no: str, style
                     "manual_pieces": manual,
                 }
     return {"hours": hours, "found": True, "rows_loaded": len(existing)}
+
+
+def _session_hour_entries_from_log(
+    date_str: str,
+    karigar_id: str,
+    challan_no: str,
+    style: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Rebuild hour_entries for save_production_entry from persisted log rows."""
+    pl = get_sheet_df("production_log")
+    if pl.empty:
+        return [], ""
+    pl = pl.copy()
+    pl["_date"] = pl["Date"].apply(clean_key)
+    pl["_kar"] = pl["Karigar_ID"].apply(clean_key)
+    pl["_challan"] = pl["Challan_No"].apply(clean_key)
+    pl["_style"] = pl["Style"].apply(_style_session_key)
+    existing = pl[
+        (pl["_date"] == clean_key(date_str))
+        & (pl["_kar"] == clean_key(karigar_id))
+        & (pl["_challan"] == clean_key(challan_no))
+        & (pl["_style"] == _style_session_key(style))
+    ]
+    if existing.empty:
+        return [], ""
+    if "Save_Time" in existing.columns:
+        existing = existing.sort_values("Save_Time", ascending=False, na_position="last")
+    if "Operation" in existing.columns:
+        existing["_op_norm"] = existing["Operation"].apply(normalize_operation_name)
+        existing = existing.drop_duplicates(subset=["_op_norm"], keep="first")
+
+    kname = str(existing.iloc[0].get("Karigar_Name", karigar_id))
+    hour_entries: list[dict[str, Any]] = []
+    for _, row in existing.iterrows():
+        op_name = normalize_operation_name(row.get("Operation", ""))
+        for hcol in HOUR_COLS:
+            if hcol == "H_13_14":
+                continue
+            try:
+                pcs = int(float(row.get(hcol, 0) or 0))
+            except (ValueError, TypeError):
+                pcs = 0
+            try:
+                si = int(float(row.get(sticker_in_col(hcol), 0) or 0))
+            except (ValueError, TypeError):
+                si = 0
+            try:
+                so = int(float(row.get(sticker_out_col(hcol), 0) or 0))
+            except (ValueError, TypeError):
+                so = 0
+            if pcs > 0 or si > 0 or so > 0:
+                hour_entries.append(
+                    {
+                        "hour_col": hcol,
+                        "operation": op_name,
+                        "pieces": pcs,
+                        "sticker_in": si,
+                        "sticker_out": so,
+                        "manual_pieces": si == 0 and so == 0,
+                    }
+                )
+    return hour_entries, kname
+
+
+def recalculate_production_for_karigar_from_date(karigar_id: str, effective_from: str) -> dict:
+    """Re-save all production sessions for a karigar on/after effective_from (rate/LTL refresh)."""
+    kid = clean_key(karigar_id)
+    eff = str(effective_from or "")[:10]
+    if not kid or not eff:
+        return {"ok": False, "message": "Karigar and effective date required"}
+
+    pl = get_sheet_df("production_log")
+    if pl.empty:
+        return {"ok": True, "sessions": 0, "message": "No production entries to recalculate"}
+
+    work = pl.copy()
+    work["_date"] = work["Date"].astype(str).str[:10]
+    work["_kar"] = work["Karigar_ID"].apply(clean_key)
+    subset = work[(work["_kar"] == kid) & (work["_date"] >= eff)]
+    if subset.empty:
+        return {"ok": True, "sessions": 0, "message": "No sessions on or after effective date"}
+
+    latest = _production_log_latest_rows(subset)
+    sessions: set[tuple[str, str, str]] = set()
+    for _, r in latest.iterrows():
+        sessions.add(
+            (
+                str(r.get("Date", ""))[:10],
+                str(r.get("Challan_No", "")),
+                str(r.get("Style", "")),
+            )
+        )
+
+    recalced = 0
+    for date_str, challan_no, style in sorted(sessions):
+        hour_entries, kname = _session_hour_entries_from_log(date_str, kid, challan_no, style)
+        if not hour_entries:
+            continue
+        out = save_production_entry(
+            date_str=date_str,
+            karigar_id=kid,
+            karigar_name=kname or kid,
+            challan_no=challan_no,
+            style=style,
+            hour_entries=hour_entries,
+            saved_by="system",
+            saved_by_name="rate-recalc",
+        )
+        if out.get("ok"):
+            recalced += 1
+
+    return {
+        "ok": True,
+        "sessions": recalced,
+        "message": f"Recalculated {recalced} production session(s) from {eff} using current rates and LTL.",
+    }
 
 
 def save_production_entry(
@@ -1779,7 +2052,7 @@ def build_daily_rate_map(as_of_date: str | None = None) -> dict[str, float]:
     km = get_sheet_df("karigar_master")
     if not km.empty and "Karigar_ID" in km.columns:
         kids = km["Karigar_ID"].map(clean_key)
-        vals = safe_num(km.get("Daily_Rate_Rs", 0))
+        vals = safe_num(km["Daily_Rate_Rs"]) if "Daily_Rate_Rs" in km.columns else pd.Series(0, index=km.index)
         for kid, val in zip(kids, vals, strict=False):
             if kid:
                 rates[str(kid)] = float(val)
@@ -1787,7 +2060,7 @@ def build_daily_rate_map(as_of_date: str | None = None) -> dict[str, float]:
     em = get_sheet_df("employee_master")
     if not em.empty and "E_Code" in em.columns:
         kids = em["E_Code"].map(clean_key)
-        vals = safe_num(em.get("Daily_Rate_Rs", 0))
+        vals = safe_num(em["Daily_Rate_Rs"]) if "Daily_Rate_Rs" in em.columns else pd.Series(0, index=em.index)
         for kid, val in zip(kids, vals, strict=False):
             if kid and kid not in rates:
                 rates[str(kid)] = float(val)
@@ -2187,6 +2460,158 @@ def performance_report(date_from: str, date_to: str) -> dict:
         "summary": summary,
         "operation_type_breakup": op_type_breakup,
     }
+
+
+def comparison_dashboard_report(date_from: str, date_to: str) -> dict:
+    """P&L comparison: karigar vs benchmark/LTL, SKU profit/loss, challan budget status."""
+    pl = get_sheet_df("production_log")
+    empty = {
+        "date_from": date_from,
+        "date_to": date_to,
+        "summary": {
+            "karigars_at_loss": 0,
+            "karigars_at_profit": 0,
+            "skus_at_loss": 0,
+            "challans_over_budget": 0,
+            "total_budgeted_rs": 0.0,
+            "total_actual_rs": 0.0,
+            "total_net_pl_rs": 0.0,
+        },
+        "karigar_comparison": [],
+        "sku_comparison": [],
+        "challan_comparison": [],
+        "karigar_sku_detail": [],
+    }
+    if pl.empty:
+        return empty
+
+    work = pl.copy()
+    work["Date_dt"] = pd.to_datetime(work["Date"], errors="coerce")
+    d0 = pd.Timestamp(date_from)
+    d1 = pd.Timestamp(date_to)
+    work = work[(work["Date_dt"] >= d0) & (work["Date_dt"] <= d1)]
+    if work.empty:
+        return empty
+
+    work = _production_log_latest_rows(work)
+    fin_cols = ["Budgeted_Expense_Rs", "Actual_Expense_Rs", "PL_Rs", "Piece_Value_Rs", "Applied_LTL", "Formula_LTL"]
+
+    def _agg_group(group: pd.DataFrame, key_name: str, key_val: str) -> dict:
+        budgeted = float(safe_num(group.get("Budgeted_Expense_Rs", 0)).sum()) if "Budgeted_Expense_Rs" in group.columns else 0.0
+        actual = float(safe_num(group.get("Actual_Expense_Rs", 0)).sum()) if "Actual_Expense_Rs" in group.columns else 0.0
+        pl_rs = float(safe_num(group.get("PL_Rs", 0)).sum()) if "PL_Rs" in group.columns else budgeted - actual
+        piece_val = float(safe_num(group.get("Piece_Value_Rs", 0)).sum()) if "Piece_Value_Rs" in group.columns else 0.0
+        pieces = int(safe_num(group.get("Total_Pieces", 0)).sum()) if "Total_Pieces" in group.columns else 0
+        if budgeted <= 0 and actual > 0:
+            for _, r in group.iterrows():
+                fin = _financial_from_log_row(r, date_str=str(r.get("Date", ""))[:10], kid=str(r.get("Karigar_ID", "")))
+                budgeted += fin["budgeted_amount"]
+                actual += fin["actual_amount"]
+                pl_rs += fin["pl_rs"]
+        running_ltl = 0.0
+        if "Applied_LTL" in group.columns:
+            running_ltl = float(safe_num(group["Applied_LTL"]).mean())
+        return {
+            key_name: key_val,
+            "Pieces": pieces,
+            "Piece_Value_Rs": round(piece_val, 2),
+            "Budgeted_Rs": round(budgeted, 2),
+            "Actual_Rs": round(actual, 2),
+            "Net_PL_Rs": round(pl_rs, 2),
+            "Running_LTL": round(running_ltl, 1),
+            "Status": "Profit" if pl_rs >= 0 else "Loss",
+            "Variance_%": round((actual / budgeted * 100) if budgeted > 0 else 0, 1),
+        }
+
+    karigar_comparison: list[dict] = []
+    if "Karigar_ID" in work.columns:
+        for kid, grp in work.groupby(work["Karigar_ID"].apply(clean_key)):
+            if not kid:
+                continue
+            nm = str(grp.iloc[0].get("Karigar_Name", kid))
+            row = _agg_group(grp, "Karigar_ID", str(kid))
+            row["Karigar_Name"] = nm
+            karigar_comparison.append(row)
+    karigar_comparison.sort(key=lambda r: r["Net_PL_Rs"])
+
+    sku_comparison: list[dict] = []
+    if "Style" in work.columns:
+        for st, grp in work.groupby(work["Style"].astype(str).str.strip()):
+            if not st:
+                continue
+            sku_comparison.append(_agg_group(grp, "Style", st))
+    sku_comparison.sort(key=lambda r: r["Net_PL_Rs"])
+
+    challan_comparison: list[dict] = []
+    if "Challan_No" in work.columns:
+        for cn, grp in work.groupby(work["Challan_No"].astype(str).str.strip()):
+            if not cn:
+                continue
+            row = _agg_group(grp, "Challan_No", cn)
+            row["Style"] = str(grp.iloc[0].get("Style", ""))
+            challan_comparison.append(row)
+    challan_comparison.sort(key=lambda r: r["Net_PL_Rs"])
+
+    karigar_sku_detail: list[dict] = []
+    if "Karigar_ID" in work.columns and "Style" in work.columns:
+        work["_kid"] = work["Karigar_ID"].apply(clean_key)
+        work["_st"] = work["Style"].astype(str).str.strip()
+        for (kid, st), grp in work.groupby(["_kid", "_st"]):
+            if not kid or not st:
+                continue
+            row = _agg_group(grp, "Style", st)
+            row["Karigar_ID"] = kid
+            row["Karigar_Name"] = str(grp.iloc[0].get("Karigar_Name", kid))
+            karigar_sku_detail.append(row)
+
+    loss_k = sum(1 for r in karigar_comparison if r["Net_PL_Rs"] < 0)
+    loss_s = sum(1 for r in sku_comparison if r["Net_PL_Rs"] < 0)
+    over_ch = sum(1 for r in challan_comparison if r["Actual_Rs"] > r["Budgeted_Rs"] and r["Budgeted_Rs"] > 0)
+
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "summary": {
+            "karigars_at_loss": loss_k,
+            "karigars_at_profit": len(karigar_comparison) - loss_k,
+            "skus_at_loss": loss_s,
+            "challans_over_budget": over_ch,
+            "total_budgeted_rs": round(sum(r["Budgeted_Rs"] for r in karigar_comparison), 2),
+            "total_actual_rs": round(sum(r["Actual_Rs"] for r in karigar_comparison), 2),
+            "total_net_pl_rs": round(sum(r["Net_PL_Rs"] for r in karigar_comparison), 2),
+        },
+        "karigar_comparison": karigar_comparison,
+        "sku_comparison": sku_comparison,
+        "challan_comparison": challan_comparison,
+        "karigar_sku_detail": karigar_sku_detail,
+    }
+
+
+def update_employee_master(
+    e_code: str,
+    *,
+    name: str | None = None,
+    emp_type: str | None = None,
+    daily_rate_rs: float | None = None,
+) -> dict:
+    code = clean_key(e_code)
+    df = get_sheet_df("employee_master")
+    if df.empty or "E_Code" not in df.columns:
+        return {"ok": False, "message": "Employee master empty"}
+    mask = df["E_Code"].apply(clean_key) == code
+    if not mask.any():
+        return {"ok": False, "message": f"Employee {code} not found"}
+    idx = df[mask].index[0]
+    if name is not None:
+        df.at[idx, "Name"] = str(name).strip()
+    if emp_type is not None:
+        df.at[idx, "Type"] = str(emp_type).strip()
+    if daily_rate_rs is not None:
+        rate = float(daily_rate_rs)
+        df.at[idx, "Daily_Rate_Rs"] = rate
+        df.at[idx, "Hourly_Rate_Rs"] = round(rate / 8, 2)
+    save_sheet_df("employee_master", df)
+    return {"ok": True, "message": f"Employee {code} updated"}
 
 
 def update_style_operation(
@@ -2637,7 +3062,15 @@ def update_karigar_master(
     if rate_changed:
         eff = (effective_from or str(date.today()))[:10]
         _append_rate_history(kid, rate, eff)
-        return {"ok": True, "message": f"Rate ₹{rate}/day applies from {eff} (synced across app)"}
+        recalc = recalculate_production_for_karigar_from_date(kid, eff)
+        extra = ""
+        if recalc.get("sessions", 0):
+            extra = f" Recalculated {recalc['sessions']} production session(s)."
+        return {
+            "ok": True,
+            "message": f"Rate ₹{rate}/day applies from {eff}.{extra}",
+            "recalculated_sessions": recalc.get("sessions", 0),
+        }
     return {"ok": True, "message": "Karigar updated"}
 
 

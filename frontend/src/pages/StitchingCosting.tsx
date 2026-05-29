@@ -22,6 +22,7 @@ type TabId =
   | 'target_control'
   | 'ltl_setup'
   | 'expenses'
+  | 'comparison'
   | 'challan'
   | 'style'
   | 'efficiency'
@@ -41,6 +42,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'target_control', label: '🎯 Target Control' },
   { id: 'ltl_setup', label: '📐 LTL Setup' },
   { id: 'expenses', label: '💸 Karigar Expenses' },
+  { id: 'comparison', label: '📈 P&L Compare' },
   { id: 'challan', label: '🧾 Challans' },
   { id: 'style', label: '💎 Style Costing' },
   { id: 'efficiency', label: '📊 Efficiency' },
@@ -160,6 +162,7 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
       )}
       {!karigarOnly && tab === 'ltl_setup' && <LtlSetupTab admin={admin} onFlash={flash} />}
       {!karigarOnly && tab === 'expenses' && <KarigarExpensesTab admin={admin} onFlash={flash} />}
+      {!karigarOnly && tab === 'comparison' && <ComparisonDashboardTab />}
       {!karigarOnly && tab === 'challan' && <ChallanTab onFlash={flash} />}
       {!karigarOnly && tab === 'style' && <StyleCostingTab />}
       {!karigarOnly && tab === 'efficiency' && <EfficiencyTab />}
@@ -1900,16 +1903,115 @@ function ChallanRegisterTable({
   )
 }
 
+function ComparisonDashboardTab() {
+  const [from, setFrom] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 6)
+    return d.toISOString().slice(0, 10)
+  })
+  const [to, setTo] = useState(todayStr())
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['stitching-comparison', from, to],
+    queryFn: () =>
+      api.get('/stitching/comparison-dashboard', { params: { date_from: from, date_to: to } }).then(r => r.data),
+  })
+  const s = data?.summary
+  const plClass = (v: number) => (v < 0 ? 'text-rose-700 font-semibold' : 'text-emerald-700 font-semibold')
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-gray-600">
+        Compare benchmark (₹480/day) budget vs actual karigar cost, running LTL, and P&amp;L by karigar, SKU, and challan.
+      </p>
+      <div className="flex flex-wrap gap-2 items-end text-xs">
+        <label>
+          From
+          <input type="date" className="block border rounded mt-1 px-2 py-1" value={from} onChange={e => setFrom(e.target.value)} />
+        </label>
+        <label>
+          To
+          <input type="date" className="block border rounded mt-1 px-2 py-1" value={to} onChange={e => setTo(e.target.value)} />
+        </label>
+        <button type="button" onClick={() => void refetch()} className="px-3 py-1.5 bg-[#002B5B] text-white rounded-lg">
+          {isLoading ? 'Loading…' : 'Refresh'}
+        </button>
+      </div>
+      {s && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+          <div className="bg-white border rounded-lg p-3">
+            <p className="text-gray-500 text-xs">Karigars at loss</p>
+            <p className={`font-bold ${plClass(-1)}`}>{s.karigars_at_loss}</p>
+          </div>
+          <div className="bg-white border rounded-lg p-3">
+            <p className="text-gray-500 text-xs">Karigars at profit</p>
+            <p className="font-bold text-emerald-700">{s.karigars_at_profit}</p>
+          </div>
+          <div className="bg-white border rounded-lg p-3">
+            <p className="text-gray-500 text-xs">SKUs at loss</p>
+            <p className={`font-bold ${plClass(-1)}`}>{s.skus_at_loss}</p>
+          </div>
+          <div className="bg-white border rounded-lg p-3">
+            <p className="text-gray-500 text-xs">Challans over budget</p>
+            <p className="font-bold text-amber-700">{s.challans_over_budget}</p>
+          </div>
+          <div className="bg-white border rounded-lg p-3 col-span-2">
+            <p className="text-gray-500 text-xs">Net P&amp;L (budget − actual)</p>
+            <p className={`font-bold text-lg ${plClass(s.total_net_pl_rs)}`}>₹{Number(s.total_net_pl_rs).toLocaleString()}</p>
+          </div>
+        </div>
+      )}
+      <Section title="Karigar — actual vs budget (who is losing money)">
+        <DataTable
+          rows={data?.karigar_comparison ?? []}
+          cols={['Karigar_Name', 'Pieces', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Running_LTL', 'Variance_%', 'Status']}
+        />
+      </Section>
+      <Section title="SKU — profit / loss">
+        <DataTable
+          rows={data?.sku_comparison ?? []}
+          cols={['Style', 'Pieces', 'Piece_Value_Rs', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Status']}
+        />
+      </Section>
+      <Section title="Challan — over / under budget">
+        <DataTable
+          rows={data?.challan_comparison ?? []}
+          cols={['Challan_No', 'Style', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Status']}
+        />
+      </Section>
+      <Section title="Karigar × SKU detail">
+        <DataTable
+          rows={data?.karigar_sku_detail ?? []}
+          cols={['Karigar_Name', 'Style', 'Pieces', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Running_LTL', 'Status']}
+        />
+      </Section>
+    </div>
+  )
+}
+
 function StyleCostingTab() {
   const [month, setMonth] = useState('All')
   const [style, setStyle] = useState('All')
-  const { data } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['stitching-style-costing', month, style],
     queryFn: () => api.get('/stitching/style-costing', { params: { month, style } }).then(r => r.data),
   })
   const s = data?.summary
   return (
     <div className="space-y-4">
+      {(isLoading || isFetching) && (
+        <div className="flex items-center gap-2 text-sm text-[#2c5aa0] bg-blue-50 border border-blue-100 rounded-lg px-4 py-3">
+          <span className="inline-block w-4 h-4 border-2 border-[#2c5aa0] border-t-transparent rounded-full animate-spin" />
+          Loading style costing…
+        </div>
+      )}
+      {isError && (
+        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          Failed to load style costing.{' '}
+          <button type="button" className="underline font-semibold" onClick={() => void refetch()}>
+            Retry
+          </button>
+        </p>
+      )}
       <p className="text-xs text-gray-500">
         P&amp;L uses <strong>received</strong> qty when set (e.g. 90 of 100 ordered). Party value (ordered) is shown for reference.
       </p>
@@ -2216,6 +2318,8 @@ function LtlSetupTab({
   const [karigarId, setKarigarId] = useState('')
   const [manualLtl, setManualLtl] = useState('')
   const [notes, setNotes] = useState('')
+  const [applyAllStyles, setApplyAllStyles] = useState(false)
+  const [bandRows, setBandRows] = useState<{ Min_Rs: string; Max_Rs: string; Tolerance_Pct: string }[]>([])
 
   const { data: setup, refetch } = useQuery({
     queryKey: ['stitching-ltl-setup'],
@@ -2247,14 +2351,51 @@ function LtlSetupTab({
     return [...s].sort()
   }, [styleSheet, style])
 
+  useEffect(() => {
+    const raw = (setup?.tolerance_band_rows ?? []) as { Min_Rs: number; Max_Rs: number; Tolerance_Pct: number }[]
+    if (raw.length) {
+      setBandRows(
+        raw.map(b => ({
+          Min_Rs: String(b.Min_Rs ?? ''),
+          Max_Rs: String(b.Max_Rs ?? ''),
+          Tolerance_Pct: String(b.Tolerance_Pct ?? ''),
+        })),
+      )
+    }
+  }, [setup?.tolerance_band_rows])
+
+  const saveBands = async () => {
+    const pw = admin.adminPassword()
+    if (!pw) {
+      onFlash('err', 'Unlock admin to edit tolerance bands')
+      return
+    }
+    try {
+      const { data } = await api.put('/stitching/ltl-setup/tolerance-bands', {
+        bands: bandRows.map(b => ({
+          Min_Rs: parseFloat(b.Min_Rs) || 0,
+          Max_Rs: parseFloat(b.Max_Rs) || 0,
+          Tolerance_Pct: parseFloat(b.Tolerance_Pct) || 0,
+        })),
+        admin_password: pw,
+        recalculate_production: true,
+      })
+      onFlash('ok', data.message || 'Bands saved')
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['stitching-pe-reports'] })
+    } catch (e: unknown) {
+      onFlash('err', axios.isAxiosError(e) ? String(e.response?.data?.detail || 'Save failed') : 'Save failed')
+    }
+  }
+
   const saveOverride = async () => {
     const pw = admin.adminPassword()
     if (!pw) {
       onFlash('err', 'Unlock admin to set manual LTL')
       return
     }
-    if (!style || !operation || !karigarId) {
-      onFlash('err', 'Style, operation, and karigar are required')
+    if ((!applyAllStyles && !style) || !operation || !karigarId) {
+      onFlash('err', applyAllStyles ? 'Operation and karigar are required' : 'Style, operation, and karigar are required')
       return
     }
     const manual = manualLtl === '' ? null : Math.max(0, parseInt(manualLtl, 10) || 0)
@@ -2265,6 +2406,7 @@ function LtlSetupTab({
         Karigar_ID: karigarId,
         Manual_LTL: manual,
         Notes: notes,
+        apply_all_styles: applyAllStyles,
         admin_password: pw,
       })
       onFlash('ok', data.message || 'LTL override saved')
@@ -2287,10 +2429,19 @@ function LtlSetupTab({
           Set manual LTL per style / operation / karigar. Production entry and costing use the applied LTL automatically.
           Clear manual LTL (leave blank) to revert to formula.
         </p>
+        <label className="flex items-center gap-2 text-xs mb-2">
+          <input type="checkbox" checked={applyAllStyles} onChange={e => setApplyAllStyles(e.target.checked)} />
+          Apply manual LTL to <strong>all styles</strong> for this operation + karigar
+        </label>
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
-          <label>
+          <label className={applyAllStyles ? 'opacity-50' : ''}>
             Style
-            <select className="block w-full border rounded mt-1 px-2 py-1.5" value={style} onChange={e => setStyle(e.target.value)}>
+            <select
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={style}
+              disabled={applyAllStyles}
+              onChange={e => setStyle(e.target.value)}
+            >
               <option value="">—</option>
               {styles.map(s => (
                 <option key={s} value={s}>
@@ -2357,14 +2508,75 @@ function LtlSetupTab({
         </button>
       </Section>
 
-      {setup?.tolerance_bands?.length > 0 && (
-        <p className="text-xs text-gray-600 px-1">
-          Tolerance bands (by daily rate):{' '}
-          {(setup.tolerance_bands as { from_rs: number; to_rs: number; tolerance_pct: number }[])
-            .map(b => `₹${b.from_rs}–${b.to_rs}: ${b.tolerance_pct}%`)
-            .join(' · ')}
+      <Section title="LTL tolerance by salary range">
+        <p className="text-xs text-gray-600 mb-3">
+          Karigars in each daily-pay band get this tolerance % on formula LTL (e.g. ₹200–300 at 20% → target × 0.80 × rate/480).
         </p>
-      )}
+        <div className="space-y-2 text-xs max-w-xl">
+          {bandRows.map((b, i) => (
+            <div key={i} className="grid grid-cols-4 gap-2 items-end">
+              <label>
+                Min ₹
+                <input
+                  type="number"
+                  className="w-full border rounded mt-1 px-2 py-1"
+                  value={b.Min_Rs}
+                  onChange={e => {
+                    const next = [...bandRows]
+                    next[i] = { ...next[i], Min_Rs: e.target.value }
+                    setBandRows(next)
+                  }}
+                />
+              </label>
+              <label>
+                Max ₹
+                <input
+                  type="number"
+                  className="w-full border rounded mt-1 px-2 py-1"
+                  value={b.Max_Rs}
+                  onChange={e => {
+                    const next = [...bandRows]
+                    next[i] = { ...next[i], Max_Rs: e.target.value }
+                    setBandRows(next)
+                  }}
+                />
+              </label>
+              <label>
+                Tolerance %
+                <input
+                  type="number"
+                  className="w-full border rounded mt-1 px-2 py-1"
+                  value={b.Tolerance_Pct}
+                  onChange={e => {
+                    const next = [...bandRows]
+                    next[i] = { ...next[i], Tolerance_Pct: e.target.value }
+                    setBandRows(next)
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className="text-red-600 text-xs py-1"
+                onClick={() => setBandRows(bandRows.filter((_, j) => j !== i))}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="px-3 py-1.5 border rounded-lg"
+              onClick={() => setBandRows([...bandRows, { Min_Rs: '', Max_Rs: '', Tolerance_Pct: '' }])}
+            >
+              + Add band
+            </button>
+            <button type="button" className="px-3 py-1.5 bg-violet-700 text-white rounded-lg" onClick={() => void saveBands()}>
+              Save bands &amp; recalc production
+            </button>
+          </div>
+        </div>
+      </Section>
 
       <Section title="Saved manual LTL overrides">
         <DataTable
@@ -2399,6 +2611,7 @@ function KarigarExpensesTab({
     return d.toISOString().slice(0, 10)
   })
   const [to, setTo] = useState(todayStr())
+  const [selectedChallans, setSelectedChallans] = useState<string[]>([])
   const [form, setForm] = useState({
     Date: todayStr(),
     Karigar_ID: '',
@@ -2408,6 +2621,8 @@ function KarigarExpensesTab({
     Hours: '',
     Amount_Rs: '',
     Notes: '',
+    Operation: '',
+    Output: '',
     Expense_ID: '',
   })
 
@@ -2421,9 +2636,17 @@ function KarigarExpensesTab({
   })
 
   const { data: expenseData, refetch } = useQuery({
-    queryKey: ['stitching-expenses', from, to],
+    queryKey: ['stitching-expenses', from, to, form.Karigar_ID],
     queryFn: () =>
-      api.get('/stitching/expenses', { params: { date_from: from, date_to: to } }).then(r => r.data),
+      api
+        .get('/stitching/expenses', {
+          params: {
+            date_from: from,
+            date_to: to,
+            ...(form.Karigar_ID ? { karigar_id: form.Karigar_ID } : {}),
+          },
+        })
+        .then(r => r.data),
   })
 
   const workTypes = (expenseData?.work_types ?? []) as string[]
@@ -2442,12 +2665,31 @@ function KarigarExpensesTab({
     }))
   }, [expenseData, karSheet])
 
+  const karigarRows = useMemo(
+    (): KarigarRow[] =>
+      karigarOptions.map(k => ({ Karigar_ID: k.id, Name: k.name })),
+    [karigarOptions],
+  )
+
   const challans = useMemo(() => {
+    const fromProd = (expenseData?.challans_for_karigar ?? []) as {
+      Challan_No: string
+      Style: string
+      Last_Date?: string
+    }[]
+    if (fromProd.length) {
+      return fromProd.map(c => ({
+        no: String(c.Challan_No),
+        style: String(c.Style || ''),
+        lastDate: String(c.Last_Date || ''),
+      }))
+    }
     return ((challanSheet?.rows ?? []) as { Challan_No: string; Style: string }[]).map(c => ({
       no: String(c.Challan_No),
       style: String(c.Style || ''),
+      lastDate: '',
     }))
-  }, [challanSheet])
+  }, [challanSheet, expenseData])
 
   const saveExpense = async () => {
     const pw = admin.adminPassword()
@@ -2462,16 +2704,20 @@ function KarigarExpensesTab({
     try {
       const { data } = await api.post('/stitching/expenses', {
         ...form,
+        Challan_Nos: selectedChallans.length ? selectedChallans : form.Challan_No ? [form.Challan_No] : [],
         Hours: parseFloat(form.Hours) || 0,
         Amount_Rs: parseFloat(form.Amount_Rs) || 0,
         admin_password: pw,
       })
       onFlash('ok', data.message || 'Saved')
+      setSelectedChallans([])
       setForm(f => ({
         ...f,
         Hours: '',
         Amount_Rs: '',
         Notes: '',
+        Operation: '',
+        Output: '',
         Expense_ID: '',
         Challan_No: '',
         Style: '',
@@ -2484,17 +2730,25 @@ function KarigarExpensesTab({
   }
 
   const editRow = (r: Record<string, unknown>) => {
+    const cn = String(r.Challan_No || '')
+    setSelectedChallans(cn.includes(',') ? cn.split(',').map(s => s.trim()) : cn ? [cn] : [])
     setForm({
       Date: String(r.Date || todayStr()),
       Karigar_ID: String(r.Karigar_ID || ''),
       Work_Type: String(r.Work_Type || 'Other'),
-      Challan_No: String(r.Challan_No || ''),
+      Challan_No: cn,
       Style: String(r.Style || ''),
       Hours: String(r.Hours ?? ''),
       Amount_Rs: String(r.Amount_Rs ?? ''),
       Notes: String(r.Notes || ''),
+      Operation: String(r.Operation || ''),
+      Output: String(r.Output || ''),
       Expense_ID: String(r.Expense_ID || ''),
     })
+  }
+
+  const toggleChallanPick = (no: string) => {
+    setSelectedChallans(prev => (prev.includes(no) ? prev.filter(x => x !== no) : [...prev, no]))
   }
 
   const removeExpense = async (expenseId: string) => {
@@ -2537,21 +2791,16 @@ function KarigarExpensesTab({
               onChange={e => setForm(f => ({ ...f, Date: e.target.value }))}
             />
           </label>
-          <label>
-            Karigar
-            <select
-              className="block w-full border rounded mt-1 px-2 py-1.5"
+          <div className="sm:col-span-2">
+            <KarigarSearchSelect
+              karigars={karigarRows}
               value={form.Karigar_ID}
-              onChange={e => setForm(f => ({ ...f, Karigar_ID: e.target.value }))}
-            >
-              <option value="">— select karigar —</option>
-              {karigarOptions.map(k => (
-                <option key={k.id} value={k.id}>
-                  {k.id} — {k.name}
-                </option>
-              ))}
-            </select>
-          </label>
+              onChange={id => {
+                setForm(f => ({ ...f, Karigar_ID: id }))
+                setSelectedChallans([])
+              }}
+            />
+          </div>
           <label>
             Work type
             <select
@@ -2566,24 +2815,39 @@ function KarigarExpensesTab({
               ))}
             </select>
           </label>
-          <label>
-            Challan
-            <select
-              className="block w-full border rounded mt-1 px-2 py-1.5"
-              value={form.Challan_No}
-              onChange={e => {
-                const no = e.target.value
-                const hit = challans.find(c => c.no === no)
-                setForm(f => ({ ...f, Challan_No: no, Style: hit?.style || f.Style }))
-              }}
-            >
-              <option value="">— optional —</option>
+          <div className="sm:col-span-2 lg:col-span-3">
+            <span className="font-semibold text-gray-700 text-xs">Challans (multi-select)</span>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              {form.Karigar_ID
+                ? 'Shows challans this karigar worked on recently. Select one or more.'
+                : 'Select a karigar first to see their challans.'}
+            </p>
+            <div className="mt-1 max-h-36 overflow-y-auto border rounded-lg p-2 space-y-1 bg-gray-50">
+              {!challans.length && <p className="text-xs text-gray-400 px-1">No challans</p>}
               {challans.map(c => (
-                <option key={c.no} value={c.no}>
-                  {c.no} · {c.style}
-                </option>
+                <label key={c.no} className="flex items-center gap-2 text-xs cursor-pointer py-1">
+                  <input
+                    type="checkbox"
+                    checked={selectedChallans.includes(c.no)}
+                    onChange={() => toggleChallanPick(c.no)}
+                  />
+                  <span>
+                    <span className="font-mono font-semibold">{c.no}</span>
+                    <span className="text-gray-500"> · {c.style}</span>
+                    {c.lastDate && <span className="text-gray-400"> · {c.lastDate}</span>}
+                  </span>
+                </label>
               ))}
-            </select>
+            </div>
+          </div>
+          <label>
+            Operation <span className="text-gray-400">(optional)</span>
+            <input
+              className="block w-full border rounded mt-1 px-2 py-1.5"
+              value={form.Operation}
+              onChange={e => setForm(f => ({ ...f, Operation: e.target.value }))}
+              placeholder="e.g. Alter sleeve"
+            />
           </label>
           <label>
             Style
@@ -2620,6 +2884,15 @@ function KarigarExpensesTab({
               onChange={e => setForm(f => ({ ...f, Notes: e.target.value }))}
             />
           </label>
+          <label className="sm:col-span-2 lg:col-span-3">
+            Output / remarks about karigar
+            <textarea
+              className="block w-full border rounded mt-1 px-2 py-1.5 min-h-[72px]"
+              value={form.Output}
+              onChange={e => setForm(f => ({ ...f, Output: e.target.value }))}
+              placeholder="What was done, quality notes, etc."
+            />
+          </label>
         </div>
         <button
           type="button"
@@ -2632,7 +2905,8 @@ function KarigarExpensesTab({
           <button
             type="button"
             className="mt-3 ml-2 px-4 py-2 border rounded-lg text-sm"
-            onClick={() =>
+            onClick={() => {
+              setSelectedChallans([])
               setForm({
                 Date: todayStr(),
                 Karigar_ID: '',
@@ -2642,9 +2916,11 @@ function KarigarExpensesTab({
                 Hours: '',
                 Amount_Rs: '',
                 Notes: '',
+                Operation: '',
+                Output: '',
                 Expense_ID: '',
               })
-            }
+            }}
           >
             Cancel edit
           </button>
@@ -3597,17 +3873,29 @@ function masterRowPayload(sheet: MasterSheetKey, row: Record<string, unknown>): 
   return { E_Code: String(row.E_Code ?? '') }
 }
 
-function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' | 'err', text: string) => void }) {
+function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' | 'err', text: string) => void }) {
   const qc = useQueryClient()
   const [active, setActive] = useState<MasterSheetKey>('style_master')
   const [reportFocusStyle, setReportFocusStyle] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [editKarigar, setEditKarigar] = useState<Record<string, unknown> | null>(null)
+  const [editEmployee, setEditEmployee] = useState<Record<string, unknown> | null>(null)
+  const [editStyleRow, setEditStyleRow] = useState<Record<string, unknown> | null>(null)
   const [karEdit, setKarEdit] = useState({
     Name: '',
     Skill: '',
     Daily_Rate_Rs: 420,
     Effective_From: todayStr(),
+  })
+  const [empEdit, setEmpEdit] = useState({
+    Name: '',
+    Type: 'Karigar',
+    Daily_Rate_Rs: 420,
+  })
+  const [styleEdit, setStyleEdit] = useState({
+    Target: 80,
+    Rate_Rs: 3,
+    Operation_Type: 'Medium',
   })
   const { data, refetch } = useQuery({
     queryKey: ['stitching-sheet', active],
@@ -3703,6 +3991,49 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
       }),
     onSuccess: r => {
       onFlash('ok', r.data.message || 'Updated')
+      setEditKarigar(null)
+      invalidateSheet()
+    },
+    onError: (e: { response?: { data?: { detail?: string } } }) =>
+      onFlash('err', String(e.response?.data?.detail || 'Update failed')),
+  })
+
+  const updateEmpMut = useMutation({
+    mutationFn: () => {
+      const pw = admin.adminPassword()
+      if (!pw) throw new Error('Unlock admin first')
+      return api.patch(`/stitching/master/employee/${encodeURIComponent(String(editEmployee?.E_Code ?? ''))}`, {
+        Name: empEdit.Name,
+        Type: empEdit.Type,
+        Daily_Rate_Rs: empEdit.Daily_Rate_Rs,
+        admin_password: pw,
+      })
+    },
+    onSuccess: r => {
+      onFlash('ok', r.data.message || 'Employee updated')
+      setEditEmployee(null)
+      invalidateSheet()
+    },
+    onError: (e: { response?: { data?: { detail?: string } } }) =>
+      onFlash('err', String(e.response?.data?.detail || 'Update failed')),
+  })
+
+  const updateStyleMut = useMutation({
+    mutationFn: () => {
+      const pw = admin.adminPassword()
+      if (!pw) throw new Error('Unlock admin first')
+      return api.patch('/stitching/master/style-operation', {
+        Style: String(editStyleRow?.Style ?? ''),
+        Operation: String(editStyleRow?.Operation ?? ''),
+        Target: styleEdit.Target,
+        Rate_Rs: styleEdit.Rate_Rs,
+        Operation_Type: styleEdit.Operation_Type,
+        admin_password: pw,
+      })
+    },
+    onSuccess: r => {
+      onFlash('ok', r.data.message || 'Style operation updated')
+      setEditStyleRow(null)
       invalidateSheet()
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
@@ -3736,12 +4067,36 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
   }
 
   const openKarigarEdit = (row: Record<string, unknown>) => {
+    setEditEmployee(null)
+    setEditStyleRow(null)
     setEditKarigar(row)
     setKarEdit({
       Name: String(row.Name ?? ''),
       Skill: String(row.Skill ?? ''),
       Daily_Rate_Rs: Number(row.Daily_Rate_Rs) || 420,
       Effective_From: todayStr(),
+    })
+  }
+
+  const openEmployeeEdit = (row: Record<string, unknown>) => {
+    setEditKarigar(null)
+    setEditStyleRow(null)
+    setEditEmployee(row)
+    setEmpEdit({
+      Name: String(row.Name ?? ''),
+      Type: String(row.Type ?? 'Karigar'),
+      Daily_Rate_Rs: Number(row.Daily_Rate_Rs) || 420,
+    })
+  }
+
+  const openStyleEdit = (row: Record<string, unknown>) => {
+    setEditKarigar(null)
+    setEditEmployee(null)
+    setEditStyleRow(row)
+    setStyleEdit({
+      Target: Number(row.Target) || 80,
+      Rate_Rs: Number(row.Rate_Rs) || 3,
+      Operation_Type: String(row.Operation_Type || 'Medium'),
     })
   }
 
@@ -3766,6 +4121,8 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
               setActive(k)
               setSelected(new Set())
               setEditKarigar(null)
+              setEditEmployee(null)
+              setEditStyleRow(null)
             }}
             className={`text-xs px-3 py-1.5 rounded-lg ${active === k ? 'bg-[#002B5B] text-white' : 'border'}`}
           >
@@ -3872,6 +4229,71 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
           )}
         </>
       )}
+      {active === 'employee_master' && editEmployee && (
+        <div className="text-xs border border-teal-200 bg-teal-50 rounded-xl p-4 space-y-2 mb-3">
+          <p className="font-semibold text-teal-900">Update employee — {String(editEmployee.E_Code)}</p>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
+            <label>
+              Name
+              <input className="w-full border rounded mt-1 px-2 py-1" value={empEdit.Name} onChange={e => setEmpEdit(f => ({ ...f, Name: e.target.value }))} />
+            </label>
+            <label>
+              Type
+              <select className="w-full border rounded mt-1 px-2 py-1" value={empEdit.Type} onChange={e => setEmpEdit(f => ({ ...f, Type: e.target.value }))}>
+                <option value="Karigar">Karigar</option>
+                <option value="Stitching">Stitching</option>
+                <option value="Operating">Operating</option>
+                <option value="Admin">Admin</option>
+              </select>
+            </label>
+            <label>
+              Daily rate ₹
+              <input type="number" className="w-full border rounded mt-1 px-2 py-1" value={empEdit.Daily_Rate_Rs} onChange={e => setEmpEdit(f => ({ ...f, Daily_Rate_Rs: +e.target.value }))} />
+            </label>
+            <div className="flex gap-2 self-end">
+              <button type="button" onClick={() => updateEmpMut.mutate()} disabled={updateEmpMut.isPending} className="px-3 py-2 bg-teal-700 text-white rounded-lg font-semibold disabled:opacity-50">
+                Save
+              </button>
+              <button type="button" onClick={() => setEditEmployee(null)} className="px-3 py-2 border rounded-lg">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {active === 'style_master' && editStyleRow && (
+        <div className="text-xs border border-sky-200 bg-sky-50 rounded-xl p-4 space-y-2 mb-3">
+          <p className="font-semibold text-sky-900">
+            Edit — {String(editStyleRow.Style)} / {String(editStyleRow.Operation)}
+          </p>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
+            <label>
+              Target
+              <input type="number" className="w-full border rounded mt-1 px-2 py-1" value={styleEdit.Target} onChange={e => setStyleEdit(f => ({ ...f, Target: +e.target.value }))} />
+            </label>
+            <label>
+              Rate ₹
+              <input type="number" step={0.25} className="w-full border rounded mt-1 px-2 py-1" value={styleEdit.Rate_Rs} onChange={e => setStyleEdit(f => ({ ...f, Rate_Rs: +e.target.value }))} />
+            </label>
+            <label>
+              Type
+              <select className="w-full border rounded mt-1 px-2 py-1" value={styleEdit.Operation_Type} onChange={e => setStyleEdit(f => ({ ...f, Operation_Type: e.target.value }))}>
+                <option value="Easy">Easy</option>
+                <option value="Medium">Medium</option>
+                <option value="Hard">Hard</option>
+              </select>
+            </label>
+            <div className="flex gap-2 self-end">
+              <button type="button" onClick={() => updateStyleMut.mutate()} disabled={updateStyleMut.isPending} className="px-3 py-2 bg-sky-700 text-white rounded-lg font-semibold disabled:opacity-50">
+                Save
+              </button>
+              <button type="button" onClick={() => setEditStyleRow(null)} className="px-3 py-2 border rounded-lg">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <MasterDataTable
         rows={rows}
         cols={cols}
@@ -3881,6 +4303,8 @@ function MasterTab({ admin: _admin, onFlash }: { admin: AdminApi; onFlash: (type
         onToggleAll={toggleAll}
         onDeleteOne={deleteOne}
         onEditKarigar={active === 'karigar_master' ? openKarigarEdit : undefined}
+        onEditEmployee={active === 'employee_master' ? openEmployeeEdit : undefined}
+        onEditStyle={active === 'style_master' ? openStyleEdit : undefined}
         onStyleReport={active === 'style_master' ? setReportFocusStyle : undefined}
         toolbar={
           <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -3909,6 +4333,8 @@ function MasterDataTable({
   onToggleAll,
   onDeleteOne,
   onEditKarigar,
+  onEditEmployee,
+  onEditStyle,
   onStyleReport,
   toolbar,
 }: {
@@ -3920,6 +4346,8 @@ function MasterDataTable({
   onToggleAll: () => void
   onDeleteOne: (row: Record<string, unknown>) => void
   onEditKarigar?: (row: Record<string, unknown>) => void
+  onEditEmployee?: (row: Record<string, unknown>) => void
+  onEditStyle?: (row: Record<string, unknown>) => void
   onStyleReport?: (style: string) => void
   toolbar?: React.ReactNode
 }) {
@@ -3984,7 +4412,17 @@ function MasterDataTable({
                     )}
                     {onEditKarigar && (
                       <button type="button" onClick={() => onEditKarigar(r)} className="text-violet-700 hover:underline mr-2">
-                        Rate
+                        Edit
+                      </button>
+                    )}
+                    {onEditEmployee && (
+                      <button type="button" onClick={() => onEditEmployee(r)} className="text-teal-700 hover:underline mr-2">
+                        Edit
+                      </button>
+                    )}
+                    {onEditStyle && (
+                      <button type="button" onClick={() => onEditStyle(r)} className="text-sky-700 hover:underline mr-2">
+                        Edit
                       </button>
                     )}
                     <button type="button" onClick={() => onDeleteOne(r)} className="text-red-600 hover:underline">

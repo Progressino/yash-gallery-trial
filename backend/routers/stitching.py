@@ -133,11 +133,25 @@ class StyleOpUpdateBody(BaseModel):
 
 
 class LtlOverrideBody(BaseModel):
-    Style: str
+    Style: str = ""
     Operation: str
     Karigar_ID: str
     Manual_LTL: Optional[int] = None
     Notes: str = ""
+    apply_all_styles: bool = False
+    admin_password: str = ""
+
+
+class LtlToleranceBandsBody(BaseModel):
+    bands: list[dict] = Field(default_factory=list)
+    admin_password: str = ""
+    recalculate_production: bool = True
+
+
+class EmployeeUpdateBody(BaseModel):
+    Name: Optional[str] = None
+    Type: Optional[str] = None
+    Daily_Rate_Rs: Optional[float] = None
     admin_password: str = ""
 
 
@@ -155,10 +169,13 @@ class KarigarExpenseBody(BaseModel):
     Karigar_ID: str
     Work_Type: str
     Challan_No: str = ""
+    Challan_Nos: list[str] = Field(default_factory=list)
     Style: str = ""
     Amount_Rs: float = 0
     Hours: float = 0
     Notes: str = ""
+    Operation: str = ""
+    Output: str = ""
     Expense_ID: str = ""
     admin_password: str = ""
 
@@ -285,6 +302,7 @@ def list_expenses(date_from: str = "", date_to: str = "", karigar_id: str = ""):
         "rows": svc.list_karigar_expenses(date_from, date_to, karigar_id or None),
         "work_types": list(svc.KARIGAR_EXPENSE_WORK_TYPES),
         "karigars": svc.list_karigar_directory(),
+        "challans_for_karigar": svc.list_karigar_challans_for_expense(karigar_id) if karigar_id else [],
     }
 
 
@@ -297,10 +315,13 @@ def upsert_expense(body: KarigarExpenseBody):
         karigar_id=body.Karigar_ID,
         work_type=body.Work_Type,
         challan_no=body.Challan_No,
+        challan_nos=body.Challan_Nos,
         style=body.Style,
         amount_rs=body.Amount_Rs,
         hours=body.Hours,
         notes=body.Notes,
+        operation=body.Operation,
+        output=body.Output,
         expense_id=body.Expense_ID,
     )
     if not out.get("ok"):
@@ -339,6 +360,15 @@ def target_control_preview(
 def put_ltl_override(body: LtlOverrideBody):
     if not verify_admin_password(body.admin_password):
         raise HTTPException(403, "Admin password required to set manual LTL overrides")
+    if body.apply_all_styles:
+        return svc.bulk_upsert_ltl_override_all_styles(
+            body.Operation,
+            body.Karigar_ID,
+            body.Manual_LTL,
+            notes=body.Notes,
+        )
+    if not body.Style.strip():
+        raise HTTPException(400, "Style is required unless apply_all_styles is true")
     return svc.upsert_ltl_override(
         body.Style,
         body.Operation,
@@ -346,6 +376,34 @@ def put_ltl_override(body: LtlOverrideBody):
         body.Manual_LTL,
         notes=body.Notes,
     )
+
+
+@router.put("/ltl-setup/tolerance-bands")
+def put_ltl_tolerance_bands(body: LtlToleranceBandsBody):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required")
+    out = svc.save_ltl_tolerance_bands(body.bands)
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("message", "Save failed"))
+    if body.recalculate_production:
+        pl = get_sheet_df("production_log")
+        if not pl.empty and "Karigar_ID" in pl.columns:
+            kids = sorted({svc.clean_key(k) for k in pl["Karigar_ID"].astype(str) if svc.clean_key(k)})
+            total = 0
+            for kid in kids:
+                r = svc.recalculate_production_for_karigar_from_date(kid, "2000-01-01")
+                total += int(r.get("sessions", 0))
+            out["recalculated_sessions"] = total
+    return out
+
+
+@router.get("/comparison-dashboard")
+def comparison_dashboard(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.comparison_dashboard_report(date_from, date_to)
 
 
 @router.get("/style-costing")
@@ -643,6 +701,21 @@ def update_karigar(karigar_id: str, body: KarigarUpdateBody):
         skill=body.Skill,
         daily_rate_rs=body.Daily_Rate_Rs,
         effective_from=body.Effective_From,
+    )
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Not found"))
+    return out
+
+
+@router.patch("/master/employee/{e_code}")
+def update_employee(e_code: str, body: EmployeeUpdateBody):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required")
+    out = svc.update_employee_master(
+        e_code,
+        name=body.Name,
+        emp_type=body.Type,
+        daily_rate_rs=body.Daily_Rate_Rs,
     )
     if not out.get("ok"):
         raise HTTPException(404, out.get("message", "Not found"))

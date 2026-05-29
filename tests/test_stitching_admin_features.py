@@ -200,6 +200,60 @@ def test_delete_hour_uses_latest_duplicate_production_row():
     assert "10-11" in hours
 
 
+def test_karigar_rate_change_recalculates_production():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-R", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    save_sheet_df(
+        "karigar_master",
+        pd.DataFrame([{"Karigar_ID": "K500", "Name": "Rate Test", "Skill": "Stitching", "Daily_Rate_Rs": 400}]),
+    )
+    svc.save_production_entry(
+        date_str="2026-05-18",
+        karigar_id="K500",
+        karigar_name="Rate Test",
+        challan_no="CH-500",
+        style="SKU-R",
+        hour_entries=[{"hour_col": "H_09_10", "operation": "Stitch", "pieces": 15}],
+    )
+    pl_before = get_sheet_df("production_log")
+    old_rate = float(pl_before.iloc[-1].get("Daily_Rate_Rs", 0))
+
+    svc.update_karigar_master("K500", daily_rate_rs=550.0, effective_from="2026-05-18")
+    pl_after = get_sheet_df("production_log")
+    assert not pl_after.empty
+    new_rate = float(pl_after.iloc[-1].get("Daily_Rate_Rs", 0))
+    assert old_rate == 400.0
+    assert new_rate == 550.0
+
+
+def test_ltl_tolerance_bands_from_sheet():
+    save_sheet_df(
+        "ltl_tolerance_bands",
+        pd.DataFrame([{"Min_Rs": 200, "Max_Rs": 300, "Tolerance_Pct": 20}]),
+    )
+    assert svc.ltl_tolerance_pct_for_rate(250) == 20.0
+    assert svc.ltl_tolerance_factor(250) == 0.8
+
+
+def test_bulk_ltl_all_styles():
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame(
+            [
+                {"Style": "SKU-A", "Operation": "Cut", "Target": 100, "Rate_Rs": 2},
+                {"Style": "SKU-B", "Operation": "Cut", "Target": 100, "Rate_Rs": 2},
+            ]
+        ),
+    )
+    out = svc.bulk_upsert_ltl_override_all_styles("Cut", "K1", 55, notes="all styles")
+    assert out["ok"] is True
+    assert out["styles_updated"] == 2
+    ov = get_sheet_df("target_ltl_override")
+    assert len(ov) == 2
+
+
 def test_delete_single_hour_recalculates_related_rows():
     save_sheet_df(
         "style_master",
