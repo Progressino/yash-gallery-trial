@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
@@ -9,42 +9,45 @@ import type { ModuleKey } from '../lib/modules'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
 import { clearLocalSessionHint, formatLocalHintAge, readLocalSessionHint } from '../lib/localSessionHint'
 
-type NavItem = { to: string; label: string; module: ModuleKey }
+type NavItem = { to: string; label: string; module: ModuleKey; short?: string }
 
 const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: 'Sales & Analytics',
     items: [
-      { to: '/', module: 'intelligence', label: '📊 Intelligence' },
-      { to: '/upload', module: 'upload', label: '📁 Upload Data' },
-      { to: '/mtr', module: 'amazon', label: '📦 Amazon' },
-      { to: '/myntra', module: 'myntra', label: '🛍️ Myntra' },
-      { to: '/meesho', module: 'meesho', label: '🛒 Meesho' },
-      { to: '/flipkart', module: 'flipkart', label: '🟡 Flipkart' },
-      { to: '/snapdeal', module: 'snapdeal', label: '🔴 Snapdeal' },
-      { to: '/forecast', module: 'forecast', label: '📈 AI Forecast' },
-      { to: '/finance', module: 'finance', label: '💰 Finance' },
-      { to: '/sku-deepdive', module: 'sku_deepdive', label: '🔬 SKU Deepdive' },
+      { to: '/', module: 'intelligence', label: 'Intelligence', short: '📊' },
+      { to: '/upload', module: 'upload', label: 'Upload Data', short: '📁' },
+      { to: '/mtr', module: 'amazon', label: 'Amazon', short: '📦' },
+      { to: '/myntra', module: 'myntra', label: 'Myntra', short: '🛍️' },
+      { to: '/meesho', module: 'meesho', label: 'Meesho', short: '🛒' },
+      { to: '/flipkart', module: 'flipkart', label: 'Flipkart', short: '🟡' },
+      { to: '/snapdeal', module: 'snapdeal', label: 'Snapdeal', short: '🔴' },
+      { to: '/forecast', module: 'forecast', label: 'AI Forecast', short: '📈' },
+      { to: '/finance', module: 'finance', label: 'Finance', short: '💰' },
+      { to: '/sku-deepdive', module: 'sku_deepdive', label: 'SKU Deepdive', short: '🔬' },
     ],
   },
   {
     label: 'ERP',
     items: [
-      { to: '/sales', module: 'sales', label: '🧾 Sales Orders' },
-      { to: '/items', module: 'items', label: '🏭 Item Master' },
-      { to: '/purchase', module: 'purchase', label: '🛒 Purchase' },
-      { to: '/tna', module: 'tna', label: '📅 TNA Calendar' },
-      { to: '/production', module: 'production', label: '⚙️ Production' },
-      { to: '/stitching-costing', module: 'stitching', label: '🧵 Stitching Costing' },
-      { to: '/grey', module: 'grey', label: '🧵 Grey Fabric' },
-      { to: '/hrm', module: 'hrm', label: '👥 HRM' },
-      { to: '/inventory', module: 'inventory', label: '📦 Inventory' },
-      { to: '/po', module: 'po', label: '🎯 PO Engine' },
-      { to: '/admin', module: 'admin', label: '🔐 Admin' },
-      { to: '/marketplace-connections', module: 'marketplace', label: '🔗 Marketplace API' },
+      { to: '/sales', module: 'sales', label: 'Sales Orders', short: '🧾' },
+      { to: '/items', module: 'items', label: 'Item Master', short: '🏭' },
+      { to: '/purchase', module: 'purchase', label: 'Purchase', short: '🛒' },
+      { to: '/tna', module: 'tna', label: 'TNA Calendar', short: '📅' },
+      { to: '/production', module: 'production', label: 'Production', short: '⚙️' },
+      { to: '/stitching-costing', module: 'stitching', label: 'Stitching Costing', short: '🧵' },
+      { to: '/grey', module: 'grey', label: 'Grey Fabric', short: '🧵' },
+      { to: '/hrm', module: 'hrm', label: 'HRM', short: '👥' },
+      { to: '/inventory', module: 'inventory', label: 'Inventory', short: '📦' },
+      { to: '/po', module: 'po', label: 'PO Engine', short: '🎯' },
+      { to: '/admin', module: 'admin', label: 'Admin', short: '🔐' },
+      { to: '/marketplace-connections', module: 'marketplace', label: 'Marketplace API', short: '🔗' },
     ],
   },
 ]
+
+const LOADED_PANEL_KEY = 'erp_sidebar_loaded_open'
+const TOOLS_PANEL_KEY = 'erp_sidebar_tools_open'
 
 function filterNavGroups(user: ReturnType<typeof useAuth.getState>['user']) {
   return NAV_GROUPS.map(g => ({
@@ -53,12 +56,197 @@ function filterNavGroups(user: ReturnType<typeof useAuth.getState>['user']) {
   })).filter(g => g.items.length > 0)
 }
 
+function readPanelPref(key: string, defaultOpen: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key)
+    if (v === '1') return true
+    if (v === '0') return false
+  } catch {
+    /* ignore */
+  }
+  return defaultOpen
+}
+
+function writePanelPref(key: string, open: boolean) {
+  try {
+    localStorage.setItem(key, open ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+}
+
+type DatasetRow = { id: string; label: string; active: boolean }
+
+function LoadedDataPanel({
+  datasets,
+  open,
+  onToggle,
+}: {
+  datasets: DatasetRow[]
+  open: boolean
+  onToggle: () => void
+}) {
+  const loaded = datasets.filter(d => d.active).length
+  const total = datasets.length
+  const allOk = loaded === total
+
+  return (
+    <div className="border-t border-slate-200/80 shrink-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 transition-colors"
+        aria-expanded={open}
+      >
+        <span
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${
+            allOk ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
+          }`}
+        >
+          {loaded}/{total}
+        </span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-[11px] font-semibold text-slate-700">Data loaded</span>
+          <span className="block text-[10px] text-slate-500 truncate">
+            {open ? 'Tap to hide' : allOk ? 'All sheets ready' : `${total - loaded} missing`}
+          </span>
+        </span>
+        <span className={`text-slate-400 text-xs transition-transform ${open ? 'rotate-180' : ''}`}>▼</span>
+      </button>
+      {open && (
+        <div className="px-3 pb-2">
+          <div className="grid grid-cols-2 gap-1">
+            {datasets.map(d => (
+              <div
+                key={d.id}
+                className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] ${
+                  d.active ? 'bg-emerald-50 text-emerald-900' : 'bg-slate-50 text-slate-400'
+                }`}
+                title={d.active ? `${d.label} loaded` : `${d.label} not loaded`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${d.active ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                <span className="truncate font-medium">{d.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CacheToolsPanel({
+  open,
+  onToggle,
+  cacheLoading,
+  allowHistorical,
+  allowReset,
+  localHintAge,
+  cacheMsg,
+  onLoad,
+  onSave,
+  onReload,
+  onDelete,
+}: {
+  open: boolean
+  onToggle: () => void
+  cacheLoading: 'load' | 'save' | 'reload' | 'delete' | null
+  allowHistorical: boolean
+  allowReset: boolean
+  localHintAge: string | null
+  cacheMsg: { type: 'ok' | 'err'; text: string } | null
+  onLoad: () => void
+  onSave: () => void
+  onReload: () => void
+  onDelete: () => void
+}) {
+  const busy = cacheLoading !== null
+
+  return (
+    <div className="border-t border-slate-200/80 shrink-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 transition-colors"
+        aria-expanded={open}
+      >
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#002B5B]/10 text-sm">⚡</span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-[11px] font-semibold text-slate-700">Server &amp; cache</span>
+          <span className="block text-[10px] text-slate-500 truncate">
+            {busy ? 'Working…' : open ? 'Tap to hide' : 'Load · save · reload'}
+          </span>
+        </span>
+        <span className={`text-slate-400 text-xs transition-transform ${open ? 'rotate-180' : ''}`}>▼</span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 space-y-1.5">
+          <button
+            type="button"
+            onClick={onLoad}
+            disabled={busy}
+            className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-[#002B5B] to-[#1e5a9a] hover:from-[#003d7a] hover:to-[#2563a8] disabled:opacity-50 shadow-sm"
+          >
+            {cacheLoading === 'load' ? 'Loading…' : '📥 Load cache'}
+          </button>
+          {allowHistorical && (
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={busy}
+                className="py-1.5 rounded-lg text-[10px] font-semibold text-[#002B5B] border border-[#002B5B]/30 bg-white hover:bg-slate-50 disabled:opacity-50"
+              >
+                {cacheLoading === 'save' ? '…' : '💾 Save'}
+              </button>
+              <button
+                type="button"
+                onClick={onReload}
+                disabled={busy}
+                title="GitHub + warm snapshot + Tier-3"
+                className="py-1.5 rounded-lg text-[10px] font-semibold text-[#002B5B] border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50"
+              >
+                {cacheLoading === 'reload' ? '…' : '↻ Reload'}
+              </button>
+            </div>
+          )}
+          {allowReset && (
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={busy}
+              className="w-full py-1.5 rounded-lg text-[10px] font-semibold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+            >
+              {cacheLoading === 'delete' ? 'Deleting…' : '🗑️ Delete all data'}
+            </button>
+          )}
+          {!allowHistorical && (
+            <p className="text-[10px] text-slate-500 leading-snug pt-0.5">
+              Daily uploads only for your role. Use Upload for new sales files.
+            </p>
+          )}
+          {localHintAge && (
+            <p className="text-[10px] text-slate-400">Browser hint: {localHintAge}</p>
+          )}
+          {cacheMsg && (
+            <p className={`text-[10px] leading-tight rounded px-2 py-1 ${cacheMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>
+              {cacheMsg.text}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Layout() {
   const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, inventory, setCoverage } =
     useSession()
   const qc = useQueryClient()
   const [cacheMsg, setCacheMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [cacheLoading, setCacheLoading] = useState<'load' | 'save' | 'reload' | 'delete' | null>(null)
+  const [loadedPanelOpen, setLoadedPanelOpen] = useState(() => readPanelPref(LOADED_PANEL_KEY, false))
+  const [toolsPanelOpen, setToolsPanelOpen] = useState(() => readPanelPref(TOOLS_PANEL_KEY, false))
 
   const cacheBarLabel =
     cacheLoading === 'load'
@@ -75,6 +263,22 @@ export default function Layout() {
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const autoLoadAttempted = useRef(false)
   const localHint = readLocalSessionHint()
+  const navScrollRef = useRef<HTMLElement>(null)
+  const [navCanScroll, setNavCanScroll] = useState(false)
+
+  const datasets = useMemo<DatasetRow[]>(
+    () => [
+      { id: 'sku', label: 'SKU Map', active: sku_mapping },
+      { id: 'mtr', label: 'Amazon', active: mtr },
+      { id: 'sales', label: 'Sales', active: sales },
+      { id: 'inv', label: 'Inventory', active: inventory },
+      { id: 'myntra', label: 'Myntra', active: myntra },
+      { id: 'meesho', label: 'Meesho', active: meesho },
+      { id: 'flipkart', label: 'Flipkart', active: flipkart },
+      { id: 'snapdeal', label: 'Snapdeal', active: snapdeal },
+    ],
+    [sku_mapping, mtr, sales, inventory, myntra, meesho, flipkart, snapdeal],
+  )
 
   useEffect(() => {
     api
@@ -86,16 +290,11 @@ export default function Layout() {
       .catch(() => {})
   }, [])
 
-  // On mount: just refresh badges from server session state.
-  // Auto-restore is handled once in ProtectedRoute to avoid duplicate cacheLoad calls.
   useEffect(() => {
     if (autoLoadAttempted.current) return
     autoLoadAttempted.current = true
-
     getCoverage({ light: false, timeout: 120_000 })
-      .then(c => {
-        setCoverage(c)
-      })
+      .then(c => setCoverage(c))
       .catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -113,9 +312,7 @@ export default function Layout() {
         setCoverage(c)
         invalidateDataQueries(qc)
         flash('ok', res.message)
-      } else {
-        flash('err', res.message)
-      }
+      } else flash('err', res.message)
     } catch {
       flash('err', 'Load failed')
     } finally {
@@ -127,8 +324,20 @@ export default function Layout() {
   const authUser = useAuth(s => s.user)
   const allowReset = mayResetSharedData(authUser)
   const allowHistorical = mayUploadHistorical(authUser)
-  const navGroups = filterNavGroups(authUser)
+  const navGroups = useMemo(() => filterNavGroups(authUser), [authUser])
   const hrmOnly = isHrmOnlyUser(authUser)
+
+  useEffect(() => {
+    const el = navScrollRef.current
+    if (!el) return
+    const check = () => {
+      setNavCanScroll(el.scrollHeight > el.clientHeight + 4)
+    }
+    check()
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [navGroups])
 
   const handleLogout = async () => {
     try {
@@ -152,7 +361,6 @@ export default function Layout() {
     }
   }
 
-  /** Full pipeline: clears server warm cache + session, GitHub download, SQLite daily merge, rebuild sales (no browser file picking). */
   const handleReloadFresh = async () => {
     setCacheLoading('reload')
     try {
@@ -162,14 +370,12 @@ export default function Layout() {
         setCoverage(c)
         invalidateDataQueries(qc)
         flash('ok', res.message)
-      } else {
-        flash('err', res.message)
-      }
+      } else flash('err', res.message)
     } catch (e: unknown) {
       const msg =
         e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string'
           ? (e as { message: string }).message
-          : 'Fresh reload failed (timeout or network — try again; if it persists, check server logs).'
+          : 'Fresh reload failed (timeout or network — try again).'
       flash('err', msg)
     } finally {
       setCacheLoading(null)
@@ -187,9 +393,7 @@ export default function Layout() {
         setCoverage(c)
         qc.clear()
         flash('ok', res.message)
-      } else {
-        flash('err', res.message)
-      }
+      } else flash('err', res.message)
     } catch {
       flash('err', 'Delete failed')
     } finally {
@@ -198,194 +402,184 @@ export default function Layout() {
   }
 
   const closeSidebar = () => setSidebarOpen(false)
+  const toggleLoaded = () => {
+    setLoadedPanelOpen(v => {
+      const next = !v
+      writePanelPref(LOADED_PANEL_KEY, next)
+      return next
+    })
+  }
+  const toggleTools = () => {
+    setToolsPanelOpen(v => {
+      const next = !v
+      writePanelPref(TOOLS_PANEL_KEY, next)
+      return next
+    })
+  }
 
   return (
     <div className="flex h-screen overflow-hidden">
       <FixedTopLoadingBar active={cacheLoading !== null} label={cacheBarLabel} />
-      {/* Mobile backdrop */}
       {sidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black/40 z-20 md:hidden"
-          onClick={closeSidebar}
-        />
+        <div className="fixed inset-0 bg-black/40 z-20 md:hidden" onClick={closeSidebar} aria-hidden />
       )}
 
-      {/* Sidebar */}
       <aside
         className={`
           fixed md:static inset-y-0 left-0 z-30
-          w-56 bg-white border-r border-gray-200 flex flex-col shrink-0
-          transition-transform duration-200 ease-in-out
+          w-[15.5rem] md:w-60
+          bg-gradient-to-b from-white via-white to-slate-50
+          border-r border-slate-200/90 flex flex-col shrink-0 min-h-0
+          shadow-xl md:shadow-none
+          transition-transform duration-200 ease-out
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
         `}
       >
-        <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
-          <div>
-            <img src="/logo.png" alt="Progressino" className="h-8 w-auto" />
-            <p className="text-[10px] text-gray-400 font-medium mt-0.5 tracking-wide">Yash Gallery ERP</p>
-          </div>
-          {/* Close button — mobile only */}
-          <button
-            className="md:hidden text-gray-400 hover:text-gray-600 text-lg leading-none"
-            onClick={closeSidebar}
-          >
-            ✕
-          </button>
-        </div>
-
-        <nav className="flex-1 overflow-y-auto py-2">
-          {navGroups.map(({ label, items }) => (
-            <div key={label}>
-              <p className="px-4 pt-3 pb-1 text-[10px] font-bold text-gray-400 uppercase tracking-widest">{label}</p>
-              {items.map(({ to, label: navLabel }) => (
-                <NavLink
-                  key={to}
-                  to={to}
-                  end={to === '/'}
-                  onClick={closeSidebar}
-                  className={({ isActive }) =>
-                    `block px-4 py-1.5 text-sm transition-colors ${
-                      isActive
-                        ? 'bg-[#002B5B] text-white font-semibold'
-                        : 'text-gray-600 hover:bg-gray-50'
-                    }`
-                  }
-                >
-                  {navLabel}
-                </NavLink>
-              ))}
+        {/* Header */}
+        <div className="shrink-0 px-3 py-3 border-b border-slate-200/80 bg-gradient-to-r from-[#002B5B] to-[#1a4a7c] text-white">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <img src="/logo.png" alt="" className="h-8 w-auto brightness-0 invert opacity-95" />
+              <div className="min-w-0">
+                <p className="text-xs font-bold leading-tight truncate">Yash Gallery</p>
+                <p className="text-[10px] text-white/70">ERP · Progressino</p>
+              </div>
             </div>
-          ))}
-        </nav>
-
-        {/* Data coverage badges — full ERP users only */}
-        {!hrmOnly && (
-        <div className="px-3 py-3 border-t border-gray-100 text-xs space-y-1">
-          <p className="font-semibold text-gray-500 uppercase tracking-wide mb-2">Loaded</p>
-          <Badge label="SKU Map"  active={sku_mapping} />
-          <Badge label="Amazon"   active={mtr} />
-          <Badge label="Sales"    active={sales} />
-          <Badge label="Inventory" active={inventory} />
-          <Badge label="Myntra"   active={myntra} />
-          <Badge label="Meesho"   active={meesho} />
-          <Badge label="Flipkart" active={flipkart} />
-          <Badge label="Snapdeal" active={snapdeal} />
+            <button
+              type="button"
+              className="md:hidden shrink-0 h-8 w-8 rounded-lg bg-white/10 hover:bg-white/20 text-sm"
+              onClick={closeSidebar}
+              aria-label="Close menu"
+            >
+              ✕
+            </button>
+          </div>
         </div>
-        )}
 
-        {/* Logout */}
-        <div className="px-3 pb-2">
+        {/* Navigation — primary scroll region */}
+        <div className="relative flex-1 min-h-0 flex flex-col">
+          {navCanScroll && (
+            <div
+              className="pointer-events-none absolute top-0 left-0 right-0 h-6 z-10 bg-gradient-to-b from-white to-transparent"
+              aria-hidden
+            />
+          )}
+          <nav
+            ref={navScrollRef}
+            className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden py-2 sidebar-nav-scroll"
+            aria-label="Main navigation"
+          >
+            {navGroups.map(({ label, items }) => (
+              <div key={label} className="mb-1">
+                <p className="sticky top-0 z-[1] mx-2 mb-0.5 px-2 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-white/95 backdrop-blur-sm rounded-md">
+                  {label}
+                </p>
+                <ul className="space-y-0.5 px-2">
+                  {items.map(({ to, label: navLabel, short }) => (
+                    <li key={to}>
+                      <NavLink
+                        to={to}
+                        end={to === '/'}
+                        onClick={closeSidebar}
+                        title={navLabel}
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] transition-all ${
+                            isActive
+                              ? 'bg-[#002B5B] text-white font-semibold shadow-md shadow-[#002B5B]/20'
+                              : 'text-slate-600 hover:bg-slate-100 hover:text-[#002B5B]'
+                          }`
+                        }
+                      >
+                        <span className="text-base leading-none shrink-0 w-5 text-center" aria-hidden>
+                          {short}
+                        </span>
+                        <span className="truncate">{navLabel}</span>
+                      </NavLink>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
+          {navCanScroll && (
+            <div
+              className="pointer-events-none absolute bottom-0 left-0 right-0 h-8 z-10 bg-gradient-to-t from-slate-50 to-transparent flex items-end justify-center pb-0.5"
+              aria-hidden
+            >
+              <span className="text-[9px] text-slate-400 font-medium tracking-wide">SCROLL</span>
+            </div>
+          )}
+        </div>
+
+        {/* Footer stack — compact, collapsible */}
+        <div className="shrink-0 bg-white/80 backdrop-blur-sm border-t border-slate-200/80">
           <button
+            type="button"
             onClick={handleLogout}
-            className="w-full py-1.5 rounded text-xs font-semibold text-gray-500 hover:text-red-600 hover:bg-red-50 border border-gray-200 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-red-50 hover:text-red-700 transition-colors border-b border-slate-100"
           >
-            🚪 Sign Out
+            <span className="text-sm">🚪</span>
+            <span>Sign out</span>
+            {(authUser?.full_name || authUser?.username) && (
+              <span
+                className="ml-auto text-[10px] text-slate-400 truncate max-w-[5rem]"
+                title={authUser.full_name || authUser.username}
+              >
+                {(authUser.full_name || authUser.username).split(' ')[0]}
+              </span>
+            )}
           </button>
-        </div>
 
-        {/* Cache controls — analytics modules only */}
-        {!hrmOnly && (
-        <div className="px-3 py-3 border-t border-gray-100 space-y-2">
-          <button
-            onClick={handleLoad}
-            disabled={cacheLoading !== null}
-            className="w-full py-1.5 rounded text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
-          >
-            {cacheLoading === 'load' ? 'Loading…' : '📥 Load Cache'}
-          </button>
-          {allowHistorical && (
-            <button
-              onClick={handleSave}
-              disabled={cacheLoading !== null}
-              className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-[#002B5B] hover:bg-gray-50 disabled:opacity-50"
-            >
-              {cacheLoading === 'save' ? 'Saving…' : '💾 Save Cache'}
-            </button>
+          {!hrmOnly && (
+            <>
+              <LoadedDataPanel datasets={datasets} open={loadedPanelOpen} onToggle={toggleLoaded} />
+              <CacheToolsPanel
+                open={toolsPanelOpen}
+                onToggle={toggleTools}
+                cacheLoading={cacheLoading}
+                allowHistorical={allowHistorical}
+                allowReset={allowReset}
+                localHintAge={localHint ? formatLocalHintAge(localHint) : null}
+                cacheMsg={cacheMsg}
+                onLoad={handleLoad}
+                onSave={handleSave}
+                onReload={handleReloadFresh}
+                onDelete={handleDeleteAll}
+              />
+            </>
           )}
-          {allowHistorical && (
-            <button
-              type="button"
-              onClick={handleReloadFresh}
-              disabled={cacheLoading !== null}
-              title="GitHub Release + merge with on-disk warm snapshot (if present) + Tier-3 SQLite. Recovers bulk rows missing from GitHub after a bad save."
-              className="w-full py-1.5 rounded text-xs font-semibold text-[#002B5B] border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
-            >
-              {cacheLoading === 'reload' ? 'Rebuilding…' : '↻ Fresh reload (server)'}
-            </button>
-          )}
-          {allowReset && (
-            <button
-              type="button"
-              onClick={handleDeleteAll}
-              disabled={cacheLoading !== null}
-              title="Wipes session, server warm cache, Tier-3 SQLite, AND GitHub Release cache. Re-upload required."
-              className="w-full py-1.5 rounded text-xs font-semibold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
-            >
-              {cacheLoading === 'delete' ? 'Deleting…' : '🗑️ Delete All Data'}
-            </button>
-          )}
-          {!allowHistorical && (
-            <p className="text-[10px] text-gray-500 leading-snug">
-              Shared history is read-only for your role. Use Upload → Tier 3 for daily sales files.
-            </p>
-          )}
-          <p className="text-[10px] text-gray-500 leading-snug">
-            Sales and inventory stay on the server (and GitHub when you Save Cache). This browser only
-            remembers load status{localHint ? ` (${formatLocalHintAge(localHint)})` : ''} so return visits
-            can skip a slow re-download when your session is still warm.
-          </p>
-          {cacheMsg && (
-            <p className={`text-xs leading-tight ${cacheMsg.type === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
-              {cacheMsg.text}
-            </p>
-          )}
-        </div>
-        )}
 
-        {/* Built by Progressino */}
-        <div className="px-3 py-3 border-t border-gray-100 flex items-center justify-center gap-1.5">
-          <img src="/logo.png" alt="Progressino" className="h-4 w-auto opacity-40" />
-          <span className="text-[10px] text-gray-300 font-medium">Built by Progressino</span>
+          <div className="px-3 py-2 flex items-center justify-between gap-1 border-t border-slate-100">
+            <div className="flex items-center gap-1 opacity-50">
+              <img src="/logo.png" alt="" className="h-3 w-auto" />
+              <span className="text-[9px] text-slate-400">Progressino</span>
+            </div>
+            {appVersion && (
+              <span className="text-[9px] text-slate-400 font-mono" title={`v${appVersion}`}>
+                v{appVersion.slice(0, 8)}
+              </span>
+            )}
+          </div>
         </div>
       </aside>
 
-      {/* Main column */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
-        {/* Mobile top bar */}
         <header className="md:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
           <button
+            type="button"
             onClick={() => setSidebarOpen(true)}
-            className="text-[#002B5B] text-xl font-bold leading-none"
+            className="flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-[#002B5B] text-lg"
             aria-label="Open menu"
           >
             ☰
           </button>
-          <span className="text-sm font-bold text-[#002B5B]">🚀 Yash Gallery ERP</span>
+          <span className="text-sm font-bold text-[#002B5B]">Yash Gallery ERP</span>
         </header>
 
-        {/* Page content */}
-        <main className="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-6">
+        <main className="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-6 min-h-0">
           <Outlet />
         </main>
-
-        {appVersion && (
-          <div
-            className="absolute bottom-2 right-3 z-10 rounded bg-white/90 border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 font-mono shadow-sm pointer-events-none select-none"
-            title={`App version ${appVersion}`}
-          >
-            v{appVersion}
-          </div>
-        )}
       </div>
-    </div>
-  )
-}
-
-function Badge({ label, active }: { label: string; active: boolean }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className={`w-2 h-2 rounded-full ${active ? 'bg-green-500' : 'bg-gray-300'}`} />
-      <span className={active ? 'text-gray-700' : 'text-gray-400'}>{label}</span>
     </div>
   )
 }
