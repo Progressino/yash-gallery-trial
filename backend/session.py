@@ -71,6 +71,7 @@ class AppSession:
     session_restore_message: str = ""
     session_restore_step: str = ""  # machine id for UI checklist
     session_restore_progress: int = 0  # 0–100
+    session_restore_started: float = 0.0  # monotonic time when restore was queued
     session_restore_result: dict = field(default_factory=dict)
 
     # Async Tier-3 ingest (RAR extract + daily SQLite) — avoids 502 while proxy waits.
@@ -155,6 +156,7 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.session_restore_message = ""
     sess.session_restore_step = ""
     sess.session_restore_progress = 0
+    sess.session_restore_started = 0.0
     sess.session_restore_result = {}
     sess.daily_auto_ingest_status = "idle"
     sess.daily_auto_ingest_message = ""

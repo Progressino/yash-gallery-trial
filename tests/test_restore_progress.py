@@ -6,7 +6,7 @@ from backend.session import AppSession
 def test_set_restore_step_updates_progress():
     sess = AppSession()
     _set_restore_step(sess, "queued")
-    assert sess.session_restore_progress == 0
+    assert sess.session_restore_progress == 1
     assert sess.session_restore_step == "queued"
 
     _set_restore_step(sess, "tier3", "Merging SQLite…")

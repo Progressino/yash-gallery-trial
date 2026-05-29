@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useDropzone, type FileRejection } from 'react-dropzone'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
@@ -102,9 +102,24 @@ export default function Upload() {
       setCoverage(c)
       return c
     },
-    refetchInterval: uploadBusy ? 3_000 : coverageEmpty ? 20_000 : 60_000,
+    refetchInterval: uploadBusy ? 2_000 : coverageEmpty ? 20_000 : 60_000,
     retry: 3,
   })
+
+  // Keep progress bar in sync when coverage polls (not only during restoreFullFromServer callback).
+  useEffect(() => {
+    if (coverage.session_restore_status !== 'running') return
+    setRestoreProgress({
+      message: coverage.session_restore_message || 'Restoring from server…',
+      progress: coverage.session_restore_progress ?? 0,
+      step: coverage.session_restore_step || 'queued',
+    })
+  }, [
+    coverage.session_restore_status,
+    coverage.session_restore_message,
+    coverage.session_restore_progress,
+    coverage.session_restore_step,
+  ])
 
   const handleRefreshAllData = async () => {
     setL('refresh_all', true)

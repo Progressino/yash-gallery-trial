@@ -617,8 +617,8 @@ def _maybe_restore_daily_for_empty_sales(sess: AppSession) -> None:
 
 # (step_id, progress 0–100, default label for UI)
 _RESTORE_STEP_DEFS: tuple[tuple[str, int, str], ...] = (
-    ("queued", 0, "Queued"),
-    ("waiting", 2, "Waiting for other heavy jobs"),
+    ("queued", 1, "Queued"),
+    ("waiting", 3, "Waiting for server memory (warm cache or upload)"),
     ("sku", 8, "SKU mapping"),
     ("warm", 20, "Warm cache — Amazon, platforms, sales"),
     ("disk", 30, "On-disk backup snapshot"),
@@ -911,9 +911,31 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     )
 
 
+def _acquire_upload_lock_with_progress(sess: AppSession, *, timeout_sec: float = 3600.0) -> bool:
+    """Wait for upload-memory lock; update UI progress so restore does not look stuck at 0%."""
+    import time
+
+    from ..concurrency import _UPLOAD_MEMORY_LOCK
+
+    start = time.monotonic()
+    while True:
+        if _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
+            return True
+        elapsed = int(time.monotonic() - start)
+        _set_restore_step(
+            sess,
+            "waiting",
+            f"Waiting for server memory lock ({elapsed}s) — warm cache or another upload may be running…",
+        )
+        if time.monotonic() - start > timeout_sec:
+            return False
+        time.sleep(2.0)
+
+
 def _run_session_restore_worker(session_id: str) -> None:
     """Background full restore — holds upload memory lock; may run 10+ minutes on large GitHub cache."""
     import logging
+    import time
 
     from ..concurrency import _UPLOAD_MEMORY_LOCK
     from ..session import store
@@ -926,11 +948,12 @@ def _run_session_restore_worker(session_id: str) -> None:
     acquired = False
     try:
         sess.session_restore_status = "running"
-        _set_restore_step(sess, "queued")
-        if not _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
-            _set_restore_step(sess, "waiting")
-            _UPLOAD_MEMORY_LOCK.acquire()
+        sess.session_restore_started = time.monotonic()
+        _set_restore_step(sess, "queued", "Restore worker started…")
+        if not _acquire_upload_lock_with_progress(sess):
+            raise TimeoutError("Timed out waiting for server memory — try again in a few minutes.")
         acquired = True
+        _set_restore_step(sess, "sku")
 
         missing, steps, msg = full_restore_session(sess, defer_sales_rebuild=True)
         essential_missing = _essential_missing_platforms(missing)
@@ -1045,7 +1068,9 @@ def restore_full(request: Request, sync: bool = False):
     """
     import os
 
-    from ..concurrency import HEAVY_EXECUTOR
+    import time
+
+    from ..concurrency import DAILY_UPLOAD_EXECUTOR
 
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
@@ -1082,13 +1107,15 @@ def restore_full(request: Request, sync: bool = False):
         )
 
     sess.session_restore_status = "running"
+    sess.session_restore_started = time.monotonic()
     _set_restore_step(
         sess,
         "queued",
-        "Queued full restore from server — large Amazon history may take 10–15 minutes.",
+        "Queued full restore — starting worker (not blocked behind warm-cache load)…",
     )
     sess.session_restore_result = {}
-    HEAVY_EXECUTOR.submit(_run_session_restore_worker, sid)
+    # DAILY_UPLOAD_EXECUTOR — HEAVY_EXECUTOR is monopolized by warm-cache Phase 2 at startup.
+    DAILY_UPLOAD_EXECUTOR.submit(_run_session_restore_worker, sid)
     cov = _build_coverage_response(sess)
     return RestoreFullResponse(
         **cov.model_dump(),
