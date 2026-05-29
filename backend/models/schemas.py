@@ -82,6 +82,15 @@ class CoverageResponse(BaseModel):
     daily_inventory_upload_message: str = ""
 
 
+class RestoreFullResponse(CoverageResponse):
+    """POST /data/restore-full — full warm + disk + Tier-3 + GitHub recovery."""
+
+    ok: bool = True
+    message: str = ""
+    missing_platforms: list[str] = []
+    restore_steps: list[str] = []
+
+
 class ErrorResponse(BaseModel):
     ok: bool = False
     error: str

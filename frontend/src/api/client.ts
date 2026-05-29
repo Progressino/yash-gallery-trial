@@ -884,6 +884,25 @@ export async function getCoverage(opts?: {
   }
 }
 
+/** Full restore: warm + disk + Tier-3 + GitHub for missing platforms (Upload page). */
+export type RestoreFullResponse = CoverageResponse & {
+  ok: boolean
+  message: string
+  missing_platforms: string[]
+  restore_steps: string[]
+}
+
+export async function restoreFullFromServer(): Promise<RestoreFullResponse> {
+  try {
+    const { data } = await api.post<RestoreFullResponse>('/data/restore-full', undefined, {
+      timeout: 900_000,
+    })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Full restore from server failed'))
+  }
+}
+
 /** YG vs Akiko monthly comparison CSV (uses same date params as dashboard summary). */
 export async function downloadDsrBrandMonthlyCsv(params: string): Promise<void> {
   const q = params.trim() ? `?${params}` : ''

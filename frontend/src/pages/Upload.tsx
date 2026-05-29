@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
-  uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage,
+  uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile,
   waitForDailyAutoIngest, waitForSalesRebuild,
@@ -96,7 +96,7 @@ export default function Upload() {
   const handleRefreshAllData = async () => {
     setL('refresh_all', true)
     try {
-      const c = await getCoverage({ light: false, timeout: 180_000 })
+      const c = await restoreFullFromServer()
       setCoverage(c)
       invalidateDataQueries(qc)
       const loaded = [
@@ -109,15 +109,25 @@ export default function Upload() {
         c.sales && `Sales (${c.sales_rows.toLocaleString()})`,
         c.inventory && 'Inventory',
       ].filter(Boolean)
-      showToast(
-        'success',
-        loaded.length
-          ? `Session refreshed: ${loaded.join(' · ')}`
-          : 'No bulk data in session — use Load Cache or upload Tier 1 files.',
-        12_000,
-      )
+      if (c.missing_platforms?.length) {
+        showToast(
+          'error',
+          c.message ||
+            `Still missing: ${c.missing_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}`,
+          14_000,
+        )
+      } else {
+        showToast(
+          'success',
+          c.message ||
+            (loaded.length
+              ? `Full restore: ${loaded.join(' · ')}`
+              : 'No bulk data on server — upload Tier 1 files or use Load Cache.'),
+          12_000,
+        )
+      }
     } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : 'Refresh failed')
+      showToast('error', e instanceof Error ? e.message : 'Restore failed')
     } finally {
       setL('refresh_all', false)
     }

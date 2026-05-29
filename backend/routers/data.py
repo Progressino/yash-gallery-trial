@@ -11,7 +11,7 @@ import re
 from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
-from ..models.schemas import CoverageResponse
+from ..models.schemas import CoverageResponse, RestoreFullResponse
 from ..services.helpers import (
     clean_sku,
     get_parent_sku,
@@ -71,16 +71,92 @@ def _sess(request: Request):
     return sess
 
 
-def _restore_daily_if_needed(sess: AppSession) -> None:
+_PLATFORM_ATTRS = (
+    ("amazon", "mtr_df"),
+    ("myntra", "myntra_df"),
+    ("meesho", "meesho_df"),
+    ("flipkart", "flipkart_df"),
+    ("snapdeal", "snapdeal_df"),
+)
+
+
+def _missing_platform_names(sess: AppSession) -> list[str]:
+    out: list[str] = []
+    for plat, attr in _PLATFORM_ATTRS:
+        df = getattr(sess, attr, None)
+        if df is None or not hasattr(df, "empty") or df.empty:
+            out.append(plat)
+    return out
+
+
+def _merge_disk_warm_into_session(sess: AppSession) -> str:
+    """Merge on-disk warm snapshot into session platform frames (fills gaps vs GitHub-only)."""
+    import pandas as pd
+
+    try:
+        from backend.routers.cache import _disk_recovery_payload, _sanitize_snapdeal_in_loaded
+        from ..services.daily_store import merge_platform_data
+    except Exception:
+        return ""
+    try:
+        disk_data = _disk_recovery_payload()
+    except Exception:
+        return ""
+    if not disk_data:
+        return ""
+    _sanitize_snapdeal_in_loaded(disk_data)
+    notes: list[str] = []
+    for plat, attr in _PLATFORM_ATTRS:
+        dsk = disk_data.get(attr)
+        if not isinstance(dsk, pd.DataFrame) or dsk.empty:
+            continue
+        cur = getattr(sess, attr)
+        if not isinstance(cur, pd.DataFrame):
+            cur = pd.DataFrame()
+        before = len(cur) if not cur.empty else 0
+        merged = merge_platform_data(cur, dsk, plat)
+        after = len(merged)
+        setattr(sess, attr, merged)
+        if after > before:
+            notes.append(f"{attr} +{after - before:,}")
+    dm = disk_data.get("sku_mapping")
+    if isinstance(dm, dict) and dm and not sess.sku_mapping:
+        sess.sku_mapping = dm.copy()
+        notes.append("sku_mapping from disk")
+    if not notes:
+        return ""
+    return " Disk snapshot merged (" + "; ".join(notes) + ")."
+
+
+def _restore_daily_if_needed(
+    sess: AppSession,
+    *,
+    force: bool = False,
+    lock_timeout: float | None = None,
+) -> None:
     """
     On first coverage check per session, merge any persisted daily SQLite data
     into the session platform DFs (fills gaps after restart and folds Tier-3
     rows into warm-cache copies without replacing bulk history).
     Also auto-restores SKU mapping from GitHub cache if missing.
+
+    ``force=True`` (restore-full): blocking lock, full Tier-3 pass, ignores pause flag.
     """
-    if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
+    import pandas as pd
+
+    if force:
+        try:
+            from ..session import resume_auto_data_restore
+
+            sess.pause_auto_data_restore = False
+            resume_auto_data_restore(sess)
+        except Exception:
+            pass
+        sess.daily_restored = False
+
+    if getattr(sess, "daily_inventory_upload_status", "idle") == "running" and not force:
         return
-    if getattr(sess, "inventory_upload_status", "idle") == "running":
+    if getattr(sess, "inventory_upload_status", "idle") == "running" and not force:
         return
     try:
         import backend.main as _main
@@ -100,24 +176,33 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
 
     # After "Clear all app data": warm-cache fill above may still be empty; do not pull
     # Tier-3 SQLite into the session until the user uploads or clicks Load Cache.
-    if getattr(sess, "pause_auto_data_restore", False) and needs_data:
+    if not force and getattr(sess, "pause_auto_data_restore", False) and needs_data:
         return
 
-    if getattr(sess, "pause_auto_data_restore", False) and not needs_data:
+    if not force and getattr(sess, "pause_auto_data_restore", False) and not needs_data:
         return
-    needs_tier3_refresh = _tier3_session_needs_topup(sess) or _session_sales_stale_vs_platforms(sess)
-    if sess.daily_restored and not needs_data:
+    needs_tier3_refresh = (
+        _tier3_session_needs_topup(sess)
+        or _session_sales_stale_vs_platforms(sess)
+        or (force and bool(_missing_platform_names(sess)))
+    )
+    if sess.daily_restored and not needs_data and not force:
         if not needs_tier3_refresh:
             return
-    if needs_data or needs_tier3_refresh:
+    if force or needs_data or needs_tier3_refresh:
         sess.daily_restored = False
 
-    # Never block coverage/login behind a multi-minute Tier-3 upload on the same lock.
-    if not sess._daily_restore_lock.acquire(blocking=False):
+    if force:
+        acquired = sess._daily_restore_lock.acquire(
+            blocking=True, timeout=lock_timeout if lock_timeout is not None else 300.0
+        )
+    else:
+        acquired = sess._daily_restore_lock.acquire(blocking=False)
+    if not acquired:
         return
 
     try:
-        if sess.daily_restored and not needs_tier3_refresh:
+        if sess.daily_restored and not needs_tier3_refresh and not force:
             return
 
         import pandas as pd
@@ -257,14 +342,6 @@ def _restore_daily_if_needed(sess: AppSession) -> None:
     finally:
         sess._daily_restore_lock.release()
 
-
-_PLATFORM_ATTRS = (
-    ("amazon", "mtr_df"),
-    ("myntra", "myntra_df"),
-    ("meesho", "meesho_df"),
-    ("flipkart", "flipkart_df"),
-    ("snapdeal", "snapdeal_df"),
-)
 
 _SOURCE_BY_ATTR = {
     "mtr_df": "Amazon",
@@ -531,49 +608,111 @@ def _maybe_restore_daily_for_empty_sales(sess: AppSession) -> None:
     _restore_daily_if_needed(sess)
 
 
-# ── Coverage ──────────────────────────────────────────────────
+def full_restore_session(sess: AppSession) -> tuple[list[str], list[str], str]:
+    """
+    Operator restore: warm cache → disk snapshot → blocking Tier-3 → GitHub for gaps.
+    Unlike GET coverage, this blocks until merges finish and may download GitHub assets.
+    """
+    import pandas as pd
 
-@router.get("/coverage", response_model=CoverageResponse)
-def get_coverage(request: Request, light: bool = False):
-    """Session coverage flags. ``light=1`` skips SQLite restore / sales rebuild (fast after PO uploads)."""
-    sess = _sess(request)
+    import backend.main as _main
+    from ..session import resume_auto_data_restore
+
+    steps: list[str] = []
+    sess.pause_auto_data_restore = False
+    resume_auto_data_restore(sess)
+    sess.daily_restored = False
+
     try:
         from ..services.sku_mapping import restore_sku_mapping_to_session
 
         restore_sku_mapping_to_session(sess)
     except Exception:
         pass
-    try:
-        import backend.main as _main
 
+    try:
         _main.restore_po_sidecars_from_warm(sess)
-        if _main.session_needs_operational_data(sess):
-            _main.force_restore_session_from_server_cache(
-                sess, _main._warm_cache_generation
-            )
+        _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
+        steps.append("warm")
     except Exception:
         pass
-    _restore_inventory_from_warm(sess)
-    if not light:
-        if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
-            light = True
-        if getattr(sess, "sales_rebuild_status", "idle") == "running":
-            light = True
-        if getattr(sess, "inventory_upload_status", "idle") == "running":
-            light = True
-        if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
-            light = True
-    if not light:
-        try:
-            from ..services.po_raise_import import hydrate_session_ledger_from_db
 
-            hydrate_session_ledger_from_db(sess, lookback_days=30)
+    if _merge_disk_warm_into_session(sess).strip():
+        steps.append("disk")
+
+    _restore_inventory_from_warm(sess)
+    _restore_daily_if_needed(sess, force=True, lock_timeout=300.0)
+    if "tier3" not in steps:
+        steps.append("tier3")
+
+    missing = _missing_platform_names(sess)
+    if missing:
+        try:
+            from ..services.github_cache import load_cache_from_drive
+            from backend.routers.cache import (
+                _merge_disk_warm_cache_into_loaded,
+                _merge_daily_store_into_session,
+                _sanitize_snapdeal_in_loaded,
+            )
+            from ..services.daily_store import merge_platform_data
+
+            ok, _, loaded = load_cache_from_drive()
+            if ok:
+                _sanitize_snapdeal_in_loaded(loaded)
+                loaded, _ = _merge_disk_warm_cache_into_loaded(loaded)
+                filled_any = False
+                for plat, attr in _PLATFORM_ATTRS:
+                    if plat not in missing:
+                        continue
+                    gh = loaded.get(attr)
+                    if not isinstance(gh, pd.DataFrame) or gh.empty:
+                        continue
+                    cur = getattr(sess, attr)
+                    if not isinstance(cur, pd.DataFrame):
+                        cur = pd.DataFrame()
+                    merged = merge_platform_data(cur, gh, plat)
+                    if len(merged) > len(cur) or (cur.empty and not merged.empty):
+                        setattr(sess, attr, merged)
+                        filled_any = True
+                if not sess.sku_mapping and loaded.get("sku_mapping"):
+                    sess.sku_mapping = loaded["sku_mapping"]
+                    filled_any = True
+                if filled_any:
+                    steps.append("github")
+                missing = _missing_platform_names(sess)
         except Exception:
             pass
-        _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
+
+    try:
+        from backend.routers.cache import _merge_daily_store_into_session
+
+        if _merge_daily_store_into_session(sess).strip():
+            if "daily_store" not in steps:
+                steps.append("daily_store")
+    except Exception:
+        pass
+
+    _rebuild_session_sales(sess)
+    try:
+        _main.publish_warm_cache_from_session(sess)
+    except Exception:
+        pass
+
+    missing = _missing_platform_names(sess)
+    step_txt = ", ".join(steps) if steps else "none"
+    if missing:
+        labels = ", ".join(p.capitalize() for p in missing)
+        msg = (
+            f"Restored from server ({step_txt}). Still missing: {labels} — "
+            "not found in warm cache, disk, Tier-3, or GitHub. Re-upload those files."
+        )
     else:
-        _maybe_restore_daily_for_empty_sales(sess)
-    _ensure_sales_rebuilt(sess)
+        msg = f"Full restore complete ({step_txt})."
+    return missing, steps, msg
+
+
+def _build_coverage_response(sess: AppSession) -> CoverageResponse:
+    """Build coverage flags from current session state (no restore side effects)."""
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
 
@@ -687,6 +826,71 @@ def get_coverage(request: Request, light: bool = False):
         ) or None,
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
+    )
+
+
+# ── Coverage ──────────────────────────────────────────────────
+
+@router.get("/coverage", response_model=CoverageResponse)
+def get_coverage(request: Request, light: bool = False):
+    """Session coverage flags. ``light=1`` skips SQLite restore / sales rebuild (fast after PO uploads)."""
+    sess = _sess(request)
+    try:
+        from ..services.sku_mapping import restore_sku_mapping_to_session
+
+        restore_sku_mapping_to_session(sess)
+    except Exception:
+        pass
+    try:
+        import backend.main as _main
+
+        _main.restore_po_sidecars_from_warm(sess)
+        if _main.session_needs_operational_data(sess):
+            _main.force_restore_session_from_server_cache(
+                sess, _main._warm_cache_generation
+            )
+    except Exception:
+        pass
+    _restore_inventory_from_warm(sess)
+    if not light:
+        if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+            light = True
+        if getattr(sess, "sales_rebuild_status", "idle") == "running":
+            light = True
+        if getattr(sess, "inventory_upload_status", "idle") == "running":
+            light = True
+        if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
+            light = True
+    if not light:
+        try:
+            from ..services.po_raise_import import hydrate_session_ledger_from_db
+
+            hydrate_session_ledger_from_db(sess, lookback_days=30)
+        except Exception:
+            pass
+        _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
+    else:
+        _maybe_restore_daily_for_empty_sales(sess)
+    _ensure_sales_rebuilt(sess)
+    return _build_coverage_response(sess)
+
+
+@router.post("/restore-full", response_model=RestoreFullResponse)
+def restore_full(request: Request):
+    """
+    Full session restore: warm cache, disk snapshot, blocking Tier-3 SQLite, then GitHub
+    for any platform still empty. Use instead of GET coverage when the user clicks
+    "Restore all from server" on the upload page.
+    """
+    sess = _sess(request)
+    missing, steps, msg = full_restore_session(sess)
+    cov = _build_coverage_response(sess)
+    return RestoreFullResponse(
+        **cov.model_dump(),
+        ok=not missing,
+        message=msg,
+        missing_platforms=missing,
+        restore_steps=steps,
     )
 
 
