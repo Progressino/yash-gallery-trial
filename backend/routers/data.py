@@ -79,6 +79,13 @@ _PLATFORM_ATTRS = (
     ("snapdeal", "snapdeal_df"),
 )
 
+# Restore success / warnings ignore optional platforms (e.g. Snapdeal not used by all tenants).
+_ESSENTIAL_RESTORE_PLATFORMS = frozenset({"amazon", "myntra", "meesho", "flipkart"})
+
+
+def _essential_missing_platforms(missing: list[str]) -> list[str]:
+    return [p for p in missing if p in _ESSENTIAL_RESTORE_PLATFORMS]
+
 
 def _missing_platform_names(sess: AppSession) -> list[str]:
     out: list[str] = []
@@ -699,13 +706,17 @@ def full_restore_session(sess: AppSession) -> tuple[list[str], list[str], str]:
         pass
 
     missing = _missing_platform_names(sess)
+    essential_missing = _essential_missing_platforms(missing)
     step_txt = ", ".join(steps) if steps else "none"
-    if missing:
-        labels = ", ".join(p.capitalize() for p in missing)
+    if essential_missing:
+        labels = ", ".join(p.capitalize() for p in essential_missing)
         msg = (
             f"Restored from server ({step_txt}). Still missing: {labels} — "
             "not found in warm cache, disk, Tier-3, or GitHub. Re-upload those files."
         )
+    elif missing:
+        opt = ", ".join(p.capitalize() for p in missing)
+        msg = f"Full restore complete ({step_txt}). Optional data not on server: {opt}."
     else:
         msg = f"Full restore complete ({step_txt})."
     return missing, steps, msg
@@ -885,9 +896,16 @@ def restore_full(request: Request):
     sess = _sess(request)
     missing, steps, msg = full_restore_session(sess)
     cov = _build_coverage_response(sess)
+    essential_missing = _essential_missing_platforms(missing)
+    ok = (
+        not essential_missing
+        and bool(sess.sku_mapping)
+        and not sess.mtr_df.empty
+        and not sess.sales_df.empty
+    )
     return RestoreFullResponse(
         **cov.model_dump(),
-        ok=not missing,
+        ok=ok,
         message=msg,
         missing_platforms=missing,
         restore_steps=steps,

@@ -109,11 +109,12 @@ export default function Upload() {
         c.sales && `Sales (${c.sales_rows.toLocaleString()})`,
         c.inventory && 'Inventory',
       ].filter(Boolean)
-      if (c.missing_platforms?.length) {
+      const essentialMissing = (c.missing_platforms ?? []).filter(p => p !== 'snapdeal')
+      if (essentialMissing.length) {
         showToast(
           'error',
           c.message ||
-            `Still missing: ${c.missing_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}`,
+            `Still missing: ${essentialMissing.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}`,
           14_000,
         )
       } else {
