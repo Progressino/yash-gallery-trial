@@ -68,6 +68,9 @@ export interface CoverageResponse {
   /** Tier-3 daily-auto background sales rebuild */
   sales_rebuild?: 'idle' | 'running' | 'done' | 'error'
   sales_rebuild_message?: string
+  /** Background full restore (Upload → Restore all from server) */
+  session_restore_status?: 'idle' | 'running' | 'done' | 'error'
+  session_restore_message?: string
   daily_auto_ingest_status?: 'idle' | 'running' | 'done' | 'error'
   daily_auto_ingest_message?: string
   /** Set after background daily-auto ingest finishes (see session.daily_auto_ingest_result). */
@@ -890,15 +893,77 @@ export type RestoreFullResponse = CoverageResponse & {
   message: string
   missing_platforms: string[]
   restore_steps: string[]
+  restore_async?: boolean
 }
 
-export async function restoreFullFromServer(): Promise<RestoreFullResponse> {
+/** Poll until background restore (+ optional sales rebuild) finishes. */
+export async function waitForSessionRestore(
+  onTick?: (msg: string) => void,
+): Promise<RestoreFullResponse> {
+  const deadline = Date.now() + 20 * 60_000
+  while (Date.now() < deadline) {
+    const cov = await getCoverageResilient({ light: true, timeout: 60_000 })
+    const st = cov.session_restore_status ?? 'idle'
+    const salesSt = cov.sales_rebuild ?? 'idle'
+    if (st === 'running') {
+      onTick?.(cov.session_restore_message || 'Restoring from server…')
+      await new Promise(r => setTimeout(r, 4000))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(cov.session_restore_message || 'Restore from server failed')
+    }
+    if (st === 'done') {
+      if (salesSt === 'running') {
+        onTick?.(cov.sales_rebuild_message || 'Rebuilding combined sales…')
+        await new Promise(r => setTimeout(r, 4000))
+        continue
+      }
+      if (salesSt === 'error') {
+        throw new Error(cov.sales_rebuild_message || 'Sales rebuild failed')
+      }
+      const full = await getCoverage({ light: false, timeout: 180_000 })
+      const essentialMissing: string[] = []
+      if (!full.mtr) essentialMissing.push('amazon')
+      if (!full.myntra) essentialMissing.push('myntra')
+      if (!full.meesho) essentialMissing.push('meesho')
+      if (!full.flipkart) essentialMissing.push('flipkart')
+      const ok =
+        essentialMissing.length === 0 &&
+        full.sku_mapping &&
+        full.mtr &&
+        full.sales
+      return {
+        ...full,
+        ok,
+        message: cov.session_restore_message || 'Full restore complete.',
+        missing_platforms: full.snapdeal ? [] : ['snapdeal'].filter(() => !full.snapdeal),
+        restore_steps: [],
+        restore_async: false,
+      }
+    }
+    await new Promise(r => setTimeout(r, 3500))
+  }
+  throw new Error('Restore timed out after 20 minutes — refresh the page and try again.')
+}
+
+export async function restoreFullFromServer(
+  onTick?: (msg: string) => void,
+): Promise<RestoreFullResponse> {
   try {
     const { data } = await api.post<RestoreFullResponse>('/data/restore-full', undefined, {
-      timeout: 900_000,
+      timeout: 90_000,
     })
+    if (data.restore_async || data.session_restore_status === 'running') {
+      onTick?.(data.message || 'Restore started…')
+      return waitForSessionRestore(onTick)
+    }
     return data
   } catch (e: unknown) {
+    if (isUploadGateway502(e) || (axios.isAxiosError(e) && !e.response)) {
+      onTick?.('Gateway timed out — checking if restore is still running…')
+      return waitForSessionRestore(onTick)
+    }
     throw new Error(_errMessage(e, 'Full restore from server failed'))
   }
 }

@@ -39,6 +39,8 @@ const empty: CoverageResponse = {
   pause_auto_data_restore: false,
   sales_rebuild: 'idle',
   sales_rebuild_message: '',
+  session_restore_status: 'idle',
+  session_restore_message: '',
   daily_auto_ingest_status: 'idle',
   daily_auto_ingest_message: '',
   inventory_upload_status: 'idle',

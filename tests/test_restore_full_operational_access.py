@@ -102,7 +102,7 @@ def test_restore_full_then_data_apis_accessible(client, session_for_client, full
     sess.pause_auto_data_restore = True
     assert not sess.mtr_df.empty is False or sess.mtr_df.empty
 
-    r = client.post("/api/data/restore-full")
+    r = client.post("/api/data/restore-full?sync=1")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body.get("ok") is True, body.get("message")

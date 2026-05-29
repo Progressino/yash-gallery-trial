@@ -80,6 +80,9 @@ class CoverageResponse(BaseModel):
     # Wide daily inventory matrix (PO) background parse
     daily_inventory_upload_status: str = "idle"
     daily_inventory_upload_message: str = ""
+    # Background full session restore (Upload → Restore all from server)
+    session_restore_status: str = "idle"
+    session_restore_message: str = ""
 
 
 class RestoreFullResponse(CoverageResponse):
@@ -89,6 +92,7 @@ class RestoreFullResponse(CoverageResponse):
     message: str = ""
     missing_platforms: list[str] = []
     restore_steps: list[str] = []
+    restore_async: bool = False
 
 
 class ErrorResponse(BaseModel):

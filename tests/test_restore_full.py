@@ -44,7 +44,7 @@ def test_restore_full_fills_snapdeal_from_warm(client, session_for_client, warm_
     sess.snapdeal_df = pd.DataFrame()
     assert sess.snapdeal_df.empty
 
-    r = client.post("/api/data/restore-full")
+    r = client.post("/api/data/restore-full?sync=1")
     assert r.status_code == 200
     body = r.json()
     assert body["snapdeal"] is True
@@ -82,7 +82,7 @@ def test_restore_full_force_tier3_when_platform_empty(monkeypatch, client, sessi
     main._warm_cache = {}
     main._warm_cache_generation = 0
 
-    r = client.post("/api/data/restore-full")
+    r = client.post("/api/data/restore-full?sync=1")
     assert r.status_code == 200
     body = r.json()
     assert body["snapdeal"] is True

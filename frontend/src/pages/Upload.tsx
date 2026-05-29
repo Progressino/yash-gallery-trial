@@ -64,10 +64,16 @@ export default function Upload() {
   const [chunkProgress, setChunkProgress] = useState<{ pct: number; sent: number; total: number; msg: string } | null>(null)
   const [invProgress, setInvProgress] = useState<{ pct: number; msg: string; phase: 'upload' | 'parse' } | null>(null)
   const [uploadAlertsBySource, setUploadAlertsBySource] = useState<Record<string, UploadAlert>>({})
+  const [restoreProgressMsg, setRestoreProgressMsg] = useState('')
   const uploadBegin = useUploadActivity(s => s.begin)
   const uploadEnd = useUploadActivity(s => s.end)
+  const restoreBusy =
+    coverage.session_restore_status === 'running' || coverage.sales_rebuild === 'running'
   const uploadBusy =
-    Object.values(loading).some(Boolean) || !!buildingMsg || !!invProgress
+    Object.values(loading).some(Boolean) ||
+    !!buildingMsg ||
+    !!invProgress ||
+    restoreBusy
 
   const coverageEmpty =
     !coverage.mtr &&
@@ -95,8 +101,9 @@ export default function Upload() {
 
   const handleRefreshAllData = async () => {
     setL('refresh_all', true)
+    setRestoreProgressMsg('')
     try {
-      const c = await restoreFullFromServer()
+      const c = await restoreFullFromServer(msg => setRestoreProgressMsg(msg))
       setCoverage(c)
       invalidateDataQueries(qc)
       const loaded = [
@@ -130,6 +137,7 @@ export default function Upload() {
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Restore failed')
     } finally {
+      setRestoreProgressMsg('')
       setL('refresh_all', false)
     }
   }
@@ -574,7 +582,9 @@ export default function Upload() {
           disabled={loading['refresh_all'] || uploadBusy}
           className="text-xs px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] font-semibold hover:bg-blue-50 disabled:opacity-50"
         >
-          {loading['refresh_all'] ? 'Restoring…' : '↻ Restore all from server'}
+          {loading['refresh_all']
+            ? (restoreProgressMsg ? `Restoring… ${restoreProgressMsg}` : 'Restoring…')
+            : '↻ Restore all from server'}
         </button>
       </div>
       <DataLoadedSummary coverage={coverage} />

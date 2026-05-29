@@ -615,13 +615,65 @@ def _maybe_restore_daily_for_empty_sales(sess: AppSession) -> None:
     _restore_daily_if_needed(sess)
 
 
-def full_restore_session(sess: AppSession) -> tuple[list[str], list[str], str]:
-    """
-    Operator restore: warm cache → disk snapshot → blocking Tier-3 → GitHub for gaps.
-    Unlike GET coverage, this blocks until merges finish and may download GitHub assets.
-    """
+def _restore_progress(sess: AppSession, msg: str, cb=None) -> None:
+    sess.session_restore_message = msg
+    if cb:
+        cb(msg)
+
+
+def _merge_github_bulk_into_session(sess: AppSession, *, progress=None) -> bool:
+    """Download GitHub Release cache and merge into session (keeps larger history)."""
     import pandas as pd
 
+    from ..services.daily_store import merge_platform_data
+    from ..services.github_cache import load_cache_from_drive
+    from backend.routers.cache import (
+        _merge_disk_warm_cache_into_loaded,
+        _sanitize_snapdeal_in_loaded,
+    )
+
+    _restore_progress(sess, "Downloading GitHub cache (full history)…", progress)
+    ok, _, loaded = load_cache_from_drive()
+    if not ok:
+        return False
+    _sanitize_snapdeal_in_loaded(loaded)
+    loaded, _disk_note = _merge_disk_warm_cache_into_loaded(loaded)
+    changed = False
+    for _plat, attr in _PLATFORM_ATTRS:
+        gh = loaded.get(attr)
+        if not isinstance(gh, pd.DataFrame) or gh.empty:
+            continue
+        cur = getattr(sess, attr, None)
+        if not isinstance(cur, pd.DataFrame):
+            cur = pd.DataFrame()
+        merged = merge_platform_data(cur, gh, _plat)
+        if len(merged) != len(cur) or (cur.empty and not merged.empty):
+            setattr(sess, attr, merged)
+            changed = True
+    gm = loaded.get("sku_mapping")
+    if isinstance(gm, dict) and gm and len(gm) > len(sess.sku_mapping or {}):
+        sess.sku_mapping = {**gm, **(sess.sku_mapping or {})}
+        changed = True
+    for inv_key in ("inventory_df_variant", "inventory_df_parent"):
+        iv = loaded.get(inv_key)
+        if isinstance(iv, pd.DataFrame) and not iv.empty:
+            cur_iv = getattr(sess, inv_key, None)
+            if not isinstance(cur_iv, pd.DataFrame) or cur_iv.empty or len(iv) > len(cur_iv):
+                setattr(sess, inv_key, iv)
+                changed = True
+    return changed
+
+
+def full_restore_session(
+    sess: AppSession,
+    *,
+    progress=None,
+    defer_sales_rebuild: bool = False,
+) -> tuple[list[str], list[str], str]:
+    """
+    Operator restore: warm cache → disk snapshot → blocking Tier-3 → GitHub bulk merge.
+    Unlike GET coverage, this may download GitHub assets and rebuild sales (defer for async).
+    """
     import backend.main as _main
     from ..session import resume_auto_data_restore
 
@@ -630,6 +682,7 @@ def full_restore_session(sess: AppSession) -> tuple[list[str], list[str], str]:
     resume_auto_data_restore(sess)
     sess.daily_restored = False
 
+    _restore_progress(sess, "Loading SKU mapping…", progress)
     try:
         from ..services.sku_mapping import restore_sku_mapping_to_session
 
@@ -637,6 +690,7 @@ def full_restore_session(sess: AppSession) -> tuple[list[str], list[str], str]:
     except Exception:
         pass
 
+    _restore_progress(sess, "Loading warm cache…", progress)
     try:
         _main.restore_po_sidecars_from_warm(sess)
         _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
@@ -644,52 +698,23 @@ def full_restore_session(sess: AppSession) -> tuple[list[str], list[str], str]:
     except Exception:
         pass
 
+    _restore_progress(sess, "Merging on-disk snapshot…", progress)
     if _merge_disk_warm_into_session(sess).strip():
         steps.append("disk")
 
     _restore_inventory_from_warm(sess)
-    _restore_daily_if_needed(sess, force=True, lock_timeout=300.0)
+    _restore_progress(sess, "Merging Tier-3 daily history (may take several minutes)…", progress)
+    _restore_daily_if_needed(sess, force=True, lock_timeout=600.0)
     if "tier3" not in steps:
         steps.append("tier3")
 
-    missing = _missing_platform_names(sess)
-    if missing:
-        try:
-            from ..services.github_cache import load_cache_from_drive
-            from backend.routers.cache import (
-                _merge_disk_warm_cache_into_loaded,
-                _merge_daily_store_into_session,
-                _sanitize_snapdeal_in_loaded,
-            )
-            from ..services.daily_store import merge_platform_data
+    try:
+        if _merge_github_bulk_into_session(sess, progress=progress):
+            steps.append("github")
+    except Exception:
+        pass
 
-            ok, _, loaded = load_cache_from_drive()
-            if ok:
-                _sanitize_snapdeal_in_loaded(loaded)
-                loaded, _ = _merge_disk_warm_cache_into_loaded(loaded)
-                filled_any = False
-                for plat, attr in _PLATFORM_ATTRS:
-                    if plat not in missing:
-                        continue
-                    gh = loaded.get(attr)
-                    if not isinstance(gh, pd.DataFrame) or gh.empty:
-                        continue
-                    cur = getattr(sess, attr)
-                    if not isinstance(cur, pd.DataFrame):
-                        cur = pd.DataFrame()
-                    merged = merge_platform_data(cur, gh, plat)
-                    if len(merged) > len(cur) or (cur.empty and not merged.empty):
-                        setattr(sess, attr, merged)
-                        filled_any = True
-                if not sess.sku_mapping and loaded.get("sku_mapping"):
-                    sess.sku_mapping = loaded["sku_mapping"]
-                    filled_any = True
-                if filled_any:
-                    steps.append("github")
-                missing = _missing_platform_names(sess)
-        except Exception:
-            pass
-
+    _restore_progress(sess, "Merging daily upload store…", progress)
     try:
         from backend.routers.cache import _merge_daily_store_into_session
 
@@ -699,7 +724,11 @@ def full_restore_session(sess: AppSession) -> tuple[list[str], list[str], str]:
     except Exception:
         pass
 
-    _rebuild_session_sales(sess)
+    if defer_sales_rebuild:
+        _restore_progress(sess, "Queuing combined sales rebuild…", progress)
+    else:
+        _restore_progress(sess, "Rebuilding combined sales…", progress)
+        _rebuild_session_sales(sess)
     try:
         _main.publish_warm_cache_from_session(sess)
     except Exception:
@@ -837,7 +866,66 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         ) or None,
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
+        session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
+        session_restore_message=getattr(sess, "session_restore_message", "") or "",
     )
+
+
+def _run_session_restore_worker(session_id: str) -> None:
+    """Background full restore — holds upload memory lock; may run 10+ minutes on large GitHub cache."""
+    import logging
+
+    from ..concurrency import _UPLOAD_MEMORY_LOCK
+    from ..session import store
+
+    _log = logging.getLogger(__name__)
+    sess = store.get(session_id)
+    if sess is None:
+        return
+
+    acquired = False
+    try:
+        sess.session_restore_status = "running"
+        sess.session_restore_message = "Starting full restore…"
+        if not _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
+            sess.session_restore_message = "Waiting for other heavy jobs to finish…"
+            _UPLOAD_MEMORY_LOCK.acquire()
+        acquired = True
+
+        missing, steps, msg = full_restore_session(
+            sess,
+            progress=lambda m: None,
+            defer_sales_rebuild=True,
+        )
+        essential_missing = _essential_missing_platforms(missing)
+        sess.session_restore_result = {
+            "missing_platforms": missing,
+            "restore_steps": steps,
+            "message": msg,
+            "essential_missing": essential_missing,
+        }
+        sess.session_restore_message = msg
+        sess.session_restore_status = "done"
+
+        if _session_has_platform_data(sess) and sess.sku_mapping:
+            from .upload import DAILY_UPLOAD_EXECUTOR, _run_sales_rebuild_worker
+
+            sess.sales_rebuild_status = "running"
+            sess.sales_rebuild_message = "Rebuilding combined sales (large history)…"
+            DAILY_UPLOAD_EXECUTOR.submit(
+                _run_sales_rebuild_worker,
+                session_id,
+                refresh_sqlite=True,
+            )
+        else:
+            _rebuild_session_sales(sess)
+    except Exception as e:
+        _log.exception("background session restore failed")
+        sess.session_restore_status = "error"
+        sess.session_restore_message = str(e)[:500]
+    finally:
+        if acquired:
+            _UPLOAD_MEMORY_LOCK.release()
 
 
 # ── Coverage ──────────────────────────────────────────────────
@@ -872,6 +960,8 @@ def get_coverage(request: Request, light: bool = False):
             light = True
         if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
             light = True
+        if getattr(sess, "session_restore_status", "idle") == "running":
+            light = True
     if not light:
         try:
             from ..services.po_raise_import import hydrate_session_ledger_from_db
@@ -887,28 +977,66 @@ def get_coverage(request: Request, light: bool = False):
 
 
 @router.post("/restore-full", response_model=RestoreFullResponse)
-def restore_full(request: Request):
+def restore_full(request: Request, sync: bool = False):
     """
-    Full session restore: warm cache, disk snapshot, blocking Tier-3 SQLite, then GitHub
-    for any platform still empty. Use instead of GET coverage when the user clicks
-    "Restore all from server" on the upload page.
+    Full session restore: warm cache, disk snapshot, Tier-3 SQLite, GitHub bulk merge.
+
+    Default is **async** (returns immediately; poll ``session_restore_status`` on coverage).
+    Pass ``sync=1`` only for tests / debugging.
     """
+    import os
+
+    from ..concurrency import HEAVY_EXECUTOR
+
     sess = _sess(request)
-    missing, steps, msg = full_restore_session(sess)
+    sid = getattr(request.state, "session_id", None) or ""
+
+    if getattr(sess, "session_restore_status", "idle") == "running":
+        cov = _build_coverage_response(sess)
+        return RestoreFullResponse(
+            **cov.model_dump(),
+            ok=True,
+            message=sess.session_restore_message or "Restore already in progress…",
+            missing_platforms=[],
+            restore_steps=[],
+            restore_async=True,
+        )
+
+    use_sync = sync or (os.environ.get("RESTORE_FULL_SYNC", "").strip() == "1")
+    if use_sync:
+        missing, steps, msg = full_restore_session(sess)
+        cov = _build_coverage_response(sess)
+        essential_missing = _essential_missing_platforms(missing)
+        ok = (
+            not essential_missing
+            and bool(sess.sku_mapping)
+            and not sess.mtr_df.empty
+            and not sess.sales_df.empty
+        )
+        return RestoreFullResponse(
+            **cov.model_dump(),
+            ok=ok,
+            message=msg,
+            missing_platforms=missing,
+            restore_steps=steps,
+            restore_async=False,
+        )
+
+    sess.session_restore_status = "running"
+    sess.session_restore_message = "Queued full restore from server…"
+    sess.session_restore_result = {}
+    HEAVY_EXECUTOR.submit(_run_session_restore_worker, sid)
     cov = _build_coverage_response(sess)
-    essential_missing = _essential_missing_platforms(missing)
-    ok = (
-        not essential_missing
-        and bool(sess.sku_mapping)
-        and not sess.mtr_df.empty
-        and not sess.sales_df.empty
-    )
     return RestoreFullResponse(
         **cov.model_dump(),
-        ok=ok,
-        message=msg,
-        missing_platforms=missing,
-        restore_steps=steps,
+        ok=True,
+        message=(
+            "Restore running in background — stay on this page. "
+            "Large Amazon history may take several minutes."
+        ),
+        missing_platforms=[],
+        restore_steps=[],
+        restore_async=True,
     )
 
 
