@@ -81,8 +81,10 @@ export default function Upload() {
     queryKey: ['coverage'],
     queryFn: async () => {
       const c = await getCoverage({
-        light: uploadBusy || !!coverage.sales,
-        timeout: uploadBusy ? 45_000 : 90_000,
+        // Full restore on Upload page so every platform frame merges from warm cache / Tier-3
+        // (light mode skipped tier-3 top-up when sales was already loaded — hid Flipkart etc.).
+        light: uploadBusy,
+        timeout: uploadBusy ? 45_000 : 120_000,
       })
       setCoverage(c)
       return c
@@ -90,6 +92,36 @@ export default function Upload() {
     refetchInterval: uploadBusy ? 3_000 : coverageEmpty ? 20_000 : 60_000,
     retry: 3,
   })
+
+  const handleRefreshAllData = async () => {
+    setL('refresh_all', true)
+    try {
+      const c = await getCoverage({ light: false, timeout: 180_000 })
+      setCoverage(c)
+      invalidateDataQueries(qc)
+      const loaded = [
+        c.sku_mapping && 'SKU map',
+        c.mtr && `Amazon (${c.mtr_rows.toLocaleString()})`,
+        c.myntra && `Myntra (${c.myntra_rows.toLocaleString()})`,
+        c.meesho && `Meesho (${c.meesho_rows.toLocaleString()})`,
+        c.flipkart && `Flipkart (${c.flipkart_rows.toLocaleString()})`,
+        c.snapdeal && `Snapdeal (${c.snapdeal_rows.toLocaleString()})`,
+        c.sales && `Sales (${c.sales_rows.toLocaleString()})`,
+        c.inventory && 'Inventory',
+      ].filter(Boolean)
+      showToast(
+        'success',
+        loaded.length
+          ? `Session refreshed: ${loaded.join(' · ')}`
+          : 'No bulk data in session — use Load Cache or upload Tier 1 files.',
+        12_000,
+      )
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Refresh failed')
+    } finally {
+      setL('refresh_all', false)
+    }
+  }
 
   const showToast = (type: 'success' | 'error', msg: string, durationMs = 5000) => {
     setToast({ type, msg })
@@ -523,16 +555,23 @@ export default function Upload() {
       )}
 
       {/* KPI strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <p className="text-xs text-gray-500">Session data status — scroll down for upload cards per platform.</p>
+        <button
+          type="button"
+          onClick={() => void handleRefreshAllData()}
+          disabled={loading['refresh_all'] || uploadBusy}
+          className="text-xs px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] font-semibold hover:bg-blue-50 disabled:opacity-50"
+        >
+          {loading['refresh_all'] ? 'Restoring…' : '↻ Restore all from server'}
+        </button>
+      </div>
+      <DataLoadedSummary coverage={coverage} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiCard label="SKU Mapping"  value={coverage.sku_mapping ? '✅ Loaded' : '— Not loaded'} />
         <KpiCard label="Amazon Rows"  value={coverage.mtr_rows > 0 ? coverage.mtr_rows.toLocaleString() : '—'} />
         <KpiCard label="Sales Rows"   value={coverage.sales_rows > 0 ? coverage.sales_rows.toLocaleString() : '—'} />
-        <KpiCard label="Platforms"    value={[
-          coverage.myntra && 'Myntra',
-          coverage.meesho && 'Meesho',
-          coverage.snapdeal && 'Snapdeal',
-          coverage.flipkart && 'Flipkart',
-        ].filter(Boolean).join(', ') || '—'} />
+        <KpiCard label="Inventory"    value={coverage.inventory ? '✅ Loaded' : '— Not loaded'} />
       </div>
 
       {showAdminTab && (
@@ -1343,11 +1382,73 @@ function KpiCard({ label, value }: { label: string; value: string }) {
   )
 }
 
+type CoverageLike = {
+  sku_mapping: boolean
+  mtr: boolean
+  sales: boolean
+  myntra: boolean
+  meesho: boolean
+  flipkart: boolean
+  snapdeal: boolean
+  inventory: boolean
+  daily_orders?: boolean
+  mtr_rows: number
+  sales_rows: number
+  myntra_rows: number
+  meesho_rows: number
+  flipkart_rows: number
+  snapdeal_rows: number
+}
+
+function DataLoadedSummary({ coverage: c }: { coverage: CoverageLike }) {
+  const rows: { key: string; label: string; loaded: boolean; detail: string }[] = [
+    { key: 'sku', label: 'SKU mapping', loaded: c.sku_mapping, detail: c.sku_mapping ? 'Ready' : 'Upload master map' },
+    { key: 'mtr', label: 'Amazon (MTR)', loaded: c.mtr, detail: c.mtr_rows > 0 ? `${c.mtr_rows.toLocaleString()} rows` : '—' },
+    { key: 'myntra', label: 'Myntra PPMP', loaded: c.myntra, detail: c.myntra_rows > 0 ? `${c.myntra_rows.toLocaleString()} rows` : '—' },
+    { key: 'meesho', label: 'Meesho', loaded: c.meesho, detail: c.meesho_rows > 0 ? `${c.meesho_rows.toLocaleString()} rows` : '—' },
+    { key: 'flipkart', label: 'Flipkart', loaded: c.flipkart, detail: c.flipkart_rows > 0 ? `${c.flipkart_rows.toLocaleString()} rows` : '—' },
+    { key: 'snapdeal', label: 'Snapdeal', loaded: c.snapdeal, detail: c.snapdeal_rows > 0 ? `${c.snapdeal_rows.toLocaleString()} rows` : '—' },
+    { key: 'sales', label: 'Combined sales', loaded: c.sales, detail: c.sales_rows > 0 ? `${c.sales_rows.toLocaleString()} rows` : 'Build sales' },
+    { key: 'inv', label: 'Snapshot inventory', loaded: c.inventory, detail: c.inventory ? 'Loaded' : 'Daily uploads tab' },
+    { key: 'daily', label: 'Daily orders (Tier 3)', loaded: !!c.daily_orders, detail: c.daily_orders ? 'On server' : '—' },
+  ]
+  const missing = rows.filter(r => !r.loaded && r.key !== 'daily')
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-2">
+      <div className="px-4 py-2 bg-slate-50 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-[#002B5B] uppercase tracking-wide">All datasets in this session</p>
+        {missing.length > 0 && (
+          <p className="text-[11px] text-amber-800">
+            Missing: {missing.map(m => m.label).join(', ')} — upload below or click Restore all from server
+          </p>
+        )}
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-px bg-gray-100">
+        {rows.map(r => (
+          <div
+            key={r.key}
+            id={`upload-dataset-${r.key}`}
+            className={`px-3 py-2.5 bg-white ${r.loaded ? '' : 'opacity-80'}`}
+          >
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide truncate">{r.label}</p>
+            <p className={`text-sm font-bold mt-0.5 ${r.loaded ? 'text-green-700' : 'text-gray-400'}`}>
+              {r.loaded ? '✓ Loaded' : '—'}
+            </p>
+            <p className="text-[10px] text-gray-500 truncate" title={r.detail}>
+              {r.detail}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div>
+    <div className="scroll-mt-4">
       <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">{title}</h3>
-      <div className="grid grid-cols-2 gap-4">{children}</div>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">{children}</div>
     </div>
   )
 }
@@ -1368,9 +1469,9 @@ function UploadCard({
           <p className="text-xs text-gray-400">{subtitle}</p>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          {loaded && rows !== undefined && rows > 0 && (
+          {loaded && (
             <span className="text-green-700 text-xs font-medium bg-green-50 px-2 py-0.5 rounded-full">
-              ✓ {rows.toLocaleString()} rows
+              {rows !== undefined && rows > 0 ? `✓ ${rows.toLocaleString()} rows` : '✓ Loaded'}
             </span>
           )}
           {loaded && onClear && (

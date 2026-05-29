@@ -92,7 +92,7 @@ export default function Layout() {
     if (autoLoadAttempted.current) return
     autoLoadAttempted.current = true
 
-    getCoverage()
+    getCoverage({ light: false, timeout: 120_000 })
       .then(c => {
         setCoverage(c)
       })
