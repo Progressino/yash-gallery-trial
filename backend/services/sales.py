@@ -63,6 +63,67 @@ _UPLOAD_GATE_SOURCE_TO_PLATFORM: Dict[str, str] = {
 }
 
 
+def reporting_date_span_days(
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Optional[int]:
+    """Inclusive calendar-day span for Intelligence dashboard filters."""
+    if not start_date or not end_date:
+        return None
+    try:
+        d0 = pd.Timestamp(start_date).normalize()
+        d1 = pd.Timestamp(end_date).normalize()
+        if d1 < d0:
+            return None
+        return int((d1 - d0).days) + 1
+    except Exception:
+        return None
+
+
+_INTELLIGENCE_DAILY_CHART_MAX_DAYS = 45
+
+
+def intelligence_daily_chart_enabled(
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> bool:
+    span = reporting_date_span_days(start_date, end_date)
+    return span is not None and 1 <= span <= _INTELLIGENCE_DAILY_CHART_MAX_DAYS
+
+
+def _daily_shipment_records(
+    day_series: pd.Series,
+    qty: pd.Series,
+    shipped_mask: pd.Series,
+    refund_mask: pd.Series,
+) -> List[dict]:
+    """Per-calendar-day gross/refund/net for short-range dashboard charts."""
+    work = pd.DataFrame(
+        {
+            "_day": day_series.dt.normalize().dt.strftime("%Y-%m-%d"),
+            "_qty": pd.to_numeric(qty, errors="coerce").fillna(0),
+            "_ship": shipped_mask,
+            "_ref": refund_mask,
+        }
+    )
+    work = work[work["_day"].astype(str).str.len() > 0]
+    if work.empty:
+        return []
+    rows: List[dict] = []
+    for day, grp in work.groupby("_day", sort=True):
+        ship = int(grp.loc[grp["_ship"], "_qty"].sum())
+        ref = int(grp.loc[grp["_ref"], "_qty"].sum())
+        rows.append(
+            {
+                "date": str(day),
+                "shipments": ship,
+                "refunds": ref,
+                "net": ship - ref,
+            }
+        )
+    return rows
+
+
 def upload_report_day_gate_enabled() -> bool:
     """Emergency toggle for strict upload-day gating on Intelligence views."""
     v = (os.environ.get("DASHBOARD_UPLOAD_DAY_GATE") or "0").strip().lower()
@@ -1109,7 +1170,7 @@ def _compute_platform_metrics(
         "total_units": 0, "total_returns": 0, "net_units": 0,
         "return_rate": 0.0,
         "top_sku": "", "trend_direction": "flat", "trend_direction_net": "flat",
-        "monthly": [], "by_state": [],
+        "monthly": [], "daily": [], "by_state": [],
     }
     if df.empty:
         return stub
@@ -1218,6 +1279,10 @@ def _compute_platform_metrics(
                 by_state.append({"state": stname, "units": u, "net_units": u - r})
             by_state.sort(key=lambda x: x["units"], reverse=True)
 
+        daily: List[dict] = []
+        if intelligence_daily_chart_enabled(start_date, end_date):
+            daily = _daily_shipment_records(d["_Date"], qty, shipped_mask, refund_mask)
+
         return {
             "platform": platform_name, "loaded": True,
             "total_units": total_units, "total_returns": total_returns,
@@ -1225,7 +1290,7 @@ def _compute_platform_metrics(
             "return_rate": return_rate, "top_sku": str(top_sku),
             "trend_direction": trend_direction,
             "trend_direction_net": trend_direction_net,
-            "monthly": monthly, "by_state": by_state,
+            "monthly": monthly, "daily": daily, "by_state": by_state,
         }
     except Exception as _exc:
         log.warning("_compute_platform_metrics failed for %s: %s", platform_name, _exc, exc_info=True)
@@ -1244,6 +1309,7 @@ def _unified_platform_stub(platform_name: str, loaded: bool) -> dict:
         "trend_direction": "flat",
         "trend_direction_net": "flat",
         "monthly": [],
+        "daily": [],
         "by_state": [],
     }
 
@@ -1321,6 +1387,10 @@ def _unified_platform_summary_one(
     keep_cols = [c for c in ["month", "shipments", "refunds", "net"] if c in monthly_grp.columns]
     monthly = monthly_grp[keep_cols].to_dict("records")
 
+    daily: List[dict] = []
+    if intelligence_daily_chart_enabled(start_date, end_date):
+        daily = _daily_shipment_records(s["TxnDate"], qty, shipped_mask, refund_mask)
+
     trend_direction = "flat"
     ships = monthly_grp["shipments"].tolist() if "shipments" in monthly_grp.columns else []
     if len(ships) >= 3:
@@ -1395,6 +1465,7 @@ def _unified_platform_summary_one(
         "trend_direction": trend_direction,
         "trend_direction_net": trend_direction_net,
         "monthly": monthly,
+        "daily": daily,
         "by_state": by_state,
     }
 

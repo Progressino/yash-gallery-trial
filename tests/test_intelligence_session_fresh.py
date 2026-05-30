@@ -119,3 +119,72 @@ def test_tier3_topup_needed_when_session_platform_empty(monkeypatch):
         lambda: {"meesho": {"file_count": 3, "max_date": "2026-05-24", "total_rows": 96}},
     )
     assert data_router._tier3_session_needs_topup(sess) is True
+
+
+def test_tier3_topup_needed_when_unified_sales_lags_sqlite(monkeypatch):
+    """Regression: bulk session max can match Tier-3 while May 29 daily rows are missing from sales_df."""
+    from backend.services import daily_store
+
+    sess = AppSession()
+    sess.sku_mapping = {"A": "OMS-A"}
+    sess.mtr_df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-05-29"]),
+            "SKU": ["SKU-A"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [1],
+            "OrderId": ["O1"],
+        }
+    )
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["SKU-A"],
+            "TxnDate": pd.to_datetime(["2026-05-28"]),
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Units_Effective": [1],
+            "Source": ["Amazon"],
+            "OrderId": ["O1"],
+        }
+    )
+    monkeypatch.setattr(
+        daily_store,
+        "get_summary",
+        lambda: {"amazon": {"file_count": 2, "max_date": "2026-05-29", "total_rows": 50}},
+    )
+    assert data_router._platforms_needing_tier3_topup(sess) == ["amazon"]
+    assert data_router._session_sales_stale_vs_platforms(sess) is True
+
+
+def test_platform_summary_includes_daily_for_short_range():
+    myntra = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-05-28", "2026-05-29"]),
+            "OMS_SKU": ["A", "A"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [10, 25],
+            "OrderId": ["1", "2"],
+            "LineKey": ["", ""],
+        }
+    )
+    sales = build_sales_df(
+        mtr_df=pd.DataFrame(),
+        myntra_df=myntra,
+        meesho_df=pd.DataFrame(),
+        flipkart_df=pd.DataFrame(),
+        sku_mapping={"A": "A"},
+    )
+    plat = get_platform_summary(
+        pd.DataFrame(),
+        myntra,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        None,
+        start_date="2026-05-28",
+        end_date="2026-05-29",
+        sales_df=sales,
+    )
+    myntra_row = next(p for p in plat if p["platform"] == "Myntra")
+    assert myntra_row["total_units"] == 35
+    dates = {r["date"] for r in myntra_row.get("daily") or []}
+    assert "2026-05-29" in dates

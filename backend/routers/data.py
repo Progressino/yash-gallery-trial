@@ -397,14 +397,34 @@ def _platform_df_max_iso(df) -> Optional[str]:
     return None
 
 
+def _sales_max_for_source(sales_df, source: str) -> Optional[str]:
+    """Latest unified-sales calendar day for a marketplace ``Source``."""
+    import pandas as pd
+
+    from ..services.sales import txn_reporting_naive_ist
+
+    if sales_df is None or not hasattr(sales_df, "empty") or sales_df.empty:
+        return None
+    if "Source" not in sales_df.columns or "TxnDate" not in sales_df.columns:
+        return None
+    sub = sales_df[sales_df["Source"].astype(str).str.strip() == source]
+    if sub.empty:
+        return None
+    mx = txn_reporting_naive_ist(sub["TxnDate"]).max()
+    if pd.isna(mx):
+        return None
+    return str(pd.Timestamp(mx).date())
+
+
 def _tier3_session_needs_topup(sess: AppSession) -> bool:
-    """True when SQLite has newer/more daily uploads than the in-memory platform frame."""
+    """True when SQLite has newer/more daily uploads than session or unified sales."""
     try:
         from ..services.daily_store import get_summary
 
         summary = get_summary()
     except Exception:
         return False
+    sales = getattr(sess, "sales_df", None)
     for plat, attr in _PLATFORM_ATTRS:
         plat_sum = summary.get(plat) or {}
         if int(plat_sum.get("file_count") or 0) <= 0:
@@ -414,13 +434,17 @@ def _tier3_session_needs_topup(sess: AppSession) -> bool:
             return True
         tier_max = str(plat_sum.get("max_date") or "")[:10]
         sess_max = _platform_df_max_iso(cur) or ""
+        src = _SOURCE_BY_ATTR.get(attr, "")
+        sales_max = _sales_max_for_source(sales, src) or ""
         if tier_max and (not sess_max or tier_max > sess_max):
+            return True
+        if tier_max and (not sales_max or tier_max > sales_max):
             return True
     return False
 
 
 def _session_sales_stale_vs_platforms(sess: AppSession) -> bool:
-    """True when a non-empty platform frame is missing from unified sales_df."""
+    """True when unified sales_df is missing or lags loaded platform / Tier-3 history."""
     sales = getattr(sess, "sales_df", None)
     sources: set[str] = set()
     if sales is not None and not sales.empty and "Source" in sales.columns:
@@ -429,6 +453,13 @@ def _session_sales_stale_vs_platforms(sess: AppSession) -> bool:
         raw = getattr(sess, attr, None)
         if raw is not None and hasattr(raw, "empty") and not raw.empty and src not in sources:
             return True
+        if raw is not None and hasattr(raw, "empty") and not raw.empty:
+            plat_max = _platform_df_max_iso(raw) or ""
+            sales_max = _sales_max_for_source(sales, src) or ""
+            if plat_max and (not sales_max or sales_max < plat_max):
+                return True
+    if _tier3_session_needs_topup(sess):
+        return True
     return sales is None or (hasattr(sales, "empty") and sales.empty and _session_has_platform_data(sess))
 
 
@@ -514,6 +545,7 @@ def _platforms_needing_tier3_topup(sess: AppSession) -> list[str]:
         summary = get_summary()
     except Exception:
         return out
+    sales = getattr(sess, "sales_df", None)
     for plat, attr in _PLATFORM_ATTRS:
         plat_sum = summary.get(plat) or {}
         if int(plat_sum.get("file_count") or 0) <= 0:
@@ -524,7 +556,12 @@ def _platforms_needing_tier3_topup(sess: AppSession) -> list[str]:
             continue
         tier_max = str(plat_sum.get("max_date") or "")[:10]
         sess_max = _platform_df_max_iso(cur) or ""
+        src = _SOURCE_BY_ATTR.get(attr, "")
+        sales_max = _sales_max_for_source(sales, src) or ""
         if tier_max and (not sess_max or tier_max > sess_max):
+            out.append(plat)
+            continue
+        if tier_max and (not sales_max or tier_max > sales_max):
             out.append(plat)
     return out
 
@@ -561,6 +598,8 @@ def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
                 _rebuild_session_sales(sess)
         finally:
             sess._daily_restore_lock.release()
+    elif _session_sales_stale_vs_platforms(sess):
+        _rebuild_session_sales(sess)
     else:
         _ensure_sales_rebuilt(sess)
 
@@ -1776,7 +1815,7 @@ def daily_dsr(request: Request, date: Optional[str] = None):
     Query: ``date`` = ISO ``YYYY-MM-DD`` (defaults to latest day with sales if omitted).
     """
     sess = _sess(request)
-    _restore_daily_if_needed(sess)
+    _ensure_intelligence_session_fresh(sess)
     df, iso = _resolve_daily_dsr_date(sess, date)
     return get_daily_dsr_report(df, iso)
 

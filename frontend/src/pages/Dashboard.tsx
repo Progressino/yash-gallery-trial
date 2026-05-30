@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
   BarChart, Bar, XAxis, YAxis,
@@ -10,7 +10,9 @@ import api, {
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
   getCoverage,
+  invalidateDataQueries,
 } from '../api/client'
+import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
 import { useSession } from '../store/session'
 import './Dashboard.css'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
@@ -58,6 +60,7 @@ interface PlatformSummaryItem {
   trend_direction: 'up' | 'down' | 'flat'
   trend_direction_net?: 'up' | 'down' | 'flat'
   monthly: { month: string; shipments: number; refunds: number; net?: number }[]
+  daily?: { date: string; shipments: number; refunds: number; net?: number }[]
   by_state: { state: string; units: number; net_units?: number }[]
 }
 interface AnomalyItem {
@@ -94,19 +97,29 @@ const PLATFORM_SHORT: Record<string, string> = {
 /* ═══════════════════════════════════════════════════════════
    DATE HELPERS
    ═══════════════════════════════════════════════════════════ */
-function toIso(d: Date) { return d.toISOString().split('T')[0] }
-function daysAgo(n: number) { const d = new Date(); d.setDate(d.getDate() - n); return toIso(d) }
-function monthsAgo(n: number) { const d = new Date(); d.setMonth(d.getMonth() - n); return toIso(d) }
-const TODAY = toIso(new Date())
+function monthsAgoIsoIST(n: number): string {
+  const t = todayIsoIST()
+  const [y, m, d] = t.split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  dt.setMonth(dt.getMonth() - n)
+  return todayIsoIST(dt)
+}
 
 type DatePreset = { label: string; start: () => string; end?: () => string }
 const PRESETS: DatePreset[] = [
-  { label: '30D',  start: () => daysAgo(30) },
-  { label: '90D',  start: () => daysAgo(90) },
-  { label: '6M',   start: () => monthsAgo(6) },
-  { label: '1Y',   start: () => monthsAgo(12) },
+  { label: '30D',  start: () => daysAgoIsoIST(30) },
+  { label: '90D',  start: () => daysAgoIsoIST(90) },
+  { label: '6M',   start: () => monthsAgoIsoIST(6) },
+  { label: '1Y',   start: () => monthsAgoIsoIST(12) },
   { label: 'All',  start: () => '' },
 ]
+
+function fmtDay(iso: string) {
+  try {
+    const [y, m, d] = iso.split('-').map(Number)
+    return new Date(y, m - 1, d).toLocaleString('default', { month: 'short', day: 'numeric' })
+  } catch { return iso }
+}
 
 function fmtMonth(m: string) {
   try {
@@ -766,6 +779,8 @@ function DsrTable({ data }: { data: DsrSection[] }) {
    ═══════════════════════════════════════════════════════════ */
 export default function Dashboard() {
   const navigate = useNavigate()
+  const qc = useQueryClient()
+  const prevSalesRebuild = useRef<string>('idle')
   const setCoverage = useSession(s => s.setCoverage)
   const salesLoaded = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
   const jobRunning = useSession(s =>
@@ -776,15 +791,15 @@ export default function Dashboard() {
   )
 
   /* ── state ── */
-  const [dateStart,      setDateStart]      = useState(() => daysAgo(90))
-  const [dateEnd,        setDateEnd]        = useState(TODAY)
+  const [dateStart,      setDateStart]      = useState(() => daysAgoIsoIST(90))
+  const [dateEnd,        setDateEnd]        = useState(() => todayIsoIST())
   const [activePreset,   setActivePreset]   = useState('90D')
   const [salesViewNet,   setSalesViewNet]   = useState(false)
   const [hiddenPlatforms,setHiddenPlatforms]= useState<Set<string>>(new Set())
   const [heatPlatform,   setHeatPlatform]   = useState('Myntra')
   const [topSkuLimit,    setTopSkuLimit]    = useState(10)
   const [showDsr,        setShowDsr]        = useState(false)
-  const [dsrDate,        setDsrDate]        = useState(TODAY)
+  const [dsrDate,        setDsrDate]        = useState(() => addDaysIsoIST(todayIsoIST(), -1))
   const [exportingSales,     setExportingSales]     = useState(false)
   const [exportingDsr,       setExportingDsr]       = useState(false)
   const [exportingDsrMonthly,setExportingDsrMonthly]= useState(false)
@@ -793,7 +808,7 @@ export default function Dashboard() {
   /* ── preset ── */
   function applyPreset(label: string, startFn: () => string, endFn?: () => string) {
     setDateStart(startFn())
-    setDateEnd(endFn ? endFn() : toIso(new Date()))
+    setDateEnd(endFn ? endFn() : todayIsoIST())
     setActivePreset(label)
   }
   function togglePlatform(name: string) {
@@ -831,6 +846,11 @@ export default function Dashboard() {
     queryFn: async () => {
       const c = await getCoverage({ timeout: jobRunning || salesLoaded ? 45_000 : 120_000, light: jobRunning || salesLoaded })
       setCoverage(c)
+      const st = c.sales_rebuild ?? 'idle'
+      if (prevSalesRebuild.current === 'running' && st !== 'running') {
+        invalidateDataQueries(qc)
+      }
+      prevSalesRebuild.current = st
       return c
     },
     enabled: true,
@@ -894,6 +914,11 @@ export default function Dashboard() {
   const platforms = platformSummary ?? []
   const loadedPlatforms = platforms.filter(p => p.loaded)
 
+  const useDailyChart = useMemo(
+    () => (reportingSpanDays(dateStart, dateEnd) ?? 999) <= 45,
+    [dateStart, dateEnd],
+  )
+
   const filteredPlatforms = useMemo(() => {
     const startM = dateStart.slice(0, 7)
     const endM   = dateEnd.slice(0, 7)
@@ -904,6 +929,17 @@ export default function Dashboard() {
       ),
     }))
   }, [platforms, dateStart, dateEnd])
+
+  const allDays = useMemo(() => {
+    const days = new Set<string>()
+    for (const p of filteredPlatforms) {
+      if (!p.loaded) continue
+      for (const r of p.daily ?? []) days.add(r.date)
+    }
+    return Array.from(days).sort()
+  }, [filteredPlatforms])
+
+  const dayLabels = useMemo(() => allDays.map(fmtDay), [allDays])
 
   const allMonths = useMemo(() => {
     const months = new Set<string>()
@@ -917,6 +953,21 @@ export default function Dashboard() {
   const monthLabels = useMemo(() => allMonths.map(fmtMonth), [allMonths])
 
   const platformSeries = useMemo<HeroSeries[]>(() => {
+    if (useDailyChart) {
+      return filteredPlatforms
+        .filter(p => p.loaded && !hiddenPlatforms.has(p.platform))
+        .map(p => {
+          const dm: Record<string, number> = {}
+          for (const r of p.daily ?? []) {
+            dm[r.date] = salesViewNet ? (r.net ?? r.shipments - r.refunds) : r.shipments
+          }
+          return {
+            name: p.platform,
+            color: PLATFORM_COLORS[p.platform] ?? '#6366F1',
+            values: allDays.map(d => dm[d] ?? 0),
+          }
+        })
+    }
     return filteredPlatforms
       .filter(p => p.loaded && !hiddenPlatforms.has(p.platform))
       .map(p => {
@@ -928,12 +979,15 @@ export default function Dashboard() {
           values: allMonths.map(m => mm[m] ?? 0),
         }
       })
-  }, [filteredPlatforms, hiddenPlatforms, allMonths, salesViewNet])
+  }, [filteredPlatforms, hiddenPlatforms, allMonths, allDays, salesViewNet, useDailyChart])
 
-  const allMonthlyTotals = useMemo(() =>
-    allMonths.map((_, i) => platformSeries.reduce((s, p) => s + p.values[i], 0)),
-    [allMonths, platformSeries]
+  const chartLabels = useDailyChart ? dayLabels : monthLabels
+  const chartTotals = useMemo(() =>
+    (useDailyChart ? allDays : allMonths).map((_, i) => platformSeries.reduce((s, p) => s + p.values[i], 0)),
+    [useDailyChart, allDays, allMonths, platformSeries],
   )
+
+  const allMonthlyTotals = chartTotals
 
   const totalUnits  = salesSummary?.total_units  ?? 0
   const totalReturns= salesSummary?.total_returns ?? 0
@@ -958,7 +1012,7 @@ export default function Dashboard() {
   const forecastMonths = ['May 26', 'Jun 26', 'Jul 26']
   const lastTotal = allMonthlyTotals[allMonthlyTotals.length - 1] ?? 0
   const withForecast = useMemo<HeroSeries[]>(() => {
-    if (!lastTotal) return platformSeries
+    if (useDailyChart || !lastTotal) return platformSeries
     return platformSeries.map(s => {
       const last = s.values[s.values.length - 1] ?? 0
       return {
@@ -966,7 +1020,7 @@ export default function Dashboard() {
         values: [...s.values, Math.round(last * 1.06), Math.round(last * 1.11), Math.round(last * 1.18)],
       }
     })
-  }, [platformSeries, lastTotal])
+  }, [platformSeries, lastTotal, useDailyChart])
 
   /* ── exports ── */
   const exportPlatforms = useMemo(() => {
@@ -1143,10 +1197,10 @@ export default function Dashboard() {
             ))}
           </div>
           <div className="controls-row" style={{ gap: 6 }}>
-            <input type="date" className="ctrl-date" value={dateStart} max={dateEnd || TODAY}
+            <input type="date" className="ctrl-date" value={dateStart} max={dateEnd || todayIsoIST()}
               onChange={e => { setDateStart(e.target.value); setActivePreset('') }} />
             <span className="ctrl-arrow">→</span>
-            <input type="date" className="ctrl-date" value={dateEnd} min={dateStart} max={TODAY}
+            <input type="date" className="ctrl-date" value={dateEnd} min={dateStart} max={todayIsoIST()}
               onChange={e => { setDateEnd(e.target.value); setActivePreset('') }} />
           </div>
         </div>
@@ -1191,11 +1245,11 @@ export default function Dashboard() {
 
           <label className="dsr-toggle-label" style={{ marginLeft: 'auto' }}>
             <input type="checkbox" checked={showDsr}
-              onChange={e => { setShowDsr(e.target.checked); if (e.target.checked) setDsrDate(dateEnd || TODAY) }} />
+              onChange={e => { setShowDsr(e.target.checked); if (e.target.checked) setDsrDate(dateEnd || todayIsoIST()) }} />
             Daily DSR
           </label>
           {showDsr && (
-            <input type="date" className="ctrl-date" value={dsrDate} max={TODAY}
+            <input type="date" className="ctrl-date" value={dsrDate} max={todayIsoIST()}
               onChange={e => setDsrDate(e.target.value)} />
           )}
         </div>
@@ -1241,7 +1295,8 @@ export default function Dashboard() {
             <div>
               <div className="card-title">Sales velocity · {activePreset || 'custom range'}</div>
               <div className="card-sub">
-                {salesViewNet ? 'Net' : 'Gross'} shipments by channel · forecast shaded
+                {salesViewNet ? 'Net' : 'Gross'} shipments by channel
+                {useDailyChart ? ' · daily' : ' · forecast shaded'}
               </div>
             </div>
             <div className="card-actions">
@@ -1272,14 +1327,14 @@ export default function Dashboard() {
               <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 13 }}>
                 Loading…
               </div>
-            ) : withForecast.length === 0 || allMonths.length === 0 ? (
+            ) : withForecast.length === 0 || chartLabels.length === 0 ? (
               <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 13 }}>
                 No data — <a href="/upload" style={{ color: 'var(--primary)', marginLeft: 4 }}>upload files</a>
               </div>
             ) : (
               <HeroChart
                 series={withForecast}
-                months={[...monthLabels, ...forecastMonths]}
+                months={useDailyChart ? chartLabels : [...monthLabels, ...forecastMonths]}
                 hidden={hiddenByName}
                 viewMode={salesViewNet ? 'net' : 'gross'}
               />
