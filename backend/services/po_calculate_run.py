@@ -160,7 +160,7 @@ def execute_po_calculate(
             inv_df=inv_df,
             period_days=_period,
             lead_time=int(body.get("lead_time", 30)),
-            target_days=int(body.get("target_days", 210)),
+            target_days=int(body.get("target_days", 135)),
             demand_basis=str(body.get("demand_basis", "Sold")),
             min_denominator=int(body.get("min_denominator", 7)),
             grace_days=int(body.get("grace_days", 0)),
@@ -184,6 +184,7 @@ def execute_po_calculate(
                 and not getattr(sess, "po_return_overlay_df", pd.DataFrame()).empty
                 else None
             ),
+            urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

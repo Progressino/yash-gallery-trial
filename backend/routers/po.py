@@ -63,7 +63,7 @@ def _sync_po_sidecars_to_durable_storage(
 class PORequest(BaseModel):
     period_days:      int   = 90
     lead_time:        int   = 30
-    target_days:      int   = 210
+    target_days:      int   = 135
     demand_basis:     str   = "Sold"       # "Sold" or "Net"
     use_seasonality:  bool  = False
     seasonal_weight:  float = 0.5
@@ -85,6 +85,10 @@ class PORequest(BaseModel):
     # When True (default), before PO math import yesterday's server-archived export if the
     # ledger has no rows for that day (see POST /raise-ledger/archive-export).
     auto_import_yesterday_ledger: bool = True
+    # When any size of a parent SKU has Projected_Running_Days below this threshold,
+    # automatically include ALL sibling sizes in the PO output so the operator
+    # can review and raise for every size.  Set to 0 to disable.
+    urgent_all_sizes_days: int = 45
 
 
 class RaiseConfirmItem(BaseModel):
@@ -776,7 +780,7 @@ class PODashboardRequest(PORequest):
     prev_days: int = 7
     spike_ratio: float = 1.35
     min_recent_units: int = 5
-    low_run_days: float = 40.0
+    low_run_days: float = 45.0
     max_rows_per_section: int = 80
 
 
@@ -833,6 +837,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
                 and not getattr(sess, "po_return_overlay_df", pd.DataFrame()).empty
                 else None
             ),
+            urgent_all_sizes_days=body.urgent_all_sizes_days,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

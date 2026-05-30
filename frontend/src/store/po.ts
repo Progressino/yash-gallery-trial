@@ -37,6 +37,7 @@ interface POParams {
   grace_days: number
   safety_pct: number
   enforce_two_size_minimum: boolean
+  urgent_all_sizes_days: number
 }
 
 interface POState {
@@ -72,7 +73,7 @@ export const usePOStore = create<POState>()(
   params: {
     period_days: 90,
     lead_time: 30,
-    target_days: 210,
+    target_days: 135,
     demand_basis: 'Sold',
     use_seasonality: false,
     seasonal_weight: 0.5,
@@ -80,6 +81,7 @@ export const usePOStore = create<POState>()(
     grace_days: 0,
     safety_pct: 0,
     enforce_two_size_minimum: true,
+    urgent_all_sizes_days: 45,
   },
   result: null,
   quarterly: null,

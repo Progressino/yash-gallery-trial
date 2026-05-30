@@ -108,7 +108,7 @@ export function PODashboardPanel({
     prev_days: 7,
     spike_ratio: 1.35,
     min_recent_units: 5,
-    low_run_days: 40,
+    low_run_days: 45,
     max_rows_per_section: 80,
   })
   const [data, setData] = useState<DashboardPayload | null>(null)

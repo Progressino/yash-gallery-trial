@@ -1036,7 +1036,7 @@ export default function POEngine() {
                 value={params.period_days} onChange={v => setParams({ ...params, period_days: +v })} />
               <Param label="Lead Time (days)" type="number"
                 value={params.lead_time} onChange={v => setParams({ ...params, lead_time: +v })} />
-              <Param label="Target Cover (days)" type="number"
+              <Param label="Post-PO Running Days" type="number"
                 value={params.target_days} onChange={v => setParams({ ...params, target_days: +v })} />
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Demand Basis</label>
@@ -1054,6 +1054,19 @@ export default function POEngine() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
               <Param label="Grace Days (urgency buffer)" type="number"
                 value={params.grace_days} onChange={v => setParams({ ...params, grace_days: +v })} />
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1" title="When any size of a parent has running days below this threshold, all sibling sizes are included in the PO output">
+                  All sizes below (days)
+                </label>
+                <input
+                  type="number" min={0} step={5}
+                  value={params.urgent_all_sizes_days}
+                  onChange={e => setParams({ ...params, urgent_all_sizes_days: Math.max(0, +e.target.value) })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  title="Show all sizes when any variant's running days is below this threshold"
+                />
+                <p className="text-[10px] text-gray-400 mt-0.5">Show all sizes when any variant runs low</p>
+              </div>
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">
                   Safety Stock % ({params.safety_pct}%)
@@ -2457,7 +2470,7 @@ const PriorityBadge = memo(function PriorityBadge({ priority }: { priority: stri
 const DaysLeftBadge = memo(function DaysLeftBadge({ days }: { days: number }) {
   const safe = Number.isFinite(days) ? days : 999
   if (safe >= 999) return <span className="text-gray-400">999+</span>
-  const color = safe < 14 ? 'text-red-600 font-bold' : safe < 30 ? 'text-yellow-600 font-semibold' : 'text-gray-700'
+  const color = safe < 14 ? 'text-red-600 font-bold' : safe < 45 ? 'text-yellow-600 font-semibold' : 'text-gray-700'
   return <span className={color}>{Math.round(safe)}</span>
 })
 

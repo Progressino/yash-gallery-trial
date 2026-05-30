@@ -477,6 +477,7 @@ def calculate_po_base(
     raise_ledger_lookback_days: int = 14,
     raise_view_date: Optional[str] = None,
     po_return_overlay_df: Optional[pd.DataFrame] = None,
+    urgent_all_sizes_days: int = 45,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -1686,6 +1687,67 @@ def calculate_po_base(
     )
     suggest.loc[deep_stock] = "High stock cover, no recent sales — review listing."
     po_df["Suggest_Close_SKU"] = suggest.fillna("").astype(str)
+
+    # ── Urgent all-sizes expansion ─────────────────────────────────────────────
+    # When any size of a parent SKU has Projected_Running_Days < urgent_all_sizes_days,
+    # add ghost rows for every sibling size found in sku_mapping that is not already
+    # in the output.  This ensures the operator can see and raise PO for ALL sizes
+    # of an urgent style — not just the ones with active ADS.
+    if urgent_all_sizes_days > 0 and sku_mapping:
+        try:
+            proj_col = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
+            urgent_parents: set = set(
+                po_df.loc[proj_col < float(urgent_all_sizes_days), "Parent_SKU"].dropna().unique()
+            )
+            if urgent_parents:
+                existing_skus: set = set(po_df["OMS_SKU"].astype(str))
+                # Build a reverse map: parent_sku → [child_skus from sku_mapping]
+                parent_to_children: dict = {}
+                for child_sku in sku_mapping:
+                    p = get_parent_sku(child_sku)
+                    parent_to_children.setdefault(p, []).append(child_sku)
+
+                ghost_rows = []
+                for parent in urgent_parents:
+                    for child in parent_to_children.get(parent, []):
+                        if str(child) not in existing_skus:
+                            ghost = {c: 0 for c in po_df.columns}
+                            ghost["OMS_SKU"]              = str(child)
+                            ghost["Parent_SKU"]           = str(parent)
+                            ghost["Total_Inventory"]      = 0
+                            ghost["ADS"]                  = 0.0
+                            ghost["Days_Left"]            = 999.0
+                            ghost["Projected_Running_Days"] = 999.0
+                            ghost["Post_PO_Cover_Days_Capped"] = 999.0
+                            ghost["PO_Qty"]               = 0
+                            ghost["Gross_PO_Qty"]         = 0
+                            ghost["PO_Block_Reason"]      = "Urgent parent — all sizes shown for review"
+                            ghost["Suggest_Close_SKU"]    = ""
+                            ghost["Priority"]             = ""
+                            ghost["SKU_Sheet_Closed"]     = False
+                            ghost["SKU_Sheet_Status"]     = ""
+                            for col in po_df.columns:
+                                if col not in ghost:
+                                    ghost[col] = ""
+                            ghost_rows.append(ghost)
+
+                if ghost_rows:
+                    ghost_df = pd.DataFrame(ghost_rows, columns=po_df.columns)
+                    for col in po_df.columns:
+                        try:
+                            ghost_df[col] = ghost_df[col].astype(po_df[col].dtype)
+                        except Exception:
+                            pass
+                    po_df = pd.concat([po_df, ghost_df], ignore_index=True)
+                    import logging as _log_mod
+                    _log_mod.getLogger(__name__).info(
+                        "urgent_all_sizes: added %d ghost rows for %d urgent parent(s) "
+                        "(Projected_Running_Days < %d)",
+                        len(ghost_rows), len(urgent_parents), urgent_all_sizes_days,
+                    )
+        except Exception as _uas_err:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).warning("urgent_all_sizes expansion failed (non-fatal): %s", _uas_err)
 
     # Drop intermediate calc columns (datetime/float cols that break router serialisation)
     po_df.drop(
