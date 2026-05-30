@@ -36,6 +36,7 @@ const empty: CoverageResponse = {
   daily_inventory_history_skus: 0,
   po_raise_ledger_rows: 0,
   return_sheet_skus: 0,
+  return_sheet_units: 0,
   pause_auto_data_restore: false,
   sales_rebuild: 'idle',
   sales_rebuild_message: '',

@@ -178,6 +178,46 @@ def _parse_amazon_business_return(df: pd.DataFrame) -> Tuple[pd.DataFrame, Optio
     return out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum(), None
 
 
+def _infer_return_platform_from_filename(filename: str) -> str:
+    """Map return export filename to Tier-3 platform key (amazon, myntra, …)."""
+    low = (filename or "").lower()
+    if "amazon" in low or "businessreport" in low.replace(" ", ""):
+        return "amazon"
+    if "myntra" in low:
+        return "myntra"
+    if "meesho" in low:
+        return "meesho"
+    if "flipkart" in low:
+        return "flipkart"
+    if "snapdeal" in low:
+        return "snapdeal"
+    return "unknown"
+
+
+def _attach_return_platform(df: pd.DataFrame, filename: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["Return_Platform"] = _infer_return_platform_from_filename(filename)
+    return out
+
+
+def _finalize_return_overlay_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if "Return_Platform" not in out.columns:
+        out["Return_Platform"] = "unknown"
+    out["Return_Platform"] = out["Return_Platform"].astype(str).str.strip().str.lower()
+    out.loc[out["Return_Platform"].isin(["", "nan", "none"]), "Return_Platform"] = "unknown"
+    if "Return_Platform" in out.columns and (out["Return_Platform"] != "unknown").any():
+        return (
+            out.groupby(["OMS_SKU", "Return_Platform"], as_index=False)["Return_Units"]
+            .sum()
+        )
+    return out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum()
+
+
 def _parse_generic_return_table(
     df: pd.DataFrame,
     *,
@@ -211,6 +251,11 @@ def _parse_single_return_file(
         return pd.DataFrame(), "Empty file."
     low = (filename or "").lower()
 
+    def _finish(part: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str]]:
+        if part is None or part.empty:
+            return pd.DataFrame(), None
+        return _attach_return_platform(part, filename), None
+
     if "flipkart" in low and low.endswith((".xlsx", ".xls")):
         partial, err = _parse_flipkart_returns_xlsx(raw)
         if partial is not None and not partial.empty:
@@ -218,7 +263,7 @@ def _parse_single_return_file(
                 partial["OMS_SKU"] = partial["OMS_SKU"].map(
                     lambda s: canonical_oms_key(s, sku_mapping)
                 )
-            return partial, None
+            return _finish(partial)
         if err:
             return pd.DataFrame(), err
 
@@ -226,7 +271,10 @@ def _parse_single_return_file(
         df, err = _parse_meesho_panel_csv(raw)
         if err:
             return pd.DataFrame(), err
-        return _parse_generic_return_table(df, sku_mapping=sku_mapping)
+        part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
+        if err:
+            return pd.DataFrame(), err
+        return _finish(part)
 
     df, read_err = _read_tabular(raw, filename)
     if read_err:
@@ -241,7 +289,7 @@ def _parse_single_return_file(
                 partial["OMS_SKU"] = partial["OMS_SKU"].map(
                     lambda s: canonical_oms_key(s, sku_mapping)
                 )
-            return partial, None
+            return _finish(partial)
         if err:
             return pd.DataFrame(), err
 
@@ -255,11 +303,14 @@ def _parse_single_return_file(
                         partial["OMS_SKU"] = partial["OMS_SKU"].map(
                             lambda s: canonical_oms_key(s, sku_mapping)
                         )
-                    return partial, None
+                    return _finish(partial)
         except Exception:
             pass
 
-    return _parse_generic_return_table(df, sku_mapping=sku_mapping)
+    part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
+    if err:
+        return pd.DataFrame(), err
+    return _finish(part)
 
 
 def parse_return_upload_bytes(
@@ -305,7 +356,7 @@ def parse_return_upload_bytes(
         return pd.DataFrame(), detail
 
     out = pd.concat(frames, ignore_index=True)
-    out = out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum()
+    out = _finalize_return_overlay_df(out)
 
     if group_by_parent:
         from .helpers import get_parent_sku
@@ -313,7 +364,7 @@ def parse_return_upload_bytes(
         out["OMS_SKU"] = out["OMS_SKU"].map(
             lambda s: str(get_parent_sku(s) or s).strip().upper()
         )
-        out = out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum()
+        out = _finalize_return_overlay_df(out)
 
     sources = len(frames)
     _log.info(
@@ -331,15 +382,19 @@ def apply_return_overlay_import(
     *,
     replace: bool = True,
 ) -> dict:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
     if overlay_df is None or overlay_df.empty:
         return {"ok": False, "message": "No return rows to import."}
+    overlay_df = _finalize_return_overlay_df(overlay_df)
     if replace:
         sess.po_return_overlay_df = overlay_df.copy()
     else:
         base = getattr(sess, "po_return_overlay_df", pd.DataFrame())
         merged = pd.concat([base, overlay_df], ignore_index=True)
-        merged = merged.groupby("OMS_SKU", as_index=False)["Return_Units"].sum()
-        sess.po_return_overlay_df = merged
+        sess.po_return_overlay_df = _finalize_return_overlay_df(merged)
+    sess.return_overlay_as_of = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
     n = int(len(sess.po_return_overlay_df))
     units = int(sess.po_return_overlay_df["Return_Units"].sum())
     sess._quarterly_cache.clear()

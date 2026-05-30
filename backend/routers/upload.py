@@ -64,6 +64,18 @@ def _sess_return_overlay(sess):
     return ov
 
 
+def _sales_overlay_build_kwargs(sess) -> dict:
+    """Pass return overlay + as-of date into build_sales_df."""
+    kw: dict = {}
+    ov = _sess_return_overlay(sess)
+    if ov is not None:
+        kw["return_overlay_df"] = ov
+    as_of = getattr(sess, "return_overlay_as_of", None)
+    if as_of and str(as_of).strip():
+        kw["return_overlay_as_of"] = str(as_of).strip()[:10]
+    return kw
+
+
 def _session_data_changed(sess) -> None:
     """Undo pause_auto_data_restore after uploads / builds so Tier-3 merge and warm cache work again."""
     resume_auto_data_restore(sess)
@@ -326,7 +338,7 @@ def _incremental_sales_rebuild_from_buffers(
         flipkart_df=flipkart,
         snapdeal_df=snapdeal,
         sku_mapping=sess.sku_mapping,
-        return_overlay_df=_sess_return_overlay(sess),
+        **_sales_overlay_build_kwargs(sess),
     )
 
     existing = getattr(sess, "sales_df", None)
@@ -435,7 +447,7 @@ def _rebuild_sales_sync(
             flipkart_df=sess.flipkart_df,
             snapdeal_df=sess.snapdeal_df,
             sku_mapping=sess.sku_mapping,
-            return_overlay_df=_sess_return_overlay(sess),
+            **_sales_overlay_build_kwargs(sess),
         )
         sess._quarterly_cache.clear()
         _session_data_changed(sess)
@@ -881,7 +893,7 @@ async def upload_sku_mapping(
                     flipkart_df=sess.flipkart_df,
                     snapdeal_df=sess.snapdeal_df,
                     sku_mapping=mapping,
-                    return_overlay_df=_sess_return_overlay(sess),
+                    **_sales_overlay_build_kwargs(sess),
                 )
 
             gaps = list_sku_mapping_gaps(sess.sales_df, mapping)
@@ -1114,7 +1126,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                         flipkart_df=sess.flipkart_df,
                         snapdeal_df=sess.snapdeal_df,
                         sku_mapping=sess.sku_mapping,
-                        return_overlay_df=_sess_return_overlay(sess),
+                        **_sales_overlay_build_kwargs(sess),
                     )
                     total = len(sess.meesho_df)
                     years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -1174,7 +1186,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                     mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
                     flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
                     sku_mapping=sess.sku_mapping,
-                    return_overlay_df=_sess_return_overlay(sess),
+                    **_sales_overlay_build_kwargs(sess),
                 )
                 total = len(sess.meesho_df)
                 years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -1224,7 +1236,7 @@ async def upload_meesho(request: Request, background_tasks: BackgroundTasks, fil
                 mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
                 flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
                 sku_mapping=sess.sku_mapping,
-                return_overlay_df=_sess_return_overlay(sess),
+                **_sales_overlay_build_kwargs(sess),
             )
             total = len(sess.meesho_df)
             years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
@@ -1398,7 +1410,7 @@ async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, f
                     flipkart_df=sess.flipkart_df,
                     snapdeal_df=sess.snapdeal_df,
                     sku_mapping=sess.sku_mapping,
-                    return_overlay_df=_sess_return_overlay(sess),
+                    **_sales_overlay_build_kwargs(sess),
                 )
                 sess._quarterly_cache.clear()
 

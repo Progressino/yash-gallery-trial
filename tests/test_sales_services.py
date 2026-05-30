@@ -349,6 +349,54 @@ def test_build_sales_df_amazon_with_empty_mapping_includes_rows():
     assert "1023YKBLUE-3XL" in merged["Sku"].astype(str).values or merged["Sku"].astype(str).str.contains("1023").any()
 
 
+def test_build_sales_df_return_overlay_attributes_to_platform():
+    mtr = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-04-01"]),
+            "SKU": ["1001YK-RED-L"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [10.0],
+            "Order_Id": ["OID-1"],
+            "Invoice_Number": [""],
+        }
+    )
+    overlay = pd.DataFrame(
+        {
+            "OMS_SKU": ["1001YK-RED-L"],
+            "Return_Units": [3],
+            "Return_Platform": ["amazon"],
+        }
+    )
+    merged = build_sales_df(
+        mtr_df=mtr,
+        myntra_df=pd.DataFrame(),
+        meesho_df=pd.DataFrame(),
+        flipkart_df=pd.DataFrame(),
+        sku_mapping={"1001YK-RED-L": "1001YK-RED-L"},
+        return_overlay_df=overlay,
+        return_overlay_as_of="2025-04-09",
+    )
+    amz_ref = merged[
+        (merged["Source"].astype(str) == "Amazon")
+        & (merged["Transaction Type"].astype(str) == "Refund")
+    ]
+    assert len(amz_ref) == 1
+    assert int(amz_ref["Quantity"].iloc[0]) == 3
+    plat = get_platform_summary(
+        mtr,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        None,
+        start_date="2025-04-01",
+        end_date="2025-04-30",
+        sales_df=merged,
+    )
+    amazon = next(p for p in plat if p["platform"] == "Amazon")
+    assert amazon["total_returns"] == 3
+    assert amazon["return_rate"] == 30.0
+
+
 def test_build_sales_df_return_sheet_overlay_in_net_sales_summary():
     """Optional return sheet rows must land in unified sales so dashboard net KPIs include them."""
     mtr = pd.DataFrame(

@@ -319,12 +319,7 @@ def _restore_daily_if_needed(
                     flipkart_df=sess.flipkart_df,
                     snapdeal_df=sess.snapdeal_df,
                     sku_mapping=sess.sku_mapping,
-                    return_overlay_df=(
-                        None
-                        if getattr(sess, "po_return_overlay_df", None) is None
-                        or getattr(sess.po_return_overlay_df, "empty", True)
-                        else sess.po_return_overlay_df
-                    ),
+                    **_sales_overlay_build_kwargs(sess),
                 )
                 sess._quarterly_cache.clear()
             except Exception:
@@ -463,6 +458,17 @@ def _session_sales_stale_vs_platforms(sess: AppSession) -> bool:
     return sales is None or (hasattr(sales, "empty") and sales.empty and _session_has_platform_data(sess))
 
 
+def _sales_overlay_build_kwargs(sess: AppSession) -> dict:
+    kw: dict = {}
+    ov = getattr(sess, "po_return_overlay_df", None)
+    if ov is not None and not getattr(ov, "empty", True):
+        kw["return_overlay_df"] = ov
+    as_of = getattr(sess, "return_overlay_as_of", None)
+    if as_of and str(as_of).strip():
+        kw["return_overlay_as_of"] = str(as_of).strip()[:10]
+    return kw
+
+
 def _rebuild_session_sales(sess: AppSession) -> None:
     if getattr(sess, "inventory_upload_status", "idle") == "running":
         return
@@ -482,12 +488,7 @@ def _rebuild_session_sales(sess: AppSession) -> None:
             flipkart_df=sess.flipkart_df,
             snapdeal_df=sess.snapdeal_df,
             sku_mapping=sess.sku_mapping,
-            return_overlay_df=(
-                None
-                if getattr(sess, "po_return_overlay_df", None) is None
-                or getattr(sess.po_return_overlay_df, "empty", True)
-                else sess.po_return_overlay_df
-            ),
+            **_sales_overlay_build_kwargs(sess),
         )
         sess._quarterly_cache.clear()
     except Exception:
@@ -655,12 +656,7 @@ def _ensure_sales_rebuilt(sess: AppSession) -> None:
             flipkart_df=sess.flipkart_df,
             snapdeal_df=sess.snapdeal_df,
             sku_mapping=sess.sku_mapping,
-            return_overlay_df=(
-                None
-                if getattr(sess, "po_return_overlay_df", None) is None
-                or getattr(sess.po_return_overlay_df, "empty", True)
-                else sess.po_return_overlay_df
-            ),
+            **_sales_overlay_build_kwargs(sess),
         )
         sess._quarterly_cache.clear()
     except Exception:
@@ -947,6 +943,7 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         ),
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
         return_sheet_skus=int(len(_ret_ov)) if _ret_ok else 0,
+        return_sheet_units=int(_ret_ov["Return_Units"].sum()) if _ret_ok else 0,
         pause_auto_data_restore=paused,
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",

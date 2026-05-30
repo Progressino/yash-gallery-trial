@@ -461,6 +461,19 @@ def _build_mtr_sales_tagged(mtr_df: pd.DataFrame, sku_mapping: Dict[str, str]) -
 RETURN_SHEET_SOURCE = "Return_Sheet"
 RETURN_SHEET_ORDER_PLACEHOLDER = "RETURN_SHEET"
 
+RETURN_PLATFORM_TO_SOURCE: Dict[str, str] = {
+    "amazon": "Amazon",
+    "myntra": "Myntra",
+    "meesho": "Meesho",
+    "flipkart": "Flipkart",
+    "snapdeal": "Snapdeal",
+}
+
+
+def _source_for_return_platform(platform_key: object) -> str:
+    key = str(platform_key or "").strip().lower()
+    return RETURN_PLATFORM_TO_SOURCE.get(key, RETURN_SHEET_SOURCE)
+
 
 def return_sheet_refund_rows_from_overlay(
     overlay: pd.DataFrame,
@@ -479,8 +492,15 @@ def return_sheet_refund_rows_from_overlay(
     ok = (qty > 0) & (sk.str.len() > 0) & ~sk.str.lower().isin(["nan", "none"])
     if not ok.any():
         return pd.DataFrame()
-    qty = qty.loc[ok]
-    sk = sk.loc[ok]
+    work = overlay.loc[ok].copy()
+    work["_qty"] = qty.loc[ok].astype(float)
+    work["_sku"] = sk.loc[ok]
+    if "Return_Platform" in work.columns:
+        work["_plat"] = work["Return_Platform"].astype(str).str.strip().str.lower()
+        work.loc[work["_plat"].isin(["", "nan", "none", "unknown"]), "_plat"] = ""
+    else:
+        work["_plat"] = ""
+
     ref = txn_reporting_naive_ist(pd.Series([pd.Timestamp(ref_txn_date)])).iloc[0]
     if pd.isna(ref):
         ref = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
@@ -489,19 +509,19 @@ def return_sheet_refund_rows_from_overlay(
 
     synth = pd.DataFrame(
         {
-            "Sku": sk.values,
+            "Sku": work["_sku"].values,
             "TxnDate": ref,
             "Transaction Type": "Refund",
-            "Quantity": qty.astype(float).values,
-            "Units_Effective": (-qty.astype(float)).values,
+            "Quantity": work["_qty"].values,
+            "Units_Effective": (-work["_qty"]).values,
             "OrderId": RETURN_SHEET_ORDER_PLACEHOLDER,
             "LineKey": "",
-            "Source": RETURN_SHEET_SOURCE,
+            "Source": work["_plat"].map(_source_for_return_platform).values,
+            "DSR_Segment": "",
         }
     )
     synth = _apply_unified_oms_skus(synth, sku_mapping or {})
-    synth["LineKey"] = "RETURN_SHEET|" + synth["Sku"].astype(str)
-    synth["DSR_Segment"] = ""
+    synth["LineKey"] = "RETURN_SHEET|" + synth["Sku"].astype(str) + "|" + synth["Source"].astype(str)
     return synth
 
 
@@ -513,6 +533,7 @@ def build_sales_df(
     sku_mapping: Dict[str, str],
     snapdeal_df: Optional[pd.DataFrame] = None,
     return_overlay_df: Optional[pd.DataFrame] = None,
+    return_overlay_as_of: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Concatenate all platform DataFrames into a unified sales_df and deduplicate.
@@ -567,6 +588,11 @@ def build_sales_df(
         if return_overlay_df is None or return_overlay_df.empty:
             return pd.DataFrame()
         ref0 = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+        if return_overlay_as_of and str(return_overlay_as_of).strip():
+            try:
+                ref0 = pd.Timestamp(str(return_overlay_as_of).strip()[:10]).normalize()
+            except Exception:
+                pass
         synth0 = return_sheet_refund_rows_from_overlay(
             return_overlay_df, sku_mapping or {}, ref_txn_date=ref0
         )
@@ -633,7 +659,12 @@ def build_sales_df(
         result["DSR_Segment"] = ""
 
     if return_overlay_df is not None and not return_overlay_df.empty:
-        if not result.empty:
+        if return_overlay_as_of and str(return_overlay_as_of).strip():
+            try:
+                ref_dt = pd.Timestamp(str(return_overlay_as_of).strip()[:10]).normalize()
+            except Exception:
+                ref_dt = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+        elif not result.empty:
             ref_dt = txn_reporting_naive_ist(result["TxnDate"]).max()
         else:
             ref_dt = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
@@ -757,6 +788,14 @@ def get_sales_summary(
         "net_units":    int(net),
         "return_rate":  round(rate, 1),
     }
+    if "Source" in df.columns:
+        src = df["Source"].astype(str).str.strip()
+        overlay_refunds = df.loc[
+            (df["Transaction Type"] == "Refund") & src.eq(RETURN_SHEET_SOURCE),
+            "Quantity",
+        ].sum()
+        out["return_sheet_units"] = int(overlay_refunds)
+        out["marketplace_return_units"] = int(returned - overlay_refunds)
     if (start_date and str(start_date).strip()) or (end_date and str(end_date).strip()):
         if upload_report_day_gate_enabled():
             out["date_basis_note"] = (

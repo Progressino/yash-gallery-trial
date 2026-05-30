@@ -63,6 +63,7 @@ export interface CoverageResponse {
   daily_inventory_history_skus?: number
   po_raise_ledger_rows?: number
   return_sheet_skus?: number
+  return_sheet_units?: number
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
   /** Tier-3 daily-auto background sales rebuild */

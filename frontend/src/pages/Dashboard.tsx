@@ -75,6 +75,8 @@ interface SalesSummary {
   total_returns: number
   net_units: number
   return_rate: number
+  return_sheet_units?: number
+  marketplace_return_units?: number
   active_months?: number
   date_basis_note?: string
 }
@@ -266,7 +268,7 @@ function RadialGauge({ value, max = 100, color = 'var(--primary)', label, size =
 /* ═══════════════════════════════════════════════════════════
    HERO CHART
    ═══════════════════════════════════════════════════════════ */
-interface HeroSeries { name: string; color: string; values: number[] }
+interface HeroSeries { name: string; color: string; values: number[]; returns?: number[] }
 
 function HeroChart({ series, months, hidden, viewMode }: {
   series: HeroSeries[]; months: string[]; hidden: Set<string>; viewMode: string
@@ -406,6 +408,11 @@ function HeroChart({ series, months, hidden, viewMode }: {
               </span>
               <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--ink)' }}>
                 {(s.values[hover] ?? 0).toLocaleString()}
+                {(s.returns?.[hover] ?? 0) > 0 && (
+                  <span style={{ color: 'var(--danger)', fontWeight: 600, marginLeft: 6 }}>
+                    −{(s.returns?.[hover] ?? 0).toLocaleString()} ret
+                  </span>
+                )}
               </span>
             </div>
           ))}
@@ -575,6 +582,11 @@ function PlatformTile({ p, salesViewNet, onClick }: {
             <span className={`badge ${rr > 30 ? 'danger' : rr > 15 ? 'warn' : 'success'}`}>
               {rr.toFixed(1)}% return
             </span>
+            {p.total_returns > 0 && (
+              <span style={{ fontSize: 10, color: 'var(--muted)', marginLeft: 6 }}>
+                {p.total_returns.toLocaleString()} ret
+              </span>
+            )}
             {monthly.length > 1 && (
               <BigSpark values={monthly} color={color} width={80} height={22} />
             )}
@@ -782,6 +794,8 @@ export default function Dashboard() {
   const qc = useQueryClient()
   const prevSalesRebuild = useRef<string>('idle')
   const setCoverage = useSession(s => s.setCoverage)
+  const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
+  const coverageReturnLoaded = useSession(s => s.return_sheet)
   const salesLoaded = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
   const jobRunning = useSession(s =>
     s.inventory_upload_status === 'running' ||
@@ -958,13 +972,16 @@ export default function Dashboard() {
         .filter(p => p.loaded && !hiddenPlatforms.has(p.platform))
         .map(p => {
           const dm: Record<string, number> = {}
+          const rm: Record<string, number> = {}
           for (const r of p.daily ?? []) {
             dm[r.date] = salesViewNet ? (r.net ?? r.shipments - r.refunds) : r.shipments
+            rm[r.date] = r.refunds ?? 0
           }
           return {
             name: p.platform,
             color: PLATFORM_COLORS[p.platform] ?? '#6366F1',
             values: allDays.map(d => dm[d] ?? 0),
+            returns: allDays.map(d => rm[d] ?? 0),
           }
         })
     }
@@ -972,11 +989,16 @@ export default function Dashboard() {
       .filter(p => p.loaded && !hiddenPlatforms.has(p.platform))
       .map(p => {
         const mm: Record<string, number> = {}
-        for (const r of p.monthly) mm[r.month] = salesViewNet ? monthlyRowNet(r) : r.shipments
+        const rm: Record<string, number> = {}
+        for (const r of p.monthly) {
+          mm[r.month] = salesViewNet ? monthlyRowNet(r) : r.shipments
+          rm[r.month] = r.refunds ?? 0
+        }
         return {
           name: p.platform,
           color: PLATFORM_COLORS[p.platform] ?? '#6366F1',
           values: allMonths.map(m => mm[m] ?? 0),
+          returns: allMonths.map(m => rm[m] ?? 0),
         }
       })
   }, [filteredPlatforms, hiddenPlatforms, allMonths, allDays, salesViewNet, useDailyChart])
@@ -1141,11 +1163,17 @@ export default function Dashboard() {
                 : <CountUp value={displayUnits} />}
             </div>
             <div className="hero-total-sub">
-              {returnRate > 0 && (
-                <span className={`trend-pill ${returnRate < 20 ? 'up' : 'down'}`}>
-                  {returnRate < 20 ? <Icon.arrowUp /> : <Icon.arrowDown />}
-                  {returnRate.toFixed(1)}% return rate
-                </span>
+              <span className={`trend-pill ${returnRate < 20 ? 'up' : 'down'}`}>
+                {returnRate < 20 ? <Icon.arrowUp /> : <Icon.arrowDown />}
+                {returnRate.toFixed(1)}% return rate
+              </span>
+              <span className="sep">·</span>
+              <span>{totalReturns.toLocaleString()} returns</span>
+              {coverageReturnLoaded && (
+                <>
+                  <span className="sep">·</span>
+                  <span>Return sheet: {coverageReturnUnits.toLocaleString()} units</span>
+                </>
               )}
               <span className="sep">·</span>
               <span>₹{(displayUnits * 680 / 10_000_000).toFixed(1)}Cr est. GMV</span>

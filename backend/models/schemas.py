@@ -47,6 +47,7 @@ class CoverageResponse(BaseModel):
     daily_inventory_history_skus: int = 0
     po_raise_ledger_rows: int = 0
     return_sheet_skus: int = 0
+    return_sheet_units: int = 0
     # After full wipe: True until user uploads or clicks Load Cache (blocks auto-restore)
     pause_auto_data_restore: bool = False
     # Tier-3 daily-auto background sales rebuild (idle | running | done | error)

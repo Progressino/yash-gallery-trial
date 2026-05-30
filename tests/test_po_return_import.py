@@ -45,6 +45,14 @@ def test_flipkart_sku_prefix_stripped():
     assert int(out["Return_Units"].sum()) == 3
 
 
+def test_infer_return_platform_from_filename():
+    from backend.services.po_return_import import _infer_return_platform_from_filename
+
+    assert _infer_return_platform_from_filename("BusinessReport-Amazon Return.csv") == "amazon"
+    assert _infer_return_platform_from_filename("Myntra Return.csv") == "myntra"
+    assert _infer_return_platform_from_filename("Flipkart Return.xlsx") == "flipkart"
+
+
 def test_meesho_csv_header_skip():
     csv_body = (
         '"Meesho Supplier Panel"\n'

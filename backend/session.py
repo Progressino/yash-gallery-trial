@@ -37,6 +37,7 @@ class AppSession:
     existing_po_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     po_raise_ledger_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     po_return_overlay_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    return_overlay_as_of: Optional[str] = None
     sku_status_lead_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     daily_inventory_history_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     transfer_df: pd.DataFrame = field(default_factory=pd.DataFrame)
