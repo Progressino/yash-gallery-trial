@@ -622,11 +622,18 @@ def _do_load_warm_cache() -> bool:
         # immediately and still run Phase 1+2 in the same thread to pick up any
         # new uploads that arrived since the last deploy.
         disk_ok, disk_data = _load_warm_cache_from_disk()
+        # Capture Phase-0 mtr_df row count as a guard: if reload-fresh clears
+        # _warm_cache between the Phase-1 top-up and the disk save, we detect
+        # the race and skip re-saving the now-empty/small warm cache to disk.
+        _phase0_mtr_rows: int = 0
         if disk_ok and disk_data:
             _warm_cache = disk_data
             _warm_cache_loaded_at = datetime.now(IST)
             _warm_cache_generation += 1   # generation 1 = Phase-0 disk data
             _warm_cache_ready.set()       # ← unblocks first page-load immediately
+            _phase0_mtr_df = disk_data.get("mtr_df")
+            _phase0_mtr_rows = len(_phase0_mtr_df) if _phase0_mtr_df is not None and hasattr(_phase0_mtr_df, "__len__") else 0
+            del _phase0_mtr_df
             log.warning(
                 "Warm-cache Phase 0 ready from disk (%d keys, gen=%d). "
                 "Continuing Phase 1+2 to pick up new uploads…",
@@ -725,8 +732,24 @@ def _do_load_warm_cache() -> bool:
                 _merge_recent_sqlite_into_warm_cache(months=_P1_MONTHS or 4)
             except Exception:
                 log.exception("Warm-cache SQLite top-up after disk load failed")
+            # Guard: only re-save to disk if the warm cache still has meaningful
+            # data.  reload-fresh calls clear_warm_cache() which sets _warm_cache={}
+            # while this background thread is running.  If that race fires between
+            # the top-up and the disk save, _warm_cache["mtr_df"] would be empty or
+            # tiny, and we would overwrite the good 2-year disk file with 4 months.
             try:
-                _save_warm_cache_to_disk(_warm_cache)
+                _cur_mtr = _warm_cache.get("mtr_df") if _warm_cache else None
+                _cur_rows = len(_cur_mtr) if _cur_mtr is not None and hasattr(_cur_mtr, "__len__") else 0
+                _min_ok = max(1000, _phase0_mtr_rows // 2)  # at least half of what Phase-0 had
+                if _cur_rows >= _min_ok:
+                    _save_warm_cache_to_disk(_warm_cache)
+                else:
+                    log.warning(
+                        "Warm-cache disk save skipped after skip-Phase-2 top-up: "
+                        "mtr_df has %d rows (need ≥%d). "
+                        "Likely cleared by concurrent reload-fresh; disk file preserved.",
+                        _cur_rows, _min_ok,
+                    )
             except Exception:
                 pass
             return True
