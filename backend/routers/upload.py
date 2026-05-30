@@ -536,6 +536,38 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
     )
 
 
+def _run_returns_import_followup(session_id: str) -> None:
+    """After return overlay import: rebuild net sales, warm cache, durable PO sidecars."""
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    _run_sales_rebuild_worker(session_id, refresh_sqlite=False)
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    try:
+        import backend.main as _main
+
+        _main.merge_po_optional_sheets_into_warm_cache(sess)
+        _main.publish_warm_cache_from_session(sess)
+    except Exception:
+        _log.exception("warm cache after return import")
+    try:
+        from ..db.forecast_session_pg import (
+            persist_session_bundle_thread_safe,
+            pg_session_persist_enabled,
+        )
+
+        if pg_session_persist_enabled():
+            persist_session_bundle_thread_safe(session_id, sess)
+    except Exception:
+        _log.exception("PostgreSQL persist after return import")
+    try:
+        _auto_save_cache(sess)
+    except Exception:
+        _log.exception("auto-save after return import")
+
+
 @router.post("/daily-auto/reset-stuck")
 async def reset_stuck_daily_upload(request: Request):
     """Clear a session stuck in daily ingest / sales rebuild (UI “Clear stuck upload”)."""

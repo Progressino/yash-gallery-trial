@@ -650,10 +650,10 @@ export default function POEngine() {
       fd.append('file', file)
       fd.append('group_by_parent', params.group_by_parent ? 'true' : 'false')
       fd.append('replace', 'true')
-      const { data } = await api.post<{ ok?: boolean; message?: string }>(
+      const { data } = await api.post<{ ok?: boolean; message?: string; sales_rebuild?: string }>(
         '/po/returns/import-file',
         fd,
-        { timeout: 120_000, headers: { 'Content-Type': 'multipart/form-data' } },
+        { timeout: 900_000, headers: { 'Content-Type': 'multipart/form-data' } },
       )
       if (data?.ok) {
         setReturnImportMsg({ type: 'ok', text: data.message || 'Returns imported.' })

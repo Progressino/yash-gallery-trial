@@ -59,14 +59,42 @@ def test_meesho_csv_header_skip():
     assert int(out["Return_Units"].sum()) == 3
 
 
-@pytest.mark.skipif(
-    not Path("/Users/samraisinghani/Downloads/Return Data 2.rar").is_file(),
-    reason="Return Data 2.rar not on disk",
+@pytest.mark.parametrize(
+    "rar_name",
+    ["Return Data 2.rar", "Return Data 3.rar"],
 )
-def test_parse_return_data_rar_bundle():
-    rar = Path("/Users/samraisinghani/Downloads/Return Data 2.rar")
+def test_parse_return_data_rar_bundle(rar_name):
+    rar = Path("/Users/samraisinghani/Downloads") / rar_name
+    if not rar.is_file():
+        pytest.skip(f"{rar_name} not on disk")
     raw = rar.read_bytes()
     df, err = parse_return_upload_bytes(raw, rar.name)
     assert err is None, err
     assert not df.empty
     assert int(df["Return_Units"].sum()) > 100
+
+
+def test_meesho_lost_skipped_in_rar(monkeypatch):
+    from backend.services.po_return_import import _expand_upload_to_member_files
+
+    members = [
+        ("Return Data/meesho_return.csv", b"x"),
+        ("Return Data/meesho_lost.csv", b"y"),
+    ]
+    monkeypatch.setattr(
+        "backend.services.po_return_import._expand_upload_to_member_files",
+        lambda raw, filename: members,
+    )
+    import pandas as pd
+    from backend.services import po_return_import as pri
+
+    def fake_single(raw, name, **k):
+        if "lost" in name.lower():
+            return pd.DataFrame({"OMS_SKU": ["BAD"], "Return_Units": [99]}), None
+        return pd.DataFrame({"OMS_SKU": ["GOOD"], "Return_Units": [1]}), None
+
+    monkeypatch.setattr(pri, "_parse_single_return_file", fake_single)
+    df, err = parse_return_upload_bytes(b"fake", "bundle.rar")
+    assert err is None
+    assert "BAD" not in df["OMS_SKU"].tolist()
+    assert int(df["Return_Units"].sum()) == 1

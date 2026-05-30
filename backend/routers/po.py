@@ -666,45 +666,25 @@ async def po_returns_import_file(
     if err:
         return {"ok": False, "message": err}
     out = apply_return_overlay_import(sess, overlay, replace=rep)
-    sales_rebuilt = False
-    sales_note = ""
-    try:
-        with sess._daily_restore_lock:
-            from ..routers import upload as _upload_router
-
-            ok_rb, msg_rb = _upload_router._rebuild_sales_sync(sess)
-            sales_rebuilt = bool(ok_rb)
-            sales_note = msg_rb if ok_rb else f"Unified sales rebuild skipped: {msg_rb}"
-    except Exception:
-        logging.getLogger(__name__).exception("sales rebuild after return sheet import")
-        sales_note = "Unified sales rebuild failed (see server logs)."
-
-    try:
-        import backend.main as _main
-
-        _main.publish_warm_cache_from_session(sess)
-    except Exception:
-        logging.getLogger(__name__).exception("publish_warm_cache_from_session after return import")
-
     _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
-    base_msg = str(out.get("message") or "").strip()
-    out["message"] = f"{base_msg} {sales_note}".strip()
-    out["sales_rebuilt"] = sales_rebuilt
-    try:
-        from ..routers.upload import _auto_save_cache
 
-        background_tasks.add_task(_auto_save_cache, sess)
+    session_id = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
+    base_msg = str(out.get("message") or "").strip()
+    try:
+        from ..concurrency import DAILY_UPLOAD_EXECUTOR
+        from ..routers.upload import _run_returns_import_followup
+
+        if session_id:
+            DAILY_UPLOAD_EXECUTOR.submit(_run_returns_import_followup, session_id)
     except Exception:
-        logging.getLogger(__name__).exception("auto-save after returns import failed to schedule")
-    if sales_rebuilt:
-        out["message"] = (
-            f"{out['message']} Net sales on the dashboard are updated. "
-            "Run Calculate PO on PO Engine to refresh PO qty columns."
-        ).strip()
-    else:
-        out["message"] = (
-            f"{out['message']} Run Calculate PO on PO Engine to refresh the table."
-        ).strip()
+        logging.getLogger(__name__).exception("queue return import follow-up")
+
+    out["sales_rebuilt"] = False
+    out["sales_rebuild"] = "pending"
+    out["message"] = (
+        f"{base_msg} Dashboard net sales are updating in the background (usually under a minute). "
+        "Run Calculate PO on PO Engine to refresh PO qty columns."
+    ).strip()
     return out
 
 

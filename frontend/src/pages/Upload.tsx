@@ -1252,7 +1252,11 @@ export default function Upload() {
             }}
             onUpload={handle('returns_po', async (file: File) => {
               const data = await uploadPoReturnsImport(file)
-              return { ok: data.ok, message: data.message } as UploadResponse
+              const msg =
+                data.sales_rebuild === 'pending'
+                  ? `${data.message} Refresh the dashboard in a minute if net sales look stale.`
+                  : data.message
+              return { ok: data.ok, message: msg } as UploadResponse
             })}
             uploading={loading['returns_po']}
           />

@@ -18,6 +18,16 @@ _RAR_MAGIC = b"Rar!\x1a\x07"
 _ARCHIVE_EXTS = (".rar", ".zip")
 _DATA_EXTS = (".csv", ".xlsx", ".xls", ".txt")
 
+
+def _skip_return_archive_member(inner_name: str) -> bool:
+    """Skip non-return exports bundled in daily Return Data.rar (e.g. Meesho Lost)."""
+    base = inner_name.split("/")[-1].lower()
+    if base.startswith("help"):
+        return True
+    if "meesho" in base and "lost" in base:
+        return True
+    return False
+
 _SKU_CANDS = (
     "oms_sku",
     "sku",
@@ -83,7 +93,9 @@ def _expand_upload_to_member_files(raw: bytes, filename: str) -> List[Tuple[str,
             return [
                 (n, b)
                 for n, b in members
-                if n.lower().endswith(_DATA_EXTS) and not n.split("/")[-1].startswith(".")
+                if n.lower().endswith(_DATA_EXTS)
+                and not n.split("/")[-1].startswith(".")
+                and not _skip_return_archive_member(n)
             ]
         return []
     return [(filename or "upload.csv", raw)]
@@ -277,9 +289,9 @@ def parse_return_upload_bytes(
     frames: List[pd.DataFrame] = []
     errors: List[str] = []
     for inner_name, inner_raw in members:
-        base = inner_name.split("/")[-1]
-        if base.lower().startswith("help"):
+        if _skip_return_archive_member(inner_name):
             continue
+        base = inner_name.split("/")[-1]
         part, err = _parse_single_return_file(
             inner_raw, base, sku_mapping=sku_mapping
         )

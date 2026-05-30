@@ -308,13 +308,13 @@ export async function uploadInventory(files: {
 export async function uploadPoReturnsImport(
   file: File,
   opts?: { groupByParent?: boolean; replace?: boolean },
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; sales_rebuild?: string }> {
   const fd = new FormData()
   fd.append('file', file)
   fd.append('group_by_parent', opts?.groupByParent ? 'true' : 'false')
   fd.append('replace', opts?.replace === false ? 'false' : 'true')
   try {
-    const { data } = await api.post<{ ok?: boolean; message?: string }>(
+    const { data } = await api.post<{ ok?: boolean; message?: string; sales_rebuild?: string }>(
       '/po/returns/import-file',
       fd,
       { headers: { 'Content-Type': 'multipart/form-data' }, timeout: UPLOAD_TIMEOUT_MS },
@@ -322,6 +322,7 @@ export async function uploadPoReturnsImport(
     return {
       ok: !!data?.ok,
       message: data?.message || (data?.ok ? 'Returns imported.' : 'Import failed.'),
+      sales_rebuild: data?.sales_rebuild,
     }
   } catch (e: unknown) {
     throw new Error(_errMessage(e, 'Returns import failed'))
