@@ -1,5 +1,6 @@
 """HTTP tests: /api/data/* , /api/po/* , /api/sales/* (requires auth middleware bypass)."""
 
+import time
 import pandas as pd
 
 
@@ -86,7 +87,7 @@ def test_po_calculate_ok(client, session_for_client):
     assert kick.get("ok") is True
     assert kick.get("status") == "running"
     body = kick
-    for _ in range(30):
+    for _ in range(60):
         st = client.get("/api/po/calculate/status")
         assert st.status_code == 200
         body = st.json()
@@ -94,6 +95,7 @@ def test_po_calculate_ok(client, session_for_client):
             break
         if body.get("status") == "error":
             raise AssertionError(body.get("message") or "PO calculate failed")
+        time.sleep(0.5)
     assert body.get("ok") is True
     res = client.get(
         "/api/po/calculate/result",
