@@ -338,14 +338,20 @@ def _skip_phase2_when_disk_fresh() -> bool:
 
 
 def _merge_recent_sqlite_into_warm_cache(months: int = 4) -> None:
-    """Light Tier-3 top-up into ``_warm_cache`` without GitHub Phase 2."""
+    """Light Tier-3 top-up into ``_warm_cache`` without GitHub Phase 2.
+
+    Only merges new platform rows — does NOT rebuild sales_df.  Rebuilding
+    sales_df with a 980K-row mtr_df takes 10–15 min and blocks the health
+    check, causing autoheal restarts.  User sessions rebuild sales lazily via
+    _restore_daily_if_needed when they first load data.
+    """
     global _warm_cache
     from .services.daily_store import load_platform_data, merge_platform_data
-    from .services.sales import build_sales_df
     import pandas as pd
 
     if not _warm_cache:
         return
+    new_rows_added = False
     for plat, key in (
         ("amazon", "mtr_df"),
         ("myntra", "myntra_df"),
@@ -356,18 +362,15 @@ def _merge_recent_sqlite_into_warm_cache(months: int = 4) -> None:
         df = load_platform_data(plat, months=months)
         if df is not None and not df.empty:
             cur = _warm_cache.get(key, pd.DataFrame())
-            _warm_cache[key] = merge_platform_data(cur, df, plat)
-    try:
-        _warm_cache["sales_df"] = build_sales_df(
-            mtr_df=_warm_cache.get("mtr_df", pd.DataFrame()),
-            myntra_df=_warm_cache.get("myntra_df", pd.DataFrame()),
-            meesho_df=_warm_cache.get("meesho_df", pd.DataFrame()),
-            flipkart_df=_warm_cache.get("flipkart_df", pd.DataFrame()),
-            snapdeal_df=_warm_cache.get("snapdeal_df", pd.DataFrame()),
-            sku_mapping=_warm_cache.get("sku_mapping") or {},
-        )
-    except Exception:
-        log.exception("merge_recent_sqlite_into_warm_cache: sales rebuild failed")
+            merged = merge_platform_data(cur, df, plat)
+            if len(merged) > len(cur):
+                _warm_cache[key] = merged
+                new_rows_added = True
+    if new_rows_added:
+        log.info("Warm-cache SQLite top-up: merged new rows — sales_df will rebuild on first session load.")
+    # NOTE: sales_df is intentionally NOT rebuilt here.  With large mtr_df
+    # (980K+ rows) build_sales_df takes 10-15 minutes and blocks health checks.
+    # The disk cache already holds a valid sales_df from the last Phase 2 save.
 
 
 def _save_warm_cache_to_disk(cache_dict: dict) -> None:
