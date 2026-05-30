@@ -172,7 +172,7 @@ def execute_po_calculate(
             existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
             sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
             enforce_two_size_minimum=bool(body.get("enforce_two_size_minimum", False)),
-            enforce_lead_time_release_gate=bool(body.get("enforce_lead_time_release_gate", True)),
+            enforce_lead_time_release_gate=bool(body.get("enforce_lead_time_release_gate", False)),
             inventory_history_df=_inv_history_for_calc,
             po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
             planning_date=body.get("planning_date"),

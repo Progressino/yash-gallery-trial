@@ -1036,8 +1036,19 @@ export default function POEngine() {
                 value={params.period_days} onChange={v => setParams({ ...params, period_days: +v })} />
               <Param label="Lead Time (days)" type="number"
                 value={params.lead_time} onChange={v => setParams({ ...params, lead_time: +v })} />
-              <Param label="Post-PO Running Days" type="number"
-                value={params.target_days} onChange={v => setParams({ ...params, target_days: +v })} />
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Post-PO Running Days</label>
+                <select
+                  value={params.target_days}
+                  onChange={e => setParams({ ...params, target_days: +e.target.value })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold"
+                >
+                  <option value={90}>90 days</option>
+                  <option value={120}>120 days</option>
+                  <option value={135}>135 days</option>
+                  <option value={150}>150 days</option>
+                </select>
+              </div>
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Demand Basis</label>
                 <select
@@ -1097,6 +1108,11 @@ export default function POEngine() {
                 label="Require ≥2 sizes to place PO"
                 checked={params.enforce_two_size_minimum}
                 onChange={v => setParams({ ...params, enforce_two_size_minimum: v })}
+              />
+              <Toggle
+                label="Lead-time gate (hold PO while cover > lead time)"
+                checked={!!params.enforce_lead_time_release_gate}
+                onChange={v => setParams({ ...params, enforce_lead_time_release_gate: v })}
               />
             </div>
 

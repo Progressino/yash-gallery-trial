@@ -38,6 +38,7 @@ interface POParams {
   safety_pct: number
   enforce_two_size_minimum: boolean
   urgent_all_sizes_days: number
+  enforce_lead_time_release_gate: boolean
 }
 
 interface POState {
@@ -82,6 +83,7 @@ export const usePOStore = create<POState>()(
     safety_pct: 0,
     enforce_two_size_minimum: true,
     urgent_all_sizes_days: 45,
+    enforce_lead_time_release_gate: false,
   },
   result: null,
   quarterly: null,

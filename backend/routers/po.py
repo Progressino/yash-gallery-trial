@@ -72,9 +72,10 @@ class PORequest(BaseModel):
     grace_days:       int   = 0
     safety_pct:       float = 0.0
     enforce_two_size_minimum: bool = False
-    # When True (default): for sheet-resolved lead rows only, block PO while
+    # When True: for sheet-resolved lead rows only, block PO while
     # (Tot inv + eff. pipeline) / ADS > Lead_Time_Days.
-    enforce_lead_time_release_gate: bool = True
+    # Default False so Post_PO_Cover_Days always reaches target_days.
+    enforce_lead_time_release_gate: bool = False
     # Calendar day for PO raise-ledger "yesterday / today" columns (YYYY-MM-DD).
     # Defaults to server date if omitted; browser should send local date for daily PO.
     planning_date: Optional[str] = None

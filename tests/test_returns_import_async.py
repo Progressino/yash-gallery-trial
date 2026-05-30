@@ -1,5 +1,6 @@
 """Returns RAR import returns immediately; net sales rebuild runs in background."""
 
+import time
 from io import BytesIO
 from unittest.mock import MagicMock
 
@@ -46,6 +47,11 @@ def test_returns_import_accepts_rar_and_queues_followup(client, auth_token, monk
     assert body.get("sales_rebuild") == "pending"
     assert body.get("sales_rebuilt") is False
     assert "background" in (body.get("message") or "").lower()
+    # The followup runs in a background executor — give it a moment to start.
+    for _ in range(20):
+        if queued:
+            break
+        time.sleep(0.1)
     assert len(queued) == 1
 
 
