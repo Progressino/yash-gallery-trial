@@ -1688,11 +1688,79 @@ def calculate_po_base(
     suggest.loc[deep_stock] = "High stock cover, no recent sales — review listing."
     po_df["Suggest_Close_SKU"] = suggest.fillna("").astype(str)
 
-    # ── Urgent all-sizes expansion ─────────────────────────────────────────────
-    # When any size of a parent SKU has Projected_Running_Days < urgent_all_sizes_days,
-    # add ghost rows for every sibling size found in sku_mapping that is not already
-    # in the output.  This ensures the operator can see and raise PO for ALL sizes
-    # of an urgent style — not just the ones with active ADS.
+    # ── All-sizes expansion (two-part) ────────────────────────────────────────
+    #
+    # Part A — Lead-time gate lift:
+    #   When ≥2 sizes of a parent already have PO_Qty > 0, siblings that are
+    #   blocked *only* by the lead-time release gate (Projected > Lead_Time but
+    #   still below target_days) should also receive a PO so that all sizes of the
+    #   style move together.  The balance formula is identical to the main engine
+    #   (target_days − projected) × ADS; the lead-time gate is simply overridden.
+    #
+    # Part B — Missing-size ghost rows:
+    #   When any size of a parent has Projected_Running_Days < urgent_all_sizes_days,
+    #   add display rows (PO_Qty = 0) for sibling SKUs found in sku_mapping that are
+    #   entirely absent from the output (no inventory, no ADS).  These rows let the
+    #   operator see and raise for every size even if some aren't in the current data.
+    import logging as _log_mod
+    _LT_GATE_MSG = "Projected cover exceeds factory lead time"
+
+    # ── Part A ────────────────────────────────────────────────────────────────
+    try:
+        _po_qty_a = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0.0)
+        _par_a    = po_df["Parent_SKU"]
+        _ads_a    = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
+        _proj_a   = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
+        _n_active = (_po_qty_a > 0).astype(int).groupby(_par_a).transform("sum")
+
+        # Siblings that qualify for the gate lift:
+        # • parent has ≥2 active PO sizes
+        # • this row currently has PO_Qty = 0
+        # • the *only* reason is the lead-time gate (i.e. block reason contains the gate msg)
+        # • the row has real ADS > 0 (it has sales history; not a phantom size)
+        # • projected cover is below target_days (otherwise there is nothing to order)
+        _target_eff = float(target_days) + float(grace_days)
+        _lift_mask = (
+            (_n_active >= 2)
+            & (_po_qty_a == 0)
+            & (_ads_a > 0)
+            & (_proj_a < _target_eff)
+            & po_df["PO_Block_Reason"].astype(str).str.contains(_LT_GATE_MSG, na=False)
+            & ~po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
+        )
+        if _lift_mask.any():
+            _bal  = (_target_eff - _proj_a[_lift_mask]).clip(lower=0.0)
+            _gross = (_bal * _ads_a[_lift_mask]).round(1)
+            _rounded = ((_gross / 5).round() * 5).clip(lower=0).astype(int)
+
+            po_df.loc[_lift_mask, "Gross_PO_Qty"] = _gross
+            po_df.loc[_lift_mask, "PO_Qty"]       = _rounded
+
+            # Recompute Post-PO cover
+            _new_post = (_proj_a[_lift_mask] + _rounded / _ads_a[_lift_mask]).round(1)
+            po_df.loc[_lift_mask, "Post_PO_Cover_Days_Capped"] = _new_post
+
+            # Strip the lead-time gate message from the block reason; keep any others
+            _old_br = po_df.loc[_lift_mask, "PO_Block_Reason"].astype(str)
+            _new_br = (
+                _old_br
+                .str.replace(_LT_GATE_MSG + "[^;]*", "", regex=True)
+                .str.strip("; ").str.strip()
+            )
+            po_df.loc[_lift_mask, "PO_Block_Reason"] = _new_br
+            po_df.loc[_lift_mask & (_rounded > 0), "Priority"] = "🟡 HIGH"
+
+            _log_mod.getLogger(__name__).info(
+                "all-sizes gate-lift: %d sibling row(s) unblocked across %d parent(s)",
+                int(_lift_mask.sum()),
+                int((_n_active >= 2)[_lift_mask].groupby(_par_a[_lift_mask]).ngroups
+                    if hasattr(_par_a[_lift_mask].groupby(_par_a[_lift_mask]), "ngroups")
+                    else len(_par_a[_lift_mask].unique())),
+            )
+    except Exception as _lift_err:
+        _log_mod.getLogger(__name__).warning("all-sizes gate-lift failed (non-fatal): %s", _lift_err)
+
+    # ── Part B ────────────────────────────────────────────────────────────────
     if urgent_all_sizes_days > 0 and sku_mapping:
         try:
             proj_col = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
@@ -1701,7 +1769,6 @@ def calculate_po_base(
             )
             if urgent_parents:
                 existing_skus: set = set(po_df["OMS_SKU"].astype(str))
-                # Build a reverse map: parent_sku → [child_skus from sku_mapping]
                 parent_to_children: dict = {}
                 for child_sku in sku_mapping:
                     p = get_parent_sku(child_sku)
@@ -1712,20 +1779,20 @@ def calculate_po_base(
                     for child in parent_to_children.get(parent, []):
                         if str(child) not in existing_skus:
                             ghost = {c: 0 for c in po_df.columns}
-                            ghost["OMS_SKU"]              = str(child)
-                            ghost["Parent_SKU"]           = str(parent)
-                            ghost["Total_Inventory"]      = 0
-                            ghost["ADS"]                  = 0.0
-                            ghost["Days_Left"]            = 999.0
-                            ghost["Projected_Running_Days"] = 999.0
+                            ghost["OMS_SKU"]               = str(child)
+                            ghost["Parent_SKU"]            = str(parent)
+                            ghost["Total_Inventory"]       = 0
+                            ghost["ADS"]                   = 0.0
+                            ghost["Days_Left"]             = 999.0
+                            ghost["Projected_Running_Days"]    = 999.0
                             ghost["Post_PO_Cover_Days_Capped"] = 999.0
-                            ghost["PO_Qty"]               = 0
-                            ghost["Gross_PO_Qty"]         = 0
-                            ghost["PO_Block_Reason"]      = "Urgent parent — all sizes shown for review"
-                            ghost["Suggest_Close_SKU"]    = ""
-                            ghost["Priority"]             = ""
-                            ghost["SKU_Sheet_Closed"]     = False
-                            ghost["SKU_Sheet_Status"]     = ""
+                            ghost["PO_Qty"]                = 0
+                            ghost["Gross_PO_Qty"]          = 0
+                            ghost["PO_Block_Reason"]       = "Urgent parent — all sizes shown for review"
+                            ghost["Suggest_Close_SKU"]     = ""
+                            ghost["Priority"]              = ""
+                            ghost["SKU_Sheet_Closed"]      = False
+                            ghost["SKU_Sheet_Status"]      = ""
                             for col in po_df.columns:
                                 if col not in ghost:
                                     ghost[col] = ""
@@ -1739,15 +1806,12 @@ def calculate_po_base(
                         except Exception:
                             pass
                     po_df = pd.concat([po_df, ghost_df], ignore_index=True)
-                    import logging as _log_mod
                     _log_mod.getLogger(__name__).info(
-                        "urgent_all_sizes: added %d ghost rows for %d urgent parent(s) "
-                        "(Projected_Running_Days < %d)",
+                        "all-sizes ghost rows: %d added for %d urgent parent(s) (proj < %dd)",
                         len(ghost_rows), len(urgent_parents), urgent_all_sizes_days,
                     )
         except Exception as _uas_err:
-            import logging as _log_mod
-            _log_mod.getLogger(__name__).warning("urgent_all_sizes expansion failed (non-fatal): %s", _uas_err)
+            _log_mod.getLogger(__name__).warning("all-sizes ghost-row expansion failed (non-fatal): %s", _uas_err)
 
     # Drop intermediate calc columns (datetime/float cols that break router serialisation)
     po_df.drop(
