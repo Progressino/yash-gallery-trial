@@ -320,6 +320,11 @@ def merge_inventory_into_warm_cache(sess) -> None:
 import os as _os_main
 _DISK_CACHE_DIR     = _os_main.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
 _DISK_CACHE_MAX_AGE = int(_os_main.environ.get("WARM_CACHE_MAX_AGE_HOURS", "24"))
+# Minimum mtr_df rows the disk cache must have to be considered healthy.
+# If the saved cache has fewer rows, Phase 2 is forced regardless of disk age,
+# recovering automatically from partial-data corruption (e.g. race-condition saves).
+# Override via WARM_CACHE_MIN_MTR_ROWS env var; set to 0 to disable the check.
+_DISK_CACHE_MIN_MTR_ROWS = int(_os_main.environ.get("WARM_CACHE_MIN_MTR_ROWS", "200000"))
 
 
 def _skip_phase2_when_disk_fresh() -> bool:
@@ -622,22 +627,37 @@ def _do_load_warm_cache() -> bool:
         # immediately and still run Phase 1+2 in the same thread to pick up any
         # new uploads that arrived since the last deploy.
         disk_ok, disk_data = _load_warm_cache_from_disk()
-        # Capture Phase-0 mtr_df row count as a guard: if reload-fresh clears
-        # _warm_cache between the Phase-1 top-up and the disk save, we detect
-        # the race and skip re-saving the now-empty/small warm cache to disk.
+        # ── Auto-detect corrupt disk cache (too few mtr rows) ─────────────────
+        # If Phase 0 loaded a cache with fewer than _DISK_CACHE_MIN_MTR_ROWS rows
+        # (default 200 K) it was almost certainly saved while the warm cache was
+        # partially cleared (race-condition between reload-fresh and the background
+        # Phase-1+2 thread).  Mark disk_ok=False so Phase 2 runs from GitHub and
+        # rebuilds the full 2-year history automatically.
         _phase0_mtr_rows: int = 0
+        if disk_ok and disk_data and _DISK_CACHE_MIN_MTR_ROWS > 0:
+            _p0_mtr = disk_data.get("mtr_df")
+            _p0_rows = len(_p0_mtr) if _p0_mtr is not None and hasattr(_p0_mtr, "__len__") else 0
+            del _p0_mtr
+            if _p0_rows < _DISK_CACHE_MIN_MTR_ROWS:
+                log.warning(
+                    "Warm-cache Phase 0: disk mtr_df has only %d rows (min %d). "
+                    "Treating disk cache as corrupt — forcing Phase 2 rebuild from GitHub.",
+                    _p0_rows, _DISK_CACHE_MIN_MTR_ROWS,
+                )
+                disk_ok = False
+                disk_data = {}
         if disk_ok and disk_data:
             _warm_cache = disk_data
             _warm_cache_loaded_at = datetime.now(IST)
             _warm_cache_generation += 1   # generation 1 = Phase-0 disk data
             _warm_cache_ready.set()       # ← unblocks first page-load immediately
-            _phase0_mtr_df = disk_data.get("mtr_df")
-            _phase0_mtr_rows = len(_phase0_mtr_df) if _phase0_mtr_df is not None and hasattr(_phase0_mtr_df, "__len__") else 0
-            del _phase0_mtr_df
+            _p0_mtr2 = disk_data.get("mtr_df")
+            _phase0_mtr_rows = len(_p0_mtr2) if _p0_mtr2 is not None and hasattr(_p0_mtr2, "__len__") else 0
+            del _p0_mtr2
             log.warning(
-                "Warm-cache Phase 0 ready from disk (%d keys, gen=%d). "
+                "Warm-cache Phase 0 ready from disk (%d keys, %d mtr rows, gen=%d). "
                 "Continuing Phase 1+2 to pick up new uploads…",
-                len(disk_data), _warm_cache_generation,
+                len(disk_data), _phase0_mtr_rows, _warm_cache_generation,
             )
 
         # ── Acquire upload-memory lock before Phase 1 ─────────────────────────
@@ -948,6 +968,33 @@ def _do_load_warm_cache() -> bool:
             _save_warm_cache_to_disk(_warm_cache)
         except Exception as _disk_err:
             log.warning("Warm-cache disk save failed (non-fatal): %s", _disk_err)
+
+        # ── Auto-sync to GitHub release ───────────────────────────────────────
+        # After every successful Phase 2, push the freshly-built cache back to
+        # the GitHub Release so the release always holds full 2-year history.
+        # This prevents corruption from accumulating: the next Phase 2 always
+        # starts from a known-good baseline rather than a stale release.
+        # Run in a background thread so it doesn't block startup completion.
+        try:
+            from .services.github_cache import save_cache_to_drive as _save_to_gh
+            from .concurrency import HEAVY_EXECUTOR as _HEX
+
+            _gh_snapshot = dict(_warm_cache)
+
+            def _bg_github_save():
+                try:
+                    _ok, _msg = _save_to_gh(_gh_snapshot)
+                    if _ok:
+                        log.info("Phase 2 auto-sync to GitHub: %s", _msg)
+                    else:
+                        log.warning("Phase 2 auto-sync to GitHub failed: %s", _msg)
+                except Exception as _gh_err:
+                    log.warning("Phase 2 auto-sync to GitHub error: %s", _gh_err)
+
+            _HEX.submit(_bg_github_save)
+            log.info("Phase 2 auto-sync to GitHub queued.")
+        except Exception as _gh_queue_err:
+            log.warning("Phase 2 GitHub sync queue failed (non-fatal): %s", _gh_queue_err)
 
         return True
 
