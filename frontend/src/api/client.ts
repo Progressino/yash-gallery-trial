@@ -4,6 +4,7 @@
  * In production, nginx proxies /api → FastAPI.
  */
 import axios from 'axios'
+import { clearIntelligenceCache } from '../lib/intelligenceCache'
 import { isUploadBusy } from '../store/uploadActivity'
 import {
   shouldUseChunkedUpload,
@@ -1222,6 +1223,7 @@ api.interceptors.response.use(
 export function invalidateDataQueries(
   qc: { invalidateQueries: (opts?: { predicate?: (q: { queryKey: unknown }) => boolean }) => void },
 ) {
+  clearIntelligenceCache()
   qc.invalidateQueries({
     predicate: q => {
       const key = Array.isArray(q.queryKey) ? q.queryKey[0] : q.queryKey

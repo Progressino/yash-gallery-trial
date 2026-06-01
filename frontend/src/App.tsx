@@ -123,6 +123,18 @@ function ProtectedRoute() {
         setCoverage(coverage)
         const localHint = readLocalSessionHint()
         if (canSkipHeavyServerRestore(coverage, localHint)) {
+          if (localHint?.sales && !coverage.sales) {
+            setCoverage({
+              ...coverage,
+              sales: true,
+              sales_rows: Math.max(coverage.sales_rows ?? 0, localHint.sales_rows ?? 0),
+            })
+            coverage = {
+              ...coverage,
+              sales: true,
+              sales_rows: Math.max(coverage.sales_rows ?? 0, localHint.sales_rows ?? 0),
+            }
+          }
           if (!sessionNeedsSync(coverage)) invalidateDataQueries(qc)
           return true
         }

@@ -13,6 +13,16 @@ import api, {
   invalidateDataQueries,
 } from '../api/client'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
+import {
+  bundleHasDisplayData,
+  readIntelligenceCache,
+  writeIntelligenceCache,
+  type DsrBrandMonthlyRow,
+  type IntelligenceBundle,
+  type PlatformSummaryItem,
+  type SalesSummary,
+  type TopSku,
+} from '../lib/intelligenceCache'
 import { useSession } from '../store/session'
 import './Dashboard.css'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
@@ -33,54 +43,7 @@ interface DsrResponse {
   subtotal: { sales: number; returns: number }
 }
 
-interface DsrBrandMonthlyRow {
-  month: string
-  month_display: string
-  YG: number
-  Akiko: number
-  Other: number
-  Untagged: number
-  leader: string
-  delta: number
-}
-interface DsrBrandMonthlyResponse {
-  rows: DsrBrandMonthlyRow[]
-  totals: { YG: number; Akiko: number; Other: number; Untagged: number }
-  note: string
-}
-
-interface PlatformSummaryItem {
-  platform: string
-  loaded: boolean
-  total_units: number
-  total_returns: number
-  net_units?: number
-  return_rate: number
-  top_sku: string
-  trend_direction: 'up' | 'down' | 'flat'
-  trend_direction_net?: 'up' | 'down' | 'flat'
-  monthly: { month: string; shipments: number; refunds: number; net?: number }[]
-  daily?: { date: string; shipments: number; refunds: number; net?: number }[]
-  by_state: { state: string; units: number; net_units?: number }[]
-}
-interface AnomalyItem {
-  type: string
-  severity: 'critical' | 'warning' | 'info'
-  platform: string
-  message: string
-  sku?: string
-}
-interface SalesSummary {
-  total_units: number
-  total_returns: number
-  net_units: number
-  return_rate: number
-  return_sheet_units?: number
-  marketplace_return_units?: number
-  active_months?: number
-  date_basis_note?: string
-}
-interface TopSku { sku: string; units: number }
+export type { DsrBrandMonthlyRow, PlatformSummaryItem, SalesSummary, TopSku }
 
 /* ═══════════════════════════════════════════════════════════
    CONSTANTS
@@ -796,7 +759,10 @@ export default function Dashboard() {
   const setCoverage = useSession(s => s.setCoverage)
   const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
   const coverageReturnLoaded = useSession(s => s.return_sheet)
-  const salesLoaded = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
+  const sessionSales = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
+  const hasPlatformData = useSession(
+    s => !!(s.mtr || s.myntra || s.meesho || s.flipkart || s.snapdeal),
+  )
   const jobRunning = useSession(s =>
     s.inventory_upload_status === 'running' ||
     s.daily_inventory_upload_status === 'running' ||
@@ -818,6 +784,7 @@ export default function Dashboard() {
   const [exportingDsr,       setExportingDsr]       = useState(false)
   const [exportingDsrMonthly,setExportingDsrMonthly]= useState(false)
   const [skuSearch,      setSkuSearch]      = useState('')
+  const salesBasis = salesViewNet ? 'net' : 'gross' as const
 
   /* ── preset ── */
   function applyPreset(label: string, startFn: () => string, endFn?: () => string) {
@@ -831,22 +798,6 @@ export default function Dashboard() {
     })
   }
 
-  /* ── query params ── */
-  const summaryParams = useMemo(() => {
-    const p = new URLSearchParams({ months: '0' })
-    if (dateStart) p.set('start_date', dateStart)
-    if (dateEnd)   p.set('end_date',   dateEnd)
-    return p.toString()
-  }, [dateStart, dateEnd])
-
-  const dateParams = useMemo(() => {
-    const p = new URLSearchParams({ limit: String(topSkuLimit) })
-    if (dateStart) p.set('start_date', dateStart)
-    if (dateEnd)   p.set('end_date',   dateEnd)
-    if (salesViewNet) p.set('basis', 'net')
-    return p.toString()
-  }, [dateStart, dateEnd, topSkuLimit, salesViewNet])
-
   const dsrBrandMonthlyParams = useMemo(() => {
     const p = new URLSearchParams()
     if (dateStart) p.set('start_date', dateStart)
@@ -858,7 +809,10 @@ export default function Dashboard() {
   useQuery({
     queryKey: ['dashboard-coverage-sync'],
     queryFn: async () => {
-      const c = await getCoverage({ timeout: jobRunning || salesLoaded ? 45_000 : 120_000, light: jobRunning || salesLoaded })
+      const c = await getCoverage({
+        timeout: jobRunning || sessionSales || hasPlatformData ? 45_000 : 120_000,
+        light: jobRunning || sessionSales || hasPlatformData,
+      })
       setCoverage(c)
       const st = c.sales_rebuild ?? 'idle'
       if (prevSalesRebuild.current === 'running' && st !== 'running') {
@@ -883,48 +837,53 @@ export default function Dashboard() {
       return false
     },
   })
-  const { data: salesSummary } = useQuery<SalesSummary>({
-    queryKey: ['sales-summary', dateStart, dateEnd],
-    queryFn: async () => { const { data } = await api.get(`/data/sales-summary?${summaryParams}`); return data },
-    enabled: salesLoaded,
-    staleTime: 120_000,
-  })
-  const { data: topSkusRaw } = useQuery<TopSku[]>({
-    queryKey: ['top-skus', dateStart, dateEnd, topSkuLimit, salesViewNet],
-    queryFn: async () => { const { data } = await api.get(`/data/top-skus?${dateParams}`); return data },
-    enabled: salesLoaded,
-    staleTime: 120_000,
-  })
-  const { data: platformSummary, isLoading: loadingPlatforms } = useQuery<PlatformSummaryItem[]>({
-    queryKey: ['platform-summary', dateStart, dateEnd],
+  const bundleParams = useMemo(() => {
+    const p = new URLSearchParams({ limit: String(topSkuLimit), basis: salesBasis })
+    if (dateStart) p.set('start_date', dateStart)
+    if (dateEnd) p.set('end_date', dateEnd)
+    return p.toString()
+  }, [dateStart, dateEnd, topSkuLimit, salesBasis])
+
+  const dataReady = sessionSales || hasPlatformData
+
+  const {
+    data: intelligenceBundle,
+    isLoading: loadingBundle,
+    isFetching: fetchingBundle,
+  } = useQuery<IntelligenceBundle>({
+    queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis],
     queryFn: async () => {
-      const { data } = await api.get(`/data/platform-summary?${summaryParams}`, { timeout: 120_000 })
+      const { data } = await api.get<IntelligenceBundle>(
+        `/data/intelligence-bundle?${bundleParams}`,
+        { timeout: 180_000 },
+      )
+      writeIntelligenceCache(dateStart, dateEnd, salesBasis, data)
       return data
     },
-    enabled: salesLoaded,
+    enabled: dataReady,
     staleTime: 300_000,
     retry: 1,
+    placeholderData: () =>
+      readIntelligenceCache(dateStart, dateEnd, salesBasis) ?? undefined,
   })
-  const { data: anomalies } = useQuery<AnomalyItem[]>({
-    queryKey: ['anomalies', dateStart, dateEnd],
-    queryFn: async () => { const { data } = await api.get(`/data/anomalies?${summaryParams}`); return data },
-    enabled: salesLoaded,
-    staleTime: 120_000,
-  })
+
+  const salesSummary = intelligenceBundle?.sales_summary
+  const topSkusRaw = intelligenceBundle?.top_skus
+  const platformSummary = intelligenceBundle?.platform_summary
+  const anomalies = intelligenceBundle?.anomalies
+  const dsrBrandMonthly = intelligenceBundle?.dsr_brand_monthly
+  const loadingPlatforms = loadingBundle && !bundleHasDisplayData(intelligenceBundle)
+  const loadingDsrBrands = loadingBundle && !dsrBrandMonthly?.rows?.length
+
   const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
     queryKey: ['daily-dsr', dsrDate],
     queryFn: async () => { const { data } = await api.get(`/data/daily-dsr?date=${encodeURIComponent(dsrDate)}`); return data },
     enabled: showDsr && !!dsrDate,
     staleTime: 60_000,
   })
-  const { data: dsrBrandMonthly, isLoading: loadingDsrBrands } = useQuery<DsrBrandMonthlyResponse>({
-    queryKey: ['dsr-brand-monthly', dateStart, dateEnd],
-    queryFn: async () => { const { data } = await api.get(`/data/dsr-brand-monthly?${dsrBrandMonthlyParams}`); return data },
-    enabled: salesLoaded,
-    staleTime: 60_000,
-  })
 
   /* ── derived ── */
+  const salesLoaded = sessionSales || bundleHasDisplayData(intelligenceBundle)
   const platforms = platformSummary ?? []
   const loadedPlatforms = platforms.filter(p => p.loaded)
 
@@ -1069,33 +1028,35 @@ export default function Dashboard() {
 
   const hiddenByName = new Set([...hiddenPlatforms].map(id => id))
 
+  const hasDisplayData = bundleHasDisplayData(intelligenceBundle)
+
   const intelligenceLoading =
-    !salesLoaded ||
+    (!hasDisplayData && (loadingBundle || !dataReady)) ||
+    (fetchingBundle && !hasDisplayData) ||
     (showDsr && loadingDsr) ||
-    (salesLoaded && loadingDsrBrands) ||
     exportingSales ||
     exportingDsr ||
     exportingDsrMonthly
 
   const intelligenceLoadLabel = useMemo(() => {
-    if (!salesLoaded) return 'Syncing your data…'
-    if (loadingPlatforms) return 'Loading marketplace breakdown…'
+    if (!hasDisplayData && !dataReady) return 'Syncing your data…'
+    if (!hasDisplayData && loadingBundle) return 'Loading marketplace data…'
+    if (fetchingBundle && hasDisplayData) return 'Refreshing dashboard…'
     if (exportingSales) return 'Preparing sales export…'
     if (exportingDsr) return 'Exporting DSR…'
     if (exportingDsrMonthly) return 'Exporting brand monthly…'
-    if (loadingPlatforms) return 'Loading marketplace data…'
     if (showDsr && loadingDsr) return 'Loading daily DSR…'
-    if (salesLoaded && loadingDsrBrands) return 'Loading DSR by brand…'
     return undefined
   }, [
     exportingSales,
     exportingDsr,
     exportingDsrMonthly,
-    salesLoaded,
-    loadingPlatforms,
+    hasDisplayData,
+    dataReady,
+    loadingBundle,
+    fetchingBundle,
     showDsr,
     loadingDsr,
-    loadingDsrBrands,
   ])
 
   /* ────────────────────────────────────────────────────────────────

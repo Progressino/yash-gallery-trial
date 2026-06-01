@@ -490,6 +490,7 @@ def _rebuild_session_sales(sess: AppSession) -> None:
             **_sales_overlay_build_kwargs(sess),
         )
         sess._quarterly_cache.clear()
+        sess._intelligence_bundle_cache.clear()
     except Exception:
         pass
 
@@ -1338,6 +1339,82 @@ def sales_summary(
     sess = _sess(request)
     _ensure_intelligence_session_fresh(sess)
     return get_sales_summary(sess.sales_df, months=months, start_date=start_date, end_date=end_date)
+
+
+@router.get("/intelligence-bundle")
+def intelligence_bundle(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10,
+    basis: Optional[str] = None,
+):
+    """
+    One round-trip for the Intelligence dashboard (summary + platforms + top SKUs + anomalies + DSR brands).
+    Runs session freshness once instead of five parallel handlers each rebuilding sales.
+    """
+    from ..services.sales import apply_upload_report_day_gate
+
+    sess = _sess(request)
+    _ensure_intelligence_session_fresh(sess)
+
+    cache_key = (
+        str(start_date or ""),
+        str(end_date or ""),
+        str(basis or "gross"),
+        int(limit),
+    )
+    now = time.time()
+    bundle_cache = getattr(sess, "_intelligence_bundle_cache", None)
+    if bundle_cache is None:
+        bundle_cache = {}
+        sess._intelligence_bundle_cache = bundle_cache
+    cached = bundle_cache.get(cache_key)
+    if cached and (now - float(cached.get("_ts", 0))) < 45.0:
+        return cached["payload"]
+
+    sales_df = sess.sales_df
+    if not sales_df.empty:
+        sales_df = apply_upload_report_day_gate(sales_df.copy())
+
+    payload = {
+        "sales_summary": get_sales_summary(
+            sess.sales_df, months=0, start_date=start_date, end_date=end_date
+        ),
+        "platform_summary": get_platform_summary(
+            sess.mtr_df,
+            sess.myntra_df,
+            sess.meesho_df,
+            sess.flipkart_df,
+            sess.snapdeal_df,
+            start_date=start_date,
+            end_date=end_date,
+            sales_df=sales_df,
+        ),
+        "top_skus": get_top_skus(
+            sess.sales_df,
+            limit=limit,
+            start_date=start_date,
+            end_date=end_date,
+            basis=basis or "gross",
+        ),
+        "anomalies": get_anomalies(
+            sess.mtr_df,
+            sess.myntra_df,
+            sess.meesho_df,
+            sess.flipkart_df,
+            sess.snapdeal_df,
+            sess.inventory_df_variant,
+            sales_df,
+            start_date=start_date,
+            end_date=end_date,
+        ),
+        "dsr_brand_monthly": get_dsr_brand_monthly_comparison(
+            sess.sales_df, start_date, end_date
+        ),
+    }
+    bundle_cache[cache_key] = {"_ts": now, "payload": payload}
+    return payload
 
 
 @router.get("/sales-export")

@@ -112,6 +112,8 @@ class AppSession:
     # ── PO Engine cache ───────────────────────────────────────
     # Keyed by (group_by_parent, n_quarters) — cleared when sales data changes
     _quarterly_cache: dict = field(default_factory=dict)
+    # Intelligence dashboard bundle — keyed by (start, end, basis, limit), ~45s TTL
+    _intelligence_bundle_cache: dict = field(default_factory=dict)
 
     # Serialize Tier-3 SQLite restore + build_sales_df + Tier-1 upload mutations so parallel
     # requests on the same browser session do not corrupt DataFrames (see ``upload._session_lock_apply``).
@@ -178,6 +180,7 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.inventory_upload_result = {}
     sess.pause_auto_data_restore = True
     sess._quarterly_cache.clear()
+    sess._intelligence_bundle_cache.clear()
 
 
 def resume_auto_data_restore(sess: AppSession) -> None:
