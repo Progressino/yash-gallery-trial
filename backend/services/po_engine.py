@@ -129,6 +129,10 @@ def calculate_quarterly_history(
                 tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
                 tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
                 tmp["TxnType"] = myntra_df[myn_txn_col].values if myn_txn_col else "Shipment"
+                if sku_mapping:
+                    _u = tmp["SKU"].unique()
+                    _c = {s: canonical_oms_key(s, sku_mapping) for s in _u}
+                    tmp["SKU"] = tmp["SKU"].map(_c)
                 parts.append(tmp.dropna(subset=["Date"]))
 
     if not parts:
@@ -144,13 +148,13 @@ def calculate_quarterly_history(
     if hist.empty:
         return pd.DataFrame()
 
-    # Normalize SKUs: strip PL infix — use unique-value cache (18x faster than row-by-row apply)
+    # Same canonical OMS keys as calculate_po_base (mapping + PL strip + clean_sku).
     _uniq_hist = hist["SKU"].unique()
-    _pl_norm_cache = {
-        s: (_PL_RE.sub(r"\1\2", str(s).strip().upper()) if isinstance(s, str) else str(s))
-        for s in _uniq_hist
-    }
-    hist["SKU"] = hist["SKU"].map(_pl_norm_cache)
+    _canon_cache = {s: canonical_oms_key(s, sku_mapping) for s in _uniq_hist}
+    hist["SKU"] = hist["SKU"].map(_canon_cache).fillna("")
+    hist = hist[hist["SKU"].str.len() > 0]
+    if hist.empty:
+        return pd.DataFrame()
 
     if group_by_parent:
         _uniq_par = hist["SKU"].unique()

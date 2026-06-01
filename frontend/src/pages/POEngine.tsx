@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
+import axios from 'axios'
 import { api, getCoverage, startPoCalculate } from '../api/client'
 import { useSession } from '../store/session'
 import { useAuth, mayResetSharedData } from '../store/auth'
@@ -424,19 +425,24 @@ export default function POEngine() {
   // Cutting planner: parentSku → total pieces of material available
   const [materialQty, setMaterialQty] = useState<Record<string, number>>({})
 
-  const loadQuarterlyForRun = async (seq: number) => {
+  const loadQuarterlyForRun = async (seq: number, attempt = 1) => {
     setQuarterlyLoading(true)
     try {
       const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
         params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
-        timeout: 300_000,
+        timeout: 600_000,
       })
       if (seq !== poRunSeqRef.current) return
       setQuarterly(data)
     } catch (e: unknown) {
-      if (seq === poRunSeqRef.current) {
-        console.warn('[PO] quarterly fetch failed:', e)
+      if (seq !== poRunSeqRef.current) return
+      const is502 =
+        axios.isAxiosError(e) && (e.response?.status === 502 || e.code === 'ECONNABORTED')
+      if (is502 && attempt < 8) {
+        await new Promise(r => setTimeout(r, 3000 + attempt * 1500))
+        return loadQuarterlyForRun(seq, attempt + 1)
       }
+      console.warn('[PO] quarterly fetch failed:', e)
     } finally {
       if (seq === poRunSeqRef.current) setQuarterlyLoading(false)
     }
@@ -726,6 +732,17 @@ export default function POEngine() {
     }
     return map
   }, [quarterly, quarterCols])
+
+  // After PO results load, fetch quarterly history if cache is empty (auto-retry inside loader).
+  useEffect(() => {
+    if (!result?.ok || quarterlyLoading || loading) return
+    const rows = quarterly?.rows ?? []
+    const hasValues =
+      rows.length > 0 &&
+      rows.some(r => quarterCols.some(c => Number((r as QuarterlyRow)[c] ?? 0) > 0))
+    if (hasValues) return
+    void loadQuarterlyForRun(poRunSeqRef.current)
+  }, [result?.ok, loading, quarterly?.rows, quarterCols.length])
 
   // ── PO tab rows ──
   const allRows = result?.rows ?? []

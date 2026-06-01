@@ -148,6 +148,20 @@ def execute_po_calculate(
         del _inv_dates
         _gc.collect()
 
+    _set_po_calculate_progress(sess, session_id, 28, "Checking sales history for quarterly columns…")
+    try:
+        from .po_quarterly_warmup import ensure_sales_history_for_quarterly
+
+        if ensure_sales_history_for_quarterly(sess):
+            _set_po_calculate_progress(
+                sess,
+                session_id,
+                32,
+                "Rebuilt unified sales from platform history (multi-year)…",
+            )
+    except Exception:
+        logger.exception("ensure_sales_history_for_quarterly failed")
+
     _set_po_calculate_progress(
         sess,
         session_id,
@@ -192,7 +206,7 @@ def execute_po_calculate(
     if po_df is None or po_df.empty:
         return {"ok": False, "message": "PO result is empty."}
 
-    _set_po_calculate_progress(sess, session_id, 88, "Formatting PO results…")
+    _set_po_calculate_progress(sess, session_id, 85, "Formatting PO results…")
     po_df = po_df.copy()
     po_df = _dedupe_column_names(po_df)
     for c in ["Suggest_Close_SKU", "PO_Block_Reason", "SKU_Sheet_Status"]:
@@ -312,6 +326,23 @@ def background_po_calculate(session_id: str, body: dict) -> None:
                         sess.po_calculate_result["columns"] = list(po_df.columns)
             except Exception:
                 logger.exception("spill_po_result_df after calculate")
+            try:
+                from .po_quarterly_warmup import warmup_quarterly_cache
+
+                _set_po_calculate_progress(
+                    sess,
+                    session_id,
+                    92,
+                    "Loading quarterly sales history (8 quarters)…",
+                )
+                warmup_quarterly_cache(
+                    sess,
+                    group_by_parent=bool(body.get("group_by_parent", False)),
+                    n_quarters=8,
+                )
+            except Exception:
+                logger.exception("quarterly warmup after PO calculate failed")
+
             _set_po_calculate_progress(sess, session_id, 100, msg)
             set_po_job(
                 session_id,

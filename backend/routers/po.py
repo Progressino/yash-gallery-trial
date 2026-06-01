@@ -1098,31 +1098,15 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if sess is None:
         return {"loaded": False}
 
-    from ..routers.data import _restore_daily_if_needed
-    _restore_daily_if_needed(sess)
-
     cache_key = (group_by_parent, n_quarters)
     if cache_key in sess._quarterly_cache:
-        return sess._quarterly_cache[cache_key]
+        cached = sess._quarterly_cache[cache_key]
+        if cached.get("loaded") and cached.get("rows"):
+            return cached
 
-    from ..services.po_engine import calculate_quarterly_history
+    from ..services.po_quarterly_warmup import warmup_quarterly_cache
 
-    _boot = sess.sales_df.empty or "Sku" not in sess.sales_df.columns
-    pivot = calculate_quarterly_history(
-        sales_df=sess.sales_df,
-        mtr_df=sess.mtr_df if _boot and not sess.mtr_df.empty else None,
-        myntra_df=sess.myntra_df if _boot and not sess.myntra_df.empty else None,
-        sku_mapping=sess.sku_mapping or None,
-        group_by_parent=group_by_parent,
-        n_quarters=n_quarters,
+    result, _ = warmup_quarterly_cache(
+        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
     )
-    if pivot.empty:
-        result = {"loaded": False, "rows": []}
-    else:
-        result = {
-            "loaded":   True,
-            "columns":  list(pivot.columns),
-            "rows":     pivot.fillna(0).to_dict("records"),
-        }
-    sess._quarterly_cache[cache_key] = result
     return result

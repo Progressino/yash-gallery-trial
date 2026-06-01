@@ -43,6 +43,28 @@ def test_calculate_quarterly_history_returns_rows():
     assert "OMS_SKU" in pivot.columns
 
 
+def test_calculate_quarterly_history_uses_sku_mapping():
+    """Quarterly pivot keys must match PO engine OMS_SKU (PL strip + mapping)."""
+    days = pd.date_range("2025-06-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1001PLYKBEIGE-M"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [3] * 20,
+        }
+    )
+    mapping = {"1001YKBEIGE-M": "1001YKBEIGE-M"}
+    pivot = calculate_quarterly_history(
+        sales_df=sales,
+        sku_mapping=mapping,
+        group_by_parent=False,
+        n_quarters=2,
+    )
+    assert not pivot.empty
+    assert (pivot["OMS_SKU"] == "1001YKBEIGE-M").any()
+
+
 def test_calculate_quarterly_history_shipment_type_case_insensitive():
     days = pd.date_range("2025-06-01", periods=10, freq="D")
     sales = pd.DataFrame(

@@ -702,10 +702,11 @@ export async function waitForPoCalculate(
         POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
       >('/po/calculate/status', { timeout: POLL_TIMEOUT_MS }))
     } catch (e: unknown) {
-      if (_isGateway502(e) && statusGatewayRetries < 40) {
+      if (_isGateway502(e) && statusGatewayRetries < 120) {
         statusGatewayRetries += 1
-        onTick?.('Server busy (502) — still calculating…', 90)
-        await _sleep(3000)
+        const pct = Math.min(98, 82 + Math.floor(statusGatewayRetries / 4))
+        onTick?.('Server busy (502) — still calculating…', pct)
+        await _sleep(statusGatewayRetries < 20 ? 2500 : 4000)
         continue
       }
       throw e
