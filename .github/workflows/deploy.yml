@@ -28,6 +28,10 @@ jobs:
           git checkout -f main
           git reset --hard origin/main
           git log -1 --oneline
+          # Keep /etc/nginx-vps/nginx.conf in sync (post-merge hook restores from here on pull).
+          if grep -q "raisinghanitextiles.com" nginx/nginx.conf && grep -q "acme-challenge" nginx/nginx.conf; then
+            cp nginx/nginx.conf /etc/nginx-vps/nginx.conf
+          fi
           # Build metadata for /api/health version badge
           _SHA="$(git rev-parse --short HEAD)"
           _BUILT="$(date -u +%Y-%m-%dT%H:%MZ)"
