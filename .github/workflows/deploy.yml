@@ -122,7 +122,7 @@ jobs:
             echo "WARN: certbot not installed on this runner; skipping TLS renewal."
             exit 0
           fi
-          certbot renew \
+          timeout 120s certbot renew \
             --cert-name app.progressino.com \
             --non-interactive \
             --quiet \
