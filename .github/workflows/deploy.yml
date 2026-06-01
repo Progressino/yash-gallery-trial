@@ -118,6 +118,7 @@ jobs:
         continue-on-error: true
         run: |
           set -eu
+          mkdir -p /var/www/certbot/.well-known/acme-challenge
           if ! command -v certbot >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               apt-get update -y
@@ -127,12 +128,26 @@ jobs:
               exit 0
             fi
           fi
-          timeout 120s certbot renew \
+          timeout 180s certbot renew \
             --cert-name app.progressino.com \
             --non-interactive \
-            --quiet \
             --deploy-hook "docker compose -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload" \
             || true
+          if [ -f /etc/letsencrypt/live/app.progressino.com/fullchain.pem ]; then
+            _EXP0="$(openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -enddate | cut -d= -f2)"
+            _EXP0_EPOCH="$(date -d "${_EXP0}" +%s 2>/dev/null || true)"
+            _NOW_EPOCH="$(date +%s)"
+            if [ -n "${_EXP0_EPOCH}" ] && [ "${_EXP0_EPOCH}" -le "${_NOW_EPOCH}" ]; then
+              certbot certonly \
+                --webroot -w /var/www/certbot \
+                -d app.progressino.com \
+                --non-interactive \
+                --agree-tos \
+                --register-unsafely-without-email \
+                --keep-until-expiring || true
+              docker compose -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload || true
+            fi
+          fi
           if [ -f /etc/letsencrypt/live/app.progressino.com/fullchain.pem ]; then
             openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -dates || true
             _EXP="$(openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -enddate | cut -d= -f2)"

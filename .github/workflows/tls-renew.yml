@@ -28,9 +28,22 @@ jobs:
       - name: Renew app.progressino.com cert
         run: |
           set -eu
-          timeout 120s certbot renew \
+          mkdir -p /var/www/certbot/.well-known/acme-challenge
+          timeout 180s certbot renew \
             --cert-name app.progressino.com \
             --non-interactive \
-            --quiet \
             --deploy-hook "docker compose -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload"
+          _EXP0="$(openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -enddate | cut -d= -f2)"
+          _EXP0_EPOCH="$(date -d "${_EXP0}" +%s 2>/dev/null || true)"
+          _NOW_EPOCH="$(date +%s)"
+          if [ -n "${_EXP0_EPOCH}" ] && [ "${_EXP0_EPOCH}" -le "${_NOW_EPOCH}" ]; then
+            certbot certonly \
+              --webroot -w /var/www/certbot \
+              -d app.progressino.com \
+              --non-interactive \
+              --agree-tos \
+              --register-unsafely-without-email \
+              --keep-until-expiring
+            docker compose -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload
+          fi
           openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -dates
