@@ -879,56 +879,26 @@ def po_dashboard(request: Request, body: PODashboardRequest):
 
 @router.get("/calculate/status")
 def po_calculate_status(request: Request):
-    """Lightweight poll — status + message only (full table is on ``/calculate/result``)."""
+    """Lightweight poll — in-memory job store only (must stay fast during heavy PO math)."""
     from ..services.po_calculate_jobs import get_po_job
 
     sid = getattr(request.state, "session_id", None) or ""
     job = get_po_job(sid)
-    sess = request.state.session
-    st = (
-        job.get("status")
-        or (getattr(sess, "po_calculate_status", None) if sess is not None else None)
-        or "idle"
-    )
-    msg = (
-        job.get("message")
-        or (getattr(sess, "po_calculate_message", "") if sess is not None else "")
-        or ""
-    )
-    progress = int(
-        job.get("progress")
-        if job.get("progress") is not None
-        else (getattr(sess, "po_calculate_progress", 0) if sess is not None else 0)
-        or 0
-    )
-    out: dict = {"status": st, "message": msg, "progress": max(0, min(100, progress))}
+    if not job:
+        return {"status": "idle", "message": "", "progress": 0, "ok": True}
+
+    st = str(job.get("status") or "idle")
+    msg = str(job.get("message") or "")
+    progress = max(0, min(100, int(job.get("progress") or 0)))
+    out: dict = {"status": st, "message": msg, "progress": progress}
     if st == "error":
         out["ok"] = bool(job.get("ok", False))
-        if job.get("message"):
-            out["message"] = job["message"]
-        elif sess is not None:
-            result = getattr(sess, "po_calculate_result", None) or {}
-            if result.get("message"):
-                out["message"] = result["message"]
     elif st == "done":
         out["ok"] = bool(job.get("ok", True))
         if job.get("total_rows") is not None:
             out["row_count"] = int(job["total_rows"])
-        elif sess is not None:
-            result = getattr(sess, "po_calculate_result", None) or {}
-            out["ok"] = bool(result.get("ok", True))
-            po_df = getattr(sess, "po_calculate_result_df", None)
-            if po_df is not None and hasattr(po_df, "__len__") and not getattr(po_df, "empty", True):
-                out["row_count"] = int(len(po_df))
-                out["columns"] = list(po_df.columns)
-            else:
-                out["row_count"] = len(result.get("rows") or []) or int(result.get("total_rows") or 0)
-                if result.get("columns"):
-                    out["columns"] = list(result["columns"])
-        if sess is not None and "columns" not in out:
-            result = getattr(sess, "po_calculate_result", None) or {}
-            if result.get("columns"):
-                out["columns"] = list(result["columns"])
+        if job.get("columns"):
+            out["columns"] = list(job["columns"])
     else:
         out["ok"] = True
     return out

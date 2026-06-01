@@ -1312,12 +1312,13 @@ def _session_skip_heavy_warm(path: str) -> bool:
 
 
 def _session_po_calculate_light(path: str, method: str) -> bool:
-    """PO calc poll/start/result — avoid PG restore + warm-cache copy (stay fast during long jobs)."""
+    """PO calc poll/start/result/quarterly — avoid PG restore + warm-cache copy during long jobs."""
     if method == "POST" and path == "/api/po/calculate":
         return True
     if method == "GET" and path in (
         "/api/po/calculate/status",
         "/api/po/calculate/result",
+        "/api/po/quarterly",
     ):
         return True
     return False

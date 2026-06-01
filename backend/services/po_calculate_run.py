@@ -148,24 +148,10 @@ def execute_po_calculate(
         del _inv_dates
         _gc.collect()
 
-    _set_po_calculate_progress(sess, session_id, 28, "Checking sales history for quarterly columns…")
-    try:
-        from .po_quarterly_warmup import ensure_sales_history_for_quarterly
-
-        if ensure_sales_history_for_quarterly(sess):
-            _set_po_calculate_progress(
-                sess,
-                session_id,
-                32,
-                "Rebuilt unified sales from platform history (multi-year)…",
-            )
-    except Exception:
-        logger.exception("ensure_sales_history_for_quarterly failed")
-
     _set_po_calculate_progress(
         sess,
         session_id,
-        35,
+        30,
         "Running PO calculation engine (this step may take 1–3 minutes)…",
     )
     try:
@@ -313,36 +299,22 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         result = execute_po_calculate(sess, body, session_id=session_id, sync_sidecars=None)
         sess.po_calculate_result = result
         if result.get("ok"):
-            sess.po_calculate_status = "done"
             n = int(result.get("total_rows") or 0)
             msg = f"PO calculation complete ({n:,} rows)."
+            cols: list[str] = []
             try:
                 from .po_result_spill import spill_df
 
                 po_df = getattr(sess, "po_calculate_result_df", None)
                 if po_df is not None and not getattr(po_df, "empty", True):
+                    cols = list(po_df.columns)
                     spill_df(session_id, po_df)
                     if sess.po_calculate_result:
-                        sess.po_calculate_result["columns"] = list(po_df.columns)
+                        sess.po_calculate_result["columns"] = cols
             except Exception:
                 logger.exception("spill_po_result_df after calculate")
-            try:
-                from .po_quarterly_warmup import warmup_quarterly_cache
 
-                _set_po_calculate_progress(
-                    sess,
-                    session_id,
-                    92,
-                    "Loading quarterly sales history (8 quarters)…",
-                )
-                warmup_quarterly_cache(
-                    sess,
-                    group_by_parent=bool(body.get("group_by_parent", False)),
-                    n_quarters=8,
-                )
-            except Exception:
-                logger.exception("quarterly warmup after PO calculate failed")
-
+            sess.po_calculate_status = "done"
             _set_po_calculate_progress(sess, session_id, 100, msg)
             set_po_job(
                 session_id,
@@ -351,11 +323,30 @@ def background_po_calculate(session_id: str, body: dict) -> None:
                 progress=100,
                 message=msg,
                 total_rows=n,
+                columns=cols or result.get("columns"),
                 sales_through=result.get("sales_through"),
                 planning_date=result.get("planning_date"),
                 raise_ledger_rows=result.get("raise_ledger_rows"),
                 ledger_auto_import=result.get("ledger_auto_import"),
             )
+
+            def _warm_quarterly_bg() -> None:
+                try:
+                    from .po_quarterly_warmup import warmup_quarterly_cache
+
+                    warmup_quarterly_cache(
+                        sess,
+                        group_by_parent=bool(body.get("group_by_parent", False)),
+                        n_quarters=8,
+                    )
+                except Exception:
+                    logger.exception("quarterly warmup after PO calculate failed")
+
+            threading.Thread(
+                target=_warm_quarterly_bg,
+                daemon=True,
+                name=f"po-qtr-{session_id[:8]}",
+            ).start()
             threading.Thread(
                 target=_sync,
                 daemon=True,

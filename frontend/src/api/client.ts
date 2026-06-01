@@ -206,6 +206,8 @@ const UPLOAD_TIMEOUT_MS = 900_000
 const CACHE_TIMEOUT_MS = 120_000
 /** Status polls while server parses inventory or runs PO math (per request). */
 const POLL_TIMEOUT_MS = 180_000
+/** Status polls during PO calc — short timeout so Cloudflare/nginx 502s retry quickly. */
+const PO_STATUS_POLL_TIMEOUT_MS = 25_000
 /** Fetching the full PO table after calculate completes (can be 10k+ rows). */
 const PO_RESULT_TIMEOUT_MS = 900_000
 /** POST /po/calculate should return immediately; allow headroom if the worker is busy. */
@@ -696,17 +698,24 @@ export async function waitForPoCalculate(
 ): Promise<POCalculateResult> {
   const start = Date.now()
   let statusGatewayRetries = 0
+  let lastServerMessage = 'Calculating PO recommendations…'
+  let lastServerProgress: number | undefined
   while (Date.now() - start < maxMs) {
     let data: POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
     try {
       ;({ data } = await api.get<
         POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
-      >('/po/calculate/status', { timeout: POLL_TIMEOUT_MS }))
+      >('/po/calculate/status', { timeout: PO_STATUS_POLL_TIMEOUT_MS }))
     } catch (e: unknown) {
       if (_isGateway502(e) && statusGatewayRetries < 120) {
         statusGatewayRetries += 1
-        const pct = Math.min(98, 82 + Math.floor(statusGatewayRetries / 4))
-        onTick?.('Server busy (502) — still calculating…', pct)
+        const pct =
+          lastServerProgress ??
+          Math.min(98, 82 + Math.floor(statusGatewayRetries / 4))
+        const busyMsg = lastServerMessage
+          ? `${lastServerMessage} (server busy — retrying…)`
+          : 'Server busy (502) — still calculating…'
+        onTick?.(busyMsg, pct)
         await _sleep(statusGatewayRetries < 20 ? 2500 : 4000)
         continue
       }
@@ -718,7 +727,9 @@ export async function waitForPoCalculate(
         typeof data.progress === 'number' && Number.isFinite(data.progress)
           ? Math.max(0, Math.min(100, Math.round(data.progress)))
           : undefined
-      onTick?.(data.message || 'Calculating PO recommendations…', prog)
+      if (data.message) lastServerMessage = data.message
+      if (prog != null) lastServerProgress = prog
+      onTick?.(data.message || lastServerMessage, prog)
       await new Promise(r => setTimeout(r, 2000))
       continue
     }
