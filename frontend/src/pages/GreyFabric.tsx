@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 
@@ -343,6 +343,34 @@ export default function GreyFabric() {
   const pfSelectedFabric = pfCheckedAvailable.find(f => f.fabric_code === pfReserveForm.fabric_code)
   const pfSelectedSO = pfSalesOrders.find(o => o.so_number === pfReserveForm.so_number)
   const pfSkuLines = pfSelectedSO?.lines ?? []
+
+  useEffect(() => {
+    const sku = pfReserveForm.sku
+    const fabricCode = pfReserveForm.fabric_code
+    if (!sku || !fabricCode || !pfReserveForm.so_number) return
+    const line = pfSkuLines.find(l => l.sku === sku)
+    const orderQty = Number(line?.qty) || 0
+    if (orderQty <= 0) return
+    let cancelled = false
+    api
+      .get(`/production/bom-inputs/${encodeURIComponent(sku)}`, { params: { qty: orderQty } })
+      .then(res => {
+        if (cancelled) return
+        const inputs = (res.data?.inputs ?? []) as { material_code?: string; adj_qty?: number }[]
+        const match = inputs.find(
+          i => (i.material_code || '').toUpperCase() === fabricCode.toUpperCase(),
+        )
+        const bomMtr = Number(match?.adj_qty) || 0
+        if (bomMtr <= 0) return
+        const maxAvail = pfSelectedFabric?.available_qty ?? bomMtr
+        const qty = Math.min(bomMtr, maxAvail)
+        setPFReserveForm(prev => ({ ...prev, qty: Math.round(qty * 1000) / 1000 }))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [pfReserveForm.sku, pfReserveForm.fabric_code, pfReserveForm.so_number, pfSkuLines, pfSelectedFabric?.available_qty])
 
   const pfReserveMut = useMutation({
     mutationFn: (b: object) => api.post('/grey/printed-fabric/reserve', b),
@@ -1192,7 +1220,7 @@ export default function GreyFabric() {
                       <label className="text-xs text-gray-500">Style / SKU *</label>
                       <select
                         value={pfReserveForm.sku}
-                        onChange={e => setPFReserveForm(prev => ({ ...prev, sku: e.target.value }))}
+                        onChange={e => setPFReserveForm(prev => ({ ...prev, sku: e.target.value, qty: 0 }))}
                         disabled={!pfReserveForm.so_number}
                         className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 disabled:bg-gray-100"
                       >
@@ -1203,6 +1231,11 @@ export default function GreyFabric() {
                           </option>
                         ))}
                       </select>
+                      {pfReserveForm.so_number && pfSkuLines.length === 0 && (
+                        <p className="text-[10px] text-amber-600 mt-1">
+                          No SKUs left to reserve on this order (already reserved or a cutting job order exists).
+                        </p>
+                      )}
                     </div>
                     <div>
                       <label className="text-xs text-gray-500">Qty to reserve (MTR) *</label>
@@ -1216,7 +1249,9 @@ export default function GreyFabric() {
                         className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
                       />
                       {pfSelectedFabric && (
-                        <p className="text-[10px] text-gray-500 mt-0.5">Max {(pfSelectedFabric.available_qty ?? 0).toFixed(1)} m</p>
+                        <p className="text-[10px] text-gray-500 mt-0.5">
+                          From BOM for order qty · max {(pfSelectedFabric.available_qty ?? 0).toFixed(1)} m available
+                        </p>
                       )}
                     </div>
                     <div>

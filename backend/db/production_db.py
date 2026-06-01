@@ -631,6 +631,15 @@ def create_jo(data: dict) -> str:
         pass
     if so_number and fabric_code and fabric_qty > 0:
         record_mrp_jo_commitment(so_number, fabric_code, fabric_qty)
+    if process == "Cutting" and so_number and data.get("sku"):
+        try:
+            from .grey_db import close_printed_reservations_when_fully_planned
+
+            close_printed_reservations_when_fully_planned(
+                so_number, (data.get("sku") or "").strip(), fabric_code
+            )
+        except Exception:
+            pass
     return num
 
 

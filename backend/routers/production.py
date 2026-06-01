@@ -532,14 +532,14 @@ def regenerate_production_issue_note(joid: int):
 def get_bom_inputs(item_code: str, qty: float = 1.0):
     try:
         conn = _item_connect()
-        item = _get_item_by_code(conn, item_code)
+        bom_code, item, reason = _resolve_bom_anchor(conn, item_code)
         if not item:
             conn.close()
-            return {'inputs': []}
+            return {'inputs': [], 'error': reason or f"SKU '{item_code}' not found"}
         bom = _get_default_bom(conn, item['id'])
         if not bom:
             conn.close()
-            return {'inputs': []}
+            return {'inputs': [], 'error': reason or f"No BOM for '{item_code}'"}
         inputs = []
         for ln in _get_bom_lines(conn, bom['id']):
             ctype = (ln.get('component_type') or 'RM').upper()
@@ -554,7 +554,12 @@ def get_bom_inputs(item_code: str, qty: float = 1.0):
             inputs.append({'material_code': comp['item_code'] if comp else '', 'material_name': comp['item_name'] if comp else '',
                            'material_type': ctype, 'bom_qty': bom_qty, 'adj_qty': adj, 'unit': ln.get('unit','MTR')})
         conn.close()
-        return {'item_code': item_code, 'item_name': item['item_name'], 'inputs': inputs}
+        return {
+            'item_code': item_code,
+            'bom_item_code': bom_code or item.get('item_code', item_code),
+            'item_name': item['item_name'],
+            'inputs': inputs,
+        }
     except Exception as ex:
         return {'inputs': [], 'error': str(ex)}
 

@@ -5,6 +5,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 _DB = os.environ.get("GREY_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "grey.db"))
+_PRODUCTION_DB = os.environ.get(
+    "PRODUCTION_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "production.db"),
+)
 
 
 def _connect():
@@ -1142,9 +1146,76 @@ def list_printed_fabric_checked_available():
         return []
 
 
+def _cutting_jo_planned_by_so_sku() -> Dict[tuple, float]:
+    """Sum of planned Cutting JO qty per (so_number, sku), excluding cancelled."""
+    if not os.path.isfile(_PRODUCTION_DB):
+        return {}
+    try:
+        conn = sqlite3.connect(_PRODUCTION_DB, timeout=5.0)
+        rows = conn.execute(
+            """SELECT TRIM(so_number) AS so_number, TRIM(sku) AS sku,
+                      COALESCE(SUM(planned_qty), 0) AS planned
+               FROM job_orders
+               WHERE process = 'Cutting' AND status NOT IN ('Cancelled')
+                 AND TRIM(COALESCE(so_number, '')) != ''
+                 AND TRIM(COALESCE(sku, '')) != ''
+               GROUP BY TRIM(so_number), TRIM(sku)"""
+        ).fetchall()
+        conn.close()
+        return {(str(r[0]), str(r[1])): float(r[2] or 0) for r in rows}
+    except Exception:
+        return {}
+
+
+def _active_printed_reserve_so_sku() -> set:
+    """(so_number, sku) pairs with an Active printed-fabric reservation."""
+    conn = _connect()
+    try:
+        rows = _fetchall_retry(
+            conn,
+            """SELECT DISTINCT TRIM(so_number), TRIM(sku)
+               FROM printed_fabric_reservations
+               WHERE status = 'Active'
+                 AND TRIM(COALESCE(so_number, '')) != ''
+                 AND TRIM(COALESCE(sku, '')) != ''""",
+        )
+        conn.close()
+        return {(str(r[0]), str(r[1])) for r in rows}
+    except sqlite3.Error:
+        conn.close()
+        return set()
+
+
+def close_printed_reservations_when_fully_planned(
+    so_number: str, sku: str, fabric_code: str = ""
+) -> None:
+    """Mark Active reservations as JO Created once a Cutting job order exists."""
+    so_number = (so_number or "").strip()
+    sku = (sku or "").strip()
+    fabric_code = (fabric_code or "").strip()
+    if not so_number or not sku:
+        return
+    if _cutting_jo_planned_by_so_sku().get((so_number, sku), 0.0) <= 0:
+        return
+    conn = _connect()
+    try:
+        params: tuple = (so_number, sku)
+        q = """UPDATE printed_fabric_reservations SET status = 'JO Created'
+               WHERE status = 'Active' AND TRIM(so_number) = ? AND TRIM(sku) = ?"""
+        if fabric_code:
+            q += " AND TRIM(fabric_code) = ?"
+            params = (so_number, sku, fabric_code)
+        conn.execute(q, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def printed_fabric_reserve_options() -> dict:
     """Dropdown data: checked fabrics + open sales orders with line SKUs."""
     fabrics = list_printed_fabric_checked_available()
+    jo_planned = _cutting_jo_planned_by_so_sku()
+    active_reserved = _active_printed_reserve_so_sku()
     try:
         from .sales_db import list_orders
 
@@ -1156,10 +1227,16 @@ def printed_fabric_reserve_options() -> dict:
         status = (so.get("status") or "").strip()
         if status in ("Closed", "Cancelled"):
             continue
+        so_number = (so.get("so_number") or "").strip()
         lines = []
         for ln in so.get("lines") or []:
             sku = (ln.get("sku") or "").strip()
             if not sku:
+                continue
+            key = (so_number, sku)
+            if key in active_reserved:
+                continue
+            if jo_planned.get(key, 0) > 0:
                 continue
             lines.append(
                 {
@@ -1174,7 +1251,7 @@ def printed_fabric_reserve_options() -> dict:
             continue
         sales_orders.append(
             {
-                "so_number": so.get("so_number") or "",
+                "so_number": so_number,
                 "buyer": so.get("buyer") or "",
                 "status": status,
                 "delivery_date": so.get("delivery_date") or "",
@@ -1188,13 +1265,27 @@ def reserve_printed_fabric(data: dict):
     """Printed checked fabric reserve karo against SO — Ready to Cut ke liye."""
     fabric_code = (data.get("fabric_code") or "").strip()
     so_number = (data.get("so_number") or "").strip()
+    sku = (data.get("sku") or "").strip()
     qty = float(data.get("qty") or 0)
     if not fabric_code:
         raise ValueError("fabric_code is required")
     if not so_number:
         raise ValueError("so_number is required")
+    if not sku:
+        raise ValueError("sku is required")
     if qty <= 0:
         raise ValueError("qty must be greater than 0")
+
+    key = (so_number, sku)
+    if key in _active_printed_reserve_so_sku():
+        raise ValueError(
+            f"{sku} is already reserved on {so_number}. Use Ready to Cut to create a job order."
+        )
+    if _cutting_jo_planned_by_so_sku().get(key, 0) > 0:
+        raise ValueError(
+            f"A Cutting job order already exists for {sku} on {so_number}. "
+            "Create any additional cutting from Ready to Cut, not a new reservation."
+        )
 
     conn = _connect()
     row = conn.execute(
@@ -1220,8 +1311,7 @@ def reserve_printed_fabric(data: dict):
     conn.execute(
         """INSERT INTO printed_fabric_reservations(fabric_code, fabric_name, so_number, sku, qty, unit, status, remarks)
         VALUES (?,?,?,?,?,?,?,?)""",
-        (fabric_code, fabric_name, so_number,
-         (data.get('sku') or '').strip(), qty, 'MTR', 'Active', data.get('remarks', ''))
+        (fabric_code, fabric_name, so_number, sku, qty, 'MTR', 'Active', data.get('remarks', ''))
     )
     conn.commit()
     conn.close()
@@ -1241,7 +1331,16 @@ def list_printed_fabric_ready_to_cut():
             ORDER BY r.so_number
         """)
         conn.close()
-        return [dict(r) for r in rows]
+        jo_planned = _cutting_jo_planned_by_so_sku()
+        result: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            so = (d.get("so_number") or "").strip()
+            sku = (d.get("sku") or "").strip()
+            if jo_planned.get((so, sku), 0) > 0:
+                continue
+            result.append(d)
+        return result
     except sqlite3.Error:
         conn.close()
         return []
