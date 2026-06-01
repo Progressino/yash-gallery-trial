@@ -114,6 +114,24 @@ jobs:
           _dc -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
 
+      - name: Renew TLS certificate (app.progressino.com)
+        continue-on-error: true
+        run: |
+          set -eu
+          if ! command -v certbot >/dev/null 2>&1; then
+            echo "WARN: certbot not installed on this runner; skipping TLS renewal."
+            exit 0
+          fi
+          certbot renew \
+            --cert-name app.progressino.com \
+            --non-interactive \
+            --quiet \
+            --deploy-hook "docker compose -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload" \
+            || true
+          if [ -f /etc/letsencrypt/live/app.progressino.com/fullchain.pem ]; then
+            openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -dates || true
+          fi
+
       # Prefer direct backend on loopback :8000 (see docker-compose.prod.yml ports).
       # Fallback: nginx on :80 for localhost (TLS/certs not involved on loopback HTTP).
       - name: Health check
