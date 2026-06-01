@@ -2406,12 +2406,38 @@ def performance_report(date_from: str, date_to: str) -> dict:
     psm2["E_Code"] = psm2["E_Code"].astype(str)
     perf = ss.merge(psm2, on="E_Code", how="outer").fillna(0)
     perf["Piece_Value"] = perf["Piece_Value"].round(2)
-    perf["Salary"] = perf["Salary"].round(2)
-    perf["Surplus"] = (perf["Piece_Value"] - perf["Salary"]).round(2)
+    perf["Attendance_Pay"] = perf["Salary"].round(2)
+    perf["Other_Work_Pay"] = 0.0
+    try:
+        pr = payroll_report(date_from, date_to)
+        pr_df = pd.DataFrame(pr.get("rows") or [])
+        if not pr_df.empty and "Karigar_ID" in pr_df.columns:
+            pr_df["E_Code"] = pr_df["Karigar_ID"].astype(str)
+            for c in ("Attendance_Pay", "Other_Work_Pay", "Total"):
+                if c in pr_df.columns:
+                    pr_df[c] = safe_num(pr_df[c])
+            perf = perf.merge(
+                pr_df[["E_Code", "Attendance_Pay", "Other_Work_Pay", "Total"]],
+                on="E_Code",
+                how="left",
+                suffixes=("_att", ""),
+            )
+            if "Attendance_Pay_att" in perf.columns:
+                perf["Attendance_Pay"] = perf["Attendance_Pay"].combine_first(perf["Attendance_Pay_att"]).fillna(0)
+                perf = perf.drop(columns=["Attendance_Pay_att"], errors="ignore")
+            perf["Other_Work_Pay"] = safe_num(perf.get("Other_Work_Pay", 0)).fillna(0)
+            perf["Total_Payroll_Paid"] = safe_num(perf.get("Total", perf["Attendance_Pay"])).fillna(0).round(2)
+        else:
+            perf["Total_Payroll_Paid"] = perf["Attendance_Pay"].round(2)
+    except Exception:
+        perf["Total_Payroll_Paid"] = perf["Attendance_Pay"].round(2)
+        perf["Other_Work_Pay"] = 0.0
+    perf["Salary"] = perf["Total_Payroll_Paid"]
+    perf["Surplus"] = (perf["Piece_Value"] - perf["Total_Payroll_Paid"]).round(2)
     perf["In_Production"] = perf["Total_Pieces"] > 0
-    perf["In_Payroll"] = perf["Salary"] > 0
+    perf["In_Payroll"] = perf["Total_Payroll_Paid"] > 0
     perf["Payroll_Only_Expense"] = perf["In_Payroll"] & ~perf["In_Production"]
-    perf["ROI_%"] = (perf["Piece_Value"] / perf["Salary"].replace(0, 1) * 100).round(1)
+    perf["ROI_%"] = (perf["Piece_Value"] / perf["Total_Payroll_Paid"].replace(0, 1) * 100).round(1)
     perf["Avg_Eff"] = perf["Avg_Eff"].round(1)
     perf["Grade"] = perf["Avg_Eff"].apply(
         lambda x: "A–Excellent"
@@ -2421,7 +2447,9 @@ def performance_report(date_from: str, date_to: str) -> dict:
 
     summary = {
         "total_piece_value": float(perf["Piece_Value"].sum()),
-        "total_salary": float(perf["Salary"].sum()),
+        "total_salary": float(perf["Total_Payroll_Paid"].sum()),
+        "total_attendance_pay": float(perf["Attendance_Pay"].sum()),
+        "total_other_work_pay": float(perf["Other_Work_Pay"].sum()),
         "net_surplus": float(perf["Surplus"].sum()),
     }
     op_type_breakup: list[dict[str, Any]] = []
@@ -2584,6 +2612,209 @@ def comparison_dashboard_report(date_from: str, date_to: str) -> dict:
         "sku_comparison": sku_comparison,
         "challan_comparison": challan_comparison,
         "karigar_sku_detail": karigar_sku_detail,
+    }
+
+
+def karigar_profitability_report(date_from: str, date_to: str) -> dict:
+    """
+    Karigar-wise: full payroll paid vs piece value vs ₹480 benchmark P&L (LTL in Running_LTL).
+    Answers whether each karigar is profitable on payroll and on factory benchmark.
+    """
+    payroll = payroll_report(date_from, date_to)
+    comp = comparison_dashboard_report(date_from, date_to)
+    pr_by_id = {str(r.get("Karigar_ID", "")): r for r in payroll.get("rows", [])}
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _row(
+        kid: str,
+        name: str,
+        prow: dict,
+        krow: dict | None,
+    ) -> dict[str, Any]:
+        att = float(prow.get("Attendance_Pay", 0) or 0)
+        other = float(prow.get("Other_Work_Pay", 0) or 0)
+        paid = float(prow.get("Total", 0) or att + other)
+        piece = float((krow or {}).get("Piece_Value_Rs", 0) or 0)
+        budgeted = float((krow or {}).get("Budgeted_Rs", 0) or 0)
+        actual = float((krow or {}).get("Actual_Rs", 0) or 0)
+        net_pl = float((krow or {}).get("Net_PL_Rs", 0) or 0)
+        ltl = float((krow or {}).get("Running_LTL", 0) or 0)
+        pay_vs_piece = round(piece - paid, 2)
+        return {
+            "Karigar_ID": kid,
+            "Karigar_Name": name or kid,
+            "Days": int(prow.get("Days", 0) or 0),
+            "Attendance_Pay": round(att, 2),
+            "Other_Work_Pay": round(other, 2),
+            "Total_Payroll_Paid": round(paid, 2),
+            "Piece_Value_Rs": round(piece, 2),
+            "Pay_vs_Piece_Rs": pay_vs_piece,
+            "Profitable_On_Payroll": "Yes" if piece >= paid - 0.01 else "No",
+            "Budgeted_Rs": round(budgeted, 2),
+            "Actual_Cost_Rs": round(actual, 2),
+            "Net_PL_Benchmark": round(net_pl, 2),
+            "Profitable_On_Benchmark": "Yes" if net_pl >= -0.01 else "No",
+            "Running_LTL": round(ltl, 1),
+            "LTL_Note": "LTL targets active" if ltl > 0 else "Base target (no LTL row)",
+            "Pieces": int((krow or {}).get("Pieces", 0) or 0),
+            "Payroll_Only": "Yes" if paid > 0 and piece <= 0 else "",
+        }
+
+    for krow in comp.get("karigar_comparison", []):
+        kid = str(krow.get("Karigar_ID", "")).strip()
+        if not kid:
+            continue
+        seen.add(kid)
+        prow = pr_by_id.get(kid, {})
+        rows.append(
+            _row(kid, str(krow.get("Karigar_Name", prow.get("Name", ""))), prow, krow)
+        )
+
+    for kid, prow in pr_by_id.items():
+        if kid in seen or not kid:
+            continue
+        rows.append(_row(kid, str(prow.get("Name", "")), prow, None))
+
+    rows.sort(key=lambda r: float(r.get("Net_PL_Benchmark", 0)))
+    prof_pay = sum(1 for r in rows if r.get("Profitable_On_Payroll") == "Yes")
+    prof_bench = sum(1 for r in rows if r.get("Profitable_On_Benchmark") == "Yes")
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "summary": {
+            "karigar_count": len(rows),
+            "profitable_on_payroll": prof_pay,
+            "profitable_on_benchmark": prof_bench,
+            "total_payroll_paid": float(payroll.get("total_payroll", 0) or 0),
+            "total_piece_value": round(sum(float(r.get("Piece_Value_Rs", 0)) for r in rows), 2),
+            "total_net_pl_benchmark": round(sum(float(r.get("Net_PL_Benchmark", 0)) for r in rows), 2),
+        },
+    }
+
+
+def challan_labour_payroll_report(date_from: str, date_to: str) -> dict:
+    """Challan + style + karigar: production budget/actual and payroll paid (expense + allocated attendance)."""
+    pl = get_sheet_df("production_log")
+    exp = get_sheet_df("karigar_expenses")
+    empty = {"date_from": date_from, "date_to": date_to, "rows": [], "summary": {}}
+    if pl.empty:
+        return empty
+
+    work = pl.copy()
+    work["Date_dt"] = pd.to_datetime(work["Date"], errors="coerce")
+    d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+    work = work[(work["Date_dt"] >= d0) & (work["Date_dt"] <= d1)]
+    if work.empty:
+        return empty
+    work = _production_log_latest_rows(work)
+    for c in ("Total_Pieces", "Piece_Value_Rs", "Budgeted_Expense_Rs", "Actual_Expense_Rs", "PL_Rs"):
+        if c in work.columns:
+            work[c] = safe_num(work[c])
+
+    payroll = payroll_report(date_from, date_to)
+    att_by_k: dict[str, float] = {}
+    for r in payroll.get("rows", []):
+        kid = str(r.get("Karigar_ID", ""))
+        if kid:
+            att_by_k[kid] = float(r.get("Attendance_Pay", 0) or 0)
+
+    karigar_piece: dict[str, float] = {}
+    if "Karigar_ID" in work.columns and "Piece_Value_Rs" in work.columns:
+        for kid, g in work.groupby(work["Karigar_ID"].apply(clean_key)):
+            if kid:
+                karigar_piece[kid] = float(safe_num(g["Piece_Value_Rs"]).sum())
+
+    exp_direct: dict[tuple, float] = {}
+    if not exp.empty:
+        ex = exp.copy()
+        ex["Date_dt"] = pd.to_datetime(ex["Date"], errors="coerce")
+        ex = ex[(ex["Date_dt"] >= d0) & (ex["Date_dt"] <= d1)]
+        if not ex.empty and "Amount_Rs" in ex.columns:
+            ex["Amount_Rs"] = safe_num(ex["Amount_Rs"])
+            for _, er in ex.iterrows():
+                key = (
+                    str(er.get("Challan_No", "")).strip(),
+                    str(er.get("Style", "")).strip(),
+                    str(er.get("Karigar_ID", "")).strip(),
+                )
+                exp_direct[key] = exp_direct.get(key, 0.0) + float(er.get("Amount_Rs", 0) or 0)
+
+    rows: list[dict[str, Any]] = []
+    group_cols = ["Challan_No", "Style", "Karigar_ID"]
+    for col in group_cols:
+        if col not in work.columns:
+            return empty
+
+    for (cn, st, kid), grp in work.groupby(
+        [work["Challan_No"].astype(str).str.strip(), work["Style"].astype(str).str.strip(), work["Karigar_ID"].apply(clean_key)]
+    ):
+        if not cn and not st:
+            continue
+        kid = str(kid or "")
+        piece_val = float(safe_num(grp.get("Piece_Value_Rs", 0)).sum())
+        budgeted = float(safe_num(grp.get("Budgeted_Expense_Rs", 0)).sum())
+        actual = float(safe_num(grp.get("Actual_Expense_Rs", 0)).sum())
+        net_pl = float(safe_num(grp.get("PL_Rs", 0)).sum())
+        if budgeted <= 0 and actual > 0:
+            for _, r in grp.iterrows():
+                fin = _financial_from_log_row(
+                    r, date_str=str(r.get("Date", ""))[:10], kid=kid
+                )
+                budgeted += fin["budgeted_amount"]
+                actual += fin["actual_amount"]
+                net_pl += fin["pl_rs"]
+        direct = exp_direct.get((cn, st, kid), 0.0)
+        k_total = karigar_piece.get(kid, 0.0)
+        att_pool = att_by_k.get(kid, 0.0)
+        att_alloc = round(att_pool * (piece_val / k_total), 2) if k_total > 0 and piece_val > 0 else 0.0
+        total_paid = round(direct + att_alloc, 2)
+        rows.append(
+            {
+                "Challan_No": cn,
+                "Style": st,
+                "Karigar_ID": kid,
+                "Karigar_Name": str(grp.iloc[0].get("Karigar_Name", kid)),
+                "Pieces": int(safe_num(grp.get("Total_Pieces", 0)).sum()),
+                "Piece_Value_Rs": round(piece_val, 2),
+                "Budgeted_Labour_Rs": round(budgeted, 2),
+                "Actual_Cost_Rs": round(actual, 2),
+                "Net_PL_Benchmark": round(net_pl, 2),
+                "Expense_On_Challan_Rs": round(direct, 2),
+                "Attendance_Allocated_Rs": att_alloc,
+                "Total_Payroll_Paid": total_paid,
+                "Pay_vs_Budget": round(budgeted - total_paid, 2),
+                "Profitable_On_Payroll": "Yes" if piece_val >= total_paid - 0.01 else "No",
+                "Profitable_On_Benchmark": "Yes" if net_pl >= -0.01 else "No",
+            }
+        )
+
+    rows.sort(key=lambda r: (r.get("Challan_No", ""), r.get("Style", "")))
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "summary": {
+            "challan_lines": len(rows),
+            "total_payroll_paid": round(sum(float(r["Total_Payroll_Paid"]) for r in rows), 2),
+            "total_budgeted": round(sum(float(r["Budgeted_Labour_Rs"]) for r in rows), 2),
+            "total_net_pl": round(sum(float(r["Net_PL_Benchmark"]) for r in rows), 2),
+        },
+    }
+
+
+def stitching_reports_hub(date_from: str, date_to: str) -> dict:
+    """Dynamics-style report pack: payroll, performance, P&L compare, karigar profit, challan labour."""
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "generated_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"),
+        "payroll": payroll_report(date_from, date_to),
+        "performance": performance_report(date_from, date_to),
+        "comparison": comparison_dashboard_report(date_from, date_to),
+        "karigar_profitability": karigar_profitability_report(date_from, date_to),
+        "challan_labour": challan_labour_payroll_report(date_from, date_to),
     }
 
 

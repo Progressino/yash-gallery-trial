@@ -30,6 +30,7 @@ type TabId =
   | 'attendance'
   | 'operating'
   | 'performance'
+  | 'reports'
   | 'master'
 
 function normStyleKey(s: string) {
@@ -50,6 +51,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'attendance', label: '🕐 Karigar Attendance' },
   { id: 'operating', label: '🏢 Operating Staff' },
   { id: 'performance', label: '🌟 Performance' },
+  { id: 'reports', label: '📑 Reports' },
   { id: 'master', label: '⚙️ Master Data' },
 ]
 
@@ -170,6 +172,7 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
       {!karigarOnly && tab === 'attendance' && <AttendanceTab type="karigar" />}
       {!karigarOnly && tab === 'operating' && <AttendanceTab type="operating" />}
       {!karigarOnly && tab === 'performance' && <PerformanceTab />}
+      {!karigarOnly && tab === 'reports' && <StitchingReportsTab />}
       {!karigarOnly && tab === 'master' && <MasterTab admin={admin} onFlash={flash} />}
     </div>
   )
@@ -1960,30 +1963,30 @@ function ComparisonDashboardTab() {
           </div>
         </div>
       )}
-      <Section title="Karigar — actual vs budget (who is losing money)">
-        <DataTable
-          rows={data?.karigar_comparison ?? []}
-          cols={['Karigar_Name', 'Pieces', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Running_LTL', 'Variance_%', 'Status']}
-        />
-      </Section>
-      <Section title="SKU — profit / loss">
-        <DataTable
-          rows={data?.sku_comparison ?? []}
-          cols={['Style', 'Pieces', 'Piece_Value_Rs', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Status']}
-        />
-      </Section>
-      <Section title="Challan — over / under budget">
-        <DataTable
-          rows={data?.challan_comparison ?? []}
-          cols={['Challan_No', 'Style', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Status']}
-        />
-      </Section>
-      <Section title="Karigar × SKU detail">
-        <DataTable
-          rows={data?.karigar_sku_detail ?? []}
-          cols={['Karigar_Name', 'Style', 'Pieces', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Running_LTL', 'Status']}
-        />
-      </Section>
+      <ReportTableSection
+        title="Karigar — actual vs budget (who is losing money)"
+        rows={(data?.karigar_comparison ?? []) as Record<string, unknown>[]}
+        cols={['Karigar_Name', 'Pieces', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Running_LTL', 'Variance_%', 'Status']}
+        downloadName={`pl_compare_karigar_${from}_${to}`}
+      />
+      <ReportTableSection
+        title="SKU — profit / loss"
+        rows={(data?.sku_comparison ?? []) as Record<string, unknown>[]}
+        cols={['Style', 'Pieces', 'Piece_Value_Rs', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Status']}
+        downloadName={`pl_compare_sku_${from}_${to}`}
+      />
+      <ReportTableSection
+        title="Challan — over / under budget"
+        rows={(data?.challan_comparison ?? []) as Record<string, unknown>[]}
+        cols={['Challan_No', 'Style', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Status']}
+        downloadName={`pl_compare_challan_${from}_${to}`}
+      />
+      <ReportTableSection
+        title="Karigar × SKU detail"
+        rows={(data?.karigar_sku_detail ?? []) as Record<string, unknown>[]}
+        cols={['Karigar_Name', 'Style', 'Pieces', 'Budgeted_Rs', 'Actual_Rs', 'Net_PL_Rs', 'Running_LTL', 'Status']}
+        downloadName={`pl_compare_karigar_sku_${from}_${to}`}
+      />
     </div>
   )
 }
@@ -2153,7 +2156,169 @@ function PayrollTab() {
           <p className="text-xs text-gray-500">
             Includes attendance pay plus karigar expenses (part change, alter, trainee, etc.) from the Karigar Expenses tab.
           </p>
-          <DataTable rows={data.rows ?? []} cols={payrollCols} />
+          <ReportTableSection
+            title="Karigar payroll (all expenses)"
+            rows={(data.rows ?? []) as Record<string, unknown>[]}
+            cols={payrollCols}
+            downloadName={`payroll_${from}_${to}`}
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+function StitchingReportsTab() {
+  const [from, setFrom] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 6)
+    return d.toISOString().slice(0, 10)
+  })
+  const [to, setTo] = useState(todayStr())
+  const { data, refetch, isFetching } = useQuery({
+    queryKey: ['stitching-reports-hub', from, to],
+    queryFn: () =>
+      api.get('/stitching/reports/hub', { params: { date_from: from, date_to: to } }).then(r => r.data),
+    enabled: false,
+  })
+
+  const kp = data?.karigar_profitability?.summary
+  const ch = data?.challan_labour?.summary
+
+  return (
+    <div className="space-y-4">
+      <Section title="How payroll is calculated">
+        <div className="text-xs text-gray-600 space-y-2 max-w-3xl">
+          <p>
+            <strong>Attendance pay</strong> comes from biometric punches (09:00–18:00 blocks, lunch/tea deductions,
+            late/early rules, OT after 18:00 billed in whole hours at daily rate ÷ 8). Stored in{' '}
+            <em>Karigar Attendance</em> as Normal + OT = Total_Pay.
+          </p>
+          <p>
+            <strong>Other work pay</strong> is every row in <em>Karigar Expenses</em> (part change, alter, trainee, etc.)
+            with amount on the challan.
+          </p>
+          <p>
+            <strong>Total payroll</strong> = attendance + other work. Production costing still uses ₹480/day benchmark
+            and daily-rate allocation for P&amp;L; this report pack compares <em>actual payroll paid</em> to piece value
+            and benchmark.
+          </p>
+        </div>
+      </Section>
+      <div className="flex flex-wrap gap-2 items-end text-xs">
+        <label>
+          From
+          <input type="date" className="block border rounded mt-1 px-2 py-1" value={from} onChange={e => setFrom(e.target.value)} />
+        </label>
+        <label>
+          To
+          <input type="date" className="block border rounded mt-1 px-2 py-1" value={to} onChange={e => setTo(e.target.value)} />
+        </label>
+        <button type="button" onClick={() => void refetch()} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm">
+          Run all reports
+        </button>
+        {data?.generated_at && <span className="text-gray-500">Generated {data.generated_at}</span>}
+      </div>
+      {isFetching && <p className="text-sm text-gray-500">Building report pack…</p>}
+      {data && (
+        <>
+          {kp && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+              <div className="bg-white border rounded-lg p-3">
+                <p className="text-xs text-gray-500">Total payroll paid</p>
+                <p className="font-bold text-[#2c5aa0]">₹{Number(kp.total_payroll_paid).toLocaleString()}</p>
+              </div>
+              <div className="bg-white border rounded-lg p-3">
+                <p className="text-xs text-gray-500">Profitable on payroll</p>
+                <p className="font-bold text-emerald-700">{kp.profitable_on_payroll} / {kp.karigar_count}</p>
+              </div>
+              <div className="bg-white border rounded-lg p-3">
+                <p className="text-xs text-gray-500">Profitable on benchmark</p>
+                <p className="font-bold text-emerald-700">{kp.profitable_on_benchmark} / {kp.karigar_count}</p>
+              </div>
+              <div className="bg-white border rounded-lg p-3">
+                <p className="text-xs text-gray-500">Net P&amp;L (benchmark)</p>
+                <p className="font-bold">₹{Number(kp.total_net_pl_benchmark).toLocaleString()}</p>
+              </div>
+            </div>
+          )}
+          <ReportTableSection
+            title="Karigar profitability — payroll paid vs piece value vs benchmark (LTL column)"
+            rows={(data.karigar_profitability?.rows ?? []) as Record<string, unknown>[]}
+            cols={[
+              'Karigar_Name',
+              'Total_Payroll_Paid',
+              'Attendance_Pay',
+              'Other_Work_Pay',
+              'Piece_Value_Rs',
+              'Pay_vs_Piece_Rs',
+              'Profitable_On_Payroll',
+              'Budgeted_Rs',
+              'Net_PL_Benchmark',
+              'Profitable_On_Benchmark',
+              'Running_LTL',
+              'LTL_Note',
+              'Payroll_Only',
+            ]}
+            downloadName={`karigar_profitability_${from}_${to}`}
+          />
+          <ReportTableSection
+            title="Challan labour — budget, payroll paid (expense + allocated attendance), P&amp;L"
+            rows={(data.challan_labour?.rows ?? []) as Record<string, unknown>[]}
+            cols={[
+              'Challan_No',
+              'Style',
+              'Karigar_Name',
+              'Pieces',
+              'Piece_Value_Rs',
+              'Budgeted_Labour_Rs',
+              'Total_Payroll_Paid',
+              'Expense_On_Challan_Rs',
+              'Attendance_Allocated_Rs',
+              'Pay_vs_Budget',
+              'Net_PL_Benchmark',
+              'Profitable_On_Payroll',
+              'Profitable_On_Benchmark',
+            ]}
+            downloadName={`challan_labour_${from}_${to}`}
+          />
+          {ch && (
+            <p className="text-xs text-gray-500">
+              Challan lines: {ch.challan_lines} · Total payroll on challans: ₹
+              {Number(ch.total_payroll_paid).toLocaleString()}
+            </p>
+          )}
+          <ReportTableSection
+            title="Payroll register (all karigar expenses)"
+            rows={(data.payroll?.rows ?? []) as Record<string, unknown>[]}
+            cols={[
+              'Karigar_ID',
+              'Name',
+              'Days',
+              'Attendance_Pay',
+              'Other_Work_Pay',
+              'Total',
+            ]}
+            downloadName={`payroll_register_${from}_${to}`}
+          />
+          {data.performance?.ok && (
+            <ReportTableSection
+              title="Performance — piece value vs full payroll"
+              rows={(data.performance.rows ?? []) as Record<string, unknown>[]}
+              cols={[
+                'Name',
+                'Total_Payroll_Paid',
+                'Attendance_Pay',
+                'Other_Work_Pay',
+                'Piece_Value',
+                'Surplus',
+                'Profitable_On_Payroll',
+                'Avg_Eff',
+                'Grade',
+              ]}
+              downloadName={`performance_${from}_${to}`}
+            />
+          )}
         </>
       )}
     </div>
@@ -4692,8 +4857,8 @@ function PerformanceTab() {
     <div className="space-y-4">
       <Section title="Employee performance — piece value vs salary">
         <p className="text-xs text-gray-600 mb-3">
-          Compares production piece-value to karigar attendance pay. Rows flagged <strong>Payroll only</strong> are in attendance payroll but
-          have no production costing for the period — treat their salary as expense to capture.
+          Compares production piece-value to <strong>full payroll</strong> (attendance + karigar expenses). Rows flagged{' '}
+          <strong>Payroll only</strong> are paid but have no production in the period.
         </p>
         <div className="flex flex-wrap gap-2 items-end mb-4">
           <label className="text-xs">
@@ -4717,8 +4882,14 @@ function PerformanceTab() {
               <p className="text-lg font-bold text-[#2c5aa0]">₹{Number(data.summary.total_piece_value).toLocaleString()}</p>
             </div>
             <div className="bg-white border rounded-lg p-3">
-              <p className="text-xs text-gray-500">Total salary paid</p>
+              <p className="text-xs text-gray-500">Total payroll paid</p>
               <p className="text-lg font-bold text-gray-800">₹{Number(data.summary.total_salary).toLocaleString()}</p>
+              {data.summary.total_other_work_pay != null && (
+                <p className="text-[10px] text-gray-500 mt-1">
+                  Attendance ₹{Number(data.summary.total_attendance_pay ?? 0).toLocaleString()} + other ₹
+                  {Number(data.summary.total_other_work_pay).toLocaleString()}
+                </p>
+              )}
             </div>
             <div className="bg-white border rounded-lg p-3">
               <p className="text-xs text-gray-500">Net surplus</p>
@@ -4764,25 +4935,31 @@ function PerformanceTab() {
                 Highlighted rows: paid in payroll but missing from production costing — mark as expense.
               </p>
             )}
-            <DataTable
+            <ReportTableSection
+              title="Karigar detail"
               rows={(data.rows as Record<string, unknown>[]).map(r => ({
                 ...r,
                 Payroll_Only_Expense: r.Payroll_Only_Expense ? 'Yes — expense' : '',
+                Profitable_On_Payroll: Number(r.Surplus) >= 0 ? 'Yes' : 'No',
               }))}
               cols={[
                 'E_Code',
                 'Name',
                 'Days',
                 'Hrs',
-                'Salary',
+                'Total_Payroll_Paid',
+                'Attendance_Pay',
+                'Other_Work_Pay',
                 'Total_Pieces',
                 'Piece_Value',
                 'Surplus',
+                'Profitable_On_Payroll',
                 'Payroll_Only_Expense',
                 'ROI_%',
                 'Avg_Eff',
                 'Grade',
               ]}
+              downloadName={`performance_${from}_${to}`}
             />
           </>
         )}

@@ -486,6 +486,33 @@ def payroll(date_from: str = "", date_to: str = ""):
     return svc.payroll_report(date_from, date_to)
 
 
+@router.get("/reports/hub")
+def stitching_reports_hub(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.stitching_reports_hub(date_from, date_to)
+
+
+@router.get("/reports/karigar-profitability")
+def karigar_profitability(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.karigar_profitability_report(date_from, date_to)
+
+
+@router.get("/reports/challan-labour")
+def challan_labour_payroll(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.challan_labour_payroll_report(date_from, date_to)
+
+
 @router.post("/challans")
 def add_challan(body: ChallanBody):
     df = get_sheet_df("challan_master")
