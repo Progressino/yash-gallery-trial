@@ -12,14 +12,23 @@ jobs:
       run:
         working-directory: /root/app
     steps:
+      - name: Ensure certbot installed
+        run: |
+          set -eu
+          if command -v certbot >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "ERROR: certbot missing and apt-get unavailable."
+            exit 1
+          fi
+          apt-get update -y
+          DEBIAN_FRONTEND=noninteractive apt-get install -y certbot
+
       - name: Renew app.progressino.com cert
         run: |
           set -eu
-          if ! command -v certbot >/dev/null 2>&1; then
-            echo "ERROR: certbot not installed on self-hosted runner."
-            exit 1
-          fi
-          certbot renew \
+          timeout 120s certbot renew \
             --cert-name app.progressino.com \
             --non-interactive \
             --quiet \

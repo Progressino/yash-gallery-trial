@@ -119,8 +119,13 @@ jobs:
         run: |
           set -eu
           if ! command -v certbot >/dev/null 2>&1; then
-            echo "WARN: certbot not installed on this runner; skipping TLS renewal."
-            exit 0
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update -y
+              DEBIAN_FRONTEND=noninteractive apt-get install -y certbot
+            else
+              echo "WARN: certbot not installed and apt-get unavailable; skipping TLS renewal."
+              exit 0
+            fi
           fi
           timeout 120s certbot renew \
             --cert-name app.progressino.com \
@@ -130,6 +135,12 @@ jobs:
             || true
           if [ -f /etc/letsencrypt/live/app.progressino.com/fullchain.pem ]; then
             openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -dates || true
+            _EXP="$(openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -enddate | cut -d= -f2)"
+            _EXP_EPOCH="$(date -d "${_EXP}" +%s 2>/dev/null || true)"
+            _NOW_EPOCH="$(date +%s)"
+            if [ -n "${_EXP_EPOCH}" ] && [ "${_EXP_EPOCH}" -le "${_NOW_EPOCH}" ]; then
+              echo "WARN: TLS certificate is still expired after renewal attempt."
+            fi
           fi
 
       # Prefer direct backend on loopback :8000 (see docker-compose.prod.yml ports).
