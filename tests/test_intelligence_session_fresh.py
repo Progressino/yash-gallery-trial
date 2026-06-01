@@ -188,3 +188,14 @@ def test_platform_summary_includes_daily_for_short_range():
     assert myntra_row["total_units"] == 35
     dates = {r["date"] for r in myntra_row.get("daily") or []}
     assert "2026-05-29" in dates
+
+
+def test_intelligence_refresh_throttle_skips_parallel_reentry(monkeypatch):
+    sess = AppSession()
+    sess._intelligence_refresh_running = True
+
+    called = {"n": 0}
+    monkeypatch.setattr(data_router, "_session_sales_stale_vs_platforms", lambda s: called.__setitem__("n", called["n"] + 1) or False)
+
+    data_router._ensure_intelligence_session_fresh(sess)
+    assert called["n"] == 0

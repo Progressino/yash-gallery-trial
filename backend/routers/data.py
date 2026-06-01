@@ -439,7 +439,7 @@ def _tier3_session_needs_topup(sess: AppSession) -> bool:
 
 
 def _session_sales_stale_vs_platforms(sess: AppSession) -> bool:
-    """True when unified sales_df is missing or lags loaded platform / Tier-3 history."""
+    """True when unified sales_df is missing or lags loaded in-memory platform frames."""
     sales = getattr(sess, "sales_df", None)
     sources: set[str] = set()
     if sales is not None and not sales.empty and "Source" in sales.columns:
@@ -453,8 +453,6 @@ def _session_sales_stale_vs_platforms(sess: AppSession) -> bool:
             sales_max = _sales_max_for_source(sales, src) or ""
             if plat_max and (not sales_max or sales_max < plat_max):
                 return True
-    if _tier3_session_needs_topup(sess):
-        return True
     return sales is None or (hasattr(sales, "empty") and sales.empty and _session_has_platform_data(sess))
 
 
@@ -581,6 +579,15 @@ def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
         return
     if getattr(sess, "sales_rebuild_status", "idle") == "running":
         return
+    # Dashboard fires several queries in parallel (sales-summary/platform/top-skus/anomalies).
+    # Keep only one expensive freshness pass every few seconds per session.
+    if getattr(sess, "_intelligence_refresh_running", False):
+        return
+    now = time.time()
+    last = float(getattr(sess, "_intelligence_refresh_ts", 0.0) or 0.0)
+    if now - last < 5.0:
+        return
+    sess._intelligence_refresh_running = True
     try:
         import backend.main as _main
 
@@ -588,21 +595,24 @@ def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
             _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
     except Exception:
         pass
+    try:
+        if _session_sales_stale_vs_platforms(sess):
+            _rebuild_session_sales(sess)
 
-    if _session_sales_stale_vs_platforms(sess):
-        _rebuild_session_sales(sess)
-
-    need_plat = _platforms_needing_tier3_topup(sess)
-    if need_plat and sess._daily_restore_lock.acquire(blocking=False):
-        try:
-            if _merge_tier3_light(sess, only_platforms=need_plat):
-                _rebuild_session_sales(sess)
-        finally:
-            sess._daily_restore_lock.release()
-    elif _session_sales_stale_vs_platforms(sess):
-        _rebuild_session_sales(sess)
-    else:
-        _ensure_sales_rebuilt(sess)
+        need_plat = _platforms_needing_tier3_topup(sess)
+        if need_plat and sess._daily_restore_lock.acquire(blocking=False):
+            try:
+                if _merge_tier3_light(sess, only_platforms=need_plat):
+                    _rebuild_session_sales(sess)
+            finally:
+                sess._daily_restore_lock.release()
+        elif _session_sales_stale_vs_platforms(sess):
+            _rebuild_session_sales(sess)
+        else:
+            _ensure_sales_rebuilt(sess)
+    finally:
+        sess._intelligence_refresh_ts = time.time()
+        sess._intelligence_refresh_running = False
 
 
 def _ensure_warm_session_data(sess: AppSession) -> None:
