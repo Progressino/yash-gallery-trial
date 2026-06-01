@@ -23,9 +23,16 @@ One hub loads:
 
 **P&L Compare** tab also has CSV downloads per section.
 
+## Print / PDF
+
+**Reports tab → Print / Save PDF** opens a print-ready HTML document (all sections). In the browser print dialog, choose **Save as PDF** or send to a printer.
+
+API: `GET /api/stitching/reports/print?date_from=&date_to=` (returns `text/html`).
+
 ## API
 
 - `GET /api/stitching/reports/hub?date_from=&date_to=`
+- `GET /api/stitching/reports/print?date_from=&date_to=`
 - `GET /api/stitching/reports/karigar-profitability`
 - `GET /api/stitching/reports/challan-labour`
 - `GET /api/stitching/payroll`

@@ -513,6 +513,21 @@ def challan_labour_payroll(date_from: str = "", date_to: str = ""):
     return svc.challan_labour_payroll_report(date_from, date_to)
 
 
+@router.get("/reports/print")
+def stitching_reports_print(date_from: str = "", date_to: str = ""):
+    """Print-ready HTML — open in browser and use Print → Save as PDF."""
+    from fastapi.responses import HTMLResponse
+
+    from ..services.stitching_report_print import stitching_reports_print_html
+
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    hub = svc.stitching_reports_hub(date_from, date_to)
+    return HTMLResponse(content=stitching_reports_print_html(hub))
+
+
 @router.post("/challans")
 def add_challan(body: ChallanBody):
     df = get_sheet_df("challan_master")

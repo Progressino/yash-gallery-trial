@@ -14,6 +14,7 @@ import {
   type HourEntryState,
 } from '../lib/stitchingHourEntry'
 import { computeDayFinancialSummary, formatProfitLoss } from '../lib/stitchingFinancial'
+import { printStitchingReportsPack } from '../lib/stitchingReportPrint'
 import { useAuth } from '../store/auth'
 
 type TabId =
@@ -2175,6 +2176,7 @@ function StitchingReportsTab() {
     return d.toISOString().slice(0, 10)
   })
   const [to, setTo] = useState(todayStr())
+  const [printing, setPrinting] = useState(false)
   const { data, refetch, isFetching } = useQuery({
     queryKey: ['stitching-reports-hub', from, to],
     queryFn: () =>
@@ -2217,8 +2219,28 @@ function StitchingReportsTab() {
         <button type="button" onClick={() => void refetch()} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm">
           Run all reports
         </button>
+        <button
+          type="button"
+          disabled={printing}
+          onClick={async () => {
+            setPrinting(true)
+            try {
+              await printStitchingReportsPack(from, to)
+            } catch (e: unknown) {
+              alert(e instanceof Error ? e.message : 'Could not open print view')
+            } finally {
+              setPrinting(false)
+            }
+          }}
+          className="px-4 py-2 border border-[#002B5B] text-[#002B5B] bg-white rounded-lg text-sm font-medium hover:bg-blue-50 disabled:opacity-50"
+        >
+          {printing ? 'Opening…' : '🖨 Print / Save PDF'}
+        </button>
         {data?.generated_at && <span className="text-gray-500">Generated {data.generated_at}</span>}
       </div>
+      <p className="text-xs text-gray-500 -mt-2">
+        Print opens a new tab with all sections; choose <strong>Save as PDF</strong> in the print dialog.
+      </p>
       {isFetching && <p className="text-sm text-gray-500">Building report pack…</p>}
       {data && (
         <>
