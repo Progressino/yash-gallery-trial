@@ -512,6 +512,7 @@ export default function POEngine() {
           planning_date: planningDate,
           raise_view_date: ledgerImportDate,
           raise_ledger_lookback_days: 14,
+          use_shared_cache: true,
         },
         (msg, pct) => {
           if (seq !== poRunSeqRef.current) return
@@ -1198,6 +1199,14 @@ export default function POEngine() {
 
             {result && !result.ok && (
               <p className="mt-3 text-sm text-red-600 bg-red-50 rounded p-2">{result.message}</p>
+            )}
+            {result?.ok && (result as { from_shared_cache?: boolean }).from_shared_cache && (
+              <p className="mt-3 text-sm text-sky-800 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
+                Loaded a <strong>shared PO run</strong> from earlier today on this server (same planning date and
+                settings). Click <strong>Calculate PO</strong> again with{' '}
+                <code className="text-xs">use_shared_cache: false</code> only if you need a fresh recompute after
+                uploading new data.
+              </p>
             )}
           </div>
 

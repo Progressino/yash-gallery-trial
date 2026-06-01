@@ -582,6 +582,8 @@ export interface POCalculateResult {
   planning_date?: string | null
   raise_ledger_rows?: number
   ledger_auto_import?: string | null
+  from_shared_cache?: boolean
+  shared_cache_at?: string
 }
 
 export type DailyInventoryUploadResult = {
@@ -839,7 +841,9 @@ export async function startPoCalculate(
   onTick?: (message: string, progress?: number) => void,
 ): Promise<POCalculateResult> {
   try {
-    const { data } = await api.post<POCalculateResult & { status?: string }>(
+    const { data } = await api.post<
+      POCalculateResult & { status?: string; from_shared_cache?: boolean }
+    >(
       '/po/calculate',
       body,
       { timeout: PO_REQUEST_TIMEOUT_MS },
@@ -847,7 +851,16 @@ export async function startPoCalculate(
     if (!data.ok) {
       return data
     }
-    if (data.status === 'running' || !data.rows) {
+    if (data.from_shared_cache) {
+      onTick?.(
+        (data.message as string) || 'Loaded shared PO from an earlier run today…',
+        100,
+      )
+    }
+    if (data.status === 'running' || (!data.rows && data.status !== 'done')) {
+      return waitForPoCalculate(onTick)
+    }
+    if (data.status === 'done' && !data.rows) {
       return waitForPoCalculate(onTick)
     }
     return data

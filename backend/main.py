@@ -1318,6 +1318,7 @@ def _session_po_calculate_light(path: str, method: str) -> bool:
     if method == "GET" and path in (
         "/api/po/calculate/status",
         "/api/po/calculate/result",
+        "/api/po/calculate/shared-cache",
         "/api/po/quarterly",
     ):
         return True

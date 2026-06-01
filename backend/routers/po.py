@@ -90,6 +90,9 @@ class PORequest(BaseModel):
     # automatically include ALL sibling sizes in the PO output so the operator
     # can review and raise for every size.  Set to 0 to disable.
     urgent_all_sizes_days: int = 45
+    # When True (default), reuse another session's PO result on this server if planning
+    # date, settings, and data snapshot match (see ``po_shared_cache``).
+    use_shared_cache: bool = True
 
 
 class RaiseConfirmItem(BaseModel):
@@ -942,6 +945,37 @@ def po_calculate_result(
     )
 
 
+@router.get("/calculate/shared-cache")
+def po_shared_cache_info(
+    request: Request,
+    planning_date: Optional[str] = None,
+    period_days: int = 90,
+    lead_time: int = 30,
+    target_days: int = 135,
+    demand_basis: str = "Sold",
+    group_by_parent: bool = False,
+    raise_ledger_lookback_days: int = 14,
+):
+    """Whether a shared PO run exists for this planning date and settings (no copy yet)."""
+    sess = request.state.session
+    if sess is None:
+        return {"available": False}
+    from ..services.po_shared_cache import shared_cache_availability
+
+    return shared_cache_availability(
+        sess,
+        {
+            "planning_date": planning_date,
+            "period_days": period_days,
+            "lead_time": lead_time,
+            "target_days": target_days,
+            "demand_basis": demand_basis,
+            "group_by_parent": group_by_parent,
+            "raise_ledger_lookback_days": raise_ledger_lookback_days,
+        },
+    )
+
+
 @router.post("/calculate")
 async def po_calculate(request: Request, body: PORequest, background_tasks: BackgroundTasks):
     """Start PO calculation in the background (avoids 502 on large catalogs)."""
@@ -956,6 +990,14 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     sid = getattr(request.state, "session_id", None)
     if not sid:
         return {"ok": False, "message": "No session id."}
+
+    body_dict = body.model_dump()
+    if body.use_shared_cache:
+        from ..services.po_shared_cache import apply_shared_cache_to_session
+
+        cached = apply_shared_cache_to_session(sess, sid, body_dict)
+        if cached:
+            return cached
 
     if getattr(sess, "po_calculate_status", "idle") == "running":
         return {

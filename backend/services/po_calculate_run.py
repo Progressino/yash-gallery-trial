@@ -342,6 +342,13 @@ def background_po_calculate(session_id: str, body: dict) -> None:
                 except Exception:
                     logger.exception("quarterly warmup after PO calculate failed")
 
+            try:
+                from .po_shared_cache import save_shared_cache
+
+                save_shared_cache(sess, body, po_df, result)
+            except Exception:
+                logger.exception("save_shared_cache after PO calculate failed")
+
             threading.Thread(
                 target=_warm_quarterly_bg,
                 daemon=True,

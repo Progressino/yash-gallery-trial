@@ -63,6 +63,21 @@ def has_spill(session_id: str | None) -> bool:
     return bool(session_id and _path(session_id).is_file())
 
 
+def copy_spill_from_path(source: Path, session_id: str) -> bool:
+    """Copy an existing parquet file into this session's spill path."""
+    if not session_id or not source.is_file():
+        return False
+    try:
+        tmp = _path(session_id).with_suffix(".parquet.tmp")
+        final = _path(session_id)
+        shutil.copy2(source, tmp)
+        tmp.replace(final)
+        return True
+    except Exception:
+        _log.exception("copy_spill_from_path failed session=%s", session_id[:8])
+        return False
+
+
 def spill_row_count(session_id: str) -> int:
     if not session_id or not has_spill(session_id):
         return 0
