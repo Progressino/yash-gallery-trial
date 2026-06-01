@@ -80,22 +80,29 @@ def test_po_calculate_ok(client, session_for_client):
     )
     r = client.post(
         "/api/po/calculate",
-        json={"period_days": 30, "lead_time": 7, "target_days": 60, "safety_pct": 0},
+        json={
+            "period_days": 30,
+            "lead_time": 7,
+            "target_days": 60,
+            "safety_pct": 0,
+            "use_shared_cache": False,
+        },
     )
     assert r.status_code == 200
     kick = r.json()
     assert kick.get("ok") is True
-    assert kick.get("status") == "running"
+    assert kick.get("status") in ("running", "done")
     body = kick
-    for _ in range(60):
-        st = client.get("/api/po/calculate/status")
-        assert st.status_code == 200
-        body = st.json()
-        if body.get("status") == "done":
-            break
-        if body.get("status") == "error":
-            raise AssertionError(body.get("message") or "PO calculate failed")
-        time.sleep(0.5)
+    if body.get("status") != "done":
+        for _ in range(60):
+            st = client.get("/api/po/calculate/status")
+            assert st.status_code == 200
+            body = st.json()
+            if body.get("status") == "done":
+                break
+            if body.get("status") == "error":
+                raise AssertionError(body.get("message") or "PO calculate failed")
+            time.sleep(0.5)
     assert body.get("ok") is True
     res = client.get(
         "/api/po/calculate/result",
