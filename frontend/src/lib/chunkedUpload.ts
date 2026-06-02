@@ -7,6 +7,8 @@ import axios, { type AxiosError } from 'axios'
 const chunkApi = axios.create({
   baseURL: '/api',
   withCredentials: true,
+  // Keep chunk transport resilient on slow networks / busy server.
+  timeout: 120_000,
 })
 
 export type ChunkUploadTarget = 'daily-auto' | 'inventory-auto'

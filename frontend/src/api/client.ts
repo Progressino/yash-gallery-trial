@@ -18,6 +18,8 @@ export const api = axios.create({
   baseURL: '/api',
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
+  // Prevent accidental tiny inherited timeouts (e.g. 3000ms) on upload/status calls.
+  timeout: 120_000,
 })
 
 // ── Types ─────────────────────────────────────────────────────
