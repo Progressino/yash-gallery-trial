@@ -32,6 +32,16 @@ OT_BREAK_MINUTES = 15
 STANDARD_PAY_MINUTES = 8 * 60  # salary based on 8 working hours
 EARLY_LEAVE_GRACE_MINUTES = 5  # ignore tiny early-outs (e.g. 17:58 vs 18:00)
 LATE_ARRIVAL_GRACE_MINUTES = 5  # ignore tiny late-ins (e.g. 09:02 vs 09:00)
+# Late-out grace at shift end and OT cap (e.g. 17:58≈18:00, 20:59≈21:00)
+LATE_OUT_GRACE_MINUTES = 5
+# If worker leaves early at/before 16:00, apply extra 30-minute deduction.
+EARLY_LEAVE_16_PENALTY_MINUTES = 30
+
+# Sunday policy: 7-hour shift including 1-hour lunch, so payable basis is 6 hours.
+SUNDAY_WORK_END = time(17, 0)
+SUNDAY_LUNCH_START = time(13, 0)
+SUNDAY_LUNCH_END = time(14, 0)
+SUNDAY_PAYABLE_MINUTES = 6 * 60
 # work_minutes uses WORK_BLOCKS (already excludes lunch/tea slots); near-full days skip extra lunch cut
 NEAR_FULL_BLOCK_MINUTES = STANDARD_PAY_MINUTES - 15
 
@@ -41,6 +51,43 @@ WORK_BLOCKS = (
     (LUNCH_END, TEA2_START),
     (TEA2_END, WORK_END),
 )
+
+
+def _policy_for_date(base: date) -> dict[str, Any]:
+    """Dynamic shift policy. Sunday uses 09:00–17:00 with 13:00–14:00 lunch (6h payable basis)."""
+    is_sunday = base.weekday() == 6
+    if not is_sunday:
+        return {
+            "is_sunday": False,
+            "work_end": WORK_END,
+            "ot_start": OT_START,
+            "ot_end": OT_END,
+            "lunch_start": LUNCH_START,
+            "lunch_end": LUNCH_END,
+            "lunch_default_min": float(DEFAULT_LUNCH_BREAK_MINUTES),
+            "standard_pay_minutes": float(STANDARD_PAY_MINUTES),
+            "near_full_block_minutes": float(NEAR_FULL_BLOCK_MINUTES),
+            "work_blocks": list(WORK_BLOCKS),
+            "sunday_waive_tea": False,
+        }
+    blocks = [
+        # Sunday basis is 7 hours with only lunch as mid break (manual rulebook).
+        (WORK_START, SUNDAY_LUNCH_START),
+        (SUNDAY_LUNCH_END, SUNDAY_WORK_END),
+    ]
+    return {
+        "is_sunday": True,
+        "work_end": SUNDAY_WORK_END,
+        "ot_start": SUNDAY_WORK_END,
+        "ot_end": OT_END,
+        "lunch_start": SUNDAY_LUNCH_START,
+        "lunch_end": SUNDAY_LUNCH_END,
+        "lunch_default_min": 60.0,
+        "standard_pay_minutes": float(SUNDAY_PAYABLE_MINUTES),
+        "near_full_block_minutes": float(SUNDAY_PAYABLE_MINUTES - 15),
+        "work_blocks": blocks,
+        "sunday_waive_tea": True,
+    }
 
 
 def _parse_clock(val: Any) -> time | None:
@@ -240,6 +287,7 @@ def calc_salary_from_punches(
         return zero
 
     base = pd.to_datetime(on_date or date.today()).date()
+    pol = _policy_for_date(base)
     intervals = _intervals_from_pairs(punch_pairs, base)
     if not intervals:
         return zero
@@ -255,16 +303,17 @@ def calc_salary_from_punches(
     total_presence_min = sum((e - s).total_seconds() / 60.0 for s, e in intervals)
 
     work_minutes = 0.0
-    for block_start, block_end in WORK_BLOCKS:
+    for block_start, block_end in pol["work_blocks"]:
         bs = _dt_on(base, block_start)
         be = _dt_on(base, block_end)
         for s, e in intervals:
             work_minutes += _overlap_minutes(s, e, bs, be)
 
     lunch_penalty = 0.0
+    lunch_penalty_display = 0.0
     tea_penalty = 0.0
     special_break_penalty = _left_before_lunch_return_at_tea(intervals, base)
-    lunch_window = (_dt_on(base, LUNCH_START), _dt_on(base, LUNCH_END))
+    lunch_window = (_dt_on(base, pol["lunch_start"]), _dt_on(base, pol["lunch_end"]))
     tea1_window = (_dt_on(base, TEA1_START), _dt_on(base, TEA1_END))
     tea2_window = (_dt_on(base, TEA2_START), _dt_on(base, TEA2_END))
     # Lunch: deduct if they stayed clocked in through lunch (no break). Tea: deduct if absent from floor.
@@ -272,16 +321,31 @@ def calc_salary_from_punches(
     tea1_absent = not _present_during(intervals, *tea1_window)
     tea2_absent = not _present_during(intervals, *tea2_window)
 
-    if waive_lunch_break:
-        lunch_penalty = 0.0
-    elif lunch_break_minutes is not None:
-        lunch_penalty = max(0.0, float(lunch_break_minutes))
-    elif special_break_penalty:
-        lunch_penalty = float(DEFAULT_LUNCH_BREAK_MINUTES)
-    elif worked_through_lunch:
-        lunch_penalty = float(DEFAULT_LUNCH_BREAK_MINUTES)
+    if pol.get("is_sunday"):
+        # Sunday rulebook: lunch is a fixed 13:00–14:00 mid break; work blocks already exclude it,
+        # so don't deduct it again from payable minutes (but still show it in the sheet).
+        lunch_penalty_display = float(pol["lunch_default_min"])
+        if waive_lunch_break:
+            lunch_penalty = 0.0
+        elif lunch_break_minutes is not None:
+            # Explicit override, apply as provided.
+            lunch_penalty = max(0.0, float(lunch_break_minutes))
+        else:
+            lunch_penalty = 0.0
+    else:
+        lunch_penalty_display = 0.0
+        if waive_lunch_break:
+            lunch_penalty = 0.0
+        elif lunch_break_minutes is not None:
+            lunch_penalty = max(0.0, float(lunch_break_minutes))
+        elif special_break_penalty:
+            lunch_penalty = float(pol["lunch_default_min"])
+        elif worked_through_lunch:
+            lunch_penalty = float(pol["lunch_default_min"])
 
-    if waive_tea_break:
+    if pol.get("sunday_waive_tea"):
+        tea_penalty = 0.0
+    elif waive_tea_break:
         tea_penalty = 0.0
     elif tea_break_minutes is not None:
         tea_penalty = max(0.0, float(tea_break_minutes))
@@ -303,8 +367,16 @@ def calc_salary_from_punches(
     late_min = 0.0 if late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES else late_min_raw
     # Overtime: after 18:00 until actual out (cap 21:00), same hourly rate as regular (daily/8).
     last_out_dt = max(e for _, e in intervals)
-    ot_start = _dt_on(base, OT_START)
-    ot_end_cap = min(last_out_dt, _dt_on(base, OT_END))
+    # Late-out grace: treat small differences as exact shift end / OT cap.
+    shift_end_dt = _dt_on(base, pol["work_end"])
+    if shift_end_dt - timedelta(minutes=LATE_OUT_GRACE_MINUTES) <= last_out_dt <= shift_end_dt:
+        last_out_dt = shift_end_dt
+    ot_end_dt = _dt_on(base, pol["ot_end"])
+    if ot_end_dt - timedelta(minutes=LATE_OUT_GRACE_MINUTES) <= last_out_dt <= ot_end_dt:
+        last_out_dt = ot_end_dt
+
+    ot_start = _dt_on(base, pol["ot_start"])
+    ot_end_cap = min(last_out_dt, _dt_on(base, pol["ot_end"]))
     ot_minutes = 0.0
     if ot_end_cap > ot_start:
         ot_minutes = (ot_end_cap - ot_start).total_seconds() / 60.0
@@ -318,51 +390,54 @@ def calc_salary_from_punches(
     ot_pay = round(ot_hrs_bill * hourly, 2)
 
     early_min = 0.0
-    if last_out < WORK_END and ot_minutes <= 0:
+    if last_out < pol["work_end"] and ot_minutes <= 0:
         early_min = (
-            datetime.combine(base, WORK_END) - datetime.combine(base, last_out)
+            datetime.combine(base, pol["work_end"]) - datetime.combine(base, last_out)
         ).total_seconds() / 60.0
     early_min_payable = 0.0 if early_min <= EARLY_LEAVE_GRACE_MINUTES else early_min
+    # Rulebook: if out at/before 16:00, deduct extra 30 minutes.
+    early_16_penalty = float(EARLY_LEAVE_16_PENALTY_MINUTES) if last_out <= time(16, 0) else 0.0
 
     work_net_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
 
     # Full shift + OT with only grace-level lateness → master daily rate + OT (manual sheet).
     full_day_with_ot = (
         ot_hrs_bill > 0
-        and work_minutes >= NEAR_FULL_BLOCK_MINUTES
+        and work_minutes >= pol["near_full_block_minutes"]
         and late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES
     )
 
     if full_day_with_ot:
-        payable_minutes = float(STANDARD_PAY_MINUTES)
+        payable_minutes = float(pol["standard_pay_minutes"])
         normal_pay = round(float(daily_rate), 2)
     elif late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
         shift_net_minutes = max(
-            float(STANDARD_PAY_MINUTES)
+            float(pol["standard_pay_minutes"])
             - lunch_penalty
             - tea_penalty
             - late_min
-            - early_min_payable,
+            - early_min_payable
+            - early_16_penalty,
             0.0,
         )
         payable_minutes = min(shift_net_minutes, work_net_minutes)
-        payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
-        normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
+        payable_minutes = min(payable_minutes, float(pol["standard_pay_minutes"]))
+        normal_pay = round((payable_minutes / float(pol["standard_pay_minutes"])) * daily_rate, 2)
     else:
         # Near-full day within grace: pay full master daily rate (manual salary sheet).
         near_full_grace_day = (
-            work_minutes >= NEAR_FULL_BLOCK_MINUTES
+            work_minutes >= pol["near_full_block_minutes"]
             and late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES
             and early_min <= EARLY_LEAVE_GRACE_MINUTES
         )
         if near_full_grace_day:
-            payable_minutes = float(STANDARD_PAY_MINUTES)
+            payable_minutes = float(pol["standard_pay_minutes"])
             normal_pay = round(float(daily_rate), 2)
         else:
             # On-time in: WORK_BLOCKS already exclude scheduled breaks.
             payable_minutes = max(work_minutes - early_min_payable, 0.0)
-            payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
-            normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
+            payable_minutes = min(payable_minutes, float(pol["standard_pay_minutes"]))
+            normal_pay = round((payable_minutes / float(pol["standard_pay_minutes"])) * daily_rate, 2)
     payable_hrs = round(payable_minutes / 60.0, 2)
 
     punch_pairs_json = serialize_punch_pairs(punch_pairs)
@@ -380,7 +455,7 @@ def calc_salary_from_punches(
         "OT_Hours": ot_hrs,
         "OT_Pay": ot_pay,
         "Total_Pay": round(normal_pay + ot_pay, 2),
-        "Lunch_Deduction_Hrs": round(lunch_penalty / 60.0, 2),
+        "Lunch_Deduction_Hrs": round((lunch_penalty_display or lunch_penalty) / 60.0, 2),
         "Tea_Deduction_Hrs": round(tea_penalty / 60.0, 2),
         "Break_Penalty_Hrs": round((lunch_penalty + tea_penalty) / 60.0, 2),
         "Late_Deduction_Hrs": _late_deduction_hrs_display(late_min_raw),
@@ -545,7 +620,24 @@ def _extract_report_date(raw: pd.DataFrame) -> str:
                     m = re.search(r"(\d{1,2}-[A-Za-z]{3}-\d{4})", cell)
                     if m:
                         return pd.to_datetime(m.group(1), dayfirst=True).strftime("%Y-%m-%d")
-    return str(date.today())
+    return ""
+
+
+def _date_from_filename(filename: str) -> str:
+    fn = (filename or "").strip()
+    if not fn:
+        return ""
+    # common: 02-06-2026.xls / 2_6_26.xlsx / attendance 02.06.2026.xls
+    m = re.search(r"(\d{1,2})[\\-_/\\.](\d{1,2})[\\-_/\\.](\d{2,4})", fn)
+    if not m:
+        return ""
+    d, mth, y = m.group(1), m.group(2), m.group(3)
+    if len(y) == 2:
+        y = "20" + y
+    try:
+        return pd.to_datetime(f"{d}-{mth}-{y}", dayfirst=True).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
 
 
 def _find_header_row(raw: pd.DataFrame) -> int:
@@ -569,7 +661,7 @@ def parse_inout_punch_report(raw: bytes, filename: str = "") -> tuple[str, pd.Da
         preview = pd.read_excel(bio, sheet_name=0, header=None, engine="xlrd")
     else:
         preview = pd.read_excel(bio, sheet_name=0, header=None)
-    report_date = _extract_report_date(preview)
+    report_date = _extract_report_date(preview) or _date_from_filename(filename) or str(date.today())
     header_row = _find_header_row(preview)
     bio.seek(0)
     if fn.endswith(".xls"):

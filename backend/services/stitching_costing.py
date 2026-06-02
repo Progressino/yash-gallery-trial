@@ -443,8 +443,10 @@ def upsert_karigar_expense(
         return {"ok": False, "message": "Enter Amount_Rs or Hours."}
     daily = get_daily_rate_for_date(kid, date_str)
     hourly = round(daily / 8, 2) if daily > 0 else 0.0
+    auto_amount = False
     if amt <= 0 and hours > 0 and hourly > 0:
         amt = round(float(hours) * hourly, 2)
+        auto_amount = True
     km = get_sheet_df("karigar_master")
     kname = kid
     if not km.empty and "Karigar_ID" in km.columns:
@@ -491,6 +493,7 @@ def upsert_karigar_expense(
         "Amount_Rs": amt,
         "Daily_Rate_Rs": daily,
         "Hourly_Rate_Rs": hourly,
+        "Auto_Amount": auto_amount,
         "Notes": combined_notes,
         "Updated_At": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -558,6 +561,28 @@ def list_karigar_expenses(
     ]
     if karigar_id:
         work = work[work["Karigar_ID"].apply(clean_key) == clean_key(karigar_id)]
+    # Recompute hourly/daily and (when auto-derived) amount for consistency across SKUs.
+    for c in ("Hours", "Amount_Rs", "Daily_Rate_Rs", "Hourly_Rate_Rs"):
+        if c in work.columns:
+            work[c] = safe_num(work[c])
+    if not work.empty and "Karigar_ID" in work.columns and "Date" in work.columns:
+        for idx in work.index:
+            kid = clean_key(work.at[idx, "Karigar_ID"])
+            dstr = str(work.at[idx, "Date"] or "")[:10]
+            if not kid or not dstr:
+                continue
+            daily = get_daily_rate_for_date(kid, dstr)
+            hourly = round(daily / 8, 2) if daily > 0 else float(work.at[idx, "Hourly_Rate_Rs"] or 0)
+            hrs = float(work.at[idx, "Hours"] or 0)
+            amt = float(work.at[idx, "Amount_Rs"] or 0)
+            expected = round(hrs * hourly, 2) if hrs > 0 and hourly > 0 else amt
+            auto_flag = bool(work.at[idx, "Auto_Amount"]) if "Auto_Amount" in work.columns else False
+            # If amount is auto-calculated (or looks auto), keep it in sync with current rate-at-date.
+            if hrs > 0 and hourly > 0 and (auto_flag or amt <= 0 or abs(amt - expected) <= 1.0):
+                work.at[idx, "Amount_Rs"] = expected
+            if daily > 0:
+                work.at[idx, "Daily_Rate_Rs"] = daily
+            work.at[idx, "Hourly_Rate_Rs"] = hourly
     return work.fillna("").to_dict(orient="records")
 
 

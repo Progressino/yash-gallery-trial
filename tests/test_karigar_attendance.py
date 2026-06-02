@@ -88,6 +88,42 @@ def test_overtime_manoj_807_two_minute_late_still_full_day():
     assert out["Total_Pay"] == 715.0
 
 
+def test_late_out_grace_2059_counts_as_21():
+    """20:59 should get OT-cap grace to 21:00 (policy)."""
+    out = att.calc_salary_from_punches(
+        [(time(9, 0), time(20, 59))],
+        520.0,
+        on_date="2026-06-01",
+        status="P",
+    )
+    assert out["OT_Hours"] == 3.0
+    assert out["Total_Pay"] == 715.0
+
+
+def test_sunday_7_hour_basis_6_hour_payable_full_day():
+    """Sunday: shift 09:00–17:00 with 13:00–14:00 lunch => 6h payable basis = full daily rate."""
+    # 2026-06-07 is a Sunday.
+    out = att.calc_salary_from_punches(
+        [(time(9, 0), time(17, 0))],
+        400.0,
+        on_date="2026-06-07",
+        status="P",
+    )
+    assert out["Payable_Hrs"] == 6.0
+    assert out["Normal_Pay"] == 400.0
+
+
+def test_early_leave_before_16_adds_30_min_penalty():
+    """Leaving at 16:00 triggers extra 30m deduction in addition to early minutes."""
+    out = att.calc_salary_from_punches(
+        [(time(9, 0), time(16, 0))],
+        480.0,
+        on_date="2026-06-01",
+        status="P",
+    )
+    assert out["Payable_Hrs"] < 7.0  # 7h block minus lunch/tea plus 30m penalty
+
+
 def test_needs_miss_punch_single_in():
     assert att.needs_miss_punch([(time(9, 0), None)]) is True
     assert att.needs_miss_punch([(time(9, 0), time(18, 0))]) is False
