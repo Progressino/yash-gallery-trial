@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { resetErpModuleData } from '../api/client'
+import { mayAccessErpAdmin, useAuth } from '../store/auth'
 
 type Tab = 'dashboard' | 'demands' | 'orders' | 'reports' | 'tracker' | 'settings'
 type ReportView = 'sku-pending' | 'delivery-due' | 'buyer' | 'source' | 'demand-coverage'
@@ -199,6 +201,7 @@ function ParentSkuPicker({ onAddLines }: {
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function SalesOrders() {
   const qc = useQueryClient()
+  const authUser = useAuth(s => s.user)
   const [tab, setTab] = useState<Tab>('dashboard')
   const [showNewDemand, setShowNewDemand] = useState(false)
   const [showNewSO, setShowNewSO] = useState(false)
@@ -221,6 +224,8 @@ export default function SalesOrders() {
   const [customTeams, setCustomTeams] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('erp_teams') || 'null') || DEFAULT_TEAMS } catch { return DEFAULT_TEAMS }
   })
+  const [resetBusyModule, setResetBusyModule] = useState<string | null>(null)
+  const [resetMessage, setResetMessage] = useState<string>('')
 
   // Demand form
   const [dForm, setDForm] = useState({ demand_source: 'Sales Team', buyer: '', priority: 'Normal', notes: '' })
@@ -286,6 +291,37 @@ export default function SalesOrders() {
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/sales/orders/lines/${id}`, data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['sales-orders'] }); qc.invalidateQueries({ queryKey: ['sales-orders-all'] }); setEditingLineId(null) }
   })
+  const resetModuleMut = useMutation({
+    mutationFn: (module: string) => resetErpModuleData(module),
+    onSuccess: (res) => {
+      setResetMessage(`${res.message} (${res.rows_deleted} rows deleted)`)
+      qc.invalidateQueries({ queryKey: ['demands'] })
+      qc.invalidateQueries({ queryKey: ['sales-orders'] })
+      qc.invalidateQueries({ queryKey: ['sales-orders-all'] })
+      qc.invalidateQueries({ queryKey: ['demands-all'] })
+    },
+  })
+
+  const SALES_RESET_MODULES: Array<{ key: string; label: string }> = [
+    { key: 'sales_orders', label: 'Sales Orders' },
+    { key: 'item_master', label: 'Item Master' },
+    { key: 'purchase', label: 'Purchase' },
+    { key: 'tna', label: 'TNA' },
+    { key: 'production', label: 'Production' },
+    { key: 'grey_fabric', label: 'Grey Fabric' },
+  ]
+
+  function runModuleReset(module: string, label: string) {
+    const ok = window.confirm(
+      `Remove testing data from ${label}?\n\nThis permanently deletes records and cannot be undone.`,
+    )
+    if (!ok) return
+    setResetBusyModule(module)
+    setResetMessage('')
+    resetModuleMut.mutate(module, {
+      onSettled: () => setResetBusyModule(null),
+    })
+  }
 
   function addDLine() { setDLines(l => [...l, { sku: '', sku_name: '', demand_qty: 0 }]) }
   const blankSOLine = () => ({
@@ -1337,6 +1373,34 @@ export default function SalesOrders() {
       {/* ── Settings ── */}
       {tab === 'settings' && (
         <div className="space-y-4">
+          {mayAccessErpAdmin(authUser) && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+              <div>
+                <p className="text-sm font-semibold text-amber-800">Admin Data Reset (Convenience)</p>
+                <p className="text-xs text-amber-700">Quick remove of testing data from ERP modules.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {SALES_RESET_MODULES.map(m => (
+                  <button
+                    key={m.key}
+                    type="button"
+                    onClick={() => runModuleReset(m.key, m.label)}
+                    disabled={resetModuleMut.isPending}
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    {resetBusyModule === m.key ? 'Removing…' : `Reset ${m.label}`}
+                  </button>
+                ))}
+              </div>
+              {resetMessage && <p className="text-xs text-green-700">{resetMessage}</p>}
+              {resetModuleMut.isError && (
+                <p className="text-xs text-red-600">
+                  {(resetModuleMut.error as Error)?.message || 'Reset failed'}
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
             {([['buyers', '🛒 Buyers'], ['warehouses', '🏭 Warehouses'], ['teams', '👥 Sales Teams']] as [SettingsTab, string][]).map(([key, label]) => (
               <button key={key} onClick={() => setSettingsTab(key)}
