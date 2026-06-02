@@ -380,62 +380,76 @@ export default function Upload() {
         if (res.ok) {
           if (res.ingest_async || res.sales_rebuild === 'pending') {
             showToast('success', `${res.message} Processing on server…`, 6000)
-            let cov: CoverageResponse | null = null
-            if (res.ingest_async) {
-              cov = await waitForDailyAutoIngest(msg => {
-                setBuildingMsg(msg)
-                setChunkProgress(prev => {
-                  const total = prev?.total ?? 100
-                  const prevPct = prev?.pct ?? 85
-                  const pct = _bumpProgress(prevPct, 96, 2)
-                  return {
-                    pct,
-                    sent: Math.round((total * pct) / 100),
-                    total,
-                    msg,
-                  }
+            try {
+              let cov: CoverageResponse | null = null
+              if (res.ingest_async) {
+                cov = await waitForDailyAutoIngest(msg => {
+                  setBuildingMsg(msg)
+                  setChunkProgress(prev => {
+                    const total = prev?.total ?? 100
+                    const prevPct = prev?.pct ?? 85
+                    const pct = _bumpProgress(prevPct, 96, 2)
+                    return {
+                      pct,
+                      sent: Math.round((total * pct) / 100),
+                      total,
+                      msg,
+                    }
+                  })
                 })
-              })
-            }
-            if (res.sales_rebuild === 'pending') {
-              setBuildingMsg('Rebuilding combined sales…')
-              setChunkProgress(prev => {
-                const total = prev?.total ?? 100
-                const prevPct = prev?.pct ?? 96
-                const pct = Math.max(96, prevPct)
-                return {
-                  pct,
-                  sent: Math.round((total * pct) / 100),
-                  total,
-                  msg: 'Rebuilding combined sales…',
-                }
-              })
-              cov = await waitForSalesRebuild(msg => {
-                setBuildingMsg(msg)
+              }
+              if (res.sales_rebuild === 'pending') {
+                setBuildingMsg('Rebuilding combined sales…')
                 setChunkProgress(prev => {
                   const total = prev?.total ?? 100
                   const prevPct = prev?.pct ?? 96
-                  const pct = _bumpProgress(prevPct, 99, 1)
+                  const pct = Math.max(96, prevPct)
                   return {
                     pct,
                     sent: Math.round((total * pct) / 100),
                     total,
-                    msg,
+                    msg: 'Rebuilding combined sales…',
                   }
                 })
-              })
-            }
-            setChunkProgress(prev => {
-              const total = prev?.total ?? 100
-              return {
-                pct: 100,
-                sent: total,
-                total,
-                msg: 'Done',
+                cov = await waitForSalesRebuild(msg => {
+                  setBuildingMsg(msg)
+                  setChunkProgress(prev => {
+                    const total = prev?.total ?? 100
+                    const prevPct = prev?.pct ?? 96
+                    const pct = _bumpProgress(prevPct, 99, 1)
+                    return {
+                      pct,
+                      sent: Math.round((total * pct) / 100),
+                      total,
+                      msg,
+                    }
+                  })
+                })
               }
-            })
-            setBuildingMsg('')
-            finalizeDailyAutoUpload('daily', cov, res)
+              setChunkProgress(prev => {
+                const total = prev?.total ?? 100
+                return {
+                  pct: 100,
+                  sent: total,
+                  total,
+                  msg: 'Done',
+                }
+              })
+              setBuildingMsg('')
+              finalizeDailyAutoUpload('daily', cov, res)
+            } catch (pollErr: unknown) {
+              const msg = pollErr instanceof Error ? pollErr.message : 'Upload status unknown'
+              if (/timed out/i.test(msg)) {
+                showToast(
+                  'success',
+                  'Upload accepted and still processing on server. You can continue working; status will update below.',
+                  12_000,
+                )
+                await refresh({ light: true })
+              } else {
+                throw pollErr
+              }
+            }
           } else {
             finalizeDailyAutoUpload('daily', null, res)
           }
@@ -462,11 +476,20 @@ export default function Upload() {
           await refresh()
         } catch (pollErr: unknown) {
           const msg = pollErr instanceof Error ? pollErr.message : 'Upload status unknown'
-          showToast(
-            'error',
-            `${msg} Try “Clear stuck upload”, wait a minute, then Load Cache.`,
-            12_000,
-          )
+          if (/timed out/i.test(msg)) {
+            showToast(
+              'success',
+              'Upload accepted and still processing on server. You can continue working; status will update below.',
+              12_000,
+            )
+            await refresh({ light: true })
+          } else {
+            showToast(
+              'error',
+              `${msg} Try “Clear stuck upload”, wait a minute, then Load Cache.`,
+              12_000,
+            )
+          }
         }
       } else {
         const msg = e instanceof Error ? e.message : 'Upload failed'

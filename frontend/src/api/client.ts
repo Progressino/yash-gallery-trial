@@ -204,6 +204,8 @@ export function formatDailyAutoCompleteToast(
 
 /** Tier-1 multi-year ZIPs can take several minutes to parse; align with nginx proxy_read_timeout (e.g. 900s). */
 const UPLOAD_TIMEOUT_MS = 900_000
+/** Background parsing/rebuild can exceed request upload timeout on very large bundles. */
+const UPLOAD_BACKGROUND_WAIT_MS = 1_800_000
 // Coverage/cache calls may queue behind uploads or session restore.
 const CACHE_TIMEOUT_MS = 120_000
 /** Status polls while server parses inventory or runs PO math (per request). */
@@ -480,7 +482,7 @@ export async function resetStuckDailyUpload(): Promise<{ ok: boolean; cleared: b
 /** Poll until Tier-3 background ingest finishes (daily-auto). */
 export async function waitForDailyAutoIngest(
   onTick?: (message: string) => void,
-  maxMs = UPLOAD_TIMEOUT_MS,
+  maxMs = UPLOAD_BACKGROUND_WAIT_MS,
 ): Promise<CoverageResponse> {
   const start = Date.now()
   let sawRunning = false
@@ -555,7 +557,7 @@ export async function waitForInventoryUpload(
 /** Poll until Tier-3 background sales rebuild finishes (daily-auto). */
 export async function waitForSalesRebuild(
   onTick?: (message: string) => void,
-  maxMs = UPLOAD_TIMEOUT_MS,
+  maxMs = UPLOAD_BACKGROUND_WAIT_MS,
 ): Promise<CoverageResponse> {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
