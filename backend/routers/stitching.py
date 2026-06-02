@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 import pandas as pd
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,7 @@ from ..db.stitching_db import (
     verify_admin_password,
 )
 from ..services import stitching_costing as svc
+from ..services.permissions import may_access_erp_admin
 from ..services.stitching_gsheet import gsheet_status, sync_from_gsheet, sync_from_gsheet_merge, sync_to_gsheet
 
 router = APIRouter()
@@ -770,6 +771,25 @@ def update_employee(e_code: str, body: EmployeeUpdateBody):
         emp_type=body.Type,
         daily_rate_rs=body.Daily_Rate_Rs,
     )
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Not found"))
+    return out
+
+
+class KarigarActiveBody(BaseModel):
+    karigar_id: str
+    active: bool
+    admin_password: str = ""
+
+
+@router.post("/master/karigar/active")
+def set_karigar_active(body: KarigarActiveBody, request: Request):
+    if not verify_admin_password(body.admin_password):
+        raise HTTPException(403, "Admin password required")
+    role = str(getattr(request.state, "user_role", "") or "")
+    if not may_access_erp_admin(role):
+        raise HTTPException(403, "Only Admin can deactivate contractors.")
+    out = svc.set_karigar_active(body.karigar_id, body.active)
     if not out.get("ok"):
         raise HTTPException(404, out.get("message", "Not found"))
     return out

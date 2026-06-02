@@ -2115,6 +2115,7 @@ function PayrollTab() {
     queryFn: () => api.get('/stitching/payroll', { params: { date_from: from, date_to: to } }).then(r => r.data),
     enabled: false,
   })
+  const rows = ((data?.rows ?? []) as Record<string, unknown>[]).filter(r => Number(r.Total ?? 0) > 0)
   const payrollCols = [
     'Karigar_ID',
     'Name',
@@ -2159,7 +2160,7 @@ function PayrollTab() {
           </p>
           <ReportTableSection
             title="Karigar payroll (all expenses)"
-            rows={(data.rows ?? []) as Record<string, unknown>[]}
+            rows={rows}
             cols={payrollCols}
             downloadName={`payroll_${from}_${to}`}
           />
@@ -4185,6 +4186,20 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
       onFlash('err', String(e.response?.data?.detail || 'Update failed')),
   })
 
+  const setKarigarActiveMut = useMutation({
+    mutationFn: (payload: { karigar_id: string; active: boolean }) => {
+      const pw = admin.adminPassword()
+      if (!pw) throw new Error('Unlock admin first')
+      return api.post('/stitching/master/karigar/active', { ...payload, admin_password: pw })
+    },
+    onSuccess: r => {
+      onFlash('ok', r.data.message || 'Updated')
+      invalidateSheet()
+    },
+    onError: (e: { response?: { data?: { detail?: string } } }) =>
+      onFlash('err', String(e.response?.data?.detail || 'Update failed')),
+  })
+
   const updateEmpMut = useMutation({
     mutationFn: () => {
       const pw = admin.adminPassword()
@@ -4406,6 +4421,19 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
                 <div className="flex gap-2 self-end">
                   <button type="button" onClick={() => updateKarMut.mutate()} disabled={updateKarMut.isPending} className="px-3 py-2 bg-violet-700 text-white rounded-lg font-semibold disabled:opacity-50">
                     Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setKarigarActiveMut.mutate({
+                        karigar_id: String(editKarigar?.Karigar_ID ?? ''),
+                        active: String((editKarigar as any)?.Active ?? 'true').toLowerCase() === 'true' ? false : true,
+                      })
+                    }
+                    disabled={setKarigarActiveMut.isPending}
+                    className="px-3 py-2 border rounded-lg"
+                  >
+                    {setKarigarActiveMut.isPending ? 'Updating…' : 'Toggle Active'}
                   </button>
                   <button type="button" onClick={() => setEditKarigar(null)} className="px-3 py-2 border rounded-lg">
                     Cancel

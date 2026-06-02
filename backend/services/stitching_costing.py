@@ -260,6 +260,7 @@ def _latest_production_row_index(
 def list_karigar_directory() -> list[dict[str, str]]:
     """Karigars for expense/production dropdowns — master + employees + recent production."""
     out: dict[str, dict[str, str]] = {}
+    inactive: set[str] = set()
 
     def _add(kid: Any, name: Any = "") -> None:
         key = clean_key(kid)
@@ -274,6 +275,9 @@ def list_karigar_directory() -> list[dict[str, str]]:
     km = get_sheet_df("karigar_master")
     if not km.empty and "Karigar_ID" in km.columns:
         for _, row in km.iterrows():
+            key = clean_key(row.get("Karigar_ID"))
+            if key and str(row.get("Active", "")).strip().lower() in ("0", "false", "no", "inactive"):
+                inactive.add(key)
             _add(row.get("Karigar_ID"), row.get("Name", ""))
 
     em = get_sheet_df("employee_master")
@@ -282,6 +286,9 @@ def list_karigar_directory() -> list[dict[str, str]]:
             typ = str(row.get("Type", "") or "").strip().lower()
             if typ not in ("karigar", "stitching"):
                 continue
+            key = clean_key(row.get("E_Code"))
+            if key and str(row.get("Active", "")).strip().lower() in ("0", "false", "no", "inactive"):
+                inactive.add(key)
             _add(row.get("E_Code"), row.get("Name", ""))
 
     pl = get_sheet_df("production_log")
@@ -289,7 +296,44 @@ def list_karigar_directory() -> list[dict[str, str]]:
         for _, row in pl.iterrows():
             _add(row.get("Karigar_ID"), row.get("Karigar_Name", ""))
 
-    return sorted(out.values(), key=lambda r: (r["Name"].lower(), r["Karigar_ID"]))
+    rows = []
+    for r in out.values():
+        kid = clean_key(r.get("Karigar_ID"))
+        if kid in inactive:
+            continue
+        rows.append(r)
+    return sorted(rows, key=lambda r: (r["Name"].lower(), r["Karigar_ID"]))
+
+
+def set_karigar_active(karigar_id: str, active: bool) -> dict:
+    """Soft deactivate a karigar/contractor so they don't show in payroll/dropdowns."""
+    kid = clean_key(karigar_id)
+    if not kid:
+        return {"ok": False, "message": "Karigar ID is required"}
+
+    changed = 0
+    km = get_sheet_df("karigar_master")
+    if not km.empty and "Karigar_ID" in km.columns:
+        mask = km["Karigar_ID"].apply(clean_key) == kid
+        if mask.any():
+            idx = km[mask].index[0]
+            km.at[idx, "Active"] = bool(active)
+            save_sheet_df("karigar_master", km)
+            changed += 1
+
+    em = get_sheet_df("employee_master")
+    if not em.empty and "E_Code" in em.columns:
+        mask = em["E_Code"].apply(clean_key) == kid
+        if mask.any():
+            idx = em[mask].index[0]
+            em.at[idx, "Active"] = bool(active)
+            save_sheet_df("employee_master", em)
+            changed += 1
+
+    if changed <= 0:
+        return {"ok": False, "message": f"Karigar {kid} not found in masters"}
+    state = "active" if active else "inactive"
+    return {"ok": True, "message": f"Marked {kid} as {state}.", "karigar_id": kid, "active": bool(active)}
 
 
 def delete_production_entries(
@@ -2021,6 +2065,9 @@ def payroll_report(date_from: str, date_to: str) -> dict:
         "Other_Work_Pay",
         "Total",
     ]
+    merged["Total"] = safe_num(merged.get("Total", 0)).fillna(0)
+    # Filter out zero rows (requested): don't show people with 0 payroll in the range.
+    merged = merged[merged["Total"] > 0].copy()
     rows = merged[[c for c in out_cols if c in merged.columns]].fillna("").to_dict(orient="records")
     return {
         "rows": rows,
