@@ -1725,3 +1725,30 @@ def test_apply_upload_report_day_gate_fails_open_when_channel_has_no_coverage(mo
     out = apply_upload_report_day_gate(df)
     # Myntra rows are retained (fail-open) when coverage metadata is unavailable.
     assert int(out.loc[out["Source"] == "Myntra", "Quantity"].sum()) == 1071
+
+
+def test_apply_upload_report_day_gate_keeps_return_overlay_rows(monkeypatch):
+    from backend.services import daily_store
+    from backend.services.sales import apply_upload_report_day_gate
+
+    monkeypatch.setenv("DASHBOARD_UPLOAD_DAY_GATE", "1")
+    monkeypatch.setattr(
+        daily_store,
+        "get_upload_report_day_coverage",
+        lambda: {"myntra": {"2026-04-09"}},
+    )
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-04-10", "2026-04-09"]),
+            "Transaction Type": ["Refund", "Shipment"],
+            "Quantity": [12, 3],
+            "Units_Effective": [-12, 3],
+            "Sku": ["RET-1", "ORD-1"],
+            "Source": ["Myntra", "Myntra"],
+            "OrderId": ["RETURN_SHEET", "ORD-1"],
+        }
+    )
+    out = apply_upload_report_day_gate(df)
+    # Synthetic return overlay row must survive upload-day gate even on uncovered date.
+    assert len(out) == 2
+    assert int(out.loc[out["OrderId"] == "RETURN_SHEET", "Quantity"].sum()) == 12

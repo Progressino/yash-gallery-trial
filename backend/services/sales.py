@@ -160,6 +160,15 @@ def apply_upload_report_day_gate(sales_df: pd.DataFrame) -> pd.DataFrame:
     t = txn_reporting_naive_ist(df["TxnDate"])
     day_str = t.dt.normalize().dt.strftime("%Y-%m-%d")
     src = df["Source"].astype(str).str.strip()
+    # Return-sheet overlay rows are synthetic refunds (OrderId=RETURN_SHEET) and may be
+    # tagged to marketplace sources (Myntra/Flipkart/etc). Always keep them even when
+    # their synthetic TxnDate is not present in daily_uploads coverage metadata.
+    _oid = (
+        df["OrderId"].astype(str).str.strip()
+        if "OrderId" in df.columns
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    _is_return_overlay_row = _oid.eq("RETURN_SHEET")
 
     keep = pd.Series(True, index=df.index)
     for p_name, db_key in _UPLOAD_GATE_SOURCE_TO_PLATFORM.items():
@@ -173,7 +182,7 @@ def apply_upload_report_day_gate(sales_df: pd.DataFrame) -> pd.DataFrame:
             # SQLite persistence / restore mismatches.
             continue
         else:
-            keep &= (~m_src) | day_str.isin(allowed)
+            keep &= (~m_src) | day_str.isin(allowed) | _is_return_overlay_row
 
     out = df.loc[keep].reset_index(drop=True)
     return out
