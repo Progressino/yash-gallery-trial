@@ -3476,7 +3476,9 @@ async def chunk_upload_complete(
     else:
         _mark_inventory_upload_running(sess, "Assembling uploaded chunks…", progress=1)
 
-    HEAVY_EXECUTOR.submit(_finalize_chunk_upload_worker, sid, body.upload_id)
+    # Use the dedicated daily/inventory upload executor so chunk finalization
+    # does not wait behind unrelated heavy jobs (cache/restore/PO work).
+    _finalize_chunk_upload(sid, body.upload_id)
 
     if target == "daily-auto":
         return JSONResponse(

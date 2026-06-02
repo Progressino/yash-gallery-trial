@@ -361,7 +361,12 @@ export default function Upload() {
           setBuildingMsg(p.message)
           if (p.bytesTotal > 0) {
             if (p.phase === 'complete') {
-              setChunkProgress(null)
+              setChunkProgress({
+                pct: 100,
+                sent: p.bytesTotal,
+                total: p.bytesTotal,
+                msg: 'Upload complete — processing on server…',
+              })
             } else {
               setChunkProgress({
                 pct: Math.min(99, Math.round((p.bytesSent / p.bytesTotal) * 100)),
@@ -377,12 +382,58 @@ export default function Upload() {
             showToast('success', `${res.message} Processing on server…`, 6000)
             let cov: CoverageResponse | null = null
             if (res.ingest_async) {
-              cov = await waitForDailyAutoIngest(msg => setBuildingMsg(msg))
+              cov = await waitForDailyAutoIngest(msg => {
+                setBuildingMsg(msg)
+                setChunkProgress(prev => {
+                  const total = prev?.total ?? 100
+                  const prevPct = prev?.pct ?? 85
+                  const pct = _bumpProgress(prevPct, 96, 2)
+                  return {
+                    pct,
+                    sent: Math.round((total * pct) / 100),
+                    total,
+                    msg,
+                  }
+                })
+              })
             }
             if (res.sales_rebuild === 'pending') {
               setBuildingMsg('Rebuilding combined sales…')
-              cov = await waitForSalesRebuild(msg => setBuildingMsg(msg))
+              setChunkProgress(prev => {
+                const total = prev?.total ?? 100
+                const prevPct = prev?.pct ?? 96
+                const pct = Math.max(96, prevPct)
+                return {
+                  pct,
+                  sent: Math.round((total * pct) / 100),
+                  total,
+                  msg: 'Rebuilding combined sales…',
+                }
+              })
+              cov = await waitForSalesRebuild(msg => {
+                setBuildingMsg(msg)
+                setChunkProgress(prev => {
+                  const total = prev?.total ?? 100
+                  const prevPct = prev?.pct ?? 96
+                  const pct = _bumpProgress(prevPct, 99, 1)
+                  return {
+                    pct,
+                    sent: Math.round((total * pct) / 100),
+                    total,
+                    msg,
+                  }
+                })
+              })
             }
+            setChunkProgress(prev => {
+              const total = prev?.total ?? 100
+              return {
+                pct: 100,
+                sent: total,
+                total,
+                msg: 'Done',
+              }
+            })
             setBuildingMsg('')
             finalizeDailyAutoUpload('daily', cov, res)
           } else {
@@ -1618,6 +1669,10 @@ function _fmtBytes(b: number): string {
   return `${b} B`
 }
 
+function _bumpProgress(prevPct: number, cap: number, step = 2): number {
+  return Math.min(cap, Math.max(prevPct, prevPct + step))
+}
+
 function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
   uploading: boolean
   chunkProgress?: { pct: number; sent: number; total: number; msg: string } | null
@@ -1699,14 +1754,14 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
               <p className="text-xs text-blue-500 text-right tabular-nums">{chunkProgress.pct}%</p>
             </div>
           )
-          : uploading
+            : uploading
             ? (
               <div className="flex items-center justify-center gap-2 text-sm text-blue-600">
                 <svg className="animate-spin h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                 </svg>
-                <span>Sending to server…</span>
+                <span>{chunkProgress?.msg || 'Sending to server…'}</span>
               </div>
             )
             : isDragActive
