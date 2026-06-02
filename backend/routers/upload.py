@@ -790,7 +790,9 @@ def _clear_stuck_daily_ingest(sess: AppSession, *, force: bool = False) -> bool:
         return False
     started = float(getattr(sess, "daily_auto_ingest_started", 0) or 0)
     age = time.time() - started if started > 0 else 999999
-    stuck_sec = int(os.environ.get("DAILY_INGEST_STUCK_SEC", "1800"))
+    # Keep default conservative enough for large archives, but avoid blocking
+    # normal users behind a stale "running" state for 30 minutes.
+    stuck_sec = int(os.environ.get("DAILY_INGEST_STUCK_SEC", "600"))
     if not force and age < stuck_sec:
         return False
     sess.daily_auto_ingest_status = "error"
