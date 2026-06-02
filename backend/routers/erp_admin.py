@@ -1,7 +1,8 @@
 """Admin Module router — Users, Roles, Activity Log"""
 import sqlite3
+from contextlib import contextmanager
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 from ..db.users_db import (
@@ -9,6 +10,7 @@ from ..db.users_db import (
     list_users, create_user, update_user, deactivate_user,
     list_activity, get_admin_stats, log_activity
 )
+from ..services.upload_policy import may_reset_shared_data
 
 router = APIRouter()
 
@@ -50,6 +52,164 @@ class ActivityIn(BaseModel):
     document_type: Optional[str] = ''
     document_no: Optional[str] = ''
     details: Optional[str] = ''
+
+
+class ModuleDataResetIn(BaseModel):
+    module: str
+
+
+_ALLOWED_RESET_MODULES = {
+    "sales_orders",
+    "item_master",
+    "purchase",
+    "tna",
+    "production",
+    "grey_fabric",
+}
+
+
+def _request_role(request: Request) -> str:
+    auth = getattr(request.state, "auth", None) or {}
+    return str(auth.get("role") or "Admin")
+
+
+@contextmanager
+def _sqlite_conn(path: str):
+    conn = sqlite3.connect(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        yield conn
+    finally:
+        conn.close()
+
+
+def _clear_tables(path: str, table_names: list[str]) -> int:
+    deleted = 0
+    with _sqlite_conn(path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for t in table_names:
+            try:
+                cur = conn.execute(f"DELETE FROM {t}")
+                if cur.rowcount and cur.rowcount > 0:
+                    deleted += int(cur.rowcount)
+            except sqlite3.OperationalError:
+                # Missing table on older DB versions — skip silently.
+                continue
+        try:
+            conn.execute("DELETE FROM sqlite_sequence")
+        except Exception:
+            pass
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+    return deleted
+
+
+def _reset_sales_orders_data() -> int:
+    from ..db import sales_db
+
+    return _clear_tables(sales_db._DB, ["so_lines", "sales_orders", "demand_lines", "demands"])
+
+
+def _reset_item_master_data() -> int:
+    from ..db import item_db
+
+    # Keep static setup tables (item_types, size_groups, routing_steps).
+    return _clear_tables(
+        item_db.DB_PATH,
+        ["item_buyer_packaging", "bom_lines", "bom_headers", "item_routing", "items", "merchants", "buyers"],
+    )
+
+
+def _reset_purchase_data() -> int:
+    from ..db import purchase_db
+
+    return _clear_tables(
+        purchase_db._DB,
+        [
+            "po_lines",
+            "po_headers",
+            "pr_lines",
+            "pr_headers",
+            "jwo_lines",
+            "jwo_headers",
+            "grn_lines",
+            "grn_headers",
+            "material_issue_notes",
+            "min_lines",
+            "gate_pass_lines",
+            "gate_passes",
+            "suppliers",
+            "processors",
+        ],
+    )
+
+
+def _reset_tna_data() -> int:
+    from ..db import tna_db
+
+    return _clear_tables(tna_db._DB, ["tna_lines", "tna_list"])
+
+
+def _reset_production_data() -> int:
+    from ..db import production_db
+
+    return _clear_tables(
+        production_db._DB,
+        [
+            "jo_cost_entries",
+            "jo_piece_receipts",
+            "jo_piece_issues",
+            "jo_fabric_returns",
+            "jo_fabric_issues",
+            "jo_lines",
+            "job_orders",
+            "process_stock",
+            "soft_reservations",
+            "mrp_soft_reservations",
+            "mrp_last_run",
+            "mrp_material_commitments",
+        ],
+    )
+
+
+def _reset_grey_fabric_data() -> int:
+    from ..db import grey_db
+
+    return _clear_tables(
+        grey_db._DB,
+        [
+            "grey_ledger",
+            "grey_tracker",
+            "hard_reservations",
+            "grey_mrp_requirement",
+            "grey_printer_issue",
+            "grey_conversion",
+            "grey_qc_event",
+            "grey_return_vendor",
+            "fabric_check_log",
+            "fabric_checked_stock",
+            "grey_unchecked_stock",
+            "printed_fabric_stock",
+            "printed_fabric_checked_stock",
+            "printed_fabric_reservations",
+        ],
+    )
+
+
+def _run_module_reset(module: str) -> int:
+    if module == "sales_orders":
+        return _reset_sales_orders_data()
+    if module == "item_master":
+        return _reset_item_master_data()
+    if module == "purchase":
+        return _reset_purchase_data()
+    if module == "tna":
+        return _reset_tna_data()
+    if module == "production":
+        return _reset_production_data()
+    if module == "grey_fabric":
+        return _reset_grey_fabric_data()
+    raise ValueError(f"Unsupported module: {module}")
 
 @router.get("/stats")
 def get_stats():
@@ -114,3 +274,38 @@ def post_activity(body: ActivityIn):
     log_activity(body.username, body.action, body.document_type or '',
                  body.document_no or '', body.details or '')
     return {"ok": True}
+
+
+@router.post("/reset-module-data")
+def reset_module_data(request: Request, body: ModuleDataResetIn):
+    role = _request_role(request)
+    if not may_reset_shared_data(role):
+        raise HTTPException(status_code=403, detail="Only Admin can remove ERP module data.")
+
+    module = (body.module or "").strip().lower()
+    if module not in _ALLOWED_RESET_MODULES:
+        raise HTTPException(status_code=400, detail="Invalid module key.")
+
+    try:
+        deleted_rows = _run_module_reset(module)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reset failed: {e}") from e
+
+    try:
+        actor = str((getattr(request.state, "auth", None) or {}).get("sub") or "admin")
+        log_activity(
+            actor,
+            "delete",
+            "module_data_reset",
+            module,
+            f"Admin reset module data: {module}, rows_deleted={deleted_rows}",
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "module": module,
+        "rows_deleted": int(deleted_rows),
+        "message": f"{module} test data removed.",
+    }

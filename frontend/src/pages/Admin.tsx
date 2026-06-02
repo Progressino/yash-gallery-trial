@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
+import { resetErpModuleData } from '../api/client'
 import { ALL_MODULE_KEYS, MODULE_LABELS } from '../lib/modules'
 import { mayAccessErpAdmin, useAuth } from '../store/auth'
 
-type Tab = 'dashboard' | 'users' | 'roles' | 'activity'
+type Tab = 'dashboard' | 'users' | 'roles' | 'activity' | 'data-reset'
 
 interface AdminStats { total_users: number; total_roles: number; recent_activity: number; by_role: { role_name: string; cnt: number }[] }
 interface ERPUser {
@@ -65,6 +66,7 @@ export default function Admin() {
   const [showRoleForm, setShowRoleForm] = useState(false)
   const [editUser, setEditUser] = useState<ERPUser | null>(null)
   const [editData, setEditData] = useState<Record<string, string | number | null>>({})
+  const [resetBusyModule, setResetBusyModule] = useState<string | null>(null)
 
   const payloadFromUserForm = (form: typeof EMPTY_USER_FORM, modules: string[]) => {
     const body: Record<string, unknown> = {
@@ -134,8 +136,22 @@ export default function Admin() {
     mutationFn: (b: object) => api.post('/erp-admin/roles', b),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['erp-roles'] }); qc.invalidateQueries({ queryKey: ['admin-stats'] }); setShowRoleForm(false); setRoleForm({ role_name: '', description: '' }) }
   })
+  const resetModuleMut = useMutation({
+    mutationFn: (module: string) => resetErpModuleData(module),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin-stats'] })
+    },
+  })
 
-  const TABS: [Tab, string][] = [['dashboard', '📊 Dashboard'], ['users', '👤 Users'], ['roles', '🔑 Roles'], ['activity', '📜 Activity Log']]
+  const TABS: [Tab, string][] = [['dashboard', '📊 Dashboard'], ['users', '👤 Users'], ['roles', '🔑 Roles'], ['activity', '📜 Activity Log'], ['data-reset', '🧹 Data Reset']]
+  const RESET_MODULES: Array<{ key: string; label: string; detail: string }> = [
+    { key: 'sales_orders', label: 'Sales Orders', detail: 'Sales orders + demand rows' },
+    { key: 'item_master', label: 'Item Master', detail: 'Items, BOMs, buyers, merchants' },
+    { key: 'purchase', label: 'Purchase', detail: 'PR/PO/JWO/GRN + suppliers/processors' },
+    { key: 'tna', label: 'TNA', detail: 'TNA list + activity lines' },
+    { key: 'production', label: 'Production', detail: 'JOs, process stock, MRP reservations' },
+    { key: 'grey_fabric', label: 'Grey Fabric', detail: 'Tracker, ledger, checked/printed stock' },
+  ]
 
   const newUserRole = roles.find(r => r.id === userForm.role_id)?.role_name
   const editRoleId = editData.role_id !== undefined ? Number(editData.role_id) : editUser?.role_id
@@ -145,6 +161,17 @@ export default function Admin() {
     const karigarRole = roles.find(r => r.role_name === 'Karigar')
     setUserForm({ ...EMPTY_USER_FORM, role_id: karigarRole?.id ?? 1 })
     setShowUserForm(true)
+  }
+
+  const runModuleReset = (module: string, label: string) => {
+    const ok = window.confirm(
+      `Remove testing data from ${label}?\n\nThis deletes records from production DB and cannot be undone.`,
+    )
+    if (!ok) return
+    setResetBusyModule(module)
+    resetModuleMut.mutate(module, {
+      onSettled: () => setResetBusyModule(null),
+    })
   }
 
   if (!mayAccessErpAdmin(authUser)) {
@@ -512,6 +539,43 @@ export default function Admin() {
             </tbody>
           </table>
           {activity.length === 0 && <p className="text-center text-gray-400 py-6 text-sm">No activity logged yet</p>}
+        </div>
+      )}
+
+      {tab === 'data-reset' && (
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <p className="text-sm font-semibold text-amber-800">Admin-only dangerous action</p>
+            <p className="text-xs text-amber-700 mt-1">
+              Use only to remove testing data in production. Each action permanently deletes one module&apos;s records.
+            </p>
+          </div>
+          <div className="grid md:grid-cols-2 gap-3">
+            {RESET_MODULES.map(m => (
+              <div key={m.key} className="bg-white rounded-xl border p-4">
+                <p className="text-sm font-semibold text-gray-800">{m.label}</p>
+                <p className="text-xs text-gray-500 mt-1">{m.detail}</p>
+                <button
+                  type="button"
+                  onClick={() => runModuleReset(m.key, m.label)}
+                  disabled={resetModuleMut.isPending}
+                  className="mt-3 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                >
+                  {resetBusyModule === m.key ? 'Removing…' : `Remove ${m.label} Data`}
+                </button>
+              </div>
+            ))}
+          </div>
+          {resetModuleMut.isSuccess && (
+            <p className="text-sm text-green-700">
+              {resetModuleMut.data?.message} ({resetModuleMut.data?.rows_deleted ?? 0} rows deleted)
+            </p>
+          )}
+          {resetModuleMut.isError && (
+            <p className="text-sm text-red-600">
+              {formatUserCreateError(resetModuleMut.error)}
+            </p>
+          )}
         </div>
       )}
     </div>

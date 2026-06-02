@@ -1204,6 +1204,16 @@ export async function resetAllAppData(opts?: {
   return data
 }
 
+export async function resetErpModuleData(module: string): Promise<{
+  ok: boolean
+  module: string
+  rows_deleted: number
+  message: string
+}> {
+  const { data } = await api.post('/erp-admin/reset-module-data', { module }, { timeout: 120_000 })
+  return data
+}
+
 export async function getDataQuality(): Promise<{
   loaded: boolean
   checks: Record<string, unknown>
