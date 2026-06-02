@@ -31,6 +31,7 @@ OT_MIN_MINUTES = 25
 OT_BREAK_MINUTES = 15
 STANDARD_PAY_MINUTES = 8 * 60  # salary based on 8 working hours
 EARLY_LEAVE_GRACE_MINUTES = 5  # ignore tiny early-outs (e.g. 17:58 vs 18:00)
+LATE_ARRIVAL_GRACE_MINUTES = 5  # ignore tiny late-ins (e.g. 09:02 vs 09:00)
 # work_minutes uses WORK_BLOCKS (already excludes lunch/tea slots); near-full days skip extra lunch cut
 NEAR_FULL_BLOCK_MINUTES = STANDARD_PAY_MINUTES - 15
 
@@ -79,6 +80,16 @@ def _merge_intervals(intervals: list[tuple[datetime, datetime]]) -> list[tuple[d
         else:
             merged.append((start, end))
     return merged
+
+
+def _late_deduction_hrs_display(late_min: float) -> float:
+    """Show small lates as hundredths (2 min → 0.02); larger lates as fractional hours."""
+    if late_min <= 0:
+        return 0.0
+    lm = int(round(late_min))
+    if lm < 10:
+        return round(lm / 100.0, 2)
+    return round(late_min / 60.0, 2)
 
 
 def _overlap_minutes(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> float:
@@ -284,11 +295,12 @@ def calc_salary_from_punches(
 
     first_in = min(s for s, _ in intervals).time()
     last_out = max(e for _, e in intervals).time()
-    late_min = 0.0
+    late_min_raw = 0.0
     if first_in > WORK_START:
-        late_min = (
+        late_min_raw = (
             datetime.combine(base, first_in) - datetime.combine(base, WORK_START)
         ).total_seconds() / 60.0
+    late_min = 0.0 if late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES else late_min_raw
     # Overtime: after 18:00 until actual out (cap 21:00), same hourly rate as regular (daily/8).
     last_out_dt = max(e for _, e in intervals)
     ot_start = _dt_on(base, OT_START)
@@ -314,7 +326,17 @@ def calc_salary_from_punches(
 
     work_net_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
 
-    if late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
+    # Full shift + OT with only grace-level lateness → master daily rate + OT (manual sheet).
+    full_day_with_ot = (
+        ot_hrs_bill > 0
+        and work_minutes >= NEAR_FULL_BLOCK_MINUTES
+        and late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES
+    )
+
+    if full_day_with_ot:
+        payable_minutes = float(STANDARD_PAY_MINUTES)
+        normal_pay = round(float(daily_rate), 2)
+    elif late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
         shift_net_minutes = max(
             float(STANDARD_PAY_MINUTES)
             - lunch_penalty
@@ -324,16 +346,29 @@ def calc_salary_from_punches(
             0.0,
         )
         payable_minutes = min(shift_net_minutes, work_net_minutes)
+        payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
+        normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
     else:
-        # Near-full day, on-time in: WORK_BLOCKS already exclude scheduled breaks.
-        payable_minutes = max(work_minutes - early_min_payable, 0.0)
-    payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
+        # Near-full day within grace: pay full master daily rate (manual salary sheet).
+        near_full_grace_day = (
+            work_minutes >= NEAR_FULL_BLOCK_MINUTES
+            and late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES
+            and early_min <= EARLY_LEAVE_GRACE_MINUTES
+        )
+        if near_full_grace_day:
+            payable_minutes = float(STANDARD_PAY_MINUTES)
+            normal_pay = round(float(daily_rate), 2)
+        else:
+            # On-time in: WORK_BLOCKS already exclude scheduled breaks.
+            payable_minutes = max(work_minutes - early_min_payable, 0.0)
+            payable_minutes = min(payable_minutes, float(STANDARD_PAY_MINUTES))
+            normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
     payable_hrs = round(payable_minutes / 60.0, 2)
-    normal_pay = round((payable_minutes / STANDARD_PAY_MINUTES) * daily_rate, 2)
 
     punch_pairs_json = serialize_punch_pairs(punch_pairs)
 
-    late_deduction_rs = round((late_min / 60.0) * hourly, 2)
+    late_for_money = 0.0 if late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES else late_min_raw
+    late_deduction_rs = round((late_for_money / 60.0) * hourly, 2)
     early_deduction_rs = round((early_min_payable / 60.0) * hourly, 2)
 
     return {
@@ -348,7 +383,7 @@ def calc_salary_from_punches(
         "Lunch_Deduction_Hrs": round(lunch_penalty / 60.0, 2),
         "Tea_Deduction_Hrs": round(tea_penalty / 60.0, 2),
         "Break_Penalty_Hrs": round((lunch_penalty + tea_penalty) / 60.0, 2),
-        "Late_Deduction_Hrs": round(late_min / 60.0, 2),
+        "Late_Deduction_Hrs": _late_deduction_hrs_display(late_min_raw),
         "Early_Deduction_Hrs": round(early_min_payable / 60.0, 2),
         "Late_Deduction_Rs": late_deduction_rs,
         "Early_Deduction_Rs": early_deduction_rs,
@@ -543,6 +578,45 @@ def parse_inout_punch_report(raw: bytes, filename: str = "") -> tuple[str, pd.Da
         df = pd.read_excel(bio, sheet_name=0, header=header_row)
     df = df.dropna(how="all")
     return report_date, df, warnings
+
+
+def recalculate_attendance_for_date(on_date: str) -> dict[str, Any]:
+    """Re-run payroll policy on all karigar_attendance rows for one date."""
+    df = get_sheet_df("karigar_attendance")
+    if df.empty:
+        return {"ok": False, "message": f"No attendance rows for {on_date}.", "updated": 0}
+    mask = df["Date"].astype(str) == str(on_date)
+    if not mask.any():
+        return {"ok": False, "message": f"No attendance rows for {on_date}.", "updated": 0}
+
+    updated = 0
+    for idx in df.index[mask]:
+        row = df.loc[idx]
+        status = str(row.get("Status") or "P").strip().upper()
+        e_code = str(row.get("E_Code") or "")
+        daily = float(row.get("Daily_Rate_Rs") or 0)
+        if daily <= 0:
+            daily = get_daily_rate_for_date(e_code, on_date)
+        pairs = deserialize_punch_pairs(row.get("Punch_Pairs"))
+        if not pairs:
+            tin = _parse_clock(row.get("In_Punch"))
+            tout = _parse_clock(row.get("Out_Punch"))
+            if tin is not None:
+                pairs = [(tin, tout)]
+        calc = calc_salary_from_punches(pairs, daily, on_date=on_date, status=status)
+        for key, val in calc.items():
+            df.at[idx, key] = val
+        df.at[idx, "Daily_Rate_Rs"] = daily
+        df.at[idx, "Needs_Miss_Punch"] = needs_miss_punch(pairs)
+        updated += 1
+
+    save_sheet_df("karigar_attendance", df)
+    return {
+        "ok": True,
+        "message": f"Recalculated payroll for {updated} attendance row(s) on {on_date}.",
+        "date": on_date,
+        "updated": updated,
+    }
 
 
 def import_karigar_attendance_bytes(raw: bytes, filename: str = "") -> dict[str, Any]:

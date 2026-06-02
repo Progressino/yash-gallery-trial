@@ -625,6 +625,17 @@ def patch_karigar_attendance(body: AttendancePatchBody):
         raise HTTPException(400, str(e)) from e
 
 
+@router.post("/attendance/karigar/recalculate")
+def recalculate_karigar_attendance(date: str):
+    """Re-apply attendance payroll rules for every row on a date (after policy fixes)."""
+    from ..services import karigar_attendance as att_svc
+
+    try:
+        return att_svc.recalculate_attendance_for_date(date)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.post("/attendance/karigar/upload")
 async def upload_karigar_attendance(file: UploadFile = File(...)):
     """Import Daily Attendance IN/OUT Punch Report (.xls / .xlsx)."""

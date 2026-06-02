@@ -71,6 +71,23 @@ def test_overtime_manoj_807_9_to_2059():
     assert out["Hourly_Rate_Rs"] == 65.0
 
 
+def test_overtime_manoj_807_two_minute_late_still_full_day():
+    """09:02–20:59: grace late-in, full ₹520 day + 3h OT = ₹715 (manual salary sheet)."""
+    out = att.calc_salary_from_punches(
+        [(time(9, 2), time(20, 59))],
+        520.0,
+        on_date="2026-06-01",
+        status="P",
+    )
+    assert out["Late_Deduction_Hrs"] == 0.02
+    assert out["Late_Deduction_Rs"] == 0.0
+    assert out["Normal_Pay"] == 520.0
+    assert out["Payable_Hrs"] == 8.0
+    assert out["OT_Hours"] == 3.0
+    assert out["OT_Pay"] == 195.0
+    assert out["Total_Pay"] == 715.0
+
+
 def test_needs_miss_punch_single_in():
     assert att.needs_miss_punch([(time(9, 0), None)]) is True
     assert att.needs_miss_punch([(time(9, 0), time(18, 0))]) is False
@@ -128,13 +145,14 @@ def test_absent_shift_pays_zero():
 
 
 def test_employee_828_on_time_near_full_day_payable_hrs():
-    """09:00–17:58: block hours 7.97; do not double-deduct lunch on near-full days."""
+    """09:00–17:58 within grace: full daily rate; lunch tracked but not prorated down."""
     out = att.calc_salary_from_punches(
         [(time(9, 0), time(17, 58))],
         330.0,
         on_date="2026-05-22",
     )
-    assert out["Payable_Hrs"] == 7.97
+    assert out["Payable_Hrs"] == 8.0
+    assert out["Normal_Pay"] == 330.0
     assert out["Lunch_Deduction_Hrs"] == 0.5
     assert out["Early_Deduction_Hrs"] == 0.0
 
@@ -146,10 +164,10 @@ def test_employee_804_on_time_near_full_and_late():
         460.0,
         on_date="2026-05-20",
     )
-    assert near_full["Payable_Hrs"] == 7.97
+    assert near_full["Payable_Hrs"] == 8.0
     assert near_full["Lunch_Deduction_Hrs"] == 0.5
     assert near_full["Late_Deduction_Hrs"] == 0.0
-    assert near_full["Normal_Pay"] == 458.08
+    assert near_full["Normal_Pay"] == 460.0
 
     full = att.calc_salary_from_punches(
         [(time(9, 0), time(18, 0))],
@@ -183,6 +201,38 @@ def test_employee_845_late_arrival_reduces_normal_pay():
     assert out["OT_Pay"] == 41.25
     assert out["Total_Pay"] == 336.19
     assert out["Payable_Hrs"] == 7.15
+
+
+def test_recalculate_attendance_for_date():
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame(
+            [{"E_Code": "807", "Name": "Manoj", "Type": "Karigar", "Daily_Rate_Rs": 520, "Hourly_Rate_Rs": 65}]
+        ),
+    )
+    save_sheet_df(
+        "karigar_attendance",
+        pd.DataFrame(
+            [
+                {
+                    "Date": "2026-06-01",
+                    "E_Code": "807",
+                    "Name": "Manoj",
+                    "Status": "P",
+                    "Daily_Rate_Rs": 520,
+                    "Punch_Pairs": att.serialize_punch_pairs([(time(9, 2), time(20, 59))]),
+                    "Normal_Pay": 485.33,
+                    "Total_Pay": 680.33,
+                }
+            ]
+        ),
+    )
+    out = att.recalculate_attendance_for_date("2026-06-01")
+    assert out["ok"] is True
+    assert out["updated"] == 1
+    row = get_sheet_df("karigar_attendance").iloc[0]
+    assert float(row["Total_Pay"]) == 715.0
+    assert float(row["Normal_Pay"]) == 520.0
 
 
 def test_calc_salary_wrapper():
