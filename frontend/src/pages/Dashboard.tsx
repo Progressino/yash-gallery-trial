@@ -760,9 +760,6 @@ export default function Dashboard() {
   const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
   const coverageReturnLoaded = useSession(s => s.return_sheet)
   const sessionSales = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
-  const hasPlatformData = useSession(
-    s => !!(s.mtr || s.myntra || s.meesho || s.flipkart || s.snapdeal),
-  )
   const jobRunning = useSession(s =>
     s.inventory_upload_status === 'running' ||
     s.daily_inventory_upload_status === 'running' ||
