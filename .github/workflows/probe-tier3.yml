@@ -20,4 +20,40 @@ jobs:
         run: |
           set -eu
           if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
-          $DC -f docker-compose.prod.yml exec -T backend python3 scripts/vps_probe_tier3_june.py
+          $DC -f docker-compose.prod.yml exec -T backend python3 - <<'PY'
+          import json
+          from backend.services.daily_store import (
+              get_summary,
+              load_platform_data_for_report_range,
+              platforms_with_uploads_in_range,
+          )
+          from backend.services.sales import _compute_platform_metrics
+
+          start, end = "2026-06-01", "2026-06-04"
+          uploaded = platforms_with_uploads_in_range(start, end)
+          out = {
+              "window": [start, end],
+              "platforms_with_uploads": uploaded,
+              "tier3_summary": get_summary(),
+              "metrics": {},
+          }
+          specs = {
+              "amazon": ("Amazon", "Date", "SKU", "Transaction_Type"),
+              "meesho": ("Meesho", "Date", "OMS_SKU", "TxnType"),
+          }
+          for plat in uploaded:
+              df = load_platform_data_for_report_range(plat, start, end, dedup=False)
+              if plat in specs:
+                  name, _dc, sku, txn = specs[plat]
+                  m = _compute_platform_metrics(
+                      df, name, sku, txn, start_date=start, end_date=end
+                  )
+                  out["metrics"][plat] = {
+                      "rows": len(df),
+                      "total_units": m.get("total_units"),
+                      "loaded": m.get("loaded"),
+                  }
+              else:
+                  out["metrics"][plat] = {"rows": len(df)}
+          print(json.dumps(out, indent=2))
+          PY
