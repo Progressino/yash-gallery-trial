@@ -134,6 +134,18 @@ export function writeIntelligenceCache(
   }
 }
 
+export function clearIntelligenceCacheForRange(
+  start: string,
+  end: string,
+  basis: 'gross' | 'net',
+): void {
+  try {
+    localStorage.removeItem(storageKey(start, end, basis))
+  } catch {
+    /* ignore */
+  }
+}
+
 export function clearIntelligenceCache(): void {
   try {
     const keys: string[] = []

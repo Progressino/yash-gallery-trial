@@ -15,6 +15,7 @@ import { readLocalSessionHint } from '../lib/localSessionHint'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
 import {
   bundleHasDisplayData,
+  clearIntelligenceCacheForRange,
   readIntelligenceCache,
   writeIntelligenceCache,
   type DsrBrandMonthlyRow,
@@ -814,10 +815,18 @@ export default function Dashboard() {
 
   const localHint = readLocalSessionHint()
   const hintSaysSales = !!(localHint?.sales && (localHint.sales_rows ?? 0) > 0)
-  const cachedBundleHint = useMemo(
-    () => readIntelligenceCache(dateStart, dateEnd, salesBasis),
-    [dateStart, dateEnd, salesBasis],
-  )
+  const cachedBundleHint = useMemo(() => {
+    const c = readIntelligenceCache(dateStart, dateEnd, salesBasis)
+    if (c && !bundleHasDisplayData(c)) return null
+    return c
+  }, [dateStart, dateEnd, salesBasis])
+
+  useEffect(() => {
+    const c = readIntelligenceCache(dateStart, dateEnd, salesBasis)
+    if (c && !bundleHasDisplayData(c)) {
+      clearIntelligenceCacheForRange(dateStart, dateEnd, salesBasis)
+    }
+  }, [dateStart, dateEnd, salesBasis])
 
   const bundleSpanDays = useMemo(
     () => reportingSpanDays(dateStart, dateEnd),
@@ -855,18 +864,20 @@ export default function Dashboard() {
         `/data/intelligence-bundle?${bundleParams}`,
         { timeout: bundleTimeoutMs },
       )
-      if (data?.status !== 'warming') {
+      if (data?.status !== 'warming' && bundleHasDisplayData(data)) {
         writeIntelligenceCache(dateStart, dateEnd, salesBasis, data)
       }
       return data
     },
     enabled: dataReady,
-    staleTime: 300_000,
-    retry: 1,
+    staleTime: 60_000,
+    refetchOnMount: 'always',
+    retry: 2,
     placeholderData: previousData => {
       const prev = previousData as IntelligenceBundle | undefined
       if (prev && bundleHasDisplayData(prev)) return prev
-      return cachedBundleHint ?? undefined
+      if (cachedBundleHint && bundleHasDisplayData(cachedBundleHint)) return cachedBundleHint
+      return undefined
     },
     refetchInterval: q => {
       const d = q.state.data

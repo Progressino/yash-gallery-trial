@@ -841,16 +841,19 @@ def _intelligence_payload_from_tier3_direct(
         if df.empty:
             platform_summary.append(_unified_platform_stub(name, False))
             continue
-        platform_summary.append(
-            _compute_platform_metrics(
-                df,
-                name,
-                sku_col,
-                txn_col,
-                start_date=s,
-                end_date=e,
+        try:
+            platform_summary.append(
+                _compute_platform_metrics(
+                    df,
+                    name,
+                    sku_col,
+                    txn_col,
+                    start_date=s,
+                    end_date=e,
+                )
             )
-        )
+        except Exception:
+            platform_summary.append(_unified_platform_stub(name, True))
 
     shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
     returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
@@ -937,6 +940,61 @@ def _tier3_direct_has_units(
     if int(out[0].get("total_units") or 0) <= 0:
         return None
     return out
+
+
+def _build_intelligence_bundle_payload_from_tier3(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+    limit: int,
+    basis: Optional[str],
+    include_extras: bool,
+) -> dict | None:
+    """Fast path: full Intelligence bundle JSON from Tier-3 only (no session sales scan)."""
+    import pandas as pd
+
+    t3 = _tier3_direct_has_units(start_date, end_date, sess, limit, basis)
+    if t3 is None:
+        return None
+    (
+        sales_summary,
+        platform_summary,
+        top_skus,
+        sales_for_bundle,
+        _mtr,
+        _myntra,
+        _meesho,
+        _flipkart,
+        _snapdeal,
+        pulled_platforms,
+    ) = t3
+    _empty_plat = pd.DataFrame()
+    payload: dict = {
+        "sales_summary": sales_summary,
+        "platform_summary": platform_summary,
+        "top_skus": top_skus,
+        "status": "ready",
+        "tier3_auto_pull": True,
+    }
+    if include_extras:
+        payload["anomalies"] = get_anomalies(
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            sess.inventory_df_variant,
+            sales_for_bundle,
+            start_date=None,
+            end_date=None,
+        )
+        payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
+            sales_for_bundle, start_date=None, end_date=None
+        )
+    else:
+        payload["anomalies"] = []
+        payload["dsr_brand_monthly"] = {"rows": [], "totals": {}, "note": ""}
+    return payload
 
 
 def _tier3_session_needs_topup(sess: AppSession) -> bool:
@@ -2101,6 +2159,24 @@ def intelligence_bundle(
         _schedule_intelligence_refresh_async(sid or None)
         return cached["payload"]
 
+    # ── FAST PATH: Tier-3 first (Upload tab = source of truth). Avoids scanning 1M+ session rows. ──
+    if has_dates:
+        s_win = str(start_date or end_date or "")[:10]
+        e_win = str(end_date or start_date or "")[:10]
+        if len(s_win) == 10 and len(e_win) == 10:
+            tier3_payload = _build_intelligence_bundle_payload_from_tier3(
+                sess, s_win, e_win, limit, basis, include_extras
+            )
+            if tier3_payload is not None:
+                from ..services.daily_store import platforms_with_uploads_in_range
+
+                need_persist = platforms_with_uploads_in_range(s_win, e_win)
+                if need_persist:
+                    _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
+                _schedule_intelligence_refresh_async(sid or None)
+                bundle_cache[cache_key] = {"_ts": now, "payload": tier3_payload}
+                return tier3_payload
+
     span_days = _report_span_days(start_date, end_date)
     fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
 
@@ -2109,7 +2185,7 @@ def intelligence_bundle(
     if not fast_window and _session_sales_stale_vs_platforms(sess):
         _ensure_intelligence_session_fresh(sess)
 
-    # ── Auto-pull Tier-3 for the selected window when uploads exist but sales lag ──
+    # ── Fallback: session sales + optional Tier-3 patch ──
     import pandas as pd
 
     _empty_plat = pd.DataFrame()
@@ -2126,8 +2202,6 @@ def intelligence_bundle(
         ) = _auto_dashboard_bundle_data(sess, start_date, end_date)
         sales_gated = sales_for_bundle
         if pulled_platforms:
-            s_win = str(start_date or end_date or "")[:10]
-            e_win = str(end_date or start_date or "")[:10]
             _schedule_persist_tier3_window(sid or None, s_win, e_win, pulled_platforms)
     else:
         mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b = (
@@ -2151,53 +2225,6 @@ def intelligence_bundle(
     _units_in_window = int(
         get_sales_summary(sales_for_bundle, months=0).get("total_units") or 0
     ) if sales_for_bundle is not None and not getattr(sales_for_bundle, "empty", True) else 0
-
-    if has_dates:
-        s_try = str(start_date or end_date or "")[:10]
-        e_try = str(end_date or start_date or "")[:10]
-        t3 = _tier3_direct_has_units(s_try, e_try, sess, limit, basis)
-        if t3 is not None:
-            (
-                sales_summary,
-                platform_summary,
-                top_skus,
-                sales_for_bundle,
-                mtr_b,
-                myntra_b,
-                meesho_b,
-                flipkart_b,
-                snapdeal_b,
-                pulled_platforms,
-            ) = t3
-            sales_gated = sales_for_bundle
-            _schedule_persist_tier3_window(sid or None, s_try, e_try, pulled_platforms)
-            payload = {
-                "sales_summary": sales_summary,
-                "platform_summary": platform_summary,
-                "top_skus": top_skus,
-                "status": "ready",
-                "tier3_auto_pull": True,
-            }
-            if include_extras:
-                payload["anomalies"] = get_anomalies(
-                    _empty_plat,
-                    _empty_plat,
-                    _empty_plat,
-                    _empty_plat,
-                    _empty_plat,
-                    sess.inventory_df_variant,
-                    sales_for_bundle,
-                    start_date=None,
-                    end_date=None,
-                )
-                payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
-                    sales_for_bundle, start_date=None, end_date=None
-                )
-            else:
-                payload["anomalies"] = []
-                payload["dsr_brand_monthly"] = {"rows": [], "totals": {}, "note": ""}
-            bundle_cache[cache_key] = {"_ts": now, "payload": payload}
-            return payload
 
     if sess.sales_df.empty and _units_in_window <= 0:
         busy = any(
