@@ -854,17 +854,17 @@ def _do_load_warm_cache() -> bool:
         # the GitHub cache may still carry those stale rows.
         try:
             from .services.daily_store import get_blocked_dates as _get_blocked_dates
-            # Load ALL SQLite history (months=None) so the disk/GitHub cache contains
-            # the full multi-year dataset, not just a 4-month window.
-            # Memory is safe here: Phase-0/1 data was already freed before load_cache_from_drive(),
-            # and the platform trim below (SESSION_PLATFORM_MAX_DAYS = 730 days) caps the final
-            # in-memory size to 2 years before build_sales_df runs.
-            # If the GitHub mtr_df was previously saved with only partial data (regression bug),
-            # this full SQLite load will correct it and rebuild the authoritative 2-year cache.
+            # Merge the last 6 months from SQLite on top of the GitHub release data.
+            # GitHub already carries the full 2-year historical cache; we only need recent
+            # uploads (daily files from the last ~6 months) to be layered on top.
+            # months=None was previously needed to rebuild after cache corruption but caused
+            # loading 1.18M+ rows alongside the GitHub 980K rows = 5-6 GiB memory peak and
+            # autoheal restarts.  months=6 covers all practical daily upload scenarios while
+            # keeping Phase-2 memory under 3 GiB.
             daily = {
                 _p: _df
                 for _p in ("amazon", "myntra", "meesho", "flipkart", "snapdeal")
-                if not (_df := _load_plat(_p, months=None)).empty
+                if not (_df := _load_plat(_p, months=6)).empty
             }
             merged_any = False
             for plat, key in [
