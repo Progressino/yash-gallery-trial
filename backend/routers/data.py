@@ -621,13 +621,18 @@ def _load_tier3_frames_for_platforms(
     end_date: str,
     *,
     dedup: bool = False,
+    columns_only: bool = False,
 ) -> dict[str, "pd.DataFrame"]:
     from ..services.daily_store import load_platform_data_for_report_range
 
     out: dict[str, pd.DataFrame] = {}
     for plat in platforms:
         chunk = load_platform_data_for_report_range(
-            plat, start_date, end_date, dedup=dedup
+            plat,
+            start_date,
+            end_date,
+            dedup=dedup,
+            columns_only=columns_only,
         )
         if not chunk.empty:
             out[plat] = chunk
@@ -691,10 +696,49 @@ def _slice_sales_for_bundle(
 
     if sales_df is None or not hasattr(sales_df, "empty") or sales_df.empty:
         return sales_df if sales_df is not None else __import__("pandas").DataFrame()
-    gated = apply_upload_report_day_gate(sales_df)
-    normed = gated.copy()
-    normed["TxnDate"] = txn_reporting_naive_ist(normed["TxnDate"])
-    return _filter_by_reporting_days(normed, "TxnDate", start_date, end_date)
+    # Clip to the reporting window before upload-day gating (much faster on large sales_df).
+    clipped = sales_df
+    if (start_date or end_date) and "TxnDate" in sales_df.columns:
+        clipped = _filter_by_reporting_days(sales_df, "TxnDate", start_date, end_date)
+    return apply_upload_report_day_gate(clipped)
+
+
+def _filter_platform_df_by_window(
+    df: "pd.DataFrame",
+    start_date: str,
+    end_date: str,
+    *,
+    date_col: str = "Date",
+) -> "pd.DataFrame":
+    """In-memory platform frame clipped to the dashboard window (no Tier-3 blob load)."""
+    import pandas as pd
+
+    if df is None or not hasattr(df, "empty") or df.empty:
+        return pd.DataFrame()
+    if date_col not in df.columns:
+        return df
+    d = df.copy()
+    d["_Date"] = txn_reporting_naive_ist(
+        pd.to_datetime(d[date_col], errors="coerce")
+    )
+    d = d.dropna(subset=["_Date"])
+    return _filter_by_reporting_days(d, "_Date", start_date, end_date)
+
+
+def _session_has_operational_frames(sess: AppSession) -> bool:
+    sales = getattr(sess, "sales_df", None)
+    if sales is not None and hasattr(sales, "empty") and not sales.empty:
+        return True
+    return _session_has_platform_data(sess)
+
+
+def _bundle_payload_has_display_data(payload: dict) -> bool:
+    if int((payload.get("sales_summary") or {}).get("total_units") or 0) > 0:
+        return True
+    return any(
+        p.get("loaded") and int(p.get("total_units") or 0) > 0
+        for p in (payload.get("platform_summary") or [])
+    )
 
 
 def _schedule_persist_tier3_window(
@@ -823,7 +867,9 @@ def _intelligence_payload_from_tier3_direct(
     s = str(start_date)[:10]
     e = str(end_date)[:10]
     uploaded = set(platforms_with_uploads_in_range(s, e))
-    all_frames = _load_tier3_frames_for_platforms(sorted(uploaded), s, e, dedup=False)
+    all_frames = _load_tier3_frames_for_platforms(
+        sorted(uploaded), s, e, dedup=False, columns_only=True
+    )
 
     metrics_specs = (
         ("amazon", "Amazon", "Date", "SKU", "Transaction_Type"),
@@ -872,7 +918,8 @@ def _intelligence_payload_from_tier3_direct(
 
     sales_for_bundle = pd.DataFrame()
     _ensure_sku_mapping_for_dashboard(sess)
-    if all_frames and sess.sku_mapping:
+    span = _report_span_days(s, e) or 999
+    if span <= _intelligence_fast_window_days() and all_frames and sess.sku_mapping:
         built = _build_sales_from_tier3_frames(sess, all_frames)
         sales_for_bundle = _slice_sales_for_bundle(built, s, e)
 
@@ -940,6 +987,111 @@ def _tier3_direct_has_units(
     if int(out[0].get("total_units") or 0) <= 0:
         return None
     return out
+
+
+def _build_intelligence_bundle_payload_from_session(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+    limit: int,
+    basis: Optional[str],
+    include_extras: bool,
+) -> dict | None:
+    """
+    Fast path: unified sales + in-memory platform frames (warm cache).
+    Avoids loading Tier-3 parquet blobs on every Intelligence GET.
+    """
+    import pandas as pd
+    from ..services.sales import (
+        get_anomalies,
+        get_dsr_brand_monthly_comparison,
+        get_platform_summary,
+        get_sales_summary,
+        get_top_skus,
+    )
+
+    if not _session_has_operational_frames(sess):
+        return None
+
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    sales_slice = _slice_sales_for_bundle(sess.sales_df, s, e)
+    mtr_b = _filter_platform_df_by_window(sess.mtr_df, s, e)
+    myntra_b = _filter_platform_df_by_window(sess.myntra_df, s, e)
+    meesho_b = _filter_platform_df_by_window(sess.meesho_df, s, e)
+    flipkart_b = _filter_platform_df_by_window(sess.flipkart_df, s, e)
+    snapdeal_b = _filter_platform_df_by_window(sess.snapdeal_df, s, e)
+
+    platform_summary = get_platform_summary(
+        mtr_b,
+        myntra_b,
+        meesho_b,
+        flipkart_b,
+        snapdeal_b,
+        start_date=s,
+        end_date=e,
+        sales_df=sales_slice if not sales_slice.empty else None,
+    )
+    if not sales_slice.empty:
+        sales_summary = get_sales_summary(sales_slice, months=0)
+        top_skus = get_top_skus(
+            sales_slice,
+            limit=limit,
+            start_date=None,
+            end_date=None,
+            basis=basis or "gross",
+        )
+        sales_for_extras = sales_slice
+    else:
+        shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
+        returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
+        net = sum(int(p.get("net_units") or 0) for p in platform_summary)
+        rate = round(returned / shipped * 100, 1) if shipped > 0 else 0.0
+        sales_summary = {
+            "total_units": shipped,
+            "total_returns": returned,
+            "net_units": net,
+            "return_rate": rate,
+        }
+        top_skus = []
+        sales_for_extras = pd.DataFrame()
+
+    span_days = _report_span_days(s, e)
+    fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
+    payload: dict = {
+        "sales_summary": sales_summary,
+        "platform_summary": platform_summary,
+        "top_skus": top_skus,
+        "status": "ready",
+        "session_fast_path": True,
+    }
+    if include_extras:
+        _empty_plat = pd.DataFrame()
+        if fast_window and not sales_for_extras.empty:
+            payload["anomalies"] = get_anomalies(
+                _empty_plat,
+                _empty_plat,
+                _empty_plat,
+                _empty_plat,
+                _empty_plat,
+                sess.inventory_df_variant,
+                sales_for_extras,
+                start_date=None,
+                end_date=None,
+            )
+        else:
+            payload["anomalies"] = []
+        payload["dsr_brand_monthly"] = (
+            get_dsr_brand_monthly_comparison(
+                sales_for_extras, start_date=None, end_date=None
+            )
+            if not sales_for_extras.empty
+            else {"rows": [], "totals": {}, "note": ""}
+        )
+    else:
+        payload["anomalies"] = []
+        payload["dsr_brand_monthly"] = {"rows": [], "totals": {}, "note": ""}
+    return payload
 
 
 def _build_intelligence_bundle_payload_from_tier3(
@@ -2159,11 +2311,23 @@ def intelligence_bundle(
         _schedule_intelligence_refresh_async(sid or None)
         return cached["payload"]
 
-    # ── FAST PATH: Tier-3 first (Upload tab = source of truth). Avoids scanning 1M+ session rows. ──
-    if has_dates:
-        s_win = str(start_date or end_date or "")[:10]
-        e_win = str(end_date or start_date or "")[:10]
-        if len(s_win) == 10 and len(e_win) == 10:
+    span_days = _report_span_days(start_date, end_date)
+    fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
+    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
+    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
+
+    _schedule_intelligence_refresh_async(sid or None)
+
+    session_payload: dict | None = None
+    if has_dates and len(s_win) == 10 and len(e_win) == 10:
+        session_payload = _build_intelligence_bundle_payload_from_session(
+            sess, s_win, e_win, limit, basis, include_extras
+        )
+        if session_payload and _bundle_payload_has_display_data(session_payload):
+            bundle_cache[cache_key] = {"_ts": now, "payload": session_payload}
+            return session_payload
+
+        if fast_window:
             tier3_payload = _build_intelligence_bundle_payload_from_tier3(
                 sess, s_win, e_win, limit, basis, include_extras
             )
@@ -2173,60 +2337,33 @@ def intelligence_bundle(
                 need_persist = platforms_with_uploads_in_range(s_win, e_win)
                 if need_persist:
                     _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
-                _schedule_intelligence_refresh_async(sid or None)
                 bundle_cache[cache_key] = {"_ts": now, "payload": tier3_payload}
                 return tier3_payload
 
-    span_days = _report_span_days(start_date, end_date)
-    fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
+        if session_payload is not None:
+            bundle_cache[cache_key] = {"_ts": now, "payload": session_payload}
+            return session_payload
 
-    # Never block the request on a full Tier-3 merge / 1M-row sales rebuild.
-    _schedule_intelligence_refresh_async(sid or None)
-    if not fast_window and _session_sales_stale_vs_platforms(sess):
-        _ensure_intelligence_session_fresh(sess)
+        from ..services.daily_store import platforms_with_uploads_in_range
 
-    # ── Fallback: session sales + optional Tier-3 patch ──
-    import pandas as pd
+        need_persist = platforms_with_uploads_in_range(s_win, e_win)
+        if need_persist:
+            _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
 
-    _empty_plat = pd.DataFrame()
-    pulled_platforms: list[str] = []
-    if has_dates:
-        (
-            sales_for_bundle,
-            mtr_b,
-            myntra_b,
-            meesho_b,
-            flipkart_b,
-            snapdeal_b,
-            pulled_platforms,
-        ) = _auto_dashboard_bundle_data(sess, start_date, end_date)
-        sales_gated = sales_for_bundle
-        if pulled_platforms:
-            _schedule_persist_tier3_window(sid or None, s_win, e_win, pulled_platforms)
-    else:
-        mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b = (
-            sess.mtr_df,
-            sess.myntra_df,
-            sess.meesho_df,
-            sess.flipkart_df,
-            sess.snapdeal_df,
+    elif _session_has_operational_frames(sess):
+        session_payload = _build_intelligence_bundle_payload_from_session(
+            sess,
+            s_win or str(start_date or "")[:10],
+            e_win or str(end_date or "")[:10],
+            limit,
+            basis,
+            include_extras,
         )
-        raw_sales = sess.sales_df
-        if not raw_sales.empty:
-            sales_gated = apply_upload_report_day_gate(raw_sales)
-            sales_normed = sales_gated.copy()
-            sales_normed["TxnDate"] = txn_reporting_naive_ist(sales_normed["TxnDate"])
-            sales_for_bundle = sales_normed
-            del sales_normed
-        else:
-            sales_gated = raw_sales
-            sales_for_bundle = raw_sales
+        if session_payload is not None:
+            bundle_cache[cache_key] = {"_ts": now, "payload": session_payload}
+            return session_payload
 
-    _units_in_window = int(
-        get_sales_summary(sales_for_bundle, months=0).get("total_units") or 0
-    ) if sales_for_bundle is not None and not getattr(sales_for_bundle, "empty", True) else 0
-
-    if sess.sales_df.empty and _units_in_window <= 0:
+    if not _session_has_operational_frames(sess):
         busy = any(
             getattr(sess, a, "idle") == "running"
             for a in (
@@ -2252,65 +2389,14 @@ def intelligence_bundle(
             "busy": busy,
         }
 
-    platform_summary = get_platform_summary(
-        mtr_b,
-        myntra_b,
-        meesho_b,
-        flipkart_b,
-        snapdeal_b,
-        start_date=start_date,
-        end_date=end_date,
-        sales_df=sales_for_bundle,
-    )
-    sales_summary = get_sales_summary(
-        sales_for_bundle, months=0, start_date=None, end_date=None
-    )
-    top_skus = get_top_skus(
-        sales_for_bundle,
-        limit=limit,
-        start_date=None,
-        end_date=None,
-        basis=basis or "gross",
-    )
-
     payload = {
-        "sales_summary": sales_summary,
-        "platform_summary": platform_summary,
-        "top_skus": top_skus,
+        "sales_summary": {"total_units": 0, "total_returns": 0, "net_units": 0, "return_rate": 0.0},
+        "platform_summary": [],
+        "top_skus": [],
+        "anomalies": [],
+        "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
+        "status": "ready",
     }
-    if include_extras:
-        # Short windows: anomalies from the pre-sliced sales only (avoids scanning 1M+ rows / raw frames).
-        if has_dates and fast_window:
-            payload["anomalies"] = get_anomalies(
-                _empty_plat,
-                _empty_plat,
-                _empty_plat,
-                _empty_plat,
-                _empty_plat,
-                sess.inventory_df_variant,
-                sales_for_bundle,
-                start_date=None,
-                end_date=None,
-            )
-        else:
-            payload["anomalies"] = get_anomalies(
-                sess.mtr_df,
-                sess.myntra_df,
-                sess.meesho_df,
-                sess.flipkart_df,
-                sess.snapdeal_df,
-                sess.inventory_df_variant,
-                sales_gated,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
-            sales_for_bundle, start_date=None, end_date=None
-        )
-    else:
-        payload["anomalies"] = []
-        payload["dsr_brand_monthly"] = {"rows": [], "totals": {}, "note": ""}
-    payload["status"] = "ready"
     bundle_cache[cache_key] = {"_ts": now, "payload": payload}
     return payload
 

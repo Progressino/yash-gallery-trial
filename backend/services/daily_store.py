@@ -1258,12 +1258,22 @@ def platforms_with_uploads_in_range(start_date: str, end_date: str) -> List[str]
     return out
 
 
+_PLATFORM_METRICS_COLUMNS: dict[str, list[str]] = {
+    "amazon": ["Date", "SKU", "Transaction_Type", "Quantity", "State"],
+    "myntra": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
+    "meesho": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
+    "flipkart": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
+    "snapdeal": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
+}
+
+
 def load_platform_data_for_report_range(
     platform: str,
     start_date: str,
     end_date: str,
     *,
     dedup: bool = True,
+    columns_only: bool = False,
 ) -> pd.DataFrame:
     """
     Load Tier-3 blobs whose declared row window overlaps ``[start_date, end_date]``.
@@ -1292,9 +1302,18 @@ def load_platform_data_for_report_range(
 
     dfs: list[pd.DataFrame] = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
+    want_cols = _PLATFORM_METRICS_COLUMNS.get(platform) if columns_only else None
     for filename, blob in rows:
         try:
-            d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+            if want_cols:
+                try:
+                    d = pd.read_parquet(
+                        io.BytesIO(blob), engine="pyarrow", columns=want_cols
+                    )
+                except Exception:
+                    d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+            else:
+                d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
             if tail and not d.empty:
                 label = infer_dsr_label_from_upload_filename(filename, tail)
                 if label:

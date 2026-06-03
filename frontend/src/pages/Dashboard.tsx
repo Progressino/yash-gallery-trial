@@ -11,7 +11,6 @@ import api, {
   downloadIntelligenceSalesCsv,
   invalidateDataQueries,
 } from '../api/client'
-import { readLocalSessionHint } from '../lib/localSessionHint'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
 import {
   bundleHasDisplayData,
@@ -813,8 +812,6 @@ export default function Dashboard() {
     prevSalesRebuild.current = salesRebuild
   }, [salesRebuild, qc])
 
-  const localHint = readLocalSessionHint()
-  const hintSaysSales = !!(localHint?.sales && (localHint.sales_rows ?? 0) > 0)
   const cachedBundleHint = useMemo(() => {
     const c = readIntelligenceCache(dateStart, dateEnd, salesBasis)
     if (c && !bundleHasDisplayData(c)) return null
@@ -833,7 +830,18 @@ export default function Dashboard() {
     [dateStart, dateEnd],
   )
 
-  const bundleParams = useMemo(() => {
+  const bundleCoreParams = useMemo(() => {
+    const p = new URLSearchParams({
+      limit: String(topSkuLimit),
+      basis: salesBasis,
+      include_extras: '0',
+    })
+    if (dateStart) p.set('start_date', dateStart)
+    if (dateEnd) p.set('end_date', dateEnd)
+    return p.toString()
+  }, [dateStart, dateEnd, topSkuLimit, salesBasis])
+
+  const bundleExtrasParams = useMemo(() => {
     const p = new URLSearchParams({
       limit: String(topSkuLimit),
       basis: salesBasis,
@@ -846,22 +854,22 @@ export default function Dashboard() {
 
   const bundleTimeoutMs = useMemo(() => {
     const span = bundleSpanDays ?? 999
-    if (span <= 7) return 25_000
-    if (span <= 45) return 45_000
-    return 90_000
+    if (span <= 7) return 20_000
+    if (span <= 45) return 30_000
+    return 35_000
   }, [bundleSpanDays])
 
-  const dataReady = sessionSales || hasPlatformData || hintSaysSales || !!cachedBundleHint
+  const fetchBundleExtras = (bundleSpanDays ?? 999) <= 45
 
   const {
-    data: intelligenceBundle,
+    data: intelligenceCore,
     isLoading: loadingBundle,
     isFetching: fetchingBundle,
   } = useQuery<IntelligenceBundle>({
-    queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis],
+    queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis, 'core'],
     queryFn: async () => {
       const { data } = await api.get<IntelligenceBundle & { status?: string }>(
-        `/data/intelligence-bundle?${bundleParams}`,
+        `/data/intelligence-bundle?${bundleCoreParams}`,
         { timeout: bundleTimeoutMs },
       )
       if (data?.status !== 'warming' && bundleHasDisplayData(data)) {
@@ -869,10 +877,8 @@ export default function Dashboard() {
       }
       return data
     },
-    enabled: dataReady,
-    staleTime: 60_000,
-    refetchOnMount: 'always',
-    retry: 2,
+    staleTime: 120_000,
+    retry: 1,
     placeholderData: previousData => {
       const prev = previousData as IntelligenceBundle | undefined
       if (prev && bundleHasDisplayData(prev)) return prev
@@ -885,6 +891,31 @@ export default function Dashboard() {
       return false
     },
   })
+
+  const { data: intelligenceExtras } = useQuery<IntelligenceBundle>({
+    queryKey: ['intelligence-bundle-extras', dateStart, dateEnd, topSkuLimit, salesBasis],
+    queryFn: async () => {
+      const { data } = await api.get<IntelligenceBundle>(
+        `/data/intelligence-bundle?${bundleExtrasParams}`,
+        { timeout: bundleTimeoutMs },
+      )
+      return data
+    },
+    enabled: fetchBundleExtras && bundleHasDisplayData(intelligenceCore),
+    staleTime: 300_000,
+    retry: 0,
+  })
+
+  const intelligenceBundle = useMemo<IntelligenceBundle | undefined>(() => {
+    if (!intelligenceCore) return undefined
+    if (!intelligenceExtras) return intelligenceCore
+    return {
+      ...intelligenceCore,
+      anomalies: intelligenceExtras.anomalies ?? intelligenceCore.anomalies,
+      dsr_brand_monthly:
+        intelligenceExtras.dsr_brand_monthly ?? intelligenceCore.dsr_brand_monthly,
+    }
+  }, [intelligenceCore, intelligenceExtras])
 
   const bundleWarming = intelligenceBundle?.status === 'warming'
 
@@ -1066,7 +1097,6 @@ export default function Dashboard() {
   const intelligenceLoadLabel = useMemo(() => {
     if (bundleWarming && intelligenceBundle?.message) return intelligenceBundle.message
     if (bundleWarming) return 'Warming sales data on server…'
-    if (!hasDisplayData && !dataReady) return 'Syncing your data…'
     if (!hasDisplayData && loadingBundle) return 'Loading marketplace data…'
     if (fetchingBundle && hasDisplayData) return 'Refreshing dashboard…'
     if (exportingSales) return 'Preparing sales export…'
@@ -1079,7 +1109,6 @@ export default function Dashboard() {
     exportingDsr,
     exportingDsrMonthly,
     hasDisplayData,
-    dataReady,
     loadingBundle,
     fetchingBundle,
     showDsr,

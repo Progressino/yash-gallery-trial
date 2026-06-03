@@ -50,7 +50,7 @@ def test_auto_dashboard_builds_from_tier3_when_sales_empty(monkeypatch):
         }
     )
 
-    def _load(plat, start, end, dedup=True):
+    def _load(plat, start, end, dedup=True, **kwargs):
         return amazon.copy() if plat == "amazon" else pd.DataFrame()
 
     monkeypatch.setattr(daily_store, "platforms_with_uploads_in_range", lambda s, e: ["amazon"])
@@ -95,7 +95,7 @@ def test_tier3_direct_preferred_over_empty_session_sales(client, monkeypatch):
     monkeypatch.setattr(
         daily_store,
         "load_platform_data_for_report_range",
-        lambda plat, s, e, dedup=True: amazon.copy() if plat == "amazon" else pd.DataFrame(),
+        lambda plat, s, e, dedup=True, **kwargs: amazon.copy() if plat == "amazon" else pd.DataFrame(),
     )
     monkeypatch.setattr(daily_store, "merge_platform_data", merge_platform_data)
     monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _sid: None)
@@ -151,7 +151,7 @@ def test_intelligence_bundle_serves_june_from_tier3_not_warming(client, monkeypa
     monkeypatch.setattr(
         daily_store,
         "load_platform_data_for_report_range",
-        lambda plat, s, e, dedup=True: amazon.copy() if plat == "amazon" else pd.DataFrame(),
+        lambda plat, s, e, dedup=True, **kwargs: amazon.copy() if plat == "amazon" else pd.DataFrame(),
     )
     monkeypatch.setattr(
         daily_store,
@@ -183,3 +183,55 @@ def test_intelligence_bundle_serves_june_from_tier3_not_warming(client, monkeypa
     plat = next(p for p in body["platform_summary"] if p["platform"] == "Amazon")
     assert plat.get("loaded") is True
     assert plat.get("total_units", 0) == 33
+
+
+def test_long_window_uses_session_without_tier3_parquet_load(client, monkeypatch):
+    """90D Intelligence must not load Tier-3 parquet blobs when session sales has window data."""
+    from backend.services import daily_store
+    from backend.session import store
+
+    tier3_loads = {"n": 0}
+
+    def _load(plat, start, end, dedup=True, **kwargs):
+        tier3_loads["n"] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(daily_store, "load_platform_data_for_report_range", _load)
+    monkeypatch.setattr(daily_store, "platforms_with_uploads_in_range", lambda s, e: ["amazon"])
+    monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _sid: None)
+    monkeypatch.setattr(data_router, "_schedule_persist_tier3_window", lambda *a, **k: None)
+    monkeypatch.setattr(daily_store, "get_tier3_sync_token", lambda: {})
+
+    client.get("/api/health")
+    sess = store.get(client.cookies.get("session_id"))
+    assert sess is not None
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["SKU-A", "SKU-A"],
+            "TxnDate": pd.to_datetime(["2026-06-01", "2026-06-02"]),
+            "Transaction Type": ["Shipment", "Refund"],
+            "Quantity": [40, 5],
+            "Units_Effective": [40, -5],
+            "Source": ["Amazon", "Amazon"],
+            "OrderId": ["O1", "O2"],
+            "LineKey": ["L1", "L2"],
+        }
+    )
+    sess.mtr_df = pd.DataFrame(
+        [{"Date": "2026-06-01", "SKU": "SKU-A", "Transaction_Type": "Shipment", "Quantity": 40}]
+    )
+    sess.sku_mapping = {"SKU-A": "SKU-A"}
+
+    r = client.get(
+        "/api/data/intelligence-bundle",
+        params={
+            "start_date": "2026-03-06",
+            "end_date": "2026-06-04",
+            "include_extras": "0",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("session_fast_path") is True
+    assert body["sales_summary"]["total_units"] == 40
+    assert tier3_loads["n"] == 0
