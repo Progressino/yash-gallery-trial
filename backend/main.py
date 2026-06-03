@@ -647,8 +647,8 @@ def _do_load_warm_cache() -> bool:
         _FAST_SKIP_MAX_AGE_HOURS = float(_os_main.environ.get("WARM_CACHE_FAST_SKIP_HOURS", "2"))
         if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
             try:
-                import os as _os_fast, json as _json_fast
-                _mf = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
+                import json as _json_fast
+                _mf = _os_main.path.join(_DISK_CACHE_DIR, "_manifest.json")
                 with open(_mf) as _fmf:
                     _m = _json_fast.load(_fmf)
                 _s = _m.get("saved_at", "")
