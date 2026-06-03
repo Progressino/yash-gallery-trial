@@ -1158,6 +1158,12 @@ def get_coverage(request: Request, light: bool = False):
     except Exception:
         pass
     _restore_inventory_from_warm(sess)
+    # Auto-clear stuck daily ingest on every coverage poll — no manual button needed.
+    try:
+        from ..routers.upload import _clear_stuck_daily_ingest
+        _clear_stuck_daily_ingest(sess, force=False)
+    except Exception:
+        pass
     if not light:
         if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
             light = True

@@ -47,8 +47,9 @@ def test_returns_import_accepts_rar_and_queues_followup(client, auth_token, monk
     assert body.get("sales_rebuild") == "pending"
     assert body.get("sales_rebuilt") is False
     assert "background" in (body.get("message") or "").lower()
-    # The followup runs in a background executor — give it a moment to start.
-    for _ in range(20):
+    # The followup runs in a background executor — wait up to 5 s for the thread.
+    # Full test-suite runs can saturate the executor; a short 2-s window is not enough.
+    for _ in range(50):
         if queued:
             break
         time.sleep(0.1)

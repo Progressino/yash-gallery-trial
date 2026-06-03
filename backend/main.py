@@ -95,6 +95,9 @@ _WARM_CACHE_KEYS = (
     "sku_status_lead_df",
     # Confirmed PO raises (Export & Confirm / CSV import) — must survive restarts like other PO sidecars.
     "po_raise_ledger_df",
+    # Return overlay (uploaded via Upload → Returns for PO) — must survive restarts so the
+    # dashboard return-rate and PO net-unit deduction remain active without re-uploading.
+    "po_return_overlay_df",
 )
 
 
@@ -127,7 +130,7 @@ def publish_warm_cache_from_session(sess) -> None:
     _warm_cache_loaded_at = datetime.now(IST)
 
 
-_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df")
+_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df", "po_return_overlay_df")
 
 
 def session_needs_operational_data(sess) -> bool:
@@ -205,8 +208,13 @@ def restore_po_sidecars_from_warm(sess) -> bool:
             continue
         setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
         changed = True
+        # When the return overlay is newly restored, invalidate sales so it
+        # gets rebuilt with the return deduction applied.
+        if key == "po_return_overlay_df":
+            sess.daily_restored = False
     if changed:
         sess._quarterly_cache.clear()
+        sess._intelligence_bundle_cache.clear()
     return changed
 
 
