@@ -950,21 +950,29 @@ def _do_load_warm_cache() -> bool:
         _warm_cache = {}
         _gc.collect()
 
-        # Rebuild unified sales_df from the fully-merged platform data
-        try:
-            loaded["sales_df"] = build_sales_df(
-                mtr_df=loaded.get("mtr_df", pd.DataFrame()),
-                myntra_df=loaded.get("myntra_df", pd.DataFrame()),
-                meesho_df=loaded.get("meesho_df", pd.DataFrame()),
-                flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
-                sku_mapping=loaded.get("sku_mapping") or {},
-                snapdeal_df=loaded.get("snapdeal_df"),
-            )
-            log.info("Phase 2 sales_df: %d rows", len(loaded["sales_df"]))
-        except Exception as e:
-            log.warning("Phase 2 sales_df rebuild failed: %s", e)
-            if phase1_ok:
-                loaded.setdefault("sales_df", _old_sales_df)
+        # ── Skip build_sales_df in Phase 2 — use the disk-cached sales_df instead ──
+        # build_sales_df with 980K+ mtr rows peaks at 5-6 GiB, blocks the health
+        # check, and causes autoheal to restart the container before Phase 2 saves.
+        # The disk cache already holds a valid sales_df from the previous Phase 2.
+        # Load it from disk; user sessions rebuild lazily via _restore_daily_if_needed
+        # when they first access data (with any new daily uploads already merged).
+        if _old_sales_df is not None and not _old_sales_df.empty:
+            loaded["sales_df"] = _old_sales_df
+            log.info("Phase 2: using disk sales_df (%d rows) — skipping build_sales_df to prevent OOM.", len(_old_sales_df))
+        else:
+            # No disk sales_df available — build it (first-time Phase 2 only)
+            try:
+                loaded["sales_df"] = build_sales_df(
+                    mtr_df=loaded.get("mtr_df", pd.DataFrame()),
+                    myntra_df=loaded.get("myntra_df", pd.DataFrame()),
+                    meesho_df=loaded.get("meesho_df", pd.DataFrame()),
+                    flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
+                    sku_mapping=loaded.get("sku_mapping") or {},
+                    snapdeal_df=loaded.get("snapdeal_df"),
+                )
+                log.info("Phase 2 sales_df: %d rows (first-time build)", len(loaded["sales_df"]))
+            except Exception as e:
+                log.warning("Phase 2 sales_df rebuild failed: %s", e)
         del _old_sales_df
         _gc.collect()
         _warm_cache = loaded
