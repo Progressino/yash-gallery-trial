@@ -11,6 +11,7 @@ import io
 import os
 import re
 import sqlite3
+import time
 import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -899,6 +900,7 @@ def save_daily_file(
     )
     conn.commit()
     conn.close()
+    invalidate_upload_coverage_cache()
     return file_date, len(df), None
 
 
@@ -1115,6 +1117,15 @@ def list_uploads() -> List[dict]:
     ]
 
 
+_COVERAGE_CACHE: tuple[float, Dict[str, Set[str]]] | None = None
+_COVERAGE_CACHE_TTL_SEC = 30.0
+
+
+def invalidate_upload_coverage_cache() -> None:
+    global _COVERAGE_CACHE
+    _COVERAGE_CACHE = None
+
+
 def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
     """
     For each Tier-3 platform, return all calendar days covered by persisted uploads.
@@ -1123,6 +1134,11 @@ def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
     and falls back to ``file_date`` for legacy rows. This keeps Intelligence in sync
     with Upload coverage while still allowing day-level gating.
     """
+    global _COVERAGE_CACHE
+    now = time.time()
+    if _COVERAGE_CACHE is not None and (now - _COVERAGE_CACHE[0]) < _COVERAGE_CACHE_TTL_SEC:
+        return _COVERAGE_CACHE[1]
+
     conn = _get_conn()
     rows = conn.execute(
         """
@@ -1168,6 +1184,7 @@ def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
         while cur <= d1:
             bucket.add(cur.isoformat())
             cur += datetime.timedelta(days=1)
+    _COVERAGE_CACHE = (now, out)
     return out
 
 
@@ -1293,6 +1310,8 @@ def delete_upload(upload_id: int) -> bool:
     conn.commit()
     changed = conn.total_changes > 0
     conn.close()
+    if changed:
+        invalidate_upload_coverage_cache()
     return changed
 
 

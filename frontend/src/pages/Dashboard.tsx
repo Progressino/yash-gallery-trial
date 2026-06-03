@@ -819,21 +819,28 @@ export default function Dashboard() {
     [dateStart, dateEnd, salesBasis],
   )
 
-  const bundleParamsCore = useMemo(() => {
+  const bundleSpanDays = useMemo(
+    () => reportingSpanDays(dateStart, dateEnd),
+    [dateStart, dateEnd],
+  )
+
+  const bundleParams = useMemo(() => {
     const p = new URLSearchParams({
       limit: String(topSkuLimit),
       basis: salesBasis,
-      include_extras: '0',
+      include_extras: '1',
     })
     if (dateStart) p.set('start_date', dateStart)
     if (dateEnd) p.set('end_date', dateEnd)
     return p.toString()
   }, [dateStart, dateEnd, topSkuLimit, salesBasis])
 
-  const bundleParamsFull = useMemo(
-    () => bundleParamsCore.replace('include_extras=0', 'include_extras=1'),
-    [bundleParamsCore],
-  )
+  const bundleTimeoutMs = useMemo(() => {
+    const span = bundleSpanDays ?? 999
+    if (span <= 7) return 25_000
+    if (span <= 45) return 45_000
+    return 90_000
+  }, [bundleSpanDays])
 
   const dataReady = sessionSales || hasPlatformData || hintSaysSales || !!cachedBundleHint
 
@@ -844,37 +851,28 @@ export default function Dashboard() {
   } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis],
     queryFn: async () => {
-      const { data: core } = await api.get<IntelligenceBundle & { status?: string }>(
-        `/data/intelligence-bundle?${bundleParamsCore}`,
-        { timeout: 90_000 },
+      const { data } = await api.get<IntelligenceBundle & { status?: string }>(
+        `/data/intelligence-bundle?${bundleParams}`,
+        { timeout: bundleTimeoutMs },
       )
-      if (core?.status === 'warming') {
-        return core
+      if (data?.status !== 'warming') {
+        writeIntelligenceCache(dateStart, dateEnd, salesBasis, data)
       }
-      writeIntelligenceCache(dateStart, dateEnd, salesBasis, core)
-      try {
-        const { data: full } = await api.get<IntelligenceBundle & { status?: string }>(
-          `/data/intelligence-bundle?${bundleParamsFull}`,
-          { timeout: 120_000 },
-        )
-        if (full?.status !== 'warming') {
-          writeIntelligenceCache(dateStart, dateEnd, salesBasis, full)
-          return full
-        }
-      } catch {
-        /* charts already usable from core bundle */
-      }
-      return core
+      return data
     },
     enabled: dataReady,
     staleTime: 300_000,
     retry: 1,
+    placeholderData: previousData => {
+      const prev = previousData as IntelligenceBundle | undefined
+      if (prev && bundleHasDisplayData(prev)) return prev
+      return cachedBundleHint ?? undefined
+    },
     refetchInterval: q => {
       const d = q.state.data
       if (d?.status === 'warming' || jobRunning) return 4_000
       return false
     },
-    placeholderData: () => cachedBundleHint ?? undefined,
   })
 
   const bundleWarming = intelligenceBundle?.status === 'warming'
@@ -884,7 +882,10 @@ export default function Dashboard() {
   const platformSummary = intelligenceBundle?.platform_summary
   const anomalies = intelligenceBundle?.anomalies
   const dsrBrandMonthly = intelligenceBundle?.dsr_brand_monthly
-  const loadingPlatforms = loadingBundle && !bundleHasDisplayData(intelligenceBundle)
+  const loadingPlatforms =
+    !bundleHasDisplayData(intelligenceBundle) &&
+    !cachedBundleHint &&
+    (loadingBundle || (fetchingBundle && !bundleHasDisplayData(intelligenceBundle)))
   const loadingDsrBrands = loadingBundle && !dsrBrandMonthly?.rows?.length
 
   const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
@@ -1104,8 +1105,8 @@ export default function Dashboard() {
             </h1>
             <p className="hero-sub">
               {dateStart || 'All time'} → {dateEnd || 'today'} ·{' '}
-              {salesLoaded
-                ? `${loadedPlatforms.length} of ${platforms.length || 5} marketplaces loaded`
+              {salesLoaded || cachedBundleHint
+                ? `${loadedPlatforms.length || (cachedBundleHint?.platform_summary?.filter(p => p.loaded).length ?? 0)} of ${platforms.length || 5} marketplaces loaded`
                 : 'Preparing marketplace data…'}
             </p>
           </div>

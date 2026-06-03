@@ -439,15 +439,74 @@ def _platforms_with_tier3_token_mismatch(sess: AppSession) -> list[str]:
     return out
 
 
-def _platforms_with_sales_gaps_for_upload_days(
+def _report_span_days(
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Optional[int]:
+    """Inclusive calendar days in the reporting window, or None if open-ended."""
+    s0 = str(start_date or "").strip()[:10]
+    s1 = str(end_date or "").strip()[:10]
+    if len(s0) != 10 and len(s1) != 10:
+        return None
+    if len(s0) != 10:
+        s0 = s1
+    if len(s1) != 10:
+        s1 = s0
+    try:
+        d0 = datetime.date.fromisoformat(s0)
+        d1 = datetime.date.fromisoformat(s1)
+    except ValueError:
+        return None
+    if d1 < d0:
+        d0, d1 = d1, d0
+    return (d1 - d0).days + 1
+
+
+def _intelligence_fast_window_days() -> int:
+    try:
+        return max(7, int((os.environ.get("INTELLIGENCE_FAST_WINDOW_DAYS") or "45").strip()))
+    except ValueError:
+        return 45
+
+
+def _refresh_sales_days_by_source(sess: AppSession) -> Dict[str, Set[str]]:
+    """Per-marketplace calendar days present in unified sales (cheap gap checks)."""
+    sales = getattr(sess, "sales_df", None)
+    out: Dict[str, Set[str]] = {}
+    for _attr, src in _SOURCE_BY_ATTR.items():
+        out[src] = set()
+    if sales is None or not hasattr(sales, "empty") or sales.empty:
+        sess._sales_days_by_source = out
+        return out
+    if "Source" not in sales.columns or "TxnDate" not in sales.columns:
+        sess._sales_days_by_source = out
+        return out
+    src_col = sales["Source"].astype(str).str.strip()
+    days = txn_reporting_naive_ist(sales["TxnDate"]).dt.normalize().dt.strftime("%Y-%m-%d")
+    for src in out:
+        mask = src_col == src
+        if mask.any():
+            out[src] = set(days.loc[mask].dropna().unique())
+    sess._sales_days_by_source = out
+    return out
+
+
+def _sales_days_by_source(sess: AppSession) -> Dict[str, Set[str]]:
+    cached = getattr(sess, "_sales_days_by_source", None)
+    if isinstance(cached, dict):
+        return cached
+    return _refresh_sales_days_by_source(sess)
+
+
+def _platforms_with_sales_gaps_fast(
     sess: AppSession,
     start_date: str,
     end_date: str,
 ) -> list[str]:
     """
-    Platforms where Tier-3 coverage includes calendar days in the window but unified
-    sales_df has no shipment/refund rows on those days (common after backfilling June 1
-    while the session already holds later dates).
+    Platforms where Tier-3 coverage includes a day in the window but unified sales
+    has no rows that day (e.g. June 1 backfill while session max is June 4).
+    Uses cached per-source day sets — O(window × platforms), not O(sales rows).
     """
     from ..services.daily_store import get_upload_report_day_coverage
 
@@ -466,7 +525,7 @@ def _platforms_with_sales_gaps_for_upload_days(
         return []
 
     cov = get_upload_report_day_coverage()
-    sales = getattr(sess, "sales_df", None)
+    have_by_src = _sales_days_by_source(sess)
     out: list[str] = []
     cur = d0
     while cur <= d1:
@@ -478,29 +537,64 @@ def _platforms_with_sales_gaps_for_upload_days(
             src = _SOURCE_BY_ATTR.get(attr, "")
             if not src:
                 continue
-            if (
-                sales is None
-                or not hasattr(sales, "empty")
-                or sales.empty
-                or "Source" not in sales.columns
-                or "TxnDate" not in sales.columns
-            ):
-                if plat not in out:
-                    out.append(plat)
-                continue
-            sub = sales[sales["Source"].astype(str).str.strip() == src]
-            if sub.empty:
-                if plat not in out:
-                    out.append(plat)
-                continue
-            have = set(
-                txn_reporting_naive_ist(sub["TxnDate"])
-                .dt.normalize()
-                .dt.strftime("%Y-%m-%d")
-            )
-            if day not in have and plat not in out:
+            if day not in (have_by_src.get(src) or set()) and plat not in out:
                 out.append(plat)
     return out
+
+
+def _ephemeral_sales_for_bundle_window(
+    sess: AppSession,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> "pd.DataFrame":
+    """
+    Build a small unified-sales slice for the dashboard window without rebuilding
+    the full 1M+ row session frame (patches missing days from Tier-3 blobs only).
+    """
+    import pandas as pd
+    from ..services.daily_store import load_platform_data_for_report_range
+    from ..services.sales import (
+        apply_upload_report_day_gate,
+        build_sales_df,
+        patch_sales_df_after_daily_upload,
+    )
+
+    raw = getattr(sess, "sales_df", None)
+    if raw is None or not hasattr(raw, "empty"):
+        raw = pd.DataFrame()
+
+    s = str(start_date or end_date or "")[:10]
+    e = str(end_date or start_date or "")[:10]
+    gap_plat = _platforms_with_sales_gaps_fast(sess, s, e) if len(s) == 10 and len(e) == 10 else []
+
+    working = raw
+    if gap_plat and sess.sku_mapping:
+        plat_frames: dict[str, pd.DataFrame] = {}
+        for plat in gap_plat:
+            chunk = load_platform_data_for_report_range(plat, s, e, dedup=True)
+            if not chunk.empty:
+                plat_frames[plat] = chunk
+        if plat_frames:
+            fresh = build_sales_df(
+                mtr_df=plat_frames.get("amazon", pd.DataFrame()),
+                myntra_df=plat_frames.get("myntra", pd.DataFrame()),
+                meesho_df=plat_frames.get("meesho", pd.DataFrame()),
+                flipkart_df=plat_frames.get("flipkart", pd.DataFrame()),
+                snapdeal_df=plat_frames.get("snapdeal", pd.DataFrame()),
+                sku_mapping=sess.sku_mapping,
+                **_sales_overlay_build_kwargs(sess),
+            )
+            d0 = pd.Timestamp(s)
+            d1 = pd.Timestamp(e)
+            working = patch_sales_df_after_daily_upload(raw, fresh, gap_plat, d0, d1)
+
+    if working.empty:
+        return working
+
+    gated = apply_upload_report_day_gate(working)
+    normed = gated.copy()
+    normed["TxnDate"] = txn_reporting_naive_ist(normed["TxnDate"])
+    return _filter_by_reporting_days(normed, "TxnDate", start_date, end_date)
 
 
 def _tier3_session_needs_topup(sess: AppSession) -> bool:
@@ -584,6 +678,7 @@ def _rebuild_session_sales(sess: AppSession) -> None:
         )
         sess._quarterly_cache.clear()
         sess._intelligence_bundle_cache.clear()
+        _refresh_sales_days_by_source(sess)
         _mark_tier3_sync_applied(sess)
     except Exception:
         pass
@@ -659,37 +754,6 @@ def _merge_tier3_for_report_range(
             changed = True
     if changed:
         _mark_tier3_sync_applied(sess)
-    return changed
-
-
-def _ensure_intelligence_dates_synced(
-    sess: AppSession,
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> bool:
-    """
-    Blocking sync before Intelligence bundle: merge Tier-3 when the store changed or
-    when Upload coverage days in the window are missing from unified sales.
-    """
-    changed = False
-    if _tier3_token_mismatch(sess):
-        _ensure_intelligence_session_fresh(sess)
-        changed = True
-    if not (start_date or end_date):
-        return changed
-    s = str(start_date or end_date or "")[:10]
-    e = str(end_date or start_date or "")[:10]
-    gap_plat = _platforms_with_sales_gaps_for_upload_days(sess, s, e)
-    if not gap_plat:
-        return changed
-    acquired = sess._daily_restore_lock.acquire(timeout=20.0)
-    if acquired:
-        try:
-            if _merge_tier3_for_report_range(sess, gap_plat, s, e):
-                _rebuild_session_sales(sess)
-                changed = True
-        finally:
-            sess._daily_restore_lock.release()
     return changed
 
 
@@ -1711,37 +1775,37 @@ def intelligence_bundle(
         _schedule_intelligence_refresh_async(sid or None)
         return cached["payload"]
 
-    # Sync Tier-3 + sales for the requested window (fixes Upload-visible days missing on Intelligence).
-    _ensure_intelligence_dates_synced(sess, start_date, end_date)
+    span_days = _report_span_days(start_date, end_date)
+    fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
 
-    if _session_sales_stale_vs_platforms(sess) or _tier3_token_mismatch(sess):
+    # Never block the request on a full Tier-3 merge / 1M-row sales rebuild.
+    _schedule_intelligence_refresh_async(sid or None)
+    if not fast_window and _session_sales_stale_vs_platforms(sess):
         _ensure_intelligence_session_fresh(sess)
-    else:
-        _schedule_intelligence_refresh_async(sid or None)
 
     # ── Pre-process sales_df ONCE for the whole bundle ────────────────────────
-    # Previously each sub-function (get_sales_summary, get_top_skus, etc.) did
-    # its own sales_df.copy() + date-normalise + date-range filter independently,
-    # costing ~5× redundant copies of the 1.3M-row frame.  Now:
-    #   • Apply the upload-day gate once (no-op unless DASHBOARD_UPLOAD_DAY_GATE=1)
-    #   • Normalise TxnDate to IST naive once
-    #   • Slice to the requested date range once → tiny slice passed to all functions
-    raw_sales = sess.sales_df
-    if not raw_sales.empty:
-        sales_gated = apply_upload_report_day_gate(raw_sales)  # no-op when gate off
-        sales_normed = sales_gated.copy()
-        sales_normed["TxnDate"] = txn_reporting_naive_ist(sales_normed["TxnDate"])
-        if start_date or end_date:
-            # Slice once; sub-functions receive a small df and skip their own filter
-            sales_for_bundle = _filter_by_reporting_days(
-                sales_normed, "TxnDate", start_date, end_date
-            )
-        else:
-            sales_for_bundle = sales_normed
-        del sales_normed
+    import pandas as pd
+
+    _empty_plat = pd.DataFrame()
+    if fast_window and (start_date or end_date):
+        sales_for_bundle = _ephemeral_sales_for_bundle_window(sess, start_date, end_date)
+        sales_gated = sales_for_bundle
     else:
-        sales_gated = raw_sales
-        sales_for_bundle = raw_sales
+        raw_sales = sess.sales_df
+        if not raw_sales.empty:
+            sales_gated = apply_upload_report_day_gate(raw_sales)
+            sales_normed = sales_gated.copy()
+            sales_normed["TxnDate"] = txn_reporting_naive_ist(sales_normed["TxnDate"])
+            if start_date or end_date:
+                sales_for_bundle = _filter_by_reporting_days(
+                    sales_normed, "TxnDate", start_date, end_date
+                )
+            else:
+                sales_for_bundle = sales_normed
+            del sales_normed
+        else:
+            sales_gated = raw_sales
+            sales_for_bundle = raw_sales
 
     payload = {
         # Pass pre-filtered slice with start_date/end_date=None → sub-functions
@@ -1768,17 +1832,31 @@ def intelligence_bundle(
         ),
     }
     if include_extras:
-        payload["anomalies"] = get_anomalies(
-            sess.mtr_df,
-            sess.myntra_df,
-            sess.meesho_df,
-            sess.flipkart_df,
-            sess.snapdeal_df,
-            sess.inventory_df_variant,
-            sales_gated,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        # Short windows: anomalies from the pre-sliced sales only (avoids scanning 1M+ rows / raw frames).
+        if fast_window and (start_date or end_date):
+            payload["anomalies"] = get_anomalies(
+                _empty_plat,
+                _empty_plat,
+                _empty_plat,
+                _empty_plat,
+                _empty_plat,
+                sess.inventory_df_variant,
+                sales_for_bundle,
+                start_date=None,
+                end_date=None,
+            )
+        else:
+            payload["anomalies"] = get_anomalies(
+                sess.mtr_df,
+                sess.myntra_df,
+                sess.meesho_df,
+                sess.flipkart_df,
+                sess.snapdeal_df,
+                sess.inventory_df_variant,
+                sales_gated,
+                start_date=start_date,
+                end_date=end_date,
+            )
         payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
             sales_for_bundle, start_date=None, end_date=None
         )

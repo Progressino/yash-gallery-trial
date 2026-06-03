@@ -188,6 +188,8 @@ def mark_tier3_store_changed(sess: AppSession) -> None:
     """After Tier-3 SQLite writes: force Intelligence to re-merge before serving cached bundles."""
     sess._intelligence_bundle_cache.clear()
     sess._tier3_sync_token_applied = {}
+    if hasattr(sess, "_sales_days_by_source"):
+        delattr(sess, "_sales_days_by_source")
 
 
 def resume_auto_data_restore(sess: AppSession) -> None:

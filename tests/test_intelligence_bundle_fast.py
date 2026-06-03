@@ -15,6 +15,10 @@ def test_intelligence_bundle_uses_cache_without_refresh(client, monkeypatch):
 
     monkeypatch.setattr("backend.routers.data._ensure_intelligence_session_fresh", _track_refresh)
     monkeypatch.setattr("backend.routers.data._schedule_intelligence_refresh_async", lambda _sid: None)
+    monkeypatch.setattr(
+        "backend.services.daily_store.get_tier3_sync_token",
+        lambda: {},
+    )
 
     r = client.get("/api/health")
     assert r.status_code == 200
@@ -25,7 +29,7 @@ def test_intelligence_bundle_uses_cache_without_refresh(client, monkeypatch):
     sess.sales_df = pd.DataFrame(
         {
             "Sku": ["SKU1", "SKU1"],
-            "TxnDate": ["2026-06-01", "2026-06-02"],
+            "TxnDate": pd.to_datetime(["2026-06-01", "2026-06-02"]),
             "Transaction Type": ["Shipment", "Refund"],
             "Quantity": [10, 2],
             "Units_Effective": [10, -2],
@@ -37,6 +41,8 @@ def test_intelligence_bundle_uses_cache_without_refresh(client, monkeypatch):
     sess.mtr_df = pd.DataFrame(
         [{"Date": "2026-06-01", "SKU": "SKU1", "Transaction_Type": "Shipment", "Quantity": 10}]
     )
+    sess._tier3_sync_token_applied = {}
+    sess.sku_mapping = {"SKU1": "SKU1"}
 
     r1 = client.get(
         "/api/data/intelligence-bundle",
@@ -55,3 +61,48 @@ def test_intelligence_bundle_uses_cache_without_refresh(client, monkeypatch):
     assert r2.status_code == 200
     assert r2.json() == body1
     assert called["refresh"] == refresh_after_first
+
+
+def test_short_window_bundle_does_not_block_full_refresh(client, monkeypatch):
+    """4-day window must not call blocking _ensure_intelligence_session_fresh on GET."""
+    called = {"refresh": 0}
+
+    def _track_refresh(sess):
+        called["refresh"] += 1
+
+    monkeypatch.setattr("backend.routers.data._ensure_intelligence_session_fresh", _track_refresh)
+    monkeypatch.setattr("backend.routers.data._schedule_intelligence_refresh_async", lambda _sid: None)
+    monkeypatch.setattr(
+        "backend.services.daily_store.get_upload_report_day_coverage",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "backend.services.daily_store.get_tier3_sync_token",
+        lambda: {"amazon": "1:1:x"},
+    )
+
+    client.get("/api/health")
+    sid = client.cookies.get("session_id")
+    sess = store.get(sid)
+    assert sess is not None
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["SKU1"],
+            "TxnDate": pd.to_datetime(["2026-06-04"]),
+            "Transaction Type": ["Shipment"],
+            "Quantity": [5],
+            "Units_Effective": [5],
+            "Source": ["Amazon"],
+            "OrderId": ["O1"],
+            "LineKey": ["L1"],
+        }
+    )
+    sess.sku_mapping = {"SKU1": "SKU1"}
+    sess._tier3_sync_token_applied = {}
+
+    r = client.get(
+        "/api/data/intelligence-bundle",
+        params={"start_date": "2026-06-01", "end_date": "2026-06-04", "include_extras": "0"},
+    )
+    assert r.status_code == 200
+    assert called["refresh"] == 0

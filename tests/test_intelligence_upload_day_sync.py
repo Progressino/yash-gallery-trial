@@ -42,9 +42,7 @@ def test_sales_gap_detects_missing_june_1_with_upload_coverage(monkeypatch):
         "get_upload_report_day_coverage",
         lambda: {"amazon": {"2026-06-01", "2026-06-02", "2026-06-04"}},
     )
-    gaps = data_router._platforms_with_sales_gaps_for_upload_days(
-        sess, "2026-06-01", "2026-06-01"
-    )
+    gaps = data_router._platforms_with_sales_gaps_fast(sess, "2026-06-01", "2026-06-01")
     assert gaps == ["amazon"]
 
 
