@@ -715,7 +715,12 @@ def _do_load_warm_cache() -> bool:
                     for v in [p1["mtr_df"], p1["myntra_df"], p1["meesho_df"],
                                p1["flipkart_df"], p1["snapdeal_df"]]
                 )
-                if has_sales:
+                # Only build Phase-1 sales_df when Phase 0 disk cache is absent.
+                # When disk_ok=True, p1 is never published to _warm_cache, so
+                # building sales_df is pure waste (1-2 GB allocation immediately freed).
+                # Skipping it keeps Phase 1 memory under 500 MB and prevents the
+                # health-check timeouts that trigger autoheal container restarts.
+                if has_sales and not disk_ok:
                     p1["sales_df"] = build_sales_df(
                         mtr_df=p1["mtr_df"],       myntra_df=p1["myntra_df"],
                         meesho_df=p1["meesho_df"], flipkart_df=p1["flipkart_df"],
@@ -940,10 +945,16 @@ def _do_load_warm_cache() -> bool:
             del daily
         except Exception:
             pass
-        # Save fallback sales_df in case build_sales_df fails below.
+        # Use the Phase-0 disk sales_df as the fallback.  When disk_ok=True, Phase 1
+        # no longer builds its own sales_df (skipped to reduce memory), so _warm_cache
+        # at this point holds p1 data (which has an empty sales_df).  Fall back to
+        # disk_data to get the valid historical sales_df saved during the last Phase 2.
+        _disk_sales = disk_data.get("sales_df") if disk_data else None
+        _p1_sales = _warm_cache.get("sales_df") if _warm_cache else None
         _old_sales_df: "pd.DataFrame" = (
-            _warm_cache.get("sales_df", pd.DataFrame())
-            if _warm_cache else pd.DataFrame()
+            _disk_sales
+            if (_disk_sales is not None and not getattr(_disk_sales, "empty", True))
+            else (_p1_sales if _p1_sales is not None else pd.DataFrame())
         )
         # Swap out the old warm cache before the peak allocation.
         # Active sessions already hold their own data; the brief empty window is safe.
