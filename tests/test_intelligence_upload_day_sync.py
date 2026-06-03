@@ -77,9 +77,10 @@ def test_merge_report_range_adds_june_1_platform_rows(monkeypatch):
     )
     monkeypatch.setattr(daily_store, "merge_platform_data", merge_platform_data)
 
-    assert data_router._merge_tier3_for_report_range(
+    changed = data_router._merge_tier3_for_report_range(
         sess, ["amazon"], "2026-06-01", "2026-06-01"
     )
+    assert changed
     j1 = sess.mtr_df[
         pd.to_datetime(sess.mtr_df["Date"]).dt.normalize() == pd.Timestamp("2026-06-01")
     ]

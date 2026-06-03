@@ -1213,6 +1213,34 @@ def get_tier3_sync_token() -> Dict[str, str]:
     return out
 
 
+def platforms_with_uploads_in_range(start_date: str, end_date: str) -> List[str]:
+    """Platforms that have at least one Tier-3 blob overlapping the calendar window."""
+    s0 = str(start_date or "").strip()[:10]
+    s1 = str(end_date or "").strip()[:10]
+    if len(s0) != 10 or len(s1) != 10:
+        return []
+    if s1 < s0:
+        s0, s1 = s1, s0
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT platform
+        FROM daily_uploads
+        WHERE platform IS NOT NULL
+          AND COALESCE(NULLIF(TRIM(COALESCE(date_to, '')), ''), file_date) >= ?
+          AND COALESCE(NULLIF(TRIM(COALESCE(date_from, '')), ''), file_date) <= ?
+        """,
+        (s0, s1),
+    ).fetchall()
+    conn.close()
+    out: List[str] = []
+    for (plat,) in rows:
+        p = str(plat).strip().lower()
+        if p:
+            out.append(p)
+    return out
+
+
 def load_platform_data_for_report_range(
     platform: str,
     start_date: str,
