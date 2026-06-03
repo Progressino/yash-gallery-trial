@@ -1171,6 +1171,92 @@ def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
     return out
 
 
+def get_tier3_sync_token() -> Dict[str, str]:
+    """
+    Cheap fingerprint of Tier-3 SQLite per platform (file count, rows, last upload time).
+    Used to detect backfills (e.g. June 1 saved while session already has June 4) that
+    do not change ``max_date`` but must still trigger a dashboard merge.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT platform, COUNT(*), COALESCE(SUM(rows), 0), MAX(uploaded_at)
+        FROM daily_uploads
+        WHERE platform IS NOT NULL
+        GROUP BY platform
+        """
+    ).fetchall()
+    conn.close()
+    out: Dict[str, str] = {}
+    for plat, n_files, n_rows, last_up in rows:
+        p = str(plat).strip().lower()
+        if not p:
+            continue
+        out[p] = f"{int(n_files)}:{int(n_rows)}:{str(last_up or '')}"
+    return out
+
+
+def load_platform_data_for_report_range(
+    platform: str,
+    start_date: str,
+    end_date: str,
+    *,
+    dedup: bool = True,
+) -> pd.DataFrame:
+    """
+    Load Tier-3 blobs whose declared row window overlaps ``[start_date, end_date]``.
+    Used when Intelligence requests a calendar window that Upload already covers.
+    """
+    s0 = str(start_date or "").strip()[:10]
+    s1 = str(end_date or "").strip()[:10]
+    if len(s0) != 10 or len(s1) != 10:
+        return pd.DataFrame()
+    if s1 < s0:
+        s0, s1 = s1, s0
+
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT filename, data_parquet
+        FROM daily_uploads
+        WHERE platform = ?
+          AND COALESCE(NULLIF(TRIM(COALESCE(date_to, '')), ''), file_date) >= ?
+          AND COALESCE(NULLIF(TRIM(COALESCE(date_from, '')), ''), file_date) <= ?
+        ORDER BY file_date ASC
+        """,
+        (platform, s0, s1),
+    ).fetchall()
+    conn.close()
+
+    dfs: list[pd.DataFrame] = []
+    tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
+    for filename, blob in rows:
+        try:
+            d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+            if tail and not d.empty:
+                label = infer_dsr_label_from_upload_filename(filename, tail)
+                if label:
+                    if "DSR_Segment" not in d.columns:
+                        d["DSR_Segment"] = label
+                    else:
+                        seg = d["DSR_Segment"].fillna("").astype(str).str.strip()
+                        miss = seg.str.len().eq(0) | seg.str.casefold().isin(
+                            {"all", "nan", "none"}
+                        )
+                        if miss.any():
+                            d.loc[miss, "DSR_Segment"] = label
+            if not d.empty:
+                dfs.append(d)
+        except Exception:
+            pass
+    if not dfs:
+        return pd.DataFrame()
+    combined = pd.concat(dfs, ignore_index=True)
+    if not dedup:
+        return combined.reset_index(drop=True)
+    return _dedup_platform_df(combined, platform)
+
+
 def get_summary() -> dict:
     """Per-platform: min_date, max_date, total_rows, file_count.
 

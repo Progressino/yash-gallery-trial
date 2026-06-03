@@ -184,6 +184,12 @@ def wipe_app_session(sess: AppSession) -> None:
     sess._intelligence_bundle_cache.clear()
 
 
+def mark_tier3_store_changed(sess: AppSession) -> None:
+    """After Tier-3 SQLite writes: force Intelligence to re-merge before serving cached bundles."""
+    sess._intelligence_bundle_cache.clear()
+    sess._tier3_sync_token_applied = {}
+
+
 def resume_auto_data_restore(sess: AppSession) -> None:
     """Re-enable automatic restores / merges after an explicit load or new upload."""
     sess.pause_auto_data_restore = False

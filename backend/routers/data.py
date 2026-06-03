@@ -5,11 +5,12 @@ dsr-brand-monthly, dsr-brand-monthly-export, top-skus,
 mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 """
 import csv
+import datetime
 import io
 import os
 import re
 import time
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from ..models.schemas import CoverageResponse, JobStatusResponse, RestoreFullResponse
@@ -412,8 +413,100 @@ def _sales_max_for_source(sales_df, source: str) -> Optional[str]:
     return str(pd.Timestamp(mx).date())
 
 
+def _mark_tier3_sync_applied(sess: AppSession) -> None:
+    from ..services.daily_store import get_tier3_sync_token
+
+    sess._tier3_sync_token_applied = get_tier3_sync_token()
+
+
+def _tier3_token_mismatch(sess: AppSession) -> bool:
+    from ..services.daily_store import get_tier3_sync_token
+
+    store = get_tier3_sync_token()
+    applied: Dict[str, str] = getattr(sess, "_tier3_sync_token_applied", None) or {}
+    return store != applied
+
+
+def _platforms_with_tier3_token_mismatch(sess: AppSession) -> list[str]:
+    from ..services.daily_store import get_tier3_sync_token
+
+    store = get_tier3_sync_token()
+    applied: Dict[str, str] = getattr(sess, "_tier3_sync_token_applied", None) or {}
+    out: list[str] = []
+    for plat, _attr in _PLATFORM_ATTRS:
+        if store.get(plat) != applied.get(plat):
+            out.append(plat)
+    return out
+
+
+def _platforms_with_sales_gaps_for_upload_days(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+) -> list[str]:
+    """
+    Platforms where Tier-3 coverage includes calendar days in the window but unified
+    sales_df has no shipment/refund rows on those days (common after backfilling June 1
+    while the session already holds later dates).
+    """
+    from ..services.daily_store import get_upload_report_day_coverage
+
+    s0 = str(start_date or "").strip()[:10]
+    s1 = str(end_date or "").strip()[:10]
+    if len(s0) != 10 or len(s1) != 10:
+        return []
+    try:
+        d0 = datetime.date.fromisoformat(s0)
+        d1 = datetime.date.fromisoformat(s1)
+    except ValueError:
+        return []
+    if d1 < d0:
+        d0, d1 = d1, d0
+    if (d1 - d0).days > 120:
+        return []
+
+    cov = get_upload_report_day_coverage()
+    sales = getattr(sess, "sales_df", None)
+    out: list[str] = []
+    cur = d0
+    while cur <= d1:
+        day = cur.isoformat()
+        cur += datetime.timedelta(days=1)
+        for plat, attr in _PLATFORM_ATTRS:
+            if day not in (cov.get(plat) or set()):
+                continue
+            src = _SOURCE_BY_ATTR.get(attr, "")
+            if not src:
+                continue
+            if (
+                sales is None
+                or not hasattr(sales, "empty")
+                or sales.empty
+                or "Source" not in sales.columns
+                or "TxnDate" not in sales.columns
+            ):
+                if plat not in out:
+                    out.append(plat)
+                continue
+            sub = sales[sales["Source"].astype(str).str.strip() == src]
+            if sub.empty:
+                if plat not in out:
+                    out.append(plat)
+                continue
+            have = set(
+                txn_reporting_naive_ist(sub["TxnDate"])
+                .dt.normalize()
+                .dt.strftime("%Y-%m-%d")
+            )
+            if day not in have and plat not in out:
+                out.append(plat)
+    return out
+
+
 def _tier3_session_needs_topup(sess: AppSession) -> bool:
     """True when SQLite has newer/more daily uploads than session or unified sales."""
+    if _tier3_token_mismatch(sess):
+        return True
     try:
         from ..services.daily_store import get_summary
 
@@ -491,6 +584,7 @@ def _rebuild_session_sales(sess: AppSession) -> None:
         )
         sess._quarterly_cache.clear()
         sess._intelligence_bundle_cache.clear()
+        _mark_tier3_sync_applied(sess)
     except Exception:
         pass
 
@@ -535,10 +629,74 @@ def _merge_tier3_light(sess: AppSession, *, only_platforms: list[str] | None = N
         if len(merged) != len(cur) or (cur.empty and not merged.empty):
             setattr(sess, attr, merged)
             changed = True
+    if changed:
+        _mark_tier3_sync_applied(sess)
+    return changed
+
+
+def _merge_tier3_for_report_range(
+    sess: AppSession,
+    platforms: list[str],
+    start_date: str,
+    end_date: str,
+) -> bool:
+    from ..services.daily_store import (
+        load_platform_data_for_report_range,
+        merge_platform_data,
+    )
+
+    changed = False
+    for platform, attr in _PLATFORM_ATTRS:
+        if platform not in platforms:
+            continue
+        df = load_platform_data_for_report_range(platform, start_date, end_date, dedup=False)
+        if df.empty:
+            continue
+        cur = getattr(sess, attr)
+        merged = merge_platform_data(cur, df, platform)
+        if len(merged) != len(cur) or (cur.empty and not merged.empty):
+            setattr(sess, attr, merged)
+            changed = True
+    if changed:
+        _mark_tier3_sync_applied(sess)
+    return changed
+
+
+def _ensure_intelligence_dates_synced(
+    sess: AppSession,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> bool:
+    """
+    Blocking sync before Intelligence bundle: merge Tier-3 when the store changed or
+    when Upload coverage days in the window are missing from unified sales.
+    """
+    changed = False
+    if _tier3_token_mismatch(sess):
+        _ensure_intelligence_session_fresh(sess)
+        changed = True
+    if not (start_date or end_date):
+        return changed
+    s = str(start_date or end_date or "")[:10]
+    e = str(end_date or start_date or "")[:10]
+    gap_plat = _platforms_with_sales_gaps_for_upload_days(sess, s, e)
+    if not gap_plat:
+        return changed
+    acquired = sess._daily_restore_lock.acquire(timeout=20.0)
+    if acquired:
+        try:
+            if _merge_tier3_for_report_range(sess, gap_plat, s, e):
+                _rebuild_session_sales(sess)
+                changed = True
+        finally:
+            sess._daily_restore_lock.release()
     return changed
 
 
 def _platforms_needing_tier3_topup(sess: AppSession) -> list[str]:
+    token_gap = _platforms_with_tier3_token_mismatch(sess)
+    if token_gap:
+        return token_gap
     out: list[str] = []
     try:
         from ..services.daily_store import get_summary
@@ -636,6 +794,7 @@ def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
             _rebuild_session_sales(sess)
         else:
             _ensure_sales_rebuilt(sess)
+        _mark_tier3_sync_applied(sess)
     finally:
         sess._intelligence_refresh_ts = time.time()
         sess._intelligence_refresh_running = False
@@ -1548,12 +1707,14 @@ def intelligence_bundle(
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
     cached = bundle_cache.get(cache_key)
-    if cached and (now - float(cached.get("_ts", 0))) < 300.0:
+    if cached and (now - float(cached.get("_ts", 0))) < 300.0 and not _tier3_token_mismatch(sess):
         _schedule_intelligence_refresh_async(sid or None)
         return cached["payload"]
 
-    # Do not block the request thread on Tier-3 merge when sales are already loaded.
-    if _session_sales_stale_vs_platforms(sess):
+    # Sync Tier-3 + sales for the requested window (fixes Upload-visible days missing on Intelligence).
+    _ensure_intelligence_dates_synced(sess, start_date, end_date)
+
+    if _session_sales_stale_vs_platforms(sess) or _tier3_token_mismatch(sess):
         _ensure_intelligence_session_fresh(sess)
     else:
         _schedule_intelligence_refresh_async(sid or None)

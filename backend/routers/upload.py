@@ -2558,6 +2558,9 @@ def _save_daily_file_tracked(
 
 
 def _after_daily_file_saved(sess: AppSession, platform: str, df: pd.DataFrame) -> None:
+    from ..session import mark_tier3_store_changed
+
+    mark_tier3_store_changed(sess)
     if _daily_auto_fast_ingest_enabled():
         _track_daily_auto_platform(sess, platform)
         _buffer_daily_auto_parsed(sess, platform, df)
