@@ -638,6 +638,46 @@ def _do_load_warm_cache() -> bool:
         # immediately and still run Phase 1+2 in the same thread to pick up any
         # new uploads that arrived since the last deploy.
         disk_ok, disk_data = _load_warm_cache_from_disk()
+        # ── Fast-path: if disk is fresh AND healthy, skip all of Phase 1+2 ──────
+        # Phase 1+2 causes 6-7 GB memory spikes (session DataFrames + GitHub DL)
+        # that trigger health-check failures and autoheal restarts.  When the disk
+        # was recently saved (< 2 h) and has full historical mtr_df, there is no
+        # value in running Phase 2 — skip it entirely and just do a lightweight
+        # SQLite top-up.  Phase 2 will still run on the next 6 AM scheduler tick.
+        _FAST_SKIP_MAX_AGE_HOURS = float(_os_main.environ.get("WARM_CACHE_FAST_SKIP_HOURS", "2"))
+        if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
+            try:
+                import os as _os_fast, json as _json_fast
+                _mf = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
+                with open(_mf) as _fmf:
+                    _m = _json_fast.load(_fmf)
+                _s = _m.get("saved_at", "")
+                if _s:
+                    _saved = datetime.fromisoformat(_s)
+                    if _saved.tzinfo is None:
+                        _saved = _saved.replace(tzinfo=IST)
+                    _age_h = (datetime.now(IST) - _saved).total_seconds() / 3600
+                    _p0_m = disk_data.get("mtr_df")
+                    _p0_r = len(_p0_m) if _p0_m is not None else 0
+                    del _p0_m
+                    if _age_h < _FAST_SKIP_MAX_AGE_HOURS and _p0_r >= _DISK_CACHE_MIN_MTR_ROWS:
+                        log.warning(
+                            "Warm-cache fast-path: disk is %.0fm old with %d mtr rows — "
+                            "serving immediately, skipping Phase 1+2 entirely.",
+                            _age_h * 60, _p0_r,
+                        )
+                        _warm_cache = disk_data
+                        _warm_cache_loaded_at = datetime.now(IST)
+                        _warm_cache_generation += 1
+                        _warm_cache_ready.set()
+                        # Light SQLite top-up without loading Phase 1 from scratch
+                        try:
+                            _merge_recent_sqlite_into_warm_cache(months=4)
+                        except Exception:
+                            log.exception("fast-path SQLite top-up failed")
+                        return True
+            except Exception as _fp_err:
+                log.warning("fast-path check failed (non-fatal): %s", _fp_err)
         # ── Auto-detect corrupt disk cache (too few mtr rows) ─────────────────
         # If Phase 0 loaded a cache with fewer than _DISK_CACHE_MIN_MTR_ROWS rows
         # (default 200 K) it was almost certainly saved while the warm cache was
