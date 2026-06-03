@@ -229,11 +229,25 @@ def _extract_file_date(filename: str, df: pd.DataFrame) -> str:
         except ValueError:
             pass
 
-    # Pattern: DD-MM-YYYY or DD_MM_YYYY
+    # Pattern: DD-MM-YYYY or DD_MM_YYYY (2-digit day/month, 4-digit year)
     m = re.search(r"(\d{2})[_-](\d{2})[_-](\d{4})", filename)
     if m:
         try:
             d = datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            if 2020 <= d.year <= 2030:
+                return str(d)
+        except ValueError:
+            pass
+
+    # Pattern: D-M-YY or D-M-YYYY (single-digit day/month, 2-or-4-digit year)
+    # Handles filenames like "Sales 1-6-26.rar" → 2026-06-01
+    m = re.search(r"(?<!\d)(\d{1,2})[_-](\d{1,2})[_-](\d{2,4})(?!\d)", filename)
+    if m:
+        try:
+            yr = int(m.group(3))
+            if yr < 100:
+                yr = 2000 + yr  # 26 → 2026
+            d = datetime.date(yr, int(m.group(2)), int(m.group(1)))
             if 2020 <= d.year <= 2030:
                 return str(d)
         except ValueError:

@@ -1353,7 +1353,11 @@ def intelligence_bundle(
     One round-trip for the Intelligence dashboard (summary + platforms + top SKUs + anomalies + DSR brands).
     Runs session freshness once instead of five parallel handlers each rebuilding sales.
     """
-    from ..services.sales import apply_upload_report_day_gate
+    from ..services.sales import (
+        apply_upload_report_day_gate,
+        txn_reporting_naive_ist,
+        _filter_by_reporting_days,
+    )
 
     sess = _sess(request)
     _ensure_intelligence_session_fresh(sess)
@@ -1370,16 +1374,38 @@ def intelligence_bundle(
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
     cached = bundle_cache.get(cache_key)
-    if cached and (now - float(cached.get("_ts", 0))) < 45.0:
+    if cached and (now - float(cached.get("_ts", 0))) < 120.0:  # extended: 45→120s
         return cached["payload"]
 
-    sales_df = sess.sales_df
-    if not sales_df.empty:
-        sales_df = apply_upload_report_day_gate(sales_df.copy())
+    # ── Pre-process sales_df ONCE for the whole bundle ────────────────────────
+    # Previously each sub-function (get_sales_summary, get_top_skus, etc.) did
+    # its own sales_df.copy() + date-normalise + date-range filter independently,
+    # costing ~5× redundant copies of the 1.3M-row frame.  Now:
+    #   • Apply the upload-day gate once (no-op unless DASHBOARD_UPLOAD_DAY_GATE=1)
+    #   • Normalise TxnDate to IST naive once
+    #   • Slice to the requested date range once → tiny slice passed to all functions
+    raw_sales = sess.sales_df
+    if not raw_sales.empty:
+        sales_gated = apply_upload_report_day_gate(raw_sales)  # no-op when gate off
+        sales_normed = sales_gated.copy()
+        sales_normed["TxnDate"] = txn_reporting_naive_ist(sales_normed["TxnDate"])
+        if start_date or end_date:
+            # Slice once; sub-functions receive a small df and skip their own filter
+            sales_for_bundle = _filter_by_reporting_days(
+                sales_normed, "TxnDate", start_date, end_date
+            )
+        else:
+            sales_for_bundle = sales_normed
+        del sales_normed
+    else:
+        sales_gated = raw_sales
+        sales_for_bundle = raw_sales
 
     payload = {
+        # Pass pre-filtered slice with start_date/end_date=None → sub-functions
+        # detect empty start/end and skip their internal copy+filter.
         "sales_summary": get_sales_summary(
-            sess.sales_df, months=0, start_date=start_date, end_date=end_date
+            sales_for_bundle, months=0, start_date=None, end_date=None
         ),
         "platform_summary": get_platform_summary(
             sess.mtr_df,
@@ -1389,13 +1415,13 @@ def intelligence_bundle(
             sess.snapdeal_df,
             start_date=start_date,
             end_date=end_date,
-            sales_df=sales_df,
+            sales_df=sales_gated,  # gated but not sliced — platform_summary does its own filter
         ),
         "top_skus": get_top_skus(
-            sess.sales_df,
+            sales_for_bundle,
             limit=limit,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=None,
+            end_date=None,
             basis=basis or "gross",
         ),
         "anomalies": get_anomalies(
@@ -1405,12 +1431,12 @@ def intelligence_bundle(
             sess.flipkart_df,
             sess.snapdeal_df,
             sess.inventory_df_variant,
-            sales_df,
+            sales_gated,
             start_date=start_date,
             end_date=end_date,
         ),
         "dsr_brand_monthly": get_dsr_brand_monthly_comparison(
-            sess.sales_df, start_date, end_date
+            sales_for_bundle, start_date=None, end_date=None
         ),
     }
     bundle_cache[cache_key] = {"_ts": now, "payload": payload}
