@@ -1213,6 +1213,23 @@ def get_tier3_sync_token() -> Dict[str, str]:
     return out
 
 
+def _tier3_window_sql_clause() -> str:
+    """Upload row-date range overlaps dashboard window ``[start, end]`` (ISO date strings)."""
+    return """
+          SUBSTR(TRIM(COALESCE(NULLIF(TRIM(COALESCE(date_from, '')), ''), file_date)), 1, 10) <= ?
+          AND SUBSTR(
+              TRIM(
+                  COALESCE(
+                      NULLIF(TRIM(COALESCE(date_to, '')), ''),
+                      NULLIF(TRIM(COALESCE(date_from, '')), ''),
+                      file_date
+                  )
+              ),
+              1, 10
+          ) >= ?
+    """
+
+
 def platforms_with_uploads_in_range(start_date: str, end_date: str) -> List[str]:
     """Platforms that have at least one Tier-3 blob overlapping the calendar window."""
     s0 = str(start_date or "").strip()[:10]
@@ -1222,15 +1239,15 @@ def platforms_with_uploads_in_range(start_date: str, end_date: str) -> List[str]
     if s1 < s0:
         s0, s1 = s1, s0
     conn = _get_conn()
+    clause = _tier3_window_sql_clause()
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT platform
         FROM daily_uploads
         WHERE platform IS NOT NULL
-          AND COALESCE(NULLIF(TRIM(COALESCE(date_to, '')), ''), file_date) >= ?
-          AND COALESCE(NULLIF(TRIM(COALESCE(date_from, '')), ''), file_date) <= ?
+          AND ({clause})
         """,
-        (s0, s1),
+        (s1, s0),
     ).fetchall()
     conn.close()
     out: List[str] = []
@@ -1260,16 +1277,16 @@ def load_platform_data_for_report_range(
         s0, s1 = s1, s0
 
     conn = _get_conn()
+    clause = _tier3_window_sql_clause()
     rows = conn.execute(
-        """
+        f"""
         SELECT filename, data_parquet
         FROM daily_uploads
         WHERE platform = ?
-          AND COALESCE(NULLIF(TRIM(COALESCE(date_to, '')), ''), file_date) >= ?
-          AND COALESCE(NULLIF(TRIM(COALESCE(date_from, '')), ''), file_date) <= ?
+          AND ({clause})
         ORDER BY file_date ASC
         """,
-        (platform, s0, s1),
+        (platform, s1, s0),
     ).fetchall()
     conn.close()
 

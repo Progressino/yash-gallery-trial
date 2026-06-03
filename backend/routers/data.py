@@ -619,12 +619,16 @@ def _load_tier3_frames_for_platforms(
     platforms: list[str],
     start_date: str,
     end_date: str,
+    *,
+    dedup: bool = False,
 ) -> dict[str, "pd.DataFrame"]:
     from ..services.daily_store import load_platform_data_for_report_range
 
     out: dict[str, pd.DataFrame] = {}
     for plat in platforms:
-        chunk = load_platform_data_for_report_range(plat, start_date, end_date, dedup=True)
+        chunk = load_platform_data_for_report_range(
+            plat, start_date, end_date, dedup=dedup
+        )
         if not chunk.empty:
             out[plat] = chunk
     return out
@@ -795,6 +799,144 @@ def _auto_dashboard_bundle_data(
     mtr, myntra, meesho, flipkart, snapdeal = _bundle_platform_frames(sess, tier3_frames)
     pulled = list(tier3_frames.keys())
     return sales_for_bundle, mtr, myntra, meesho, flipkart, snapdeal, pulled
+
+
+def _intelligence_payload_from_tier3_direct(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+    limit: int,
+    basis: Optional[str],
+) -> tuple:
+    """
+    Build dashboard metrics straight from Tier-3 SQLite (Upload tab source of truth).
+    Used when session unified sales exist but show zero for a window that has uploads.
+    """
+    import pandas as pd
+    from ..services.daily_store import platforms_with_uploads_in_range
+    from ..services.sales import (
+        _compute_platform_metrics,
+        _unified_platform_stub,
+        get_top_skus,
+    )
+
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    uploaded = set(platforms_with_uploads_in_range(s, e))
+    all_frames = _load_tier3_frames_for_platforms(sorted(uploaded), s, e, dedup=False)
+
+    metrics_specs = (
+        ("amazon", "Amazon", "Date", "SKU", "Transaction_Type"),
+        ("myntra", "Myntra", "Date", "OMS_SKU", "TxnType"),
+        ("meesho", "Meesho", "Date", "OMS_SKU", "TxnType"),
+        ("flipkart", "Flipkart", "Date", "OMS_SKU", "TxnType"),
+        ("snapdeal", "Snapdeal", "Date", "OMS_SKU", "TxnType"),
+    )
+    platform_summary: list[dict] = []
+    for plat, name, _dc, sku_col, txn_col in metrics_specs:
+        if plat not in uploaded:
+            platform_summary.append(_unified_platform_stub(name, False))
+            continue
+        df = all_frames.get(plat, pd.DataFrame())
+        if df.empty:
+            platform_summary.append(_unified_platform_stub(name, False))
+            continue
+        platform_summary.append(
+            _compute_platform_metrics(
+                df,
+                name,
+                sku_col,
+                txn_col,
+                start_date=s,
+                end_date=e,
+            )
+        )
+
+    shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
+    returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
+    net = sum(int(p.get("net_units") or 0) for p in platform_summary)
+    rate = round(returned / shipped * 100, 1) if shipped > 0 else 0.0
+    sales_summary = {
+        "total_units": shipped,
+        "total_returns": returned,
+        "net_units": net,
+        "return_rate": rate,
+        "date_basis_note": (
+            "Totals from saved Tier-3 daily uploads for this date range "
+            "(auto-synced with the Upload tab)."
+        ),
+    }
+
+    sales_for_bundle = pd.DataFrame()
+    _ensure_sku_mapping_for_dashboard(sess)
+    if all_frames and sess.sku_mapping:
+        built = _build_sales_from_tier3_frames(sess, all_frames)
+        sales_for_bundle = _slice_sales_for_bundle(built, s, e)
+
+    top_skus = (
+        get_top_skus(
+            sales_for_bundle,
+            limit=limit,
+            start_date=None,
+            end_date=None,
+            basis=basis or "gross",
+        )
+        if not sales_for_bundle.empty
+        else []
+    )
+
+    mtr, myntra, meesho, flipkart, snapdeal = _bundle_platform_frames(sess, all_frames)
+    return (
+        sales_summary,
+        platform_summary,
+        top_skus,
+        sales_for_bundle,
+        mtr,
+        myntra,
+        meesho,
+        flipkart,
+        snapdeal,
+        sorted(uploaded),
+    )
+
+
+def _cached_bundle_stale_vs_tier3_uploads(
+    payload: dict,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> bool:
+    """True when cache shows zero but Upload tab has blobs for this window."""
+    from ..services.daily_store import platforms_with_uploads_in_range
+
+    if int((payload.get("sales_summary") or {}).get("total_units") or 0) > 0:
+        return False
+    s = str(start_date or end_date or "")[:10]
+    e = str(end_date or start_date or "")[:10]
+    if len(s) != 10 or len(e) != 10:
+        return False
+    return bool(platforms_with_uploads_in_range(s, e))
+
+
+def _tier3_direct_has_units(
+    start_date: str,
+    end_date: str,
+    sess: AppSession,
+    limit: int,
+    basis: Optional[str],
+) -> tuple | None:
+    """
+    If Tier-3 has shipment units for the window, return the direct payload tuple; else None.
+    """
+    from ..services.daily_store import platforms_with_uploads_in_range
+
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    if not platforms_with_uploads_in_range(s, e):
+        return None
+    out = _intelligence_payload_from_tier3_direct(sess, s, e, limit, basis)
+    if int(out[0].get("total_units") or 0) <= 0:
+        return None
+    return out
 
 
 def _tier3_session_needs_topup(sess: AppSession) -> bool:
@@ -1948,7 +2090,14 @@ def intelligence_bundle(
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
     cached = bundle_cache.get(cache_key)
-    if cached and (now - float(cached.get("_ts", 0))) < 300.0 and not _tier3_token_mismatch(sess):
+    if (
+        cached
+        and (now - float(cached.get("_ts", 0))) < 300.0
+        and not _tier3_token_mismatch(sess)
+        and not _cached_bundle_stale_vs_tier3_uploads(
+            cached.get("payload") or {}, start_date, end_date
+        )
+    ):
         _schedule_intelligence_refresh_async(sid or None)
         return cached["payload"]
 
@@ -2002,6 +2151,54 @@ def intelligence_bundle(
     _units_in_window = int(
         get_sales_summary(sales_for_bundle, months=0).get("total_units") or 0
     ) if sales_for_bundle is not None and not getattr(sales_for_bundle, "empty", True) else 0
+
+    if has_dates:
+        s_try = str(start_date or end_date or "")[:10]
+        e_try = str(end_date or start_date or "")[:10]
+        t3 = _tier3_direct_has_units(s_try, e_try, sess, limit, basis)
+        if t3 is not None:
+            (
+                sales_summary,
+                platform_summary,
+                top_skus,
+                sales_for_bundle,
+                mtr_b,
+                myntra_b,
+                meesho_b,
+                flipkart_b,
+                snapdeal_b,
+                pulled_platforms,
+            ) = t3
+            sales_gated = sales_for_bundle
+            _schedule_persist_tier3_window(sid or None, s_try, e_try, pulled_platforms)
+            payload = {
+                "sales_summary": sales_summary,
+                "platform_summary": platform_summary,
+                "top_skus": top_skus,
+                "status": "ready",
+                "tier3_auto_pull": True,
+            }
+            if include_extras:
+                payload["anomalies"] = get_anomalies(
+                    _empty_plat,
+                    _empty_plat,
+                    _empty_plat,
+                    _empty_plat,
+                    _empty_plat,
+                    sess.inventory_df_variant,
+                    sales_for_bundle,
+                    start_date=None,
+                    end_date=None,
+                )
+                payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
+                    sales_for_bundle, start_date=None, end_date=None
+                )
+            else:
+                payload["anomalies"] = []
+                payload["dsr_brand_monthly"] = {"rows": [], "totals": {}, "note": ""}
+            bundle_cache[cache_key] = {"_ts": now, "payload": payload}
+            return payload
+
     if sess.sales_df.empty and _units_in_window <= 0:
         busy = any(
             getattr(sess, a, "idle") == "running"
@@ -2028,27 +2225,31 @@ def intelligence_bundle(
             "busy": busy,
         }
 
+    platform_summary = get_platform_summary(
+        mtr_b,
+        myntra_b,
+        meesho_b,
+        flipkart_b,
+        snapdeal_b,
+        start_date=start_date,
+        end_date=end_date,
+        sales_df=sales_for_bundle,
+    )
+    sales_summary = get_sales_summary(
+        sales_for_bundle, months=0, start_date=None, end_date=None
+    )
+    top_skus = get_top_skus(
+        sales_for_bundle,
+        limit=limit,
+        start_date=None,
+        end_date=None,
+        basis=basis or "gross",
+    )
+
     payload = {
-        "sales_summary": get_sales_summary(
-            sales_for_bundle, months=0, start_date=None, end_date=None
-        ),
-        "platform_summary": get_platform_summary(
-            mtr_b,
-            myntra_b,
-            meesho_b,
-            flipkart_b,
-            snapdeal_b,
-            start_date=start_date,
-            end_date=end_date,
-            sales_df=sales_for_bundle,
-        ),
-        "top_skus": get_top_skus(
-            sales_for_bundle,
-            limit=limit,
-            start_date=None,
-            end_date=None,
-            basis=basis or "gross",
-        ),
+        "sales_summary": sales_summary,
+        "platform_summary": platform_summary,
+        "top_skus": top_skus,
     }
     if include_extras:
         # Short windows: anomalies from the pre-sliced sales only (avoids scanning 1M+ rows / raw frames).

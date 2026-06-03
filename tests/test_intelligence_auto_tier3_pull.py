@@ -72,6 +72,62 @@ def test_auto_dashboard_builds_from_tier3_when_sales_empty(monkeypatch):
     assert not mtr.empty
 
 
+def test_tier3_direct_preferred_over_empty_session_sales(client, monkeypatch):
+    """Session sales empty in window but Tier-3 has rows → bundle uses Tier-3 direct."""
+    from backend.services import daily_store
+    from backend.services.daily_store import merge_platform_data
+    from backend.session import store
+
+    amazon = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-06-01"]),
+            "SKU": ["SKU-A"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [99],
+            "Order_Id": ["O1"],
+        }
+    )
+    monkeypatch.setattr(
+        daily_store,
+        "platforms_with_uploads_in_range",
+        lambda s, e: ["amazon"],
+    )
+    monkeypatch.setattr(
+        daily_store,
+        "load_platform_data_for_report_range",
+        lambda plat, s, e, dedup=True: amazon.copy() if plat == "amazon" else pd.DataFrame(),
+    )
+    monkeypatch.setattr(daily_store, "merge_platform_data", merge_platform_data)
+    monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _sid: None)
+    monkeypatch.setattr(data_router, "_schedule_persist_tier3_window", lambda *a, **k: None)
+    monkeypatch.setattr(daily_store, "get_tier3_sync_token", lambda: {})
+
+    client.get("/api/health")
+    sess = store.get(client.cookies.get("session_id"))
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["X"],
+            "TxnDate": pd.to_datetime(["2025-01-01"]),
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Units_Effective": [1],
+            "Source": ["Amazon"],
+            "OrderId": ["O0"],
+            "LineKey": [""],
+        }
+    )
+    sess.sku_mapping = {"SKU-A": "SKU-A"}
+
+    r = client.get(
+        "/api/data/intelligence-bundle",
+        params={"start_date": "2026-06-01", "end_date": "2026-06-04"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("tier3_auto_pull") is True
+    assert body["sales_summary"]["total_units"] == 99
+
+
 def test_intelligence_bundle_serves_june_from_tier3_not_warming(client, monkeypatch):
     from backend.services import daily_store
     from backend.services.daily_store import merge_platform_data
