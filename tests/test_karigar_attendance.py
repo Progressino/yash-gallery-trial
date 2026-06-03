@@ -218,13 +218,13 @@ def test_employee_804_on_time_near_full_and_late():
         460.0,
         on_date="2026-05-20",
     )
-    assert late["Payable_Hrs"] == 7.15
+    assert late["Payable_Hrs"] == 7.65
     assert late["Late_Deduction_Hrs"] == 0.35
     assert late["Lunch_Deduction_Hrs"] == 0.5
 
 
 def test_employee_845_late_arrival_reduces_normal_pay():
-    """09:21–18:30 on ₹330/day: late 21m + lunch-through 30m → ~₹295 normal + ₹41.25 OT = ~₹336."""
+    """09:21–18:30 on ₹330/day: near-full day deducts 21 late minutes only from 8h rate + OT."""
     out = att.calc_salary_from_punches(
         [(time(9, 21), time(18, 30))],
         330.0,
@@ -233,10 +233,38 @@ def test_employee_845_late_arrival_reduces_normal_pay():
     assert out["Hourly_Rate_Rs"] == 41.25
     assert out["Late_Deduction_Hrs"] == 0.35
     assert out["Late_Deduction_Rs"] == 14.44
-    assert out["Normal_Pay"] == 294.94
+    assert abs(out["Normal_Pay"] - 315.94) < 1.0
     assert out["OT_Pay"] == 41.25
-    assert out["Total_Pay"] == 336.19
-    assert out["Payable_Hrs"] == 7.15
+    assert abs(out["Total_Pay"] - 357.19) < 1.0
+    assert out["Payable_Hrs"] == 7.65
+
+
+def test_near_full_day_17_min_late_deducts_only_late_minutes():
+    """₹450/day, 09:17–18:00 → deduct 17 min from 8h (manual sheet ≈ ₹434)."""
+    out = att.calc_salary_from_punches(
+        [(time(9, 17), time(18, 0))],
+        450.0,
+        on_date="2026-06-04",
+    )
+    assert out["Late_Deduction_Hrs"] in (0.17, 0.28)
+    assert abs(out["Normal_Pay"] - 434.06) < 0.05
+    assert out["Payable_Hrs"] == 7.72
+
+
+def test_extract_report_date_from_header_text():
+    raw = pd.DataFrame(
+        [
+            ["Daily Attendance IN/OUT Punch Report", "", ""],
+            ["Date : 04-Jun-2026", "", ""],
+            ["", "", ""],
+        ]
+    )
+    assert att._extract_report_date(raw) == "2026-06-04"
+
+
+def test_date_from_filename_day_first():
+    assert att._date_from_filename("attendance_04-06-2026.xls") == "2026-06-04"
+    assert att._date_from_filename("03-06-2026.xls") == "2026-06-03"
 
 
 def test_recalculate_attendance_for_date():

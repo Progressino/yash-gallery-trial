@@ -20,6 +20,21 @@ class UploadResponse(BaseModel):
     unmapped_skus: Optional[list[str]] = None
 
 
+class JobStatusResponse(BaseModel):
+    """Fast background-job snapshot — no restore or Tier-3 side effects."""
+    server_time: str
+    warm_cache: bool = False
+    warm_cache_generation: int = 0
+    upload_memory_lock_held: bool = False
+    daily_auto_ingest_status: str = "idle"
+    daily_auto_ingest_message: str = ""
+    sales_rebuild_status: str = "idle"
+    sales_rebuild_message: str = ""
+    session_restore_status: str = "idle"
+    inventory_upload_status: str = "idle"
+    daily_inventory_upload_status: str = "idle"
+
+
 class CoverageResponse(BaseModel):
     sku_mapping: bool
     mtr: bool

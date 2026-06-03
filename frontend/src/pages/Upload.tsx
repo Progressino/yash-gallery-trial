@@ -9,8 +9,9 @@ import {
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile,
-  waitForDailyAutoIngest, waitForSalesRebuild,
+  waitForDailyAutoIngest, waitForSalesRebuild, verifyDailyUpload,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
+  type DailyUploadVerifyResponse,
   type CoverageResponse,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, invalidateDataQueries,
@@ -82,29 +83,7 @@ export default function Upload() {
     !!invProgress ||
     restoreBusy
 
-  const coverageEmpty =
-    !coverage.mtr &&
-    !coverage.sales &&
-    !coverage.myntra &&
-    !coverage.meesho &&
-    !coverage.flipkart &&
-    !coverage.snapdeal
-
-  useQuery({
-    queryKey: ['coverage'],
-    queryFn: async () => {
-      const c = await getCoverage({
-        // Full restore on Upload page so every platform frame merges from warm cache / Tier-3
-        // (light mode skipped tier-3 top-up when sales was already loaded — hid Flipkart etc.).
-        light: uploadBusy,
-        timeout: uploadBusy ? 45_000 : 120_000,
-      })
-      setCoverage(c)
-      return c
-    },
-    refetchInterval: uploadBusy ? 2_000 : coverageEmpty ? 20_000 : 60_000,
-    retry: 3,
-  })
+  // Shared coverage polling: CoverageProvider in App.tsx (light, 3s while jobs run).
 
   // Keep progress bar in sync when coverage polls (not only during restoreFullFromServer callback).
   useEffect(() => {
@@ -283,8 +262,8 @@ export default function Upload() {
   const refresh = async (opts?: { light?: boolean }) => {
     try {
       const c = await getCoverage({
-        light: opts?.light,
-        timeout: opts?.light ? 45_000 : 90_000,
+        light: opts?.light ?? true,
+        timeout: opts?.light === false ? 120_000 : 20_000,
       })
       setCoverage(c)
     } catch (err) {
@@ -350,6 +329,35 @@ export default function Upload() {
   const [showImportCompleteness, setShowImportCompleteness] = useState(true)
   const [inventoryAmzDisclaimer, setInventoryAmzDisclaimer] = useState<InventoryAmazonDisclaimer | null>(null)
   const [qualityReport, setQualityReport] = useState<Awaited<ReturnType<typeof getDataQuality>> | null>(null)
+  const [verifyDate, setVerifyDate] = useState(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 1)
+    return d.toISOString().slice(0, 10)
+  })
+  const [verifyResult, setVerifyResult] = useState<DailyUploadVerifyResponse | null>(null)
+  const [verifyBusy, setVerifyBusy] = useState(false)
+
+  const runUploadVerify = async (dateOverride?: string) => {
+    const day = (dateOverride || verifyDate).trim()
+    if (!day) return
+    setVerifyBusy(true)
+    try {
+      const v = await verifyDailyUpload(day)
+      setVerifyResult(v)
+      if (v.ok && v.sales_ready) {
+        showToast('success', v.message, 10_000)
+        await refresh({ light: true })
+      } else if (v.ok) {
+        showToast('success', `${v.message} Tap ↻ Rebuild if dashboard is still empty.`, 12_000)
+      } else {
+        showToast('error', v.message, 12_000)
+      }
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Verify failed')
+    } finally {
+      setVerifyBusy(false)
+    }
+  }
 
   const handleDailyAuto = async (files: File[]) => {
     setL('daily', true)
@@ -437,6 +445,18 @@ export default function Upload() {
               })
               setBuildingMsg('')
               finalizeDailyAutoUpload('daily', cov, res)
+              const dateFromName = files
+                .map(f => f.name.match(/(\d{1,2})[-_./](\d{1,2})[-_./](\d{2,4})/))
+                .find(Boolean)
+              if (dateFromName) {
+                const [, d, m, y] = dateFromName
+                const yr = y.length === 2 ? `20${y}` : y
+                const iso = `${yr}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+                setVerifyDate(iso)
+                void runUploadVerify(iso)
+              } else if (verifyDate) {
+                void runUploadVerify(verifyDate)
+              }
             } catch (pollErr: unknown) {
               const msg = pollErr instanceof Error ? pollErr.message : 'Upload status unknown'
               if (/timed out/i.test(msg)) {
@@ -1101,6 +1121,53 @@ export default function Upload() {
               ✓ Recognized: {dailyDetected.join(' · ')}
             </p>
           )}
+          <div className="rounded-lg border border-slate-200 bg-slate-50/80 px-3 py-3 space-y-2">
+            <p className="text-xs font-semibold text-[#002B5B]">Verify upload on server</p>
+            <p className="text-xs text-gray-600">
+              After upload, confirm Tier-3 saved your date and sales rebuilt (e.g. 2 Jun 2026).
+            </p>
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="text-xs text-gray-600">
+                Date
+                <input
+                  type="date"
+                  className="block border rounded px-2 py-1 mt-0.5 text-sm"
+                  value={verifyDate}
+                  onChange={e => setVerifyDate(e.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                disabled={verifyBusy || !verifyDate}
+                onClick={() => void runUploadVerify()}
+                className="px-3 py-1.5 rounded-lg bg-[#002B5B] text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {verifyBusy ? 'Checking…' : 'Check data saved'}
+              </button>
+            </div>
+            {verifyResult && (
+              <div
+                className={`text-xs rounded border px-2 py-2 ${
+                  verifyResult.ok && verifyResult.sales_ready
+                    ? 'border-green-200 bg-green-50 text-green-900'
+                    : verifyResult.ok
+                      ? 'border-amber-200 bg-amber-50 text-amber-900'
+                      : 'border-red-200 bg-red-50 text-red-900'
+                }`}
+              >
+                <p>{verifyResult.message}</p>
+                {verifyResult.tier3_platforms.length > 0 && (
+                  <p className="mt-1">
+                    Tier-3: {verifyResult.tier3_platforms.join(', ')} ({verifyResult.tier3_upload_count} file
+                    {verifyResult.tier3_upload_count === 1 ? '' : 's'})
+                  </p>
+                )}
+                {verifyResult.session_sales_rows > 0 && (
+                  <p className="mt-0.5">Session sales rows: {verifyResult.session_sales_rows.toLocaleString()}</p>
+                )}
+              </div>
+            )}
+          </div>
           {showImportCompleteness && uploadAlertsBySource['daily'] && (
             <div className={`rounded border p-2 text-xs ${
               uploadAlertsBySource['daily'].complete
@@ -1310,7 +1377,7 @@ export default function Upload() {
         <UploadCard
           title="↩ Returns (for PO)"
           subtitle="Upload Return Data.rar (or CSV/Excel inside) — all marketplaces merged; dashboard net sales update automatically. Run Calculate PO for PO qty."
-          loaded={false}
+          loaded={!!coverage.return_sheet}
           alert={showImportCompleteness ? uploadAlertsBySource['returns_po'] : undefined}
           onClearAlert={() => clearUploadAlert('returns_po')}
         >
@@ -1326,6 +1393,15 @@ export default function Upload() {
             }}
             onUpload={handle('returns_po', async (file: File) => {
               const data = await uploadPoReturnsImport(file)
+              if (data.ok && data.sales_rebuild === 'pending') {
+                try {
+                  await waitForSalesRebuild(msg => setBuildingMsg(msg))
+                } catch {
+                  /* coverage poll will pick up rebuild */
+                } finally {
+                  setBuildingMsg('')
+                }
+              }
               const msg =
                 data.sales_rebuild === 'pending'
                   ? `${data.message} Refresh the dashboard in a minute if net sales look stale.`

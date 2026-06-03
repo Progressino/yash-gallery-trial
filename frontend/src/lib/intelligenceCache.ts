@@ -60,6 +60,9 @@ export interface TopSku {
 }
 
 export type IntelligenceBundle = {
+  status?: 'warming' | 'ready'
+  message?: string
+  busy?: boolean
   sales_summary: SalesSummary
   platform_summary: PlatformSummaryItem[]
   top_skus: TopSku[]
@@ -146,6 +149,7 @@ export function clearIntelligenceCache(): void {
 
 export function bundleHasDisplayData(bundle: IntelligenceBundle | null | undefined): boolean {
   if (!bundle) return false
+  if (bundle.status === 'warming') return false
   if ((bundle.sales_summary?.total_units ?? 0) > 0) return true
   return (bundle.platform_summary ?? []).some(p => p.loaded && (p.total_units ?? 0) > 0)
 }

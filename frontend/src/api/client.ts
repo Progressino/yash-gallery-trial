@@ -492,11 +492,23 @@ export async function waitForDailyAutoIngest(
     const salesSt = cov.sales_rebuild ?? 'idle'
     if (st === 'running' || salesSt === 'running') {
       sawRunning = true
-      onTick?.(
+      let tickMsg =
         cov.daily_auto_ingest_message ||
-          cov.sales_rebuild_message ||
-          'Parsing daily files…',
-      )
+        cov.sales_rebuild_message ||
+        'Parsing daily files…'
+      try {
+        const job = await getJobStatus()
+        if (job.upload_memory_lock_held && st === 'running') {
+          tickMsg = `${cov.daily_auto_ingest_message || 'Parsing…'} (server cache loading — your files are queued)`
+        } else if (job.daily_auto_ingest_message) {
+          tickMsg = job.daily_auto_ingest_message
+        } else if (job.sales_rebuild_message && salesSt === 'running') {
+          tickMsg = job.sales_rebuild_message
+        }
+      } catch {
+        /* use coverage message */
+      }
+      onTick?.(tickMsg)
       await new Promise(r => setTimeout(r, 2000))
       continue
     }
@@ -903,6 +915,48 @@ export async function clearPlatform(platform: string): Promise<{ ok: boolean; me
 }
 
 // ── Coverage ──────────────────────────────────────────────────
+
+export type JobStatusResponse = {
+  server_time: string
+  warm_cache: boolean
+  warm_cache_generation: number
+  upload_memory_lock_held: boolean
+  daily_auto_ingest_status: string
+  daily_auto_ingest_message?: string
+  sales_rebuild_status: string
+  sales_rebuild_message?: string
+  session_restore_status: string
+  inventory_upload_status: string
+  daily_inventory_upload_status: string
+}
+
+export type DailyUploadVerifyResponse = {
+  ok: boolean
+  date: string
+  message: string
+  tier3_platforms: string[]
+  tier3_upload_count: number
+  recent_uploads: Array<Record<string, unknown>>
+  session_sales_rows: number
+  sales_ready: boolean
+  dashboard_ready: boolean
+  daily_auto_ingest_status?: string
+  sales_rebuild_status?: string
+  last_ingest_message?: string
+}
+
+export async function verifyDailyUpload(date: string): Promise<DailyUploadVerifyResponse> {
+  const { data } = await api.get<DailyUploadVerifyResponse>('/upload/daily-auto/verify', {
+    params: { date },
+    timeout: 30_000,
+  })
+  return data
+}
+
+export async function getJobStatus(): Promise<JobStatusResponse> {
+  const { data } = await api.get<JobStatusResponse>('/data/job-status', { timeout: 15_000 })
+  return data
+}
 
 export async function getCoverage(opts?: {
   timeout?: number

@@ -504,6 +504,7 @@ def _run_sales_rebuild_worker(
         return
     touched = platforms_touched or getattr(sess, "_daily_auto_platforms_touched", None) or None
     sess.sales_rebuild_status = "running"
+    sess.sales_rebuild_started = time.time()
     if touched and _daily_auto_fast_ingest_enabled():
         plats = ", ".join(sorted(touched))
         if getattr(sess, "_daily_auto_parsed_buffers", None):
@@ -531,10 +532,35 @@ def _run_sales_rebuild_worker(
         sess.sales_rebuild_message = str(e)
         _log.exception("background sales rebuild failed")
     finally:
+        sess.sales_rebuild_started = 0.0
         if getattr(sess, "daily_auto_ingest_status", "") == "done":
             sess.daily_auto_ingest_status = "idle"
             sess.daily_auto_ingest_message = ""
             sess.daily_auto_ingest_started = 0.0
+
+
+def _clear_stuck_sales_rebuild(sess: AppSession, *, force: bool = False) -> bool:
+    """Reset sales_rebuild when stuck in running (orphan or timed out)."""
+    if getattr(sess, "sales_rebuild_status", "idle") != "running":
+        return False
+    started = float(getattr(sess, "sales_rebuild_started", 0) or 0)
+    age = time.time() - started if started > 0 else 999999
+    stuck_sec = int(os.environ.get("SALES_REBUILD_STUCK_SEC", "600"))
+    if not force and age < stuck_sec:
+        return False
+    sess.sales_rebuild_status = "idle"
+    sess.sales_rebuild_message = (
+        "Previous sales rebuild did not finish (server was busy). "
+        "Data may still be updating — refresh in a minute."
+    )
+    sess.sales_rebuild_started = 0.0
+    return True
+
+
+def clear_stale_background_jobs(sess: AppSession) -> None:
+    """Clear orphan/timed-out ingest and sales-rebuild flags (safe on every light poll)."""
+    _clear_stuck_daily_ingest(sess, force=False)
+    _clear_stuck_sales_rebuild(sess, force=False)
 
 
 def _run_daily_auto_sales_rebuild(session_id: str) -> None:
@@ -585,6 +611,7 @@ async def reset_stuck_daily_upload(request: Request):
     """Clear a session stuck in daily ingest / sales rebuild (UI “Clear stuck upload”)."""
     sess = _get_session(request)
     cleared = _clear_stuck_daily_ingest(sess, force=True)
+    _clear_stuck_sales_rebuild(sess, force=True)
     return {
         "ok": True,
         "cleared": cleared,
@@ -598,17 +625,105 @@ async def reset_stuck_daily_upload(request: Request):
     }
 
 
+@router.get("/daily-auto/verify")
+def verify_daily_upload(request: Request, date: str = ""):
+    """
+    Confirm Tier-3 persistence and session sales for a calendar day (YYYY-MM-DD).
+    Use after upload to verify data before opening Intelligence.
+    """
+    from ..services.daily_store import get_upload_report_day_coverage, list_uploads
+
+    day = str(date or "").strip()[:10]
+    if not day or len(day) < 10:
+        return {"ok": False, "message": "Provide date=YYYY-MM-DD (e.g. 2026-06-02)."}
+
+    coverage = get_upload_report_day_coverage()
+    tier3_platforms = sorted(p for p, days in coverage.items() if day in days)
+    recent = [
+        u
+        for u in list_uploads()
+        if day in (str(u.get("date_from") or "")[:10], str(u.get("date_to") or "")[:10], str(u.get("file_date") or "")[:10])
+        or (
+            str(u.get("date_from") or "")[:10] <= day <= str(u.get("date_to") or "")[:10]
+            if u.get("date_from") and u.get("date_to")
+            else False
+        )
+    ]
+    sess = _get_session(request)
+    ingest = getattr(sess, "daily_auto_ingest_result", None) or {}
+    sales_df = getattr(sess, "sales_df", None)
+    sales_rows = len(sales_df) if sales_df is not None and not sales_df.empty else 0
+    sales_ready = sales_rows > 0
+    dashboard_ready = sales_ready and any(
+        not getattr(sess, attr).empty
+        for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
+        if getattr(sess, attr, None) is not None and hasattr(getattr(sess, attr), "empty")
+    )
+    ok = bool(tier3_platforms)
+    return {
+        "ok": ok,
+        "date": day,
+        "tier3_platforms": tier3_platforms,
+        "tier3_upload_count": len(recent),
+        "recent_uploads": recent[:12],
+        "session_sales_rows": sales_rows,
+        "sales_ready": sales_ready,
+        "dashboard_ready": dashboard_ready,
+        "daily_auto_ingest_status": getattr(sess, "daily_auto_ingest_status", "idle"),
+        "sales_rebuild_status": getattr(sess, "sales_rebuild_status", "idle"),
+        "last_ingest_message": str(ingest.get("message") or ""),
+        "message": (
+            f"Tier-3 has {len(tier3_platforms)} platform(s) for {day}: {', '.join(tier3_platforms) or 'none'}."
+            + (f" Session sales: {sales_rows:,} rows." if sales_ready else " Sales not rebuilt yet — wait or tap ↻ Rebuild.")
+        ),
+    }
+
+
 def _queue_daily_auto_ingest(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
     """Schedule ingest on the dedicated upload executor (never blocks behind warm-cache)."""
     DAILY_UPLOAD_EXECUTOR.submit(_run_daily_auto_ingest_pipeline, session_id, file_parts)
 
 
-def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
-    """Parse Tier-3 upload off the request thread, then queue the usual sales rebuild.
+def _memory_lock_wait_sec() -> int:
+    try:
+        return max(30, int((os.environ.get("DAILY_INGEST_LOCK_WAIT_SEC") or "90").strip()))
+    except ValueError:
+        return 90
 
-    Acquires _UPLOAD_MEMORY_LOCK before heavy pandas work so this never runs
-    concurrently with warm-cache Phase 2 (both are memory-intensive on 7.5 GB).
+
+def _acquire_ingest_memory_lock(sess, *, fnames: str) -> bool:
     """
+    Fast Tier-3 ingest (SQLite + small buffers) does not need the global memory lock.
+    Legacy full in-memory merge waits briefly, then proceeds so uploads are not stuck
+    behind a multi-minute warm-cache load.
+    """
+    if _daily_auto_fast_ingest_enabled():
+        if _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
+            return True
+        _log.info(
+            "daily-auto fast ingest: proceeding without memory lock (session=%s)",
+            getattr(sess, "_persist_sid", "")[:8],
+        )
+        sess.daily_auto_ingest_message = (
+            f"Parsing files… ({fnames}) — server finishing cache load in background"
+        )
+        return False
+    if _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
+        return True
+    wait_sec = _memory_lock_wait_sec()
+    sess.daily_auto_ingest_message = (
+        f"Queued: waiting for server ({wait_sec}s max)… ({fnames})"
+    )
+    _log.info("daily-auto ingest waiting for memory lock (session=%s)", getattr(sess, "_persist_sid", "")[:8])
+    if _UPLOAD_MEMORY_LOCK.acquire(timeout=wait_sec):
+        return True
+    _log.warning("daily-auto ingest timeout waiting for memory lock — running anyway")
+    sess.daily_auto_ingest_message = f"Parsing files… ({fnames})"
+    return False
+
+
+def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
+    """Parse Tier-3 upload off the request thread, then rebuild sales in the same worker."""
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
@@ -616,16 +731,9 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
     sess.daily_auto_ingest_started = time.time()
     n = len(file_parts)
     fnames = ", ".join(name for name, _ in file_parts[:3])
-    sess.daily_auto_ingest_message = (
-        f"Queued: waiting for server resources… ({fnames})"
-        if not _UPLOAD_MEMORY_LOCK.acquire(timeout=0)
-        else None  # got lock immediately, update below
-    )
-    if sess.daily_auto_ingest_message is not None:
-        # Lock was busy — waiting. Keep updating message until acquired.
-        _log.info("daily-auto ingest queued behind another heavy job (session=%s)", session_id[:8])
-        _UPLOAD_MEMORY_LOCK.acquire()  # blocking wait
-    sess.daily_auto_ingest_message = f"Parsing {n} file{'s' if n != 1 else ''}… ({fnames})"
+    lock_held = _acquire_ingest_memory_lock(sess, fnames=fnames)
+    if lock_held:
+        sess.daily_auto_ingest_message = f"Parsing {n} file{'s' if n != 1 else ''}… ({fnames})"
     try:
         payload = _process_daily_auto_sync(sess, file_parts, rebuild_sales=False)
     except Exception as e:
@@ -646,7 +754,8 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
         sess.sales_rebuild_message = f"Ingest failed: {e}"
         return
     finally:
-        _UPLOAD_MEMORY_LOCK.release()
+        if lock_held:
+            _UPLOAD_MEMORY_LOCK.release()
 
     _store_daily_auto_ingest_result(sess, payload)
     if not payload.get("ok"):
@@ -663,9 +772,10 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
     if payload.get("sales_rebuild") == "pending":
         _n_sales = len(getattr(sess, "sales_df", None) or [])
         sess.sales_rebuild_status = "running"
+        sess.sales_rebuild_started = time.time()
         sess.sales_rebuild_message = (
-            f"Rebuilding combined sales ({_n_sales:,} rows)…"
-            if _n_sales else "Rebuilding combined sales…"
+            f"Updating dashboard sales ({_n_sales:,} rows)…"
+            if _n_sales else "Updating dashboard sales…"
         )
         try:
             from ..db.forecast_session_pg import persist_session_bundle_thread_safe

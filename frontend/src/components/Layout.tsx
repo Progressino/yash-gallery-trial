@@ -261,7 +261,6 @@ export default function Layout() {
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
-  const autoLoadAttempted = useRef(false)
   const localHint = readLocalSessionHint()
   const navScrollRef = useRef<HTMLElement>(null)
   const [navCanScroll, setNavCanScroll] = useState(false)
@@ -290,13 +289,7 @@ export default function Layout() {
       .catch(() => {})
   }, [])
 
-  useEffect(() => {
-    if (autoLoadAttempted.current) return
-    autoLoadAttempted.current = true
-    getCoverage({ light: false, timeout: 120_000 })
-      .then(c => setCoverage(c))
-      .catch(() => {})
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Coverage polling is centralized in CoverageProvider (App.tsx).
 
   const flash = (type: 'ok' | 'err', text: string) => {
     setCacheMsg({ type, text })

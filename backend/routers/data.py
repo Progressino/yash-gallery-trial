@@ -12,7 +12,7 @@ import time
 from typing import List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
-from ..models.schemas import CoverageResponse, RestoreFullResponse
+from ..models.schemas import CoverageResponse, JobStatusResponse, RestoreFullResponse
 from ..services.helpers import (
     clean_sku,
     get_parent_sku,
@@ -1135,12 +1135,131 @@ def _run_session_restore_sales_worker(session_id: str) -> None:
         sess.session_restore_message = str(e)[:500]
 
 
-# ── Coverage ──────────────────────────────────────────────────
+# ── Coverage / job status ─────────────────────────────────────
+
+_hydrate_queued: set[str] = set()
+
+
+def _session_needs_background_hydrate(sess: AppSession) -> bool:
+    """True when session should top up from warm cache / Tier-3 in a background worker."""
+    if getattr(sess, "pause_auto_data_restore", False):
+        return False
+    if any(
+        getattr(sess, attr, "idle") == "running"
+        for attr in (
+            "daily_auto_ingest_status",
+            "sales_rebuild_status",
+            "session_restore_status",
+            "inventory_upload_status",
+            "daily_inventory_upload_status",
+        )
+    ):
+        return False
+    try:
+        import backend.main as _main
+
+        if _main.session_needs_operational_data(sess):
+            return True
+    except Exception:
+        pass
+    if not sess.sales_df.empty:
+        return False
+    if _session_has_platform_data(sess):
+        return True
+    try:
+        if get_summary():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _run_light_session_hydrate_worker(session_id: str) -> None:
+    """Background Tier-3 / warm-cache hydrate — never blocks GET /coverage?light=1."""
+    import logging
+
+    from ..session import store
+
+    _log = logging.getLogger(__name__)
+    try:
+        sess = store.get(session_id)
+        if sess is None:
+            return
+        if getattr(sess, "pause_auto_data_restore", False):
+            return
+        try:
+            import backend.main as _main
+
+            if _main.session_needs_operational_data(sess):
+                _main.force_restore_session_from_server_cache(
+                    sess, _main._warm_cache_generation,
+                )
+        except Exception:
+            _log.exception("light hydrate warm copy failed session=%s", session_id[:8])
+        if not sess._daily_restore_lock.acquire(blocking=False):
+            return
+        try:
+            _restore_daily_if_needed(sess)
+            _ensure_sales_rebuilt(sess)
+        finally:
+            sess._daily_restore_lock.release()
+    except Exception:
+        _log.exception("light session hydrate worker failed session=%s", session_id[:8])
+    finally:
+        _hydrate_queued.discard(session_id)
+
+
+def _maybe_queue_light_session_hydrate(sess: AppSession, session_id: str | None) -> None:
+    if not session_id or not _session_needs_background_hydrate(sess):
+        return
+    if session_id in _hydrate_queued:
+        return
+    _hydrate_queued.add(session_id)
+    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+    DAILY_UPLOAD_EXECUTOR.submit(_run_light_session_hydrate_worker, session_id)
+
+
+@router.get("/job-status", response_model=JobStatusResponse)
+def get_job_status(request: Request):
+    """Fast job snapshot for UI polling — no restore, Tier-3 merge, or sales rebuild."""
+    from datetime import datetime, timezone
+
+    import backend.main as _main
+    from ..concurrency import upload_memory_lock_held
+
+    sess = getattr(request.state, "session", None)
+    return JobStatusResponse(
+        server_time=datetime.now(timezone.utc).isoformat(),
+        warm_cache=bool(_main._warm_cache),
+        warm_cache_generation=int(getattr(_main, "_warm_cache_generation", 0) or 0),
+        upload_memory_lock_held=upload_memory_lock_held(),
+        daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
+        daily_auto_ingest_message=str(getattr(sess, "daily_auto_ingest_message", "") or ""),
+        sales_rebuild_status=getattr(sess, "sales_rebuild_status", "idle") or "idle",
+        sales_rebuild_message=str(getattr(sess, "sales_rebuild_message", "") or ""),
+        session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
+        inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
+        daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
+    )
+
 
 @router.get("/coverage", response_model=CoverageResponse)
 def get_coverage(request: Request, light: bool = False):
-    """Session coverage flags. ``light=1`` skips SQLite restore / sales rebuild (fast after PO uploads)."""
+    """Session coverage flags. ``light=1`` is read-only + queues background hydrate when needed."""
     sess = _sess(request)
+    sid = getattr(request.state, "session_id", None) or ""
+    try:
+        from ..routers.upload import clear_stale_background_jobs
+
+        clear_stale_background_jobs(sess)
+    except Exception:
+        pass
+
+    if light:
+        _maybe_queue_light_session_hydrate(sess, sid or None)
+        return _build_coverage_response(sess)
+
     try:
         from ..services.sku_mapping import restore_sku_mapping_to_session
 
@@ -1158,33 +1277,26 @@ def get_coverage(request: Request, light: bool = False):
     except Exception:
         pass
     _restore_inventory_from_warm(sess)
-    # Auto-clear stuck daily ingest on every coverage poll — no manual button needed.
+    if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+        light = True
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
+        light = True
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        light = True
+    if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
+        light = True
+    if getattr(sess, "session_restore_status", "idle") == "running":
+        light = True
+    if light:
+        _maybe_queue_light_session_hydrate(sess, sid or None)
+        return _build_coverage_response(sess)
     try:
-        from ..routers.upload import _clear_stuck_daily_ingest
-        _clear_stuck_daily_ingest(sess, force=False)
+        from ..services.po_raise_import import hydrate_session_ledger_from_db
+
+        hydrate_session_ledger_from_db(sess, lookback_days=30)
     except Exception:
         pass
-    if not light:
-        if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
-            light = True
-        if getattr(sess, "sales_rebuild_status", "idle") == "running":
-            light = True
-        if getattr(sess, "inventory_upload_status", "idle") == "running":
-            light = True
-        if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
-            light = True
-        if getattr(sess, "session_restore_status", "idle") == "running":
-            light = True
-    if not light:
-        try:
-            from ..services.po_raise_import import hydrate_session_ledger_from_db
-
-            hydrate_session_ledger_from_db(sess, lookback_days=30)
-        except Exception:
-            pass
-        _restore_daily_if_needed(sess)   # auto-load persisted daily data on first access
-    else:
-        _maybe_restore_daily_for_empty_sales(sess)
+    _restore_daily_if_needed(sess)
     _ensure_sales_rebuilt(sess)
     return _build_coverage_response(sess)
 
@@ -1366,6 +1478,53 @@ def intelligence_bundle(
     )
 
     sess = _sess(request)
+    sid = getattr(request.state, "session_id", None) or ""
+    if sess.sales_df.empty and not _session_has_platform_data(sess):
+        try:
+            import backend.main as _main
+
+            if _main.session_needs_operational_data(sess):
+                _maybe_queue_light_session_hydrate(sess, sid or None)
+        except Exception:
+            pass
+    if sess.sales_df.empty:
+        busy = any(
+            getattr(sess, a, "idle") == "running"
+            for a in (
+                "daily_auto_ingest_status",
+                "sales_rebuild_status",
+                "session_restore_status",
+            )
+        )
+        msg = (
+            getattr(sess, "sales_rebuild_message", "")
+            or getattr(sess, "daily_auto_ingest_message", "")
+            or getattr(sess, "session_restore_message", "")
+            or "Loading sales data on the server…"
+        )
+        _ret_ov = getattr(sess, "po_return_overlay_df", None)
+        _ret_units = (
+            int(_ret_ov["Return_Units"].sum())
+            if _ret_ov is not None and not getattr(_ret_ov, "empty", True)
+            else 0
+        )
+        return {
+            "status": "warming",
+            "message": msg,
+            "sales_summary": {
+                "total_units": 0,
+                "total_gmv": 0,
+                "sku_count": 0,
+                "total_returns": _ret_units if _ret_units else 0,
+            },
+            "return_sheet": bool(_ret_units),
+            "return_sheet_units": _ret_units,
+            "platform_summary": [],
+            "top_skus": [],
+            "anomalies": [],
+            "dsr_brand_monthly": {"rows": []},
+            "busy": busy,
+        }
     _ensure_intelligence_session_fresh(sess)
 
     cache_key = (

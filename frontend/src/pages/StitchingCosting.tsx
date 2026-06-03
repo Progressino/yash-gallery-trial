@@ -15,6 +15,10 @@ import {
 } from '../lib/stitchingHourEntry'
 import { computeDayFinancialSummary, formatProfitLoss } from '../lib/stitchingFinancial'
 import { printStitchingReportsPack } from '../lib/stitchingReportPrint'
+import {
+  formatProductionEntrySaveError,
+  saveProductionEntry,
+} from '../lib/productionEntrySave'
 import { useAuth } from '../store/auth'
 
 type TabId =
@@ -488,6 +492,8 @@ function ProductionTab({
   const [hourDeleteBusyKey, setHourDeleteBusyKey] = useState('')
   const skipAutoSaveRef = useRef(true)
   const loadInProgressRef = useRef(false)
+  const saveInFlightRef = useRef(false)
+  const reportsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const qc = useQueryClient()
 
   useEffect(() => {
@@ -626,12 +632,15 @@ function ProductionTab({
     try {
       const { data } = await api.get('/stitching/production-entry/load', {
         params: { date: entryDate, karigar_id: karigarId, challan_no: challanNo, style },
+        timeout: 30_000,
       })
       const next: Record<string, HourEntryState> = {}
       for (const h of hours) {
         next[h.col] = normalizeLoadedHourEntry(data.hours?.[h.col] ?? {})
       }
       setHourState(next)
+    } catch {
+      // Keep in-progress edits if load fails (e.g. server busy during ERP upload).
     } finally {
       loadInProgressRef.current = false
       skipAutoSaveRef.current = true
@@ -652,6 +661,23 @@ function ProductionTab({
         .then(r => r.data),
     enabled: !!entryDate,
   })
+
+  useEffect(() => {
+    return () => {
+      if (reportsRefreshTimerRef.current) clearTimeout(reportsRefreshTimerRef.current)
+    }
+  }, [])
+
+  const scheduleReportsRefresh = useCallback(
+    (delayMs: number) => {
+      if (reportsRefreshTimerRef.current) clearTimeout(reportsRefreshTimerRef.current)
+      reportsRefreshTimerRef.current = setTimeout(() => {
+        reportsRefreshTimerRef.current = null
+        void refetchReports()
+      }, delayMs)
+    },
+    [refetchReports],
+  )
 
   const [showSalaryCols, setShowSalaryCols] = useState(true)
   useEffect(() => {
@@ -827,6 +853,7 @@ function ProductionTab({
   const doSave = useCallback(
     async (silent: boolean) => {
       if (!karigarId || !challanNo || !style) return
+      if (saveInFlightRef.current) return
       const entries = normalizeHourEntriesForSave()
       const savablePcs = entries.reduce(
         (s, e) => s + (e.operation && operations.some(o => o.op === e.operation) ? e.pieces || 0 : 0),
@@ -840,10 +867,11 @@ function ProductionTab({
         return
       }
       const k = karigars.find(x => String(x.Karigar_ID) === karigarId)
+      saveInFlightRef.current = true
       setSaveStatus('saving')
       setSaveMessage('')
       try {
-        const r = await api.post('/stitching/production-entry', {
+        const data = await saveProductionEntry({
           date: entryDate,
           karigar_id: karigarId,
           karigar_name: k?.Name ?? karigarId,
@@ -851,27 +879,30 @@ function ProductionTab({
           style,
           hour_entries: entries,
         })
-        if (r.data.ok) {
+        if (data.ok) {
           setSaveStatus('saved')
-          setSaveMessage(r.data.message || 'Saved')
-          onSaved()
-          refetchReports()
-          qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })
-          if (!silent) alert(r.data.message || 'Saved')
+          setSaveMessage(data.message || 'Saved')
+          if (silent) {
+            scheduleReportsRefresh(8000)
+          } else {
+            onSaved()
+            void refetchReports()
+            qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })
+            alert(data.message || 'Saved')
+          }
         } else {
-          const msg = r.data.message || 'Save failed'
+          const msg = data.message || 'Save failed'
           setSaveStatus('error')
           setSaveMessage(msg)
           if (!silent) alert(msg)
         }
       } catch (err: unknown) {
-        const msg =
-          axios.isAxiosError(err) && err.response?.data?.detail
-            ? String(err.response.data.detail)
-            : 'Save failed — check connection and try again'
+        const msg = formatProductionEntrySaveError(err)
         setSaveStatus('error')
         setSaveMessage(msg)
         if (!silent) alert(msg)
+      } finally {
+        saveInFlightRef.current = false
       }
     },
     [
@@ -885,14 +916,15 @@ function ProductionTab({
       saveBlockReason,
       onSaved,
       refetchReports,
+      scheduleReportsRefresh,
       qc,
     ],
   )
 
   useEffect(() => {
-    if (!autoSaveEnabled || skipAutoSaveRef.current || loadInProgressRef.current) return
+    if (!autoSaveEnabled || skipAutoSaveRef.current || loadInProgressRef.current || saveInFlightRef.current) return
     if (!karigarId || !challanNo || !style || saveBlockReason) return
-    const t = setTimeout(() => void doSave(true), 2000)
+    const t = setTimeout(() => void doSave(true), 2500)
     return () => clearTimeout(t)
   }, [hourState, entryDate, karigarId, challanNo, style, autoSaveEnabled, saveBlockReason, doSave])
 
@@ -3269,13 +3301,19 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
     try {
       const fd = new FormData()
       fd.append('file', file)
-      const { data: res } = await api.post<{ ok?: boolean; message?: string; warnings?: string[] }>(
+      const { data: res } = await api.post<{
+        ok?: boolean
+        message?: string
+        warnings?: string[]
+        date?: string
+      }>(
         '/stitching/attendance/karigar/upload',
         fd,
         { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 },
       )
       const warn = res.warnings?.length ? ` ${res.warnings.join(' ')}` : ''
-      setUploadMsg({ type: 'ok', text: `${res.message || 'Imported.'}${warn}` })
+      const dateNote = res.date ? ` (attendance date ${res.date})` : ''
+      setUploadMsg({ type: 'ok', text: `${res.message || 'Imported.'}${dateNote}${warn}` })
       qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
       qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
       refetch()

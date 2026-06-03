@@ -252,16 +252,24 @@ def production_entry_reports(date: str, karigar_id: str = ""):
 
 @router.post("/production-entry")
 def save_entry(body: ProductionEntryBody):
-    return svc.save_production_entry(
-        date_str=body.date,
-        karigar_id=body.karigar_id,
-        karigar_name=body.karigar_name,
-        challan_no=body.challan_no,
-        style=body.style,
-        hour_entries=body.hour_entries,
-        saved_by=body.saved_by,
-        saved_by_name=body.saved_by_name,
-    )
+    try:
+        return svc.save_production_entry(
+            date_str=body.date,
+            karigar_id=body.karigar_id,
+            karigar_name=body.karigar_name,
+            challan_no=body.challan_no,
+            style=body.style,
+            hour_entries=body.hour_entries,
+            saved_by=body.saved_by,
+            saved_by_name=body.saved_by_name,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).exception("production-entry save failed")
+        raise HTTPException(status_code=500, detail=str(exc)[:500]) from exc
 
 
 @router.get("/production-entry/admin/sessions")

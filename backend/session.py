@@ -66,6 +66,7 @@ class AppSession:
     # Async sales rebuild after Tier-3 daily-auto (avoids 502 on long build_sales_df).
     sales_rebuild_status: str = "idle"   # idle | running | done | error
     sales_rebuild_message: str = ""
+    sales_rebuild_started: float = 0.0  # monotonic time when rebuild started
 
     # Background "Restore all from server" (warm + disk + Tier-3 + GitHub — avoids proxy 502).
     session_restore_status: str = "idle"  # idle | running | done | error

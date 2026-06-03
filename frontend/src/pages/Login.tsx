@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import api from '../api/client'
 import { useAuth, type AuthUser } from '../store/auth'
 import { getDeviceId } from '../lib/deviceId'
@@ -27,6 +27,8 @@ function profileFromLoginData(data: Record<string, unknown>): AuthUser {
 export default function Login() {
   const setUser = useAuth(s => s.setUser)
   const nav = useNavigate()
+  const location = useLocation()
+  const serverUnreachable = !!(location.state as { serverUnreachable?: boolean } | null)?.serverUnreachable
   const [step, setStep] = useState<Step>('credentials')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -165,6 +167,11 @@ export default function Login() {
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="w-full max-w-sm">
             <div className="mb-8">
+              {serverUnreachable && step === 'credentials' && (
+                <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+                  Server was slow to respond. Sign in again — your session may still be valid after login.
+                </p>
+              )}
               <h2 className="text-2xl font-bold text-gray-900">
                 {step === 'otp' ? 'Verify your phone' : 'Welcome back'}
               </h2>

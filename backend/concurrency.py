@@ -48,6 +48,15 @@ AUTH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+def upload_memory_lock_held() -> bool:
+    """True when warm-cache load, restore, or a large upload holds the memory semaphore."""
+    acquired = _UPLOAD_MEMORY_LOCK.acquire(blocking=False)
+    if acquired:
+        _UPLOAD_MEMORY_LOCK.release()
+        return False
+    return True
+
+
 async def run_heavy(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(

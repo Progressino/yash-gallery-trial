@@ -676,8 +676,19 @@ async def po_returns_import_file(
     out = apply_return_overlay_import(sess, overlay, replace=rep)
     _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
 
+    # Rebuild sales_df immediately so dashboard net returns reflect without waiting on background job.
+    try:
+        from ..routers.data import _rebuild_session_sales
+
+        _rebuild_session_sales(sess)
+        sess._intelligence_bundle_cache.clear()
+        sess._quarterly_cache.clear()
+    except Exception:
+        logging.getLogger(__name__).exception("sync sales rebuild after return import")
+
     session_id = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
     base_msg = str(out.get("message") or "").strip()
+    sales_ready = not getattr(sess, "sales_df", pd.DataFrame()).empty
     try:
         from ..concurrency import DAILY_UPLOAD_EXECUTOR
         from ..routers.upload import _run_returns_import_followup
@@ -687,12 +698,20 @@ async def po_returns_import_file(
     except Exception:
         logging.getLogger(__name__).exception("queue return import follow-up")
 
-    out["sales_rebuilt"] = False
-    out["sales_rebuild"] = "pending"
-    out["message"] = (
-        f"{base_msg} Dashboard net sales are updating in the background (usually under a minute). "
-        "Run Calculate PO on PO Engine to refresh PO qty columns."
-    ).strip()
+    out["sales_rebuilt"] = sales_ready
+    out["sales_rebuild"] = "done" if sales_ready else "pending"
+    out["return_sheet"] = True
+    out["return_sheet_units"] = int(out.get("total_units") or 0)
+    if sales_ready:
+        out["message"] = (
+            f"{base_msg} Dashboard net sales updated. "
+            "Run Calculate PO on PO Engine to refresh PO qty columns."
+        ).strip()
+    else:
+        out["message"] = (
+            f"{base_msg} Return overlay saved. Load platform sales data (Upload tab) then rebuild sales "
+            "to see returns on the dashboard."
+        ).strip()
     return out
 
 

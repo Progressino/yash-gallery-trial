@@ -1374,7 +1374,7 @@ def _session_skip_heavy_warm(path: str) -> bool:
     """Poll/start endpoints must stay fast while a heavy PO job runs in the background."""
     if path.startswith("/api/po/calculate"):
         return True
-    if path == "/api/data/coverage":
+    if path in ("/api/data/coverage", "/api/data/job-status"):
         return True
     return path.startswith(
         (
@@ -1589,6 +1589,7 @@ app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketp
 @app.get("/api/health")
 def health():
     from .app_version import get_build_info
+    from .concurrency import upload_memory_lock_held
 
     info = get_build_info()
     return {
@@ -1602,4 +1603,5 @@ def health():
         "warm_cache_loaded_at": _warm_cache_loaded_at.isoformat() if _warm_cache_loaded_at else None,
         # generation: 0=loading, 1=Phase1 SQLite ready, 2=Phase2 GitHub+SQLite ready
         "warm_cache_generation": _warm_cache_generation,
+        "upload_memory_lock_held": upload_memory_lock_held(),
     }

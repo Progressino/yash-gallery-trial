@@ -9,9 +9,9 @@ import api, {
   downloadDailyDsrCsv,
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
-  getCoverage,
   invalidateDataQueries,
 } from '../api/client'
+import { readLocalSessionHint } from '../lib/localSessionHint'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
 import {
   bundleHasDisplayData,
@@ -756,7 +756,7 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const prevSalesRebuild = useRef<string>('idle')
-  const setCoverage = useSession(s => s.setCoverage)
+  const salesRebuild = useSession(s => s.sales_rebuild ?? 'idle')
   const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
   const coverageReturnLoaded = useSession(s => s.return_sheet)
   const sessionSales = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
@@ -805,38 +805,16 @@ export default function Dashboard() {
     return p.toString()
   }, [dateStart, dateEnd])
 
-  /* ── queries ── */
-  useQuery({
-    queryKey: ['dashboard-coverage-sync'],
-    queryFn: async () => {
-      const c = await getCoverage({
-        timeout: jobRunning || sessionSales || hasPlatformData ? 45_000 : 120_000,
-        light: jobRunning || sessionSales || hasPlatformData,
-      })
-      setCoverage(c)
-      const st = c.sales_rebuild ?? 'idle'
-      if (prevSalesRebuild.current === 'running' && st !== 'running') {
-        invalidateDataQueries(qc)
-      }
-      prevSalesRebuild.current = st
-      return c
-    },
-    enabled: true,
-    staleTime: 60_000,
-    refetchInterval: (q) => {
-      const c = q.state.data
-      if (!c) return 3_000
-      if (
-        c.inventory_upload_status === 'running' ||
-        c.daily_inventory_upload_status === 'running' ||
-        c.daily_auto_ingest_status === 'running' ||
-        c.sales_rebuild === 'running'
-      ) {
-        return 3_000
-      }
-      return false
-    },
-  })
+  useEffect(() => {
+    if (prevSalesRebuild.current === 'running' && salesRebuild !== 'running') {
+      invalidateDataQueries(qc)
+    }
+    prevSalesRebuild.current = salesRebuild
+  }, [salesRebuild, qc])
+
+  const localHint = readLocalSessionHint()
+  const hintSaysSales = !!(localHint?.sales && (localHint.sales_rows ?? 0) > 0)
+
   const bundleParams = useMemo(() => {
     const p = new URLSearchParams({ limit: String(topSkuLimit), basis: salesBasis })
     if (dateStart) p.set('start_date', dateStart)
@@ -844,7 +822,7 @@ export default function Dashboard() {
     return p.toString()
   }, [dateStart, dateEnd, topSkuLimit, salesBasis])
 
-  const dataReady = sessionSales || hasPlatformData
+  const dataReady = sessionSales || hasPlatformData || hintSaysSales
 
   const {
     data: intelligenceBundle,
@@ -853,19 +831,30 @@ export default function Dashboard() {
   } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis],
     queryFn: async () => {
-      const { data } = await api.get<IntelligenceBundle>(
+      const { data } = await api.get<IntelligenceBundle & { status?: string }>(
         `/data/intelligence-bundle?${bundleParams}`,
         { timeout: 180_000 },
       )
-      writeIntelligenceCache(dateStart, dateEnd, salesBasis, data)
+      if (data?.status !== 'warming') {
+        writeIntelligenceCache(dateStart, dateEnd, salesBasis, data)
+      }
       return data
     },
     enabled: dataReady,
     staleTime: 300_000,
     retry: 1,
+    refetchInterval: q => {
+      const d = q.state.data
+      if (d?.status === 'warming' || jobRunning) return 4_000
+      return false
+    },
     placeholderData: () =>
       readIntelligenceCache(dateStart, dateEnd, salesBasis) ?? undefined,
   })
+
+  const bundleWarming =
+    intelligenceBundle?.status === 'warming' ||
+    (loadingBundle && !bundleHasDisplayData(intelligenceBundle) && !sessionSales)
 
   const salesSummary = intelligenceBundle?.sales_summary
   const topSkusRaw = intelligenceBundle?.top_skus
@@ -1031,6 +1020,7 @@ export default function Dashboard() {
   const hasDisplayData = bundleHasDisplayData(intelligenceBundle)
 
   const intelligenceLoading =
+    bundleWarming ||
     (!hasDisplayData && (loadingBundle || !dataReady)) ||
     (fetchingBundle && !hasDisplayData) ||
     (showDsr && loadingDsr) ||
@@ -1039,6 +1029,8 @@ export default function Dashboard() {
     exportingDsrMonthly
 
   const intelligenceLoadLabel = useMemo(() => {
+    if (bundleWarming && intelligenceBundle?.message) return intelligenceBundle.message
+    if (bundleWarming) return 'Warming sales data on server…'
     if (!hasDisplayData && !dataReady) return 'Syncing your data…'
     if (!hasDisplayData && loadingBundle) return 'Loading marketplace data…'
     if (fetchingBundle && hasDisplayData) return 'Refreshing dashboard…'

@@ -8,7 +8,9 @@ import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuar
 import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries } from './api/client'
+import CoverageProvider from './components/CoverageProvider'
 import { canSkipHeavyServerRestore, readLocalSessionHint } from './lib/localSessionHint'
+import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
 
@@ -64,7 +66,7 @@ function ProtectedRoute() {
   const setUser = useAuth(s => s.setUser)
   const cachedUser = useAuth(s => s.user)
 
-  const { data, isLoading, error, refetch, isFetching } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
       const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 60_000 })
@@ -100,26 +102,11 @@ function ProtectedRoute() {
   const coverageEmpty = (c: Awaited<ReturnType<typeof getCoverage>>) =>
     !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.snapdeal
 
-  /** Server has platform history but unified sales not built yet — dashboard stays blank until fixed. */
-  const sessionNeedsSales = (c: Awaited<ReturnType<typeof getCoverage>>) =>
-    !c.sales &&
-    (c.mtr || c.myntra || c.meesho || c.flipkart || c.snapdeal) &&
-    (c.sales_rebuild === 'running' || c.daily_auto_ingest_status === 'running')
-
-  const sessionNeedsSync = (c: Awaited<ReturnType<typeof getCoverage>>) =>
-    coverageEmpty(c) || sessionNeedsSales(c)
-
-  const backgroundJobRunning = (c: Awaited<ReturnType<typeof getCoverage>>) =>
-    c.inventory_upload_status === 'running' ||
-    c.daily_inventory_upload_status === 'running' ||
-    c.daily_auto_ingest_status === 'running' ||
-    c.sales_rebuild === 'running'
-
   const { isPending: isRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
-        let coverage = await getCoverage({ light: true, timeout: 45_000 })
+        let coverage = await getCoverage({ light: true, timeout: 20_000 })
         setCoverage(coverage)
         const localHint = readLocalSessionHint()
         if (canSkipHeavyServerRestore(coverage, localHint)) {
@@ -135,38 +122,19 @@ function ProtectedRoute() {
               sales_rows: Math.max(coverage.sales_rows ?? 0, localHint.sales_rows ?? 0),
             }
           }
-          if (!sessionNeedsSync(coverage)) invalidateDataQueries(qc)
+          if (!coverageNeedsSync(coverage)) invalidateDataQueries(qc)
           return true
         }
-        if (coverage.inventory_upload_status === 'running') {
+        if (coverageJobsRunning(coverage)) {
           return true
-        }
-        const inventoryOnly =
-          coverage.inventory && coverageEmpty(coverage) && !sessionNeedsSales(coverage)
-        if (inventoryOnly) {
-          if (!sessionNeedsSync(coverage)) invalidateDataQueries(qc)
-          return true
-        }
-        // Sales loaded from PG but inventory only in warm cache — coverage already restores it.
-        if (!coverage.inventory && !coverageEmpty(coverage)) {
-          try {
-            coverage = await getCoverage({ light: true, timeout: 60_000 })
-            setCoverage(coverage)
-            if (coverage.inventory && !sessionNeedsSync(coverage)) {
-              invalidateDataQueries(qc)
-            }
-          } catch {
-            /* warm cache may still be loading after deploy */
-          }
         }
         const hasAnyPlatform =
           coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart || coverage.snapdeal
         if (coverageEmpty(coverage) && !hasAnyPlatform) {
           try {
             await withTimeout(cacheHydrateWarm(), 90_000)
-            coverage = await getCoverage({ light: true, timeout: 60_000 })
+            coverage = await getCoverage({ light: true, timeout: 20_000 })
             setCoverage(coverage)
-            if (coverage.inventory_upload_status === 'running') return true
           } catch {
             /* warm cache may still be starting after deploy */
           }
@@ -174,16 +142,13 @@ function ProtectedRoute() {
         if (coverageEmpty(coverage) && !hasAnyPlatform) {
           try {
             await withTimeout(cacheLoad(), 90_000)
-            coverage = await getCoverage({ timeout: 90_000 })
+            coverage = await getCoverage({ light: true, timeout: 20_000 })
             setCoverage(coverage)
           } catch {
             /* GitHub cache optional */
           }
-        } else if (sessionNeedsSales(coverage)) {
-          coverage = await getCoverage({ timeout: 90_000 })
-          setCoverage(coverage)
         }
-        if (!sessionNeedsSync(coverage)) {
+        if (!coverageNeedsSync(coverage)) {
           invalidateDataQueries(qc)
         }
       } catch {
@@ -197,25 +162,7 @@ function ProtectedRoute() {
     staleTime: Infinity,
   })
 
-  useQuery({
-    queryKey: ['coverage-empty-retry'],
-    queryFn: async () => {
-      const prev = qc.getQueryData<Awaited<ReturnType<typeof getCoverage>>>(['coverage-empty-retry'])
-      const useLight = !!prev && !coverageEmpty(prev)
-      const c = await getCoverage({ timeout: useLight ? 45_000 : 120_000, light: useLight })
-      setCoverage(c)
-      if (c.sales) invalidateDataQueries(qc)
-      return c
-    },
-    enabled: !!activeUser && !isKarigar && !hrmOnly && !isRestoring,
-    refetchInterval: (q) => {
-      const c = q.state.data
-      if (!c) return 8_000
-      if (backgroundJobRunning(c)) return 3_000
-      return sessionNeedsSync(c) ? 15_000 : false
-    },
-    retry: 2,
-  })
+  const pollCoverage = !!activeUser && !isKarigar && !hrmOnly && !isRestoring
 
   if (isLoading && !cachedUser) {
     return (
@@ -225,34 +172,11 @@ function ProtectedRoute() {
     )
   }
   if (authUnauthorized) return <Navigate to="/login" replace />
-  if (!activeUser) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-gray-600 text-sm max-w-md">
-          Could not reach the server right now. The app may be restarting or a large upload is running.
-          Wait a minute, then sign in again.
-        </p>
-        <div className="flex flex-wrap gap-2 justify-center">
-          <button
-            type="button"
-            onClick={() => void refetch()}
-            disabled={isFetching}
-            className="px-4 py-2 rounded-lg bg-[#002B5B] text-white text-sm font-medium disabled:opacity-50"
-          >
-            {isFetching ? 'Retrying…' : 'Retry'}
-          </button>
-          <a
-            href="/login"
-            className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50"
-          >
-            Sign in
-          </a>
-        </div>
-      </div>
-    )
+  if (!activeUser && !isLoading) {
+    return <Navigate to="/login" replace state={{ serverUnreachable: authUnreachable }} />
   }
   return (
-    <>
+    <CoverageProvider enabled={pollCoverage}>
       {authUnreachable && activeUser && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-amber-600 text-white text-xs py-1.5 px-3 shadow-md">
           Server is slow to respond — using your saved sign-in. Data sync may catch up in a moment.
@@ -277,7 +201,7 @@ function ProtectedRoute() {
       <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>
         <Outlet />
       </Suspense>
-    </>
+    </CoverageProvider>
   )
 }
 
