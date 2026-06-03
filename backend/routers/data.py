@@ -567,6 +567,30 @@ def _platforms_needing_tier3_topup(sess: AppSession) -> list[str]:
     return out
 
 
+def _schedule_intelligence_refresh_async(session_id: str | None) -> None:
+    """Tier-3 top-up / sales rebuild without blocking dashboard GET handlers."""
+    if not session_id:
+        return
+    try:
+        from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+        DAILY_UPLOAD_EXECUTOR.submit(_intelligence_refresh_worker, session_id)
+    except Exception:
+        pass
+
+
+def _intelligence_refresh_worker(session_id: str) -> None:
+    from ..session import store
+
+    sess = store.get(session_id)
+    if sess is None:
+        return
+    try:
+        _ensure_intelligence_session_fresh(sess)
+    except Exception:
+        pass
+
+
 def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
     """
     Fast path for Intelligence GET handlers: rebuild sales from session frames,
@@ -1235,9 +1259,7 @@ def get_job_status(request: Request):
         warm_cache_generation=int(getattr(_main, "_warm_cache_generation", 0) or 0),
         upload_memory_lock_held=upload_memory_lock_held(),
         daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
-        daily_auto_ingest_message=str(getattr(sess, "daily_auto_ingest_message", "") or ""),
         sales_rebuild_status=getattr(sess, "sales_rebuild_status", "idle") or "idle",
-        sales_rebuild_message=str(getattr(sess, "sales_rebuild_message", "") or ""),
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
         inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
@@ -1466,6 +1488,7 @@ def intelligence_bundle(
     end_date: Optional[str] = None,
     limit: int = 10,
     basis: Optional[str] = None,
+    include_extras: bool = False,
 ):
     """
     One round-trip for the Intelligence dashboard (summary + platforms + top SKUs + anomalies + DSR brands).
@@ -1502,36 +1525,22 @@ def intelligence_bundle(
             or getattr(sess, "session_restore_message", "")
             or "Loading sales data on the server…"
         )
-        _ret_ov = getattr(sess, "po_return_overlay_df", None)
-        _ret_units = (
-            int(_ret_ov["Return_Units"].sum())
-            if _ret_ov is not None and not getattr(_ret_ov, "empty", True)
-            else 0
-        )
         return {
             "status": "warming",
             "message": msg,
-            "sales_summary": {
-                "total_units": 0,
-                "total_gmv": 0,
-                "sku_count": 0,
-                "total_returns": _ret_units if _ret_units else 0,
-            },
-            "return_sheet": bool(_ret_units),
-            "return_sheet_units": _ret_units,
+            "sales_summary": {"total_units": 0, "total_gmv": 0, "sku_count": 0},
             "platform_summary": [],
             "top_skus": [],
             "anomalies": [],
             "dsr_brand_monthly": {"rows": []},
             "busy": busy,
         }
-    _ensure_intelligence_session_fresh(sess)
-
     cache_key = (
         str(start_date or ""),
         str(end_date or ""),
         str(basis or "gross"),
         int(limit),
+        bool(include_extras),
     )
     now = time.time()
     bundle_cache = getattr(sess, "_intelligence_bundle_cache", None)
@@ -1539,8 +1548,15 @@ def intelligence_bundle(
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
     cached = bundle_cache.get(cache_key)
-    if cached and (now - float(cached.get("_ts", 0))) < 120.0:  # extended: 45→120s
+    if cached and (now - float(cached.get("_ts", 0))) < 300.0:
+        _schedule_intelligence_refresh_async(sid or None)
         return cached["payload"]
+
+    # Do not block the request thread on Tier-3 merge when sales are already loaded.
+    if _session_sales_stale_vs_platforms(sess):
+        _ensure_intelligence_session_fresh(sess)
+    else:
+        _schedule_intelligence_refresh_async(sid or None)
 
     # ── Pre-process sales_df ONCE for the whole bundle ────────────────────────
     # Previously each sub-function (get_sales_summary, get_top_skus, etc.) did
@@ -1578,9 +1594,9 @@ def intelligence_bundle(
             sess.meesho_df,
             sess.flipkart_df,
             sess.snapdeal_df,
-            start_date=start_date,
-            end_date=end_date,
-            sales_df=sales_gated,  # gated but not sliced — platform_summary does its own filter
+            start_date=None,
+            end_date=None,
+            sales_df=sales_for_bundle,
         ),
         "top_skus": get_top_skus(
             sales_for_bundle,
@@ -1589,7 +1605,9 @@ def intelligence_bundle(
             end_date=None,
             basis=basis or "gross",
         ),
-        "anomalies": get_anomalies(
+    }
+    if include_extras:
+        payload["anomalies"] = get_anomalies(
             sess.mtr_df,
             sess.myntra_df,
             sess.meesho_df,
@@ -1599,11 +1617,14 @@ def intelligence_bundle(
             sales_gated,
             start_date=start_date,
             end_date=end_date,
-        ),
-        "dsr_brand_monthly": get_dsr_brand_monthly_comparison(
+        )
+        payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
             sales_for_bundle, start_date=None, end_date=None
-        ),
-    }
+        )
+    else:
+        payload["anomalies"] = []
+        payload["dsr_brand_monthly"] = {"rows": [], "totals": {}, "note": ""}
+    payload["status"] = "ready"
     bundle_cache[cache_key] = {"_ts": now, "payload": payload}
     return payload
 

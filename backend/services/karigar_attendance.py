@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from datetime import date, datetime, time, timedelta
 from io import BytesIO
@@ -31,7 +32,12 @@ OT_MIN_MINUTES = 25
 OT_BREAK_MINUTES = 15
 STANDARD_PAY_MINUTES = 8 * 60  # salary based on 8 working hours
 EARLY_LEAVE_GRACE_MINUTES = 5  # ignore tiny early-outs (e.g. 17:58 vs 18:00)
-LATE_ARRIVAL_GRACE_MINUTES = 5  # ignore tiny late-ins (e.g. 09:02 vs 09:00)
+def _late_arrival_grace_minutes() -> int:
+    """Minutes late (after 09:00) with no salary cut — factory rulebook default 17."""
+    try:
+        return max(0, int((os.environ.get("ATTENDANCE_LATE_GRACE_MIN") or "17").strip()))
+    except ValueError:
+        return 17
 # Late-out grace at shift end and OT cap (e.g. 17:58≈18:00, 20:59≈21:00)
 LATE_OUT_GRACE_MINUTES = 5
 # If worker leaves early at/before 16:00, apply extra 30-minute deduction.
@@ -292,11 +298,26 @@ def calc_salary_from_punches(
     if not intervals:
         return zero
 
-    # First punch before 09:00 counts as 09:00 for regular hours.
+    raw_first_in = min(s for s, _ in intervals).time()
+    late_min_raw = 0.0
+    if raw_first_in > WORK_START:
+        late_min_raw = (
+            datetime.combine(base, raw_first_in) - datetime.combine(base, WORK_START)
+        ).total_seconds() / 60.0
+
+    # First punch before 09:00 → 09:00; within late grace → 09:00 for block hours (no pay cut).
+    grace = _late_arrival_grace_minutes()
     adjusted: list[tuple[datetime, datetime]] = []
     for idx, (start, end) in enumerate(intervals):
-        if idx == 0 and start.time() < WORK_START:
-            start = _dt_on(base, WORK_START)
+        if idx == 0:
+            if start.time() < WORK_START:
+                start = _dt_on(base, WORK_START)
+            elif start.time() > WORK_START:
+                late_in_raw = (
+                    datetime.combine(base, start.time()) - datetime.combine(base, WORK_START)
+                ).total_seconds() / 60.0
+                if late_in_raw <= grace:
+                    start = _dt_on(base, WORK_START)
         adjusted.append((start, end))
     intervals = _merge_intervals(adjusted)
 
@@ -357,14 +378,9 @@ def calc_salary_from_punches(
         if tea2_absent:
             tea_penalty += float(TEA_BREAK_MINUTES_EACH)
 
-    first_in = min(s for s, _ in intervals).time()
+    first_in = raw_first_in
     last_out = max(e for _, e in intervals).time()
-    late_min_raw = 0.0
-    if first_in > WORK_START:
-        late_min_raw = (
-            datetime.combine(base, first_in) - datetime.combine(base, WORK_START)
-        ).total_seconds() / 60.0
-    late_min = 0.0 if late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES else late_min_raw
+    late_min = 0.0 if late_min_raw <= grace else late_min_raw
     # Overtime: after 18:00 until actual out (cap 21:00), same hourly rate as regular (daily/8).
     last_out_dt = max(e for _, e in intervals)
     # Late-out grace: treat small differences as exact shift end / OT cap.
@@ -404,33 +420,13 @@ def calc_salary_from_punches(
     full_day_with_ot = (
         ot_hrs_bill > 0
         and work_minutes >= pol["near_full_block_minutes"]
-        and late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES
+        and late_min_raw <= grace
     )
 
     if full_day_with_ot:
         payable_minutes = float(pol["standard_pay_minutes"])
         normal_pay = round(float(daily_rate), 2)
-    elif (
-        late_min_raw > LATE_ARRIVAL_GRACE_MINUTES
-        and (
-            work_minutes >= pol["near_full_block_minutes"]
-            or total_presence_min >= float(pol["standard_pay_minutes"]) - 30
-        )
-    ):
-        # Near-full day with lateness: deduct only late minutes from 8h rate (not lunch/tea again).
-        late_pay_min = late_min_raw
-        payable_minutes = max(
-            float(pol["standard_pay_minutes"])
-            - late_pay_min
-            - early_min_payable
-            - early_16_penalty,
-            0.0,
-        )
-        normal_pay = round(
-            (payable_minutes / float(pol["standard_pay_minutes"])) * daily_rate,
-            2,
-        )
-    elif work_minutes < pol["near_full_block_minutes"]:
+    elif late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
         shift_net_minutes = max(
             float(pol["standard_pay_minutes"])
             - lunch_penalty
@@ -447,7 +443,7 @@ def calc_salary_from_punches(
         # Near-full day within grace: pay full master daily rate (manual salary sheet).
         near_full_grace_day = (
             work_minutes >= pol["near_full_block_minutes"]
-            and late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES
+            and late_min_raw <= grace
             and early_min <= EARLY_LEAVE_GRACE_MINUTES
         )
         if near_full_grace_day:
@@ -458,11 +454,13 @@ def calc_salary_from_punches(
             payable_minutes = max(work_minutes - early_min_payable, 0.0)
             payable_minutes = min(payable_minutes, float(pol["standard_pay_minutes"]))
             normal_pay = round((payable_minutes / float(pol["standard_pay_minutes"])) * daily_rate, 2)
+    if ot_hrs_bill <= 0:
+        normal_pay = min(normal_pay, round(float(daily_rate), 2))
     payable_hrs = round(payable_minutes / 60.0, 2)
 
     punch_pairs_json = serialize_punch_pairs(punch_pairs)
 
-    late_for_money = 0.0 if late_min_raw <= LATE_ARRIVAL_GRACE_MINUTES else late_min_raw
+    late_for_money = 0.0 if late_min_raw <= grace else late_min_raw
     late_deduction_rs = round((late_for_money / 60.0) * hourly, 2)
     early_deduction_rs = round((early_min_payable / 60.0) * hourly, 2)
 
@@ -630,55 +628,67 @@ def match_employee_code(raw_code: Any, name: str = "") -> tuple[str, str, float]
     return code, nm, 0.0
 
 
-def _normalize_report_date_str(val: Any) -> str:
-    """Parse a single cell into YYYY-MM-DD (IST attendance sheets, multiple formats)."""
-    if val is None or (isinstance(val, float) and pd.isna(val)):
+def _cell_to_report_date(cell: Any) -> str:
+    """Parse one spreadsheet cell as YYYY-MM-DD when possible."""
+    if cell is None or (isinstance(cell, float) and pd.isna(cell)):
         return ""
-    if isinstance(val, datetime):
-        return val.strftime("%Y-%m-%d")
-    if isinstance(val, date):
-        return val.isoformat()
-    s = str(val).strip()
+    if isinstance(cell, (datetime, pd.Timestamp)):
+        try:
+            return pd.Timestamp(cell).strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+    s = str(cell).strip()
     if not s or s.lower() in ("nan", "none", "-"):
         return ""
     m = re.search(r"(\d{1,2}-[A-Za-z]{3}-\d{4})", s, re.I)
     if m:
-        return pd.to_datetime(m.group(1), dayfirst=True).strftime("%Y-%m-%d")
-    for dayfirst in (True, False):
         try:
-            ts = pd.to_datetime(s, dayfirst=dayfirst, errors="coerce")
-            if pd.notna(ts):
-                return ts.strftime("%Y-%m-%d")
+            return pd.to_datetime(m.group(1), dayfirst=True).strftime("%Y-%m-%d")
         except Exception:
-            continue
+            pass
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+    if m:
+        return m.group(1)
+    m = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", s)
+    if m:
+        d, mo, y = m.group(1), m.group(2), m.group(3)
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return pd.to_datetime(f"{d}-{mo}-{y}", dayfirst=True).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    try:
+        parsed = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        if pd.notna(parsed):
+            return pd.Timestamp(parsed).strftime("%Y-%m-%d")
+    except Exception:
+        pass
     return ""
 
 
 def _extract_report_date(raw: pd.DataFrame) -> str:
-    """Read attendance report date from sheet header (preferred over filename)."""
-    found: list[str] = []
-    for i in range(min(25, len(raw))):
-        for j in range(min(raw.shape[1], 12)):
-            cell = str(raw.iloc[i, j] or "").strip()
-            if not cell:
+    """Read attendance report date from biometric export header (not upload day)."""
+    if raw is None or raw.empty:
+        return ""
+    max_rows = min(25, len(raw))
+    max_cols = min(16, raw.shape[1])
+    # Prefer cells on the same row as a "date" label.
+    for i in range(max_rows):
+        for j in range(max_cols):
+            label = str(raw.iloc[i, j] or "").strip().lower()
+            if "date" not in label:
                 continue
-            lower = cell.lower()
-            if "date" in lower and len(cell) < 80:
-                for k in range(j, min(j + 6, raw.shape[1])):
-                    parsed = _normalize_report_date_str(raw.iloc[i, k])
-                    if parsed:
-                        found.append(parsed)
-                inline = _normalize_report_date_str(
-                    re.sub(r"(?i).*date\s*[:=\-]?\s*", "", cell)
-                )
-                if inline:
-                    found.append(inline)
-            else:
-                parsed = _normalize_report_date_str(cell)
-                if parsed and re.search(r"\d{4}", cell):
-                    found.append(parsed)
-    if found:
-        return max(found)
+            for k in range(j, min(j + 6, max_cols)):
+                found = _cell_to_report_date(raw.iloc[i, k])
+                if found:
+                    return found
+    # Fallback: any date-like value in the header block (common when label is merged).
+    for i in range(max_rows):
+        for j in range(max_cols):
+            found = _cell_to_report_date(raw.iloc[i, j])
+            if found:
+                return found
     return ""
 
 
@@ -686,9 +696,8 @@ def _date_from_filename(filename: str) -> str:
     fn = (filename or "").strip()
     if not fn:
         return ""
-    # common: 02-06-2026.xls / Sales 2-6-26.rar / attendance_04-06-2026.xls
-    base = fn.rsplit(".", 1)[0]
-    m = re.search(r"(\d{1,2})[-_./](\d{1,2})[-_./](\d{2,4})", base)
+    # common: 02-06-2026.xls / 2_6_26.xlsx / attendance 02.06.2026.xls
+    m = re.search(r"(\d{1,2})[-/_\.](\d{1,2})[-/_\.](\d{2,4})", fn)
     if not m:
         return ""
     d, mth, y = m.group(1), m.group(2), m.group(3)
@@ -724,8 +733,8 @@ def parse_inout_punch_report(raw: bytes, filename: str = "") -> tuple[str, pd.Da
     report_date = _extract_report_date(preview) or _date_from_filename(filename)
     if not report_date:
         raise ValueError(
-            "Could not find attendance date in the sheet header or filename. "
-            "Use a file named like 04-06-2026.xls or ensure the export shows the report date."
+            "Could not read attendance date from the sheet or filename. "
+            "Use a file named like 03-06-2026.xls or ensure the report header shows the attendance date."
         )
     header_row = _find_header_row(preview)
     bio.seek(0)
@@ -778,24 +787,17 @@ def recalculate_attendance_for_date(on_date: str) -> dict[str, Any]:
 
 def import_karigar_attendance_bytes(raw: bytes, filename: str = "") -> dict[str, Any]:
     """Import biometric attendance; upserts by Date + E_Code."""
+    warnings: list[str] = []
     try:
         report_date, df, warnings = parse_inout_punch_report(raw, filename)
-    except ValueError as e:
-        return {"ok": False, "message": str(e), "warnings": []}
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc), "warnings": warnings}
     if df.empty:
         return {"ok": False, "message": "No rows found in attendance file.", "warnings": warnings}
 
     code_col = next((c for c in df.columns if "code" in str(c).lower()), None)
     name_col = next((c for c in df.columns if str(c).strip().lower() == "name"), None)
     shift_col = next((c for c in df.columns if str(c).strip().lower() == "shift"), None)
-    date_col = next(
-        (
-            c
-            for c in df.columns
-            if str(c).strip().lower() in ("date", "attendance date", "att. date", "att date")
-        ),
-        None,
-    )
     if not code_col:
         return {"ok": False, "message": "Could not find E. Code column.", "warnings": warnings}
 
@@ -807,31 +809,26 @@ def import_karigar_attendance_bytes(raw: bytes, filename: str = "") -> dict[str,
             continue
         emp_name = str(r.get(name_col, "") or "").strip() if name_col else ""
         shift = str(r.get(shift_col, "") or "").strip().upper() if shift_col else ""
-        row_date = report_date
-        if date_col is not None:
-            parsed_row = _normalize_report_date_str(r.get(date_col))
-            if parsed_row:
-                row_date = parsed_row
         pairs = extract_punch_pairs(r, list(df.columns))
         e_code, name, master_rate = match_employee_code(raw_code, emp_name)
-        daily = master_rate or get_daily_rate_for_date(e_code, row_date)
+        daily = master_rate or get_daily_rate_for_date(e_code, report_date)
         if daily <= 0 and master_rate <= 0:
             unmatched.append(f"{raw_code} {emp_name}".strip())
 
         if shift == "NS" and not pairs:
             status = "A"
-            calc = calc_salary_from_punches([], daily, on_date=row_date, status=status)
+            calc = calc_salary_from_punches([], daily, on_date=report_date, status=status)
         elif pairs:
             status = "P"
-            calc = calc_salary_from_punches(pairs, daily, on_date=row_date, status=status)
+            calc = calc_salary_from_punches(pairs, daily, on_date=report_date, status=status)
         else:
             status = "A"
-            calc = calc_salary_from_punches([], daily, on_date=row_date, status=status)
+            calc = calc_salary_from_punches([], daily, on_date=report_date, status=status)
 
         miss = needs_miss_punch(pairs)
         rows.append(
             {
-                "Date": row_date,
+                "Date": report_date,
                 "E_Code": e_code,
                 "Raw_E_Code": str(raw_code).strip(),
                 "Name": name or emp_name,
@@ -848,13 +845,11 @@ def import_karigar_attendance_bytes(raw: bytes, filename: str = "") -> dict[str,
 
     existing = get_sheet_df("karigar_attendance")
     if not existing.empty:
-        replace_keys = {(str(x["Date"]), clean_key(x["E_Code"])) for x in rows}
-
-        def _keep_row(er: pd.Series) -> bool:
-            key = (str(er.get("Date", "")), clean_key(er.get("E_Code", "")))
-            return key not in replace_keys
-
-        existing = existing[existing.apply(_keep_row, axis=1)]
+        keep = ~(
+            (existing["Date"].astype(str) == report_date)
+            & (existing["E_Code"].astype(str).map(clean_key).isin([clean_key(x["E_Code"]) for x in rows]))
+        )
+        existing = existing[keep]
     merged = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True)
     save_sheet_df("karigar_attendance", merged)
 

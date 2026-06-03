@@ -376,13 +376,32 @@ def parse_return_upload_bytes(
     return out, None
 
 
+def infer_return_overlay_as_of(filename: str, overlay_df: pd.DataFrame | None = None) -> str:
+    """Pick reporting date from archive/filename or return table — not upload day."""
+    from .karigar_attendance import _cell_to_report_date, _date_from_filename
+
+    as_of = _date_from_filename(filename or "")
+    if as_of:
+        return as_of
+    if overlay_df is not None and not overlay_df.empty:
+        for col in ("Report_Date", "Date", "Return_Date", "TxnDate", "Order_Date"):
+            if col not in overlay_df.columns:
+                continue
+            for raw in overlay_df[col].dropna().head(20):
+                found = _cell_to_report_date(raw)
+                if found:
+                    return found
+    return ""
+
+
 def apply_return_overlay_import(
     sess,
     overlay_df: pd.DataFrame,
     *,
     replace: bool = True,
+    filename: str = "",
 ) -> dict:
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
     if overlay_df is None or overlay_df.empty:
@@ -394,7 +413,11 @@ def apply_return_overlay_import(
         base = getattr(sess, "po_return_overlay_df", pd.DataFrame())
         merged = pd.concat([base, overlay_df], ignore_index=True)
         sess.po_return_overlay_df = _finalize_return_overlay_df(merged)
-    sess.return_overlay_as_of = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    as_of = infer_return_overlay_as_of(filename, overlay_df)
+    if not as_of:
+        # Prefer yesterday when sheet has no date (morning upload of prior day returns).
+        as_of = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)).isoformat()
+    sess.return_overlay_as_of = as_of
     n = int(len(sess.po_return_overlay_df))
     units = int(sess.po_return_overlay_df["Return_Units"].sum())
     sess._quarterly_cache.clear()

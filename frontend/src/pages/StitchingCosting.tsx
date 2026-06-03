@@ -3301,19 +3301,13 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
     try {
       const fd = new FormData()
       fd.append('file', file)
-      const { data: res } = await api.post<{
-        ok?: boolean
-        message?: string
-        warnings?: string[]
-        date?: string
-      }>(
+      const { data: res } = await api.post<{ ok?: boolean; message?: string; warnings?: string[] }>(
         '/stitching/attendance/karigar/upload',
         fd,
         { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 },
       )
       const warn = res.warnings?.length ? ` ${res.warnings.join(' ')}` : ''
-      const dateNote = res.date ? ` (attendance date ${res.date})` : ''
-      setUploadMsg({ type: 'ok', text: `${res.message || 'Imported.'}${dateNote}${warn}` })
+      setUploadMsg({ type: 'ok', text: `${res.message || 'Imported.'}${warn}` })
       qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
       qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
       refetch()
@@ -3375,7 +3369,7 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
             <li>Upload the biometric IN/OUT sheet (matched by <strong>E. Code</strong>).</li>
             <li>Fix any <strong>miss punch</strong> rows (single IN only) and set break time if needed.</li>
             <li>
-              Payroll uses 8h regular pay minus <strong>late minutes</strong> (after 09:00 in) and break deductions, plus OT after 18:00.
+              Payroll uses 8h regular pay minus <strong>late minutes after 17 min grace</strong> (from 09:00 in), break deductions, plus OT after 18:00.
             </li>
             <li>Use <strong>Performance</strong> tab to find karigars in payroll but not in production costing.</li>
           </ol>

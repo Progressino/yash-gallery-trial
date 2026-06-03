@@ -771,9 +771,9 @@ export default function Dashboard() {
   )
 
   /* ── state ── */
-  const [dateStart,      setDateStart]      = useState(() => daysAgoIsoIST(90))
+  const [dateStart,      setDateStart]      = useState(() => daysAgoIsoIST(30))
   const [dateEnd,        setDateEnd]        = useState(() => todayIsoIST())
-  const [activePreset,   setActivePreset]   = useState('90D')
+  const [activePreset,   setActivePreset]   = useState('30D')
   const [salesViewNet,   setSalesViewNet]   = useState(false)
   const [hiddenPlatforms,setHiddenPlatforms]= useState<Set<string>>(new Set())
   const [heatPlatform,   setHeatPlatform]   = useState('Myntra')
@@ -814,15 +814,28 @@ export default function Dashboard() {
 
   const localHint = readLocalSessionHint()
   const hintSaysSales = !!(localHint?.sales && (localHint.sales_rows ?? 0) > 0)
+  const cachedBundleHint = useMemo(
+    () => readIntelligenceCache(dateStart, dateEnd, salesBasis),
+    [dateStart, dateEnd, salesBasis],
+  )
 
-  const bundleParams = useMemo(() => {
-    const p = new URLSearchParams({ limit: String(topSkuLimit), basis: salesBasis })
+  const bundleParamsCore = useMemo(() => {
+    const p = new URLSearchParams({
+      limit: String(topSkuLimit),
+      basis: salesBasis,
+      include_extras: '0',
+    })
     if (dateStart) p.set('start_date', dateStart)
     if (dateEnd) p.set('end_date', dateEnd)
     return p.toString()
   }, [dateStart, dateEnd, topSkuLimit, salesBasis])
 
-  const dataReady = sessionSales || hasPlatformData || hintSaysSales
+  const bundleParamsFull = useMemo(
+    () => bundleParamsCore.replace('include_extras=0', 'include_extras=1'),
+    [bundleParamsCore],
+  )
+
+  const dataReady = sessionSales || hasPlatformData || hintSaysSales || !!cachedBundleHint
 
   const {
     data: intelligenceBundle,
@@ -831,14 +844,27 @@ export default function Dashboard() {
   } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis],
     queryFn: async () => {
-      const { data } = await api.get<IntelligenceBundle & { status?: string }>(
-        `/data/intelligence-bundle?${bundleParams}`,
-        { timeout: 180_000 },
+      const { data: core } = await api.get<IntelligenceBundle & { status?: string }>(
+        `/data/intelligence-bundle?${bundleParamsCore}`,
+        { timeout: 90_000 },
       )
-      if (data?.status !== 'warming') {
-        writeIntelligenceCache(dateStart, dateEnd, salesBasis, data)
+      if (core?.status === 'warming') {
+        return core
       }
-      return data
+      writeIntelligenceCache(dateStart, dateEnd, salesBasis, core)
+      try {
+        const { data: full } = await api.get<IntelligenceBundle & { status?: string }>(
+          `/data/intelligence-bundle?${bundleParamsFull}`,
+          { timeout: 120_000 },
+        )
+        if (full?.status !== 'warming') {
+          writeIntelligenceCache(dateStart, dateEnd, salesBasis, full)
+          return full
+        }
+      } catch {
+        /* charts already usable from core bundle */
+      }
+      return core
     },
     enabled: dataReady,
     staleTime: 300_000,
@@ -848,13 +874,10 @@ export default function Dashboard() {
       if (d?.status === 'warming' || jobRunning) return 4_000
       return false
     },
-    placeholderData: () =>
-      readIntelligenceCache(dateStart, dateEnd, salesBasis) ?? undefined,
+    placeholderData: () => cachedBundleHint ?? undefined,
   })
 
-  const bundleWarming =
-    intelligenceBundle?.status === 'warming' ||
-    (loadingBundle && !bundleHasDisplayData(intelligenceBundle) && !sessionSales)
+  const bundleWarming = intelligenceBundle?.status === 'warming'
 
   const salesSummary = intelligenceBundle?.sales_summary
   const topSkusRaw = intelligenceBundle?.top_skus
@@ -1021,8 +1044,8 @@ export default function Dashboard() {
 
   const intelligenceLoading =
     bundleWarming ||
-    (!hasDisplayData && (loadingBundle || !dataReady)) ||
-    (fetchingBundle && !hasDisplayData) ||
+    (!hasDisplayData && loadingBundle && !cachedBundleHint) ||
+    (fetchingBundle && !hasDisplayData && !cachedBundleHint) ||
     (showDsr && loadingDsr) ||
     exportingSales ||
     exportingDsr ||
