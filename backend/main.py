@@ -834,6 +834,13 @@ def _do_load_warm_cache() -> bool:
             del p1_raw, p1
         except Exception:
             pass
+        # Capture disk sales_df NOW before disk_data is freed below.
+        # This lets Phase 2 reuse it instead of running build_sales_df (5-6 GB peak).
+        _phase0_sales_df: "pd.DataFrame" = (
+            disk_data.get("sales_df", pd.DataFrame())
+            if disk_data
+            else pd.DataFrame()
+        )
         if disk_ok and disk_data is not None:
             disk_data = None
         _gc.collect()
@@ -945,17 +952,15 @@ def _do_load_warm_cache() -> bool:
             del daily
         except Exception:
             pass
-        # Use the Phase-0 disk sales_df as the fallback.  When disk_ok=True, Phase 1
-        # no longer builds its own sales_df (skipped to reduce memory), so _warm_cache
-        # at this point holds p1 data (which has an empty sales_df).  Fall back to
-        # disk_data to get the valid historical sales_df saved during the last Phase 2.
-        _disk_sales = disk_data.get("sales_df") if disk_data else None
-        _p1_sales = _warm_cache.get("sales_df") if _warm_cache else None
+        # Use the Phase-0 disk sales_df captured above (before disk_data was freed).
+        # disk_data is now None — reading it here would give empty.  _phase0_sales_df
+        # was extracted before the free and holds the historical sales_df from disk.
         _old_sales_df: "pd.DataFrame" = (
-            _disk_sales
-            if (_disk_sales is not None and not getattr(_disk_sales, "empty", True))
-            else (_p1_sales if _p1_sales is not None else pd.DataFrame())
+            _phase0_sales_df
+            if not getattr(_phase0_sales_df, "empty", True)
+            else pd.DataFrame()
         )
+        del _phase0_sales_df
         # Swap out the old warm cache before the peak allocation.
         # Active sessions already hold their own data; the brief empty window is safe.
         _warm_cache = {}
