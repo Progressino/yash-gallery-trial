@@ -1066,6 +1066,25 @@ def _do_load_warm_cache() -> bool:
 
         # ── Phase 0 save: persist to disk for sub-3-second load on next restart ──
         # /data/warm_cache/ lives on the Docker volume that survives container restarts.
+        # Before saving, merge any existing disk sidecars (inventory, PO sidecars,
+        # snapdeal, etc.) that Phase 2 did not reload — preserves complete data.
+        try:
+            _existing_disk = _load_warm_cache_from_disk(ignore_age=True)
+            if _existing_disk[0] and _existing_disk[1]:
+                _sidecar_keys = (
+                    "inventory_df_variant", "inventory_df_parent",
+                    "daily_inventory_history_df", "existing_po_df",
+                    "sku_status_lead_df", "po_raise_ledger_df",
+                    "po_return_overlay_df", "snapdeal_df",
+                )
+                for _sk in _sidecar_keys:
+                    if _sk not in _warm_cache or (hasattr(_warm_cache.get(_sk), "empty") and _warm_cache.get(_sk).empty):
+                        _sv = _existing_disk[1].get(_sk)
+                        if _sv is not None and not getattr(_sv, "empty", True):
+                            _warm_cache[_sk] = _sv
+                            log.info("Phase 2 save: merged sidecar %s from disk (%d rows).", _sk, len(_sv))
+        except Exception as _merge_err:
+            log.warning("Phase 2 sidecar merge from disk failed (non-fatal): %s", _merge_err)
         try:
             _save_warm_cache_to_disk(_warm_cache)
         except Exception as _disk_err:
