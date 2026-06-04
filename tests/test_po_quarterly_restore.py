@@ -11,8 +11,8 @@ from backend.services.po_quarterly_warmup import (
 from backend.session import AppSession
 
 
-def test_quarterly_restore_months_default_covers_eight_quarters():
-    assert quarterly_restore_months(8) >= 26
+def test_quarterly_restore_months_default_is_full_history():
+    assert quarterly_restore_months(8) is None
 
 
 def test_platform_frames_span_detects_deep_bulk():

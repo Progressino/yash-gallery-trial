@@ -66,7 +66,7 @@ def test_calculate_quarterly_history_uses_sku_mapping():
 
 
 def test_calculate_quarterly_history_merges_older_platform_rows():
-    """Unified sales may be recent-only; platform bulk must fill older quarter columns."""
+    """Platform frames must fill older quarter columns even when sales_df exists."""
     recent = pd.DataFrame(
         {
             "Sku": ["1001YKBEIGE-M"] * 5,

@@ -1060,7 +1060,9 @@ def po_quarterly_debug(request: Request):
         return {"ok": False, "reason": "No session"}
 
     # Also report & clear the live cache so next Calculate PO gets fresh data
-    cache_key = (False, 8)
+    from ..services.po_quarterly_warmup import quarterly_cache_key
+
+    cache_key = quarterly_cache_key(False, 8)
     cached = sess._quarterly_cache.get(cache_key)
     cached_rows = len(cached.get("rows", [])) if cached else 0
     cached_sample_sku = cached["rows"][0].get("OMS_SKU") if cached and cached.get("rows") else None
@@ -1111,7 +1113,9 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if sess is None:
         return {"loaded": False}
 
-    cache_key = (group_by_parent, n_quarters)
+    from ..services.po_quarterly_warmup import quarterly_cache_key
+
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
     if cache_key in sess._quarterly_cache:
         cached = sess._quarterly_cache[cache_key]
         if cached.get("loaded") and cached.get("rows"):

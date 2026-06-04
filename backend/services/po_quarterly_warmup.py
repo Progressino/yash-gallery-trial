@@ -9,6 +9,14 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Bump when quarterly payload shape / history rules change (invalidates session cache).
+QUARTERLY_CACHE_SCHEMA = 3
+
+
+def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
+    return (QUARTERLY_CACHE_SCHEMA, bool(group_by_parent), int(n_quarters))
+
+
 # Indian FY quarters need ~2 years of shipments for 8 quarter columns.
 _MIN_SPAN_DAYS_FOR_QUARTERLY = 540
 _MIN_PLATFORM_ROWS_FOR_REBUILD = 5000
@@ -65,8 +73,8 @@ def quarterly_restore_months(n_quarters: int) -> int | None:
             return None if v <= 0 else v
         except ValueError:
             pass
-    # 8 Indian FY quarters ≈ 24 months; add buffer for partial current quarter.
-    return max(26, int(n_quarters) * 3 + 2)
+    # Default: full Tier-3 history (bulk Tier-1 often uses old file_date metadata).
+    return None
 
 
 def restore_platform_history_for_quarterly(sess, n_quarters: int = 8) -> bool:
@@ -107,7 +115,7 @@ def restore_platform_history_for_quarterly(sess, n_quarters: int = 8) -> bool:
         getattr(sess, "meesho_df", pd.DataFrame()),
         getattr(sess, "flipkart_df", pd.DataFrame()),
         sess.sku_mapping or {},
-        snapdeal=getattr(sess, "snapdeal_df", pd.DataFrame()),
+        snapdeal_df=getattr(sess, "snapdeal_df", pd.DataFrame()),
         return_overlay_df=getattr(sess, "po_return_overlay_df", None),
     )
     sess._quarterly_cache.clear()
@@ -162,7 +170,7 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
         meesho if meesho is not None else pd.DataFrame(),
         flipkart if flipkart is not None else pd.DataFrame(),
         sess.sku_mapping or {},
-        snapdeal=snapdeal if snapdeal is not None else pd.DataFrame(),
+        snapdeal_df=snapdeal if snapdeal is not None else pd.DataFrame(),
         return_overlay_df=getattr(sess, "po_return_overlay_df", None),
     )
     new_span = sales_df_span_days(rebuilt)
@@ -227,7 +235,7 @@ def warmup_quarterly_cache(
     n_quarters: int = 8,
 ) -> Tuple[dict[str, Any], bool]:
     """Populate session quarterly cache; returns (payload, sales_was_rebuilt)."""
-    cache_key = (group_by_parent, n_quarters)
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
     if cache_key in sess._quarterly_cache and sess._quarterly_cache[cache_key].get("loaded"):
         return sess._quarterly_cache[cache_key], False
 

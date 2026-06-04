@@ -95,6 +95,10 @@ def _platform_shipment_history_part(
             tmp["SKU"] = tmp["SKU"].apply(
                 lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper())
             )
+        if sku_mapping:
+            _u = tmp["SKU"].unique()
+            _c = {s: canonical_oms_key(s, sku_mapping) for s in _u}
+            tmp["SKU"] = tmp["SKU"].map(_c)
     elif canonical_oms and sku_mapping:
         _u = tmp["SKU"].unique()
         _c = {s: canonical_oms_key(s, sku_mapping) for s in _u}
@@ -141,26 +145,36 @@ def _merge_sales_and_platform_history_parts(
     plat_parts: list[pd.DataFrame],
 ) -> list[pd.DataFrame]:
     """
-    Prefer unified sales for the overlapping window; add platform rows only for
-    dates outside unified coverage (avoids double-count while keeping deep history).
+    Platform bulk/Tier-3 frames are the source of truth for deep history.
+    Unified ``sales_df`` often spans the same calendar range but omits SKU-days;
+    only append sales rows whose (SKU, day) keys are not already on the platform side.
     """
     if not plat_parts:
         return [sales_part] if sales_part is not None and not sales_part.empty else []
     plat_hist = pd.concat(plat_parts, ignore_index=True)
     if sales_part is None or sales_part.empty:
         return [plat_hist]
-    smin = sales_part["Date"].min()
-    smax = sales_part["Date"].max()
-    pmin = plat_hist["Date"].min()
-    pmax = plat_hist["Date"].max()
-    sales_span = int((smax - smin).days) if pd.notna(smin) and pd.notna(smax) else 0
-    plat_span = int((pmax - pmin).days) if pd.notna(pmin) and pd.notna(pmax) else 0
-    if plat_span <= sales_span + 30 and pmin >= smin and pmax <= smax:
-        return [sales_part]
-    extras = plat_hist[(plat_hist["Date"] < smin) | (plat_hist["Date"] > smax)]
-    if extras.empty:
-        return [sales_part]
-    return [sales_part, extras]
+    plat_hist = plat_hist.copy()
+    plat_hist["_day"] = pd.to_datetime(plat_hist["Date"], errors="coerce").dt.normalize()
+    plat_keys = set(
+        zip(
+            plat_hist["SKU"].astype(str).str.strip(),
+            plat_hist["_day"].astype("int64"),
+        )
+    )
+    sales_part = sales_part.copy()
+    sales_part["_day"] = pd.to_datetime(sales_part["Date"], errors="coerce").dt.normalize()
+
+    def _sales_only(row) -> bool:
+        key = (str(row["SKU"]).strip(), int(row["_day"].value) if pd.notna(row["_day"]) else -1)
+        return key not in plat_keys
+
+    extra_sales = sales_part[sales_part.apply(_sales_only, axis=1)]
+    drop_cols = ["_day"]
+    plat_out = plat_hist.drop(columns=drop_cols, errors="ignore")
+    if extra_sales.empty:
+        return [plat_out]
+    return [plat_out, extra_sales.drop(columns=drop_cols, errors="ignore")]
 
 
 def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
