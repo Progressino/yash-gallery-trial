@@ -1106,6 +1106,8 @@ def _build_intelligence_bundle_payload_from_session(
     # Platform cards from Tier-3-augmented session frames (not unified sales alone).
     # Unified sales_df often lags daily uploads — using it hid Amazon/Flipkart after ~May 29
     # while Myntra still showed via MYNTRA_OVERVIEW_USE_RAW.
+    from ..services.sales import merge_return_data_into_platform_summaries
+
     platform_summary = get_platform_summary(
         mtr_b,
         myntra_b,
@@ -1115,6 +1117,14 @@ def _build_intelligence_bundle_payload_from_session(
         start_date=s,
         end_date=e,
         sales_df=None,
+    )
+    platform_summary = merge_return_data_into_platform_summaries(
+        platform_summary,
+        getattr(sess, "po_return_overlay_df", None),
+        sess.sales_df,
+        s,
+        e,
+        fallback_as_of=str(getattr(sess, "return_overlay_as_of", "") or "")[:10] or None,
     )
     shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
     returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
@@ -3028,6 +3038,86 @@ def dsr_brand_monthly_export(
     )
 
 
+def _patch_analytics_monthly_returns(
+    monthly_records: list,
+    sess: AppSession,
+    platform_key: str,
+    *,
+    display_name: str,
+) -> None:
+    """Merge PO return overlay + unified Refund rows into platform monthly analytics."""
+    from ..services.sales import (
+        _refund_buckets_for_platform,
+        overlay_refunds_by_calendar_month,
+    )
+
+    overlay = getattr(sess, "po_return_overlay_df", None)
+    sales = getattr(sess, "sales_df", None)
+    fallback = str(getattr(sess, "return_overlay_as_of", "") or "")[:10] or None
+    _, sales_by_month, _ = _refund_buckets_for_platform(
+        display_name,
+        None,
+        sales,
+        None,
+        None,
+        fallback_as_of=fallback,
+    )
+    ov_by_month = overlay_refunds_by_calendar_month(
+        overlay, platform_key, fallback_as_of=fallback
+    )
+    month_key = "Month"
+
+    def _month_of(row: dict) -> str:
+        return str(row.get(month_key) or row.get("month") or "")
+
+    for row in monthly_records:
+        m = _month_of(row)
+        extra = int(ov_by_month.get(m, 0) or 0) + int(sales_by_month.get(m, 0) or 0)
+        if extra <= 0:
+            continue
+        row["refunds"] = int(row.get("refunds") or 0) + extra
+        row["net"] = int(row.get("shipments") or 0) - int(row["refunds"] or 0)
+
+    known = {_month_of(r) for r in monthly_records}
+    for m, extra in {**ov_by_month, **sales_by_month}.items():
+        if extra <= 0 or m in known:
+            continue
+        monthly_records.append(
+            {
+                month_key: m,
+                "shipments": 0,
+                "refunds": int(extra),
+                "net": -int(extra),
+            }
+        )
+        known.add(m)
+
+
+def _finalize_platform_analytics_monthly(
+    sess: AppSession,
+    monthly,
+    platform_key: str,
+    *,
+    display_name: str,
+) -> tuple[list, int, int, int]:
+    """Monthly records + totals after overlay / unified Refund merge."""
+    import pandas as pd
+
+    frame = monthly.copy()
+    if "shipments" not in frame.columns:
+        frame["shipments"] = 0
+    if "refunds" not in frame.columns:
+        frame["refunds"] = 0
+    frame["net"] = frame["shipments"] - frame.get("refunds", 0)
+    records = frame.to_dict("records")
+    _patch_analytics_monthly_returns(
+        records, sess, platform_key, display_name=display_name
+    )
+    returned = sum(int(r.get("refunds") or 0) for r in records)
+    shipped = sum(int(r.get("shipments") or 0) for r in records)
+    return records, shipped, returned, shipped - returned
+
+
 # ── MTR Analytics ─────────────────────────────────────────────
 
 @router.get("/mtr-analytics")
@@ -3077,15 +3167,30 @@ def mtr_analytics(request: Request):
     elif "shipments" in monthly.columns:
         monthly["net"] = monthly["shipments"]
 
+    monthly_records = monthly.to_dict("records")
+    _patch_analytics_monthly_returns(
+        monthly_records,
+        sess,
+        "amazon",
+        display_name="Amazon",
+    )
+    returned = int(
+        sum(int(r.get("refunds") or 0) for r in monthly_records)
+    )
+    shipped = int(
+        sum(int(r.get("shipments") or 0) for r in monthly_records)
+    )
+    net_units = shipped - returned
+
     return {
         "loaded":       True,
         "rows":         len(df),
         "date_range":   [str(df["Date"].min().date()), str(df["Date"].max().date())],
-        "shipped":      int(shipped),
-        "returned":     int(returned),
+        "shipped":      shipped,
+        "returned":     returned,
         "net_units":    net_units,
         "return_rate":  round(returned / shipped * 100, 1) if shipped > 0 else 0,
-        "monthly":      monthly.to_dict("records"),
+        "monthly":      monthly_records,
         "top_skus":     top.to_dict("records"),
     }
 
@@ -3104,9 +3209,7 @@ def myntra_analytics(request: Request):
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
-
-    shipped  = float(df[df["TxnType"] == "Shipment"]["Quantity"].sum())
-    returned = float(df[df["TxnType"] == "Refund"]["Quantity"].sum())
+    df["Month"] = df["Date"].dt.to_period("M").astype(str)
 
     monthly = (
         df.groupby(["Month", "TxnType"])["Quantity"]
@@ -3129,18 +3232,19 @@ def myntra_analytics(request: Request):
     )
     by_state.columns = ["state", "units"]
 
-    if "shipments" in monthly.columns:
-        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+    monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
+        sess, monthly, "myntra", display_name="Myntra"
+    )
 
     return {
         "loaded":      True,
         "rows":        len(df),
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
-        "shipped":     int(shipped),
-        "returned":    int(returned),
-        "net_units":   int(shipped - returned),
+        "shipped":     shipped,
+        "returned":    returned,
+        "net_units":   net_units,
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
-        "monthly":     monthly.to_dict("records"),
+        "monthly":     monthly_records,
         "top_skus":    top_skus.to_dict("records"),
         "by_state":    by_state.to_dict("records"),
     }
@@ -3160,9 +3264,7 @@ def meesho_analytics(request: Request):
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
-
-    shipped  = float(df[df["TxnType"] == "Shipment"]["Quantity"].sum())
-    returned = float(df[df["TxnType"] == "Refund"]["Quantity"].sum())
+    df["Month"] = df["Date"].dt.to_period("M").astype(str)
 
     monthly = (
         df.groupby(["Month", "TxnType"])["Quantity"]
@@ -3179,18 +3281,19 @@ def meesho_analytics(request: Request):
     )
     by_state.columns = ["state", "units"]
 
-    if "shipments" in monthly.columns:
-        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+    monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
+        sess, monthly, "meesho", display_name="Meesho"
+    )
 
     return {
         "loaded":      True,
         "rows":        len(df),
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
-        "shipped":     int(shipped),
-        "returned":    int(returned),
-        "net_units":   int(shipped - returned),
+        "shipped":     shipped,
+        "returned":    returned,
+        "net_units":   net_units,
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
-        "monthly":     monthly.to_dict("records"),
+        "monthly":     monthly_records,
         "by_state":    by_state.to_dict("records"),
     }
 
@@ -3209,9 +3312,7 @@ def flipkart_analytics(request: Request):
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
-
-    shipped  = float(df[df["TxnType"] == "Shipment"]["Quantity"].sum())
-    returned = float(df[df["TxnType"] == "Refund"]["Quantity"].sum())
+    df["Month"] = df["Date"].dt.to_period("M").astype(str)
 
     monthly = (
         df.groupby(["Month", "TxnType"])["Quantity"]
@@ -3234,18 +3335,19 @@ def flipkart_analytics(request: Request):
     )
     by_state.columns = ["state", "units"]
 
-    if "shipments" in monthly.columns:
-        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+    monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
+        sess, monthly, "flipkart", display_name="Flipkart"
+    )
 
     return {
         "loaded":      True,
         "rows":        len(df),
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
-        "shipped":     int(shipped),
-        "returned":    int(returned),
-        "net_units":   int(shipped - returned),
+        "shipped":     shipped,
+        "returned":    returned,
+        "net_units":   net_units,
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
-        "monthly":     monthly.to_dict("records"),
+        "monthly":     monthly_records,
         "top_skus":    top_skus.to_dict("records"),
         "by_state":    by_state.to_dict("records"),
     }
@@ -3335,6 +3437,7 @@ def snapdeal_analytics(request: Request, company: Optional[str] = None):
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
+    df["Month"] = df["Date"].dt.to_period("M").astype(str)
 
     # Collect unique companies before filtering
     companies: list = []
@@ -3346,9 +3449,6 @@ def snapdeal_analytics(request: Request, company: Optional[str] = None):
     if company and "Company" in df.columns:
         df = df[df["Company"].str.strip() == company.strip()]
 
-    shipped  = float(df[df["TxnType"] == "Shipment"]["Quantity"].sum())
-    returned = float(df[df["TxnType"] == "Refund"]["Quantity"].sum())
-
     monthly = (
         df.groupby(["Month", "TxnType"])["Quantity"]
         .sum().reset_index()
@@ -3357,10 +3457,6 @@ def snapdeal_analytics(request: Request, company: Optional[str] = None):
     )
     monthly.columns.name = None
     monthly = monthly.rename(columns={"Shipment": "shipments", "Refund": "refunds"})
-    if "shipments" not in monthly.columns:
-        monthly["shipments"] = 0
-    if "refunds" not in monthly.columns:
-        monthly["refunds"] = 0
 
     top_skus = (
         df[df["TxnType"] == "Shipment"].groupby("OMS_SKU")["Quantity"]
@@ -3375,19 +3471,20 @@ def snapdeal_analytics(request: Request, company: Optional[str] = None):
     by_state.columns = ["state", "units"]
     by_state = by_state[by_state["state"].str.strip() != ""]
 
-    if "shipments" in monthly.columns:
-        monthly["net"] = monthly["shipments"] - monthly.get("refunds", 0)
+    monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
+        sess, monthly, "snapdeal", display_name="Snapdeal"
+    )
 
     return {
         "loaded":      True,
         "rows":        len(df),
         "companies":   companies,
         "date_range":  [str(df["Date"].min().date()), str(df["Date"].max().date())],
-        "shipped":     int(shipped),
-        "returned":    int(returned),
-        "net_units":   int(shipped - returned),
+        "shipped":     shipped,
+        "returned":    returned,
+        "net_units":   net_units,
         "return_rate": round(returned / shipped * 100, 1) if shipped > 0 else 0,
-        "monthly":     monthly.to_dict("records"),
+        "monthly":     monthly_records,
         "top_skus":    top_skus.to_dict("records"),
         "by_state":    by_state.to_dict("records"),
     }

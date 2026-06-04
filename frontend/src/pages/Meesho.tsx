@@ -4,6 +4,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer,
 } from 'recharts'
+import { monthlyChartXAxisProps } from '../components/MonthlyChartAxis'
 
 interface MeeshoData {
   loaded: boolean
@@ -72,7 +73,7 @@ export default function Meesho() {
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={monthly}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="Month" tick={{ fontSize: 11 }} />
+              <XAxis {...monthlyChartXAxisProps} />
               <YAxis />
               <Tooltip />
               <Legend />

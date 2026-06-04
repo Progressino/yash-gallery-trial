@@ -4,6 +4,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   Legend, ResponsiveContainer,
 } from 'recharts'
+import { monthlyChartXAxisProps } from '../components/MonthlyChartAxis'
 
 interface MTRData {
   loaded: boolean
@@ -78,7 +79,7 @@ export default function MTR() {
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={monthly}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="Month" tick={{ fontSize: 11 }} />
+              <XAxis {...monthlyChartXAxisProps} />
               <YAxis />
               <Tooltip />
               <Legend />

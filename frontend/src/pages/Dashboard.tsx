@@ -92,6 +92,17 @@ function fmtMonth(m: string) {
     return new Date(+y, +mon - 1).toLocaleString('default', { month: 'short', year: '2-digit' })
   } catch { return m }
 }
+
+/** Show at most `maxTicks` x-axis labels so daily charts do not overlap. */
+function chartLabelTickIndices(length: number, maxTicks = 8): number[] {
+  if (length <= 0) return []
+  if (length <= maxTicks) return Array.from({ length }, (_, i) => i)
+  const step = Math.max(1, Math.ceil((length - 1) / (maxTicks - 1)))
+  const out: number[] = []
+  for (let i = 0; i < length; i += step) out.push(i)
+  if (out[out.length - 1] !== length - 1) out.push(length - 1)
+  return out
+}
 function monthlyRowNet(row: PlatformSummaryItem['monthly'][0]) {
   return typeof row.net === 'number' ? row.net : row.shipments - row.refunds
 }
@@ -233,16 +244,21 @@ function RadialGauge({ value, max = 100, color = 'var(--primary)', label, size =
    ═══════════════════════════════════════════════════════════ */
 interface HeroSeries { name: string; color: string; values: number[]; returns?: number[] }
 
-function HeroChart({ series, months, hidden, viewMode }: {
+function HeroChart({ series, months, hidden, viewMode, denseLabels }: {
   series: HeroSeries[]; months: string[]; hidden: Set<string>; viewMode: string
+  denseLabels?: boolean
 }) {
   const W = 820, H = 280
-  const pad = { t: 24, r: 28, b: 32, l: 0 }
+  const pad = { t: 24, r: 28, b: denseLabels ? 52 : 32, l: 0 }
   const plotW = W - pad.l - pad.r
   const plotH = H - pad.t - pad.b
   const visible = series.filter(s => !hidden.has(s.name))
   const maxV = Math.max(1, ...visible.flatMap(s => s.values)) * 1.18
   const stepX = months.length > 1 ? plotW / (months.length - 1) : plotW
+  const labelTicks = useMemo(
+    () => chartLabelTickIndices(months.length, denseLabels ? 7 : months.length),
+    [months.length, denseLabels],
+  )
   const [hover, setHover] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
 
@@ -303,13 +319,25 @@ function HeroChart({ series, months, hidden, viewMode }: {
             </g>
           )
         })}
-        {/* x labels */}
-        {months.map((m, i) => (
-          <text key={i} x={pad.l + i * stepX} y={H - 6} fontSize="10.5"
-            fill={hover === i ? 'var(--ink)' : 'var(--muted)'}
-            fontWeight={hover === i ? 600 : 400}
-            textAnchor="middle">{m}</text>
-        ))}
+        {/* x labels (sparse ticks on dense daily charts) */}
+        {labelTicks.map(i => {
+          const x = pad.l + i * stepX
+          const y = H - 8
+          return (
+            <text
+              key={i}
+              x={x}
+              y={y}
+              fontSize={denseLabels ? 9.5 : 10.5}
+              fill={hover === i ? 'var(--ink)' : 'var(--muted)'}
+              fontWeight={hover === i ? 600 : 400}
+              textAnchor={denseLabels ? 'end' : 'middle'}
+              transform={denseLabels ? `rotate(-42 ${x} ${y})` : undefined}
+            >
+              {months[i]}
+            </text>
+          )
+        })}
         {/* areas */}
         {visible.map(s => (
           <path key={'a' + s.name} d={areaFor(s.values)}
@@ -1379,6 +1407,7 @@ export default function Dashboard() {
                 months={useDailyChart ? chartLabels : [...monthLabels, ...forecastMonths]}
                 hidden={hiddenByName}
                 viewMode={salesViewNet ? 'net' : 'gross'}
+                denseLabels={useDailyChart && chartLabels.length > 10}
               />
             )}
           </div>

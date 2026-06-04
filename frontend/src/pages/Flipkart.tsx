@@ -4,6 +4,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Cell,
 } from 'recharts'
+import { monthlyChartXAxisProps } from '../components/MonthlyChartAxis'
 
 interface FlipkartData {
   loaded: boolean
@@ -74,7 +75,7 @@ export default function Flipkart() {
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={monthly}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="Month" tick={{ fontSize: 11 }} />
+              <XAxis {...monthlyChartXAxisProps} />
               <YAxis />
               <Tooltip />
               <Legend />

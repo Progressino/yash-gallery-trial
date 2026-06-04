@@ -160,8 +160,6 @@ def _parse_myntra_seller_returns_csv(
     sku_mapping: Optional[Dict[str, str]] = None,
 ) -> Tuple[pd.DataFrame, Optional[str]]:
     """Myntra Seller Returns Report — one row per return with return_created_date."""
-    from .karigar_attendance import _cell_to_report_date
-
     try:
         df = pd.read_csv(BytesIO(raw), encoding_errors="replace")
     except Exception as e:
@@ -181,23 +179,21 @@ def _parse_myntra_seller_returns_csv(
     qty_key = cols.get("quantity") or cols.get("qty")
     if not qty_key:
         return pd.DataFrame(), "Myntra return CSV: missing quantity column."
-    date_key = None
-    for cand in ("return_created_date", "refunded_date", "order_rto_date"):
-        if cand in cols:
-            date_key = cols[cand]
-            break
-    if not date_key:
-        return pd.DataFrame(), "Myntra return CSV: missing return_created_date."
+    if not any(c in cols for c in ("return_created_date", "refunded_date", "order_rto_date")):
+        return pd.DataFrame(), "Myntra return CSV: missing return date columns."
 
     work = pd.DataFrame()
     work["OMS_SKU"] = df[sku_key].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
     work["Return_Units"] = pd.to_numeric(df[qty_key], errors="coerce").fillna(0).astype(int)
-    work["Return_Date"] = df[date_key].map(_cell_to_report_date)
+    work["Return_Date"] = _coalesce_return_date_columns(
+        df,
+        ("return_created_date", "refunded_date", "order_rto_date"),
+    )
     work["Return_Platform"] = "myntra"
     work = work[
         work["OMS_SKU"].str.len().gt(0)
         & work["Return_Units"].gt(0)
-        & work["Return_Date"].str.len().eq(10)
+        & work["Return_Date"].map(_valid_return_iso)
     ]
     if work.empty:
         return pd.DataFrame(), "No dated Myntra return rows found."
@@ -226,6 +222,29 @@ def _parse_meesho_panel_csv(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
     return pd.DataFrame(), "Meesho return CSV: could not find SKU/Qty header row."
 
 
+def _valid_return_iso(d: str) -> bool:
+    """Reject epoch placeholders and pre-2018 junk from marketplace exports."""
+    s = str(d or "").strip()[:10]
+    return bool(re.match(r"^20\d{2}-\d{2}-\d{2}$", s)) and s >= "2018-01-01"
+
+
+def _coalesce_return_date_columns(df: pd.DataFrame, col_names: tuple[str, ...]) -> pd.Series:
+    """Pick first parseable reporting date per row (Flipkart / Myntra return exports)."""
+    from .karigar_attendance import _cell_to_report_date
+
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    dates = pd.Series([""] * len(df), index=df.index, dtype=str)
+    for low in col_names:
+        key = cols.get(low)
+        if not key:
+            continue
+        parsed = df[key].map(_cell_to_report_date)
+        good = parsed.map(_valid_return_iso)
+        fill = dates.str.len().ne(10) & good
+        dates = dates.where(~fill, parsed)
+    return dates
+
+
 def _parse_flipkart_returns_xlsx(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
     try:
         xl = pd.ExcelFile(BytesIO(raw))
@@ -244,11 +263,30 @@ def _parse_flipkart_returns_xlsx(raw: bytes) -> Tuple[pd.DataFrame, Optional[str
     out = pd.DataFrame()
     out["OMS_SKU"] = df["sku"].map(_strip_flipkart_sku)
     out["Return_Units"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0).astype(int)
-    out = out[out["OMS_SKU"].str.len() > 0]
-    out = out[out["Return_Units"] > 0]
+    out["Return_Date"] = _coalesce_return_date_columns(
+        df,
+        (
+            "return_completion_date",
+            "return_approval_date",
+            "return_complete_by_date",
+            "return_requested_date",
+        ),
+    )
+    out["Return_Platform"] = "flipkart"
+    out = out[
+        out["OMS_SKU"].str.len().gt(0)
+        & out["Return_Units"].gt(0)
+        & out["Return_Date"].map(_valid_return_iso)
+    ]
     if out.empty:
-        return pd.DataFrame(), "No positive Flipkart return rows."
-    return out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum(), None
+        return pd.DataFrame(), "No dated Flipkart return rows found."
+    return (
+        out.groupby(
+            ["OMS_SKU", "Return_Platform", "Return_Date"], as_index=False
+        )["Return_Units"]
+        .sum(),
+        None,
+    )
 
 
 def _parse_amazon_business_return(df: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str]]:
@@ -362,6 +400,7 @@ def _parse_single_return_file(
     def _finish(part: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str]]:
         if part is None or part.empty:
             return pd.DataFrame(), None
+        part = _stamp_return_filename_fallback(part, filename)
         return _attach_return_platform(part, filename), None
 
     if "flipkart" in low and low.endswith((".xlsx", ".xls")):
@@ -501,6 +540,20 @@ def parse_return_upload_bytes(
         sources,
     )
     return out, None
+
+
+def _stamp_return_filename_fallback(df: pd.DataFrame, filename: str) -> pd.DataFrame:
+    """When a return table has no per-row dates, anchor rows to the export period in the filename."""
+    if df is None or df.empty:
+        return df
+    if "Return_Date" in df.columns and df["Return_Date"].map(_valid_return_iso).any():
+        return df
+    as_of = _return_report_date_from_filename(filename)
+    if not as_of:
+        return df
+    out = df.copy()
+    out["Return_Date"] = as_of
+    return out
 
 
 def _return_report_date_from_filename(filename: str) -> str:

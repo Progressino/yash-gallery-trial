@@ -478,6 +478,10 @@ RETURN_PLATFORM_TO_SOURCE: Dict[str, str] = {
     "snapdeal": "Snapdeal",
 }
 
+SOURCE_TO_RETURN_PLATFORM: Dict[str, str] = {
+    v: k for k, v in RETURN_PLATFORM_TO_SOURCE.items()
+}
+
 
 def _source_for_return_platform(platform_key: object) -> str:
     key = str(platform_key or "").strip().lower()
@@ -1533,6 +1537,189 @@ def _unified_platform_summary_one(
         "daily": daily,
         "by_state": by_state,
     }
+
+
+def _refund_buckets_for_platform(
+    platform_name: str,
+    overlay: Optional[pd.DataFrame],
+    sales_df: Optional[pd.DataFrame],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    *,
+    fallback_as_of: Optional[str] = None,
+) -> tuple[int, Dict[str, int], Dict[str, int]]:
+    """
+    Extra return units for one marketplace from PO return overlay + unified Refund rows.
+    Returns (total, by_month YYYY-MM, by_day YYYY-MM-DD).
+    """
+    total = 0
+    by_month: Dict[str, int] = {}
+    by_day: Dict[str, int] = {}
+
+    if overlay is not None and not overlay.empty and "Return_Units" in overlay.columns:
+        ov = overlay.copy()
+        if "Return_Platform" in ov.columns:
+            pk = SOURCE_TO_RETURN_PLATFORM.get(platform_name, "")
+            if pk:
+                plat = ov["Return_Platform"].astype(str).str.strip().str.lower()
+                ov = ov.loc[plat.eq(pk)]
+            else:
+                ov = ov.iloc[0:0]
+        if "Return_Date" in ov.columns and (start_date or end_date):
+            from .karigar_attendance import _cell_to_report_date
+
+            ov["_d"] = ov["Return_Date"].map(_cell_to_report_date)
+            ov = ov[ov["_d"].str.len().eq(10)]
+            ov = _filter_by_reporting_days(ov, "_d", start_date, end_date)
+        qty = pd.to_numeric(ov["Return_Units"], errors="coerce").fillna(0).astype(int)
+        for _idx, row in ov.iterrows():
+            q = int(row.get("Return_Units") or 0)
+            if q <= 0:
+                continue
+            total += q
+            d = str(row.get("_d") or row.get("Return_Date") or "")[:10]
+            if len(d) != 10 or d < "2018-01-01":
+                fb = str(fallback_as_of or "")[:10]
+                d = fb if len(fb) == 10 else ""
+            if len(d) == 10:
+                by_day[d] = by_day.get(d, 0) + q
+                m = d[:7]
+                by_month[m] = by_month.get(m, 0) + q
+            elif start_date and end_date:
+                m = str(start_date)[:7]
+                by_month[m] = by_month.get(m, 0) + q
+
+    if sales_df is not None and not sales_df.empty and "Source" in sales_df.columns:
+        prep = sales_df.copy()
+        prep["TxnDate"] = txn_reporting_naive_ist(prep["TxnDate"])
+        prep = prep.dropna(subset=["TxnDate"])
+        if start_date or end_date:
+            prep = _filter_by_reporting_days(prep, "TxnDate", start_date, end_date)
+        src = prep["Source"].astype(str).str.strip() == platform_name
+        txn = prep["Transaction Type"].astype(str).str.strip() == "Refund"
+        sub = prep.loc[src & txn]
+        if not sub.empty:
+            qty = pd.to_numeric(sub["Quantity"], errors="coerce").fillna(0).astype(int)
+            for _idx, row in sub.iterrows():
+                q = int(row["Quantity"] or 0)
+                if q <= 0:
+                    continue
+                total += q
+                d = str(txn_reporting_naive_ist(row["TxnDate"]).normalize())[:10]
+                by_day[d] = by_day.get(d, 0) + q
+                by_month[d[:7]] = by_month.get(d[:7], 0) + q
+
+    return total, by_month, by_day
+
+
+def _patch_monthly_refunds(monthly: List[dict], by_month: Dict[str, int]) -> None:
+    for ym, extra in by_month.items():
+        if extra <= 0:
+            continue
+        hit = False
+        for row in monthly:
+            if str(row.get("month") or "") == ym:
+                row["refunds"] = int(row.get("refunds") or 0) + extra
+                row["net"] = int(row.get("shipments") or 0) - int(row["refunds"] or 0)
+                hit = True
+                break
+        if not hit:
+            monthly.append(
+                {
+                    "month": ym,
+                    "shipments": 0,
+                    "refunds": extra,
+                    "net": -extra,
+                }
+            )
+
+
+def _patch_daily_refunds(daily: List[dict], by_day: Dict[str, int]) -> None:
+    for iso, extra in by_day.items():
+        if extra <= 0:
+            continue
+        hit = False
+        for row in daily:
+            if str(row.get("date") or "") == iso:
+                row["refunds"] = int(row.get("refunds") or 0) + extra
+                row["net"] = int(row.get("shipments") or 0) - int(row["refunds"] or 0)
+                hit = True
+                break
+        if not hit:
+            daily.append(
+                {
+                    "date": iso,
+                    "shipments": 0,
+                    "refunds": extra,
+                    "net": -extra,
+                }
+            )
+
+
+def merge_return_data_into_platform_summaries(
+    summaries: List[dict],
+    overlay: Optional[pd.DataFrame],
+    sales_df: Optional[pd.DataFrame],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    *,
+    fallback_as_of: Optional[str] = None,
+) -> List[dict]:
+    """Attach PO return-sheet + unified Refund rows to Intelligence platform cards."""
+    if not summaries:
+        return summaries
+    sales = sales_df
+    if sales is not None and not sales.empty and (start_date or end_date):
+        sales = _slice_sales_for_bundle(sales, start_date, end_date)
+    out: List[dict] = []
+    for card in summaries:
+        name = str(card.get("platform") or "")
+        extra, by_month, by_day = _refund_buckets_for_platform(
+            name,
+            overlay,
+            sales,
+            start_date,
+            end_date,
+            fallback_as_of=fallback_as_of,
+        )
+        if extra <= 0:
+            out.append(card)
+            continue
+        row = dict(card)
+        monthly = list(row.get("monthly") or [])
+        daily = list(row.get("daily") or [])
+        _patch_monthly_refunds(monthly, by_month)
+        _patch_daily_refunds(daily, by_day)
+        ship = int(row.get("total_units") or 0)
+        ret = int(row.get("total_returns") or 0) + extra
+        row["monthly"] = monthly
+        row["daily"] = daily
+        row["total_returns"] = ret
+        row["net_units"] = ship - ret
+        row["return_rate"] = round(ret / ship * 100, 1) if ship > 0 else 0.0
+        out.append(row)
+    return out
+
+
+def overlay_refunds_by_calendar_month(
+    overlay: Optional[pd.DataFrame],
+    platform_key: str,
+    *,
+    fallback_as_of: Optional[str] = None,
+) -> Dict[str, int]:
+    """Monthly refund totals from overlay for platform analytics (Month -> units)."""
+    if overlay is None or overlay.empty:
+        return {}
+    display = RETURN_PLATFORM_TO_SOURCE.get(platform_key, "")
+    _, by_month, _ = _refund_buckets_for_platform(
+        display,
+        overlay,
+        None,
+        None,
+        None,
+        fallback_as_of=fallback_as_of,
+    )
+    return by_month
 
 
 def _merge_unified_returns_into_platform_card(
