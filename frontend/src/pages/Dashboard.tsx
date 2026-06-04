@@ -25,7 +25,12 @@ import {
 } from '../lib/intelligenceCache'
 import { useSession } from '../store/session'
 import './Dashboard.css'
-import { PageLoadingStripe } from '../components/LoadingProgressBar'
+import {
+  DeterminateBar,
+  estimateIntelligenceBundleLoadMs,
+  IntelligenceBundleLoadPanel,
+  PageLoadingStripe,
+} from '../components/LoadingProgressBar'
 
 /* ═══════════════════════════════════════════════════════════
    TYPES
@@ -784,6 +789,8 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const prevSalesRebuild = useRef<string>('idle')
+  const bundleLoadStartedAt = useRef<number | null>(null)
+  const [bundleLoadTick, setBundleLoadTick] = useState(0)
   const salesRebuild = useSession(s => s.sales_rebuild ?? 'idle')
   const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
   const coverageReturnLoaded = useSession(s => s.return_sheet)
@@ -903,7 +910,8 @@ export default function Dashboard() {
       return data
     },
     staleTime: 120_000,
-    retry: 1,
+    retry: 2,
+    retryDelay: attempt => Math.min(8_000, 2_000 * (attempt + 1)),
     placeholderData: previousData => {
       const prev = previousData as IntelligenceBundle | undefined
       if (prev && bundleHasDisplayData(prev)) return prev
@@ -912,7 +920,10 @@ export default function Dashboard() {
     },
     refetchInterval: q => {
       const d = q.state.data
-      if (d?.status === 'warming' || jobRunning) return 4_000
+      if (jobRunning) return 4_000
+      if (d?.status === 'warming') return 4_000
+      if (q.state.fetchStatus === 'fetching') return false
+      if (!bundleHasDisplayData(d)) return 4_000
       return false
     },
   })
@@ -943,16 +954,67 @@ export default function Dashboard() {
   }, [intelligenceCore, intelligenceExtras])
 
   const bundleWarming = intelligenceBundle?.status === 'warming'
+  const hasDisplayData = bundleHasDisplayData(intelligenceBundle)
+  const hasCachedDisplay = Boolean(cachedBundleHint && bundleHasDisplayData(cachedBundleHint))
+
+  const awaitingFirstBundle =
+    !hasDisplayData &&
+    !hasCachedDisplay &&
+    (bundleWarming ||
+      loadingBundle ||
+      fetchingBundle ||
+      (intelligenceCore != null && !bundleHasDisplayData(intelligenceCore)))
+
+  const estimatedBundleMs = useMemo(
+    () => estimateIntelligenceBundleLoadMs(bundleSpanDays),
+    [bundleSpanDays],
+  )
+
+  useEffect(() => {
+    if (!awaitingFirstBundle) {
+      bundleLoadStartedAt.current = null
+      return
+    }
+    if (bundleLoadStartedAt.current == null) {
+      bundleLoadStartedAt.current = Date.now()
+    }
+    const id = window.setInterval(() => setBundleLoadTick(t => t + 1), 500)
+    return () => window.clearInterval(id)
+  }, [awaitingFirstBundle])
+
+  useEffect(() => {
+    bundleLoadStartedAt.current = null
+  }, [dateStart, dateEnd, salesBasis])
+
+  const bundleLoadElapsedMs = awaitingFirstBundle && bundleLoadStartedAt.current
+    ? Date.now() - bundleLoadStartedAt.current
+    : 0
+  void bundleLoadTick
+
+  const bundleLoadPercent = useMemo(() => {
+    if (!awaitingFirstBundle) return null
+    const raw = (bundleLoadElapsedMs / estimatedBundleMs) * 100
+    if (bundleWarming) return Math.min(92, Math.max(8, raw))
+    return Math.min(96, Math.max(5, raw))
+  }, [awaitingFirstBundle, bundleLoadElapsedMs, estimatedBundleMs, bundleWarming])
+
+  const bundlePollNote =
+    bundleWarming || (intelligenceCore && !bundleHasDisplayData(intelligenceCore))
+      ? 'Server is still preparing data — checking again every few seconds…'
+      : fetchingBundle && !loadingBundle
+        ? 'Refreshing…'
+        : undefined
 
   const salesSummary = intelligenceBundle?.sales_summary
   const topSkusRaw = intelligenceBundle?.top_skus
   const platformSummary = intelligenceBundle?.platform_summary
   const anomalies = intelligenceBundle?.anomalies
   const dsrBrandMonthly = intelligenceBundle?.dsr_brand_monthly
-  const loadingPlatforms =
-    !bundleHasDisplayData(intelligenceBundle) &&
-    !cachedBundleHint &&
-    (loadingBundle || (fetchingBundle && !bundleHasDisplayData(intelligenceBundle)))
+  const loadingPlatforms = awaitingFirstBundle || (
+    !hasDisplayData &&
+    !hasCachedDisplay &&
+    (loadingBundle || fetchingBundle)
+  )
   const loadingDsrBrands = loadingBundle && !dsrBrandMonthly?.rows?.length
 
   const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
@@ -963,7 +1025,7 @@ export default function Dashboard() {
   })
 
   /* ── derived ── */
-  const salesLoaded = sessionSales || bundleHasDisplayData(intelligenceBundle)
+  const salesLoaded = sessionSales || hasDisplayData || hasCachedDisplay
   const platforms = platformSummary ?? []
   const loadedPlatforms = platforms.filter(p => p.loaded)
 
@@ -1108,18 +1170,21 @@ export default function Dashboard() {
 
   const hiddenByName = new Set([...hiddenPlatforms].map(id => id))
 
-  const hasDisplayData = bundleHasDisplayData(intelligenceBundle)
-
   const intelligenceLoading =
+    awaitingFirstBundle ||
     bundleWarming ||
-    (!hasDisplayData && loadingBundle && !cachedBundleHint) ||
-    (fetchingBundle && !hasDisplayData && !cachedBundleHint) ||
+    (!hasDisplayData && loadingBundle && !hasCachedDisplay) ||
+    (fetchingBundle && !hasDisplayData && !hasCachedDisplay) ||
     (showDsr && loadingDsr) ||
     exportingSales ||
     exportingDsr ||
     exportingDsrMonthly
 
   const intelligenceLoadLabel = useMemo(() => {
+    if (awaitingFirstBundle && bundleLoadPercent != null) {
+      const sec = Math.floor(bundleLoadElapsedMs / 1000)
+      return `Loading marketplace data… (${bundleLoadPercent}% · ${sec}s)`
+    }
     if (bundleWarming && intelligenceBundle?.message) return intelligenceBundle.message
     if (bundleWarming) return 'Warming sales data on server…'
     if (!hasDisplayData && loadingBundle) return 'Loading marketplace data…'
@@ -1138,6 +1203,11 @@ export default function Dashboard() {
     fetchingBundle,
     showDsr,
     loadingDsr,
+    awaitingFirstBundle,
+    bundleLoadPercent,
+    bundleLoadElapsedMs,
+    bundleWarming,
+    intelligenceBundle?.message,
   ])
 
   /* ────────────────────────────────────────────────────────────────
@@ -1148,8 +1218,21 @@ export default function Dashboard() {
       <PageLoadingStripe
         active={intelligenceLoading}
         label={intelligenceLoadLabel}
+        percent={awaitingFirstBundle ? bundleLoadPercent : undefined}
         className="sticky top-0 z-50 mb-3"
       />
+      {awaitingFirstBundle && bundleLoadPercent != null ? (
+        <IntelligenceBundleLoadPanel
+          active
+          percent={bundleLoadPercent}
+          elapsedSec={Math.floor(bundleLoadElapsedMs / 1000)}
+          dateStart={dateStart}
+          dateEnd={dateEnd}
+          serverMessage={intelligenceBundle?.message}
+          pollNote={bundlePollNote}
+          className="mx-0"
+        />
+      ) : null}
       {/* ══════════ HERO ══════════ */}
       <section className="hero">
         <div className="hero-bg" aria-hidden>
@@ -1170,9 +1253,11 @@ export default function Dashboard() {
             </h1>
             <p className="hero-sub">
               {dateStart || 'All time'} → {dateEnd || 'today'} ·{' '}
-              {salesLoaded || cachedBundleHint
-                ? `${loadedPlatforms.length || (cachedBundleHint?.platform_summary?.filter(p => p.loaded).length ?? 0)} of ${platforms.length || 5} marketplaces loaded`
-                : 'Preparing marketplace data…'}
+              {awaitingFirstBundle
+                ? 'Loading marketplace data — please wait…'
+                : salesLoaded || hasCachedDisplay
+                  ? `${loadedPlatforms.length || (cachedBundleHint?.platform_summary?.filter(p => p.loaded).length ?? 0)} of ${platforms.length || 5} marketplaces loaded`
+                  : 'Preparing marketplace data…'}
             </p>
           </div>
           <div className="hero-actions">
@@ -1193,16 +1278,18 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="hero-grid-layout">
+        <div className={`hero-grid-layout${awaitingFirstBundle ? ' is-loading-metrics' : ''}`}>
           {/* Giant number */}
           <div className="hero-total">
             <div className="hero-total-eyebrow">
               TOTAL {salesViewNet ? 'NET' : 'GROSS'} UNITS · {activePreset || 'CUSTOM RANGE'}
             </div>
             <div className="hero-total-value">
-              {loadingPlatforms
-                ? <span style={{ opacity: 0.4 }}>—</span>
-                : <CountUp value={displayUnits} />}
+              {awaitingFirstBundle
+                ? <span className="hero-total-pending" aria-hidden>…</span>
+                : loadingPlatforms
+                  ? <span style={{ opacity: 0.4 }}>—</span>
+                  : <CountUp value={displayUnits} />}
             </div>
             <div className="hero-total-sub">
               <span className={`trend-pill ${returnRate < 20 ? 'up' : 'down'}`}>
@@ -1393,7 +1480,12 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="card-body">
-            {loadingPlatforms ? (
+            {awaitingFirstBundle && bundleLoadPercent != null ? (
+              <div className="chart-load-placeholder">
+                <DeterminateBar percent={bundleLoadPercent} className="max-w-md mx-auto" />
+                <p>Chart data will appear when the load completes</p>
+              </div>
+            ) : loadingPlatforms ? (
               <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 13 }}>
                 Loading…
               </div>

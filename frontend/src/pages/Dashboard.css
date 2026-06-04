@@ -725,6 +725,114 @@
   font-weight: 700;
 }
 
+/* ── Intelligence first-load banner ── */
+.intel-bundle-load {
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border-radius: var(--r-xl);
+  border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--border));
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklch, var(--primary-soft) 85%, var(--surface)) 0%,
+    var(--surface) 55%
+  );
+  box-shadow: var(--shadow-md);
+}
+
+.intel-bundle-load-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.intel-bundle-load-pulse {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: intel-bundle-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes intel-bundle-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.85); }
+}
+
+.intel-bundle-load-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.intel-bundle-load-detail {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.intel-bundle-load-poll {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--primary-ink);
+  font-weight: 500;
+}
+
+.intel-bundle-load-elapsed {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.intel-bundle-load-foot {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-2);
+}
+
+.hero-grid-layout.is-loading-metrics {
+  opacity: 0.35;
+  pointer-events: none;
+  user-select: none;
+}
+
+.hero-grid-layout.is-loading-metrics .hero-total-value {
+  filter: blur(2px);
+}
+
+.hero-total-pending {
+  font-size: 56px;
+  font-weight: 700;
+  color: var(--muted-2);
+  letter-spacing: 0.08em;
+}
+
+.chart-load-placeholder {
+  height: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.chart-load-placeholder .max-w-md {
+  width: min(100%, 320px);
+}
+
 /* ============================================================
    RESPONSIVE
    ============================================================ */

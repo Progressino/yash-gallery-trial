@@ -74,6 +74,74 @@ export function PageLoadingStripe({
   )
 }
 
+/** Estimated first Intelligence bundle build time (ms) by reporting window length. */
+export function estimateIntelligenceBundleLoadMs(spanDays: number | null | undefined): number {
+  const span = spanDays ?? 999
+  if (span <= 7) return 28_000
+  if (span <= 45) return 48_000
+  if (span <= 120) return 75_000
+  return 100_000
+}
+
+function bundleLoadPhaseLabel(
+  percent: number,
+  opts: { dateStart: string; dateEnd: string; serverMessage?: string },
+): string {
+  if (opts.serverMessage?.trim()) return opts.serverMessage.trim()
+  if (percent < 18) return `Checking uploads for ${opts.dateStart} → ${opts.dateEnd}…`
+  if (percent < 45) return 'Loading Amazon, Myntra, Meesho, Flipkart, Snapdeal from saved data…'
+  if (percent < 78) return 'Aggregating shipments and returns — first load can take up to a minute'
+  return 'Finalizing charts and platform cards…'
+}
+
+/** Full-width banner while the first Intelligence bundle is building on the server. */
+export function IntelligenceBundleLoadPanel({
+  active,
+  percent,
+  elapsedSec,
+  dateStart,
+  dateEnd,
+  serverMessage,
+  pollNote,
+  className = '',
+}: {
+  active: boolean
+  percent: number
+  elapsedSec: number
+  dateStart: string
+  dateEnd: string
+  serverMessage?: string
+  /** Shown when polling after a quick empty/warming response. */
+  pollNote?: string
+  className?: string
+}) {
+  if (!active) return null
+  const pct = Math.max(0, Math.min(99, Math.round(percent)))
+  const detail = bundleLoadPhaseLabel(pct, { dateStart, dateEnd, serverMessage })
+  return (
+    <div
+      className={`intel-bundle-load ${className}`}
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div className="intel-bundle-load-head">
+        <span className="intel-bundle-load-pulse" aria-hidden />
+        <div>
+          <p className="intel-bundle-load-title">Building your Intelligence dashboard</p>
+          <p className="intel-bundle-load-detail">{detail}</p>
+          {pollNote ? <p className="intel-bundle-load-poll">{pollNote}</p> : null}
+        </div>
+        <span className="intel-bundle-load-elapsed">{elapsedSec}s</span>
+      </div>
+      <DeterminateBar percent={pct} />
+      <p className="intel-bundle-load-foot">
+        Please keep this tab open — numbers will appear when the server finishes. Cached loads are much faster.
+      </p>
+    </div>
+  )
+}
+
 /** Fixed under browser chrome — cache / global shell loads. */
 export function FixedTopLoadingBar({ active, label }: { active: boolean; label?: string }) {
   if (!active) return null
