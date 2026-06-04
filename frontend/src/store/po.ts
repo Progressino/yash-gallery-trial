@@ -109,12 +109,15 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
-      version: 2,
-      migrate: (persisted) => {
-        const p = persisted as { params?: Record<string, unknown> } | undefined
+      version: 3,
+      migrate: (persisted, fromVersion) => {
+        const p = persisted as Partial<POState> & { params?: Record<string, unknown> } | undefined
         if (p?.params && typeof p.params === 'object') {
           const { enforce_lead_time_release_gate: _, ...rest } = p.params
           p.params = rest
+        }
+        if (fromVersion < 3) {
+          p.quarterly = null
         }
         return persisted as POState
       },

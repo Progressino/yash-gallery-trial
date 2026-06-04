@@ -12,7 +12,7 @@ from backend.session import AppSession
 
 
 def test_quarterly_cache_schema_bumped():
-    assert quarterly_cache_key(False, 8)[0] == 3
+    assert quarterly_cache_key(False, 8)[0] == 4
 
 
 def test_calculate_quarterly_platform_primary_despite_wide_sales_span():
@@ -44,20 +44,17 @@ def test_calculate_quarterly_platform_primary_despite_wide_sales_span():
     assert int(row.get("Jan-Mar 2025", 0)) == 30
 
 
-def test_restore_platform_history_calls_build_sales_df_with_snapdeal_df(monkeypatch):
+def test_hydrate_does_not_call_build_sales_df(monkeypatch):
     from backend.services import daily_store
 
-    calls: list[dict] = []
-
-    def _fake_build(*args, **kwargs):
-        calls.append(kwargs)
-        return pd.DataFrame()
-
-    monkeypatch.setattr("backend.services.sales.build_sales_df", _fake_build)
+    monkeypatch.setattr(
+        "backend.services.sales.build_sales_df",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not rebuild sales on hydrate")),
+    )
     monkeypatch.setattr(
         daily_store,
-        "load_platform_data",
-        lambda plat, *a, **k: pd.DataFrame(
+        "load_platform_data_for_report_range",
+        lambda plat, s, e, **k: pd.DataFrame(
             {
                 "Date": pd.to_datetime(["2024-06-01"]),
                 "SKU": ["X1"],
@@ -70,6 +67,11 @@ def test_restore_platform_history_calls_build_sales_df_with_snapdeal_df(monkeypa
     )
     monkeypatch.setattr(
         daily_store,
+        "load_platform_data",
+        lambda *a, **k: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        daily_store,
         "merge_platform_data",
         lambda cur, new, plat: new,
     )
@@ -77,5 +79,3 @@ def test_restore_platform_history_calls_build_sales_df_with_snapdeal_df(monkeypa
     sess = AppSession()
     sess.mtr_df = pd.DataFrame()
     assert restore_platform_history_for_quarterly(sess, n_quarters=8) is True
-    assert calls and "snapdeal_df" in calls[0]
-    assert "snapdeal" not in calls[0]

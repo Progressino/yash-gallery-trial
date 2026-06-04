@@ -1113,17 +1113,59 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if sess is None:
         return {"loaded": False}
 
-    from ..services.po_quarterly_warmup import quarterly_cache_key
-
-    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
-    if cache_key in sess._quarterly_cache:
-        cached = sess._quarterly_cache[cache_key]
-        if cached.get("loaded") and cached.get("rows"):
-            return cached
-
-    from ..services.po_quarterly_warmup import warmup_quarterly_cache
-
-    result, _ = warmup_quarterly_cache(
-        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+    from ..services.po_quarterly_jobs import (
+        get_quarterly_job,
+        start_quarterly_background,
     )
-    return result
+    from ..services.po_quarterly_warmup import (
+        quarterly_cache_key,
+        try_build_quarterly_payload_sync,
+    )
+
+    sid = getattr(request.state, "session_id", None) or ""
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+    cached = sess._quarterly_cache.get(cache_key)
+    if cached and cached.get("loaded") and cached.get("rows"):
+        return cached
+
+    job = get_quarterly_job(sid)
+    if job.get("status") == "running":
+        return {
+            "loaded": False,
+            "status": "warming",
+            "progress": int(job.get("progress") or 10),
+            "message": job.get("message") or "Loading quarterly history…",
+        }
+    if job.get("status") == "ready":
+        ready = job.get("result")
+        if isinstance(ready, dict) and ready.get("loaded"):
+            sess._quarterly_cache[cache_key] = ready
+            return ready
+    if job.get("status") == "error":
+        return {
+            "loaded": False,
+            "status": "error",
+            "message": job.get("message") or "Quarterly build failed",
+        }
+
+    result = try_build_quarterly_payload_sync(
+        sess,
+        group_by_parent=group_by_parent,
+        n_quarters=n_quarters,
+    )
+    if result and result.get("loaded") and result.get("rows"):
+        sess._quarterly_cache[cache_key] = result
+        return result
+
+    if sid:
+        start_quarterly_background(
+            sid,
+            group_by_parent=group_by_parent,
+            n_quarters=n_quarters,
+        )
+    return {
+        "loaded": False,
+        "status": "warming",
+        "progress": 8,
+        "message": "Building quarterly history (first load may take 1–3 minutes)…",
+    }

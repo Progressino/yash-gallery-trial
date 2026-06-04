@@ -85,6 +85,9 @@ interface QuarterlyRow {
 
 interface QuarterlyResult {
   loaded: boolean
+  status?: 'warming' | 'error'
+  progress?: number
+  message?: string
   columns?: string[]
   rows?: QuarterlyRow[]
 }
@@ -395,6 +398,8 @@ export default function POEngine() {
   }, [refreshPoCoverage, loading])
   /** Quarterly pivot loads after PO (or alone on Quarterly tab); was bundled with PO and blocked the UI. */
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
+  const [quarterlyProgress, setQuarterlyProgress] = useState<number | null>(null)
+  const [quarterlyLoadMessage, setQuarterlyLoadMessage] = useState<string | undefined>()
   const [shipLoading, setShipLoading] = useState(false)
   const [raiseModal, setRaiseModal] = useState(false)
   const [raiseConfirmBusy, setRaiseConfirmBusy] = useState(false)
@@ -425,47 +430,93 @@ export default function POEngine() {
   // Cutting planner: parentSku → total pieces of material available
   const [materialQty, setMaterialQty] = useState<Record<string, number>>({})
 
-  const loadQuarterlyForRun = async (seq: number, attempt = 1) => {
-    setQuarterlyLoading(true)
-    try {
-      const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
-        params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
-        timeout: 600_000,
-      })
+  const fetchQuarterlyWithPoll = async (seq: number): Promise<void> => {
+    const paramsQ = { group_by_parent: params.group_by_parent, n_quarters: 8 }
+    const maxPolls = 90
+    for (let poll = 0; poll < maxPolls; poll++) {
       if (seq !== poRunSeqRef.current) return
-      setQuarterly(data)
-    } catch (e: unknown) {
-      if (seq !== poRunSeqRef.current) return
-      const is502 =
-        axios.isAxiosError(e) && (e.response?.status === 502 || e.code === 'ECONNABORTED')
-      if (is502 && attempt < 8) {
-        await new Promise(r => setTimeout(r, 3000 + attempt * 1500))
-        return loadQuarterlyForRun(seq, attempt + 1)
+      try {
+        const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
+          params: paramsQ,
+          timeout: 90_000,
+        })
+        if (seq !== poRunSeqRef.current) return
+        if (data.status === 'warming' || (!data.loaded && !data.rows?.length && poll < maxPolls - 1)) {
+          setQuarterlyProgress(
+            typeof data.progress === 'number'
+              ? data.progress
+              : Math.min(92, 12 + poll * 2),
+          )
+          setQuarterlyLoadMessage(
+            data.message || 'Loading quarterly history…',
+          )
+          await new Promise(r => setTimeout(r, 4000))
+          continue
+        }
+        if (data.status === 'error') {
+          setQuarterly({ loaded: false, rows: [], columns: [], message: data.message })
+          return
+        }
+        setQuarterly(data)
+        setQuarterlyProgress(null)
+        setQuarterlyLoadMessage(undefined)
+        return
+      } catch (e: unknown) {
+        const retry =
+          axios.isAxiosError(e) &&
+          (e.response?.status === 502 || e.code === 'ECONNABORTED') &&
+          poll < maxPolls - 1
+        if (retry) {
+          await new Promise(r => setTimeout(r, 3000 + poll * 500))
+          continue
+        }
+        console.warn('[PO] quarterly fetch failed:', e)
+        setQuarterly({ loaded: false, rows: [], columns: [] })
+        return
       }
-      console.warn('[PO] quarterly fetch failed:', e)
-    } finally {
-      if (seq === poRunSeqRef.current) setQuarterlyLoading(false)
     }
   }
 
-  /** Quarterly tab only — does not run PO math (fast). */
+  const loadQuarterlyForRun = async (seq: number) => {
+    setQuarterlyLoading(true)
+    setQuarterlyProgress(8)
+    setQuarterlyLoadMessage('Loading quarterly history…')
+    try {
+      await fetchQuarterlyWithPoll(seq)
+    } finally {
+      if (seq === poRunSeqRef.current) {
+        setQuarterlyLoading(false)
+        setQuarterlyProgress(null)
+        setQuarterlyLoadMessage(undefined)
+      }
+    }
+  }
+
+  /** Quarterly tab — polls until server cache is ready (avoids gateway timeouts). */
   const runQuarterlyOnly = async () => {
     const seq = ++poRunSeqRef.current
     setQuarterlyLoading(true)
+    setQuarterlyProgress(8)
+    setQuarterlyLoadMessage('Loading quarterly history…')
     try {
-      const { data } = await api.get<QuarterlyResult>('/po/quarterly', {
-        params: { group_by_parent: params.group_by_parent, n_quarters: 8 },
-        timeout: 300_000,
-      })
-      if (seq !== poRunSeqRef.current) return
-      setQuarterly(data)
-    } catch (e: unknown) {
-      setQuarterly({ loaded: false, rows: [], columns: [] })
-      console.warn('[PO] quarterly-only load failed:', e)
+      await fetchQuarterlyWithPoll(seq)
     } finally {
-      if (seq === poRunSeqRef.current) setQuarterlyLoading(false)
+      if (seq === poRunSeqRef.current) {
+        setQuarterlyLoading(false)
+        setQuarterlyProgress(null)
+        setQuarterlyLoadMessage(undefined)
+      }
     }
   }
+
+  const quarterlyAutoFetch = useRef(false)
+  useEffect(() => {
+    if (activeTab !== 'quarterly') return
+    if (quarterly?.loaded && (quarterly.rows?.length ?? 0) > 0) return
+    if (quarterlyLoading || quarterlyAutoFetch.current) return
+    quarterlyAutoFetch.current = true
+    void runQuarterlyOnly()
+  }, [activeTab, quarterly?.loaded, quarterly?.rows?.length, quarterlyLoading])
 
   const markPoTableStaleAfterLedgerChange = useCallback((serverMessage?: string) => {
     if (result?.ok && (result.rows?.length ?? 0) > 0) {
@@ -2018,6 +2069,12 @@ export default function POEngine() {
       {/* ── Quarterly History Tab ── */}
       {activeTab === 'quarterly' && (
         <>
+          <PageLoadingStripe
+            active={quarterlyLoading}
+            label={quarterlyLoadMessage ?? 'Loading quarterly history…'}
+            percent={quarterlyProgress}
+            className="mb-3"
+          />
           <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
             <div className="flex items-center gap-4 flex-wrap">
               <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
@@ -2028,10 +2085,12 @@ export default function POEngine() {
                 disabled={quarterlyLoading}
                 className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
               >
-                {quarterlyLoading ? '⏳ Loading history…' : '📊 Load Quarterly History'}
+                {quarterlyLoading ? '⏳ Loading history…' : '📊 Reload Quarterly History'}
               </button>
               {quarterly && !quarterly.loaded && !quarterlyLoading && (
-                <span className="text-sm text-red-500">No data — build Sales first.</span>
+                <span className="text-sm text-red-500">
+                  {quarterly.message || 'No data — build Sales first.'}
+                </span>
               )}
             </div>
           </div>

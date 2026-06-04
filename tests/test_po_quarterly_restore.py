@@ -5,14 +5,15 @@ import pandas as pd
 
 from backend.services.po_quarterly_warmup import (
     platform_frames_span_days,
-    quarterly_restore_months,
+    quarterly_report_window,
     sales_df_span_days,
 )
 from backend.session import AppSession
 
 
-def test_quarterly_restore_months_default_is_full_history():
-    assert quarterly_restore_months(8) is None
+def test_quarterly_report_window_spans_two_years():
+    start, end = quarterly_report_window(8)
+    assert start < end
 
 
 def test_platform_frames_span_detects_deep_bulk():
