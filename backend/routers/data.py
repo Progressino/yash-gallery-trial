@@ -55,6 +55,9 @@ from ..services.inventory import (
 
 router = APIRouter()
 
+# Process-wide Intelligence bundle cache (PG-restore shells share the same Tier-3 window).
+_GLOBAL_INTELLIGENCE_BUNDLE_CACHE: dict = {}
+
 
 def _sku_deepdive_aliases(raw: str) -> Set[str]:
     """Return SKU tokens that should match the same row after PL/YK normalisation."""
@@ -1259,6 +1262,54 @@ def _tier3_direct_has_units(
     if int(out[0].get("total_units") or 0) <= 0:
         return None
     return out
+
+
+def _bundle_cache_global_key(
+    cache_key: tuple,
+) -> tuple:
+    from ..services.daily_store import get_tier3_sync_token
+
+    return (*cache_key, tuple(sorted((get_tier3_sync_token() or {}).items())))
+
+
+def _bundle_cache_lookup(
+    cache_key: tuple,
+    sess_cache: dict | None,
+    *,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> dict | None:
+    """Return a fresh cached payload if we have display data for this window."""
+    now = time.time()
+    candidates: list = []
+    if sess_cache:
+        hit = sess_cache.get(cache_key)
+        if hit:
+            candidates.append(hit)
+    ghit = _GLOBAL_INTELLIGENCE_BUNDLE_CACHE.get(_bundle_cache_global_key(cache_key))
+    if ghit:
+        candidates.append(ghit)
+    for hit in candidates:
+        age = now - float(hit.get("_ts", 0))
+        payload = hit.get("payload") or {}
+        if age >= 300.0 or not _bundle_payload_has_display_data(payload):
+            continue
+        if _cached_bundle_stale_vs_tier3_uploads(payload, start_date, end_date):
+            continue
+        return payload
+    return None
+
+
+def _bundle_cache_store(
+    cache_key: tuple,
+    sess_cache: dict,
+    payload: dict,
+    *,
+    ts: float | None = None,
+) -> None:
+    entry = {"_ts": ts if ts is not None else time.time(), "payload": payload}
+    sess_cache[cache_key] = entry
+    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[_bundle_cache_global_key(cache_key)] = entry
 
 
 def _intelligence_warming_payload(message: str = "Loading marketplace data on the server…") -> dict:
@@ -2628,18 +2679,13 @@ def intelligence_bundle(
     if bundle_cache is None:
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
-    cached = bundle_cache.get(cache_key)
-    if (
-        cached
-        and (now - float(cached.get("_ts", 0))) < 300.0
-        and not _tier3_token_mismatch(sess)
-        and not _cached_bundle_stale_vs_tier3_uploads(
-            cached.get("payload") or {}, start_date, end_date
-        )
-        and _bundle_payload_has_display_data(cached.get("payload") or {})
-    ):
-        _schedule_intelligence_refresh_async(sid or None)
-        return cached["payload"]
+    cached_payload = _bundle_cache_lookup(
+        cache_key, bundle_cache, start_date=start_date, end_date=end_date
+    )
+    if cached_payload is not None:
+        if _tier3_token_mismatch(sess):
+            _schedule_intelligence_refresh_async(sid or None)
+        return cached_payload
 
     span_days = _report_span_days(start_date, end_date)
     fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
@@ -2657,14 +2703,14 @@ def intelligence_bundle(
                 sess, s_win, e_win, limit, basis, include_extras
             )
             if tier3_first and _bundle_payload_has_display_data(tier3_first):
-                bundle_cache[cache_key] = {"_ts": now, "payload": tier3_first}
+                _bundle_cache_store(cache_key, bundle_cache, tier3_first, ts=now)
                 return tier3_first
 
         session_payload = _build_intelligence_bundle_payload_from_session(
             sess, s_win, e_win, limit, basis, include_extras
         )
         if session_payload and _bundle_payload_has_display_data(session_payload):
-            bundle_cache[cache_key] = {"_ts": now, "payload": session_payload}
+            _bundle_cache_store(cache_key, bundle_cache, session_payload, ts=now)
             return session_payload
 
         if fast_window:
@@ -2677,7 +2723,7 @@ def intelligence_bundle(
                 need_persist = platforms_with_uploads_in_range(s_win, e_win)
                 if need_persist:
                     _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
-                bundle_cache[cache_key] = {"_ts": now, "payload": tier3_payload}
+                _bundle_cache_store(cache_key, bundle_cache, tier3_payload, ts=now)
                 return tier3_payload
 
         from ..services.daily_store import platforms_with_uploads_in_range
@@ -2696,7 +2742,7 @@ def intelligence_bundle(
             include_extras,
         )
         if session_payload is not None and _bundle_payload_has_display_data(session_payload):
-            bundle_cache[cache_key] = {"_ts": now, "payload": session_payload}
+            _bundle_cache_store(cache_key, bundle_cache, session_payload, ts=now)
             return session_payload
 
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
@@ -2704,7 +2750,7 @@ def intelligence_bundle(
             sess, s_win, e_win, limit, basis, include_extras
         )
         if tier3_any and _bundle_payload_has_display_data(tier3_any):
-            bundle_cache[cache_key] = {"_ts": now, "payload": tier3_any}
+            _bundle_cache_store(cache_key, bundle_cache, tier3_any, ts=now)
             return tier3_any
 
     if not _session_has_operational_frames(sess):
