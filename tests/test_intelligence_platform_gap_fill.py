@@ -92,3 +92,41 @@ def test_tier3_gap_fill_when_session_ends_before_window(monkeypatch):
     daily = {r["date"]: r["shipments"] for r in amazon.get("daily") or []}
     assert daily.get("2026-05-30") == 100
     assert daily.get("2026-06-01") == 200
+
+
+def test_unified_sales_lag_uses_newer_tier3_daily():
+    """Stale unified sales_df must not zero out chart days that exist in gap-filled frames."""
+    from backend.services.sales import _platform_summaries_from_unified_bulk
+
+    sales = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-05-28", "2026-05-29"]),
+            "Source": ["Amazon", "Amazon"],
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Quantity": [100, 100],
+            "Sku": ["A1", "A1"],
+        }
+    )
+    mtr = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"]),
+            "SKU": ["A1", "A1", "A2", "A2"],
+            "Transaction_Type": ["Shipment"] * 4,
+            "Quantity": [100, 100, 400, 500],
+        }
+    )
+    out = _platform_summaries_from_unified_bulk(
+        sales,
+        mtr,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        "2026-05-05",
+        "2026-06-04",
+    )
+    amazon = next(p for p in out if p["platform"] == "Amazon")
+    daily = {r["date"]: r["shipments"] for r in amazon.get("daily") or []}
+    assert daily.get("2026-06-01") == 400
+    assert daily.get("2026-06-02") == 500
+    assert amazon["total_units"] == 1100

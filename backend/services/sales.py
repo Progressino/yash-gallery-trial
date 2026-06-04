@@ -1385,6 +1385,43 @@ def _unified_platform_stub(platform_name: str, loaded: bool) -> dict:
     }
 
 
+def _platform_raw_max_reporting_day(
+    raw_df: pd.DataFrame,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> str:
+    """Latest ``Date`` in a gap-filled platform frame within the dashboard window."""
+    if raw_df.empty or "Date" not in raw_df.columns:
+        return ""
+    w = _filter_by_reporting_days(raw_df, "Date", start_date, end_date)
+    if w.empty:
+        return ""
+    t = txn_reporting_naive_ist(w["Date"]).dropna()
+    if t.empty:
+        return ""
+    return str(t.max().normalize())[:10]
+
+
+def _platform_summary_from_raw_frame(
+    platform_name: str,
+    raw_df: pd.DataFrame,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> dict:
+    """Platform card from session/Tier-3 frame (used when unified sales lag uploads)."""
+    kwargs = dict(start_date=start_date, end_date=end_date)
+    if platform_name == "Amazon":
+        mtr = raw_df.copy()
+        if not mtr.empty and "Date" in mtr.columns:
+            mtr["_Date"] = mtr["Date"]
+        return _compute_platform_metrics(
+            mtr, platform_name, "SKU", "Transaction_Type", **kwargs
+        )
+    return _compute_platform_metrics(
+        raw_df, platform_name, "OMS_SKU", "TxnType", **kwargs
+    )
+
+
 def _unified_platform_summary_one(
     s: pd.DataFrame,
     platform_name: str,
@@ -1525,7 +1562,7 @@ def _unified_platform_summary_one(
             )
         by_state = raw_stub.get("by_state") or []
 
-    return {
+    out = {
         "platform": platform_name,
         "loaded": loaded,
         "total_units": total_units,
@@ -1539,6 +1576,14 @@ def _unified_platform_summary_one(
         "daily": daily,
         "by_state": by_state,
     }
+    if loaded and intelligence_daily_chart_enabled(start_date, end_date):
+        raw_max = _platform_raw_max_reporting_day(raw_df, start_date, end_date)
+        uni_max = max((str(r.get("date") or "") for r in daily), default="")
+        if raw_max and (not uni_max or raw_max > uni_max):
+            return _platform_summary_from_raw_frame(
+                platform_name, raw_df, start_date, end_date
+            )
+    return out
 
 
 def _refund_buckets_for_platform(
