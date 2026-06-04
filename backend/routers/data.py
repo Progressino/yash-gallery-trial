@@ -623,10 +623,15 @@ def _load_tier3_frames_for_platforms(
     dedup: bool = False,
     columns_only: bool = False,
 ) -> dict[str, "pd.DataFrame"]:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from ..services.daily_store import load_platform_data_for_report_range
 
-    out: dict[str, pd.DataFrame] = {}
-    for plat in platforms:
+    plats = [str(p).strip().lower() for p in platforms if str(p).strip()]
+    if not plats:
+        return {}
+
+    def _one(plat: str):
         chunk = load_platform_data_for_report_range(
             plat,
             start_date,
@@ -634,8 +639,27 @@ def _load_tier3_frames_for_platforms(
             dedup=dedup,
             columns_only=columns_only,
         )
-        if not chunk.empty:
-            out[plat] = chunk
+        if chunk.empty and columns_only:
+            chunk = load_platform_data_for_report_range(
+                plat,
+                start_date,
+                end_date,
+                dedup=dedup,
+                columns_only=False,
+            )
+        return plat, chunk
+
+    out: dict[str, pd.DataFrame] = {}
+    workers = min(5, len(plats))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_one, p) for p in plats]
+        for fut in as_completed(futs):
+            try:
+                plat, chunk = fut.result()
+                if chunk is not None and not chunk.empty:
+                    out[plat] = chunk
+            except Exception:
+                pass
     return out
 
 
@@ -878,7 +902,8 @@ def _resolve_bundle_platform_frames(
 def _hydrate_session_for_intelligence(sess: AppSession) -> bool:
     """
     Synchronously copy warm-cache platform/sales frames into the session before
-    Intelligence builds metrics. The bundle must not rely on async coverage hydrate.
+    Intelligence builds metrics. Never rebuild unified sales here — that blocks
+    the request thread for minutes on large uploads.
     """
     try:
         import backend.main as _main
@@ -890,16 +915,43 @@ def _hydrate_session_for_intelligence(sess: AppSession) -> bool:
     except Exception:
         pass
     _ensure_sku_mapping_for_dashboard(sess)
-    if _session_has_platform_data(sess) and (
-        getattr(sess, "sales_df", None) is None
-        or not hasattr(sess.sales_df, "empty")
-        or sess.sales_df.empty
-    ):
-        try:
-            _ensure_sales_rebuilt(sess)
-        except Exception:
-            pass
     return _session_has_operational_frames(sess)
+
+
+def _session_has_units_in_window(sess: AppSession, start_date: str, end_date: str) -> bool:
+    """True when unified sales or any platform frame has shipment rows in the window."""
+    import pandas as pd
+
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    if len(s) != 10 or len(e) != 10:
+        return False
+    raw_sales = getattr(sess, "sales_df", None)
+    if raw_sales is None or not hasattr(raw_sales, "empty") or raw_sales.empty:
+        sales = pd.DataFrame()
+    else:
+        sales = _slice_sales_for_bundle(raw_sales, s, e)
+    if not sales.empty and "Transaction Type" in sales.columns:
+        txn = sales["Transaction Type"].astype(str).str.strip() == "Shipment"
+        if int(pd.to_numeric(sales.loc[txn, "Quantity"], errors="coerce").fillna(0).sum()) > 0:
+            return True
+    for attr, txn_col in (
+        ("mtr_df", "Transaction_Type"),
+        ("myntra_df", "TxnType"),
+        ("meesho_df", "TxnType"),
+        ("flipkart_df", "TxnType"),
+        ("snapdeal_df", "TxnType"),
+    ):
+        raw = getattr(sess, attr, None)
+        if raw is None or not hasattr(raw, "empty") or raw.empty:
+            continue
+        w = _filter_platform_df_by_window(raw, s, e)
+        if w.empty or txn_col not in w.columns:
+            continue
+        ship = w[txn_col].astype(str).str.strip() == "Shipment"
+        if int(pd.to_numeric(w.loc[ship, "Quantity"], errors="coerce").fillna(0).sum()) > 0:
+            return True
+    return False
 
 
 def _build_platform_summary_for_bundle(
@@ -1235,7 +1287,8 @@ def _build_intelligence_bundle_payload_from_session(
     include_extras: bool,
 ) -> dict | None:
     """
-    Session + Tier-3 auto-pull (``_auto_dashboard_bundle_data``) for Intelligence cards.
+    Fast session frames first; Tier-3 direct metrics only when the window is empty.
+    Avoids ``_auto_dashboard_bundle_data`` (full parquet + sales rebuild) on every GET.
     """
     import pandas as pd
     from ..services.sales import (
@@ -1252,10 +1305,9 @@ def _build_intelligence_bundle_payload_from_session(
     s = str(start_date)[:10]
     e = str(end_date)[:10]
 
-    sales_slice, mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b, _pulled = (
-        _auto_dashboard_bundle_data(sess, s, e)
+    mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b = _resolve_bundle_platform_frames(
+        sess, s, e
     )
-
     gated_sales = (
         apply_upload_report_day_gate(sess.sales_df)
         if getattr(sess, "sales_df", None) is not None
@@ -1264,6 +1316,7 @@ def _build_intelligence_bundle_payload_from_session(
         else pd.DataFrame()
     )
     win_gated = _slice_sales_for_bundle(gated_sales, s, e)
+    sales_slice = win_gated
 
     if not win_gated.empty:
         platform_summary = get_platform_summary(
@@ -1297,7 +1350,8 @@ def _build_intelligence_bundle_payload_from_session(
         t3_tuple = _tier3_direct_has_units(s, e, sess, limit, basis)
         if t3_tuple is not None:
             platform_summary = list(t3_tuple[1])
-            sales_slice = t3_tuple[2] if not t3_tuple[2].empty else sales_slice
+            if not t3_tuple[2].empty:
+                sales_slice = t3_tuple[2]
     sales_for_returns = (
         win_gated
         if win_gated is not None and not win_gated.empty
@@ -2596,6 +2650,16 @@ def intelligence_bundle(
 
     session_payload: dict | None = None
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
+        # PG restore often times out → empty session shell; Tier-3 direct is faster than
+        # rebuilding unified sales on the request thread.
+        if not _session_has_units_in_window(sess, s_win, e_win):
+            tier3_first = _build_intelligence_bundle_payload_from_tier3(
+                sess, s_win, e_win, limit, basis, include_extras
+            )
+            if tier3_first and _bundle_payload_has_display_data(tier3_first):
+                bundle_cache[cache_key] = {"_ts": now, "payload": tier3_first}
+                return tier3_first
+
         session_payload = _build_intelligence_bundle_payload_from_session(
             sess, s_win, e_win, limit, basis, include_extras
         )

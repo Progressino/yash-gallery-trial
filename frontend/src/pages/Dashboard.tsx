@@ -879,9 +879,9 @@ export default function Dashboard() {
 
   const bundleTimeoutMs = useMemo(() => {
     const span = bundleSpanDays ?? 999
-    if (span <= 7) return 20_000
-    if (span <= 45) return 30_000
-    return 35_000
+    if (span <= 7) return 45_000
+    if (span <= 45) return 90_000
+    return 120_000
   }, [bundleSpanDays])
 
   const fetchBundleExtras = (bundleSpanDays ?? 999) <= 45
