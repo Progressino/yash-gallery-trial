@@ -1081,6 +1081,12 @@ def _do_load_warm_cache() -> bool:
         # Always signal so waiting code is never blocked forever
         # (no-op if Phase 1 already called set())
         _warm_cache_ready.set()
+        try:
+            from backend.services.po_quarterly_warmup import schedule_shared_quarterly_prewarm
+
+            schedule_shared_quarterly_prewarm()
+        except Exception:
+            pass
         # Release Phase-2 memory lock if it was acquired
         try:
             if _phase2_lock_held:

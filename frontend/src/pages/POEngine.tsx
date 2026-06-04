@@ -443,14 +443,10 @@ export default function POEngine() {
         if (seq !== poRunSeqRef.current) return
         if (data.status === 'warming' || (!data.loaded && !data.rows?.length && poll < maxPolls - 1)) {
           setQuarterlyProgress(
-            typeof data.progress === 'number'
-              ? data.progress
-              : Math.min(92, 12 + poll * 2),
+            typeof data.progress === 'number' ? Math.min(99, data.progress) : undefined,
           )
-          setQuarterlyLoadMessage(
-            data.message || 'Loading quarterly history…',
-          )
-          await new Promise(r => setTimeout(r, 4000))
+          setQuarterlyLoadMessage(data.message || 'Loading quarterly history…')
+          await new Promise(r => setTimeout(r, 3000))
           continue
         }
         if (data.status === 'error') {

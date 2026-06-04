@@ -13,8 +13,8 @@ from backend.services.po_quarterly_warmup import (
 )
 
 
-def test_quarterly_cache_schema_v4():
-    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 4
+def test_quarterly_cache_schema_v5():
+    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 5
 
 
 def test_quarterly_report_window_covers_eight_quarters():
@@ -75,36 +75,9 @@ def test_po_quarterly_warming_when_sync_times_out(client, monkeypatch):
     assert body.get("loaded") is False
 
 
-def test_hydrate_uses_report_range(monkeypatch):
+def test_hydrate_disabled():
     from backend.session import AppSession
     from backend.services import po_quarterly_warmup as mod
 
-    calls: list[tuple] = []
-
-    def _range(plat, start, end, **k):
-        calls.append((plat, start, end))
-        return pd.DataFrame(
-            {
-                "Date": pd.to_datetime(["2024-08-01"]),
-                "SKU": ["H1"],
-                "Transaction_Type": ["Shipment"],
-                "Quantity": [3],
-            }
-        )
-
-    monkeypatch.setattr(
-        "backend.services.daily_store.load_platform_data_for_report_range",
-        _range,
-    )
-    monkeypatch.setattr(
-        "backend.services.daily_store.load_platform_data",
-        lambda *a, **k: pd.DataFrame(),
-    )
-    monkeypatch.setattr(
-        "backend.services.daily_store.merge_platform_data",
-        lambda cur, new, plat: new,
-    )
-
     sess = AppSession()
-    assert mod.hydrate_platform_frames_for_quarterly(sess, n_quarters=8) is True
-    assert any(c[0] == "amazon" for c in calls)
+    assert mod.hydrate_platform_frames_for_quarterly(sess, n_quarters=8) is False

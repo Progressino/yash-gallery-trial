@@ -1,4 +1,4 @@
-"""Background PO quarterly history build (avoids proxy timeouts on first load)."""
+"""PO quarterly jobs — one shared server build, real progress."""
 from __future__ import annotations
 
 import logging
@@ -36,84 +36,93 @@ def clear_quarterly_job(session_id: str) -> None:
         _jobs.pop(session_id, None)
 
 
+def _sync_job_from_shared(session_id: str, key: tuple) -> None:
+    from .po_quarterly_cache import get_shared_quarterly, quarterly_build_status
+
+    shared = get_shared_quarterly(key)
+    if shared and shared.get("loaded"):
+        set_quarterly_job(
+            session_id,
+            status="ready",
+            progress=100,
+            message="",
+            result=shared,
+        )
+        return
+    st = quarterly_build_status()
+    if st.get("building"):
+        set_quarterly_job(
+            session_id,
+            status="running",
+            progress=int(st.get("progress") or 10),
+            message=str(st.get("message") or "Loading quarterly history…"),
+        )
+
+
 def start_quarterly_background(
     session_id: str,
     *,
     group_by_parent: bool = False,
     n_quarters: int = 8,
 ) -> bool:
-    """Start daemon thread; returns False if a job is already running for this session."""
+    from .po_quarterly_cache import (
+        get_shared_quarterly,
+        quarterly_build_status,
+        start_shared_quarterly_build,
+    )
+    from .po_quarterly_warmup import build_quarterly_payload, quarterly_cache_key
+
     if not session_id:
         return False
+
+    key = quarterly_cache_key(group_by_parent, n_quarters)
+    shared = get_shared_quarterly(key)
+    if shared and shared.get("loaded"):
+        set_quarterly_job(session_id, status="ready", progress=100, result=shared)
+        return False
+
+    st = quarterly_build_status()
+    if st.get("building"):
+        _sync_job_from_shared(session_id, key)
+        return False
+
     cur = get_quarterly_job(session_id)
     if cur.get("status") == "running":
         return False
 
-    def _run() -> None:
+    def _build(progress_cb):
         from ..session import store
-        from .po_quarterly_warmup import (
-            build_quarterly_payload,
-            quarterly_cache_key,
-        )
 
         sess = store.get(session_id)
         if sess is None:
-            set_quarterly_job(
-                session_id,
-                status="error",
-                progress=0,
-                message="Session expired — refresh and try again.",
-            )
-            return
+            raise RuntimeError("Session expired")
+        return build_quarterly_payload(
+            sess,
+            group_by_parent=group_by_parent,
+            n_quarters=n_quarters,
+            progress_cb=progress_cb,
+        )
+
+    started = start_shared_quarterly_build(key, _build)
+    if started:
         set_quarterly_job(
             session_id,
             status="running",
-            progress=12,
-            message="Loading sales history for quarterly columns…",
+            progress=8,
+            message="Building quarterly history (shared cache)…",
         )
-        try:
-            set_quarterly_job(session_id, progress=35, message="Merging platform uploads…")
-            result = build_quarterly_payload(
-                sess,
-                group_by_parent=group_by_parent,
-                n_quarters=n_quarters,
-            )
-            key = quarterly_cache_key(group_by_parent, n_quarters)
-            sess._quarterly_cache[key] = result
-            if result.get("loaded") and result.get("rows"):
-                set_quarterly_job(
-                    session_id,
-                    status="ready",
-                    progress=100,
-                    message="",
-                    result=result,
-                )
-            else:
-                set_quarterly_job(
-                    session_id,
-                    status="error",
-                    progress=0,
-                    message="No quarterly data — build Sales first (upload platforms).",
-                    result=result,
-                )
-        except Exception as exc:
-            logger.exception("quarterly background job failed session=%s", session_id[:8])
-            set_quarterly_job(
-                session_id,
-                status="error",
-                progress=0,
-                message=str(exc) or "Quarterly build failed",
-            )
 
-    set_quarterly_job(
-        session_id,
-        status="running",
-        progress=5,
-        message="Starting quarterly history build…",
-    )
-    threading.Thread(
-        target=_run,
-        daemon=True,
-        name=f"po-qtr-{session_id[:8]}",
-    ).start()
-    return True
+        def _poll() -> None:
+            for _ in range(600):
+                time.sleep(2)
+                _sync_job_from_shared(session_id, key)
+                job = get_quarterly_job(session_id)
+                if job.get("status") in ("ready", "error"):
+                    break
+
+        threading.Thread(
+            target=_poll,
+            daemon=True,
+            name=f"po-qtr-poll-{session_id[:8]}",
+        ).start()
+    return started

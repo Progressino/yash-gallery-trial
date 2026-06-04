@@ -1113,6 +1113,10 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if sess is None:
         return {"loaded": False}
 
+    from ..services.po_quarterly_cache import (
+        get_shared_quarterly,
+        quarterly_build_status,
+    )
     from ..services.po_quarterly_jobs import (
         get_quarterly_job,
         start_quarterly_background,
@@ -1124,17 +1128,30 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
 
     sid = getattr(request.state, "session_id", None) or ""
     cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+
+    shared = get_shared_quarterly(cache_key)
+    if shared and shared.get("loaded") and shared.get("rows"):
+        sess._quarterly_cache[cache_key] = shared
+        return shared
+
     cached = sess._quarterly_cache.get(cache_key)
     if cached and cached.get("loaded") and cached.get("rows"):
         return cached
 
+    build_st = quarterly_build_status()
     job = get_quarterly_job(sid)
-    if job.get("status") == "running":
+    if build_st.get("building") or job.get("status") == "running":
+        pct = int(build_st.get("progress") or job.get("progress") or 10)
+        msg = str(
+            build_st.get("message")
+            or job.get("message")
+            or "Loading quarterly history…"
+        )
         return {
             "loaded": False,
             "status": "warming",
-            "progress": int(job.get("progress") or 10),
-            "message": job.get("message") or "Loading quarterly history…",
+            "progress": pct,
+            "message": msg,
         }
     if job.get("status") == "ready":
         ready = job.get("result")
