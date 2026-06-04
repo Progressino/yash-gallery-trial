@@ -510,16 +510,26 @@ def return_sheet_refund_rows_from_overlay(
     else:
         work["_plat"] = ""
 
-    ref = txn_reporting_naive_ist(pd.Series([pd.Timestamp(ref_txn_date)])).iloc[0]
-    if pd.isna(ref):
-        ref = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+    if "Return_Date" in work.columns:
+        from .karigar_attendance import _cell_to_report_date
+
+        work["_ref"] = work["Return_Date"].map(_cell_to_report_date)
+        work = work[work["_ref"].str.len().eq(10)]
+        if work.empty:
+            return pd.DataFrame()
+        txn_dates = txn_reporting_naive_ist(pd.to_datetime(work["_ref"], errors="coerce"))
     else:
-        ref = pd.Timestamp(ref).normalize()
+        ref = txn_reporting_naive_ist(pd.Series([pd.Timestamp(ref_txn_date)])).iloc[0]
+        if pd.isna(ref):
+            ref = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+        else:
+            ref = pd.Timestamp(ref).normalize()
+        txn_dates = pd.Series([ref] * len(work), index=work.index)
 
     synth = pd.DataFrame(
         {
             "Sku": work["_sku"].values,
-            "TxnDate": ref,
+            "TxnDate": txn_dates.values,
             "Transaction Type": "Refund",
             "Quantity": work["_qty"].values,
             "Units_Effective": (-work["_qty"]).values,
@@ -530,7 +540,14 @@ def return_sheet_refund_rows_from_overlay(
         }
     )
     synth = _apply_unified_oms_skus(synth, sku_mapping or {})
-    synth["LineKey"] = "RETURN_SHEET|" + synth["Sku"].astype(str) + "|" + synth["Source"].astype(str)
+    synth["LineKey"] = (
+        "RETURN_SHEET|"
+        + synth["Sku"].astype(str)
+        + "|"
+        + synth["Source"].astype(str)
+        + "|"
+        + txn_reporting_naive_ist(synth["TxnDate"]).dt.strftime("%Y-%m-%d")
+    )
     return synth
 
 
@@ -1518,6 +1535,31 @@ def _unified_platform_summary_one(
     }
 
 
+def _merge_unified_returns_into_platform_card(
+    card: dict,
+    unified_rows: pd.DataFrame,
+) -> dict:
+    """When Myntra uses raw shipment frames, still count Refund rows from unified sales."""
+    if unified_rows is None or unified_rows.empty:
+        return card
+    txn = unified_rows["Transaction Type"].astype(str).str.strip()
+    qty = pd.to_numeric(unified_rows["Quantity"], errors="coerce").fillna(0)
+    u_ret = int(qty[txn == "Refund"].sum())
+    if u_ret <= 0:
+        return card
+    out = dict(card)
+    ship = int(out.get("total_units") or 0)
+    if ship <= 0:
+        ship = int(qty[txn == "Shipment"].sum())
+        out["total_units"] = ship
+    out["total_returns"] = max(int(out.get("total_returns") or 0), u_ret)
+    out["net_units"] = int(out.get("total_units") or 0) - out["total_returns"]
+    out["return_rate"] = (
+        round(out["total_returns"] / ship * 100, 1) if ship > 0 else 0.0
+    )
+    return out
+
+
 def _platform_summaries_from_unified_bulk(
     sales_df: pd.DataFrame,
     mtr_df: pd.DataFrame,
@@ -1570,6 +1612,9 @@ def _platform_summaries_from_unified_bulk(
     if myntra_overview_use_raw_enabled() and not myntra_df.empty:
         kwargs = dict(start_date=start_date, end_date=end_date)
         myntra_raw = _compute_platform_metrics(myntra_df, "Myntra", "OMS_SKU", "TxnType", **kwargs)
+        myntra_raw = _merge_unified_returns_into_platform_card(
+            myntra_raw, parts.get("Myntra", pd.DataFrame())
+        )
         for i, row in enumerate(out):
             if row.get("platform") == "Myntra":
                 out[i] = myntra_raw

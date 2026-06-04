@@ -27,6 +27,24 @@ def test_amazon_business_return_units_refunded():
     assert int(out.loc[out["OMS_SKU"] == "B07Z5WYPQ8", "Return_Units"].iloc[0]) == 1234
 
 
+def test_parse_flipkart_xlsx_not_treated_as_zip_archive():
+    openpyxl = pytest.importorskip("openpyxl")
+    raw_xlsx = BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Returns"
+    ws.append(["return_id", "sku", "quantity"])
+    ws.append(["RI:1", "SKU:TEST-SKU-M", 4])
+    wb.save(raw_xlsx)
+    raw_xlsx.seek(0)
+    body = raw_xlsx.read()
+    df, err = parse_return_upload_bytes(body, "Akiko Flipkart Return.xlsx")
+    assert err is None, err
+    assert not df.empty
+    assert int(df["Return_Units"].sum()) == 4
+    assert df.iloc[0]["Return_Platform"] == "flipkart"
+
+
 def test_flipkart_sku_prefix_stripped():
     openpyxl = pytest.importorskip("openpyxl")
     raw_xlsx = BytesIO()

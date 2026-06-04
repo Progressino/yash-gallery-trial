@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import zipfile
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
@@ -65,18 +69,57 @@ def _strip_flipkart_sku(val: str) -> str:
     return re.sub(r"^SKU:\s*", "", s, flags=re.IGNORECASE).strip()
 
 
+def _extract_rar_members_local(raw: bytes) -> List[Tuple[str, bytes]]:
+    """Extract RAR via bsdtar without importing the upload router."""
+    if raw[:6] != _RAR_MAGIC:
+        return []
+    bsdtar = shutil.which("bsdtar")
+    if not bsdtar:
+        return []
+    out: List[Tuple[str, bytes]] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="return-rar-") as td:
+            rar_path = os.path.join(td, "upload.rar")
+            with open(rar_path, "wb") as fh:
+                fh.write(raw)
+            subprocess.run(
+                [bsdtar, "-xf", rar_path, "-C", td],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            for root, _dirs, files in os.walk(td):
+                for fname in files:
+                    if fname == "upload.rar":
+                        continue
+                    full = os.path.join(root, fname)
+                    rel = os.path.relpath(full, td).replace("\\", "/")
+                    if not rel.lower().endswith(_DATA_EXTS):
+                        continue
+                    with open(full, "rb") as fh:
+                        out.append((rel, fh.read()))
+    except Exception:
+        _log.exception("bsdtar RAR extract failed for return upload")
+    return out
+
+
 def _expand_upload_to_member_files(raw: bytes, filename: str) -> List[Tuple[str, bytes]]:
     """Single data file, or all CSV/Excel members inside a RAR/ZIP archive."""
     name = (filename or "").lower().strip()
+    # .xlsx/.xls are ZIP containers — never treat them as multi-file archives.
+    if name.endswith(_DATA_EXTS):
+        return [(filename or "upload.csv", raw)]
     if name.endswith(_ARCHIVE_EXTS) or raw[:6] == _RAR_MAGIC or raw[:2] == b"PK":
         members: List[Tuple[str, bytes]] = []
         if raw[:6] == _RAR_MAGIC or name.endswith(".rar"):
-            try:
-                from ..routers.upload import _extract_rar_files
+            members = _extract_rar_members_local(raw)
+            if not members:
+                try:
+                    from ..routers.upload import _extract_rar_files
 
-                members = _extract_rar_files(raw)
-            except Exception:
-                _log.exception("RAR extract failed for return upload")
+                    members = _extract_rar_files(raw)
+                except Exception:
+                    _log.exception("RAR extract failed for return upload")
         if not members and (raw[:2] == b"PK" or name.endswith(".zip")):
             try:
                 with zipfile.ZipFile(BytesIO(raw)) as zf:
@@ -109,6 +152,62 @@ def _read_tabular(raw: bytes, filename: str) -> Tuple[pd.DataFrame, Optional[str
         return pd.read_csv(BytesIO(raw), encoding_errors="replace"), None
     except Exception as e:
         return pd.DataFrame(), str(e)
+
+
+def _parse_myntra_seller_returns_csv(
+    raw: bytes,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Myntra Seller Returns Report — one row per return with return_created_date."""
+    from .karigar_attendance import _cell_to_report_date
+
+    try:
+        df = pd.read_csv(BytesIO(raw), encoding_errors="replace")
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+    if df is None or df.empty:
+        return pd.DataFrame(), "Myntra return CSV is empty."
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    sku_key = None
+    for cand in ("seller_sku_code", "seller sku code", "oms_sku", "sku"):
+        if cand in cols:
+            sku_key = cols[cand]
+            break
+    if sku_key is None and "myntra_sku_code" in cols:
+        sku_key = cols["myntra_sku_code"]
+    if sku_key is None:
+        return pd.DataFrame(), "Myntra return CSV: missing seller_sku_code / SKU column."
+    qty_key = cols.get("quantity") or cols.get("qty")
+    if not qty_key:
+        return pd.DataFrame(), "Myntra return CSV: missing quantity column."
+    date_key = None
+    for cand in ("return_created_date", "refunded_date", "order_rto_date"):
+        if cand in cols:
+            date_key = cols[cand]
+            break
+    if not date_key:
+        return pd.DataFrame(), "Myntra return CSV: missing return_created_date."
+
+    work = pd.DataFrame()
+    work["OMS_SKU"] = df[sku_key].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+    work["Return_Units"] = pd.to_numeric(df[qty_key], errors="coerce").fillna(0).astype(int)
+    work["Return_Date"] = df[date_key].map(_cell_to_report_date)
+    work["Return_Platform"] = "myntra"
+    work = work[
+        work["OMS_SKU"].str.len().gt(0)
+        & work["Return_Units"].gt(0)
+        & work["Return_Date"].str.len().eq(10)
+    ]
+    if work.empty:
+        return pd.DataFrame(), "No dated Myntra return rows found."
+    return (
+        work.groupby(
+            ["OMS_SKU", "Return_Platform", "Return_Date"], as_index=False
+        )["Return_Units"]
+        .sum(),
+        None,
+    )
 
 
 def _parse_meesho_panel_csv(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
@@ -210,7 +309,16 @@ def _finalize_return_overlay_df(df: pd.DataFrame) -> pd.DataFrame:
         out["Return_Platform"] = "unknown"
     out["Return_Platform"] = out["Return_Platform"].astype(str).str.strip().str.lower()
     out.loc[out["Return_Platform"].isin(["", "nan", "none"]), "Return_Platform"] = "unknown"
-    if "Return_Platform" in out.columns and (out["Return_Platform"] != "unknown").any():
+    if "Return_Date" in out.columns:
+        out["Return_Date"] = out["Return_Date"].astype(str).str.strip().str[:10]
+        out = out[out["Return_Date"].str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)]
+        if out.empty:
+            return pd.DataFrame()
+        keys = ["OMS_SKU", "Return_Platform", "Return_Date"]
+        return out.groupby(keys, as_index=False)["Return_Units"].sum()
+    if "Return_Platform" in out.columns:
+        out["Return_Platform"] = out["Return_Platform"].astype(str).str.strip().str.lower()
+        out.loc[out["Return_Platform"].isin(["", "nan", "none"]), "Return_Platform"] = "unknown"
         return (
             out.groupby(["OMS_SKU", "Return_Platform"], as_index=False)["Return_Units"]
             .sum()
@@ -276,11 +384,30 @@ def _parse_single_return_file(
             return pd.DataFrame(), err
         return _finish(part)
 
+    if low.endswith(".csv") and (
+        "seller_returns" in low or ("myntra" in low and "return" in low)
+    ):
+        part, err = _parse_myntra_seller_returns_csv(raw, sku_mapping=sku_mapping)
+        if part is not None and not part.empty:
+            return part, None
+        if err and "missing" not in err.lower():
+            return pd.DataFrame(), err
+
     df, read_err = _read_tabular(raw, filename)
     if read_err:
         return pd.DataFrame(), f"Could not read file: {read_err}"
     if df is None or df.empty:
         return pd.DataFrame(), "No rows in file."
+
+    col_low = {str(c).strip().lower() for c in df.columns}
+    if "return_created_date" in col_low and (
+        "seller_sku_code" in col_low or "myntra_sku_code" in col_low
+    ):
+        part, err = _parse_myntra_seller_returns_csv(raw, sku_mapping=sku_mapping)
+        if part is not None and not part.empty:
+            return part, None
+        if err:
+            return pd.DataFrame(), err
 
     if "amazon" in low or "businessreport" in low.replace(" ", ""):
         partial, err = _parse_amazon_business_return(df)
@@ -376,14 +503,42 @@ def parse_return_upload_bytes(
     return out, None
 
 
+def _return_report_date_from_filename(filename: str) -> str:
+    """
+    Reporting date embedded in return export names.
+    Avoids mis-parsing ISO ``2026-06-01`` as DD-MM (→ 2001-06-26).
+    """
+    fn = (filename or "").strip()
+    if not fn:
+        return ""
+    low = fn.lower()
+    iso_dates = re.findall(r"(20\d{2}-\d{2}-\d{2})", fn)
+    if "seller_returns" in low or "seller returns" in low:
+        # Period export (…_2026-03-01_2026-03-31.csv) — use per-row Return_Date instead.
+        return ""
+    if iso_dates:
+        return iso_dates[-1]
+    m = re.search(r"(\d{1,2})[-/_\.](\d{1,2})[-/_\.](\d{2,4})", fn)
+    if not m:
+        return ""
+    d, mth, y = m.group(1), m.group(2), m.group(3)
+    if len(y) == 2:
+        y = "20" + y
+    try:
+        return pd.to_datetime(f"{d}-{mth}-{y}", dayfirst=True).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
 def infer_return_overlay_as_of(filename: str, overlay_df: pd.DataFrame | None = None) -> str:
     """Pick reporting date from archive/filename or return table — not upload day."""
-    from .karigar_attendance import _cell_to_report_date, _date_from_filename
+    from .karigar_attendance import _cell_to_report_date
 
-    as_of = _date_from_filename(filename or "")
-    if as_of:
-        return as_of
     if overlay_df is not None and not overlay_df.empty:
+        if "Return_Date" in overlay_df.columns:
+            dated = overlay_df["Return_Date"].astype(str).str.strip()
+            if dated.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False).any():
+                return ""
         for col in ("Report_Date", "Date", "Return_Date", "TxnDate", "Order_Date"):
             if col not in overlay_df.columns:
                 continue
@@ -391,6 +546,9 @@ def infer_return_overlay_as_of(filename: str, overlay_df: pd.DataFrame | None = 
                 found = _cell_to_report_date(raw)
                 if found:
                     return found
+    as_of = _return_report_date_from_filename(filename or "")
+    if as_of:
+        return as_of
     return ""
 
 
@@ -414,10 +572,14 @@ def apply_return_overlay_import(
         merged = pd.concat([base, overlay_df], ignore_index=True)
         sess.po_return_overlay_df = _finalize_return_overlay_df(merged)
     as_of = infer_return_overlay_as_of(filename, overlay_df)
-    if not as_of:
-        # Prefer yesterday when sheet has no date (morning upload of prior day returns).
+    if not as_of and (
+        overlay_df is None
+        or "Return_Date" not in overlay_df.columns
+        or overlay_df["Return_Date"].astype(str).str.len().lt(10).all()
+    ):
+        # Legacy bundle with no per-row dates — anchor refunds to prior IST day.
         as_of = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)).isoformat()
-    sess.return_overlay_as_of = as_of
+    sess.return_overlay_as_of = as_of or ""
     n = int(len(sess.po_return_overlay_df))
     units = int(sess.po_return_overlay_df["Return_Units"].sum())
     sess._quarterly_cache.clear()
