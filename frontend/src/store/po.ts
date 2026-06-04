@@ -20,6 +20,9 @@ interface QuarterlyRow {
 
 interface QuarterlyResult {
   loaded: boolean
+  status?: 'warming' | 'error'
+  progress?: number
+  message?: string
   columns?: string[]
   rows?: QuarterlyRow[]
 }
@@ -111,15 +114,16 @@ export const usePOStore = create<POState>()(
       name: 'po-store-v1',
       version: 3,
       migrate: (persisted, fromVersion) => {
-        const p = persisted as Partial<POState> & { params?: Record<string, unknown> } | undefined
-        if (p?.params && typeof p.params === 'object') {
-          const { enforce_lead_time_release_gate: _, ...rest } = p.params
-          p.params = rest
-        }
+        const p = persisted as Partial<POState> | undefined
+        if (!p) return persisted as POState
         if (fromVersion < 3) {
           p.quarterly = null
         }
-        return persisted as POState
+        const params = p.params as POParams | undefined
+        if (params && params.enforce_lead_time_release_gate === undefined) {
+          params.enforce_lead_time_release_gate = false
+        }
+        return p as POState
       },
       // Persist only user preferences/params; never persist large results or Sets.
       partialize: (s) => ({
