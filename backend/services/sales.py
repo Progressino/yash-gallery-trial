@@ -17,7 +17,7 @@ log = logging.getLogger("erp.sales")
 _REPORTING_TZ = ZoneInfo("Asia/Kolkata")
 
 
-def txn_reporting_naive_ist(series: pd.Series) -> pd.Series:
+def txn_reporting_naive_ist(series: pd.Series | pd.Timestamp) -> pd.Series:
     """
     Normalize marketplace timestamps to **naive wall clock in Asia/Kolkata**.
 
@@ -28,6 +28,8 @@ def txn_reporting_naive_ist(series: pd.Series) -> pd.Series:
     which makes single-day dashboard filters wrong for Myntra/Flipkart while Amazon (often
     date-only) still looks fine.
     """
+    if isinstance(series, pd.Timestamp):
+        series = pd.Series([series])
     t = pd.to_datetime(series, errors="coerce")
     if getattr(t.dt, "tz", None) is not None:
         return t.dt.tz_convert(_REPORTING_TZ).dt.tz_localize(None)
@@ -1605,7 +1607,7 @@ def _refund_buckets_for_platform(
                 if q <= 0:
                     continue
                 total += q
-                d = str(txn_reporting_naive_ist(row["TxnDate"]).normalize())[:10]
+                d = str(txn_reporting_naive_ist(row["TxnDate"]).iloc[0].normalize())[:10]
                 by_day[d] = by_day.get(d, 0) + q
                 by_month[d[:7]] = by_month.get(d[:7], 0) + q
 
@@ -1670,7 +1672,8 @@ def merge_return_data_into_platform_summaries(
         return summaries
     sales = sales_df
     if sales is not None and not sales.empty and (start_date or end_date):
-        sales = _slice_sales_for_bundle(sales, start_date, end_date)
+        if "TxnDate" in sales.columns:
+            sales = _filter_by_reporting_days(sales, "TxnDate", start_date, end_date)
     out: List[dict] = []
     for card in summaries:
         name = str(card.get("platform") or "")

@@ -875,6 +875,33 @@ def _resolve_bundle_platform_frames(
     return tuple(out)
 
 
+def _hydrate_session_for_intelligence(sess: AppSession) -> bool:
+    """
+    Synchronously copy warm-cache platform/sales frames into the session before
+    Intelligence builds metrics. The bundle must not rely on async coverage hydrate.
+    """
+    try:
+        import backend.main as _main
+
+        if _main.session_needs_operational_data(sess):
+            _main.force_restore_session_from_server_cache(
+                sess, _main._warm_cache_generation
+            )
+    except Exception:
+        pass
+    _ensure_sku_mapping_for_dashboard(sess)
+    if _session_has_platform_data(sess) and (
+        getattr(sess, "sales_df", None) is None
+        or not hasattr(sess.sales_df, "empty")
+        or sess.sales_df.empty
+    ):
+        try:
+            _ensure_sales_rebuilt(sess)
+        except Exception:
+            pass
+    return _session_has_operational_frames(sess)
+
+
 def _build_platform_summary_for_bundle(
     sess: AppSession,
     mtr_b,
@@ -1036,6 +1063,8 @@ def _intelligence_payload_from_tier3_direct(
     end_date: str,
     limit: int,
     basis: Optional[str],
+    *,
+    platforms: Optional[list[str]] = None,
 ) -> tuple:
     """
     Build dashboard metrics straight from Tier-3 SQLite (Upload tab source of truth).
@@ -1051,7 +1080,7 @@ def _intelligence_payload_from_tier3_direct(
 
     s = str(start_date)[:10]
     e = str(end_date)[:10]
-    uploaded = set(platforms_with_uploads_in_range(s, e))
+    uploaded = set(platforms or platforms_with_uploads_in_range(s, e))
     all_frames = _load_tier3_frames_for_platforms(
         sorted(uploaded), s, e, dedup=False, columns_only=True
     )
@@ -1170,12 +1199,31 @@ def _tier3_direct_has_units(
 
     s = str(start_date)[:10]
     e = str(end_date)[:10]
-    if not platforms_with_uploads_in_range(s, e):
-        return None
-    out = _intelligence_payload_from_tier3_direct(sess, s, e, limit, basis)
+    uploaded = platforms_with_uploads_in_range(s, e)
+    if not uploaded:
+        # Metadata overlap query can lag; still attempt all channels for the window.
+        uploaded = ["amazon", "myntra", "meesho", "flipkart", "snapdeal"]
+    out = _intelligence_payload_from_tier3_direct(sess, s, e, limit, basis, platforms=uploaded)
     if int(out[0].get("total_units") or 0) <= 0:
         return None
     return out
+
+
+def _intelligence_warming_payload(message: str = "Loading marketplace data on the server…") -> dict:
+    return {
+        "status": "warming",
+        "message": message,
+        "sales_summary": {
+            "total_units": 0,
+            "total_returns": 0,
+            "net_units": 0,
+            "return_rate": 0.0,
+        },
+        "platform_summary": [],
+        "top_skus": [],
+        "anomalies": [],
+        "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
+    }
 
 
 def _build_intelligence_bundle_payload_from_session(
@@ -1187,35 +1235,78 @@ def _build_intelligence_bundle_payload_from_session(
     include_extras: bool,
 ) -> dict | None:
     """
-    Fast path: unified sales + in-memory platform frames (warm cache).
-    Avoids loading Tier-3 parquet blobs on every Intelligence GET.
+    Session + Tier-3 auto-pull (``_auto_dashboard_bundle_data``) for Intelligence cards.
     """
     import pandas as pd
     from ..services.sales import (
+        apply_upload_report_day_gate,
         get_anomalies,
         get_dsr_brand_monthly_comparison,
+        get_platform_summary,
         get_top_skus,
+        merge_return_data_into_platform_summaries,
     )
 
-    if not _session_has_operational_frames(sess):
-        return None
+    _hydrate_session_for_intelligence(sess)
 
     s = str(start_date)[:10]
     e = str(end_date)[:10]
-    sales_slice = _slice_sales_for_bundle(sess.sales_df, s, e)
-    mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b = _resolve_bundle_platform_frames(
-        sess, s, e
+
+    sales_slice, mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b, _pulled = (
+        _auto_dashboard_bundle_data(sess, s, e)
     )
 
-    from ..services.sales import merge_return_data_into_platform_summaries
+    gated_sales = (
+        apply_upload_report_day_gate(sess.sales_df)
+        if getattr(sess, "sales_df", None) is not None
+        and hasattr(sess.sales_df, "empty")
+        and not sess.sales_df.empty
+        else pd.DataFrame()
+    )
+    win_gated = _slice_sales_for_bundle(gated_sales, s, e)
 
-    platform_summary = _build_platform_summary_for_bundle(
-        sess, mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b, s, e
+    if not win_gated.empty:
+        platform_summary = get_platform_summary(
+            mtr_b,
+            myntra_b,
+            meesho_b,
+            flipkart_b,
+            snapdeal_b,
+            start_date=s,
+            end_date=e,
+            sales_df=gated_sales,
+        )
+    else:
+        platform_summary = get_platform_summary(
+            mtr_b,
+            myntra_b,
+            meesho_b,
+            flipkart_b,
+            snapdeal_b,
+            start_date=s,
+            end_date=e,
+            sales_df=None,
+        )
+
+    if not _platform_summary_has_units(platform_summary):
+        platform_summary = _build_platform_summary_for_bundle(
+            sess, mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b, s, e
+        )
+
+    if not _platform_summary_has_units(platform_summary):
+        t3_tuple = _tier3_direct_has_units(s, e, sess, limit, basis)
+        if t3_tuple is not None:
+            platform_summary = list(t3_tuple[1])
+            sales_slice = t3_tuple[2] if not t3_tuple[2].empty else sales_slice
+    sales_for_returns = (
+        win_gated
+        if win_gated is not None and not win_gated.empty
+        else sales_slice
     )
     platform_summary = merge_return_data_into_platform_summaries(
         platform_summary,
         getattr(sess, "po_return_overlay_df", None),
-        sess.sales_df,
+        sales_for_returns if sales_for_returns is not None and not sales_for_returns.empty else None,
         s,
         e,
         fallback_as_of=str(getattr(sess, "return_overlay_as_of", "") or "")[:10] or None,
@@ -1278,6 +1369,8 @@ def _build_intelligence_bundle_payload_from_session(
     else:
         payload["anomalies"] = []
         payload["dsr_brand_monthly"] = {"rows": [], "totals": {}, "note": ""}
+    if not _bundle_payload_has_display_data(payload):
+        return None
     return payload
 
 
@@ -2465,14 +2558,9 @@ def intelligence_bundle(
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
     has_dates = bool(start_date or end_date)
+    _hydrate_session_for_intelligence(sess)
     if sess.sales_df.empty and not _session_has_platform_data(sess):
-        try:
-            import backend.main as _main
-
-            if _main.session_needs_operational_data(sess):
-                _maybe_queue_light_session_hydrate(sess, sid or None)
-        except Exception:
-            pass
+        _maybe_queue_light_session_hydrate(sess, sid or None)
 
     cache_key = (
         str(start_date or ""),
@@ -2581,15 +2669,9 @@ def intelligence_bundle(
             "busy": busy,
         }
 
-    payload = {
-        "sales_summary": {"total_units": 0, "total_returns": 0, "net_units": 0, "return_rate": 0.0},
-        "platform_summary": [],
-        "top_skus": [],
-        "anomalies": [],
-        "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
-        "status": "ready",
-    }
-    return payload
+    return _intelligence_warming_payload(
+        "Marketplace data is still loading — retrying shortly."
+    )
 
 
 @router.get("/sales-export")
