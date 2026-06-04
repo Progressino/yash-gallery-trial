@@ -131,7 +131,11 @@ function ProtectedRoute() {
         }
         const hasAnyPlatform =
           coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart || coverage.snapdeal
-        if (coverageEmpty(coverage) && !hasAnyPlatform) {
+        const needsWarmHydrate =
+          !coverage.sales ||
+          [coverage.myntra, coverage.meesho, coverage.flipkart, coverage.snapdeal].filter(Boolean)
+            .length < 2
+        if ((coverageEmpty(coverage) && !hasAnyPlatform) || needsWarmHydrate) {
           try {
             await withTimeout(cacheHydrateWarm(), 90_000)
             coverage = await getCoverage({ light: true, timeout: 20_000 })

@@ -98,6 +98,16 @@ export function canSkipHeavyServerRestore(
   if (Date.now() - hint.savedAt > hintTtlMs()) return false
   if (coverage.pause_auto_data_restore) return false
   if (!sessionLooksLoaded(coverage)) return false
+  // Partial load (e.g. Amazon only) — always run hydrate-warm for unified sales + all channels.
+  if (!coverage.sales) return false
+  const platformCount = [
+    coverage.mtr,
+    coverage.myntra,
+    coverage.meesho,
+    coverage.flipkart,
+    coverage.snapdeal,
+  ].filter(Boolean).length
+  if (platformCount < 3) return false
   if (coverage.inventory_upload_status === 'running') return false
   if (coverage.daily_auto_ingest_status === 'running') return false
   if (coverage.sales_rebuild === 'running') return false

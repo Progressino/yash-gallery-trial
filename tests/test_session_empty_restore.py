@@ -5,6 +5,7 @@ import pytest
 from backend.main import (
     force_restore_session_from_server_cache,
     session_needs_operational_data,
+    session_needs_warm_cache_topup,
 )
 from backend.session import AppSession, wipe_app_session
 
@@ -38,6 +39,13 @@ def warm_cache_sample(monkeypatch):
 def test_session_needs_operational_data_empty():
     sess = AppSession()
     assert session_needs_operational_data(sess) is True
+
+
+def test_session_needs_topup_when_sales_empty_but_mtr_loaded(warm_cache_sample):
+    sess = AppSession()
+    sess.mtr_df = pd.DataFrame({"SKU": ["A"], "Qty": [1]})
+    assert session_needs_operational_data(sess) is False
+    assert session_needs_warm_cache_topup(sess) is True
 
 
 def test_force_restore_ignores_pause(warm_cache_sample):

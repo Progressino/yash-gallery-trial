@@ -911,10 +911,15 @@ def _hydrate_session_for_intelligence(sess: AppSession) -> bool:
     try:
         import backend.main as _main
 
-        if _main.session_needs_operational_data(sess):
-            _main.force_restore_session_from_server_cache(
-                sess, _main._warm_cache_generation
-            )
+        if _main.session_needs_warm_cache_topup(sess):
+            if _main.session_needs_operational_data(sess):
+                _main.force_restore_session_from_server_cache(
+                    sess, _main._warm_cache_generation
+                )
+            else:
+                _main._apply_warm_cache_if_needed(
+                    sess, _main._warm_cache_generation
+                )
     except Exception:
         pass
     _ensure_sku_mapping_for_dashboard(sess)
@@ -2374,10 +2379,15 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
         try:
             import backend.main as _main
 
-            if _main.session_needs_operational_data(sess):
-                _main.force_restore_session_from_server_cache(
-                    sess, _main._warm_cache_generation,
-                )
+            if _main.session_needs_warm_cache_topup(sess):
+                if _main.session_needs_operational_data(sess):
+                    _main.force_restore_session_from_server_cache(
+                        sess, _main._warm_cache_generation,
+                    )
+                else:
+                    _main._apply_warm_cache_if_needed(
+                        sess, _main._warm_cache_generation,
+                    )
         except Exception:
             _log.exception("light hydrate warm copy failed session=%s", session_id[:8])
         if not sess._daily_restore_lock.acquire(blocking=False):
@@ -2439,6 +2449,15 @@ def get_coverage(request: Request, light: bool = False):
         pass
 
     if light:
+        try:
+            import backend.main as _main
+
+            if _main.session_needs_warm_cache_topup(sess):
+                _main._apply_warm_cache_if_needed(
+                    sess, _main._warm_cache_generation
+                )
+        except Exception:
+            pass
         _maybe_queue_light_session_hydrate(sess, sid or None)
         return _build_coverage_response(sess)
 
@@ -2663,6 +2682,34 @@ def intelligence_bundle(
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
     has_dates = bool(start_date or end_date)
+    _ensure_sku_mapping_for_dashboard(sess)
+
+    span_days = _report_span_days(start_date, end_date)
+    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
+    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
+
+    # Tier-3 direct first — fast path that does not wait on warm-cache copy.
+    if has_dates and len(s_win) == 10 and len(e_win) == 10:
+        tier3_immediate = _build_intelligence_bundle_payload_from_tier3(
+            sess, s_win, e_win, limit, basis, include_extras
+        )
+        if tier3_immediate and _bundle_payload_has_display_data(tier3_immediate):
+            cache_key_early = (
+                str(start_date or ""),
+                str(end_date or ""),
+                str(basis or "gross"),
+                int(limit),
+                bool(include_extras),
+            )
+            bundle_cache_early = getattr(sess, "_intelligence_bundle_cache", None)
+            if bundle_cache_early is None:
+                bundle_cache_early = {}
+                sess._intelligence_bundle_cache = bundle_cache_early
+            _bundle_cache_store(
+                cache_key_early, bundle_cache_early, tier3_immediate, ts=time.time()
+            )
+            return tier3_immediate
+
     _hydrate_session_for_intelligence(sess)
     if sess.sales_df.empty and not _session_has_platform_data(sess):
         _maybe_queue_light_session_hydrate(sess, sid or None)
@@ -2687,10 +2734,7 @@ def intelligence_bundle(
             _schedule_intelligence_refresh_async(sid or None)
         return cached_payload
 
-    span_days = _report_span_days(start_date, end_date)
     fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
-    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
-    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
 
     _schedule_intelligence_refresh_async(sid or None)
 

@@ -146,6 +146,33 @@ def session_needs_operational_data(sess) -> bool:
     return True
 
 
+def session_needs_warm_cache_topup(sess) -> bool:
+    """True when session is empty, missing unified sales, or warm cache has more platforms."""
+    if session_needs_operational_data(sess):
+        return True
+    sales = getattr(sess, "sales_df", None)
+    if sales is None or (hasattr(sales, "empty") and sales.empty):
+        return True
+    if not _warm_cache:
+        return False
+    for key in (
+        "mtr_df",
+        "myntra_df",
+        "meesho_df",
+        "flipkart_df",
+        "snapdeal_df",
+        "sales_df",
+        "inventory_df_variant",
+    ):
+        wc = _warm_cache.get(key)
+        cur = getattr(sess, key, None)
+        wc_ok = wc is not None and hasattr(wc, "empty") and not wc.empty
+        cur_ok = cur is not None and hasattr(cur, "empty") and not cur.empty
+        if wc_ok and not cur_ok:
+            return True
+    return False
+
+
 def force_restore_session_from_server_cache(sess, warm_cache_generation: int) -> bool:
     """
     Fill an empty session from warm cache even when ``pause_auto_data_restore`` is set
