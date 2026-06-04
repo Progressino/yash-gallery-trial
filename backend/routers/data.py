@@ -778,10 +778,22 @@ def _platform_df_for_intelligence_bundle(
         columns_only=True,
     )
     if t3.empty:
+        t3 = load_platform_data_for_report_range(
+            platform_key,
+            gap_start,
+            e,
+            dedup=False,
+            columns_only=False,
+        )
+    if t3.empty:
         return raw
     if in_w.empty:
-        return t3
-    return merge_platform_data(raw, t3, platform_key)
+        merged = t3
+    else:
+        merged = merge_platform_data(raw, t3, platform_key)
+    if _filter_platform_df_by_window(merged, s, e).empty and not in_w.empty:
+        return raw
+    return merged if not merged.empty else raw
 
 
 def _filter_platform_df_by_window(
@@ -820,6 +832,98 @@ def _bundle_payload_has_display_data(payload: dict) -> bool:
         p.get("loaded") and int(p.get("total_units") or 0) > 0
         for p in (payload.get("platform_summary") or [])
     )
+
+
+def _platform_summary_has_units(platform_summary: list) -> bool:
+    return any(int(p.get("total_units") or 0) > 0 for p in (platform_summary or []))
+
+
+def _session_platform_frame(sess: AppSession, attr: str) -> "pd.DataFrame":
+    import pandas as pd
+
+    raw = getattr(sess, attr, None)
+    if raw is None or not hasattr(raw, "empty"):
+        return pd.DataFrame()
+    return raw
+
+
+def _resolve_bundle_platform_frames(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+) -> tuple:
+    """Gap-filled session frames; fall back to raw session when gap-fill yields no window rows."""
+    specs = (
+        ("amazon", "mtr_df"),
+        ("myntra", "myntra_df"),
+        ("meesho", "meesho_df"),
+        ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
+    )
+    out = []
+    for pk, attr in specs:
+        raw = _session_platform_frame(sess, attr)
+        aug = _platform_df_for_intelligence_bundle(sess, pk, attr, start_date, end_date)
+        in_aug = _filter_platform_df_by_window(aug, start_date, end_date)
+        in_raw = _filter_platform_df_by_window(raw, start_date, end_date)
+        if not in_aug.empty:
+            out.append(aug if not aug.empty else raw)
+        elif not in_raw.empty:
+            out.append(raw)
+        else:
+            out.append(aug if not aug.empty else raw)
+    return tuple(out)
+
+
+def _build_platform_summary_for_bundle(
+    sess: AppSession,
+    mtr_b,
+    myntra_b,
+    meesho_b,
+    flipkart_b,
+    snapdeal_b,
+    start_date: str,
+    end_date: str,
+) -> list:
+    """Platform cards from session/Tier-3 frames, with unified-sales fallback."""
+    from ..services.sales import apply_upload_report_day_gate, get_platform_summary
+
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    kwargs = dict(start_date=s, end_date=e)
+    platform_summary = get_platform_summary(
+        mtr_b,
+        myntra_b,
+        meesho_b,
+        flipkart_b,
+        snapdeal_b,
+        sales_df=None,
+        **kwargs,
+    )
+    if _platform_summary_has_units(platform_summary):
+        return platform_summary
+
+    direct = (
+        _session_platform_frame(sess, "mtr_df"),
+        _session_platform_frame(sess, "myntra_df"),
+        _session_platform_frame(sess, "meesho_df"),
+        _session_platform_frame(sess, "flipkart_df"),
+        _session_platform_frame(sess, "snapdeal_df"),
+    )
+    platform_summary = get_platform_summary(*direct, sales_df=None, **kwargs)
+    if _platform_summary_has_units(platform_summary):
+        return platform_summary
+
+    sales = apply_upload_report_day_gate(sess.sales_df)
+    if sales is not None and not sales.empty:
+        platform_summary = get_platform_summary(*direct, sales_df=sales, **kwargs)
+        if _platform_summary_has_units(platform_summary):
+            return platform_summary
+
+    t3_tuple = _tier3_direct_has_units(s, e, sess, 10, "gross")
+    if t3_tuple is not None:
+        return list(t3_tuple[1])
+    return platform_summary
 
 
 def _schedule_persist_tier3_window(
@@ -951,6 +1055,10 @@ def _intelligence_payload_from_tier3_direct(
     all_frames = _load_tier3_frames_for_platforms(
         sorted(uploaded), s, e, dedup=False, columns_only=True
     )
+    if not all_frames:
+        all_frames = _load_tier3_frames_for_platforms(
+            sorted(uploaded), s, e, dedup=False, columns_only=False
+        )
 
     metrics_specs = (
         ("amazon", "Amazon", "Date", "SKU", "Transaction_Type"),
@@ -1086,8 +1194,6 @@ def _build_intelligence_bundle_payload_from_session(
     from ..services.sales import (
         get_anomalies,
         get_dsr_brand_monthly_comparison,
-        get_platform_summary,
-        get_sales_summary,
         get_top_skus,
     )
 
@@ -1097,26 +1203,14 @@ def _build_intelligence_bundle_payload_from_session(
     s = str(start_date)[:10]
     e = str(end_date)[:10]
     sales_slice = _slice_sales_for_bundle(sess.sales_df, s, e)
-    mtr_b = _platform_df_for_intelligence_bundle(sess, "amazon", "mtr_df", s, e)
-    myntra_b = _platform_df_for_intelligence_bundle(sess, "myntra", "myntra_df", s, e)
-    meesho_b = _platform_df_for_intelligence_bundle(sess, "meesho", "meesho_df", s, e)
-    flipkart_b = _platform_df_for_intelligence_bundle(sess, "flipkart", "flipkart_df", s, e)
-    snapdeal_b = _platform_df_for_intelligence_bundle(sess, "snapdeal", "snapdeal_df", s, e)
+    mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b = _resolve_bundle_platform_frames(
+        sess, s, e
+    )
 
-    # Platform cards from Tier-3-augmented session frames (not unified sales alone).
-    # Unified sales_df often lags daily uploads — using it hid Amazon/Flipkart after ~May 29
-    # while Myntra still showed via MYNTRA_OVERVIEW_USE_RAW.
     from ..services.sales import merge_return_data_into_platform_summaries
 
-    platform_summary = get_platform_summary(
-        mtr_b,
-        myntra_b,
-        meesho_b,
-        flipkart_b,
-        snapdeal_b,
-        start_date=s,
-        end_date=e,
-        sales_df=None,
+    platform_summary = _build_platform_summary_for_bundle(
+        sess, mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b, s, e
     )
     platform_summary = merge_return_data_into_platform_summaries(
         platform_summary,
@@ -2400,6 +2494,7 @@ def intelligence_bundle(
         and not _cached_bundle_stale_vs_tier3_uploads(
             cached.get("payload") or {}, start_date, end_date
         )
+        and _bundle_payload_has_display_data(cached.get("payload") or {})
     ):
         _schedule_intelligence_refresh_async(sid or None)
         return cached["payload"]
@@ -2424,7 +2519,7 @@ def intelligence_bundle(
             tier3_payload = _build_intelligence_bundle_payload_from_tier3(
                 sess, s_win, e_win, limit, basis, include_extras
             )
-            if tier3_payload is not None:
+            if tier3_payload and _bundle_payload_has_display_data(tier3_payload):
                 from ..services.daily_store import platforms_with_uploads_in_range
 
                 need_persist = platforms_with_uploads_in_range(s_win, e_win)
@@ -2432,10 +2527,6 @@ def intelligence_bundle(
                     _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
                 bundle_cache[cache_key] = {"_ts": now, "payload": tier3_payload}
                 return tier3_payload
-
-        if session_payload is not None:
-            bundle_cache[cache_key] = {"_ts": now, "payload": session_payload}
-            return session_payload
 
         from ..services.daily_store import platforms_with_uploads_in_range
 
@@ -2452,9 +2543,17 @@ def intelligence_bundle(
             basis,
             include_extras,
         )
-        if session_payload is not None:
+        if session_payload is not None and _bundle_payload_has_display_data(session_payload):
             bundle_cache[cache_key] = {"_ts": now, "payload": session_payload}
             return session_payload
+
+    if has_dates and len(s_win) == 10 and len(e_win) == 10:
+        tier3_any = _build_intelligence_bundle_payload_from_tier3(
+            sess, s_win, e_win, limit, basis, include_extras
+        )
+        if tier3_any and _bundle_payload_has_display_data(tier3_any):
+            bundle_cache[cache_key] = {"_ts": now, "payload": tier3_any}
+            return tier3_any
 
     if not _session_has_operational_frames(sess):
         busy = any(
@@ -2490,7 +2589,6 @@ def intelligence_bundle(
         "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
         "status": "ready",
     }
-    bundle_cache[cache_key] = {"_ts": now, "payload": payload}
     return payload
 
 
