@@ -69,6 +69,12 @@ def test_infer_return_platform_from_filename():
     assert _infer_return_platform_from_filename("BusinessReport-Amazon Return.csv") == "amazon"
     assert _infer_return_platform_from_filename("Myntra Return.csv") == "myntra"
     assert _infer_return_platform_from_filename("Flipkart Return.xlsx") == "flipkart"
+    assert (
+        _infer_return_platform_from_filename(
+            "Akiko Flipkart Return/431fe84d-60b4-491a-8dc6-429aee17f3a3.xlsx"
+        )
+        == "flipkart"
+    )
 
 
 def test_meesho_csv_header_skip():

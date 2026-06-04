@@ -469,14 +469,14 @@ def parse_return_upload_bytes(
     for inner_name, inner_raw in members:
         if _skip_return_archive_member(inner_name):
             continue
-        base = inner_name.split("/")[-1]
+        # Keep archive path (e.g. "Akiko Flipkart Return/foo.xlsx") for platform detection.
         part, err = _parse_single_return_file(
-            inner_raw, base, sku_mapping=sku_mapping
+            inner_raw, inner_name.replace("\\", "/"), sku_mapping=sku_mapping
         )
         if part is not None and not part.empty:
             frames.append(part)
         elif err:
-            errors.append(f"{base}: {err}")
+            errors.append(f"{inner_name.split('/')[-1]}: {err}")
 
     if not frames:
         detail = "; ".join(errors[:4]) if errors else "No return rows found."
