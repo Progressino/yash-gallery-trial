@@ -703,6 +703,87 @@ def _slice_sales_for_bundle(
     return apply_upload_report_day_gate(clipped)
 
 
+def _platform_max_reporting_day_in_window(
+    df: "pd.DataFrame",
+    start_date: str,
+    end_date: str,
+    *,
+    date_col: str = "Date",
+) -> str:
+    """Latest reporting day present in a platform frame within ``[start, end]``."""
+    import pandas as pd
+
+    w = _filter_platform_df_by_window(df, start_date, end_date, date_col=date_col)
+    if w.empty:
+        return ""
+    col = "_Date" if "_Date" in w.columns else date_col
+    if col not in w.columns:
+        return ""
+    t = txn_reporting_naive_ist(pd.to_datetime(w[col], errors="coerce")).dropna()
+    if t.empty:
+        return ""
+    return str(t.max().normalize())[:10]
+
+
+def _platform_df_for_intelligence_bundle(
+    sess: AppSession,
+    platform_key: str,
+    attr: str,
+    start_date: str,
+    end_date: str,
+) -> "pd.DataFrame":
+    """
+    Session platform frame plus Tier-3 gap-fill when uploads extend past session data
+    (e.g. daily files saved through June while warm-cache session stops at May 29).
+    """
+    import pandas as pd
+    from ..services.daily_store import (
+        load_platform_data_for_report_range,
+        merge_platform_data,
+        platforms_with_uploads_in_range,
+    )
+
+    raw = getattr(sess, attr, None)
+    if raw is None or not hasattr(raw, "empty"):
+        raw = pd.DataFrame()
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    if len(s) != 10 or len(e) != 10:
+        return raw
+    if platform_key not in platforms_with_uploads_in_range(s, e):
+        return raw
+
+    in_w = _filter_platform_df_by_window(raw, s, e)
+    sess_max = _platform_max_reporting_day_in_window(raw, s, e)
+    need_topup = in_w.empty or (bool(sess_max) and sess_max < e)
+    if not need_topup:
+        return raw
+
+    gap_start = s
+    if sess_max and sess_max < e:
+        try:
+            gap_start = (
+                pd.Timestamp(sess_max) + pd.Timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+        except Exception:
+            gap_start = s
+    if gap_start > e:
+        return raw
+
+    t3 = load_platform_data_for_report_range(
+        platform_key,
+        gap_start,
+        e,
+        dedup=False,
+        columns_only=True,
+    )
+    if t3.empty:
+        return raw
+    if in_w.empty:
+        return t3
+    return merge_platform_data(raw, t3, platform_key)
+
+
 def _filter_platform_df_by_window(
     df: "pd.DataFrame",
     start_date: str,
@@ -1016,12 +1097,15 @@ def _build_intelligence_bundle_payload_from_session(
     s = str(start_date)[:10]
     e = str(end_date)[:10]
     sales_slice = _slice_sales_for_bundle(sess.sales_df, s, e)
-    mtr_b = _filter_platform_df_by_window(sess.mtr_df, s, e)
-    myntra_b = _filter_platform_df_by_window(sess.myntra_df, s, e)
-    meesho_b = _filter_platform_df_by_window(sess.meesho_df, s, e)
-    flipkart_b = _filter_platform_df_by_window(sess.flipkart_df, s, e)
-    snapdeal_b = _filter_platform_df_by_window(sess.snapdeal_df, s, e)
+    mtr_b = _platform_df_for_intelligence_bundle(sess, "amazon", "mtr_df", s, e)
+    myntra_b = _platform_df_for_intelligence_bundle(sess, "myntra", "myntra_df", s, e)
+    meesho_b = _platform_df_for_intelligence_bundle(sess, "meesho", "meesho_df", s, e)
+    flipkart_b = _platform_df_for_intelligence_bundle(sess, "flipkart", "flipkart_df", s, e)
+    snapdeal_b = _platform_df_for_intelligence_bundle(sess, "snapdeal", "snapdeal_df", s, e)
 
+    # Platform cards from Tier-3-augmented session frames (not unified sales alone).
+    # Unified sales_df often lags daily uploads — using it hid Amazon/Flipkart after ~May 29
+    # while Myntra still showed via MYNTRA_OVERVIEW_USE_RAW.
     platform_summary = get_platform_summary(
         mtr_b,
         myntra_b,
@@ -1030,31 +1114,30 @@ def _build_intelligence_bundle_payload_from_session(
         snapdeal_b,
         start_date=s,
         end_date=e,
-        sales_df=sales_slice if not sales_slice.empty else None,
+        sales_df=None,
     )
-    if not sales_slice.empty:
-        sales_summary = get_sales_summary(sales_slice, months=0)
-        top_skus = get_top_skus(
+    shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
+    returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
+    net = sum(int(p.get("net_units") or 0) for p in platform_summary)
+    rate = round(returned / shipped * 100, 1) if shipped > 0 else 0.0
+    sales_summary = {
+        "total_units": shipped,
+        "total_returns": returned,
+        "net_units": net,
+        "return_rate": rate,
+    }
+    top_skus = (
+        get_top_skus(
             sales_slice,
             limit=limit,
             start_date=None,
             end_date=None,
             basis=basis or "gross",
         )
-        sales_for_extras = sales_slice
-    else:
-        shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
-        returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
-        net = sum(int(p.get("net_units") or 0) for p in platform_summary)
-        rate = round(returned / shipped * 100, 1) if shipped > 0 else 0.0
-        sales_summary = {
-            "total_units": shipped,
-            "total_returns": returned,
-            "net_units": net,
-            "return_rate": rate,
-        }
-        top_skus = []
-        sales_for_extras = pd.DataFrame()
+        if not sales_slice.empty
+        else []
+    )
+    sales_for_extras = sales_slice if not sales_slice.empty else pd.DataFrame()
 
     span_days = _report_span_days(s, e)
     fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()

@@ -1582,7 +1582,12 @@ def _platform_summaries_from_unified_bulk(
         ("Snapdeal", snapdeal_df),
     ]
     if sales_df.empty or "Source" not in sales_df.columns:
-        return [_unified_platform_stub(name, not raw.empty) for name, raw in order]
+        return [
+            _unified_platform_summary_one(
+                pd.DataFrame(), name, raw, start_date, end_date
+            )
+            for name, raw in order
+        ]
 
     prep = sales_df.copy()
     prep["TxnDate"] = txn_reporting_naive_ist(prep["TxnDate"])
@@ -1590,7 +1595,12 @@ def _platform_summaries_from_unified_bulk(
     if start_date or end_date:
         prep = _filter_by_reporting_days(prep, "TxnDate", start_date, end_date)
     if prep.empty:
-        return [_unified_platform_stub(name, not raw.empty) for name, raw in order]
+        return [
+            _unified_platform_summary_one(
+                pd.DataFrame(), name, raw, start_date, end_date
+            )
+            for name, raw in order
+        ]
 
     src_key = prep["Source"].astype(str).str.strip()
     parts: dict[str, pd.DataFrame] = {}
