@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional, Tuple
 
 import pandas as pd
@@ -11,6 +12,14 @@ logger = logging.getLogger(__name__)
 # Indian FY quarters need ~2 years of shipments for 8 quarter columns.
 _MIN_SPAN_DAYS_FOR_QUARTERLY = 540
 _MIN_PLATFORM_ROWS_FOR_REBUILD = 5000
+
+_PLATFORM_ATTRS = (
+    ("amazon", "mtr_df"),
+    ("myntra", "myntra_df"),
+    ("meesho", "meesho_df"),
+    ("flipkart", "flipkart_df"),
+    ("snapdeal", "snapdeal_df"),
+)
 
 
 def sales_df_span_days(sales_df: pd.DataFrame) -> int:
@@ -23,6 +32,93 @@ def sales_df_span_days(sales_df: pd.DataFrame) -> int:
     return int((t.max() - t.min()).days)
 
 
+def platform_frames_span_days(sess) -> int:
+    """Max calendar span across session platform bulk frames."""
+    from .platform_session_window import platform_date_column
+
+    best = 0
+    for _plat, attr in _PLATFORM_ATTRS:
+        df = getattr(sess, attr, None)
+        if df is None or getattr(df, "empty", True):
+            continue
+        col = platform_date_column(df)
+        if not col:
+            continue
+        t = pd.to_datetime(df[col], errors="coerce").dropna()
+        if t.empty:
+            continue
+        best = max(best, int((t.max() - t.min()).days))
+    return best
+
+
+def quarterly_restore_months(n_quarters: int) -> int | None:
+    """
+    Tier-3 months to load before building quarterly columns.
+    ``None`` = full platform history (recommended for 8-quarter PO view).
+    """
+    raw = (os.environ.get("QUARTERLY_RESTORE_MONTHS") or "").strip()
+    if raw == "0":
+        return None
+    if raw:
+        try:
+            v = int(raw)
+            return None if v <= 0 else v
+        except ValueError:
+            pass
+    # 8 Indian FY quarters ≈ 24 months; add buffer for partial current quarter.
+    return max(26, int(n_quarters) * 3 + 2)
+
+
+def restore_platform_history_for_quarterly(sess, n_quarters: int = 8) -> bool:
+    """
+    Merge Tier-3 SQLite uploads into session platform frames deep enough for PO
+    quarterly columns (default AUTO_RESTORE is only 12 months).
+    """
+    from ..services.daily_store import load_platform_data, merge_platform_data
+    from .sales import build_sales_df
+
+    months = quarterly_restore_months(n_quarters)
+    changed = False
+    for platform, attr in _PLATFORM_ATTRS:
+        df = load_platform_data(platform, months=months, dedup=False, max_files=None)
+        if df.empty:
+            continue
+        cur = getattr(sess, attr, None)
+        if cur is None or not hasattr(cur, "empty"):
+            cur = pd.DataFrame()
+        merged = merge_platform_data(cur, df, platform)
+        if len(merged) != len(cur) or (cur.empty and not merged.empty):
+            setattr(sess, attr, merged)
+            changed = True
+
+    if not changed:
+        return False
+
+    try:
+        from ..services.sku_mapping import restore_sku_mapping_to_session
+
+        restore_sku_mapping_to_session(sess)
+    except Exception:
+        pass
+
+    sess.sales_df = build_sales_df(
+        getattr(sess, "mtr_df", pd.DataFrame()),
+        getattr(sess, "myntra_df", pd.DataFrame()),
+        getattr(sess, "meesho_df", pd.DataFrame()),
+        getattr(sess, "flipkart_df", pd.DataFrame()),
+        sess.sku_mapping or {},
+        snapdeal=getattr(sess, "snapdeal_df", pd.DataFrame()),
+        return_overlay_df=getattr(sess, "po_return_overlay_df", None),
+    )
+    sess._quarterly_cache.clear()
+    logger.info(
+        "Quarterly: merged Tier-3 history (months=%s); sales_df span=%d days",
+        months if months is not None else "all",
+        sales_df_span_days(sess.sales_df),
+    )
+    return True
+
+
 def ensure_sales_history_for_quarterly(sess) -> bool:
     """
     When unified sales_df only has recent daily uploads but platform bulk frames
@@ -33,7 +129,8 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
         return False
 
     span = sales_df_span_days(getattr(sess, "sales_df", None))
-    if span >= _MIN_SPAN_DAYS_FOR_QUARTERLY:
+    plat_span = platform_frames_span_days(sess)
+    if span >= _MIN_SPAN_DAYS_FOR_QUARTERLY and plat_span <= span + 30:
         return False
 
     mtr = getattr(sess, "mtr_df", None)
@@ -47,14 +144,15 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
         for df in (mtr, myntra, meesho, flipkart, snapdeal)
         if df is not None and not getattr(df, "empty", True)
     )
-    if bulk_rows < _MIN_PLATFORM_ROWS_FOR_REBUILD:
+    if bulk_rows < _MIN_PLATFORM_ROWS_FOR_REBUILD and plat_span < _MIN_SPAN_DAYS_FOR_QUARTERLY:
         return False
 
     from .sales import build_sales_df
 
     logger.info(
-        "Quarterly: sales_df span=%d days (< %d) with %s platform rows — rebuilding unified sales",
+        "Quarterly: sales_df span=%d platform_span=%d (< %d) with %s platform rows — rebuilding unified sales",
         span,
+        plat_span,
         _MIN_SPAN_DAYS_FOR_QUARTERLY,
         f"{bulk_rows:,}",
     )
@@ -68,11 +166,12 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
         return_overlay_df=getattr(sess, "po_return_overlay_df", None),
     )
     new_span = sales_df_span_days(rebuilt)
-    if rebuilt.empty or new_span <= span + 14:
+    if rebuilt.empty or (new_span <= span + 14 and plat_span <= span + 30):
         logger.warning(
-            "Quarterly sales rebuild did not widen history (old=%d new=%d rows=%d)",
+            "Quarterly sales rebuild did not widen history (old=%d new=%d platform=%d rows=%d)",
             span,
             new_span,
+            plat_span,
             len(rebuilt),
         )
         return False
@@ -98,12 +197,16 @@ def build_quarterly_payload(
     from .po_engine import calculate_quarterly_history
 
     _restore_daily_if_needed(sess)
+    restore_platform_history_for_quarterly(sess, n_quarters=n_quarters)
+    ensure_sales_history_for_quarterly(sess)
 
-    _boot = sess.sales_df.empty or "Sku" not in sess.sales_df.columns
     pivot = calculate_quarterly_history(
         sales_df=sess.sales_df,
-        mtr_df=sess.mtr_df if _boot and not sess.mtr_df.empty else None,
-        myntra_df=sess.myntra_df if _boot and not sess.myntra_df.empty else None,
+        mtr_df=sess.mtr_df,
+        myntra_df=sess.myntra_df,
+        meesho_df=sess.meesho_df,
+        flipkart_df=sess.flipkart_df,
+        snapdeal_df=sess.snapdeal_df,
         sku_mapping=sess.sku_mapping or None,
         group_by_parent=group_by_parent,
         n_quarters=n_quarters,
@@ -124,13 +227,13 @@ def warmup_quarterly_cache(
     n_quarters: int = 8,
 ) -> Tuple[dict[str, Any], bool]:
     """Populate session quarterly cache; returns (payload, sales_was_rebuilt)."""
-    rebuilt = ensure_sales_history_for_quarterly(sess)
     cache_key = (group_by_parent, n_quarters)
     if cache_key in sess._quarterly_cache and sess._quarterly_cache[cache_key].get("loaded"):
-        return sess._quarterly_cache[cache_key], rebuilt
+        return sess._quarterly_cache[cache_key], False
 
+    was_rebuilt = getattr(sess, "_quarterly_sales_rebuilt", False)
     result = build_quarterly_payload(
         sess, group_by_parent=group_by_parent, n_quarters=n_quarters
     )
     sess._quarterly_cache[cache_key] = result
-    return result, rebuilt
+    return result, bool(getattr(sess, "_quarterly_sales_rebuilt", False) and not was_rebuilt)

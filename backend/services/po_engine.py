@@ -64,6 +64,105 @@ def quarter_col_name(fy: int, q: int) -> str:
     return f"{_Q_LABELS[q]} {cal_year}"
 
 
+def _platform_shipment_history_part(
+    df: pd.DataFrame,
+    sku_mapping: Optional[Dict[str, str]],
+    *,
+    strip_pl: bool = False,
+    canonical_oms: bool = False,
+) -> pd.DataFrame:
+    """Normalize one platform frame to [SKU, Date, Qty, TxnType] shipment rows."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    sku_col = next((c for c in df.columns if c in ["OMS_SKU", "SKU", "Sku"]), None)
+    date_col = next((c for c in df.columns if c in ["Date", "TxnDate"]), None)
+    qty_col = next((c for c in df.columns if c in ["Quantity", "Qty"]), None)
+    txn_col = next(
+        (c for c in df.columns if c in ["Transaction_Type", "Transaction Type", "TxnType"]),
+        None,
+    )
+    if not sku_col or not date_col or not qty_col:
+        return pd.DataFrame()
+    tmp = df[[sku_col, date_col, qty_col]].copy()
+    tmp.columns = ["SKU", "Date", "Qty"]
+    tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
+    tmp["Qty"] = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
+    tmp["TxnType"] = df[txn_col].values if txn_col else "Shipment"
+    if strip_pl:
+        if sku_mapping:
+            tmp["SKU"] = tmp["SKU"].apply(lambda x: _strip_pl(x, sku_mapping))
+        else:
+            tmp["SKU"] = tmp["SKU"].apply(
+                lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper())
+            )
+    elif canonical_oms and sku_mapping:
+        _u = tmp["SKU"].unique()
+        _c = {s: canonical_oms_key(s, sku_mapping) for s in _u}
+        tmp["SKU"] = tmp["SKU"].map(_c)
+    return tmp.dropna(subset=["Date"])
+
+
+def _sales_shipment_history_part(sales_df: pd.DataFrame) -> pd.DataFrame:
+    if sales_df is None or sales_df.empty or "Sku" not in sales_df.columns:
+        return pd.DataFrame()
+    tmp = sales_df[["Sku", "TxnDate", "Quantity", "Transaction Type"]].copy()
+    tmp.columns = ["SKU", "Date", "Qty", "TxnType"]
+    tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
+    tmp["Qty"] = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
+    return tmp.dropna(subset=["Date"])
+
+
+def _collect_platform_shipment_history_parts(
+    mtr_df: Optional[pd.DataFrame],
+    myntra_df: Optional[pd.DataFrame],
+    meesho_df: Optional[pd.DataFrame],
+    flipkart_df: Optional[pd.DataFrame],
+    snapdeal_df: Optional[pd.DataFrame],
+    sku_mapping: Optional[Dict[str, str]],
+) -> list[pd.DataFrame]:
+    parts: list[pd.DataFrame] = []
+    for raw, strip_pl, canon in (
+        (mtr_df, True, False),
+        (myntra_df, False, True),
+        (meesho_df, False, True),
+        (flipkart_df, False, True),
+        (snapdeal_df, False, True),
+    ):
+        chunk = _platform_shipment_history_part(
+            raw, sku_mapping, strip_pl=strip_pl, canonical_oms=canon
+        )
+        if not chunk.empty:
+            parts.append(chunk)
+    return parts
+
+
+def _merge_sales_and_platform_history_parts(
+    sales_part: pd.DataFrame,
+    plat_parts: list[pd.DataFrame],
+) -> list[pd.DataFrame]:
+    """
+    Prefer unified sales for the overlapping window; add platform rows only for
+    dates outside unified coverage (avoids double-count while keeping deep history).
+    """
+    if not plat_parts:
+        return [sales_part] if sales_part is not None and not sales_part.empty else []
+    plat_hist = pd.concat(plat_parts, ignore_index=True)
+    if sales_part is None or sales_part.empty:
+        return [plat_hist]
+    smin = sales_part["Date"].min()
+    smax = sales_part["Date"].max()
+    pmin = plat_hist["Date"].min()
+    pmax = plat_hist["Date"].max()
+    sales_span = int((smax - smin).days) if pd.notna(smin) and pd.notna(smax) else 0
+    plat_span = int((pmax - pmin).days) if pd.notna(pmin) and pd.notna(pmax) else 0
+    if plat_span <= sales_span + 30 and pmin >= smin and pmax <= smax:
+        return [sales_part]
+    extras = plat_hist[(plat_hist["Date"] < smin) | (plat_hist["Date"] > smax)]
+    if extras.empty:
+        return [sales_part]
+    return [sales_part, extras]
+
+
 def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
     if mtr_df.empty:
         return pd.DataFrame()
@@ -86,54 +185,18 @@ def calculate_quarterly_history(
     sales_df: pd.DataFrame,
     mtr_df: Optional[pd.DataFrame] = None,
     myntra_df: Optional[pd.DataFrame] = None,
+    meesho_df: Optional[pd.DataFrame] = None,
+    flipkart_df: Optional[pd.DataFrame] = None,
+    snapdeal_df: Optional[pd.DataFrame] = None,
     sku_mapping: Optional[Dict[str, str]] = None,
     group_by_parent: bool = False,
     n_quarters: int = 8,
 ) -> pd.DataFrame:
-    parts = []
-
-    # Unified sales_df already contains Amazon + Myntra (via build_sales_df). Appending
-    # raw mtr_df / myntra_df on top doubled those channels in quarterly / Forecast.
-    if not sales_df.empty and "Sku" in sales_df.columns:
-        tmp = sales_df[["Sku", "TxnDate", "Quantity", "Transaction Type"]].copy()
-        tmp.columns = ["SKU", "Date", "Qty", "TxnType"]
-        tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
-        tmp["Qty"]  = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
-        parts.append(tmp.dropna(subset=["Date"]))
-    else:
-        # Bootstrap: no unified sales yet (e.g. SQLite-only) — stitch raw platform frames.
-        if mtr_df is not None and not mtr_df.empty:
-            mtr_sku_col  = next((c for c in mtr_df.columns if c in ["SKU", "Sku", "OMS_SKU"]),  None)
-            mtr_date_col = next((c for c in mtr_df.columns if c in ["Date", "TxnDate"]),         None)
-            mtr_qty_col  = next((c for c in mtr_df.columns if c in ["Quantity", "Qty"]),          None)
-            mtr_txn_col  = next((c for c in mtr_df.columns if c in ["Transaction_Type", "Transaction Type", "TxnType"]), None)
-            if mtr_sku_col and mtr_date_col and mtr_qty_col:
-                tmp = mtr_df[[mtr_sku_col, mtr_date_col, mtr_qty_col]].copy()
-                tmp.columns = ["SKU", "Date", "Qty"]
-                tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
-                tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
-                tmp["TxnType"] = mtr_df[mtr_txn_col].values if mtr_txn_col else "Shipment"
-                if sku_mapping:
-                    tmp["SKU"] = tmp["SKU"].apply(lambda x: _strip_pl(x, sku_mapping))
-                else:
-                    tmp["SKU"] = tmp["SKU"].apply(lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper()))
-                parts.append(tmp.dropna(subset=["Date"]))
-        if myntra_df is not None and not myntra_df.empty:
-            myn_sku_col  = next((c for c in myntra_df.columns if c in ["OMS_SKU", "Sku", "SKU"]), None)
-            myn_date_col = next((c for c in myntra_df.columns if c in ["Date", "TxnDate"]),        None)
-            myn_qty_col  = next((c for c in myntra_df.columns if c in ["Quantity", "Qty"]),        None)
-            myn_txn_col  = next((c for c in myntra_df.columns if c in ["TxnType", "Transaction Type"]), None)
-            if myn_sku_col and myn_date_col and myn_qty_col:
-                tmp = myntra_df[[myn_sku_col, myn_date_col, myn_qty_col]].copy()
-                tmp.columns = ["SKU", "Date", "Qty"]
-                tmp["Date"]    = pd.to_datetime(tmp["Date"], errors="coerce")
-                tmp["Qty"]     = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
-                tmp["TxnType"] = myntra_df[myn_txn_col].values if myn_txn_col else "Shipment"
-                if sku_mapping:
-                    _u = tmp["SKU"].unique()
-                    _c = {s: canonical_oms_key(s, sku_mapping) for s in _u}
-                    tmp["SKU"] = tmp["SKU"].map(_c)
-                parts.append(tmp.dropna(subset=["Date"]))
+    sales_part = _sales_shipment_history_part(sales_df)
+    plat_parts = _collect_platform_shipment_history_parts(
+        mtr_df, myntra_df, meesho_df, flipkart_df, snapdeal_df, sku_mapping
+    )
+    parts = _merge_sales_and_platform_history_parts(sales_part, plat_parts)
 
     if not parts:
         return pd.DataFrame()

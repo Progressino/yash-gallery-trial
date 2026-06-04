@@ -3918,23 +3918,11 @@ def quarterly_history(request: Request, group_by_parent: bool = False, n_quarter
     if sess.sales_df.empty and sess.mtr_df.empty:
         return {"loaded": False, "rows": []}
 
-    from ..services.po_engine import calculate_quarterly_history
-    # When sales_df exists it already includes Amazon & Myntra — never pass raw DFs (was doubling).
-    # When sales_df is empty, pass platform frames so quarterly still works before first build-sales.
-    _boot = sess.sales_df.empty or "Sku" not in sess.sales_df.columns
-    pivot = calculate_quarterly_history(
-        sales_df=sess.sales_df,
-        mtr_df=sess.mtr_df if _boot and not sess.mtr_df.empty else None,
-        myntra_df=sess.myntra_df if _boot and not sess.myntra_df.empty else None,
-        sku_mapping=sess.sku_mapping or None,
-        group_by_parent=group_by_parent,
-        n_quarters=n_quarters,
-    )
-    if pivot.empty:
-        return {"loaded": False, "rows": []}
+    from ..services.po_quarterly_warmup import build_quarterly_payload
 
-    return {
-        "loaded":   True,
-        "columns":  list(pivot.columns),
-        "rows":     pivot.fillna(0).to_dict("records"),
-    }
+    payload = build_quarterly_payload(
+        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+    )
+    if not payload.get("loaded"):
+        return {"loaded": False, "rows": []}
+    return payload

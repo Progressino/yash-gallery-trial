@@ -65,6 +65,37 @@ def test_calculate_quarterly_history_uses_sku_mapping():
     assert (pivot["OMS_SKU"] == "1001YKBEIGE-M").any()
 
 
+def test_calculate_quarterly_history_merges_older_platform_rows():
+    """Unified sales may be recent-only; platform bulk must fill older quarter columns."""
+    recent = pd.DataFrame(
+        {
+            "Sku": ["1001YKBEIGE-M"] * 5,
+            "TxnDate": pd.date_range("2026-05-01", periods=5, freq="D"),
+            "Transaction Type": ["Shipment"] * 5,
+            "Quantity": [2] * 5,
+        }
+    )
+    mtr = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-11-15", "2025-02-10"]),
+            "SKU": ["1001YKBEIGE-M", "1001YKBEIGE-M"],
+            "Transaction_Type": ["Shipment", "Shipment"],
+            "Quantity": [40, 25],
+        }
+    )
+    pivot = calculate_quarterly_history(
+        sales_df=recent,
+        mtr_df=mtr,
+        sku_mapping=None,
+        group_by_parent=False,
+        n_quarters=8,
+    )
+    assert not pivot.empty
+    row = pivot.loc[pivot["OMS_SKU"] == "1001YKBEIGE-M"].iloc[0]
+    assert int(row.get("Oct-Dec 2024", 0)) == 40
+    assert int(row.get("Jan-Mar 2025", 0)) == 25
+
+
 def test_calculate_quarterly_history_shipment_type_case_insensitive():
     days = pd.date_range("2025-06-01", periods=10, freq="D")
     sales = pd.DataFrame(

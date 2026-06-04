@@ -9,7 +9,7 @@ from backend.session import AppSession
 def test_sales_df_span_days():
     df = pd.DataFrame(
         {
-            "Sku": ["A"],
+            "Sku": ["A"] * 100,
             "TxnDate": pd.date_range("2025-01-01", periods=100, freq="D"),
             "Transaction Type": ["Shipment"] * 100,
             "Quantity": [1] * 100,

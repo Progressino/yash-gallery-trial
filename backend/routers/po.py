@@ -1066,14 +1066,15 @@ def po_quarterly_debug(request: Request):
     cached_sample_sku = cached["rows"][0].get("OMS_SKU") if cached and cached.get("rows") else None
     sess._quarterly_cache.clear()  # force fresh on next po/quarterly call
 
-    from ..services.po_engine import calculate_quarterly_history
-    pivot = calculate_quarterly_history(
-        sales_df=sess.sales_df,
-        mtr_df=None,
-        myntra_df=None,
-        sku_mapping=sess.sku_mapping or None,
-        group_by_parent=False,
-        n_quarters=8,
+    from ..services.po_quarterly_warmup import build_quarterly_payload
+
+    payload = build_quarterly_payload(sess, group_by_parent=False, n_quarters=8)
+    import pandas as pd
+
+    pivot = (
+        pd.DataFrame(payload.get("rows") or [])
+        if payload.get("loaded")
+        else pd.DataFrame()
     )
     sales_skus  = sorted(str(x) for x in sess.sales_df["Sku"].unique()[:10]) if not sess.sales_df.empty and "Sku" in sess.sales_df.columns else []
     inv_skus    = sorted(str(x) for x in sess.inventory_df_variant["OMS_SKU"].unique()[:10]) if not sess.inventory_df_variant.empty else []
