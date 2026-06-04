@@ -106,6 +106,7 @@ function ProtectedRoute() {
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
+        return await withTimeout((async () => {
         let coverage = await getCoverage({ light: true, timeout: 20_000 })
         setCoverage(coverage)
         const localHint = readLocalSessionHint()
@@ -151,18 +152,20 @@ function ProtectedRoute() {
         if (!coverageNeedsSync(coverage)) {
           invalidateDataQueries(qc)
         }
+        return true
+        })(), 60_000)
       } catch {
         /* server busy during upload — coverage polling will retry */
       }
       return true
     },
     enabled: !!activeUser && !isKarigar && !hrmOnly,
-    retry: 3,
-    retryDelay: 8_000,
+    retry: 1,
+    retryDelay: 5_000,
     staleTime: Infinity,
   })
 
-  const pollCoverage = !!activeUser && !isKarigar && !hrmOnly && !isRestoring
+  const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
 
   if (isLoading && !cachedUser) {
     return (

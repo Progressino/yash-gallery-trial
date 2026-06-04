@@ -194,63 +194,69 @@ def calculate_quarterly_from_tier3_streaming(
 
     conn = _get_conn()
     clause = _tier3_window_sql_clause()
-    worklist: list[tuple[str, str, bytes]] = []
+    count_sql = f"""
+        SELECT COUNT(*)
+        FROM daily_uploads
+        WHERE platform = ?
+          AND ({clause})
+    """
+    select_sql = f"""
+        SELECT filename, data_parquet
+        FROM daily_uploads
+        WHERE platform = ?
+          AND ({clause})
+        ORDER BY file_date ASC
+    """
+    total = 0
     for plat, _sp, _ca in _PLATFORM_SPECS:
-        rows = conn.execute(
-            f"""
-            SELECT filename, data_parquet
-            FROM daily_uploads
-            WHERE platform = ?
-              AND ({clause})
-            ORDER BY file_date ASC
-            """,
-            (plat, s1, s0),
-        ).fetchall()
-        for fn, blob in rows:
-            worklist.append((plat, str(fn), blob))
-    conn.close()
+        row = conn.execute(count_sql, (plat, s1, s0)).fetchone()
+        total += int(row[0] if row else 0)
 
-    total = len(worklist)
     if progress_cb:
         progress_cb(8, f"Scanning {total} upload file(s)…")
 
-    for i, (plat, _fn, blob) in enumerate(worklist):
-        if progress_cb and total:
-            pct = 10 + int(85 * (i + 1) / total)
-            progress_cb(pct, f"Aggregating {plat} ({i + 1}/{total})…")
-        try:
-            want = _PLATFORM_METRICS_COLUMNS.get(plat)
-            d = pd.read_parquet(
-                io.BytesIO(blob),
-                engine="pyarrow",
-                columns=want,
-            )
-        except Exception:
+    done = 0
+    for plat, _sp, _ca in _PLATFORM_SPECS:
+        rows = conn.execute(select_sql, (plat, s1, s0))
+        for _fn, blob in rows:
+            done += 1
+            if progress_cb and total:
+                pct = 10 + int(85 * done / total)
+                progress_cb(pct, f"Aggregating {plat} ({done}/{total})…")
             try:
-                d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+                want = _PLATFORM_METRICS_COLUMNS.get(plat)
+                d = pd.read_parquet(
+                    io.BytesIO(blob),
+                    engine="pyarrow",
+                    columns=want,
+                )
             except Exception:
-                continue
-        strip_pl, canon = next(
-            (sp, ca) for pn, sp, ca in _PLATFORM_SPECS if pn == plat
-        )
-        _accumulate_shipment_frame(
-            d,
-            plat,
-            sku_mapping,
-            strip_pl=strip_pl,
-            canonical_oms=canon,
-            group_by_parent=group_by_parent,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            cutoff_90=cutoff_90,
-            cutoff_30=cutoff_30,
-            q_label_map=q_label_map,
-            quarter_sums=quarter_sums,
-            units_90=units_90,
-            units_30=units_30,
-            days_30=days_30,
-        )
-        del d
+                try:
+                    d = pd.read_parquet(io.BytesIO(blob), engine="pyarrow")
+                except Exception:
+                    continue
+            strip_pl, canon = next(
+                (sp, ca) for pn, sp, ca in _PLATFORM_SPECS if pn == plat
+            )
+            _accumulate_shipment_frame(
+                d,
+                plat,
+                sku_mapping,
+                strip_pl=strip_pl,
+                canonical_oms=canon,
+                group_by_parent=group_by_parent,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                cutoff_90=cutoff_90,
+                cutoff_30=cutoff_30,
+                q_label_map=q_label_map,
+                quarter_sums=quarter_sums,
+                units_90=units_90,
+                units_30=units_30,
+                days_30=days_30,
+            )
+            del d, blob
+    conn.close()
 
     if not quarter_sums:
         return pd.DataFrame()

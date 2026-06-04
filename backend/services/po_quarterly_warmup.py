@@ -132,18 +132,33 @@ def _build_via_streaming(
     group_by_parent: bool,
     n_quarters: int,
     progress_cb: Optional[Callable[[int, str], None]] = None,
+    acquire_memory_lock: bool = True,
 ) -> dict[str, Any]:
     from .po_quarterly_fast import calculate_quarterly_from_tier3_streaming
 
-    pivot = calculate_quarterly_from_tier3_streaming(
-        sku_mapping or None,
-        start,
-        end,
-        group_by_parent=group_by_parent,
-        n_quarters=n_quarters,
-        progress_cb=progress_cb,
-    )
-    return _pivot_to_payload(pivot)
+    def _run() -> dict[str, Any]:
+        pivot = calculate_quarterly_from_tier3_streaming(
+            sku_mapping or None,
+            start,
+            end,
+            group_by_parent=group_by_parent,
+            n_quarters=n_quarters,
+            progress_cb=progress_cb,
+        )
+        return _pivot_to_payload(pivot)
+
+    if not acquire_memory_lock:
+        return _run()
+
+    from .concurrency import _UPLOAD_MEMORY_LOCK
+
+    if not _UPLOAD_MEMORY_LOCK.acquire(timeout=120):
+        logger.warning("Quarterly streaming skipped: memory lock busy")
+        return {"loaded": False, "rows": []}
+    try:
+        return _run()
+    finally:
+        _UPLOAD_MEMORY_LOCK.release()
 
 
 def build_quarterly_payload(
@@ -263,12 +278,24 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
 
 
 def schedule_shared_quarterly_prewarm() -> None:
-    """Background pre-build after server warm-cache load (PO tab instant for all users)."""
+    """Deferred pre-build — wait until warm-cache / restore memory lock is free (OOM-safe)."""
     import threading
+    import time
 
     def _go() -> None:
         try:
+            from .concurrency import upload_memory_lock_held
             from .po_quarterly_cache import get_shared_quarterly, start_shared_quarterly_build
+
+            # Let warm-cache Phase 1+2 and session restores finish first.
+            for _ in range(120):
+                if not upload_memory_lock_held():
+                    break
+                time.sleep(5)
+            time.sleep(30)
+            if upload_memory_lock_held():
+                logger.info("Quarterly prewarm skipped: upload memory lock still held")
+                return
 
             key = quarterly_cache_key(False, 8)
             if get_shared_quarterly(key):
