@@ -359,7 +359,7 @@ _DISK_CACHE_MAX_AGE = int(_os_main.environ.get("WARM_CACHE_MAX_AGE_HOURS", "24")
 # If the saved cache has fewer rows, Phase 2 is forced regardless of disk age,
 # recovering automatically from partial-data corruption (e.g. race-condition saves).
 # Override via WARM_CACHE_MIN_MTR_ROWS env var; set to 0 to disable the check.
-_DISK_CACHE_MIN_MTR_ROWS = int(_os_main.environ.get("WARM_CACHE_MIN_MTR_ROWS", "200000"))
+_DISK_CACHE_MIN_MTR_ROWS = int(_os_main.environ.get("WARM_CACHE_MIN_MTR_ROWS", "500000"))
 
 
 def _skip_phase2_when_disk_fresh() -> bool:
@@ -1072,29 +1072,37 @@ def _do_load_warm_cache() -> bool:
             log.warning("Warm-cache disk save failed (non-fatal): %s", _disk_err)
 
         # ── Auto-sync to GitHub release ───────────────────────────────────────
-        # After every successful Phase 2, push the freshly-built cache back to
-        # the GitHub Release so the release always holds full 2-year history.
-        # This prevents corruption from accumulating: the next Phase 2 always
-        # starts from a known-good baseline rather than a stale release.
-        # Run in a background thread so it doesn't block startup completion.
+        # Only sync if the Phase 2 result has a meaningful number of mtr rows.
+        # If Phase 2 was interrupted or returned partial data, skip the sync to
+        # prevent overwriting the GitHub release with corrupted small data.
         try:
-            from .services.github_cache import save_cache_to_drive as _save_to_gh
-            from .concurrency import HEAVY_EXECUTOR as _HEX
+            _sync_mtr = _warm_cache.get("mtr_df")
+            _sync_rows = len(_sync_mtr) if _sync_mtr is not None else 0
+            del _sync_mtr
+            if _sync_rows < _DISK_CACHE_MIN_MTR_ROWS:
+                log.warning(
+                    "Phase 2 GitHub sync skipped: mtr_df has only %d rows (min %d). "
+                    "Protecting GitHub release from partial data.",
+                    _sync_rows, _DISK_CACHE_MIN_MTR_ROWS,
+                )
+            else:
+                from .services.github_cache import save_cache_to_drive as _save_to_gh
+                from .concurrency import HEAVY_EXECUTOR as _HEX
 
-            _gh_snapshot = dict(_warm_cache)
+                _gh_snapshot = dict(_warm_cache)
 
-            def _bg_github_save():
-                try:
-                    _ok, _msg = _save_to_gh(_gh_snapshot)
-                    if _ok:
-                        log.info("Phase 2 auto-sync to GitHub: %s", _msg)
-                    else:
-                        log.warning("Phase 2 auto-sync to GitHub failed: %s", _msg)
-                except Exception as _gh_err:
-                    log.warning("Phase 2 auto-sync to GitHub error: %s", _gh_err)
+                def _bg_github_save():
+                    try:
+                        _ok, _msg = _save_to_gh(_gh_snapshot)
+                        if _ok:
+                            log.info("Phase 2 auto-sync to GitHub: %s", _msg)
+                        else:
+                            log.warning("Phase 2 auto-sync to GitHub failed: %s", _msg)
+                    except Exception as _gh_err:
+                        log.warning("Phase 2 auto-sync to GitHub error: %s", _gh_err)
 
-            _HEX.submit(_bg_github_save)
-            log.info("Phase 2 auto-sync to GitHub queued.")
+                _HEX.submit(_bg_github_save)
+                log.info("Phase 2 auto-sync to GitHub queued (%d mtr rows).", _sync_rows)
         except Exception as _gh_queue_err:
             log.warning("Phase 2 GitHub sync queue failed (non-fatal): %s", _gh_queue_err)
 
@@ -1484,7 +1492,12 @@ async def auth_middleware(request: Request, call_next):
     ) or (_po_upload_policy and request.method.upper() in ("POST", "DELETE", "PUT")):
         from .services.upload_policy import check_upload_api_access
 
-        blocked = check_upload_api_access(role, request.method, path)
+        blocked = check_upload_api_access(
+            role,
+            request.method,
+            path,
+            username=payload.get("sub") or "",
+        )
         if blocked:
             from fastapi.responses import JSONResponse
 
