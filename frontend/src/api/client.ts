@@ -709,6 +709,27 @@ function _isGateway502(e: unknown): boolean {
   return axios.isAxiosError(e) && e.response?.status === 502
 }
 
+/** Status polls during long PO runs — gateway timeouts and network blips are common. */
+function _isRetryablePoPollError(e: unknown): boolean {
+  if (!axios.isAxiosError(e)) return false
+  const st = e.response?.status
+  if (st === 502 || st === 503 || st === 504) return true
+  if (e.code === 'ECONNABORTED') return true
+  return !e.response
+}
+
+function _poProgressWhileUnreachable(
+  pollStart: number,
+  lastProgress: number | undefined,
+  retryCount: number,
+): number {
+  if (lastProgress != null && lastProgress > 0) {
+    return Math.min(95, lastProgress + Math.floor(retryCount / 6))
+  }
+  const mins = (Date.now() - pollStart) / 60_000
+  return Math.min(88, 15 + Math.round(mins * 12))
+}
+
 async function _sleep(ms: number): Promise<void> {
   await new Promise(r => setTimeout(r, ms))
 }
@@ -745,29 +766,31 @@ export async function waitForPoCalculate(
   let statusGatewayRetries = 0
   let lastServerMessage = 'Calculating PO recommendations…'
   let lastServerProgress: number | undefined
+  let sawRunning = false
   while (Date.now() - start < maxMs) {
     let data: POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
     try {
       ;({ data } = await api.get<
         POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
       >('/po/calculate/status', { timeout: PO_STATUS_POLL_TIMEOUT_MS }))
+      statusGatewayRetries = 0
     } catch (e: unknown) {
-      if (_isGateway502(e) && statusGatewayRetries < 120) {
+      if (_isRetryablePoPollError(e) && statusGatewayRetries < 120) {
         statusGatewayRetries += 1
-        const pct =
-          lastServerProgress ??
-          Math.min(98, 82 + Math.floor(statusGatewayRetries / 4))
-        const busyMsg = lastServerMessage
-          ? `${lastServerMessage} (server busy — retrying…)`
-          : 'Server busy (502) — still calculating…'
+        const pct = _poProgressWhileUnreachable(start, lastServerProgress, statusGatewayRetries)
+        const busyMsg =
+          lastServerProgress != null && lastServerProgress >= 25
+            ? `${lastServerMessage} — server busy, still calculating (check ${statusGatewayRetries})…`
+            : `PO run in progress (~10k SKUs can take 3–8 min). Status check unavailable — retrying (${statusGatewayRetries})…`
         onTick?.(busyMsg, pct)
         await _sleep(statusGatewayRetries < 20 ? 2500 : 4000)
         continue
       }
       throw e
     }
-    const st = data.status ?? 'idle'
+    let st = data.status ?? 'idle'
     if (st === 'running') {
+      sawRunning = true
       const prog =
         typeof data.progress === 'number' && Number.isFinite(data.progress)
           ? Math.max(0, Math.min(100, Math.round(data.progress)))
@@ -780,6 +803,40 @@ export async function waitForPoCalculate(
     }
     if (st === 'error') {
       throw new Error(data.message || 'PO calculation failed')
+    }
+    if (st === 'idle' && sawRunning) {
+      try {
+        const { data: probe } = await api.get<
+          POCalculateResult & { status?: string; total?: number }
+        >('/po/calculate/result', {
+          params: { offset: 0, limit: 1, compact: 1 },
+          timeout: PO_STATUS_POLL_TIMEOUT_MS,
+        })
+        if (probe.ok && (probe.rows?.length || (probe.total ?? 0) > 0)) {
+          data = {
+            status: 'done',
+            ok: true,
+            row_count: probe.total,
+            columns: probe.columns,
+            message: 'PO calculation complete.',
+          }
+          st = 'done'
+        } else if (probe.status === 'running') {
+          onTick?.('Still calculating on server…', lastServerProgress ?? 40)
+          await _sleep(3000)
+          continue
+        } else {
+          await _sleep(2500)
+          continue
+        }
+      } catch {
+        await _sleep(2500)
+        continue
+      }
+    }
+    if (st === 'idle') {
+      await new Promise(r => setTimeout(r, 1500))
+      continue
     }
     if (st === 'done') {
       const pageSize = PO_RESULT_PAGE_SIZE
@@ -855,9 +912,10 @@ export async function waitForPoCalculate(
       }
       return { ...meta, rows: allRows }
     }
-    await new Promise(r => setTimeout(r, 1500))
   }
-  throw new Error('PO calculation timed out — try again in a minute.')
+  throw new Error(
+    'PO calculation timed out — the server may still be finishing. Wait 2 minutes, hard-refresh, and check if the table loaded.',
+  )
 }
 
 /** Start PO calculate; if the POST times out or 502s, poll anyway (server may still be running). */
