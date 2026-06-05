@@ -19,7 +19,7 @@ import {
 } from '../api/client'
 import { useSession } from '../store/session'
 import { useUploadActivity } from '../store/uploadActivity'
-import { useAuth, mayUploadHistorical, mayResetSharedData, mayUploadPoBaseline, mayDeleteDailyUploadFile } from '../store/auth'
+import { useAuth, mayUploadHistorical, mayResetSharedData, mayUploadPoBaseline, mayDeleteDailyUploadFile, mayClearPlatformData } from '../store/auth'
 
 type Toast = { type: 'success' | 'error'; msg: string }
 type UploadAlert = {
@@ -58,6 +58,7 @@ export default function Upload() {
   const allowReset = mayResetSharedData(authUser)
   const allowAdminBaseline = mayUploadPoBaseline(authUser)
   const mayDeleteDailyFiles = mayDeleteDailyUploadFile(authUser)
+  const mayClearPlatform = mayClearPlatformData(authUser)
   const showAdminTab = allowHistorical
   const [uploadTab, setUploadTab] = useState<'daily' | 'admin'>('daily')
 
@@ -612,7 +613,7 @@ export default function Upload() {
             <ul className="mt-2 space-y-1.5 text-xs text-gray-600 list-disc list-inside">
               <li>
                 <strong>Daily uploads</strong> tab — <em>everyone</em>: daily sales files (auto-detect), snapshot inventory (OMS / marketplace files),
-                and return reports for PO. Data saves automatically; only Admins can delete saved daily files when the org lock is on.
+                and return reports for PO. Data saves automatically; only the owner account can delete saved daily files or clear history.
               </li>
               <li>
                 <strong>History &amp; setup</strong> tab — <em>Admin / Manager</em>: SKU map, multi-year bulk archives, Amazon extras, and monthly RAR drops.
@@ -816,7 +817,7 @@ export default function Upload() {
           </div>
         )}
 
-        <UploadCard title="2️⃣ Amazon" subtitle="MTR master ZIP or RAR — upload multiple; data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={handleClear('mtr')} clearing={loading['clear_mtr']} alert={showImportCompleteness ? uploadAlertsBySource['mtr'] : undefined} onClearAlert={() => clearUploadAlert('mtr')}>
+        <UploadCard title="2️⃣ Amazon" subtitle="MTR master ZIP or RAR — upload multiple; data stacks" loaded={coverage.mtr} rows={coverage.mtr_rows} onClear={mayClearPlatform ? handleClear('mtr') : undefined} clearing={loading['clear_mtr']} alert={showImportCompleteness ? uploadAlertsBySource['mtr'] : undefined} onClearAlert={() => clearUploadAlert('mtr')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip or .rar"
@@ -832,7 +833,7 @@ export default function Upload() {
       </Section>}
 
       {showAdminTab && uploadTab === 'admin' && allowHistorical && <Section title="Tier 1 — Platform history (bulk / multi-year)">
-        <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={handleClear('myntra')} clearing={loading['clear_myntra']} alert={showImportCompleteness ? uploadAlertsBySource['myntra'] : undefined} onClearAlert={() => clearUploadAlert('myntra')}>
+        <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={mayClearPlatform ? handleClear('myntra') : undefined} clearing={loading['clear_myntra']} alert={showImportCompleteness ? uploadAlertsBySource['myntra'] : undefined} onClearAlert={() => clearUploadAlert('myntra')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
@@ -842,7 +843,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🛒 Meesho" subtitle="ZIP (TCS/ledger), Order CSV, or unified sales Excel (.xlsx/.xls) — select multiple" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={handleClear('meesho')} clearing={loading['clear_meesho']} alert={showImportCompleteness ? uploadAlertsBySource['meesho'] : undefined} onClearAlert={() => clearUploadAlert('meesho')}>
+        <UploadCard title="🛒 Meesho" subtitle="ZIP (TCS/ledger), Order CSV, or unified sales Excel (.xlsx/.xls) — select multiple" loaded={coverage.meesho} rows={coverage.meesho_rows} onClear={mayClearPlatform ? handleClear('meesho') : undefined} clearing={loading['clear_meesho']} alert={showImportCompleteness ? uploadAlertsBySource['meesho'] : undefined} onClearAlert={() => clearUploadAlert('meesho')}>
           <FileUpload
             label="Upload .zip, .csv, .xlsx, or .xls (select multiple)"
             accept={{
@@ -859,7 +860,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🟡 Flipkart" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.flipkart} rows={coverage.flipkart_rows} onClear={handleClear('flipkart')} clearing={loading['clear_flipkart']} alert={showImportCompleteness ? uploadAlertsBySource['flipkart'] : undefined} onClearAlert={() => clearUploadAlert('flipkart')}>
+        <UploadCard title="🟡 Flipkart" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.flipkart} rows={coverage.flipkart_rows} onClear={mayClearPlatform ? handleClear('flipkart') : undefined} clearing={loading['clear_flipkart']} alert={showImportCompleteness ? uploadAlertsBySource['flipkart'] : undefined} onClearAlert={() => clearUploadAlert('flipkart')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
@@ -869,7 +870,7 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <UploadCard title="🔴 Snapdeal" subtitle="OMS order reports (CSV/ZIP) or AG/PE/YG ZIPs" loaded={coverage.snapdeal} rows={coverage.snapdeal_rows} onClear={handleClear('snapdeal')} clearing={loading['clear_snapdeal']} alert={showImportCompleteness ? uploadAlertsBySource['snapdeal'] : undefined} onClearAlert={() => clearUploadAlert('snapdeal')}>
+        <UploadCard title="🔴 Snapdeal" subtitle="OMS order reports (CSV/ZIP) or AG/PE/YG ZIPs" loaded={coverage.snapdeal} rows={coverage.snapdeal_rows} onClear={mayClearPlatform ? handleClear('snapdeal') : undefined} clearing={loading['clear_snapdeal']} alert={showImportCompleteness ? uploadAlertsBySource['snapdeal'] : undefined} onClearAlert={() => clearUploadAlert('snapdeal')}>
           <FileUpload
             label="Upload files (select multiple)"
             accept={{ 'application/zip': ['.zip'], 'text/csv': ['.csv'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }}

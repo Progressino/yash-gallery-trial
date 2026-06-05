@@ -150,7 +150,7 @@ def _build_via_streaming(
     if not acquire_memory_lock:
         return _run()
 
-    from .concurrency import _UPLOAD_MEMORY_LOCK
+    from ..concurrency import _UPLOAD_MEMORY_LOCK
 
     if not _UPLOAD_MEMORY_LOCK.acquire(timeout=120):
         logger.warning("Quarterly streaming skipped: memory lock busy")
@@ -284,7 +284,7 @@ def schedule_shared_quarterly_prewarm() -> None:
 
     def _go() -> None:
         try:
-            from .concurrency import upload_memory_lock_held
+            from ..concurrency import upload_memory_lock_held
             from .po_quarterly_cache import get_shared_quarterly, start_shared_quarterly_build
 
             # Let warm-cache Phase 1+2 and session restores finish first.

@@ -10,7 +10,7 @@ from ..db.users_db import (
     list_users, create_user, update_user, deactivate_user,
     list_activity, get_admin_stats, log_activity
 )
-from ..services.upload_policy import may_reset_shared_data
+from ..services.upload_policy import may_admin_po_session_edits
 
 router = APIRouter()
 
@@ -279,7 +279,7 @@ def post_activity(body: ActivityIn):
 @router.post("/reset-module-data")
 def reset_module_data(request: Request, body: ModuleDataResetIn):
     role = _request_role(request)
-    if not may_reset_shared_data(role):
+    if not may_admin_po_session_edits(role):
         raise HTTPException(status_code=403, detail="Only Admin can remove ERP module data.")
 
     module = (body.module or "").strip().lower()

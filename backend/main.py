@@ -1511,12 +1511,16 @@ async def auth_middleware(request: Request, call_next):
     ) or (_po_upload_policy and request.method.upper() in ("POST", "DELETE", "PUT")):
         from .services.upload_policy import check_upload_api_access
 
-        blocked = check_upload_api_access(
-            role,
-            request.method,
-            path,
-            username=payload.get("sub") or "",
-        )
+        _uname = payload.get("sub") or ""
+        try:
+            blocked = check_upload_api_access(
+                role,
+                request.method,
+                path,
+                username=_uname,
+            )
+        except TypeError:
+            blocked = check_upload_api_access(role, request.method, path)
         if blocked:
             from fastapi.responses import JSONResponse
 

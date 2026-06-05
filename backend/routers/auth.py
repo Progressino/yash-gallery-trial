@@ -107,7 +107,7 @@ def _login_payload(user: dict) -> dict:
     redirect = "/production-entry" if role == KARIGAR_ROLE else "/"
     if role not in (KARIGAR_ROLE,) and modules == ["hrm"]:
         redirect = "/hrm"
-    pol = upload_policy_for_role(role)
+    pol = upload_policy_for_role(role, username)
     return {
         "ok": True,
         "username": username,
@@ -335,7 +335,7 @@ def me(request: Request):
 
     if profile:
         role = profile.get("role_name") or role
-        pol = upload_policy_for_role(role)
+        pol = upload_policy_for_role(role, username)
         hrm_scope = build_hrm_scope(profile, role=role)
         modules = resolve_module_access(role, profile.get("module_access"))
         return {
@@ -361,7 +361,7 @@ def me(request: Request):
             **pol,
         }
 
-    pol = upload_policy_for_role(role)
+    pol = upload_policy_for_role(role, username)
     return {
         "username": username,
         "role": role,

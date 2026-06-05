@@ -3859,7 +3859,12 @@ def daily_uploads(_request: Request):
 
 
 @router.delete("/daily-uploads/{upload_id}")
-def delete_daily_upload(upload_id: int, _request: Request):
+def delete_daily_upload(upload_id: int, request: Request):
+    from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
+
+    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
+    if not may_delete_upload_data(username):
+        raise HTTPException(status_code=403, detail=_DELETE_DENIED_MSG)
     ok = delete_upload(upload_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Upload not found")

@@ -395,6 +395,11 @@ def po_get_daily_inventory_history_for_sku(
 
 @router.delete("/daily-inventory-history")
 def po_clear_daily_inventory_history(request: Request):
+    from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
+
+    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
+    if not may_delete_upload_data(username):
+        return {"ok": False, "message": _DELETE_DENIED_MSG}
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
@@ -698,6 +703,11 @@ async def po_returns_import_file(
 
 @router.delete("/returns/overlay")
 def po_clear_returns_overlay(request: Request):
+    from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
+
+    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
+    if not may_delete_upload_data(username):
+        return {"ok": False, "message": _DELETE_DENIED_MSG}
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
@@ -746,10 +756,10 @@ def po_delete_raise_ledger_day(request: Request, raised_date: str = ""):
 @router.post("/raise-ledger/delete-skus")
 def po_delete_raise_ledger_skus(request: Request, body: RaiseLedgerDeleteSkusBody):
     """Admin-only: remove specific SKU lines for one raise date (mistaken PO)."""
-    from ..services.upload_policy import may_reset_shared_data
+    from ..services.upload_policy import may_admin_po_session_edits
 
     role = _request_role(request)
-    if not may_reset_shared_data(role):
+    if not may_admin_po_session_edits(role):
         return {
             "ok": False,
             "message": "Removing individual raised PO lines is Admin-only.",

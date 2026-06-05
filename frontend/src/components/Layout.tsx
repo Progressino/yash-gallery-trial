@@ -225,6 +225,11 @@ function CacheToolsPanel({
               Daily uploads only for your role. Use Upload for new sales files.
             </p>
           )}
+          {!allowReset && allowHistorical && (
+            <p className="text-[10px] text-amber-800 leading-snug pt-0.5">
+              Uploaded data is locked — clear and delete-all are owner-only.
+            </p>
+          )}
           {localHintAge && (
             <p className="text-[10px] text-slate-400">Browser hint: {localHintAge}</p>
           )}

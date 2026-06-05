@@ -3302,6 +3302,14 @@ _PLATFORM_CLEAR = {
 @router.delete("/clear/{platform}")
 async def clear_platform(platform: str, request: Request):
     """Clear a specific platform's data from the session."""
+    from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
+
+    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
+    if not may_delete_upload_data(username):
+        return JSONResponse(
+            content={"ok": False, "message": _DELETE_DENIED_MSG},
+            status_code=403,
+        )
     sess = _get_session(request)
     cleaner = _PLATFORM_CLEAR.get(platform)
     if not cleaner:

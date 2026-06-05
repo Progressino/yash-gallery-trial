@@ -395,6 +395,11 @@ def cache_load(request: Request, background_tasks: BackgroundTasks):
 @router.delete("", response_model=CacheStatusResponse)
 def cache_clear(request: Request, include_warm: bool = False):
     """Clear this browser session (all platforms, inventory, PO sheet, sales). Optional: server warm cache."""
+    from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
+
+    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
+    if not may_delete_upload_data(username):
+        return CacheStatusResponse(ok=False, message=_DELETE_DENIED_MSG)
     sess = request.state.session
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
@@ -413,6 +418,11 @@ def cache_reset_all(request: Request, body: ResetAllBody = ResetAllBody()):
     Full fresh start: clear session + optionally Tier-3 SQLite + optionally warm cache.
     Does not delete GitHub Release cache — next Save Cache updates the cloud after re-upload.
     """
+    from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
+
+    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
+    if not may_delete_upload_data(username):
+        return ResetAllResponse(ok=False, message=_DELETE_DENIED_MSG, tier3_deleted=0)
     sess = request.state.session
     if sess is None:
         return ResetAllResponse(ok=False, message="No session", tier3_deleted=0)

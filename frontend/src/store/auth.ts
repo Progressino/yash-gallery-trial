@@ -32,6 +32,8 @@ export interface AuthUser {
   may_save_shared_cache?: boolean
   may_reload_shared_cache?: boolean
   may_delete_daily_upload?: boolean
+  /** True when this user cannot delete uploads (UI hides clear / reset controls). */
+  upload_delete_locked?: boolean
   /** Wide PO inventory history + SKU status/lead; Admin-only when org historical lock is on. */
   may_upload_po_baseline?: boolean
 }
@@ -112,11 +114,23 @@ export function mayUploadHistorical(user: AuthUser | null | undefined): boolean 
   return user.role === 'Super Admin' || user.role === 'Admin' || user.role === 'Manager'
 }
 
-export function mayResetSharedData(user: AuthUser | null | undefined): boolean {
+export function mayDeleteUploadData(user: AuthUser | null | undefined): boolean {
   if (!user) return false
-  if (user.may_reset_all === true) return true
-  if (user.may_reset_all === false) return false
-  return user.role === 'Super Admin' || user.role === 'Admin'
+  if (user.may_delete_daily_upload === true || user.may_reset_all === true) return true
+  if (user.may_delete_daily_upload === false || user.may_reset_all === false) return false
+  if (user.upload_delete_locked === true) return false
+  return false
+}
+
+export function mayResetSharedData(user: AuthUser | null | undefined): boolean {
+  return mayDeleteUploadData(user)
+}
+
+export function mayClearPlatformData(user: AuthUser | null | undefined): boolean {
+  if (!user) return false
+  if (user.may_clear_platform === true) return true
+  if (user.may_clear_platform === false) return false
+  return mayDeleteUploadData(user)
 }
 
 /** PO baseline sheets (daily inventory history matrix, SKU status/lead) and related Admin-only uploads when locked. */
@@ -129,8 +143,5 @@ export function mayUploadPoBaseline(user: AuthUser | null | undefined): boolean 
 
 /** Removing saved Tier-3 daily files from the server. */
 export function mayDeleteDailyUploadFile(user: AuthUser | null | undefined): boolean {
-  if (!user) return false
-  if (user.may_delete_daily_upload === true) return true
-  if (user.may_delete_daily_upload === false) return false
-  return user.role === 'Super Admin' || user.role === 'Admin'
+  return mayDeleteUploadData(user)
 }
