@@ -462,6 +462,44 @@ def test_po_output_dedupes_duplicate_oms_sku_rows():
     assert int(out.iloc[0]["PO_Pipeline_Total"]) == 115
 
 
+def test_po_4_jun_fixture_pending_cutting_flows_to_calculate():
+    """Uploaded Po 4-Jun-26 values must appear on Calculate PO rows (not stale cache)."""
+    from pathlib import Path
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "Po_4-Jun-26.xlsx"
+    if not fixture.is_file():
+        return
+    from backend.services.existing_po import parse_existing_po
+
+    existing_po = parse_existing_po(fixture.read_bytes(), fixture.name)
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1003YKMUSTARD-3XL"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["1003YKMUSTARD-3XL"], "Total_Inventory": [30]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    row = po.loc[po["OMS_SKU"] == "1003YKMUSTARD-3XL"].iloc[0]
+    assert int(row["Pending_Cutting"]) == 40
+    assert int(row["Balance_to_Dispatch"]) == 3
+    assert int(row["PO_Pipeline_Total"]) == 43
+
+
 def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
     """Duplicate inventory rows for the same bundled SKU collapse to one pipeline row."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")

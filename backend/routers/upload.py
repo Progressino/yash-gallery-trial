@@ -2330,10 +2330,21 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
                 sess.existing_po_uploaded_at = _dt.datetime.now(tz=_dt.timezone.utc).isoformat().replace("+00:00", "Z")
             except Exception:
                 sess.existing_po_uploaded_at = ""
+            from ..services.po_raise_remove import invalidate_po_calculate_result
+            from ..services.po_shared_cache import invalidate_all_shared_caches
+
+            invalidate_po_calculate_result(sess)
+            invalidate_all_shared_caches()
             _session_data_changed(sess)
+            active = 0
+            if "PO_Pipeline_Total" in df.columns:
+                active = int((pd.to_numeric(df["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0).sum())
             return UploadResponse(
                 ok=True,
-                message=f"Existing PO loaded: {len(df):,} SKUs with pipeline quantities.",
+                message=(
+                    f"Existing PO loaded: {len(df):,} SKUs ({active:,} with pipeline). "
+                    "Click Calculate PO on PO Engine to refresh pipeline columns."
+                ),
                 rows=len(df),
             )
 

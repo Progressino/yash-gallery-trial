@@ -363,15 +363,15 @@ def rollup_pipeline_onto_bundled_rows(
         if len(children) < 2:
             continue
         for col in breakdown:
-            cur = pd.to_numeric(out.at[idx, col], errors="coerce")
-            cur = 0 if pd.isna(cur) else float(cur)
-            if cur > 0:
-                continue
             total = 0.0
+            found_child = False
             for child in children:
                 if child in ep_idx.index:
+                    found_child = True
                     total += float(pd.to_numeric(ep_idx.at[child, col], errors="coerce") or 0)
-            if total > 0:
+            # Always prefer child totals on bundled inventory rows — the sheet lists
+            # individual sizes, not the bundled inventory token.
+            if found_child and total > 0:
                 out.at[idx, col] = int(total) if col == "PO_Pipeline_Total" else total
     return out
 

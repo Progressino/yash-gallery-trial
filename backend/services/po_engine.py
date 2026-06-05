@@ -1153,16 +1153,29 @@ def calculate_po_base(
 
         _ep_ghost = _ep_prepared
         _po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
-        _children_of_bundled: set[str] = set()
+        # Skip ghost rows for individual sizes only when a bundled inventory row
+        # already carries their rolled-up pipeline (not merely because parent exists).
+        _child_covered_by_bundled: set[str] = set()
         for _pk in _po_keys:
             _kids = _split_bundled_po_sku(_pk)
-            if len(_kids) == 2:
-                _children_of_bundled.update(_kids)
+            if len(_kids) != 2:
+                continue
+            _parent_pipe = pd.to_numeric(
+                po_df.loc[po_df["OMS_SKU"].astype(str).str.strip() == _pk, "PO_Pipeline_Total"],
+                errors="coerce",
+            ).fillna(0)
+            if _parent_pipe.empty or float(_parent_pipe.max()) <= 0:
+                continue
+            _child_covered_by_bundled.update(_kids)
         _pipe_canon = _ep_ghost["OMS_SKU"].astype(str).str.strip()
+        _ep_active = pd.to_numeric(_ep_ghost["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
+        for _ac in ("Pending_Cutting", "Balance_to_Dispatch", "PO_Qty_Ordered"):
+            if _ac in _ep_ghost.columns:
+                _ep_active |= pd.to_numeric(_ep_ghost[_ac], errors="coerce").fillna(0) > 0
         missing_mask = (
             ~_pipe_canon.isin(_po_keys)
-            & ~_pipe_canon.isin(_children_of_bundled)
-            & (pd.to_numeric(_ep_ghost["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0)
+            & ~_pipe_canon.isin(_child_covered_by_bundled)
+            & _ep_active
         )
         missing_po = _ep_ghost[missing_mask].copy()
         if not missing_po.empty:

@@ -97,6 +97,24 @@ def _sales_through(sess) -> str:
     return ""
 
 
+def _existing_po_fingerprint(sess) -> str:
+    """Changes whenever the uploaded Existing PO sheet is replaced or its totals change."""
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is None or getattr(ep, "empty", True):
+        return "ep:0"
+    uploaded = str(getattr(sess, "existing_po_uploaded_at", "") or "")
+    fn = str(getattr(sess, "existing_po_filename", "") or "")
+    n = int(len(ep))
+    sku_n = 0
+    if "OMS_SKU" in ep.columns:
+        sku_n = int(ep["OMS_SKU"].astype(str).nunique())
+    sums: dict[str, int] = {}
+    for c in ("PO_Pipeline_Total", "Pending_Cutting", "Balance_to_Dispatch", "PO_Qty_Ordered"):
+        if c in ep.columns:
+            sums[c] = int(pd.to_numeric(ep[c], errors="coerce").fillna(0).sum())
+    return f"ep:{n}:{sku_n}:{uploaded}:{fn}:{sums}"
+
+
 def _raise_ledger_fingerprint(planning_date: str, lookback_days: int) -> str:
     """Stable signature for confirmed raises in the planning window (shared DB)."""
     try:
@@ -161,6 +179,7 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         "raise_ledger": _raise_ledger_fingerprint(
             planning, int(body.get("raise_ledger_lookback_days") or 14)
         ),
+        "existing_po": _existing_po_fingerprint(sess),
     }
 
 
@@ -326,6 +345,20 @@ def shared_cache_availability(sess, body: dict) -> dict[str, Any]:
         "computed_at": meta.get("created_at_ist"),
         "sales_through": meta.get("sales_through"),
     }
+
+
+def invalidate_all_shared_caches() -> int:
+    """Drop every shared PO calculate result (e.g. after Existing PO re-upload)."""
+    removed = 0
+    for p in _shared_dir().glob("*.meta.json"):
+        try:
+            key = p.stem.replace(".meta", "")
+            p.unlink(missing_ok=True)
+            _parquet_path(key).unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            continue
+    return removed
 
 
 def invalidate_planning_date(planning_date: str) -> int:

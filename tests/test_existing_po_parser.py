@@ -1,11 +1,14 @@
 """Tests for existing PO sheet ingestion."""
 
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
 
 from backend.services.existing_po import parse_existing_po
+
+_FIXTURE_PO = Path(__file__).resolve().parent / "fixtures" / "Po_4-Jun-26.xlsx"
 
 
 def test_parse_existing_po_csv_minimal():
@@ -110,3 +113,19 @@ def test_parse_existing_po_vendor_article_column():
     out = parse_existing_po(buf.getvalue(), "po.xlsx")
     assert len(out) == 2
     assert set(out["OMS_SKU"]) == {"V1-A", "V1-B"}
+
+
+def test_parse_po_4_jun_26_fixture():
+    """Regression: operator Po 4-Jun-26 export — pending cutting + balance columns."""
+    assert _FIXTURE_PO.is_file(), "fixture missing"
+    out = parse_existing_po(_FIXTURE_PO.read_bytes(), _FIXTURE_PO.name)
+    assert len(out) > 10_000
+    assert "Pending_Cutting" in out.columns
+    assert "Balance_to_Dispatch" in out.columns
+    row = out.loc[out["OMS_SKU"] == "1003YKMUSTARD-3XL"].iloc[0]
+    assert int(row["Pending_Cutting"]) == 40
+    assert int(row["Balance_to_Dispatch"]) == 3
+    assert int(row["PO_Pipeline_Total"]) == 43
+    yk = out.loc[out["OMS_SKU"] == "1917YKBLUE-3XL"].iloc[0]
+    assert int(yk["Pending_Cutting"]) == 0
+    assert int(yk["Balance_to_Dispatch"]) == 130

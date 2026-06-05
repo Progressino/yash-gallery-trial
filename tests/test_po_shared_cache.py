@@ -82,6 +82,38 @@ def test_save_lookup_and_apply_to_session():
     assert spill_row_count("session-b") == 2
 
 
+def test_cache_key_changes_when_existing_po_changes():
+    sess = _minimal_session()
+    body = {"planning_date": "2025-12-20", "period_days": 30}
+    k1, _ = psc.build_cache_key(sess, body)
+    sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A", "SKU-B"],
+            "PO_Pipeline_Total": [10, 5],
+            "Pending_Cutting": [3, 0],
+            "Balance_to_Dispatch": [7, 5],
+        }
+    )
+    sess.existing_po_uploaded_at = "2026-06-04T12:00:00Z"
+    sess.existing_po_filename = "Po 4-Jun-26.xlsx"
+    k2, _ = psc.build_cache_key(sess, body)
+    assert k1 != k2
+
+
+def test_apply_miss_when_existing_po_changes():
+    sess = _minimal_session()
+    body = {"planning_date": "2025-12-20", "period_days": 30}
+    po_df = pd.DataFrame({"OMS_SKU": ["SKU-A"], "PO_Qty": [1], "Pending_Cutting": [99]})
+    psc.save_shared_cache(sess, body, po_df, {"ok": True})
+
+    sess2 = _minimal_session()
+    sess2.existing_po_df = pd.DataFrame(
+        {"OMS_SKU": ["SKU-A"], "PO_Pipeline_Total": [5], "Pending_Cutting": [2]}
+    )
+    sess2.existing_po_uploaded_at = "2026-06-05T10:00:00Z"
+    assert psc.apply_shared_cache_to_session(sess2, "session-ep", body) is None
+
+
 def test_apply_miss_when_inventory_changes():
     sess = _minimal_session()
     body = {"planning_date": "2025-12-20", "period_days": 30}

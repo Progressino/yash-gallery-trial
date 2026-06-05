@@ -18,6 +18,7 @@ import {
   type DailyUpload, type DailySummary, type UploadResponse,
 } from '../api/client'
 import { useSession } from '../store/session'
+import { usePOStore } from '../store/po'
 import { useUploadActivity } from '../store/uploadActivity'
 import { useAuth, mayUploadHistorical, mayResetSharedData, mayUploadPoBaseline, mayDeleteDailyUploadFile, mayClearPlatformData } from '../store/auth'
 
@@ -930,7 +931,30 @@ export default function Upload() {
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
               'text/csv': ['.csv'],
             }}
-            onUpload={handle('existingpo', (file: File) => uploadExistingPO(file))}
+            onUpload={async (file: File) => {
+              setL('existingpo', true)
+              try {
+                await withUploadGuard(async () => {
+                  const res = await uploadExistingPO(file)
+                  if (res.ok) {
+                    captureUploadAlerts('existingpo', res)
+                    usePOStore.getState().setResult(null)
+                    showToast(
+                      'success',
+                      `${res.message} Pipeline columns update only after Calculate PO.`,
+                      8000,
+                    )
+                    await refresh()
+                  } else {
+                    showToast('error', res.message)
+                  }
+                })
+              } catch (e: unknown) {
+                showToast('error', e instanceof Error ? e.message : 'Upload failed')
+              } finally {
+                setL('existingpo', false)
+              }
+            }}
             uploading={loading['existingpo']}
           />
         </UploadCard>
