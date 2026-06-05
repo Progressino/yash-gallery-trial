@@ -83,6 +83,20 @@ def test_expand_bundled_po_skus_splits_size_ranges():
     assert int(out["PO_Pipeline_Total"].sum()) == 194
 
 
+def test_expand_bundled_po_skus_handles_unicode_dashes():
+    from backend.services.existing_po import expand_bundled_po_skus
+
+    ep = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-4XL–5XL"],  # en dash
+            "PO_Pipeline_Total": [200],
+        }
+    )
+    out = expand_bundled_po_skus(ep)
+    assert set(out["OMS_SKU"]) == {"1917YKBLUE-4XL", "1917YKBLUE-5XL"}
+    assert int(out["PO_Pipeline_Total"].sum()) == 200
+
+
 def test_parse_existing_po_vendor_article_column():
     df = pd.DataFrame(
         {

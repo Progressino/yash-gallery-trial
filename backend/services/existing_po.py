@@ -23,6 +23,22 @@ _PO_SIZE_TOKENS = frozenset(
     {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "8XL"}
 )
 
+# Accept common unicode dash variants from Excel/WhatsApp copies.
+_DASH_RE = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
+_DASH_SPLIT_RE = re.compile(r"[\-\u2010\u2011\u2012\u2013\u2014\u2212]+")
+
+
+def _normalize_sku_text(value: object) -> str:
+    """Normalize SKU tokens for stable grouping/joins (unicode dashes, stray whitespace)."""
+    s = str(value or "").strip().upper()
+    if not s:
+        return ""
+    s = _DASH_RE.sub("-", s)
+    # Collapse " - " / "--" to "-" and trim around separators.
+    parts = [p.strip() for p in s.split("-")]
+    parts = [p for p in parts if p]
+    return "-".join(parts)
+
 
 _SKU_EXACT = [
     "OMS SKU", "OMS_SKU", "OMS SKU Code", "OMS",
@@ -247,8 +263,9 @@ def _infer_quantity_columns(raw: pd.DataFrame, sku_col: str) -> tuple[Optional[s
 
 def _split_bundled_po_sku(sku: str) -> list[str]:
     """1917YKBLUE-XXL-3XL → [1917YKBLUE-XXL, 1917YKBLUE-3XL]."""
-    s = str(sku or "").strip().upper()
-    parts = s.split("-")
+    s = _normalize_sku_text(sku)
+    # Split on any dash variant / repeated separators.
+    parts = [p.strip() for p in _DASH_SPLIT_RE.split(s) if p.strip()]
     if len(parts) >= 3 and parts[-1] in _PO_SIZE_TOKENS and parts[-2] in _PO_SIZE_TOKENS:
         base = "-".join(parts[:-2])
         return [f"{base}-{parts[-2]}", f"{base}-{parts[-1]}"]
@@ -269,7 +286,7 @@ def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     ]
     rows: list[dict] = []
     for _, r in df.iterrows():
-        sku = str(r.get("OMS_SKU") or "").strip().upper()
+        sku = _normalize_sku_text(r.get("OMS_SKU"))
         if not sku:
             continue
         expanded = _split_bundled_po_sku(sku)
@@ -305,7 +322,7 @@ def _build_po_dataframe(
     all_needed = list(dict.fromkeys([sku_col] + specific_cols))
     df = raw[all_needed].copy()
 
-    df[sku_col] = df[sku_col].astype(str).str.strip().str.upper()
+    df[sku_col] = df[sku_col].map(_normalize_sku_text)
     df = df[df[sku_col].str.len() > 0]
     df = df[~df[sku_col].isin(["SKU", "OMS_SKU", "NAN", "NONE", ""])]
 

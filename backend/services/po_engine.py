@@ -1114,7 +1114,7 @@ def calculate_po_base(
         from .existing_po import expand_bundled_po_skus
 
         _ep = existing_po_df.copy()
-        _ep["OMS_SKU"] = _ep["OMS_SKU"].astype(str).map(_canonical_oms_key).str.strip().str.upper()
+        _ep["OMS_SKU"] = _ep["OMS_SKU"].astype(str).map(_canonical_oms_key).astype(str).str.strip().str.upper()
         _ep = _ep[_ep["OMS_SKU"].str.len() > 0]
         _ep = expand_bundled_po_skus(_ep)
         # Pull PO_Pipeline_Total + any breakdown columns present in the uploaded sheet
@@ -1150,7 +1150,7 @@ def calculate_po_base(
 
         _ep_ghost = expand_bundled_po_skus(
             existing_po_df.assign(
-                OMS_SKU=existing_po_df["OMS_SKU"].astype(str).map(_canonical_oms_key).str.strip().str.upper()
+                OMS_SKU=existing_po_df["OMS_SKU"].astype(str).map(_canonical_oms_key).astype(str).str.strip().str.upper()
             )
         )
         _po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
