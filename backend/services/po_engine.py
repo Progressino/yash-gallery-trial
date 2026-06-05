@@ -12,7 +12,13 @@ from pandas.tseries.offsets import MonthEnd
 
 import re
 
-from .helpers import map_to_oms_sku, get_parent_sku, clean_sku, normalize_id_token_for_mapping
+from .helpers import (
+    map_to_oms_sku,
+    get_parent_sku,
+    clean_sku,
+    normalize_id_token_for_mapping,
+    collapse_duplicate_trailing_size_suffix,
+)
 from .myntra import myntra_to_sales_rows
 
 # Strip "PL" infix in Amazon seller SKUs (e.g. 1001PLYKBEIGE-3XL → 1001YKBEIGE-3XL)
@@ -33,7 +39,9 @@ def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
     t = clean_sku(t or raw)
     if not t:
         t = str(raw).strip().upper()
-    return _strip_pl(str(t).strip(), sku_mapping or {})
+    return collapse_duplicate_trailing_size_suffix(
+        _strip_pl(str(t).strip(), sku_mapping or {})
+    )
 
 
 def _strip_pl(sku: str, mapping: Dict[str, str]) -> str:
@@ -614,7 +622,7 @@ def calculate_po_base(
         t = clean_sku(t or raw)
         if not t:
             t = str(raw).strip().upper()
-        return _strip_pl(str(t).strip(), _map)
+        return collapse_duplicate_trailing_size_suffix(_strip_pl(str(t).strip(), _map))
 
     def _merge_metric_with_parent_fallback(
         base_df: pd.DataFrame,

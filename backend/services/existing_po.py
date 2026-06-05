@@ -36,6 +36,8 @@ _DASH_SPLIT_RE = re.compile(r"[\-\u2010\u2011\u2012\u2013\u2014\u2212]+")
 
 def _normalize_sku_text(value: object) -> str:
     """Normalize SKU tokens for stable grouping/joins (unicode dashes, stray whitespace)."""
+    from .helpers import collapse_duplicate_trailing_size_suffix
+
     s = str(value or "").strip().upper()
     if not s:
         return ""
@@ -43,7 +45,7 @@ def _normalize_sku_text(value: object) -> str:
     # Collapse " - " / "--" to "-" and trim around separators.
     parts = [p.strip() for p in s.split("-")]
     parts = [p for p in parts if p]
-    return "-".join(parts)
+    return collapse_duplicate_trailing_size_suffix("-".join(parts))
 
 
 _SKU_EXACT = [
@@ -272,19 +274,25 @@ def _split_bundled_po_sku(sku: str) -> list[str]:
     s = _normalize_sku_text(sku)
     # Split on any dash variant / repeated separators.
     parts = [p.strip() for p in _DASH_SPLIT_RE.split(s) if p.strip()]
-    if len(parts) >= 3 and parts[-1] in _PO_SIZE_TOKENS and parts[-2] in _PO_SIZE_TOKENS:
+    if (
+        len(parts) >= 3
+        and parts[-1] in _PO_SIZE_TOKENS
+        and parts[-2] in _PO_SIZE_TOKENS
+        and parts[-1] != parts[-2]
+    ):
         base = "-".join(parts[:-2])
         return [f"{base}-{parts[-2]}", f"{base}-{parts[-1]}"]
     return [s]
 
 
 def is_bundled_size_range_sku(sku: object) -> bool:
-    """True when SKU is a combined size band like 1917YKBLUE-XXL-3XL."""
+    """True when SKU is a combined size band like 1917YKBLUE-XXL-3XL (not L-L typos)."""
     parts = _DASH_SPLIT_RE.split(_normalize_sku_text(sku))
     return (
         len(parts) >= 3
         and parts[-1] in _PO_SIZE_TOKENS
         and parts[-2] in _PO_SIZE_TOKENS
+        and parts[-1] != parts[-2]
     )
 
 

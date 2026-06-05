@@ -131,6 +131,49 @@ def test_parse_po_4_jun_26_fixture():
     assert int(yk["Balance_to_Dispatch"]) == 130
 
 
+def test_collapse_duplicate_trailing_size_suffix():
+    from backend.services.helpers import collapse_duplicate_trailing_size_suffix
+    from backend.services.existing_po import is_bundled_size_range_sku, _normalize_sku_text
+
+    assert collapse_duplicate_trailing_size_suffix("1361YKBLUE-L-L") == "1361YKBLUE-L"
+    assert collapse_duplicate_trailing_size_suffix("1361YKBLUE-XL-XL") == "1361YKBLUE-XL"
+    assert collapse_duplicate_trailing_size_suffix("1361YKBLUE-XXL-XXL") == "1361YKBLUE-XXL"
+    assert collapse_duplicate_trailing_size_suffix("1361YKBLUE-S-M") == "1361YKBLUE-S-M"
+    assert collapse_duplicate_trailing_size_suffix("1917YKBLUE-L-XL") == "1917YKBLUE-L-XL"
+    assert not is_bundled_size_range_sku("1361YKBLUE-L-L")
+    assert is_bundled_size_range_sku("1917YKBLUE-L-XL")
+    assert _normalize_sku_text("1361YKBLUE-M-M") == "1361YKBLUE-M"
+
+
+def test_po_engine_normalizes_l_l_inventory_sku():
+    from backend.services.po_engine import calculate_po_base
+    import pandas as pd
+
+    days = pd.date_range("2026-05-01", periods=10, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1361YKBLUE-L"] * 10,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 10,
+            "Quantity": [1] * 10,
+            "Units_Effective": [1] * 10,
+            "Source": ["Amazon"] * 10,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["1361YKBLUE-L-L"], "Total_Inventory": [12]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+    )
+    assert len(po) == 1
+    assert po.iloc[0]["OMS_SKU"] == "1361YKBLUE-L"
+
+
 def test_existing_po_needs_recalc_tracks_generation():
     from backend.session import AppSession
     from backend.services.existing_po import existing_po_needs_recalc, session_has_fresh_existing_po

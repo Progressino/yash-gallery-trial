@@ -21,6 +21,32 @@ def clean_sku(sku) -> str:
     return str(sku).strip().replace('"""', "").replace("SKU:", "").strip().upper()
 
 
+_OMS_SIZE_SUFFIX_TOKENS = frozenset(
+    {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "8XL"}
+)
+_DASH_SPLIT_RE = re.compile(r"[\-\u2010\u2011\u2012\u2013\u2014\u2212]+")
+
+
+def collapse_duplicate_trailing_size_suffix(sku: str) -> str:
+    """
+    Fix export typos like ``1361YKBLUE-L-L`` → ``1361YKBLUE-L``.
+
+    Real size bands use two different tokens (``S-M``, ``L-XL``); repeated tokens are
+    not valid ranges and must not be treated as bundled SKUs.
+    """
+    s = str(sku or "").strip().upper()
+    if not s or "-" not in s:
+        return s
+    parts = [p.strip() for p in _DASH_SPLIT_RE.split(s) if p.strip()]
+    while (
+        len(parts) >= 3
+        and parts[-1] in _OMS_SIZE_SUFFIX_TOKENS
+        and parts[-1] == parts[-2]
+    ):
+        parts = parts[:-1]
+    return "-".join(parts)
+
+
 def normalize_id_token_for_mapping(value) -> str:
     """
     Normalise marketplace / Excel tokens before map lookup (YRN, Flipkart SKU ID).
