@@ -503,10 +503,16 @@ def read_zip_csv(zip_bytes: bytes) -> pd.DataFrame:
 
 
 def _coerce_df_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert category columns to string so parquet can handle them."""
+    """Convert category + mixed-type object columns to strings so parquet can handle them."""
     out = df.copy()
     for col in out.select_dtypes(include="category").columns:
         out[col] = out[col].astype(str)
+    # Fix mixed-type object columns (e.g. PO_Last_Raised_Date with int + str values)
+    for col in out.select_dtypes(include="object").columns:
+        try:
+            out[col].to_numpy(dtype="U")  # fast check — raises if not uniform string
+        except (ValueError, TypeError):
+            out[col] = out[col].fillna("").astype(str)
     return out
 
 
