@@ -349,6 +349,106 @@ def prepare_existing_po_for_merge(
     return ep
 
 
+def _ep_row_has_pipeline(ep_idx: pd.DataFrame, sku: str, breakdown: list[str]) -> bool:
+    if sku not in ep_idx.index:
+        return False
+    for col in breakdown:
+        if col not in ep_idx.columns:
+            continue
+        if float(pd.to_numeric(ep_idx.at[sku, col], errors="coerce") or 0) > 0:
+            return True
+    return False
+
+
+def unbundle_inventory_rows_for_existing_po(
+    po_df: pd.DataFrame,
+    ep: pd.DataFrame,
+    breakdown_cols: list[str],
+) -> pd.DataFrame:
+    """
+    Inventory often lists combined sizes (4XL-5XL) while the Existing PO sheet has
+    per-size rows (4XL: 170, 5XL: 150). Split bundled inventory rows into individual
+    size rows with sheet pipeline; keep the bundled listing row only when the sheet
+    has an exact bundled SKU line (e.g. 4XL-5XL: 4).
+    """
+    if po_df is None or po_df.empty or ep is None or ep.empty:
+        return po_df
+    breakdown = list(
+        dict.fromkeys(
+            breakdown_cols
+            + [c for c in ("PO_Pipeline_Total", "PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch") if c in ep.columns]
+        )
+    )
+    if not breakdown:
+        return po_df
+
+    ep_idx = ep.set_index("OMS_SKU")
+    split_metrics = [
+        "Total_Inventory",
+        "OMS_Inventory",
+        "Sold_Units",
+        "Return_Units",
+        "Net_Units",
+        "Recent_ADS",
+        "ADS",
+        "LY_ADS",
+        "Seasonal_Month_ADS",
+        "Flat30_ADS",
+        "Ship_Units_150d",
+        "Gross_PO_Qty",
+    ]
+
+    drop_idx: list = []
+    new_rows: list[dict] = []
+
+    for idx, row in po_df.iterrows():
+        sku = _normalize_sku_text(row.get("OMS_SKU"))
+        if not is_bundled_size_range_sku(sku):
+            continue
+        children = _split_bundled_po_sku(sku)
+        if len(children) < 2:
+            continue
+        sheet_children = [c for c in children if _ep_row_has_pipeline(ep_idx, c, breakdown)]
+        if not sheet_children:
+            continue
+
+        n = len(children)
+        base = row.to_dict()
+        for child in sheet_children:
+            child_row = dict(base)
+            child_row["OMS_SKU"] = child
+            for m in split_metrics:
+                if m not in child_row:
+                    continue
+                v = pd.to_numeric(child_row.get(m), errors="coerce")
+                if pd.notna(v):
+                    child_row[m] = float(v) / n
+            for col in breakdown:
+                if col in ep_idx.columns:
+                    val = pd.to_numeric(ep_idx.at[child, col], errors="coerce")
+                    child_row[col] = 0 if pd.isna(val) else val
+            new_rows.append(child_row)
+
+        if _ep_row_has_pipeline(ep_idx, sku, breakdown):
+            for col in breakdown:
+                if col in ep_idx.columns:
+                    val = pd.to_numeric(ep_idx.at[sku, col], errors="coerce")
+                    po_df.at[idx, col] = 0 if pd.isna(val) else val
+        else:
+            drop_idx.append(idx)
+
+    if not drop_idx and not new_rows:
+        return po_df
+    out = po_df.drop(index=drop_idx, errors="ignore")
+    if new_rows:
+        add = pd.DataFrame(new_rows)
+        for c in out.columns:
+            if c not in add.columns:
+                add[c] = 0 if out[c].dtype != object else ""
+        out = pd.concat([out, add[out.columns]], ignore_index=True)
+    return out
+
+
 def rollup_pipeline_onto_bundled_rows(
     po_df: pd.DataFrame,
     ep: pd.DataFrame,

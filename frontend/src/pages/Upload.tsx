@@ -68,6 +68,12 @@ export default function Upload() {
   const [buildingMsg, setBuildingMsg] = useState('')
   const [chunkProgress, setChunkProgress] = useState<{ pct: number; sent: number; total: number; msg: string } | null>(null)
   const [invProgress, setInvProgress] = useState<{ pct: number; msg: string; phase: 'upload' | 'parse' } | null>(null)
+  const [existingPoProgress, setExistingPoProgress] = useState<{
+    pct: number
+    msg: string
+    phase: 'upload' | 'parse' | 'refresh'
+    startedAt: number
+  } | null>(null)
   const [uploadAlertsBySource, setUploadAlertsBySource] = useState<Record<string, UploadAlert>>({})
   const [restoreProgress, setRestoreProgress] = useState<RestoreProgressTick>({
     message: '',
@@ -83,6 +89,7 @@ export default function Upload() {
     Object.values(loading).some(Boolean) ||
     !!buildingMsg ||
     !!invProgress ||
+    !!existingPoProgress ||
     restoreBusy
 
   // Shared coverage polling: CoverageProvider in App.tsx (light, 3s while jobs run).
@@ -925,6 +932,33 @@ export default function Upload() {
               ) : null}
             </div>
           )}
+          <p className="text-[11px] text-slate-600 mb-2 leading-relaxed">
+            <strong>Process:</strong> upload file → server parses ~10k SKU rows (Pending Cutting, Balance, Pipeline)
+            → clears old PO cache → then click <strong>Calculate PO</strong> on PO Engine for per-size pipeline.
+            Large sheets can take 30–90 seconds.
+          </p>
+          {existingPoProgress && (
+            <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 mb-2 space-y-1.5">
+              <div className="flex items-center gap-2 text-xs text-sky-900">
+                <svg className="animate-spin h-3 w-3 text-sky-600 shrink-0" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <span className="flex-1">{existingPoProgress.msg}</span>
+                <span className="text-sky-600 tabular-nums shrink-0">
+                  {Math.round((Date.now() - existingPoProgress.startedAt) / 1000)}s
+                </span>
+              </div>
+              {existingPoProgress.pct > 0 && existingPoProgress.phase === 'upload' ? (
+                <div className="h-2 rounded-full bg-sky-100 overflow-hidden">
+                  <div
+                    className="h-full bg-sky-500 transition-all duration-300"
+                    style={{ width: `${existingPoProgress.pct}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+          )}
           <FileUpload
             label="Upload PO Sheet"
             accept={{
@@ -933,9 +967,27 @@ export default function Upload() {
             }}
             onUpload={async (file: File) => {
               setL('existingpo', true)
+              const startedAt = Date.now()
+              setExistingPoProgress({ pct: 0, msg: `Uploading ${file.name}…`, phase: 'upload', startedAt })
               try {
                 await withUploadGuard(async () => {
-                  const res = await uploadExistingPO(file)
+                  const res = await uploadExistingPO(file, (pct, phase) => {
+                    if (phase === 'upload') {
+                      setExistingPoProgress({
+                        pct,
+                        msg: pct < 100 ? `Uploading ${file.name}… ${pct}%` : `Parsing ${file.name} on server…`,
+                        phase: 'upload',
+                        startedAt,
+                      })
+                    } else {
+                      setExistingPoProgress({
+                        pct: 100,
+                        msg: 'Parsing SKU rows and refreshing session (30–90s for large sheets)…',
+                        phase: 'parse',
+                        startedAt,
+                      })
+                    }
+                  })
                   if (res.ok) {
                     captureUploadAlerts('existingpo', res)
                     usePOStore.getState().setResult(null)
@@ -945,6 +997,7 @@ export default function Upload() {
                       `${res.message} Pipeline columns update only after Calculate PO.`,
                       8000,
                     )
+                    setExistingPoProgress({ pct: 100, msg: 'Refreshing coverage…', phase: 'refresh', startedAt })
                     await refresh()
                   } else {
                     showToast('error', res.message)
@@ -954,6 +1007,7 @@ export default function Upload() {
                 showToast('error', e instanceof Error ? e.message : 'Upload failed')
               } finally {
                 setL('existingpo', false)
+                setExistingPoProgress(null)
               }
             }}
             uploading={loading['existingpo']}

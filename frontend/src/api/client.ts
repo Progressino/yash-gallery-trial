@@ -257,7 +257,27 @@ export const uploadMeesho     = (file: File) => uploadFile('/upload/meesho', fil
 export const uploadFlipkart   = (file: File) => uploadFile('/upload/flipkart', file)
 export const uploadAmazonB2C  = (file: File) => uploadFile('/upload/amazon-b2c', file)
 export const uploadAmazonB2B  = (file: File) => uploadFile('/upload/amazon-b2b', file)
-export const uploadExistingPO = (file: File) => uploadFile('/upload/existing-po', file)
+export async function uploadExistingPO(
+  file: File,
+  onProgress?: (pct: number, phase: 'upload' | 'server') => void,
+): Promise<UploadResponse> {
+  const fd = new FormData()
+  fd.append('file', file)
+  try {
+    const { data } = await api.post<UploadResponse>('/upload/existing-po', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+      onUploadProgress: (e) => {
+        if (!onProgress || !e.total) return
+        onProgress(Math.round((e.loaded / e.total) * 100), 'upload')
+      },
+    })
+    onProgress?.(100, 'server')
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Existing PO upload failed'))
+  }
+}
 export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
 export async function uploadInventoryAuto(

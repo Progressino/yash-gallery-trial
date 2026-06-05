@@ -624,7 +624,7 @@ def test_po_4_jun_fixture_1917ykblue_sizes_stay_separate():
                 "1917YKBLUE-S-M",
                 "1917YKBLUE-XXL-3XL",
             ],
-            "Total_Inventory": [22, 20, 18, 19],
+            "Total_Inventory": [18, 56, 15, 20],
         }
     )
     po = calculate_po_base(
@@ -644,6 +644,10 @@ def test_po_4_jun_fixture_1917ykblue_sizes_stay_separate():
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-3XL", "PO_Pipeline_Total"].iloc[0]) == 130
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 170
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 150
+    # Bundled inventory rows split into per-size rows (not combined pipeline).
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "Total_Inventory"].iloc[0]) == 9.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-L", "Total_Inventory"].iloc[0]) == 28.0
+    assert len(po[po["OMS_SKU"].astype(str).str.contains("1917YKBLUE")]) == 12
 
 
 def test_po_pipeline_ghost_row_inherits_sheet_lead_not_global_default():

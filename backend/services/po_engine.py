@@ -1113,7 +1113,10 @@ def calculate_po_base(
     _breakdown_cols: list[str] = []
     _ep_prepared = pd.DataFrame()
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
-        from .existing_po import prepare_existing_po_for_merge
+        from .existing_po import (
+            prepare_existing_po_for_merge,
+            unbundle_inventory_rows_for_existing_po,
+        )
 
         _ep_prepared = prepare_existing_po_for_merge(existing_po_df, _canonical_oms_key)
         _breakdown_cols = [
@@ -1125,6 +1128,7 @@ def calculate_po_base(
             _ep_merge = _ep_prepared[_merge_cols].drop_duplicates(subset=["OMS_SKU"], keep="last")
             po_df = po_df.drop(columns=["PO_Pipeline_Total"] + _breakdown_cols, errors="ignore")
             po_df = pd.merge(po_df, _ep_merge, on="OMS_SKU", how="left")
+            po_df = unbundle_inventory_rows_for_existing_po(po_df, _ep_prepared, _breakdown_cols)
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
         ).fillna(0).astype(int)
