@@ -913,8 +913,14 @@ export default function Upload() {
         {allowAdminBaseline ? (
         <UploadCard
           title="📦 Existing PO Sheet"
-          subtitle="Open/pending POs (XLSX or CSV)"
+          subtitle={
+            coverage.existing_po_rows && coverage.existing_po_rows > 0
+              ? `${coverage.existing_po_rows.toLocaleString()} SKUs loaded — drop a newer file below to replace`
+              : 'Open/pending POs (XLSX or CSV)'
+          }
           loaded={coverage.existing_po}
+          rows={coverage.existing_po_rows}
+          rowsUnit="SKUs"
           alert={showImportCompleteness ? uploadAlertsBySource['existingpo'] : undefined}
           onClearAlert={() => clearUploadAlert('existingpo')}
         >
@@ -924,6 +930,12 @@ export default function Upload() {
               <span className="font-semibold text-gray-700">
                 {coverage.existing_po_filename || 'Existing PO sheet'}
               </span>
+              {coverage.existing_po_rows && coverage.existing_po_rows > 0 ? (
+                <span className="text-gray-600">
+                  {' '}
+                  · {coverage.existing_po_rows.toLocaleString()} SKUs
+                </span>
+              ) : null}
               {coverage.existing_po_uploaded_at ? (
                 <span className="text-gray-400">
                   {' '}
@@ -933,34 +945,23 @@ export default function Upload() {
             </div>
           )}
           <p className="text-[11px] text-slate-600 mb-2 leading-relaxed">
-            <strong>Process:</strong> upload file → server parses ~10k SKU rows (Pending Cutting, Balance, Pipeline)
-            → clears old PO cache → then click <strong>Calculate PO</strong> on PO Engine for per-size pipeline.
-            Large sheets can take 30–90 seconds.
+            <strong>Process:</strong>{' '}
+            {coverage.existing_po
+              ? 'Replace anytime — new file overwrites the previous sheet.'
+              : 'Upload your open-PO export.'}{' '}
+            Server parses every SKU (Pending Cutting, Balance, Pipeline), clears old PO cache, then click{' '}
+            <strong>Calculate PO</strong> on PO Engine for per-size pipeline.
+            {coverage.existing_po_rows && coverage.existing_po_rows > 0
+              ? null
+              : ' Large sheets can take 30–90 seconds.'}
           </p>
-          {existingPoProgress && (
-            <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 mb-2 space-y-1.5">
-              <div className="flex items-center gap-2 text-xs text-sky-900">
-                <svg className="animate-spin h-3 w-3 text-sky-600 shrink-0" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                </svg>
-                <span className="flex-1">{existingPoProgress.msg}</span>
-                <span className="text-sky-600 tabular-nums shrink-0">
-                  {Math.round((Date.now() - existingPoProgress.startedAt) / 1000)}s
-                </span>
-              </div>
-              {existingPoProgress.pct > 0 && existingPoProgress.phase === 'upload' ? (
-                <div className="h-2 rounded-full bg-sky-100 overflow-hidden">
-                  <div
-                    className="h-full bg-sky-500 transition-all duration-300"
-                    style={{ width: `${existingPoProgress.pct}%` }}
-                  />
-                </div>
-              ) : null}
-            </div>
-          )}
+          {existingPoProgress ? <ExistingPoUploadProgress progress={existingPoProgress} /> : null}
           <FileUpload
-            label="Upload PO Sheet"
+            label={
+              coverage.existing_po
+                ? 'Replace PO sheet (upload updated file)'
+                : 'Upload PO Sheet'
+            }
             accept={{
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
               'text/csv': ['.csv'],
@@ -975,14 +976,17 @@ export default function Upload() {
                     if (phase === 'upload') {
                       setExistingPoProgress({
                         pct,
-                        msg: pct < 100 ? `Uploading ${file.name}… ${pct}%` : `Parsing ${file.name} on server…`,
+                        msg:
+                          pct < 100
+                            ? `Uploading ${file.name}… ${pct}%`
+                            : `Upload complete — parsing ${file.name} on server…`,
                         phase: 'upload',
                         startedAt,
                       })
                     } else {
                       setExistingPoProgress({
-                        pct: 100,
-                        msg: 'Parsing SKU rows and refreshing session (30–90s for large sheets)…',
+                        pct: 55,
+                        msg: `Parsing ${file.name} — reading SKU rows (30–90s for large sheets)…`,
                         phase: 'parse',
                         startedAt,
                       })
@@ -992,12 +996,19 @@ export default function Upload() {
                     captureUploadAlerts('existingpo', res)
                     usePOStore.getState().setResult(null)
                     usePOStore.getState().setSkipSharedCacheOnce(true)
+                    const skuNote =
+                      res.rows != null ? ` ${res.rows.toLocaleString()} SKUs loaded.` : ''
                     showToast(
                       'success',
-                      `${res.message} Pipeline columns update only after Calculate PO.`,
+                      `${res.message}${skuNote} Click Calculate PO on PO Engine to refresh pipeline.`,
                       8000,
                     )
-                    setExistingPoProgress({ pct: 100, msg: 'Refreshing coverage…', phase: 'refresh', startedAt })
+                    setExistingPoProgress({
+                      pct: 96,
+                      msg: `Saving ${res.rows != null ? `${res.rows.toLocaleString()} SKUs` : 'sheet'} to session…`,
+                      phase: 'refresh',
+                      startedAt,
+                    })
                     await refresh()
                   } else {
                     showToast('error', res.message)
@@ -1762,11 +1773,97 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
+type ExistingPoProgressState = {
+  pct: number
+  msg: string
+  phase: 'upload' | 'parse' | 'refresh'
+  startedAt: number
+}
+
+function ExistingPoUploadProgress({ progress }: { progress: ExistingPoProgressState }) {
+  const [elapsed, setElapsed] = useState(0)
+  const [barPct, setBarPct] = useState(progress.pct)
+
+  useEffect(() => {
+    setElapsed(Math.max(0, Math.round((Date.now() - progress.startedAt) / 1000)))
+    const id = window.setInterval(() => {
+      setElapsed(Math.max(0, Math.round((Date.now() - progress.startedAt) / 1000)))
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [progress.startedAt])
+
+  useEffect(() => {
+    if (progress.phase === 'upload') {
+      setBarPct(progress.pct)
+      return
+    }
+    if (progress.phase === 'parse') {
+      setBarPct(prev => Math.max(prev, progress.pct, 55))
+      const id = window.setInterval(() => {
+        setBarPct(prev => (prev < 92 ? prev + 1 : prev))
+      }, 900)
+      return () => window.clearInterval(id)
+    }
+    setBarPct(98)
+  }, [progress.phase, progress.pct])
+
+  const steps: { key: ExistingPoProgressState['phase']; label: string }[] = [
+    { key: 'upload', label: 'Upload' },
+    { key: 'parse', label: 'Parse' },
+    { key: 'refresh', label: 'Save' },
+  ]
+  const stepIndex = progress.phase === 'upload' ? 0 : progress.phase === 'parse' ? 1 : 2
+
+  return (
+    <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5 mb-2 space-y-2">
+      <div className="flex items-center gap-2 text-xs text-sky-900">
+        <svg className="animate-spin h-3.5 w-3.5 text-sky-600 shrink-0" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+        </svg>
+        <span className="flex-1 font-medium">{progress.msg}</span>
+        <span className="text-sky-600 tabular-nums shrink-0">{elapsed}s</span>
+      </div>
+      <div className="flex items-center gap-1 text-[10px] text-sky-800">
+        {steps.map((s, i) => (
+          <span
+            key={s.key}
+            className={
+              i < stepIndex
+                ? 'text-sky-600 font-semibold'
+                : i === stepIndex
+                  ? 'font-semibold text-sky-900'
+                  : 'text-sky-400'
+            }
+          >
+            {i > 0 ? ' → ' : ''}
+            {s.label}
+            {i === stepIndex ? '…' : i < stepIndex ? ' ✓' : ''}
+          </span>
+        ))}
+      </div>
+      <div className="space-y-0.5">
+        <div className="h-2.5 rounded-full bg-sky-100 overflow-hidden">
+          <div
+            className={`h-full bg-sky-500 transition-all duration-300 ${
+              progress.phase === 'parse' && barPct < 92 ? 'animate-pulse' : ''
+            }`}
+            style={{ width: `${Math.min(100, Math.max(2, barPct))}%` }}
+          />
+        </div>
+        <p className="text-[10px] text-sky-700 text-right tabular-nums">
+          {progress.phase === 'upload' ? `${barPct}%` : progress.phase === 'parse' ? 'Parsing…' : 'Almost done…'}
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function UploadCard({
-  title, subtitle, loaded, rows, onClear, clearing, alert, onClearAlert, children,
+  title, subtitle, loaded, rows, rowsUnit = 'rows', onClear, clearing, alert, onClearAlert, children,
 }: {
   title: string; subtitle: string; loaded: boolean
-  rows?: number; onClear?: () => void; clearing?: boolean
+  rows?: number; rowsUnit?: string; onClear?: () => void; clearing?: boolean
   alert?: UploadAlert; onClearAlert?: () => void
   children: React.ReactNode
 }) {
@@ -1780,7 +1877,7 @@ function UploadCard({
         <div className="flex items-center gap-1.5 shrink-0">
           {loaded && (
             <span className="text-green-700 text-xs font-medium bg-green-50 px-2 py-0.5 rounded-full">
-              {rows !== undefined && rows > 0 ? `✓ ${rows.toLocaleString()} rows` : '✓ Loaded'}
+              {rows !== undefined && rows > 0 ? `✓ ${rows.toLocaleString()} ${rowsUnit}` : '✓ Loaded'}
             </span>
           )}
           {loaded && onClear && (
