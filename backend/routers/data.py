@@ -2110,7 +2110,15 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     """Build coverage flags from current session state (no restore side effects)."""
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
-    from ..services.existing_po import existing_po_needs_recalc as _existing_po_needs_recalc
+    from ..services.existing_po import (
+        ensure_existing_po_hydrated,
+        existing_po_needs_recalc as _existing_po_needs_recalc,
+    )
+
+    try:
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        pass
 
     tier3_any = bool(get_summary())
     _po_ledger = getattr(sess, "po_raise_ledger_df", None)

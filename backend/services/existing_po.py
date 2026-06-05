@@ -10,10 +10,16 @@ Returns a DataFrame with:
   - Balance_to_Dispatch (units cut but not dispatched, if col found)
 """
 import io
+import json
+import logging
+import os
 import re
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+_log = logging.getLogger(__name__)
 
 # Heuristic used only for auto-detection (headerless sheets, ambiguous SKU columns).
 # Must be permissive: "OMS_SKU" can be size SKUs (1917YKBLUE-3XL), parent-like tokens,
@@ -335,6 +341,140 @@ def existing_po_needs_recalc(sess) -> bool:
     cur = int(getattr(sess, "existing_po_generation", 0) or 0)
     done = int(getattr(sess, "po_calculate_existing_po_generation", -1) or -1)
     return done != cur
+
+
+def _existing_po_disk_dir() -> Path:
+    return Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+
+
+def existing_po_meta_bundle(sess) -> dict:
+    """Serializable metadata for warm-cache / disk restore."""
+    ep = getattr(sess, "existing_po_df", None)
+    rows = int(len(ep)) if ep is not None and not getattr(ep, "empty", True) else 0
+    sku_n = 0
+    if ep is not None and not getattr(ep, "empty", True) and "OMS_SKU" in ep.columns:
+        sku_n = int(ep["OMS_SKU"].astype(str).nunique())
+    return {
+        "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
+        "existing_po_uploaded_at": str(getattr(sess, "existing_po_uploaded_at", "") or ""),
+        "existing_po_filename": str(getattr(sess, "existing_po_filename", "") or ""),
+        "existing_po_rows": rows,
+        "existing_po_skus": sku_n,
+    }
+
+
+def apply_existing_po_session_meta(sess, meta: dict) -> None:
+    """Copy Existing PO upload metadata onto a session (not the dataframe)."""
+    if not isinstance(meta, dict):
+        return
+    gen = int(meta.get("existing_po_generation") or 0)
+    if gen > int(getattr(sess, "existing_po_generation", 0) or 0):
+        sess.existing_po_generation = gen
+    for key in ("existing_po_uploaded_at", "existing_po_filename"):
+        if meta.get(key):
+            setattr(sess, key, str(meta[key]))
+
+
+def persist_existing_po_to_disk(sess) -> bool:
+    """Write latest Existing PO upload to warm-cache disk (survives restarts / warm-cache clobber)."""
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is None or getattr(ep, "empty", True):
+        return False
+    try:
+        from .helpers import _coerce_df_for_parquet
+
+        root = _existing_po_disk_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        _coerce_df_for_parquet(ep).to_parquet(root / "existing_po_df.parquet", index=False)
+        meta = existing_po_meta_bundle(sess)
+        (root / "existing_po_meta.json").write_text(
+            json.dumps(meta, default=str),
+            encoding="utf-8",
+        )
+        manifest_path = root / "_manifest.json"
+        manifest: dict = {}
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        keys = set(manifest.get("keys") or [])
+        keys.add("existing_po_df")
+        keys.add("existing_po_meta")
+        manifest["keys"] = sorted(keys)
+        manifest_path.write_text(json.dumps(manifest, default=str), encoding="utf-8")
+        _log.info(
+            "Existing PO disk save: %s rows (gen=%s)",
+            meta.get("existing_po_rows"),
+            meta.get("existing_po_generation"),
+        )
+        return True
+    except Exception:
+        _log.exception("persist_existing_po_to_disk failed")
+        return False
+
+
+def read_existing_po_disk_meta() -> Optional[dict]:
+    try:
+        meta_path = _existing_po_disk_dir() / "existing_po_meta.json"
+        if not meta_path.is_file():
+            return None
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _load_existing_po_df_from_disk() -> Optional[pd.DataFrame]:
+    try:
+        path = _existing_po_disk_dir() / "existing_po_df.parquet"
+        if not path.is_file():
+            return None
+        df = pd.read_parquet(path)
+        return df if not getattr(df, "empty", True) else None
+    except Exception:
+        _log.exception("load existing_po_df from disk failed")
+        return None
+
+
+def restore_existing_po_from_disk(sess) -> bool:
+    """Hydrate session from disk when warm cache left a partial or stale Existing PO."""
+    meta = read_existing_po_disk_meta()
+    df = _load_existing_po_df_from_disk()
+    if meta is None or df is None:
+        return False
+
+    disk_gen = int(meta.get("existing_po_generation") or 0)
+    disk_rows = int(meta.get("existing_po_rows") or len(df))
+    sess_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+    ep = getattr(sess, "existing_po_df", None)
+    sess_rows = int(len(ep)) if ep is not None and not getattr(ep, "empty", True) else 0
+
+    newer_gen = disk_gen > sess_gen
+    partial_session = sess_rows > 0 and disk_rows > sess_rows + 50
+    empty_session = sess_rows == 0 and disk_rows > 0
+    if not (newer_gen or partial_session or empty_session):
+        return False
+
+    sess.existing_po_df = df
+    apply_existing_po_session_meta(sess, meta)
+    sess.po_calculate_existing_po_generation = -1
+    _log.info(
+        "Existing PO restored from disk: %s rows (gen %s→%s)",
+        disk_rows,
+        sess_gen,
+        disk_gen,
+    )
+    return True
+
+
+def ensure_existing_po_hydrated(sess) -> bool:
+    """Before PO calculate, guarantee the full uploaded sheet is in memory."""
+    changed = restore_existing_po_from_disk(sess)
+    if changed:
+        try:
+            from ..services.po_raise_remove import invalidate_po_calculate_result
+
+            invalidate_po_calculate_result(sess)
+        except Exception:
+            pass
+    return changed
 
 
 def prepare_existing_po_for_merge(

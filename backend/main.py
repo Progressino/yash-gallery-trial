@@ -313,6 +313,9 @@ _INVENTORY_WARM_KEYS = ("inventory_df_variant", "inventory_df_parent")
 _INVENTORY_META_WARM_KEY = "inventory_session_meta"
 
 
+_EXISTING_PO_META_WARM_KEY = "existing_po_session_meta"
+
+
 def merge_existing_po_into_warm_cache(sess) -> None:
     """Mirror uploaded Existing PO into shared warm cache (same pattern as inventory)."""
     import pandas as pd
@@ -325,6 +328,13 @@ def merge_existing_po_into_warm_cache(sess) -> None:
         _warm_cache["existing_po_df"] = pd.DataFrame()
     else:
         _warm_cache["existing_po_df"] = df.copy()
+    try:
+        from .services.existing_po import existing_po_meta_bundle, persist_existing_po_to_disk
+
+        _warm_cache[_EXISTING_PO_META_WARM_KEY] = existing_po_meta_bundle(sess)
+        persist_existing_po_to_disk(sess)
+    except Exception:
+        log.exception("existing_po warm-cache meta/disk save failed")
     _warm_cache_loaded_at = datetime.now(IST)
 
 
@@ -1236,6 +1246,14 @@ def _copy_warm_cache_to_session(sess) -> bool:
                     continue
             except Exception:
                 pass
+        if key == _EXISTING_PO_META_WARM_KEY:
+            try:
+                from .services.existing_po import apply_existing_po_session_meta
+
+                apply_existing_po_session_meta(sess, val if isinstance(val, dict) else {})
+            except Exception:
+                pass
+            continue
         setattr(sess, key, val)
     meta = _warm_cache.get(_INVENTORY_META_WARM_KEY)
     if meta:

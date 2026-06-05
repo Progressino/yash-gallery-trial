@@ -148,6 +148,13 @@ def execute_po_calculate(
         del _inv_dates
         _gc.collect()
 
+    try:
+        from .existing_po import ensure_existing_po_hydrated
+
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        logger.exception("ensure_existing_po_hydrated before calculate failed")
+
     _set_po_calculate_progress(
         sess,
         session_id,

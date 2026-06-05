@@ -151,6 +151,40 @@ def test_existing_po_needs_recalc_tracks_generation():
     assert existing_po_needs_recalc(sess)
 
 
+def test_restore_existing_po_from_disk_replaces_partial_session():
+    import json
+    import tempfile
+    from backend.services.existing_po import (
+        persist_existing_po_to_disk,
+        restore_existing_po_from_disk,
+    )
+    from backend.session import AppSession
+
+    full = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-3XL", "1917YKBLUE-4XL", "1917YKBLUE-4XL-5XL"],
+            "PO_Pipeline_Total": [130, 170, 4],
+        }
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        import os
+
+        os.environ["WARM_CACHE_DIR"] = tmp
+        sess = AppSession()
+        sess.existing_po_df = full
+        sess.existing_po_generation = 2
+        sess.existing_po_uploaded_at = "2026-06-04T12:00:00Z"
+        sess.existing_po_filename = "Po 4-Jun-26.xlsx"
+        assert persist_existing_po_to_disk(sess)
+
+        partial = AppSession()
+        partial.existing_po_df = full.iloc[[2]].copy()
+        partial.existing_po_generation = 1
+        assert restore_existing_po_from_disk(partial)
+        assert len(partial.existing_po_df) == 3
+        assert int(partial.existing_po_generation) == 2
+
+
 def test_cache_apply_preserves_fresh_existing_po():
     from backend.routers.cache import _apply_loaded_into_session
     from backend.session import AppSession

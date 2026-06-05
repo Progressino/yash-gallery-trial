@@ -1001,12 +1001,25 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     if not sid:
         return {"ok": False, "message": "No session id."}
 
+    from ..services.existing_po import (
+        ensure_existing_po_hydrated,
+        existing_po_needs_recalc,
+        session_has_fresh_existing_po,
+    )
+
+    ensure_existing_po_hydrated(sess)
+
     body_dict = body.model_dump()
-    if body.use_shared_cache:
+    if body.use_shared_cache and (
+        not session_has_fresh_existing_po(sess) or not existing_po_needs_recalc(sess)
+    ):
         from ..services.po_shared_cache import apply_shared_cache_to_session
 
         cached = apply_shared_cache_to_session(sess, sid, body_dict)
         if cached:
+            sess.po_calculate_existing_po_generation = int(
+                getattr(sess, "existing_po_generation", 0) or 0
+            )
             return cached
 
     if getattr(sess, "po_calculate_status", "idle") == "running":

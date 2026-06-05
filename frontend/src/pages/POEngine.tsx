@@ -254,6 +254,7 @@ export default function POEngine() {
   const existingPoFilename = useSession(s => s.existing_po_filename)
   const existingPoUploadedAt = useSession(s => s.existing_po_uploaded_at)
   const existingPoNeedsRecalc = useSession(s => s.existing_po_needs_recalc ?? false)
+  const existingPoRows = useSession(s => s.existing_po_rows ?? 0)
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
 
   useEffect(() => {
@@ -587,7 +588,10 @@ export default function POEngine() {
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
-      const useSharedCache = !skipSharedCacheOnce && !existingPoNeedsRecalc
+      const useSharedCache =
+        !skipSharedCacheOnce &&
+        !existingPoNeedsRecalc &&
+        !(existingPoLoaded && existingPoRows > 0)
       if (skipSharedCacheOnce) setSkipSharedCacheOnce(false)
       poRes = (await startPoCalculate(
         {
@@ -1319,14 +1323,29 @@ export default function POEngine() {
                       : <strong>{existingPoFilename}</strong>
                     </>
                   ) : null}
+                  {existingPoRows > 0 ? (
+                    <span className="text-slate-500">
+                      {' '}
+                      · {existingPoRows.toLocaleString()} SKUs
+                    </span>
+                  ) : null}
                   {existingPoUploadedAt ? (
                     <span className="text-slate-400">
                       {' '}
                       ({new Date(existingPoUploadedAt).toLocaleString()})
                     </span>
                   ) : null}
-                  {' — '}
-                  click <strong>Calculate PO</strong> after re-uploading to refresh pipeline columns.
+                  {existingPoRows > 0 && existingPoRows < 5000 ? (
+                    <span className="text-amber-800 font-medium">
+                      {' '}
+                      — sheet looks partial; re-upload the full Existing PO file on Upload, then Calculate PO.
+                    </span>
+                  ) : (
+                    <>
+                      {' — '}
+                      click <strong>Calculate PO</strong> after re-uploading to refresh pipeline columns.
+                    </>
+                  )}
                 </p>
               ) : (
                 <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">

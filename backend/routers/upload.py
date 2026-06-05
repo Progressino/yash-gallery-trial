@@ -2362,6 +2362,9 @@ async def upload_existing_po(
 
             invalidate_po_calculate_result(sess)
             invalidate_all_shared_caches()
+            from ..services.existing_po import persist_existing_po_to_disk
+
+            persist_existing_po_to_disk(sess)
             _session_data_changed(sess)
             active = 0
             if "PO_Pipeline_Total" in df.columns:
