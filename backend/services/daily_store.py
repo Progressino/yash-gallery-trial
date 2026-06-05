@@ -1259,11 +1259,11 @@ def platforms_with_uploads_in_range(start_date: str, end_date: str) -> List[str]
 
 
 _PLATFORM_METRICS_COLUMNS: dict[str, list[str]] = {
-    "amazon": ["Date", "SKU", "Transaction_Type", "Quantity", "State"],
-    "myntra": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
-    "meesho": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
-    "flipkart": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
-    "snapdeal": ["Date", "OMS_SKU", "TxnType", "Quantity", "State"],
+    "amazon": ["Date", "SKU", "Transaction_Type", "Quantity", "State", "Order_Id", "Invoice_Number"],
+    "myntra": ["Date", "OMS_SKU", "TxnType", "Quantity", "State", "OrderId", "LineKey"],
+    "meesho": ["Date", "OMS_SKU", "TxnType", "Quantity", "State", "OrderId", "LineKey"],
+    "flipkart": ["Date", "OMS_SKU", "TxnType", "Quantity", "State", "OrderId", "LineKey"],
+    "snapdeal": ["Date", "OMS_SKU", "TxnType", "Quantity", "State", "OrderId"],
 }
 
 

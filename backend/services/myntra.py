@@ -670,7 +670,11 @@ def load_myntra_from_zip(
 def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
     if myntra_df.empty:
         return pd.DataFrame()
-    oid = myntra_df["OrderId"].astype(str).str.strip()
+    oid = (
+        myntra_df["OrderId"].astype(str).str.strip()
+        if "OrderId" in myntra_df.columns
+        else pd.Series("", index=myntra_df.index, dtype=str)
+    )
     if "LineKey" in myntra_df.columns:
         lk = myntra_df["LineKey"].astype(str).str.strip()
         use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])

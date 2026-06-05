@@ -638,6 +638,8 @@ def build_sales_df(
 
     if "LineKey" not in combined_sales.columns:
         combined_sales["LineKey"] = ""
+    if "OrderId" not in combined_sales.columns:
+        combined_sales["OrderId"] = np.nan
 
     lk_series = clean_line_id_series(combined_sales["LineKey"])
     has_lk = lk_series.ne("") & ~lk_series.str.lower().isin(["nan", "none"])

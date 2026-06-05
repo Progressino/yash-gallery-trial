@@ -550,7 +550,11 @@ def snapdeal_to_sales_rows(snapdeal_df: pd.DataFrame) -> pd.DataFrame:
                      snapdeal_df["Quantity"])
         ),
         "Source":           "Snapdeal",
-        "OrderId":          snapdeal_df["OrderId"],
+        "OrderId":          (
+            snapdeal_df["OrderId"]
+            if "OrderId" in snapdeal_df.columns
+            else pd.Series("", index=snapdeal_df.index, dtype=str)
+        ),
         "LineKey":          "",
     })
     if "Company" in snapdeal_df.columns:

@@ -841,7 +841,11 @@ def flipkart_to_sales_rows(fk_df: pd.DataFrame) -> pd.DataFrame:
     if "DSR_Segment" in fk_df.columns:
         _file_seg = fk_df["DSR_Segment"].fillna("").astype(str).str.strip()
         _brand = _file_seg.where(_file_seg.str.len() > 0, _brand)
-    oid = fk_df["OrderId"].astype(str).str.strip()
+    oid = (
+        fk_df["OrderId"].astype(str).str.strip()
+        if "OrderId" in fk_df.columns
+        else pd.Series("", index=fk_df.index, dtype=str)
+    )
     if "LineKey" in fk_df.columns:
         lk = fk_df["LineKey"].astype(str).str.strip()
         use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])

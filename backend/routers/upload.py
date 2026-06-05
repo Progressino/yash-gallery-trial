@@ -850,9 +850,20 @@ def _auto_save_cache(sess) -> None:
 
 def _get_session(request: Request):
     sess = request.state.session
-    if sess is None:
-        raise HTTPException(status_code=500, detail="Session not initialised")
-    return sess
+    if sess is not None:
+        return sess
+    sid = getattr(request.state, "session_id", None) or request.cookies.get("session_id")
+    if sid:
+        recovered = _resolve_upload_session(sid)
+        if recovered is not None:
+            request.state.session = recovered
+            request.state.session_id = sid
+            setattr(recovered, "_persist_sid", sid)
+            return recovered
+    raise HTTPException(
+        status_code=503,
+        detail="Session is still loading — refresh the page and try again in a few seconds.",
+    )
 
 
 def _resolve_upload_session(session_id: str) -> AppSession | None:

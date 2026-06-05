@@ -995,7 +995,11 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
     else:
         sku_series = "MEESHO_TOTAL"
 
-    oid = meesho_df["OrderId"].astype(str).str.strip()
+    oid = (
+        meesho_df["OrderId"].astype(str).str.strip()
+        if "OrderId" in meesho_df.columns
+        else pd.Series("", index=meesho_df.index, dtype=str)
+    )
     if "LineKey" in meesho_df.columns:
         lk = meesho_df["LineKey"].astype(str).str.strip()
         use = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])

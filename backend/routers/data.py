@@ -1198,8 +1198,12 @@ def _intelligence_payload_from_tier3_direct(
     _ensure_sku_mapping_for_dashboard(sess)
     span = _report_span_days(s, e) or 999
     if span <= _intelligence_fast_window_days() and all_frames and sess.sku_mapping:
-        built = _build_sales_from_tier3_frames(sess, all_frames)
-        sales_for_bundle = _slice_sales_for_bundle(built, s, e)
+        try:
+            built = _build_sales_from_tier3_frames(sess, all_frames)
+            sales_for_bundle = _slice_sales_for_bundle(built, s, e)
+        except Exception:
+            _log.exception("tier3 direct sales build failed for %s..%s", s, e)
+            sales_for_bundle = pd.DataFrame()
 
     top_skus = (
         get_top_skus(
