@@ -56,6 +56,8 @@ interface POState {
   qSearch: string
   groupedView: boolean
   collapsedParents: Set<string>
+  /** After Existing PO upload, next Calculate PO skips shared cache once. */
+  skipSharedCacheOnce: boolean
 
   setActiveTab: (t: Tab) => void
   setParams: (p: POParams) => void
@@ -68,6 +70,7 @@ interface POState {
   setQSearch: (s: string) => void
   setGroupedView: (v: boolean) => void
   setCollapsedParents: (s: Set<string>) => void
+  setSkipSharedCacheOnce: (v: boolean) => void
 }
 
 export const usePOStore = create<POState>()(
@@ -97,6 +100,7 @@ export const usePOStore = create<POState>()(
   qSearch: '',
   groupedView: true,
   collapsedParents: new Set(),
+  skipSharedCacheOnce: false,
 
   setActiveTab:        (t) => set({ activeTab: t }),
   setParams:           (p) => set({ params: p }),
@@ -109,6 +113,7 @@ export const usePOStore = create<POState>()(
   setQSearch:          (s) => set({ qSearch: s }),
   setGroupedView:      (v) => set({ groupedView: v }),
   setCollapsedParents: (s) => set({ collapsedParents: s }),
+  setSkipSharedCacheOnce: (v) => set({ skipSharedCacheOnce: v }),
     }),
     {
       name: 'po-store-v1',

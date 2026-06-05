@@ -26,6 +26,12 @@ def invalidate_po_calculate_result(sess) -> None:
         sid = getattr(sess, "_persist_sid", None)
         if sid:
             clear_po_job(sid)
+            try:
+                from .po_result_spill import clear_spill
+
+                clear_spill(sid)
+            except Exception:
+                pass
     except Exception:
         pass
 

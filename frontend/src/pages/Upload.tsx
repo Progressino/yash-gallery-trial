@@ -939,6 +939,7 @@ export default function Upload() {
                   if (res.ok) {
                     captureUploadAlerts('existingpo', res)
                     usePOStore.getState().setResult(null)
+                    usePOStore.getState().setSkipSharedCacheOnce(true)
                     showToast(
                       'success',
                       `${res.message} Pipeline columns update only after Calculate PO.`,

@@ -330,6 +330,7 @@ export default function POEngine() {
     qSearch, setQSearch,
     groupedView, setGroupedView,
     collapsedParents, setCollapsedParents,
+    skipSharedCacheOnce, setSkipSharedCacheOnce,
   } = usePOStore()
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -569,13 +570,15 @@ export default function POEngine() {
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
+      const useSharedCache = !skipSharedCacheOnce
+      if (skipSharedCacheOnce) setSkipSharedCacheOnce(false)
       poRes = (await startPoCalculate(
         {
           ...params,
           planning_date: planningDate,
           raise_view_date: ledgerImportDate,
           raise_ledger_lookback_days: 14,
-          use_shared_cache: true,
+          use_shared_cache: useSharedCache,
         },
         (msg, pct) => {
           if (seq !== poRunSeqRef.current) return
@@ -1872,28 +1875,30 @@ export default function POEngine() {
                                   : c === 'Sold_Units'       ? group.totalSoldUnits.toLocaleString()
                                   : c === 'ADS'              ? group.totalADS.toFixed(3)
                                   : c === 'Gross_PO_Qty'     ? group.totalGrossQty.toLocaleString()
-                                  : c === 'PO_Qty_Ordered'
-                                    ? group.totalPOOrdered > 0
-                                      ? <span className="text-xs font-semibold text-slate-700">{group.totalPOOrdered.toLocaleString()}</span>
-                                      : <span className="text-gray-300">—</span>
-                                  : c === 'Pending_Cutting'
-                                    ? group.totalPendingCutting > 0
-                                      ? <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">{group.totalPendingCutting.toLocaleString()}</span>
-                                      : <span className="text-gray-300">—</span>
-                                  : c === 'Balance_to_Dispatch'
-                                    ? group.totalBalanceDispatch > 0
-                                      ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{group.totalBalanceDispatch.toLocaleString()}</span>
-                                      : <span className="text-gray-300">—</span>
-                                  : c === 'PO_Pipeline_Total'
-                                    ? group.totalPipeline > 0
-                                      ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-full">
-                                          🏭 {group.totalPipeline.toLocaleString()}
-                                        </span>
-                                      : <span className="text-gray-300">—</span>
-                                  : c === 'PO_Pipeline_Effective'
-                                    ? group.totalPipelineEffective > 0
-                                      ? <span className="text-xs font-semibold text-teal-800">{group.totalPipelineEffective.toLocaleString()}</span>
-                                      : <span className="text-gray-300">—</span>
+                                  : c === 'PO_Qty_Ordered' || c === 'Pending_Cutting' || c === 'Balance_to_Dispatch' || c === 'PO_Pipeline_Total' || c === 'PO_Pipeline_Effective'
+                                    ? group.variants.length > 1
+                                      ? <span className="text-[10px] text-gray-400 font-normal" title="Pipeline is per size — expand the group">per size ▼</span>
+                                      : c === 'PO_Qty_Ordered'
+                                        ? group.totalPOOrdered > 0
+                                          ? <span className="text-xs font-semibold text-slate-700">{group.totalPOOrdered.toLocaleString()}</span>
+                                          : <span className="text-gray-300">—</span>
+                                        : c === 'Pending_Cutting'
+                                          ? group.totalPendingCutting > 0
+                                            ? <span className="text-xs font-semibold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">{group.totalPendingCutting.toLocaleString()}</span>
+                                            : <span className="text-gray-300">—</span>
+                                          : c === 'Balance_to_Dispatch'
+                                            ? group.totalBalanceDispatch > 0
+                                              ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{group.totalBalanceDispatch.toLocaleString()}</span>
+                                              : <span className="text-gray-300">—</span>
+                                            : c === 'PO_Pipeline_Total'
+                                              ? group.totalPipeline > 0
+                                                ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-full">
+                                                    🏭 {group.totalPipeline.toLocaleString()}
+                                                  </span>
+                                                : <span className="text-gray-300">—</span>
+                                              : group.totalPipelineEffective > 0
+                                                ? <span className="text-xs font-semibold text-teal-800">{group.totalPipelineEffective.toLocaleString()}</span>
+                                                : <span className="text-gray-300">—</span>
                                   : c === 'PO_Confirmed_Raise_Pipeline'
                                     ? group.totalConfirmedRaise > 0
                                       ? <span className="text-xs font-bold text-sky-900">{group.totalConfirmedRaise.toLocaleString()}</span>

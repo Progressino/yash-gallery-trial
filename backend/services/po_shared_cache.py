@@ -23,6 +23,9 @@ _log = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Bump when Existing PO → PO Engine merge semantics change (invalidates shared cache).
+PO_MERGE_LOGIC_VERSION = 2
+
 _CALC_PARAM_KEYS = (
     "period_days",
     "lead_time",
@@ -100,8 +103,9 @@ def _sales_through(sess) -> str:
 def _existing_po_fingerprint(sess) -> str:
     """Changes whenever the uploaded Existing PO sheet is replaced or its totals change."""
     ep = getattr(sess, "existing_po_df", None)
+    gen = int(getattr(sess, "existing_po_generation", 0) or 0)
     if ep is None or getattr(ep, "empty", True):
-        return "ep:0"
+        return f"ep:{gen}:0"
     uploaded = str(getattr(sess, "existing_po_uploaded_at", "") or "")
     fn = str(getattr(sess, "existing_po_filename", "") or "")
     n = int(len(ep))
@@ -112,7 +116,7 @@ def _existing_po_fingerprint(sess) -> str:
     for c in ("PO_Pipeline_Total", "Pending_Cutting", "Balance_to_Dispatch", "PO_Qty_Ordered"):
         if c in ep.columns:
             sums[c] = int(pd.to_numeric(ep[c], errors="coerce").fillna(0).sum())
-    return f"ep:{n}:{sku_n}:{uploaded}:{fn}:{sums}"
+    return f"ep:{gen}:{n}:{sku_n}:{uploaded}:{fn}:{sums}"
 
 
 def _raise_ledger_fingerprint(planning_date: str, lookback_days: int) -> str:
@@ -166,9 +170,19 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
     params.setdefault("demand_basis", "Sold")
     params.setdefault("group_by_parent", False)
 
+    git_sha = ""
+    try:
+        from ..app_version import get_build_info
+
+        git_sha = str(get_build_info().get("git_sha") or "")
+    except Exception:
+        pass
+
     return {
         "planning_date": planning,
         "params": params,
+        "po_merge_version": PO_MERGE_LOGIC_VERSION,
+        "git_sha": git_sha,
         "sales_through": _sales_through(sess),
         "sales_rows": sales_rows,
         "inventory_rows": inv_rows,

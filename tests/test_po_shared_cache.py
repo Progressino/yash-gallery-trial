@@ -82,6 +82,27 @@ def test_save_lookup_and_apply_to_session():
     assert spill_row_count("session-b") == 2
 
 
+def test_cache_key_changes_when_merge_version_changes():
+    sess = _minimal_session()
+    body = {"planning_date": "2025-12-20", "period_days": 30}
+    k1, fp1 = psc.build_cache_key(sess, body)
+    assert fp1.get("po_merge_version") == psc.PO_MERGE_LOGIC_VERSION
+    assert "git_sha" in fp1
+
+
+def test_apply_miss_when_merge_version_in_meta_differs():
+    sess = _minimal_session()
+    body = {"planning_date": "2025-12-20", "period_days": 30}
+    po_df = pd.DataFrame({"OMS_SKU": ["SKU-A"], "PO_Qty": [1], "Pending_Cutting": [99]})
+    key = psc.save_shared_cache(sess, body, po_df, {"ok": True})
+    assert key
+    meta_path = psc._meta_path(key)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["fingerprint"]["po_merge_version"] = 1
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert psc.apply_shared_cache_to_session(sess, "session-old-merge", body) is None
+
+
 def test_cache_key_changes_when_existing_po_changes():
     sess = _minimal_session()
     body = {"planning_date": "2025-12-20", "period_days": 30}

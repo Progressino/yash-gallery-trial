@@ -61,6 +61,7 @@ class AppSession:
     inventory_snapshot_uploaded_at: str = ""                 # UTC ISO when snapshot last applied
     existing_po_uploaded_at: str = ""                       # UTC ISO when Existing PO last applied
     existing_po_filename: str = ""                          # Original filename uploaded
+    existing_po_generation: int = 0                           # Bumped on each re-upload (cache bust)
 
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session

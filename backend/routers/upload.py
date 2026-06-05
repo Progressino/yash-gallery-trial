@@ -2325,6 +2325,7 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
             df = parse_existing_po(file_bytes, orig_fn)
             sess.existing_po_df = df
             sess.existing_po_filename = orig_fn
+            sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1
             try:
                 import datetime as _dt
                 sess.existing_po_uploaded_at = _dt.datetime.now(tz=_dt.timezone.utc).isoformat().replace("+00:00", "Z")
