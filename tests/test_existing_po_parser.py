@@ -174,6 +174,25 @@ def test_po_engine_normalizes_l_l_inventory_sku():
     assert po.iloc[0]["OMS_SKU"] == "1361YKBLUE-L"
 
 
+def test_existing_po_aggregated_bundled_only_detected():
+    from backend.services.existing_po import existing_po_looks_aggregated_bundled_only
+
+    bundled = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-4XL-5XL", "1917YKBLUE-L-XL"],
+            "PO_Pipeline_Total": [320, 220],
+        }
+    )
+    assert existing_po_looks_aggregated_bundled_only(bundled)
+    full = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-4XL", "1917YKBLUE-5XL", "1917YKBLUE-4XL-5XL"],
+            "PO_Pipeline_Total": [170, 150, 4],
+        }
+    )
+    assert not existing_po_looks_aggregated_bundled_only(full)
+
+
 def test_existing_po_needs_recalc_tracks_generation():
     from backend.session import AppSession
     from backend.services.existing_po import existing_po_needs_recalc, session_has_fresh_existing_po

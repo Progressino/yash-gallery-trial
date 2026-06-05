@@ -2111,7 +2111,9 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
     from ..services.existing_po import (
+        count_per_size_pipeline_skus,
         ensure_existing_po_hydrated,
+        existing_po_looks_aggregated_bundled_only,
         existing_po_needs_recalc as _existing_po_needs_recalc,
     )
 
@@ -2239,6 +2241,10 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
             else 0
         ),
         existing_po_needs_recalc=_existing_po_needs_recalc(sess),
+        existing_po_per_size_skus=count_per_size_pipeline_skus(getattr(sess, "existing_po_df", None)),
+        existing_po_looks_aggregated=existing_po_looks_aggregated_bundled_only(
+            getattr(sess, "existing_po_df", None)
+        ),
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",

@@ -100,6 +100,8 @@ class CoverageResponse(BaseModel):
     existing_po_generation: int = 0
     existing_po_rows: int = 0
     existing_po_needs_recalc: bool = False
+    existing_po_per_size_skus: int = 0
+    existing_po_looks_aggregated: bool = False
     # Wide daily inventory matrix (PO) background parse
     daily_inventory_upload_status: str = "idle"
     daily_inventory_upload_message: str = ""

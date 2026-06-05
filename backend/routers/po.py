@@ -938,6 +938,14 @@ def po_calculate_result(
         return {"ok": False, "status": "error", "message": result.get("message") or "PO calculation failed."}
     if st != "done":
         return {"ok": False, "status": st, "message": "No PO result yet — run Calculate PO first."}
+    from ..services.existing_po import existing_po_needs_recalc
+
+    if existing_po_needs_recalc(sess):
+        return {
+            "ok": False,
+            "status": "stale",
+            "message": "Existing PO sheet was updated. Click Calculate PO to refresh per-size pipeline rows.",
+        }
     meta = getattr(sess, "po_calculate_result", None) or {}
     if not meta:
         return {"ok": False, "message": "PO result missing."}
@@ -1010,9 +1018,7 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     ensure_existing_po_hydrated(sess)
 
     body_dict = body.model_dump()
-    if body.use_shared_cache and (
-        not session_has_fresh_existing_po(sess) or not existing_po_needs_recalc(sess)
-    ):
+    if body.use_shared_cache and not session_has_fresh_existing_po(sess):
         from ..services.po_shared_cache import apply_shared_cache_to_session
 
         cached = apply_shared_cache_to_session(sess, sid, body_dict)

@@ -441,6 +441,71 @@ def _load_existing_po_df_from_disk() -> Optional[pd.DataFrame]:
         return None
 
 
+def count_per_size_pipeline_skus(ep: pd.DataFrame) -> int:
+    """Individual-size SKUs with pipeline (not bundled bands like L-XL)."""
+    if ep is None or ep.empty or "OMS_SKU" not in ep.columns:
+        return 0
+    skus = ep["OMS_SKU"].astype(str).str.strip().str.upper()
+    pipe = pd.to_numeric(ep.get("PO_Pipeline_Total"), errors="coerce").fillna(0) > 0
+    bundled = skus.map(is_bundled_size_range_sku)
+    return int((~bundled & pipe).sum())
+
+
+def existing_po_looks_aggregated_bundled_only(ep: pd.DataFrame) -> bool:
+    """
+    True when the sheet has pipeline mostly on bundled SKUs (L-XL) with summed qty,
+    but almost no per-size rows — typical of a stale warm-cache blob, not a full export.
+    """
+    if ep is None or ep.empty:
+        return False
+    per = count_per_size_pipeline_skus(ep)
+    if per >= 500:
+        return False
+    skus = ep["OMS_SKU"].astype(str)
+    bundled = skus.map(is_bundled_size_range_sku)
+    pipe = pd.to_numeric(ep.get("PO_Pipeline_Total"), errors="coerce").fillna(0) > 0
+    bundled_active = int((bundled & pipe).sum())
+    if bundled_active == 0:
+        return False
+    if per == 0 and len(ep) <= 40:
+        return True
+    return len(ep) > 50 and per < max(80, bundled_active * 3)
+
+
+def _apply_existing_po_df_to_session(sess, df: pd.DataFrame, meta: Optional[dict] = None) -> None:
+    sess.existing_po_df = df
+    if meta:
+        apply_existing_po_session_meta(sess, meta)
+    sess.po_calculate_existing_po_generation = -1
+
+
+def restore_existing_po_from_warm_cache(sess) -> bool:
+    """Prefer shared warm-cache Existing PO when it has more per-size rows than the session."""
+    try:
+        import backend.main as _main
+
+        wc = _main._warm_cache.get("existing_po_df")
+    except Exception:
+        return False
+    if wc is None or getattr(wc, "empty", True):
+        return False
+    cur = getattr(sess, "existing_po_df", None)
+    wc_per = count_per_size_pipeline_skus(wc)
+    cur_per = count_per_size_pipeline_skus(cur) if cur is not None else 0
+    if wc_per <= cur_per + 200:
+        return False
+    meta = None
+    try:
+        import backend.main as _main
+
+        meta = _main._warm_cache.get(_main._EXISTING_PO_META_WARM_KEY)
+    except Exception:
+        pass
+    _apply_existing_po_df_to_session(sess, wc.copy(), meta if isinstance(meta, dict) else None)
+    _log.info("Existing PO restored from warm cache: %s per-size pipeline SKUs", wc_per)
+    return True
+
+
 def restore_existing_po_from_disk(sess) -> bool:
     """Hydrate session from disk when warm cache left a partial or stale Existing PO."""
     meta = read_existing_po_disk_meta()
@@ -453,19 +518,21 @@ def restore_existing_po_from_disk(sess) -> bool:
     sess_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
     ep = getattr(sess, "existing_po_df", None)
     sess_rows = int(len(ep)) if ep is not None and not getattr(ep, "empty", True) else 0
+    disk_per = count_per_size_pipeline_skus(df)
+    sess_per = count_per_size_pipeline_skus(ep) if ep is not None else 0
 
     newer_gen = disk_gen > sess_gen
     partial_session = sess_rows > 0 and disk_rows > sess_rows + 50
     empty_session = sess_rows == 0 and disk_rows > 0
-    if not (newer_gen or partial_session or empty_session):
+    aggregated_session = sess_rows > 0 and disk_per > sess_per + 200
+    if not (newer_gen or partial_session or empty_session or aggregated_session):
         return False
 
-    sess.existing_po_df = df
-    apply_existing_po_session_meta(sess, meta)
-    sess.po_calculate_existing_po_generation = -1
+    _apply_existing_po_df_to_session(sess, df, meta)
     _log.info(
-        "Existing PO restored from disk: %s rows (gen %s→%s)",
+        "Existing PO restored from disk: %s rows, %s per-size pipeline (gen %s→%s)",
         disk_rows,
+        disk_per,
         sess_gen,
         disk_gen,
     )
@@ -473,13 +540,25 @@ def restore_existing_po_from_disk(sess) -> bool:
 
 
 def ensure_existing_po_hydrated(sess) -> bool:
-    """Before PO calculate, guarantee the full uploaded sheet is in memory."""
-    changed = restore_existing_po_from_disk(sess)
+    """Before PO calculate, guarantee the full per-size uploaded sheet is in memory."""
+    changed = False
+    ep = getattr(sess, "existing_po_df", None)
+    if existing_po_looks_aggregated_bundled_only(ep):
+        changed = restore_existing_po_from_disk(sess) or changed
+        changed = restore_existing_po_from_warm_cache(sess) or changed
+    else:
+        changed = restore_existing_po_from_disk(sess) or changed
+        ep = getattr(sess, "existing_po_df", None)
+        if existing_po_looks_aggregated_bundled_only(ep):
+            changed = restore_existing_po_from_warm_cache(sess) or changed
     if changed:
         try:
             from ..services.po_raise_remove import invalidate_po_calculate_result
 
             invalidate_po_calculate_result(sess)
+            from ..services.po_shared_cache import invalidate_all_shared_caches
+
+            invalidate_all_shared_caches()
         except Exception:
             pass
     return changed
@@ -533,6 +612,7 @@ def unbundle_inventory_rows_for_existing_po(
     po_df: pd.DataFrame,
     ep: pd.DataFrame,
     breakdown_cols: list[str],
+    canonical_fn=None,
 ) -> pd.DataFrame:
     """
     Inventory often lists combined sizes (4XL-5XL) while the Existing PO sheet has
@@ -551,6 +631,7 @@ def unbundle_inventory_rows_for_existing_po(
     if not breakdown:
         return po_df
 
+    canon = canonical_fn or (lambda x: _normalize_sku_text(x))
     ep_idx = ep.set_index("OMS_SKU")
     split_metrics = [
         "Total_Inventory",
@@ -577,7 +658,10 @@ def unbundle_inventory_rows_for_existing_po(
         children = _split_bundled_po_sku(sku)
         if len(children) < 2:
             continue
-        sheet_children = [c for c in children if _ep_row_has_pipeline(ep_idx, c, breakdown)]
+        sheet_children = [
+            c for c in (_normalize_sku_text(ch) for ch in children)
+            if _ep_row_has_pipeline(ep_idx, canon(c), breakdown)
+        ]
         if not sheet_children:
             continue
 
@@ -585,7 +669,7 @@ def unbundle_inventory_rows_for_existing_po(
         base = row.to_dict()
         for child in sheet_children:
             child_row = dict(base)
-            child_row["OMS_SKU"] = child
+            child_row["OMS_SKU"] = canon(child)
             for m in split_metrics:
                 if m not in child_row:
                     continue
@@ -594,14 +678,16 @@ def unbundle_inventory_rows_for_existing_po(
                     child_row[m] = float(v) / n
             for col in breakdown:
                 if col in ep_idx.columns:
-                    val = pd.to_numeric(ep_idx.at[child, col], errors="coerce")
+                    ck = canon(child)
+                    val = pd.to_numeric(ep_idx.at[ck, col], errors="coerce") if ck in ep_idx.index else 0
                     child_row[col] = 0 if pd.isna(val) else val
             new_rows.append(child_row)
 
-        if _ep_row_has_pipeline(ep_idx, sku, breakdown):
+        bundled_key = canon(sku)
+        if _ep_row_has_pipeline(ep_idx, bundled_key, breakdown):
             for col in breakdown:
-                if col in ep_idx.columns:
-                    val = pd.to_numeric(ep_idx.at[sku, col], errors="coerce")
+                if col in ep_idx.columns and bundled_key in ep_idx.index:
+                    val = pd.to_numeric(ep_idx.at[bundled_key, col], errors="coerce")
                     po_df.at[idx, col] = 0 if pd.isna(val) else val
         else:
             drop_idx.append(idx)

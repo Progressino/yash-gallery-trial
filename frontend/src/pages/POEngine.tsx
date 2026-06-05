@@ -255,6 +255,8 @@ export default function POEngine() {
   const existingPoUploadedAt = useSession(s => s.existing_po_uploaded_at)
   const existingPoNeedsRecalc = useSession(s => s.existing_po_needs_recalc ?? false)
   const existingPoRows = useSession(s => s.existing_po_rows ?? 0)
+  const existingPoPerSizeSkus = useSession(s => s.existing_po_per_size_skus ?? 0)
+  const existingPoLooksAggregated = useSession(s => s.existing_po_looks_aggregated ?? false)
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
 
   useEffect(() => {
@@ -564,9 +566,9 @@ export default function POEngine() {
   }, [result, setResult, setSkipSharedCacheOnce])
 
   useEffect(() => {
-    if (!existingPoNeedsRecalc) return
+    if (!existingPoNeedsRecalc && !existingPoLooksAggregated) return
     markPoTableStaleAfterExistingPoChange()
-  }, [existingPoNeedsRecalc, markPoTableStaleAfterExistingPoChange])
+  }, [existingPoNeedsRecalc, existingPoLooksAggregated, markPoTableStaleAfterExistingPoChange])
 
   const refreshRaiseLedger = useCallback(
     async (serverMessage?: string) => {
@@ -1297,6 +1299,13 @@ export default function POEngine() {
                   </span>
                 ) : null}
               </div>
+              {existingPoLooksAggregated ? (
+                <p className="text-[11px] text-red-900 bg-red-50 border border-red-300 rounded px-2 py-1.5 font-medium">
+                  Existing PO in this session looks <strong>bundled-only</strong> ({existingPoPerSizeSkus.toLocaleString()} per-size SKUs vs{' '}
+                  {existingPoRows.toLocaleString()} total). Re-upload the full export on{' '}
+                  <Link to="/upload" className="underline font-semibold">Upload</Link>, then <strong>Calculate PO</strong> — otherwise only combined sizes (L-XL, S-M) appear with summed pipeline.
+                </p>
+              ) : null}
               {existingPoNeedsRecalc ? (
                 <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 font-medium">
                   Existing PO sheet was updated

@@ -58,6 +58,8 @@ const empty: CoverageResponse = {
   existing_po_generation: 0,
   existing_po_rows: 0,
   existing_po_needs_recalc: false,
+  existing_po_per_size_skus: 0,
+  existing_po_looks_aggregated: false,
   daily_inventory_upload_status: 'idle',
   daily_inventory_upload_message: '',
 }

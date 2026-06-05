@@ -116,6 +116,8 @@ export interface CoverageResponse {
   existing_po_generation?: number
   existing_po_rows?: number
   existing_po_needs_recalc?: boolean
+  existing_po_per_size_skus?: number
+  existing_po_looks_aggregated?: boolean
   daily_inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   daily_inventory_upload_message?: string
 }
