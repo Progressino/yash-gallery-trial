@@ -430,10 +430,23 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 val.to_parquet(path, index=False)
                 saved.append(key)
-        manifest = {"saved_at": datetime.now(IST).isoformat(), "keys": saved}
-        with open(os.path.join(_DISK_CACHE_DIR, "_manifest.json"), "w") as f:
+        # Merge with existing manifest instead of overwriting — prevents partial
+        # sidecar saves (inventory-only, 3 keys) from destroying the full 14-key
+        # manifest built by Phase 2.  All previously saved parquets remain listed.
+        manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
+        existing_keys: set = set()
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, encoding="utf-8") as _mf:
+                    _existing = json.load(_mf)
+                existing_keys = set(_existing.get("keys") or [])
+            except Exception:
+                pass
+        merged_keys = sorted(existing_keys | set(saved))
+        manifest = {"saved_at": datetime.now(IST).isoformat(), "keys": merged_keys}
+        with open(manifest_path, "w") as f:
             json.dump(manifest, f)
-        log.info("Warm-cache saved to disk (%d keys) → %s", len(saved), _DISK_CACHE_DIR)
+        log.info("Warm-cache saved to disk (%d new keys, %d total) → %s", len(saved), len(merged_keys), _DISK_CACHE_DIR)
     except Exception as _e:
         log.warning("Warm-cache disk save failed: %s", _e)
 
