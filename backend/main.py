@@ -684,7 +684,7 @@ def _do_load_warm_cache() -> bool:
         # was recently saved (< 2 h) and has full historical mtr_df, there is no
         # value in running Phase 2 — skip it entirely and just do a lightweight
         # SQLite top-up.  Phase 2 will still run on the next 6 AM scheduler tick.
-        _FAST_SKIP_MAX_AGE_HOURS = float(_os_main.environ.get("WARM_CACHE_FAST_SKIP_HOURS", "2"))
+        _FAST_SKIP_MAX_AGE_HOURS = float(_os_main.environ.get("WARM_CACHE_FAST_SKIP_HOURS", "24"))
         if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
             try:
                 import json as _json_fast
