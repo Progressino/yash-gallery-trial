@@ -250,6 +250,22 @@ export default function POEngine() {
   const dailyInvRows = useSession(s => s.daily_inventory_history_rows ?? 0)
   const dailyInvSkus = useSession(s => s.daily_inventory_history_skus ?? 0)
   const raiseLedgerRows = useSession(s => s.po_raise_ledger_rows ?? 0)
+  const existingPoLoaded = useSession(s => s.existing_po)
+  const existingPoFilename = useSession(s => s.existing_po_filename)
+  const existingPoUploadedAt = useSession(s => s.existing_po_uploaded_at)
+  const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
+
+  useEffect(() => {
+    api
+      .get<{ git_sha?: string; label?: string; built_at?: string }>('/health')
+      .then(r => {
+        const sha = r.data.git_sha || r.data.label
+        if (!sha) return
+        const built = r.data.built_at ? ` · ${r.data.built_at.slice(0, 10)}` : ''
+        setAppBuildLabel(`${sha}${built}`)
+      })
+      .catch(() => {})
+  }, [])
 
   const { data: ledgerDatesResp } = useQuery({
     queryKey: ['po-raise-ledger-dates', raiseLedgerRows],
@@ -1237,15 +1253,47 @@ export default function POEngine() {
               </p>
             </div>
 
-            <div className="mt-5 space-y-1">
-              <button
-                type="button"
-                onClick={() => void run()}
-                disabled={loading}
-                className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
-              >
-                {loading ? '⏳ Running PO…' : '🎯 Calculate PO'}
-              </button>
+            <div className="mt-5 space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void run()}
+                  disabled={loading}
+                  className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
+                >
+                  {loading ? '⏳ Running PO…' : '🎯 Calculate PO'}
+                </button>
+                {appBuildLabel ? (
+                  <span
+                    className="text-[11px] font-mono text-slate-600 bg-white border border-slate-200 rounded px-2 py-1"
+                    title={`Server build ${appBuildLabel}`}
+                  >
+                    Build {appBuildLabel.length > 24 ? `${appBuildLabel.slice(0, 7)}…` : appBuildLabel}
+                  </span>
+                ) : null}
+              </div>
+              {existingPoLoaded ? (
+                <p className="text-[11px] text-slate-600">
+                  Existing PO loaded
+                  {existingPoFilename ? (
+                    <>
+                      : <strong>{existingPoFilename}</strong>
+                    </>
+                  ) : null}
+                  {existingPoUploadedAt ? (
+                    <span className="text-slate-400">
+                      {' '}
+                      ({new Date(existingPoUploadedAt).toLocaleString()})
+                    </span>
+                  ) : null}
+                  {' — '}
+                  click <strong>Calculate PO</strong> after re-uploading to refresh pipeline columns.
+                </p>
+              ) : (
+                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                  No Existing PO sheet in this session — upload on <Link to="/upload" className="underline font-semibold">Upload → History &amp; setup</Link> first.
+                </p>
+              )}
               {loading && (
                 <div className="mt-2 space-y-1 max-w-md">
                   <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">

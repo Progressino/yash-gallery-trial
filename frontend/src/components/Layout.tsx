@@ -288,8 +288,10 @@ export default function Layout() {
     api
       .get<{ label?: string; git_sha?: string; version?: string; built_at?: string }>('/health')
       .then((r) => {
-        const label = r.data.label || r.data.git_sha || r.data.version
-        if (label) setAppVersion(label)
+        const sha = r.data.git_sha || r.data.label || r.data.version
+        if (!sha) return
+        const built = r.data.built_at ? ` · ${r.data.built_at.slice(0, 10)}` : ''
+        setAppVersion(`${sha}${built}`)
       })
       .catch(() => {})
   }, [])
@@ -547,16 +549,17 @@ export default function Layout() {
             </>
           )}
 
-          <div className="px-3 py-2 flex items-center justify-between gap-1 border-t border-slate-100">
-            <div className="flex items-center gap-1 opacity-50">
-              <img src="/logo.png" alt="" className="h-3 w-auto" />
-              <span className="text-[9px] text-slate-400">Progressino</span>
+          <div className="px-3 py-2 border-t border-slate-200 bg-slate-50 shrink-0 space-y-1">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <img src="/logo.png" alt="" className="h-3.5 w-auto shrink-0" />
+              <span className="text-[10px] text-slate-500 font-medium truncate">Progressino</span>
             </div>
-            {appVersion && (
-              <span className="text-[9px] text-slate-400 font-mono" title={`v${appVersion}`}>
-                v{appVersion.slice(0, 8)}
-              </span>
-            )}
+            <div
+              className="text-[11px] font-mono text-slate-700 bg-white border border-slate-300 rounded px-2 py-1 truncate"
+              title={appVersion ? `Build ${appVersion}` : 'Loading build…'}
+            >
+              {appVersion ? `Build ${appVersion}` : 'Build …'}
+            </div>
           </div>
         </div>
       </aside>

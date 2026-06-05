@@ -1110,22 +1110,25 @@ def calculate_po_base(
     po_df["Gross_PO_Qty"] = 0
 
     # Pipeline deduction from existing PO sheet
+    _breakdown_cols: list[str] = []
+    _ep_prepared = pd.DataFrame()
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
-        from .existing_po import expand_bundled_po_skus
-
-        _ep = existing_po_df.copy()
-        _ep["OMS_SKU"] = _ep["OMS_SKU"].astype(str).map(_canonical_oms_key).astype(str).str.strip().str.upper()
-        _ep = _ep[_ep["OMS_SKU"].str.len() > 0]
-        _ep = expand_bundled_po_skus(_ep)
-        # Pull PO_Pipeline_Total + any breakdown columns present in the uploaded sheet
-        _breakdown_cols = [c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
-                           if c in _ep.columns]
-        _merge_cols = ["OMS_SKU", "PO_Pipeline_Total"] + _breakdown_cols
-        po_df = pd.merge(
-            po_df,
-            _ep[_merge_cols],
-            on="OMS_SKU", how="left",
+        from .existing_po import (
+            prepare_existing_po_for_merge,
+            rollup_pipeline_onto_bundled_rows,
         )
+
+        _ep_prepared = prepare_existing_po_for_merge(existing_po_df, _canonical_oms_key)
+        _breakdown_cols = [
+            c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
+            if c in _ep_prepared.columns
+        ]
+        _merge_cols = ["OMS_SKU", "PO_Pipeline_Total"] + _breakdown_cols
+        if not _ep_prepared.empty:
+            _ep_merge = _ep_prepared[_merge_cols].drop_duplicates(subset=["OMS_SKU"], keep="last")
+            po_df = po_df.drop(columns=["PO_Pipeline_Total"] + _breakdown_cols, errors="ignore")
+            po_df = pd.merge(po_df, _ep_merge, on="OMS_SKU", how="left")
+            po_df = rollup_pipeline_onto_bundled_rows(po_df, _ep_prepared)
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
         ).fillna(0).astype(int)
@@ -1145,18 +1148,21 @@ def calculate_po_base(
     # If a SKU has an active pipeline order but isn't in the inventory file
     # (e.g. out of stock, removed from listing), add it as a ghost row so it
     # still shows up as "🔄 In Pipeline" and isn't invisible to the user.
-    if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
-        from .existing_po import expand_bundled_po_skus
+    if not _ep_prepared.empty:
+        from .existing_po import _split_bundled_po_sku
 
-        _ep_ghost = expand_bundled_po_skus(
-            existing_po_df.assign(
-                OMS_SKU=existing_po_df["OMS_SKU"].astype(str).map(_canonical_oms_key).astype(str).str.strip().str.upper()
-            )
-        )
+        _ep_ghost = _ep_prepared
         _po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
+        _children_of_bundled: set[str] = set()
+        for _pk in _po_keys:
+            _kids = _split_bundled_po_sku(_pk)
+            if len(_kids) == 2:
+                _children_of_bundled.update(_kids)
         _pipe_canon = _ep_ghost["OMS_SKU"].astype(str).str.strip()
-        missing_mask = ~_pipe_canon.isin(_po_keys) & (
-            pd.to_numeric(_ep_ghost["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
+        missing_mask = (
+            ~_pipe_canon.isin(_po_keys)
+            & ~_pipe_canon.isin(_children_of_bundled)
+            & (pd.to_numeric(_ep_ghost["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0)
         )
         missing_po = _ep_ghost[missing_mask].copy()
         if not missing_po.empty:
@@ -1914,4 +1920,6 @@ def calculate_po_base(
         inplace=True,
     )
 
-    return po_df
+    from .existing_po import dedupe_po_rows_by_sku
+
+    return dedupe_po_rows_by_sku(po_df)

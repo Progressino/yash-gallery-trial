@@ -403,6 +403,106 @@ def test_existing_po_individual_skus_merge_pipeline_to_po_rows():
     assert int(row["PO_Pipeline_Total"]) == 130
 
 
+def test_existing_po_rollup_onto_bundled_inventory_row():
+    """Individual sizes in Existing PO must roll up onto bundled inventory SKUs."""
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-3XL"] * 10 + ["1917YKBLUE-4XL-5XL"] * 10,
+            "TxnDate": list(days),
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-3XL", "1917YKBLUE-4XL-5XL"],
+            "Total_Inventory": [23, 22],
+        }
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-3XL", "1917YKBLUE-4XL", "1917YKBLUE-5XL"],
+            "PO_Pipeline_Total": [130, 85, 77],
+            "Balance_to_Dispatch": [130, 85, 77],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    assert len(po[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"]) == 1
+    row_3xl = po.loc[po["OMS_SKU"] == "1917YKBLUE-3XL"].iloc[0]
+    row_bund = po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"].iloc[0]
+    assert int(row_3xl["PO_Pipeline_Total"]) == 130
+    assert int(row_bund["PO_Pipeline_Total"]) == 162
+
+
+def test_po_output_dedupes_duplicate_oms_sku_rows():
+    from backend.services.existing_po import dedupe_po_rows_by_sku
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-S-M", "1917YKBLUE-S-M"],
+            "PO_Pipeline_Total": [0, 115],
+            "Total_Inventory": [0, 19],
+            "ADS": [0.0, 0.37],
+        }
+    )
+    out = dedupe_po_rows_by_sku(df)
+    assert len(out) == 1
+    assert int(out.iloc[0]["PO_Pipeline_Total"]) == 115
+
+
+def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
+    """Duplicate inventory rows for the same bundled SKU collapse to one pipeline row."""
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-4XL-5XL"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-4XL-5XL", "1917YKBLUE-4XL-5XL"],
+            "Total_Inventory": [22, 22],
+        }
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-4XL", "1917YKBLUE-5XL"],
+            "PO_Pipeline_Total": [85, 77],
+            "Balance_to_Dispatch": [85, 77],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    bund = po[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"]
+    assert len(bund) == 1
+    assert int(bund.iloc[0]["PO_Pipeline_Total"]) == 162
+
+
 def test_existing_po_bundled_sku_expands_to_individual_sizes():
     days = pd.date_range("2026-05-01", periods=20, freq="D")
     sales = pd.DataFrame(

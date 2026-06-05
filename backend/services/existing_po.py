@@ -272,6 +272,16 @@ def _split_bundled_po_sku(sku: str) -> list[str]:
     return [s]
 
 
+def is_bundled_size_range_sku(sku: object) -> bool:
+    """True when SKU is a combined size band like 1917YKBLUE-XXL-3XL."""
+    parts = _DASH_SPLIT_RE.split(_normalize_sku_text(sku))
+    return (
+        len(parts) >= 3
+        and parts[-1] in _PO_SIZE_TOKENS
+        and parts[-2] in _PO_SIZE_TOKENS
+    )
+
+
 def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fan out combined size-range PO lines (S-M, XXL-3XL) to individual OMS SKUs
@@ -304,6 +314,90 @@ def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     if breakdown:
         out = out.groupby("OMS_SKU", as_index=False)[breakdown].sum()
     return out
+
+
+def prepare_existing_po_for_merge(
+    existing_po_df: pd.DataFrame,
+    canonical_fn,
+) -> pd.DataFrame:
+    """Canonicalize + expand bundled size ranges; aggregate to one row per OMS_SKU."""
+    if existing_po_df is None or existing_po_df.empty:
+        return pd.DataFrame()
+    ep = existing_po_df.copy()
+    if "PO_Pipeline_Total" not in ep.columns:
+        return pd.DataFrame()
+    ep["OMS_SKU"] = (
+        ep["OMS_SKU"].astype(str).map(canonical_fn).astype(str).str.strip().str.upper()
+    )
+    ep = ep[ep["OMS_SKU"].str.len() > 0]
+    return expand_bundled_po_skus(ep)
+
+
+def rollup_pipeline_onto_bundled_rows(
+    po_df: pd.DataFrame,
+    ep: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Inventory often uses bundled SKUs (4XL-5XL) while Existing PO lists individual sizes.
+    Sum child pipeline onto the bundled inventory row when direct merge missed.
+    """
+    if po_df is None or po_df.empty or ep is None or ep.empty or "OMS_SKU" not in po_df.columns:
+        return po_df
+    breakdown = [
+        c
+        for c in ("PO_Pipeline_Total", "PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch")
+        if c in ep.columns
+    ]
+    if not breakdown:
+        return po_df
+    ep_idx = ep.set_index("OMS_SKU")
+    out = po_df.copy()
+    for col in breakdown:
+        if col not in out.columns:
+            out[col] = 0
+    for idx, row in out.iterrows():
+        sku = _normalize_sku_text(row.get("OMS_SKU"))
+        if not is_bundled_size_range_sku(sku):
+            continue
+        children = _split_bundled_po_sku(sku)
+        if len(children) < 2:
+            continue
+        for col in breakdown:
+            cur = pd.to_numeric(out.at[idx, col], errors="coerce")
+            cur = 0 if pd.isna(cur) else float(cur)
+            if cur > 0:
+                continue
+            total = 0.0
+            for child in children:
+                if child in ep_idx.index:
+                    total += float(pd.to_numeric(ep_idx.at[child, col], errors="coerce") or 0)
+            if total > 0:
+                out.at[idx, col] = int(total) if col == "PO_Pipeline_Total" else total
+    return out
+
+
+def dedupe_po_rows_by_sku(po_df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicate OMS_SKU rows — keep the richest row (pipeline / sales / stock)."""
+    if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
+        return po_df
+    if not po_df["OMS_SKU"].astype(str).duplicated().any():
+        return po_df
+    work = po_df.copy()
+
+    def _num(col: str) -> pd.Series:
+        if col not in work.columns:
+            return pd.Series(0.0, index=work.index)
+        return pd.to_numeric(work[col], errors="coerce").fillna(0)
+
+    work["_dedupe_rank"] = (
+        _num("PO_Pipeline_Total")
+        + _num("Total_Inventory")
+        + _num("Sold_Units")
+        + _num("ADS") * 10.0
+    )
+    work = work.sort_values("_dedupe_rank", ascending=False)
+    work = work.drop_duplicates(subset=["OMS_SKU"], keep="first")
+    return work.drop(columns=["_dedupe_rank"], errors="ignore")
 
 
 def _build_po_dataframe(
