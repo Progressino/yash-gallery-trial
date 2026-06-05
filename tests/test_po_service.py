@@ -510,7 +510,7 @@ def test_po_4_jun_fixture_pending_cutting_flows_to_calculate():
 
 
 def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
-    """Duplicate inventory rows collapse; individual PO sizes do not sum onto bundled row."""
+    """Duplicate inventory rows collapse; bundled inventory unbundles to per-size PO rows."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")
     sales = pd.DataFrame(
         {
@@ -545,9 +545,7 @@ def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
         safety_pct=0.0,
         existing_po_df=existing_po,
     )
-    bund = po[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"]
-    assert len(bund) == 1
-    assert int(bund.iloc[0]["PO_Pipeline_Total"]) == 0
+    assert po[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"].empty
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 85
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 77
 

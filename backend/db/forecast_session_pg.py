@@ -60,6 +60,10 @@ _META_JSON_FIELDS = (
     "inventory_snapshot_date_label",
     "inventory_snapshot_date_sources",
     "inventory_snapshot_uploaded_at",
+    "existing_po_filename",
+    "existing_po_uploaded_at",
+    "existing_po_generation",
+    "po_calculate_existing_po_generation",
     "daily_restored",
     "pause_auto_data_restore",
 )
@@ -182,7 +186,7 @@ def _hydrate_session_from_bundle(data: bytes):
                 val = meta[name]
                 if name in ("daily_restored", "pause_auto_data_restore", "include_replacements"):
                     setattr(sess, name, bool(val))
-                elif name == "daily_sales_rows":
+                elif name in ("daily_sales_rows", "existing_po_generation", "po_calculate_existing_po_generation"):
                     try:
                         setattr(sess, name, int(val) if val is not None else 0)
                     except (TypeError, ValueError):

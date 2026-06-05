@@ -98,7 +98,7 @@ export const usePOStore = create<POState>()(
   editedQty: {},
   selected: new Set(),
   qSearch: '',
-  groupedView: true,
+  groupedView: false,
   collapsedParents: new Set(),
   skipSharedCacheOnce: false,
 

@@ -25,6 +25,18 @@ router = APIRouter()
 _log = logging.getLogger(__name__)
 
 
+def _apply_loaded_into_session(sess, loaded: dict) -> None:
+    """Copy cache payload into session without clobbering a newer Existing PO upload."""
+    from ..services.existing_po import session_has_fresh_existing_po
+
+    preserve_po = session_has_fresh_existing_po(sess)
+    for key, val in loaded.items():
+        if preserve_po and key == "existing_po_df":
+            continue
+        if hasattr(sess, key):
+            setattr(sess, key, val)
+
+
 class CacheStatusResponse(BaseModel):
     ok: bool
     message: str
@@ -374,9 +386,7 @@ def cache_load(request: Request, background_tasks: BackgroundTasks):
     if ok:
         _sanitize_snapdeal_in_loaded(loaded)
         loaded, disk_note = _merge_disk_warm_cache_into_loaded(loaded)
-        for key, val in loaded.items():
-            if hasattr(sess, key):
-                setattr(sess, key, val)
+        _apply_loaded_into_session(sess, loaded)
         sess._quarterly_cache.clear()
         daily_note = _merge_daily_store_into_session(sess)
         n_sales = _rebuild_sales_in_session(sess)
@@ -524,9 +534,7 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
     if ok:
         _sanitize_snapdeal_in_loaded(loaded)
         loaded, disk_note = _merge_disk_warm_cache_into_loaded(loaded)
-        for key, val in loaded.items():
-            if hasattr(sess, key):
-                setattr(sess, key, val)
+        _apply_loaded_into_session(sess, loaded)
         daily_note = _merge_daily_store_into_session(sess)
         n_sales = _rebuild_sales_in_session(sess)
         hint = _tier1_still_missing_hint(sess)

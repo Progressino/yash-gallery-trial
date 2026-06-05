@@ -313,6 +313,21 @@ _INVENTORY_WARM_KEYS = ("inventory_df_variant", "inventory_df_parent")
 _INVENTORY_META_WARM_KEY = "inventory_session_meta"
 
 
+def merge_existing_po_into_warm_cache(sess) -> None:
+    """Mirror uploaded Existing PO into shared warm cache (same pattern as inventory)."""
+    import pandas as pd
+
+    global _warm_cache, _warm_cache_loaded_at
+    if not _warm_cache:
+        _warm_cache = {}
+    df = getattr(sess, "existing_po_df", None)
+    if df is None or not hasattr(df, "empty") or df.empty:
+        _warm_cache["existing_po_df"] = pd.DataFrame()
+    else:
+        _warm_cache["existing_po_df"] = df.copy()
+    _warm_cache_loaded_at = datetime.now(IST)
+
+
 def merge_inventory_into_warm_cache(sess) -> None:
     """Mirror inventory snapshot into shared warm cache (same pattern as PO sidecars).
 
@@ -1211,6 +1226,14 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 val = trim_platform_df(val)
                 if len(val) < before:
                     log.info("warm-cache copy: trimmed %s %d→%d rows", key, before, len(val))
+            except Exception:
+                pass
+        if key == "existing_po_df":
+            try:
+                from .services.existing_po import session_has_fresh_existing_po
+
+                if session_has_fresh_existing_po(sess):
+                    continue
             except Exception:
                 pass
         setattr(sess, key, val)

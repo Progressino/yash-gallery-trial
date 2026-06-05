@@ -62,6 +62,8 @@ class AppSession:
     existing_po_uploaded_at: str = ""                       # UTC ISO when Existing PO last applied
     existing_po_filename: str = ""                          # Original filename uploaded
     existing_po_generation: int = 0                           # Bumped on each re-upload (cache bust)
+    # Last successful PO calculate that included this existing_po_generation (-1 = never / stale).
+    po_calculate_existing_po_generation: int = -1
 
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session
@@ -139,6 +141,10 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.inventory_df_parent = pd.DataFrame()
     sess.daily_orders_df = pd.DataFrame()
     sess.existing_po_df = pd.DataFrame()
+    sess.existing_po_filename = ""
+    sess.existing_po_uploaded_at = ""
+    sess.existing_po_generation = 0
+    sess.po_calculate_existing_po_generation = -1
     sess.po_raise_ledger_df = pd.DataFrame()
     sess.po_return_overlay_df = pd.DataFrame()
     sess.sku_status_lead_df = pd.DataFrame()

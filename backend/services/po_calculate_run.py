@@ -212,6 +212,7 @@ def execute_po_calculate(
             po_df[c] = s.where(np.isfinite(s), 999.0).fillna(999.0).round(1)
 
     sess.po_calculate_result_df = po_df
+    sess.po_calculate_existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0)
 
     sales_through = None
     try:

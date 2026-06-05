@@ -19,6 +19,7 @@ def invalidate_po_calculate_result(sess) -> None:
     sess.po_calculate_progress = 0
     sess.po_calculate_result = {}
     sess.po_calculate_result_df = pd.DataFrame()
+    sess.po_calculate_existing_po_generation = -1
     sess._quarterly_cache.clear()
     try:
         from .po_calculate_jobs import clear_po_job

@@ -18,6 +18,8 @@ class UploadResponse(BaseModel):
     detected_platforms: Optional[list[str]] = None
     # After SKU master upload: tokens in sales not present as map key (incl. PL-alias) or OMS value
     unmapped_skus: Optional[list[str]] = None
+    existing_po_uploaded_at: Optional[str] = None
+    existing_po_generation: Optional[int] = None
 
 
 class JobStatusResponse(BaseModel):
@@ -95,6 +97,9 @@ class CoverageResponse(BaseModel):
     inventory_snapshot_uploaded_at: Optional[str] = None
     existing_po_uploaded_at: Optional[str] = None
     existing_po_filename: Optional[str] = None
+    existing_po_generation: int = 0
+    existing_po_rows: int = 0
+    existing_po_needs_recalc: bool = False
     # Wide daily inventory matrix (PO) background parse
     daily_inventory_upload_status: str = "idle"
     daily_inventory_upload_message: str = ""

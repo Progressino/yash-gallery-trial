@@ -316,6 +316,27 @@ def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def session_has_fresh_existing_po(sess) -> bool:
+    """True when this session holds an uploaded Existing PO newer than generic cache."""
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is None or getattr(ep, "empty", True):
+        return False
+    gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+    if gen > 0:
+        return True
+    # Sessions restored before generation tracking still have uploaded_at metadata.
+    return bool(str(getattr(sess, "existing_po_uploaded_at", "") or "").strip())
+
+
+def existing_po_needs_recalc(sess) -> bool:
+    """PO table is stale until Calculate PO runs after the latest Existing PO upload."""
+    if not session_has_fresh_existing_po(sess):
+        return False
+    cur = int(getattr(sess, "existing_po_generation", 0) or 0)
+    done = int(getattr(sess, "po_calculate_existing_po_generation", -1) or -1)
+    return done != cur
+
+
 def prepare_existing_po_for_merge(
     existing_po_df: pd.DataFrame,
     canonical_fn,

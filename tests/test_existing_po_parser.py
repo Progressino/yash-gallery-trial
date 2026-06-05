@@ -129,3 +129,41 @@ def test_parse_po_4_jun_26_fixture():
     yk = out.loc[out["OMS_SKU"] == "1917YKBLUE-3XL"].iloc[0]
     assert int(yk["Pending_Cutting"]) == 0
     assert int(yk["Balance_to_Dispatch"]) == 130
+
+
+def test_existing_po_needs_recalc_tracks_generation():
+    from backend.session import AppSession
+    from backend.services.existing_po import existing_po_needs_recalc, session_has_fresh_existing_po
+
+    sess = AppSession()
+    assert not session_has_fresh_existing_po(sess)
+    assert not existing_po_needs_recalc(sess)
+
+    sess.existing_po_df = pd.DataFrame({"OMS_SKU": ["A"], "PO_Pipeline_Total": [1]})
+    sess.existing_po_generation = 1
+    assert session_has_fresh_existing_po(sess)
+    assert existing_po_needs_recalc(sess)
+
+    sess.po_calculate_existing_po_generation = 1
+    assert not existing_po_needs_recalc(sess)
+
+    sess.existing_po_generation = 2
+    assert existing_po_needs_recalc(sess)
+
+
+def test_cache_apply_preserves_fresh_existing_po():
+    from backend.routers.cache import _apply_loaded_into_session
+    from backend.session import AppSession
+
+    sess = AppSession()
+    sess.existing_po_df = pd.DataFrame({"OMS_SKU": ["KEEP-ME"], "PO_Pipeline_Total": [9]})
+    sess.existing_po_generation = 3
+    sess.existing_po_uploaded_at = "2026-06-04T12:00:00Z"
+
+    loaded = {
+        "existing_po_df": pd.DataFrame({"OMS_SKU": ["STALE"], "PO_Pipeline_Total": [1]}),
+        "mtr_df": pd.DataFrame({"Sku": ["X"], "TxnDate": ["2026-01-01"]}),
+    }
+    _apply_loaded_into_session(sess, loaded)
+    assert sess.existing_po_df["OMS_SKU"].iloc[0] == "KEEP-ME"
+    assert not sess.mtr_df.empty

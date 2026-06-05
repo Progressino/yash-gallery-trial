@@ -253,6 +253,7 @@ export default function POEngine() {
   const existingPoLoaded = useSession(s => s.existing_po)
   const existingPoFilename = useSession(s => s.existing_po_filename)
   const existingPoUploadedAt = useSession(s => s.existing_po_uploaded_at)
+  const existingPoNeedsRecalc = useSession(s => s.existing_po_needs_recalc ?? false)
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
 
   useEffect(() => {
@@ -548,7 +549,23 @@ export default function POEngine() {
         serverMessage ??
         'Raise ledger updated. Click Calculate PO — the table still shows the previous run until you recalculate.',
     })
-  }, [result])
+  }, [result, setResult, setEditedQty, setSelected])
+
+  const markPoTableStaleAfterExistingPoChange = useCallback(() => {
+    if (result?.ok && (result.rows?.length ?? 0) > 0) {
+      setResult({
+        ok: false,
+        message:
+          'Existing PO sheet was updated. Click Calculate PO to refresh Pending Cutting, pipeline, and In Production columns.',
+      })
+    }
+    setSkipSharedCacheOnce(true)
+  }, [result, setResult, setSkipSharedCacheOnce])
+
+  useEffect(() => {
+    if (!existingPoNeedsRecalc) return
+    markPoTableStaleAfterExistingPoChange()
+  }, [existingPoNeedsRecalc, markPoTableStaleAfterExistingPoChange])
 
   const refreshRaiseLedger = useCallback(
     async (serverMessage?: string) => {
@@ -570,7 +587,7 @@ export default function POEngine() {
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
-      const useSharedCache = !skipSharedCacheOnce
+      const useSharedCache = !skipSharedCacheOnce && !existingPoNeedsRecalc
       if (skipSharedCacheOnce) setSkipSharedCacheOnce(false)
       poRes = (await startPoCalculate(
         {
@@ -609,6 +626,7 @@ export default function POEngine() {
     }
 
     if (seq !== poRunSeqRef.current || !poRes?.ok) return
+    void refreshPoCoverage()
     void loadQuarterlyForRun(seq)
   }
 
@@ -1275,7 +1293,25 @@ export default function POEngine() {
                   </span>
                 ) : null}
               </div>
-              {existingPoLoaded ? (
+              {existingPoNeedsRecalc ? (
+                <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 font-medium">
+                  Existing PO sheet was updated
+                  {existingPoFilename ? (
+                    <>
+                      {' '}
+                      (<strong>{existingPoFilename}</strong>
+                      {existingPoUploadedAt ? (
+                        <span className="font-normal text-amber-800">
+                          {' '}
+                          · {new Date(existingPoUploadedAt).toLocaleString()}
+                        </span>
+                      ) : null}
+                      )
+                    </>
+                  ) : null}
+                  . Click <strong>Calculate PO</strong> — the table still shows the previous run until you recalculate.
+                </p>
+              ) : existingPoLoaded ? (
                 <p className="text-[11px] text-slate-600">
                   Existing PO loaded
                   {existingPoFilename ? (

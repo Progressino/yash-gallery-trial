@@ -2110,6 +2110,7 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     """Build coverage flags from current session state (no restore side effects)."""
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
+    from ..services.existing_po import existing_po_needs_recalc as _existing_po_needs_recalc
 
     tier3_any = bool(get_summary())
     _po_ledger = getattr(sess, "po_raise_ledger_df", None)
@@ -2222,6 +2223,14 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         ) or None,
         existing_po_uploaded_at=(getattr(sess, "existing_po_uploaded_at", "") or None) or None,
         existing_po_filename=(getattr(sess, "existing_po_filename", "") or None) or None,
+        existing_po_generation=int(getattr(sess, "existing_po_generation", 0) or 0),
+        existing_po_rows=(
+            int(len(sess.existing_po_df))
+            if getattr(sess, "existing_po_df", None) is not None
+            and not getattr(sess.existing_po_df, "empty", True)
+            else 0
+        ),
+        existing_po_needs_recalc=_existing_po_needs_recalc(sess),
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",

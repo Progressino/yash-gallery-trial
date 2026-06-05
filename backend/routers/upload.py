@@ -2314,8 +2314,34 @@ async def upload_amazon_b2b(request: Request, file: UploadFile = File(...)):
 
 # ── Existing PO Sheet ──────────────────────────────────────────
 
+def _persist_existing_po_after_upload(sess, session_id: str | None) -> None:
+    """Sync PostgreSQL + GitHub cache immediately after Existing PO upload."""
+    if session_id:
+        setattr(sess, "_persist_sid", session_id)
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+
+            persist_session_bundle_thread_safe(session_id, sess)
+        except Exception:
+            _log.exception("PostgreSQL persist after existing PO upload")
+    try:
+        import backend.main as _main
+
+        _main.merge_existing_po_into_warm_cache(sess)
+    except Exception:
+        _log.exception("merge_existing_po_into_warm_cache after existing PO upload")
+    try:
+        _auto_save_cache(sess)
+    except Exception:
+        _log.exception("auto-save after existing PO upload")
+
+
 @router.post("/existing-po", response_model=UploadResponse)
-async def upload_existing_po(request: Request, file: UploadFile = File(...)):
+async def upload_existing_po(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
     sess = _get_session(request)
     try:
         file_bytes = await file.read()
@@ -2347,9 +2373,15 @@ async def upload_existing_po(request: Request, file: UploadFile = File(...)):
                     "Click Calculate PO on PO Engine to refresh pipeline columns."
                 ),
                 rows=len(df),
+                existing_po_uploaded_at=sess.existing_po_uploaded_at or None,
+                existing_po_generation=sess.existing_po_generation,
             )
 
-        return await _session_lock_apply(sess, work)
+        resp = await _session_lock_apply(sess, work)
+        if resp.ok:
+            sid = getattr(request.state, "session_id", None)
+            background_tasks.add_task(_persist_existing_po_after_upload, sess, sid)
+        return resp
     except Exception as e:
         _log.warning("existing-po parse failed: %s", e, exc_info=True)
         return UploadResponse(ok=False, message=f"Failed to parse Existing PO: {e}")
