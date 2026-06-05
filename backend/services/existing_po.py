@@ -10,9 +10,18 @@ Returns a DataFrame with:
   - Balance_to_Dispatch (units cut but not dispatched, if col found)
 """
 import io
+import re
 from typing import Optional
 
 import pandas as pd
+
+# Heuristic used only for auto-detection (headerless sheets, ambiguous SKU columns).
+# Must be permissive: "OMS_SKU" can be size SKUs (1917YKBLUE-3XL), parent-like tokens,
+# or vendor/article ids (V1-A). The main goal is to reject non-SKU labels like "New SKU".
+_OMS_SKU_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,}$", re.I)
+_PO_SIZE_TOKENS = frozenset(
+    {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "8XL"}
+)
 
 
 _SKU_EXACT = [
@@ -104,14 +113,12 @@ def _read_po_excel(file_bytes: bytes) -> pd.DataFrame:
             sku_guess = _resolve_sku_column(cols)
             if not sku_guess:
                 continue
-            n_ok = (
-                raw[sku_guess]
-                .astype(str)
-                .str.strip()
-                .str.len()
-                .gt(0)
-                .sum()
-            )
+            sku_series = raw[sku_guess].astype(str).str.strip()
+            n_ok = int(sku_series.map(_looks_like_oms_sku).sum())
+            if n_ok == 0:
+                # Column name looked like SKU-ish (e.g. "New SKU") but values do not.
+                # Skip this candidate; otherwise headerless sheets get mis-detected.
+                continue
             candidates.append((int(n_ok), raw, sheet, header_row))
 
     if not candidates:
@@ -143,6 +150,208 @@ def _read_raw_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return raw
 
 
+def _looks_like_oms_sku(value: object) -> bool:
+    s = str(value or "").strip().upper()
+    if len(s) < 3 or s in {"SKU", "OMS_SKU", "NAN", "NONE"}:
+        return False
+    if _OMS_SKU_RE.match(s):
+        parts = s.split("-")
+        # Size SKUs (and bundled size ranges).
+        if len(parts) >= 2 and parts[-1] in _PO_SIZE_TOKENS:
+            return True
+        if len(parts) >= 3 and parts[-1] in _PO_SIZE_TOKENS and parts[-2] in _PO_SIZE_TOKENS:
+            return True
+        # Vendor/article ids usually include digits.
+        if any(ch.isdigit() for ch in s):
+            return True
+        # Generic "ABC-RED-L" style tokens.
+        if "-" in s and len(s) >= 6:
+            return True
+    return False
+
+
+def _column_numeric_ratio(series: pd.Series) -> float:
+    nums = pd.to_numeric(series, errors="coerce")
+    if len(nums) == 0:
+        return 0.0
+    return float(nums.notna().mean())
+
+
+def _column_looks_numeric_qty(series: pd.Series) -> bool:
+    return _column_numeric_ratio(series) >= 0.6
+
+
+def _read_headerless_po(file_bytes: bytes, filename: str) -> Optional[pd.DataFrame]:
+    """Sheets whose first row is data (no header) — common in operator exports."""
+    fn_lower = filename.lower()
+    try:
+        if fn_lower.endswith(".csv"):
+            raw = pd.read_csv(
+                io.BytesIO(file_bytes), header=None, dtype=str, encoding="utf-8", on_bad_lines="skip"
+            )
+        else:
+            raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+    except Exception:
+        return None
+    if raw.empty or raw.shape[1] < 4:
+        return None
+    raw = raw.dropna(how="all").reset_index(drop=True)
+    sku_series = raw.iloc[:, 0].astype(str).str.strip()
+    hits = sku_series.map(_looks_like_oms_sku).sum()
+    if hits < max(2, int(len(raw) * 0.5)):
+        return None
+    out = raw.copy()
+    out.columns = [f"_c{i}" for i in range(out.shape[1])]
+    return out
+
+
+def _infer_quantity_columns(raw: pd.DataFrame, sku_col: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """
+    When named headers are missing, pick numeric columns by data shape.
+    Typical Yash layout: SKU | status | style | name | pending | total | total | 0
+    """
+    numeric: list[tuple[str, float, float]] = []
+    for col in raw.columns:
+        if col == sku_col:
+            continue
+        series = raw[col]
+        if not _column_looks_numeric_qty(series):
+            continue
+        nums = pd.to_numeric(series, errors="coerce").fillna(0)
+        total = float(nums.sum())
+        if total <= 0:
+            continue
+        numeric.append((col, total, float(nums.max())))
+
+    if not numeric:
+        return None, None, None, None
+
+    numeric.sort(key=lambda x: (-x[1], -x[2]))
+    total_col = numeric[0][0]
+    total_series = pd.to_numeric(raw[total_col], errors="coerce").fillna(0)
+    cutting_col = None
+    if len(numeric) > 1:
+        # Smallest non-zero numeric column that is not a duplicate of the total column.
+        rest = []
+        for col, sm, mx in numeric[1:]:
+            if col == total_col:
+                continue
+            other = pd.to_numeric(raw[col], errors="coerce").fillna(0)
+            if other.equals(total_series):
+                continue
+            rest.append((col, sm, mx))
+        if rest:
+            cutting_col = min(rest, key=lambda x: x[1])[0]
+    return None, cutting_col, None, total_col
+
+
+def _split_bundled_po_sku(sku: str) -> list[str]:
+    """1917YKBLUE-XXL-3XL → [1917YKBLUE-XXL, 1917YKBLUE-3XL]."""
+    s = str(sku or "").strip().upper()
+    parts = s.split("-")
+    if len(parts) >= 3 and parts[-1] in _PO_SIZE_TOKENS and parts[-2] in _PO_SIZE_TOKENS:
+        base = "-".join(parts[:-2])
+        return [f"{base}-{parts[-2]}", f"{base}-{parts[-1]}"]
+    return [s]
+
+
+def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fan out combined size-range PO lines (S-M, XXL-3XL) to individual OMS SKUs
+    so PO Engine rows like 1917YKBLUE-3XL receive pipeline quantities.
+    """
+    if df is None or df.empty:
+        return df
+    breakdown = [
+        c
+        for c in ("PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch", "PO_Pipeline_Total")
+        if c in df.columns
+    ]
+    rows: list[dict] = []
+    for _, r in df.iterrows():
+        sku = str(r.get("OMS_SKU") or "").strip().upper()
+        if not sku:
+            continue
+        expanded = _split_bundled_po_sku(sku)
+        n = len(expanded)
+        for esku in expanded:
+            row: dict = {"OMS_SKU": esku}
+            for c in breakdown:
+                val = pd.to_numeric(r.get(c), errors="coerce")
+                val = 0 if pd.isna(val) else int(val)
+                row[c] = val // n if n > 1 else val
+            rows.append(row)
+    if not rows:
+        return df
+    out = pd.DataFrame(rows)
+    if breakdown:
+        out = out.groupby("OMS_SKU", as_index=False)[breakdown].sum()
+    return out
+
+
+def _build_po_dataframe(
+    raw: pd.DataFrame,
+    sku_col: str,
+    *,
+    ordered_col: Optional[str],
+    cutting_col: Optional[str],
+    dispatch_col: Optional[str],
+    total_col: Optional[str],
+    fallback_col: Optional[str],
+) -> pd.DataFrame:
+    specific_cols = [
+        c for c in [ordered_col, cutting_col, dispatch_col, total_col, fallback_col] if c
+    ]
+    all_needed = list(dict.fromkeys([sku_col] + specific_cols))
+    df = raw[all_needed].copy()
+
+    df[sku_col] = df[sku_col].astype(str).str.strip().str.upper()
+    df = df[df[sku_col].str.len() > 0]
+    df = df[~df[sku_col].isin(["SKU", "OMS_SKU", "NAN", "NONE", ""])]
+
+    if df.empty:
+        raise ValueError("No valid SKU rows found after parsing.")
+
+    for c in specific_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    result = df.groupby(sku_col, as_index=False).agg({c: "sum" for c in specific_cols})
+    result = result.rename(columns={sku_col: "OMS_SKU"})
+
+    rename_map: dict[str, str] = {}
+    if ordered_col:
+        rename_map[ordered_col] = "PO_Qty_Ordered"
+    if cutting_col:
+        rename_map[cutting_col] = "Pending_Cutting"
+    if dispatch_col:
+        rename_map[dispatch_col] = "Balance_to_Dispatch"
+    if total_col:
+        rename_map[total_col] = "Total_Balance"
+    if fallback_col and fallback_col not in rename_map:
+        rename_map[fallback_col] = "PO_Qty_Ordered"
+    result = result.rename(columns=rename_map)
+
+    if "Total_Balance" in result.columns:
+        result["PO_Pipeline_Total"] = result["Total_Balance"].clip(lower=0).astype(int)
+        result = result.drop(columns=["Total_Balance"])
+    elif "Pending_Cutting" in result.columns and "Balance_to_Dispatch" in result.columns:
+        result["PO_Pipeline_Total"] = (
+            result["Pending_Cutting"] + result["Balance_to_Dispatch"]
+        ).clip(lower=0).astype(int)
+    elif "Pending_Cutting" in result.columns and "PO_Pipeline_Total" not in result.columns:
+        result["PO_Pipeline_Total"] = result["Pending_Cutting"].clip(lower=0).astype(int)
+    elif "PO_Qty_Ordered" in result.columns:
+        result["PO_Pipeline_Total"] = result["PO_Qty_Ordered"].clip(lower=0).astype(int)
+    else:
+        result["PO_Pipeline_Total"] = 0
+
+    for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch", "PO_Pipeline_Total"]:
+        if c in result.columns:
+            result[c] = result[c].clip(lower=0).astype(int)
+
+    return result
+
+
 def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """
     Parse an existing PO tracking sheet.
@@ -157,14 +366,43 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
     If none of the specific columns are found, falls back to any
     generic balance/qty column as PO_Pipeline_Total.
     """
-    raw = _read_raw_po(file_bytes, filename)
+    try:
+        raw = _read_raw_po(file_bytes, filename)
+    except ValueError:
+        # Headerless sheets can cause the Excel header-row scan to fail entirely.
+        headerless = _read_headerless_po(file_bytes, filename)
+        if headerless is not None:
+            raw = headerless
+        else:
+            raise
     cols = list(raw.columns)
 
     sku_col = _resolve_sku_column(cols)
+    # Some operator exports omit the header row; pandas then treats the first data row as headers
+    # (e.g. columns: ["1917YKBLUE-3XL", "New SKU", ..., "130"]). Detect and re-read as headerless.
+    if sku_col is not None:
+        try:
+            _col_names = [str(c).strip() for c in cols]
+            _has_numeric_headers = any(
+                bool(re.fullmatch(r"\d+(?:\.\d+)?", n)) for n in _col_names
+            )
+            if _looks_like_oms_sku(sku_col) and _has_numeric_headers:
+                headerless = _read_headerless_po(file_bytes, filename)
+                if headerless is not None:
+                    raw = headerless
+                    cols = list(raw.columns)
+                    sku_col = "_c0"
+        except Exception:
+            pass
+
     if sku_col is None:
-        raise ValueError(
-            f"Cannot find a SKU column. Columns seen: {cols[:25]}"
-        )
+        headerless = _read_headerless_po(file_bytes, filename)
+        if headerless is not None:
+            raw = headerless
+            cols = list(raw.columns)
+            sku_col = "_c0"
+        else:
+            raise ValueError(f"Cannot find a SKU column. Columns seen: {cols[:25]}")
 
     # ── Find specific breakdown columns (all optional) ──────────
     cutting_col = _find_col(
@@ -226,9 +464,12 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
                     kw in col.lower()
                     for kw in ["new order", "ordered qty", "order qty"]
                 )
+                and _column_looks_numeric_qty(raw[col])
             ),
             None,
         )
+    elif not _column_looks_numeric_qty(raw[ordered_col]):
+        ordered_col = None
 
     fallback_col: Optional[str] = None
     if not any([ordered_col, cutting_col, dispatch_col, total_col]):
@@ -239,68 +480,35 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
                 "Pending Qty", "Pending Quantity", "Units", "Balance",
                 "Qty", "Balance to dispatch", "TOTAL BALANCE From Latest Status",
                 "Total Balance", "Dispatch Balance", "Pending dispatch",
-                "New Order", "NEW ORDER",
             ],
         )
         if fallback_col is None:
             fallback_col = _find_col_fuzzy(
-                cols, ["balance", "dispatch", "pending", "open qty", "po qty", "new order"]
+                cols, ["balance", "dispatch", "pending", "open qty", "po qty"]
             )
-        if fallback_col is None:
-            raise ValueError(
-                f"Cannot find a quantity/balance column. Columns seen: {cols[:25]}"
-            )
+        if fallback_col is None or not _column_looks_numeric_qty(raw[fallback_col]):
+            inferred = _infer_quantity_columns(raw, sku_col)
+            ordered_col, cutting_col, dispatch_col, total_col = inferred
+            fallback_col = None
+            if not any([ordered_col, cutting_col, dispatch_col, total_col]):
+                headerless = _read_headerless_po(file_bytes, filename)
+                if headerless is not None:
+                    raw = headerless
+                    sku_col = "_c0"
+                    ordered_col, cutting_col, dispatch_col, total_col = _infer_quantity_columns(
+                        raw, sku_col
+                    )
+                if not any([ordered_col, cutting_col, dispatch_col, total_col]):
+                    raise ValueError(
+                        f"Cannot find a quantity/balance column. Columns seen: {cols[:25]}"
+                    )
 
-    specific_cols = [
-        c for c in [ordered_col, cutting_col, dispatch_col, total_col, fallback_col] if c
-    ]
-    all_needed = list(dict.fromkeys([sku_col] + specific_cols))
-    try:
-        df = raw[all_needed].copy()
-    except KeyError as e:
-        raise ValueError(f"Missing expected column while building PO table: {e}") from e
-
-    df[sku_col] = df[sku_col].astype(str).str.strip().str.upper()
-    df = df[df[sku_col].str.len() > 0]
-    df = df[~df[sku_col].isin(["SKU", "OMS_SKU", "NAN", "NONE", ""])]
-
-    if df.empty:
-        raise ValueError("No valid SKU rows found after parsing.")
-
-    for c in specific_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-    agg_dict = {c: "sum" for c in specific_cols}
-    result = df.groupby(sku_col, as_index=False).agg(agg_dict)
-    result = result.rename(columns={sku_col: "OMS_SKU"})
-
-    rename_map: dict[str, str] = {}
-    if ordered_col:
-        rename_map[ordered_col] = "PO_Qty_Ordered"
-    if cutting_col:
-        rename_map[cutting_col] = "Pending_Cutting"
-    if dispatch_col:
-        rename_map[dispatch_col] = "Balance_to_Dispatch"
-    if total_col:
-        rename_map[total_col] = "Total_Balance"
-    if fallback_col and fallback_col not in rename_map:
-        rename_map[fallback_col] = "PO_Qty_Ordered"
-    result = result.rename(columns=rename_map)
-
-    if "Total_Balance" in result.columns:
-        result["PO_Pipeline_Total"] = result["Total_Balance"].clip(lower=0).astype(int)
-        result = result.drop(columns=["Total_Balance"])
-    elif "Pending_Cutting" in result.columns and "Balance_to_Dispatch" in result.columns:
-        result["PO_Pipeline_Total"] = (
-            result["Pending_Cutting"] + result["Balance_to_Dispatch"]
-        ).clip(lower=0).astype(int)
-    elif "PO_Qty_Ordered" in result.columns:
-        result["PO_Pipeline_Total"] = result["PO_Qty_Ordered"].clip(lower=0).astype(int)
-    else:
-        result["PO_Pipeline_Total"] = 0
-
-    for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch", "PO_Pipeline_Total"]:
-        if c in result.columns:
-            result[c] = result[c].clip(lower=0).astype(int)
-
-    return result
+    return _build_po_dataframe(
+        raw,
+        sku_col,
+        ordered_col=ordered_col,
+        cutting_col=cutting_col,
+        dispatch_col=dispatch_col,
+        total_col=total_col,
+        fallback_col=fallback_col,
+    )

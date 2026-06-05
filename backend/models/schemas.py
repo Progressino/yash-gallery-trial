@@ -93,6 +93,8 @@ class CoverageResponse(BaseModel):
     inventory_snapshot_date_label: Optional[str] = None
     inventory_snapshot_date_sources: Optional[list[str]] = None
     inventory_snapshot_uploaded_at: Optional[str] = None
+    existing_po_uploaded_at: Optional[str] = None
+    existing_po_filename: Optional[str] = None
     # Wide daily inventory matrix (PO) background parse
     daily_inventory_upload_status: str = "idle"
     daily_inventory_upload_message: str = ""

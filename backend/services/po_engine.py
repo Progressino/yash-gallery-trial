@@ -1111,13 +1111,19 @@ def calculate_po_base(
 
     # Pipeline deduction from existing PO sheet
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
+        from .existing_po import expand_bundled_po_skus
+
+        _ep = existing_po_df.copy()
+        _ep["OMS_SKU"] = _ep["OMS_SKU"].astype(str).map(_canonical_oms_key).str.strip().str.upper()
+        _ep = _ep[_ep["OMS_SKU"].str.len() > 0]
+        _ep = expand_bundled_po_skus(_ep)
         # Pull PO_Pipeline_Total + any breakdown columns present in the uploaded sheet
         _breakdown_cols = [c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
-                           if c in existing_po_df.columns]
+                           if c in _ep.columns]
         _merge_cols = ["OMS_SKU", "PO_Pipeline_Total"] + _breakdown_cols
         po_df = pd.merge(
             po_df,
-            existing_po_df[_merge_cols],
+            _ep[_merge_cols],
             on="OMS_SKU", how="left",
         )
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
@@ -1140,12 +1146,19 @@ def calculate_po_base(
     # (e.g. out of stock, removed from listing), add it as a ghost row so it
     # still shows up as "🔄 In Pipeline" and isn't invisible to the user.
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
-        _po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
-        _pipe_canon = existing_po_df["OMS_SKU"].map(_canonical_oms_key).astype(str).str.strip()
-        missing_mask = ~_pipe_canon.isin(_po_keys) & (
-            pd.to_numeric(existing_po_df["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
+        from .existing_po import expand_bundled_po_skus
+
+        _ep_ghost = expand_bundled_po_skus(
+            existing_po_df.assign(
+                OMS_SKU=existing_po_df["OMS_SKU"].astype(str).map(_canonical_oms_key).str.strip().str.upper()
+            )
         )
-        missing_po = existing_po_df[missing_mask].copy()
+        _po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
+        _pipe_canon = _ep_ghost["OMS_SKU"].astype(str).str.strip()
+        missing_mask = ~_pipe_canon.isin(_po_keys) & (
+            pd.to_numeric(_ep_ghost["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
+        )
+        missing_po = _ep_ghost[missing_mask].copy()
         if not missing_po.empty:
             ghost = pd.DataFrame(
                 {"OMS_SKU": [_canonical_oms_key(x) for x in missing_po["OMS_SKU"].values]},

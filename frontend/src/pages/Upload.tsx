@@ -903,7 +903,27 @@ export default function Upload() {
         </UploadCard>
 
         {allowAdminBaseline ? (
-        <UploadCard title="📦 Existing PO Sheet" subtitle="Open/pending POs (XLSX or CSV)" loaded={coverage.existing_po} alert={showImportCompleteness ? uploadAlertsBySource['existingpo'] : undefined} onClearAlert={() => clearUploadAlert('existingpo')}>
+        <UploadCard
+          title="📦 Existing PO Sheet"
+          subtitle="Open/pending POs (XLSX or CSV)"
+          loaded={coverage.existing_po}
+          alert={showImportCompleteness ? uploadAlertsBySource['existingpo'] : undefined}
+          onClearAlert={() => clearUploadAlert('existingpo')}
+        >
+          {(coverage.existing_po_filename || coverage.existing_po_uploaded_at) && (
+            <div className="text-[11px] text-gray-500 mb-2">
+              Last uploaded:{' '}
+              <span className="font-semibold text-gray-700">
+                {coverage.existing_po_filename || 'Existing PO sheet'}
+              </span>
+              {coverage.existing_po_uploaded_at ? (
+                <span className="text-gray-400">
+                  {' '}
+                  ({new Date(coverage.existing_po_uploaded_at).toLocaleString()})
+                </span>
+              ) : null}
+            </div>
+          )}
           <FileUpload
             label="Upload PO Sheet"
             accept={{

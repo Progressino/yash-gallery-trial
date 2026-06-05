@@ -59,6 +59,8 @@ class AppSession:
     inventory_snapshot_date_label: str = ""                # e.g. 25 May 2026
     inventory_snapshot_date_sources: list = field(default_factory=list)
     inventory_snapshot_uploaded_at: str = ""                 # UTC ISO when snapshot last applied
+    existing_po_uploaded_at: str = ""                       # UTC ISO when Existing PO last applied
+    existing_po_filename: str = ""                          # Original filename uploaded
 
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session

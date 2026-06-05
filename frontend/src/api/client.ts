@@ -111,6 +111,8 @@ export interface CoverageResponse {
   inventory_snapshot_date_label?: string | null
   inventory_snapshot_date_sources?: string[] | null
   inventory_snapshot_uploaded_at?: string | null
+  existing_po_uploaded_at?: string | null
+  existing_po_filename?: string | null
   daily_inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   daily_inventory_upload_message?: string
 }

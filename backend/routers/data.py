@@ -2220,6 +2220,8 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         inventory_snapshot_uploaded_at=(
             getattr(sess, "inventory_snapshot_uploaded_at", "") or None
         ) or None,
+        existing_po_uploaded_at=(getattr(sess, "existing_po_uploaded_at", "") or None) or None,
+        existing_po_filename=(getattr(sess, "existing_po_filename", "") or None) or None,
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",

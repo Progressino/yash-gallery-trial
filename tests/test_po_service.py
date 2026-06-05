@@ -372,6 +372,75 @@ def test_sku_status_detects_lt_column_alias():
     assert int(out.iloc[0]["Lead_Time_From_Sheet"]) == 51
 
 
+def test_existing_po_individual_skus_merge_pipeline_to_po_rows():
+    """Per-size SKUs in the existing PO sheet must show on matching PO Engine rows."""
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-3XL"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [3] * 20,
+            "Units_Effective": [3] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["1917YKBLUE-3XL"], "Total_Inventory": [23]})
+    existing_po = pd.DataFrame(
+        {"OMS_SKU": ["1917YKBLUE-3XL"], "PO_Pipeline_Total": [130], "Pending_Cutting": [0], "Balance_to_Dispatch": [130]}
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    row = po.loc[po["OMS_SKU"] == "1917YKBLUE-3XL"].iloc[0]
+    assert int(row["PO_Pipeline_Total"]) == 130
+
+
+def test_existing_po_bundled_sku_expands_to_individual_sizes():
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-3XL"] * 10 + ["1917YKBLUE-XXL"] * 10,
+            "TxnDate": list(days),
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame(
+        {"OMS_SKU": ["1917YKBLUE-3XL", "1917YKBLUE-XXL"], "Total_Inventory": [23, 23]}
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-XXL-3XL"],
+            "PO_Pipeline_Total": [200],
+            "Pending_Cutting": [196],
+            "Balance_to_Dispatch": [4],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    for sku in ("1917YKBLUE-3XL", "1917YKBLUE-XXL"):
+        row = po.loc[po["OMS_SKU"] == sku].iloc[0]
+        assert int(row["PO_Pipeline_Total"]) == 100
+
+
 def test_po_pipeline_ghost_row_inherits_sheet_lead_not_global_default():
     """Pipeline-only SKUs were merged before the status sheet; they kept global lead_time."""
     days = pd.date_range("2025-11-01", periods=30, freq="D")

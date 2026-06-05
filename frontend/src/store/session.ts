@@ -53,6 +53,8 @@ const empty: CoverageResponse = {
   inventory_snapshot_date_label: undefined,
   inventory_snapshot_date_sources: undefined,
   inventory_snapshot_uploaded_at: undefined,
+  existing_po_uploaded_at: undefined,
+  existing_po_filename: undefined,
   daily_inventory_upload_status: 'idle',
   daily_inventory_upload_message: '',
 }
