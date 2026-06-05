@@ -1102,17 +1102,39 @@ export default function POEngine() {
               <Param label="Lead Time (days)" type="number"
                 value={params.lead_time} onChange={v => setParams({ ...params, lead_time: +v })} />
               <div>
-                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Post-PO Running Days</label>
-                <select
-                  value={params.target_days}
-                  onChange={e => setParams({ ...params, target_days: +e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold"
+                <label
+                  className="text-xs font-semibold text-gray-500 uppercase block mb-1"
+                  title="Target stock cover after PO release — editable; use 180+ for longer planning horizons"
                 >
-                  <option value={90}>90 days</option>
-                  <option value={120}>120 days</option>
-                  <option value={135}>135 days</option>
-                  <option value={150}>150 days</option>
-                </select>
+                  Post-PO Running Days
+                </label>
+                <input
+                  type="number"
+                  min={30}
+                  step={1}
+                  value={params.target_days}
+                  onChange={e => setParams({
+                    ...params,
+                    target_days: Math.max(30, Math.round(+e.target.value || 30)),
+                  })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold"
+                />
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {[90, 120, 135, 150, 180, 210].map(days => (
+                    <button
+                      key={days}
+                      type="button"
+                      onClick={() => setParams({ ...params, target_days: days })}
+                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                        params.target_days === days
+                          ? 'bg-[#002B5B] text-white border-[#002B5B]'
+                          : 'bg-white text-gray-600 border-gray-300 hover:border-[#002B5B]'
+                      }`}
+                    >
+                      {days}d
+                    </button>
+                  ))}
+                </div>
               </div>
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Demand Basis</label>

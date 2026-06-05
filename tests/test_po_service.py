@@ -1031,6 +1031,17 @@ def test_sheet_lead_from_style_code_applies_to_color_size_variant():
     assert float(row["Projected_Running_Days"]) == pytest.approx(expected_projected, abs=0.05)
 
 
+def test_post_po_target_days_accepts_180_and_above():
+    """PO engine must accept editable Post-PO running targets beyond the old 150d UI cap."""
+    sales = _minimal_sales()
+    inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [5]})
+    po = calculate_po_base(sales, inv, period_days=30, lead_time=7, target_days=180, safety_pct=0.0)
+    row = po.iloc[0]
+    assert float(row["ADS"]) > 0
+    assert int(row["PO_Qty"]) > 0
+    assert float(row["Post_PO_Cover_Days_Capped"]) >= 150.0
+
+
 def test_projected_running_days_uses_inventory_plus_pipeline_over_ads():
     """Projected days should include Total_Inventory + Pipeline (before new PO release)."""
     sales = _minimal_sales()
