@@ -1113,10 +1113,7 @@ def calculate_po_base(
     _breakdown_cols: list[str] = []
     _ep_prepared = pd.DataFrame()
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
-        from .existing_po import (
-            prepare_existing_po_for_merge,
-            rollup_pipeline_onto_bundled_rows,
-        )
+        from .existing_po import prepare_existing_po_for_merge
 
         _ep_prepared = prepare_existing_po_for_merge(existing_po_df, _canonical_oms_key)
         _breakdown_cols = [
@@ -1128,7 +1125,6 @@ def calculate_po_base(
             _ep_merge = _ep_prepared[_merge_cols].drop_duplicates(subset=["OMS_SKU"], keep="last")
             po_df = po_df.drop(columns=["PO_Pipeline_Total"] + _breakdown_cols, errors="ignore")
             po_df = pd.merge(po_df, _ep_merge, on="OMS_SKU", how="left")
-            po_df = rollup_pipeline_onto_bundled_rows(po_df, _ep_prepared)
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
         ).fillna(0).astype(int)
@@ -1149,34 +1145,14 @@ def calculate_po_base(
     # (e.g. out of stock, removed from listing), add it as a ghost row so it
     # still shows up as "🔄 In Pipeline" and isn't invisible to the user.
     if not _ep_prepared.empty:
-        from .existing_po import _split_bundled_po_sku
-
         _ep_ghost = _ep_prepared
         _po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
-        # Skip ghost rows for individual sizes only when a bundled inventory row
-        # already carries their rolled-up pipeline (not merely because parent exists).
-        _child_covered_by_bundled: set[str] = set()
-        for _pk in _po_keys:
-            _kids = _split_bundled_po_sku(_pk)
-            if len(_kids) != 2:
-                continue
-            _parent_pipe = pd.to_numeric(
-                po_df.loc[po_df["OMS_SKU"].astype(str).str.strip() == _pk, "PO_Pipeline_Total"],
-                errors="coerce",
-            ).fillna(0)
-            if _parent_pipe.empty or float(_parent_pipe.max()) <= 0:
-                continue
-            _child_covered_by_bundled.update(_kids)
         _pipe_canon = _ep_ghost["OMS_SKU"].astype(str).str.strip()
         _ep_active = pd.to_numeric(_ep_ghost["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
         for _ac in ("Pending_Cutting", "Balance_to_Dispatch", "PO_Qty_Ordered"):
             if _ac in _ep_ghost.columns:
                 _ep_active |= pd.to_numeric(_ep_ghost[_ac], errors="coerce").fillna(0) > 0
-        missing_mask = (
-            ~_pipe_canon.isin(_po_keys)
-            & ~_pipe_canon.isin(_child_covered_by_bundled)
-            & _ep_active
-        )
+        missing_mask = ~_pipe_canon.isin(_po_keys) & _ep_active
         missing_po = _ep_ghost[missing_mask].copy()
         if not missing_po.empty:
             ghost = pd.DataFrame(

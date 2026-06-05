@@ -320,7 +320,12 @@ def prepare_existing_po_for_merge(
     existing_po_df: pd.DataFrame,
     canonical_fn,
 ) -> pd.DataFrame:
-    """Canonicalize + expand bundled size ranges; aggregate to one row per OMS_SKU."""
+    """
+    Canonicalize Existing PO rows for exact OMS_SKU merge.
+
+    Operator sheets list bundled listings (4XL-5XL) and individual sizes (4XL, 5XL)
+    as separate rows with separate quantities — do not fan out or sum across them.
+    """
     if existing_po_df is None or existing_po_df.empty:
         return pd.DataFrame()
     ep = existing_po_df.copy()
@@ -330,7 +335,18 @@ def prepare_existing_po_for_merge(
         ep["OMS_SKU"].astype(str).map(canonical_fn).astype(str).str.strip().str.upper()
     )
     ep = ep[ep["OMS_SKU"].str.len() > 0]
-    return expand_bundled_po_skus(ep)
+    breakdown = [
+        c
+        for c in ("PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch", "PO_Pipeline_Total")
+        if c in ep.columns
+    ]
+    if breakdown:
+        for c in breakdown:
+            ep[c] = pd.to_numeric(ep[c], errors="coerce").fillna(0)
+        ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
+    else:
+        ep = ep.drop_duplicates(subset=["OMS_SKU"], keep="last")
+    return ep
 
 
 def rollup_pipeline_onto_bundled_rows(

@@ -403,8 +403,8 @@ def test_existing_po_individual_skus_merge_pipeline_to_po_rows():
     assert int(row["PO_Pipeline_Total"]) == 130
 
 
-def test_existing_po_rollup_onto_bundled_inventory_row():
-    """Individual sizes in Existing PO must roll up onto bundled inventory SKUs."""
+def test_existing_po_keeps_bundled_and_individual_sizes_separate():
+    """Bundled inventory rows keep only their sheet qty; individual sizes stay separate."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")
     sales = pd.DataFrame(
         {
@@ -424,9 +424,14 @@ def test_existing_po_rollup_onto_bundled_inventory_row():
     )
     existing_po = pd.DataFrame(
         {
-            "OMS_SKU": ["1917YKBLUE-3XL", "1917YKBLUE-4XL", "1917YKBLUE-5XL"],
-            "PO_Pipeline_Total": [130, 85, 77],
-            "Balance_to_Dispatch": [130, 85, 77],
+            "OMS_SKU": [
+                "1917YKBLUE-3XL",
+                "1917YKBLUE-4XL",
+                "1917YKBLUE-5XL",
+                "1917YKBLUE-4XL-5XL",
+            ],
+            "PO_Pipeline_Total": [130, 170, 150, 4],
+            "Balance_to_Dispatch": [130, 170, 150, 4],
         }
     )
     po = calculate_po_base(
@@ -442,8 +447,12 @@ def test_existing_po_rollup_onto_bundled_inventory_row():
     assert len(po[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"]) == 1
     row_3xl = po.loc[po["OMS_SKU"] == "1917YKBLUE-3XL"].iloc[0]
     row_bund = po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"].iloc[0]
+    row_4xl = po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL"].iloc[0]
+    row_5xl = po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL"].iloc[0]
     assert int(row_3xl["PO_Pipeline_Total"]) == 130
-    assert int(row_bund["PO_Pipeline_Total"]) == 162
+    assert int(row_bund["PO_Pipeline_Total"]) == 4
+    assert int(row_4xl["PO_Pipeline_Total"]) == 170
+    assert int(row_5xl["PO_Pipeline_Total"]) == 150
 
 
 def test_po_output_dedupes_duplicate_oms_sku_rows():
@@ -501,7 +510,7 @@ def test_po_4_jun_fixture_pending_cutting_flows_to_calculate():
 
 
 def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
-    """Duplicate inventory rows for the same bundled SKU collapse to one pipeline row."""
+    """Duplicate inventory rows collapse; individual PO sizes do not sum onto bundled row."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")
     sales = pd.DataFrame(
         {
@@ -538,10 +547,13 @@ def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
     )
     bund = po[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"]
     assert len(bund) == 1
-    assert int(bund.iloc[0]["PO_Pipeline_Total"]) == 162
+    assert int(bund.iloc[0]["PO_Pipeline_Total"]) == 0
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 85
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 77
 
 
-def test_existing_po_bundled_sku_expands_to_individual_sizes():
+def test_existing_po_bundled_sheet_row_stays_on_bundled_sku_not_split():
+    """A bundled PO line (XXL-3XL) is not split across individual inventory sizes."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")
     sales = pd.DataFrame(
         {
@@ -576,7 +588,62 @@ def test_existing_po_bundled_sku_expands_to_individual_sizes():
     )
     for sku in ("1917YKBLUE-3XL", "1917YKBLUE-XXL"):
         row = po.loc[po["OMS_SKU"] == sku].iloc[0]
-        assert int(row["PO_Pipeline_Total"]) == 100
+        assert int(row["PO_Pipeline_Total"]) == 0
+    ghost = po.loc[po["OMS_SKU"] == "1917YKBLUE-XXL-3XL"].iloc[0]
+    assert int(ghost["PO_Pipeline_Total"]) == 200
+    assert int(ghost["Pending_Cutting"]) == 196
+    assert int(ghost["Balance_to_Dispatch"]) == 4
+
+
+def test_po_4_jun_fixture_1917ykblue_sizes_stay_separate():
+    """Regression: Po 4-Jun-26 — bundled listings and per-size rows keep sheet quantities."""
+    from pathlib import Path
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "Po_4-Jun-26.xlsx"
+    if not fixture.is_file():
+        return
+    from backend.services.existing_po import parse_existing_po
+
+    existing_po = parse_existing_po(fixture.read_bytes(), fixture.name)
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-4XL-5XL"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": [
+                "1917YKBLUE-4XL-5XL",
+                "1917YKBLUE-L-XL",
+                "1917YKBLUE-S-M",
+                "1917YKBLUE-XXL-3XL",
+            ],
+            "Total_Inventory": [22, 20, 18, 19],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL", "PO_Pipeline_Total"].iloc[0]) == 4
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL", "PO_Pipeline_Total"].iloc[0]) == 4
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-S-M", "PO_Pipeline_Total"].iloc[0]) == 1
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-XXL-3XL", "PO_Pipeline_Total"].iloc[0]) == 4
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-3XL", "PO_Pipeline_Total"].iloc[0]) == 130
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 170
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 150
 
 
 def test_po_pipeline_ghost_row_inherits_sheet_lead_not_global_default():
