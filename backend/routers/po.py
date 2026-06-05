@@ -814,6 +814,15 @@ def po_dashboard(request: Request, body: PODashboardRequest):
     from ..services.po_dashboard import build_dashboard_payload
     from ..services.po_engine import calculate_po_base
 
+    # Ensure the full per-size Existing PO is loaded from disk before calculating.
+    # Without this, a freshly-restored session has an empty existing_po_df so bundled
+    # inventory rows (4XL-5XL) are never split into individual sizes (4XL, 5XL).
+    try:
+        from ..services.existing_po import ensure_existing_po_hydrated
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        logging.getLogger(__name__).exception("ensure_existing_po_hydrated in dashboard failed")
+
     inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 
@@ -890,16 +899,8 @@ def po_dashboard(request: Request, body: PODashboardRequest):
     return payload
 
 
-@router.get("/calculate/status")
-def po_calculate_status(request: Request):
-    """Lightweight poll — in-memory job store only (must stay fast during heavy PO math)."""
-    from ..services.po_calculate_jobs import get_po_job
-
-    sid = getattr(request.state, "session_id", None) or ""
-    job = get_po_job(sid)
-    if not job:
-        return {"status": "idle", "message": "", "progress": 0, "ok": True}
-
+def _po_calculate_status_payload(job: dict, *, sid: str = "") -> dict:
+    """Build status JSON from job store row (or session fallback fields)."""
     st = str(job.get("status") or "idle")
     msg = str(job.get("message") or "")
     progress = max(0, min(100, int(job.get("progress") or 0)))
@@ -914,7 +915,47 @@ def po_calculate_status(request: Request):
             out["columns"] = list(job["columns"])
     else:
         out["ok"] = True
+    if sid and st in ("running", "done", "error"):
+        try:
+            from ..services.po_calculate_jobs import set_po_job
+
+            set_po_job(sid, **{k: v for k, v in job.items() if k != "updated_at"})
+        except Exception:
+            pass
     return out
+
+
+@router.get("/calculate/status")
+def po_calculate_status(request: Request):
+    """Lightweight poll — in-memory job store; session fallback if job row was lost."""
+    from ..services.po_calculate_jobs import get_po_job
+
+    sid = getattr(request.state, "session_id", None) or ""
+    job = get_po_job(sid)
+    if job:
+        return _po_calculate_status_payload(job)
+
+    sess = getattr(request.state, "session", None)
+    if sess is not None:
+        st = getattr(sess, "po_calculate_status", "idle") or "idle"
+        if st and st != "idle":
+            meta = getattr(sess, "po_calculate_result", None) or {}
+            fallback = {
+                "status": st,
+                "message": getattr(sess, "po_calculate_message", "") or "",
+                "progress": int(getattr(sess, "po_calculate_progress", 0) or 0),
+                "ok": st != "error",
+            }
+            if st == "done":
+                if meta.get("total_rows") is not None:
+                    fallback["total_rows"] = int(meta["total_rows"])
+                if meta.get("columns"):
+                    fallback["columns"] = list(meta["columns"])
+            elif st == "error":
+                fallback["ok"] = False
+            return _po_calculate_status_payload(fallback, sid=sid)
+
+    return {"status": "idle", "message": "", "progress": 0, "ok": True}
 
 
 @router.get("/calculate/result")
