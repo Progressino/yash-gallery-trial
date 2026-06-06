@@ -662,6 +662,10 @@ def test_po_1917ykblue_pipeline_matches_sheet_with_sku_mapping():
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 170
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 150
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-L", "PO_Pipeline_Total"].iloc[0]) == 120
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "Total_Inventory"].iloc[0]) == 0.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "Total_Inventory"].iloc[0]) == 0.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-L", "Total_Inventory"].iloc[0]) == 0.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL", "Total_Inventory"].iloc[0]) == 18.0
     yk = po[po["OMS_SKU"].astype(str).str.contains("1917YKBLUE")]
     assert len(yk) >= 12
     if "1917YKBLUE-XXXL" in set(yk["OMS_SKU"].astype(str)):
@@ -717,10 +721,50 @@ def test_po_4_jun_fixture_1917ykblue_sizes_stay_separate():
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-3XL", "PO_Pipeline_Total"].iloc[0]) == 130
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 170
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 150
-    # Bundled inventory rows split into per-size rows (not combined pipeline).
-    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "Total_Inventory"].iloc[0]) == 9.0
-    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-L", "Total_Inventory"].iloc[0]) == 28.0
+    # Bundled listing keeps inventory; per-size pipeline rows do not inherit bundled stock.
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "Total_Inventory"].iloc[0]) == 0.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-L", "Total_Inventory"].iloc[0]) == 0.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL", "Total_Inventory"].iloc[0]) == 18.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL", "Total_Inventory"].iloc[0]) == 56.0
     assert len(po[po["OMS_SKU"].astype(str).str.contains("1917YKBLUE")]) == 12
+
+
+def test_bundled_inventory_does_not_fan_out_to_per_size_rows():
+    """Per-size PO rows from the sheet must not inherit bundled listing inventory."""
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-4XL-5XL"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame(
+        {"OMS_SKU": ["1917YKBLUE-4XL-5XL"], "Total_Inventory": [18]}
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-4XL", "1917YKBLUE-5XL", "1917YKBLUE-4XL-5XL"],
+            "PO_Pipeline_Total": [170, 150, 4],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "Total_Inventory"].iloc[0]) == 0.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "Total_Inventory"].iloc[0]) == 0.0
+    assert float(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL", "Total_Inventory"].iloc[0]) == 18.0
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 170
 
 
 def test_po_pipeline_ghost_row_inherits_sheet_lead_not_global_default():

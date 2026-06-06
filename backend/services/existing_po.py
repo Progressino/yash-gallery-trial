@@ -710,9 +710,11 @@ def unbundle_inventory_rows_for_existing_po(
 ) -> pd.DataFrame:
     """
     Inventory often lists combined sizes (4XL-5XL) while the Existing PO sheet has
-    per-size rows (4XL: 170, 5XL: 150). Split bundled inventory rows into individual
-    size rows with sheet pipeline; keep the bundled listing row only when the sheet
-    has an exact bundled SKU line (e.g. 4XL-5XL: 4).
+    per-size rows (4XL: 170, 5XL: 150). Add per-size PO rows for sheet pipeline only.
+
+    Bundled listing stock does **not** fan out to individual sizes — a 4XL-5XL listing
+    with 18 units is not 9+9 on 4XL and 5XL unless those SKUs exist separately in inventory.
+    Keep the bundled listing row (with its inventory) when the sheet has a bundled line.
     """
     if po_df is None or po_df.empty or ep is None or ep.empty:
         return po_df
@@ -744,6 +746,7 @@ def unbundle_inventory_rows_for_existing_po(
 
     drop_idx: list = []
     new_rows: list[dict] = []
+    po_skus = po_df["OMS_SKU"].astype(str).str.strip()
 
     for idx, row in po_df.iterrows():
         sku = _normalize_sku_text(row.get("OMS_SKU"))
@@ -759,18 +762,10 @@ def unbundle_inventory_rows_for_existing_po(
         if not sheet_children:
             continue
 
-        n = len(children)
         base = row.to_dict()
         for child in sheet_children:
             child_key = merge_key(child)
-            child_row = dict(base)
-            child_row["OMS_SKU"] = child_key
-            for m in split_metrics:
-                if m not in child_row:
-                    continue
-                v = pd.to_numeric(child_row.get(m), errors="coerce")
-                if pd.notna(v):
-                    child_row[m] = float(v) / n
+            pipe_vals: dict[str, object] = {}
             for col in breakdown:
                 if col in ep_idx.columns:
                     val = (
@@ -778,7 +773,21 @@ def unbundle_inventory_rows_for_existing_po(
                         if child_key in ep_idx.index
                         else 0
                     )
-                    child_row[col] = 0 if pd.isna(val) else val
+                    pipe_vals[col] = 0 if pd.isna(val) else val
+
+            existing = po_skus == child_key
+            if existing.any():
+                for col, val in pipe_vals.items():
+                    po_df.loc[existing, col] = val
+                continue
+
+            child_row = dict(base)
+            child_row["OMS_SKU"] = child_key
+            for m in split_metrics:
+                if m in child_row:
+                    child_row[m] = 0
+            for col, val in pipe_vals.items():
+                child_row[col] = val
             new_rows.append(child_row)
 
         bundled_key = merge_key(sku)
