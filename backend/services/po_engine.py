@@ -1122,11 +1122,12 @@ def calculate_po_base(
     _ep_prepared = pd.DataFrame()
     if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
         from .existing_po import (
+            existing_po_merge_key,
             prepare_existing_po_for_merge,
             unbundle_inventory_rows_for_existing_po,
         )
 
-        _ep_prepared = prepare_existing_po_for_merge(existing_po_df, _canonical_oms_key)
+        _ep_prepared = prepare_existing_po_for_merge(existing_po_df, existing_po_merge_key)
         _breakdown_cols = [
             c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
             if c in _ep_prepared.columns
@@ -1137,7 +1138,7 @@ def calculate_po_base(
             po_df = po_df.drop(columns=["PO_Pipeline_Total"] + _breakdown_cols, errors="ignore")
             po_df = pd.merge(po_df, _ep_merge, on="OMS_SKU", how="left")
             po_df = unbundle_inventory_rows_for_existing_po(
-                po_df, _ep_prepared, _breakdown_cols, canonical_fn=_canonical_oms_key
+                po_df, _ep_prepared, _breakdown_cols, canonical_fn=existing_po_merge_key
             )
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
@@ -1170,7 +1171,7 @@ def calculate_po_base(
         missing_po = _ep_ghost[missing_mask].copy()
         if not missing_po.empty:
             ghost = pd.DataFrame(
-                {"OMS_SKU": [_canonical_oms_key(x) for x in missing_po["OMS_SKU"].values]},
+                {"OMS_SKU": [existing_po_merge_key(x) for x in missing_po["OMS_SKU"].values]},
             )
             ghost["Total_Inventory"] = 0
             ghost["Sold_Units"]      = 0

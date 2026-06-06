@@ -593,6 +593,81 @@ def test_existing_po_bundled_sheet_row_stays_on_bundled_sku_not_split():
     assert int(ghost["Balance_to_Dispatch"]) == 4
 
 
+def test_po_1917ykblue_pipeline_matches_sheet_with_sku_mapping():
+    """sku_mapping must not collapse per-size Existing PO qty onto bundled listing rows."""
+    import json
+    from pathlib import Path
+
+    mapping_path = Path(__file__).resolve().parents[1] / "backend" / "data" / "yash_sku_mapping_master.json"
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": [
+                "1917YKBLUE-3XL",
+                "1917YKBLUE-4XL",
+                "1917YKBLUE-5XL",
+                "1917YKBLUE-L",
+                "1917YKBLUE-M",
+                "1917YKBLUE-S",
+                "1917YKBLUE-XL",
+                "1917YKBLUE-XXL",
+                "1917YKBLUE-4XL-5XL",
+                "1917YKBLUE-L-XL",
+                "1917YKBLUE-S-M",
+                "1917YKBLUE-XXL-3XL",
+            ],
+            "PO_Pipeline_Total": [130, 170, 150, 120, 80, 150, 100, 100, 4, 4, 1, 4],
+            "Balance_to_Dispatch": [130, 170, 150, 120, 80, 150, 100, 100, 4, 4, 1, 4],
+        }
+    )
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-4XL-5XL"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": [
+                "1917YKBLUE-4XL-5XL",
+                "1917YKBLUE-L-XL",
+                "1917YKBLUE-S-M",
+                "1917YKBLUE-XXL-3XL",
+            ],
+            "Total_Inventory": [18, 56, 15, 20],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        sku_mapping=mapping,
+    )
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL", "PO_Pipeline_Total"].iloc[0]) == 4
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL", "PO_Pipeline_Total"].iloc[0]) == 4
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-S-M", "PO_Pipeline_Total"].iloc[0]) == 1
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-XXL-3XL", "PO_Pipeline_Total"].iloc[0]) == 4
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-3XL", "PO_Pipeline_Total"].iloc[0]) == 130
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 170
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 150
+    assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-L", "PO_Pipeline_Total"].iloc[0]) == 120
+    yk = po[po["OMS_SKU"].astype(str).str.contains("1917YKBLUE")]
+    assert len(yk) >= 12
+    if "1917YKBLUE-XXXL" in set(yk["OMS_SKU"].astype(str)):
+        assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-XXXL", "PO_Pipeline_Total"].iloc[0]) == 0
+
+
 def test_po_4_jun_fixture_1917ykblue_sizes_stay_separate():
     """Regression: Po 4-Jun-26 — bundled listings and per-size rows keep sheet quantities."""
     from pathlib import Path

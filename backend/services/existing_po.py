@@ -48,6 +48,31 @@ def _normalize_sku_text(value: object) -> str:
     return collapse_duplicate_trailing_size_suffix("-".join(parts))
 
 
+_PL_INFIX_RE = re.compile(r"^(.*?)-PL-(.*?)$", re.I)
+
+
+def existing_po_merge_key(raw: object) -> str:
+    """
+    Canonicalize Existing PO / pipeline merge keys without sku_mapping.
+
+    sku_mapping maps individual sizes (1917YKBLUE-4XL) to bundled listings
+    (1917YKBLUE-4XL-5XL). The uploaded PO sheet already uses the correct per-size
+    keys — applying sku_mapping would collapse pipeline onto bundled rows.
+    """
+    try:
+        from ..services.po_engine import normalize_id_token_for_mapping, clean_sku
+        from .helpers import collapse_duplicate_trailing_size_suffix
+
+        t = normalize_id_token_for_mapping(str(raw or "").strip())
+        t = clean_sku(t or raw)
+        if not t:
+            t = str(raw or "").strip().upper()
+        stripped = _PL_INFIX_RE.sub(r"\1-\2", str(t).strip().upper())
+        return collapse_duplicate_trailing_size_suffix(stripped)
+    except Exception:
+        return _normalize_sku_text(raw)
+
+
 _SKU_EXACT = [
     "OMS SKU", "OMS_SKU", "OMS SKU Code", "OMS",
     "SKU", "Seller SKU", "Merchant SKU", "Listing SKU", "Parent SKU",
@@ -579,32 +604,9 @@ def prepare_existing_po_for_merge(
     ep = existing_po_df.copy()
     if "PO_Pipeline_Total" not in ep.columns:
         return pd.DataFrame()
-    # Normalise OMS_SKU without applying sku_mapping.
-    # sku_mapping maps individual sizes (1917YKBLUE-4XL) to bundled listing keys
-    # (1917YKBLUE-4XL-5XL), which would collapse all per-size pipeline onto the
-    # bundled row and prevent unbundle_inventory_rows_for_existing_po from splitting
-    # bundled inventory rows back into individual sizes.
-    # The existing PO sheet already uses the correct OMS_SKU keys; we only need to
-    # strip whitespace, uppercase, and remove PL prefixes.
-    try:
-        from ..services.po_engine import normalize_id_token_for_mapping, clean_sku
-        from ..services.po_engine import collapse_duplicate_trailing_size_suffix
-        import re as _re
-        _PL = _re.compile(r"^(.*?)-PL-(.*?)$", _re.I)
-
-        def _light_canon(raw: str) -> str:
-            t = normalize_id_token_for_mapping(str(raw).strip())
-            t = clean_sku(t or raw)
-            if not t:
-                t = str(raw).strip().upper()
-            # Strip PL infix but do NOT look up in sku_mapping
-            stripped = _PL.sub(r"\1-\2", str(t).strip().upper())
-            return collapse_duplicate_trailing_size_suffix(stripped)
-
-        ep["OMS_SKU"] = ep["OMS_SKU"].astype(str).map(_light_canon).astype(str).str.strip().str.upper()
-    except Exception:
-        # Fallback: basic normalisation without any mapping
-        ep["OMS_SKU"] = ep["OMS_SKU"].astype(str).str.strip().str.upper()
+    ep["OMS_SKU"] = (
+        ep["OMS_SKU"].astype(str).map(existing_po_merge_key).astype(str).str.strip().str.upper()
+    )
     ep = ep[ep["OMS_SKU"].str.len() > 0]
     breakdown = [
         c
@@ -654,7 +656,7 @@ def unbundle_inventory_rows_for_existing_po(
     if not breakdown:
         return po_df
 
-    canon = canonical_fn or (lambda x: _normalize_sku_text(x))
+    merge_key = canonical_fn or existing_po_merge_key
     ep_idx = ep.set_index("OMS_SKU")
     split_metrics = [
         "Total_Inventory",
@@ -683,7 +685,7 @@ def unbundle_inventory_rows_for_existing_po(
             continue
         sheet_children = [
             c for c in (_normalize_sku_text(ch) for ch in children)
-            if _ep_row_has_pipeline(ep_idx, canon(c), breakdown)
+            if _ep_row_has_pipeline(ep_idx, merge_key(c), breakdown)
         ]
         if not sheet_children:
             continue
@@ -691,8 +693,9 @@ def unbundle_inventory_rows_for_existing_po(
         n = len(children)
         base = row.to_dict()
         for child in sheet_children:
+            child_key = merge_key(child)
             child_row = dict(base)
-            child_row["OMS_SKU"] = canon(child)
+            child_row["OMS_SKU"] = child_key
             for m in split_metrics:
                 if m not in child_row:
                     continue
@@ -701,12 +704,15 @@ def unbundle_inventory_rows_for_existing_po(
                     child_row[m] = float(v) / n
             for col in breakdown:
                 if col in ep_idx.columns:
-                    ck = canon(child)
-                    val = pd.to_numeric(ep_idx.at[ck, col], errors="coerce") if ck in ep_idx.index else 0
+                    val = (
+                        pd.to_numeric(ep_idx.at[child_key, col], errors="coerce")
+                        if child_key in ep_idx.index
+                        else 0
+                    )
                     child_row[col] = 0 if pd.isna(val) else val
             new_rows.append(child_row)
 
-        bundled_key = canon(sku)
+        bundled_key = merge_key(sku)
         if _ep_row_has_pipeline(ep_idx, bundled_key, breakdown):
             for col in breakdown:
                 if col in ep_idx.columns and bundled_key in ep_idx.index:
