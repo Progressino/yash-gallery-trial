@@ -6,6 +6,11 @@ import json
 import re
 import sys
 import uuid
+from pathlib import Path
+
+_srv = Path(__file__).resolve().parents[2]
+if str(_srv) not in sys.path:
+    sys.path.insert(0, str(_srv))
 
 _DUP_SUFFIX_RE = re.compile(
     r"-(XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL|6XL|7XL|8XL)-\1$"
