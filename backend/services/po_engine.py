@@ -865,6 +865,13 @@ def calculate_po_base(
             )
             po_df.drop(columns=["P__eff_days_active"], inplace=True, errors="ignore")
     po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
+    # Active span is only meaningful when this row has demand in the ADS window.
+    _demand_for_eff = (
+        po_df["ADS_Net_Units"].fillna(0)
+        if demand_basis == "Net"
+        else po_df["ADS_Sold_Units"].fillna(0)
+    )
+    po_df.loc[_demand_for_eff <= 0, "_eff_days_active"] = np.nan
 
     # Sold_Units / Net_Units reflect the full ADS window (period_days).
     po_df["Sold_Units"] = po_df["ADS_Sold_Units"].astype(int)
@@ -877,12 +884,11 @@ def calculate_po_base(
             ).clip(lower=0)
             po_df["Net_Units"] = po_df["ADS_Net_Units"].astype(int)
 
-    # Use true active-day span per SKU. Old min_denominator floor (often 7) forced many SKUs
-    # to show only 7/30 and diluted ADS, which distorted PO suggestions.
+    # Active demand days only — 0 when the SKU had no sales/net in the ADS window.
     po_df["Eff_Days"] = (
         pd.to_numeric(po_df["_eff_days_active"], errors="coerce")
-        .fillna(float(ADS_WINDOW))
-        .clip(lower=1.0, upper=float(ADS_WINDOW))
+        .fillna(0)
+        .clip(lower=0, upper=float(ADS_WINDOW))
     )
     po_df.drop(columns=["_eff_days_active"], inplace=True, errors="ignore")
 
@@ -968,7 +974,12 @@ def calculate_po_base(
                     po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
                     inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
                     scale = float(ADS_WINDOW) / float(coverage_days) if coverage_days else 1.0
-                    use_inv = inv_days.notna() & (inv_days > 0)
+                    _has_demand = (
+                        po_df["Net_Units"].fillna(0) > 0
+                        if demand_basis == "Net"
+                        else po_df["Sold_Units"].fillna(0) > 0
+                    )
+                    use_inv = inv_days.notna() & (inv_days > 0) & _has_demand
                     inv_eff = (inv_days * scale).round()
                     inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
                     po_df["Eff_Days"] = np.where(
@@ -993,7 +1004,11 @@ def calculate_po_base(
         po_df["Eff_Days_Inventory"] = 0
         po_df["Inv_Coverage_Days"] = 0
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
-    po_df["Recent_ADS"] = (ads_demand / po_df["Eff_Days"]).fillna(0)
+    po_df["Recent_ADS"] = np.where(
+        po_df["Eff_Days"] > 0,
+        ads_demand / po_df["Eff_Days"],
+        0,
+    )
 
     # Spreadsheet-style FREQ = "1 MONTH SALE" / 30. Two cases from Req.xlsx:
     # (a) Rolling last 30 calendar days / 30 — can be *below* Recent_ADS when units

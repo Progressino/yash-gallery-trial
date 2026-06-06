@@ -1944,6 +1944,51 @@ def test_po_uses_inventory_history_eff_days_to_lift_ads():
     assert float(short["Recent_ADS"]) > float(plain["Recent_ADS"])
 
 
+def test_eff_days_zero_when_no_sales_despite_inventory_history():
+    """Per-size rows with zero demand must not show active or extrapolated Eff_Days."""
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["ZERO-SALES"] * 25,
+            "Date": pd.date_range("2025-12-08", periods=25, freq="D"),
+            "Qty": [5] * 25,
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "OTHER-SKU",
+                "TxnDate": pd.Timestamp("2025-12-20"),
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        ]
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["ZERO-SALES", "OTHER-SKU"],
+            "Total_Inventory": [10, 5],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Net",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist,
+    )
+    row = po.loc[po["OMS_SKU"] == "ZERO-SALES"].iloc[0]
+    assert int(row["Net_Units"]) == 0
+    assert int(row["Eff_Days_Inventory"]) == 25
+    assert int(row["Eff_Days"]) == 0
+    assert float(row["Recent_ADS"]) == 0.0
+
+
 def test_po_extrapolates_eff_days_when_sheet_covers_less_than_window():
     """Real-world bug: daily-inventory sheet had only 24 of 30 snapshot dates.
 
