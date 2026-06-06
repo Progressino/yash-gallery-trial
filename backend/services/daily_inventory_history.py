@@ -23,7 +23,11 @@ from typing import BinaryIO, Optional
 import numpy as np
 import pandas as pd
 
-from .helpers import clean_sku, normalize_id_token_for_mapping
+from .helpers import (
+    clean_sku,
+    collapse_duplicate_trailing_size_suffix,
+    normalize_id_token_for_mapping,
+)
 from .sku_status_lead import _strip_pl_sku
 
 
@@ -289,7 +293,7 @@ def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> p
         clean = clean_sku(tok or v)
         if not clean:
             clean = str(v).strip().upper()
-        return _strip_pl_sku(clean, mapping)
+        return collapse_duplicate_trailing_size_suffix(_strip_pl_sku(clean, mapping))
 
     unique_raw = tall["_raw_sku"].unique()
     canon_map = {r: _canon(r) for r in unique_raw}

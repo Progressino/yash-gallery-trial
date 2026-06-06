@@ -12,7 +12,11 @@ from typing import BinaryIO, Optional
 
 import pandas as pd
 
-from .helpers import clean_sku, normalize_id_token_for_mapping
+from .helpers import (
+    clean_sku,
+    collapse_duplicate_trailing_size_suffix,
+    normalize_id_token_for_mapping,
+)
 
 # Match Amazon PL infix stripping used in po_engine / inventory.
 _PL_RE = re.compile(r"^(\d+)PL(YK)", re.I)
@@ -172,7 +176,7 @@ def parse_sku_status_lead_dataframe(
         s = clean_sku(tok or raw)
         if not s:
             return ""
-        return _strip_pl_sku(s, _map)
+        return collapse_duplicate_trailing_size_suffix(_strip_pl_sku(s, _map))
 
     oms = df[sku_col].map(_norm_sku)
     mask = oms.str.len() > 0

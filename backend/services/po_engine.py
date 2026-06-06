@@ -991,8 +991,11 @@ def calculate_po_base(
             inv_window_start = inv_window_end - timedelta(days=int(ADS_WINDOW) - 1)
 
             po_skus = set(po_df["OMS_SKU"].astype(str))
+            ih_src = inventory_history_df.copy()
+            if "OMS_SKU" in ih_src.columns:
+                ih_src["OMS_SKU"] = ih_src["OMS_SKU"].astype(str).map(_canonical_oms_key)
             ih = trim_inventory_history_for_po(
-                inventory_history_df,
+                ih_src,
                 inv_window_start,
                 inv_window_end,
                 po_skus=po_skus,
@@ -1977,13 +1980,16 @@ def calculate_po_base(
             if urgent_parents:
                 existing_skus: set = set(po_df["OMS_SKU"].astype(str))
                 parent_to_children: dict = {}
-                for child_sku in sku_mapping:
-                    p = get_parent_sku(child_sku)
-                    parent_to_children.setdefault(p, []).append(child_sku)
+                for _mid, _mapped in sku_mapping.items():
+                    child_oms = canonical_oms_key(_mapped or _mid, sku_mapping)
+                    if not child_oms:
+                        continue
+                    p = get_parent_sku(child_oms)
+                    parent_to_children.setdefault(p, set()).add(child_oms)
 
                 ghost_rows = []
                 for parent in urgent_parents:
-                    for child in parent_to_children.get(parent, []):
+                    for child in sorted(parent_to_children.get(parent, ())):
                         if str(child) not in existing_skus:
                             ghost = {c: 0 for c in po_df.columns}
                             ghost["OMS_SKU"]               = str(child)
@@ -2026,6 +2032,19 @@ def calculate_po_base(
         errors="ignore",
         inplace=True,
     )
+
+    if "OMS_SKU" in po_df.columns:
+        po_df = po_df.copy()
+
+        def _output_oms_key(raw) -> str:
+            if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+                return ""
+            t = clean_sku(str(raw).strip())
+            if not t:
+                t = str(raw).strip().upper()
+            return collapse_duplicate_trailing_size_suffix(t)
+
+        po_df["OMS_SKU"] = po_df["OMS_SKU"].astype(str).map(_output_oms_key)
 
     from .existing_po import dedupe_po_rows_by_sku
 

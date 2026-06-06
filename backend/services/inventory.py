@@ -15,7 +15,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from .helpers import map_to_oms_sku, get_parent_sku, read_csv_safe
+from .helpers import (
+    collapse_duplicate_trailing_size_suffix,
+    map_to_oms_sku,
+    get_parent_sku,
+    read_csv_safe,
+)
 
 # Use bsdtar (libarchive-tools) for RAR extraction — supports RAR5 natively
 try:
@@ -1420,7 +1425,12 @@ def load_inventory_consolidated(
     for i, df in enumerate(inv_dfs):
         if "OMS_SKU" in df.columns:
             df = df.copy()
-            df["OMS_SKU"] = df["OMS_SKU"].str.strip().str.upper()
+            df["OMS_SKU"] = (
+                df["OMS_SKU"]
+                .str.strip()
+                .str.upper()
+                .map(collapse_duplicate_trailing_size_suffix)
+            )
             num_cols = [c for c in df.columns if c != "OMS_SKU"]
             df = df.groupby("OMS_SKU")[num_cols].sum().reset_index()
             inv_dfs[i] = df

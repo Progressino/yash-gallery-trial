@@ -2048,6 +2048,94 @@ def test_oos_size_gets_po_when_sibling_still_selling():
     assert int(xl["PO_Qty"]) > 0
 
 
+def test_inventory_history_xl_xl_key_joins_to_canonical_xl():
+    """Daily history rows keyed as 1361YKBLUE-XL-XL must attach to 1361YKBLUE-XL."""
+    dates = list(pd.date_range("2026-05-01", periods=30, freq="D"))
+    inv_hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "1361YKBLUE-XL-XL", "Date": d, "Qty": 5 if i < 8 else 0}
+            for i, d in enumerate(dates)
+        ]
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1361YKBLUE-XXL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 4,
+                "Units_Effective": 4,
+                "Source": "Amazon",
+            }
+            for d in pd.date_range("2026-05-15", periods=15, freq="D")
+        ]
+    )
+    inv = pd.DataFrame(
+        {"OMS_SKU": ["1361YKBLUE-XL", "1361YKBLUE-XXL"], "Total_Inventory": [0, 55]}
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Net",
+        safety_pct=0.0,
+        inventory_history_df=inv_hist,
+    )
+    xl = po.loc[po["OMS_SKU"] == "1361YKBLUE-XL"].iloc[0]
+    assert int(xl["Eff_Days_Inventory"]) == 8
+    assert int(xl["Eff_Days"]) == 8
+    assert float(xl["ADS"]) > 0
+
+
+def test_urgent_all_sizes_ghost_rows_use_canonical_skus_not_mapping_keys():
+    """Part B must not emit 1361YKBLUE-XL-XL when mapping keys are duplicate-suffix IDs."""
+    import json
+    from pathlib import Path
+
+    from backend.services.po_engine import calculate_po_base
+
+    mapping_path = Path(__file__).resolve().parents[1] / "backend/data/yash_sku_mapping_master.json"
+    sku_mapping = json.loads(mapping_path.read_text())
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1361YKBLUE-XXL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 4,
+                "Units_Effective": 4,
+                "Source": "Amazon",
+            }
+            for d in days
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["1361YKBLUE-XXL"], "Total_Inventory": [55]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Net",
+        safety_pct=0.0,
+        sku_mapping=sku_mapping,
+        urgent_all_sizes_days=45,
+    )
+    yk = po[po["OMS_SKU"].astype(str).str.contains("1361YKBLUE", na=False)]
+    skus = set(yk["OMS_SKU"].astype(str))
+    assert "1361YKBLUE-L-L" not in skus
+    assert "1361YKBLUE-XL-XL" not in skus
+    assert "1361YKBLUE-XXL-XXL" not in skus
+    assert "1361YKBLUE-L" in skus
+    assert "1361YKBLUE-XL" in skus
+    assert "1361YKBLUE-XXL" in skus
+    xxl = yk.loc[yk["OMS_SKU"] == "1361YKBLUE-XXL"].iloc[0]
+    assert int(xxl["Net_Units"]) > 0
+
+
 def test_unbundled_per_size_rows_do_not_inherit_bundled_eff_days():
     """1917YKBLUE-L-XL unbundle must not copy Eff_Days=30 onto L/XL with net sold 0."""
     existing_po = pd.DataFrame(
