@@ -1944,6 +1944,56 @@ def test_po_uses_inventory_history_eff_days_to_lift_ads():
     assert float(short["Recent_ADS"]) > float(plain["Recent_ADS"])
 
 
+def test_oos_size_keeps_inventory_eff_days_after_existing_po_unbundle():
+    """1361YKBLUE-XL with 8/30 in-stock days must keep Eff_Days≈8, not 0 after unbundle."""
+    dates = list(pd.date_range("2026-05-01", periods=30, freq="D"))
+    inv_hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "1361YKBLUE-XL", "Date": d, "Qty": 5 if i < 8 else 0}
+            for i, d in enumerate(dates)
+        ]
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1361YKBLUE-XXL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 4,
+                "Units_Effective": 4,
+                "Source": "Amazon",
+            }
+            for d in pd.date_range("2026-05-15", periods=15, freq="D")
+        ]
+    )
+    inv = pd.DataFrame(
+        {"OMS_SKU": ["1361YKBLUE-XL", "1361YKBLUE-XXL"], "Total_Inventory": [0, 55]}
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1361YKBLUE-XL", "1361YKBLUE-XXL", "1361YKBLUE-L-L"],
+            "PO_Pipeline_Total": [100, 80, 50],
+            "Balance_to_Dispatch": [100, 80, 50],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Net",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        inventory_history_df=inv_hist,
+    )
+    xl = po.loc[po["OMS_SKU"] == "1361YKBLUE-XL"].iloc[0]
+    assert int(xl["Eff_Days_Inventory"]) == 8
+    assert int(xl["Eff_Days"]) == 8
+    assert float(xl["ADS"]) > 0
+    assert int(xl["Gross_PO_Qty"]) > 0
+
+
 def test_oos_size_gets_po_when_sibling_still_selling():
     """1361YKBLUE-XL exhausted: impute ADS from XXL so the size still gets a PO."""
     days_out = pd.date_range("2026-05-05", periods=20, freq="D")

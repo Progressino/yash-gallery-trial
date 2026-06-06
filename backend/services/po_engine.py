@@ -1232,12 +1232,17 @@ def calculate_po_base(
                 po_df, _ep_prepared, _breakdown_cols, canonical_fn=existing_po_merge_key
             )
             # Unbundled per-size rows keep pipeline qty only — not parent/bundled Eff_Days.
+            # Do not wipe inventory-based active days (e.g. 1361YKBLUE-XL with 8/30 in-stock
+            # days) — only clear inherited Eff_Days when there is no demand and no history.
             _no_row_demand = (
                 pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0) <= 0
             ) & (
                 pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0) <= 0
             )
-            po_df.loc[_no_row_demand, "Eff_Days"] = 0
+            _no_inv_hist = (
+                pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0) <= 0
+            )
+            po_df.loc[_no_row_demand & _no_inv_hist, "Eff_Days"] = 0
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
         ).fillna(0).astype(int)
