@@ -507,12 +507,9 @@ def _coerce_df_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col in out.select_dtypes(include="category").columns:
         out[col] = out[col].astype(str)
-    # Fix mixed-type object columns (e.g. PO_Last_Raised_Date with int + str values)
+    # Object columns may mix ints/strings (e.g. PO_Last_Raised_Date) — always stringify.
     for col in out.select_dtypes(include="object").columns:
-        try:
-            out[col].to_numpy(dtype="U")  # fast check — raises if not uniform string
-        except (ValueError, TypeError):
-            out[col] = out[col].fillna("").astype(str)
+        out[col] = out[col].map(lambda x: "" if pd.isna(x) else str(x))
     return out
 
 
