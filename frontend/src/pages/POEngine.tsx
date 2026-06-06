@@ -435,7 +435,7 @@ export default function POEngine() {
           if (pct != null && Number.isFinite(pct)) setPoProgressPct(pct)
         })
         if (cancelled || seq !== poRunSeqRef.current || !poRes) return
-        setResult(poRes)
+        setResult(poRes as POResult)
         if (poRes.ledger_auto_import) {
           setLedgerImportMsg({ type: 'ok', text: poRes.ledger_auto_import })
         }

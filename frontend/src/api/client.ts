@@ -921,8 +921,6 @@ export async function waitForPoCalculate(
               total > 0
                 ? 92 + Math.round((Math.min(allRows.length, total) / total) * 8)
                 : 95
-            const pageNum = Math.floor(offset / pageSize) + 1
-            const pageTotal = total > 0 ? Math.ceil(total / pageSize) : '?'
             onTick?.(
               `Loading PO results… ${Math.min(allRows.length, total).toLocaleString()} / ${total.toLocaleString()} rows`,
               loadPct,
