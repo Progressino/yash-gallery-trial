@@ -2048,6 +2048,54 @@ def test_oos_size_gets_po_when_sibling_still_selling():
     assert int(xl["PO_Qty"]) > 0
 
 
+def test_pipeline_only_oos_size_gets_inventory_eff_days_before_ghost_injection():
+    """XL in existing PO but missing from inventory must still get Eff_Days from history."""
+    dates = list(pd.date_range("2026-05-01", periods=30, freq="D"))
+    inv_hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "1361YKBLUE-XL", "Date": d, "Qty": 5 if i < 8 else 0}
+            for i, d in enumerate(dates)
+        ]
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1361YKBLUE-XXL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 4,
+                "Units_Effective": 4,
+                "Source": "Amazon",
+            }
+            for d in pd.date_range("2026-05-15", periods=15, freq="D")
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["1361YKBLUE-XXL"], "Total_Inventory": [55]})
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1361YKBLUE-XL", "1361YKBLUE-XXL"],
+            "PO_Pipeline_Total": [19, 5],
+            "Balance_to_Dispatch": [19, 5],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Net",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        inventory_history_df=inv_hist,
+    )
+    xl = po.loc[po["OMS_SKU"] == "1361YKBLUE-XL"].iloc[0]
+    assert int(xl["Eff_Days_Inventory"]) == 8
+    assert int(xl["Eff_Days"]) == 8
+    assert float(xl["ADS"]) > 0
+    assert int(xl["Gross_PO_Qty"]) > 0
+
+
 def test_inventory_history_xl_xl_key_joins_to_canonical_xl():
     """Daily history rows keyed as 1361YKBLUE-XL-XL must attach to 1361YKBLUE-XL."""
     dates = list(pd.date_range("2026-05-01", periods=30, freq="D"))

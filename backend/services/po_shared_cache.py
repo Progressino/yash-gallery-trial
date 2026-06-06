@@ -263,7 +263,9 @@ def save_shared_cache(
     try:
         tmp = _parquet_path(key).with_suffix(".parquet.tmp")
         final = _parquet_path(key)
-        po_df.to_parquet(tmp, index=False)
+        from .helpers import _coerce_df_for_parquet
+
+        _coerce_df_for_parquet(po_df).to_parquet(tmp, index=False)
         tmp.replace(final)
         meta = {
             "cache_key": key,

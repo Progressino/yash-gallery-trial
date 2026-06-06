@@ -777,6 +777,30 @@ def calculate_po_base(
     if inv_work["OMS_SKU"].duplicated().any():
         inv_work = inv_work.drop_duplicates(subset=["OMS_SKU"], keep="last")
 
+    # Pipeline-only SKUs (OOS / dropped from inventory upload) must enter po_df before
+    # inventory-history Eff_Days — otherwise they are injected later with Eff_Days=0.
+    if existing_po_df is not None and not existing_po_df.empty:
+        from .existing_po import existing_po_merge_key, prepare_existing_po_for_merge
+
+        _ep_seed = prepare_existing_po_for_merge(existing_po_df, existing_po_merge_key)
+        if not _ep_seed.empty and "PO_Pipeline_Total" in _ep_seed.columns:
+            _have_inv = set(inv_work["OMS_SKU"].astype(str))
+            _ep_active = pd.to_numeric(_ep_seed["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
+            for _ac in ("Pending_Cutting", "Balance_to_Dispatch", "PO_Qty_Ordered"):
+                if _ac in _ep_seed.columns:
+                    _ep_active |= pd.to_numeric(_ep_seed[_ac], errors="coerce").fillna(0) > 0
+            _need = [
+                s
+                for s in _ep_seed.loc[_ep_active, "OMS_SKU"].astype(str).str.strip().unique()
+                if s and s not in _have_inv
+            ]
+            if _need:
+                _pad = pd.DataFrame({"OMS_SKU": _need})
+                for _c in inv_work.columns:
+                    if _c != "OMS_SKU":
+                        _pad[_c] = 0
+                inv_work = pd.concat([inv_work, _pad[inv_work.columns]], ignore_index=True)
+
     _plan = None
     if planning_date:
         try:
@@ -1201,12 +1225,6 @@ def calculate_po_base(
         inv_col = po_df.columns[1]
 
     inv_vals = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
-    # "Running days" for operators: use total sellable stock when present (FBA + warehouse),
-    # while PO qty still uses OMS_Inventory only (inv_vals above).
-    if "Total_Inventory" in po_df.columns:
-        inv_days_left = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0)
-    else:
-        inv_days_left = inv_vals
 
     # Gross/Net PO is finalised after pipeline merge below (sheet-style balance-days formula).
     po_df["Gross_PO_Qty"] = 0
@@ -1255,6 +1273,10 @@ def calculate_po_base(
         po_df["PO_Pipeline_Total"] = 0
 
     # Days of stock remaining = current inventory cover only (no pipeline).
+    if "Total_Inventory" in po_df.columns:
+        inv_days_left = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0)
+    else:
+        inv_days_left = inv_vals
     po_df["Days_Left"] = np.where(
         po_df["ADS"] > 0,
         (inv_days_left / po_df["ADS"]).round(1),
@@ -1841,6 +1863,10 @@ def calculate_po_base(
 
     # Formula-sheet aligned:
     # Projected_Running_Days = current cover before new release.
+    if "Total_Inventory" in po_df.columns:
+        inv_days_left = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0)
+    else:
+        inv_days_left = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
         ((inv_days_left + po_df["PO_Pipeline_Effective"]) / po_df["ADS"]).round(1),
