@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffec
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 import axios from 'axios'
-import { api, getCoverage, startPoCalculate } from '../api/client'
+import { api, getCoverage, getPoCalculateStatus, startPoCalculate, waitForPoCalculate } from '../api/client'
 import { useSession } from '../store/session'
 import { useAuth, mayResetSharedData } from '../store/auth'
 import { usePOStore, type Tab } from '../store/po'
@@ -417,6 +417,48 @@ export default function POEngine() {
     }, 12_000)
     return () => window.clearInterval(id)
   }, [refreshPoCoverage, loading])
+
+  /** Auto-resume if the server is still calculating (e.g. after gateway blip or page refresh). */
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const st = await getPoCalculateStatus()
+        if (cancelled || st.status !== 'running') return
+        const seq = ++poRunSeqRef.current
+        setLoading(true)
+        setPoProgress(st.message || 'Resuming PO calculation…')
+        setPoProgressPct(typeof st.progress === 'number' ? st.progress : 10)
+        const poRes = await waitForPoCalculate((msg, pct) => {
+          if (cancelled || seq !== poRunSeqRef.current) return
+          setPoProgress(msg)
+          if (pct != null && Number.isFinite(pct)) setPoProgressPct(pct)
+        })
+        if (cancelled || seq !== poRunSeqRef.current || !poRes) return
+        setResult(poRes)
+        if (poRes.ledger_auto_import) {
+          setLedgerImportMsg({ type: 'ok', text: poRes.ledger_auto_import })
+        }
+        void loadQuarterlyForRun(seq)
+      } catch (e: unknown) {
+        if (!cancelled) {
+          const msg =
+            e instanceof Error
+              ? e.message
+              : 'PO calculation failed. Wait a minute and try Calculate PO again.'
+          setResult({ ok: false, message: msg })
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+          setPoProgress('')
+          setPoProgressPct(null)
+        }
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- resume once on mount only
+  }, [])
   /** Quarterly pivot loads after PO (or alone on Quarterly tab); was bundled with PO and blocked the UI. */
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [quarterlyProgress, setQuarterlyProgress] = useState<number | null>(null)
