@@ -259,9 +259,11 @@ export default function POEngine() {
   const existingPoLooksAggregated = useSession(s => s.existing_po_looks_aggregated ?? false)
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
 
+  const PO_MERGE_VERSION_KEY = 'po-merge-version-seen'
+
   useEffect(() => {
     api
-      .get<{ git_sha?: string; label?: string; built_at?: string }>('/health')
+      .get<{ git_sha?: string; label?: string; built_at?: string; po_merge_version?: number }>('/health')
       .then(r => {
         const sha = r.data.git_sha || r.data.label
         if (!sha) return
@@ -632,10 +634,7 @@ export default function POEngine() {
     setSelected(new Set())
     let poRes: POResult | null = null
     try {
-      const useSharedCache =
-        !skipSharedCacheOnce &&
-        !existingPoNeedsRecalc &&
-        !(existingPoLoaded && existingPoRows > 0)
+      const useSharedCache = !skipSharedCacheOnce && !existingPoNeedsRecalc
       if (skipSharedCacheOnce) setSkipSharedCacheOnce(false)
       poRes = (await startPoCalculate(
         {
@@ -677,6 +676,55 @@ export default function POEngine() {
     void refreshPoCoverage()
     void loadQuarterlyForRun(seq)
   }
+
+  /** After a PO-engine deploy, auto-load today's shared cache (replaces stale session tables). */
+  useEffect(() => {
+    if (activeTab !== 'po' || loading || existingPoNeedsRecalc) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data: health } = await api.get<{ po_merge_version?: number }>('/health')
+        const ver = health.po_merge_version
+        if (!ver || cancelled) return
+        const seen = Number(sessionStorage.getItem(PO_MERGE_VERSION_KEY) || 0)
+        if (seen >= ver) return
+        sessionStorage.setItem(PO_MERGE_VERSION_KEY, String(ver))
+        const seq = ++poRunSeqRef.current
+        setLoading(true)
+        setPoProgress('PO engine updated — loading shared calculation…')
+        setPoProgressPct(5)
+        const poRes = await startPoCalculate(
+          {
+            ...params,
+            planning_date: planningDate,
+            raise_view_date: ledgerImportDate,
+            raise_ledger_lookback_days: 14,
+            use_shared_cache: true,
+          },
+          (msg, pct) => {
+            if (cancelled || seq !== poRunSeqRef.current) return
+            setPoProgress(msg)
+            if (pct != null && Number.isFinite(pct)) setPoProgressPct(pct)
+          },
+        )
+        if (cancelled || seq !== poRunSeqRef.current) return
+        if (poRes?.ok) {
+          setResult(poRes as POResult)
+          void loadQuarterlyForRun(seq)
+        }
+      } catch {
+        /* shared cache optional — operator can still click Calculate PO */
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+          setPoProgress('')
+          setPoProgressPct(null)
+        }
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh once per po_merge_version bump
+  }, [activeTab, existingPoNeedsRecalc, loading])
 
   const confirmRaiseAndExport = async (rows: Array<PORow & { Final_PO_Qty: number }>) => {
     setRaiseConfirmErr(null)

@@ -1059,7 +1059,7 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     ensure_existing_po_hydrated(sess)
 
     body_dict = body.model_dump()
-    if body.use_shared_cache and not session_has_fresh_existing_po(sess):
+    if body.use_shared_cache and not existing_po_needs_recalc(sess):
         from ..services.po_shared_cache import apply_shared_cache_to_session
 
         cached = apply_shared_cache_to_session(sess, sid, body_dict)

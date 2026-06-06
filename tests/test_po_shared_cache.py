@@ -222,6 +222,68 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
     assert page.get("total") == 1
 
 
+def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, session_for_client):
+    """Existing PO in session must not block shared cache (fingerprint already tracks the sheet)."""
+    import time
+
+    _, sess = session_for_client
+    days = pd.date_range("2025-12-01", periods=10, freq="D")
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["CACHE-SKU"] * len(days),
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * len(days),
+            "Quantity": [1] * len(days),
+            "Units_Effective": [1] * len(days),
+            "Source": ["Meesho"] * len(days),
+        }
+    )
+    sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["CACHE-SKU"], "Total_Inventory": [99]}
+    )
+    sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["CACHE-SKU"],
+            "PO_Pipeline_Total": [12],
+            "Balance_to_Dispatch": [12],
+        }
+    )
+    sess.existing_po_generation = 3
+    sess.existing_po_uploaded_at = "2026-06-06T10:00:00"
+    sess.po_calculate_existing_po_generation = 3
+
+    body = {
+        "planning_date": "2025-12-20",
+        "period_days": 30,
+        "lead_time": 7,
+        "target_days": 60,
+        "use_shared_cache": True,
+    }
+    psc.save_shared_cache(
+        sess,
+        body,
+        pd.DataFrame({"OMS_SKU": ["CACHE-SKU"], "PO_Qty": [9]}),
+        {"ok": True, "sales_through": "2025-12-10", "planning_date": "2025-12-20"},
+    )
+
+    ran = {"n": 0}
+
+    def _should_not_run(*_a, **_kw):
+        ran["n"] += 1
+        return {"ok": True, "total_rows": 0, "columns": []}
+
+    monkeypatch.setattr(
+        "backend.services.po_calculate_run.execute_po_calculate",
+        _should_not_run,
+    )
+
+    r = client.post("/api/po/calculate", json=body)
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("from_shared_cache") is True
+    assert ran["n"] == 0
+
+
 def test_shared_cache_info_endpoint(client, session_for_client):
     _, sess = session_for_client
     body = {"planning_date": "2025-12-21", "period_days": 30}

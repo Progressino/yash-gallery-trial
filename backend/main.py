@@ -1744,12 +1744,17 @@ def health():
     from .concurrency import upload_memory_lock_held
 
     info = get_build_info()
+    try:
+        from .services.po_shared_cache import PO_MERGE_LOGIC_VERSION
+    except Exception:
+        PO_MERGE_LOGIC_VERSION = 0
     return {
         "status": "ok",
         "version": info["version"],
         "git_sha": info["git_sha"],
         "built_at": info["built_at"],
         "label": info["label"],
+        "po_merge_version": PO_MERGE_LOGIC_VERSION,
         "sessions": store.count,
         "warm_cache": bool(_warm_cache),
         "warm_cache_loaded_at": _warm_cache_loaded_at.isoformat() if _warm_cache_loaded_at else None,
