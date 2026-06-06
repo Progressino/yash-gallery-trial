@@ -1944,6 +1944,60 @@ def test_po_uses_inventory_history_eff_days_to_lift_ads():
     assert float(short["Recent_ADS"]) > float(plain["Recent_ADS"])
 
 
+def test_oos_size_gets_po_when_sibling_still_selling():
+    """1361YKBLUE-XL exhausted: impute ADS from XXL so the size still gets a PO."""
+    days_out = pd.date_range("2026-05-05", periods=20, freq="D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1361YKBLUE-XXL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 4,
+                "Units_Effective": 4,
+                "Source": "Amazon",
+            }
+            for d in days_out
+        ]
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1361YKBLUE-XL", "1361YKBLUE-XXL"],
+            "Total_Inventory": [0, 55],
+        }
+    )
+    inv_hist = pd.DataFrame(
+        [
+            {
+                "OMS_SKU": "1361YKBLUE-XL",
+                "Date": d,
+                "Qty": 5 if d < pd.Timestamp("2026-05-10") else 0,
+            }
+            for d in pd.date_range("2026-04-10", periods=30, freq="D")
+        ]
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Net",
+        safety_pct=0.0,
+        inventory_history_df=inv_hist,
+    )
+    xl = po.loc[po["OMS_SKU"] == "1361YKBLUE-XL"].iloc[0]
+    xxl = po.loc[po["OMS_SKU"] == "1361YKBLUE-XXL"].iloc[0]
+    assert int(xl["Net_Units"]) == 0
+    assert int(xxl["Net_Units"]) > 0
+    assert int(xl["Eff_Days_Inventory"]) > 0
+    assert float(xl["Eff_Days"]) > 0
+    assert float(xl["Recent_ADS"]) > 0
+    assert float(xl["ADS"]) > 0
+    assert int(xl["Gross_PO_Qty"]) > 0
+    assert int(xl["PO_Qty"]) > 0
+
+
 def test_unbundled_per_size_rows_do_not_inherit_bundled_eff_days():
     """1917YKBLUE-L-XL unbundle must not copy Eff_Days=30 onto L/XL with net sold 0."""
     existing_po = pd.DataFrame(

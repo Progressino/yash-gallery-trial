@@ -519,6 +519,76 @@ def _style_digit_token(oms_sku: str) -> str:
     return m2.group(1) if m2 else ""
 
 
+def _oos_restock_mask(po_df: pd.DataFrame) -> pd.Series:
+    """
+    Sizes that just went OOS: no ADS-window sales on this key, but inventory history
+    shows recent in-stock days and non-bundled siblings in the same style still sell.
+    """
+    from .existing_po import is_bundled_size_range_sku
+
+    sku = po_df["OMS_SKU"].astype(str)
+    style = sku.map(_fallback_parent_key)
+    is_bund = sku.map(is_bundled_size_range_sku).fillna(False)
+    inv_total = pd.to_numeric(po_df.get("Total_Inventory"), errors="coerce").fillna(0)
+    inv_hist = pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0)
+    net_u = pd.to_numeric(po_df.get("Net_Units"), errors="coerce").fillna(0)
+    sold_u = pd.to_numeric(po_df.get("Sold_Units"), errors="coerce").fillna(0)
+    row_zero = (net_u <= 0) & (sold_u <= 0)
+    tmp = pd.DataFrame({"style": style, "bund": is_bund, "net": net_u}, index=po_df.index)
+    style_nb_net = (
+        tmp.loc[~tmp["bund"] & (tmp["net"] > 0)]
+        .groupby("style")["net"]
+        .sum()
+    )
+    style_sells = style.map(style_nb_net).fillna(0) > 0
+    return (
+        (inv_total <= 0)
+        & (inv_hist > 0)
+        & row_zero
+        & (~is_bund)
+        & style_sells
+    )
+
+
+def _impute_oos_restock_recent_ads(
+    po_df: pd.DataFrame,
+    mask: pd.Series,
+    demand_basis: str,
+) -> pd.Series:
+    """Spread style demand across OOS per-size rows that recently had stock."""
+    style = po_df["OMS_SKU"].astype(str).map(_fallback_parent_key)
+    from .existing_po import is_bundled_size_range_sku
+
+    is_bund = po_df["OMS_SKU"].astype(str).map(is_bundled_size_range_sku).fillna(False)
+    net_u = pd.to_numeric(po_df.get("Net_Units"), errors="coerce").fillna(0)
+    tmp = pd.DataFrame({"style": style, "bund": is_bund, "net": net_u}, index=po_df.index)
+    style_sell_net = (
+        tmp.loc[~tmp["bund"] & (tmp["net"] > 0)]
+        .groupby("style")["net"]
+        .sum()
+    )
+    ship = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0)
+    eff = pd.to_numeric(po_df.get("Eff_Days"), errors="coerce").fillna(0)
+    out = pd.to_numeric(po_df.get("Recent_ADS"), errors="coerce").fillna(0.0).copy()
+    for st, idx in po_df.loc[mask].groupby(style, sort=False).groups.items():
+        sell_total = float(style_sell_net.get(st, 0))
+        if sell_total <= 0:
+            continue
+        oos_idx = pd.Index(idx)
+        ship_w = ship.loc[oos_idx]
+        if float(ship_w.sum()) > 0:
+            weights = ship_w / ship_w.sum()
+        else:
+            weights = pd.Series(1.0 / len(oos_idx), index=oos_idx)
+        imputed_units = sell_total * weights
+        out.loc[oos_idx] = np.where(
+            eff.loc[oos_idx] > 0,
+            imputed_units / eff.loc[oos_idx],
+            0.0,
+        )
+    return out.round(3)
+
+
 def _fallback_parent_key(sku: str) -> str:
     """
     Parent key for sales↔inventory mismatch fallback.
@@ -979,7 +1049,8 @@ def calculate_po_base(
                         if demand_basis == "Net"
                         else po_df["Sold_Units"].fillna(0) > 0
                     )
-                    use_inv = inv_days.notna() & (inv_days > 0) & _has_demand
+                    _oos_restock = _oos_restock_mask(po_df)
+                    use_inv = inv_days.notna() & (inv_days > 0) & (_has_demand | _oos_restock)
                     inv_eff = (inv_days * scale).round()
                     inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
                     po_df["Eff_Days"] = np.where(
@@ -1009,6 +1080,11 @@ def calculate_po_base(
         ads_demand / po_df["Eff_Days"],
         0,
     )
+    _oos_restock = _oos_restock_mask(po_df)
+    if bool(_oos_restock.any()):
+        po_df.loc[_oos_restock, "Recent_ADS"] = _impute_oos_restock_recent_ads(
+            po_df, _oos_restock, demand_basis
+        )
 
     # Spreadsheet-style FREQ = "1 MONTH SALE" / 30. Two cases from Req.xlsx:
     # (a) Rolling last 30 calendar days / 30 — can be *below* Recent_ADS when units
