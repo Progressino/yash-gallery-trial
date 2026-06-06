@@ -213,6 +213,45 @@ def test_existing_po_needs_recalc_tracks_generation():
     assert existing_po_needs_recalc(sess)
 
 
+def test_seed_existing_po_warm_cache_from_disk():
+    import tempfile
+    from backend.services.existing_po import persist_existing_po_to_disk, seed_existing_po_warm_cache_from_disk
+    from backend.session import AppSession
+    import backend.main as main
+
+    full = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-3XL", "1917YKBLUE-4XL"],
+            "PO_Pipeline_Total": [130, 170],
+        }
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        import os
+
+        os.environ["WARM_CACHE_DIR"] = tmp
+        main._warm_cache = {}
+        sess = AppSession()
+        sess.existing_po_df = full
+        sess.existing_po_generation = 4
+        sess.existing_po_filename = "Po 4-Jun-26.xlsx"
+        assert persist_existing_po_to_disk(sess)
+        assert seed_existing_po_warm_cache_from_disk()
+        assert len(main._warm_cache["existing_po_df"]) == 2
+        assert int(main._warm_cache["existing_po_session_meta"]["existing_po_generation"]) == 4
+
+
+def test_session_should_keep_existing_po_rejects_aggregated():
+    from backend.services.existing_po import session_should_keep_existing_po
+    from backend.session import AppSession
+
+    sess = AppSession()
+    sess.existing_po_df = pd.DataFrame(
+        {"OMS_SKU": ["1917YKBLUE-L-XL"], "PO_Pipeline_Total": [120]}
+    )
+    sess.existing_po_generation = 1
+    assert not session_should_keep_existing_po(sess)
+
+
 def test_restore_existing_po_from_disk_replaces_partial_session():
     import json
     import tempfile

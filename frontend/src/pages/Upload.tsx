@@ -915,7 +915,7 @@ export default function Upload() {
           title="📦 Existing PO Sheet"
           subtitle={
             coverage.existing_po_rows && coverage.existing_po_rows > 0
-              ? `${coverage.existing_po_rows.toLocaleString()} SKUs loaded — drop a newer file below to replace`
+              ? `${coverage.existing_po_rows.toLocaleString()} SKUs saved on server — drop a newer file below to replace`
               : 'Open/pending POs (XLSX or CSV)'
           }
           loaded={coverage.existing_po}

@@ -451,6 +451,12 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                 with open(path, "w") as f:
                     json.dump(val, f, default=str)
                 saved.append(key)
+            elif key == _EXISTING_PO_META_WARM_KEY and isinstance(val, dict):
+                path = os.path.join(_DISK_CACHE_DIR, "existing_po_meta.json")
+                with open(path, "w") as f:
+                    json.dump(val, f, default=str)
+                saved.append("existing_po_meta")
+                saved.append(key)
             elif hasattr(val, "to_parquet") and hasattr(val, "empty") and not val.empty:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 val.to_parquet(path, index=False)
@@ -525,6 +531,11 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                 if os.path.exists(path):
                     with open(path) as f:
                         loaded[key] = json.load(f)
+            elif key in ("existing_po_meta", _EXISTING_PO_META_WARM_KEY):
+                path = os.path.join(_DISK_CACHE_DIR, "existing_po_meta.json")
+                if os.path.exists(path):
+                    with open(path) as f:
+                        loaded[_EXISTING_PO_META_WARM_KEY] = json.load(f)
             else:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 if os.path.exists(path):
@@ -735,6 +746,12 @@ def _do_load_warm_cache() -> bool:
                         _warm_cache_loaded_at = datetime.now(IST)
                         _warm_cache_generation += 1
                         _warm_cache_ready.set()
+                        try:
+                            from .services.existing_po import seed_existing_po_warm_cache_from_disk
+
+                            seed_existing_po_warm_cache_from_disk()
+                        except Exception:
+                            log.exception("seed existing_po after fast-path disk load failed")
                         # Light SQLite top-up without loading Phase 1 from scratch
                         try:
                             _merge_recent_sqlite_into_warm_cache(months=4)
@@ -767,6 +784,12 @@ def _do_load_warm_cache() -> bool:
             _warm_cache_loaded_at = datetime.now(IST)
             _warm_cache_generation += 1   # generation 1 = Phase-0 disk data
             _warm_cache_ready.set()       # ← unblocks first page-load immediately
+            try:
+                from .services.existing_po import seed_existing_po_warm_cache_from_disk
+
+                seed_existing_po_warm_cache_from_disk()
+            except Exception:
+                log.exception("seed existing_po after Phase 0 disk load failed")
             _p0_mtr2 = disk_data.get("mtr_df")
             _phase0_mtr_rows = len(_p0_mtr2) if _p0_mtr2 is not None and hasattr(_p0_mtr2, "__len__") else 0
             del _p0_mtr2
@@ -1240,9 +1263,9 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 pass
         if key == "existing_po_df":
             try:
-                from .services.existing_po import session_has_fresh_existing_po
+                from .services.existing_po import session_should_keep_existing_po
 
-                if session_has_fresh_existing_po(sess):
+                if session_should_keep_existing_po(sess, val if hasattr(val, "empty") else None):
                     continue
             except Exception:
                 pass
@@ -1269,6 +1292,12 @@ def _copy_warm_cache_to_session(sess) -> bool:
     # Mark restored to avoid triggering a heavy synchronous SQLite restore on first
     # /data/* request right after login (the main cause of "syncing..." slowness).
     sess.daily_restored = True
+    try:
+        from .services.existing_po import ensure_existing_po_hydrated
+
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        pass
     return True
 
 

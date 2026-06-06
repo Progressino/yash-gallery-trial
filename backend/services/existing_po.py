@@ -476,6 +476,71 @@ def count_per_size_pipeline_skus(ep: pd.DataFrame) -> int:
     return int((~bundled & pipe).sum())
 
 
+def session_should_keep_existing_po(sess, warm_df: Optional[pd.DataFrame] = None) -> bool:
+    """True when the session sheet is complete and should not be replaced by warm-cache copy."""
+    if not session_has_fresh_existing_po(sess):
+        return False
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is None or getattr(ep, "empty", True):
+        return False
+    if existing_po_looks_aggregated_bundled_only(ep):
+        return False
+    if warm_df is None or getattr(warm_df, "empty", True):
+        return True
+    sess_rows = int(len(ep))
+    warm_rows = int(len(warm_df))
+    if warm_rows > sess_rows + 50:
+        return False
+    sess_per = count_per_size_pipeline_skus(ep)
+    warm_per = count_per_size_pipeline_skus(warm_df)
+    if warm_per > sess_per + 200:
+        return False
+    return True
+
+
+def seed_existing_po_warm_cache_from_disk() -> bool:
+    """Mirror on-disk Existing PO into server warm cache (survives restarts / deploys)."""
+    df = _load_existing_po_df_from_disk()
+    if df is None:
+        return False
+    meta = read_existing_po_disk_meta()
+    try:
+        import backend.main as _main
+
+        wc = _main._warm_cache.get("existing_po_df")
+        wc_rows = int(len(wc)) if wc is not None and not getattr(wc, "empty", True) else 0
+        disk_rows = int(len(df))
+        disk_per = count_per_size_pipeline_skus(df)
+        wc_per = count_per_size_pipeline_skus(wc) if wc is not None else 0
+        disk_gen = int((meta or {}).get("existing_po_generation") or 0)
+        wc_meta = _main._warm_cache.get(_main._EXISTING_PO_META_WARM_KEY)
+        wc_gen = int((wc_meta or {}).get("existing_po_generation") or 0) if isinstance(wc_meta, dict) else 0
+        should_seed = (
+            wc_rows == 0
+            or disk_gen > wc_gen
+            or disk_rows > wc_rows + 50
+            or disk_per > wc_per + 200
+            or existing_po_looks_aggregated_bundled_only(wc)
+        )
+        if not should_seed:
+            return False
+        if not _main._warm_cache:
+            _main._warm_cache = {}
+        _main._warm_cache["existing_po_df"] = df.copy()
+        if meta:
+            _main._warm_cache[_main._EXISTING_PO_META_WARM_KEY] = dict(meta)
+        _log.info(
+            "Existing PO seeded into warm cache from disk (%s rows, gen %s→%s)",
+            disk_rows,
+            wc_gen,
+            disk_gen,
+        )
+        return True
+    except Exception:
+        _log.exception("seed_existing_po_warm_cache_from_disk failed")
+        return False
+
+
 def existing_po_looks_aggregated_bundled_only(ep: pd.DataFrame) -> bool:
     """
     True when the sheet has pipeline mostly on bundled SKUs (L-XL) with summed qty,
@@ -498,10 +563,13 @@ def existing_po_looks_aggregated_bundled_only(ep: pd.DataFrame) -> bool:
 
 
 def _apply_existing_po_df_to_session(sess, df: pd.DataFrame, meta: Optional[dict] = None) -> None:
+    old_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
     sess.existing_po_df = df
     if meta:
         apply_existing_po_session_meta(sess, meta)
-    sess.po_calculate_existing_po_generation = -1
+    new_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+    if new_gen > old_gen:
+        sess.po_calculate_existing_po_generation = -1
 
 
 def restore_existing_po_from_warm_cache(sess) -> bool:
@@ -548,9 +616,10 @@ def restore_existing_po_from_disk(sess) -> bool:
 
     newer_gen = disk_gen > sess_gen
     partial_session = sess_rows > 0 and disk_rows > sess_rows + 50
+    same_gen_partial = disk_gen == sess_gen and sess_rows > 0 and disk_rows > sess_rows + 50
     empty_session = sess_rows == 0 and disk_rows > 0
     aggregated_session = sess_rows > 0 and disk_per > sess_per + 200
-    if not (newer_gen or partial_session or empty_session or aggregated_session):
+    if not (newer_gen or partial_session or same_gen_partial or empty_session or aggregated_session):
         return False
 
     _apply_existing_po_df_to_session(sess, df, meta)

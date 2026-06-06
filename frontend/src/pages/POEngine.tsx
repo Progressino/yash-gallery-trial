@@ -554,21 +554,21 @@ export default function POEngine() {
     })
   }, [result, setResult, setEditedQty, setSelected])
 
-  const markPoTableStaleAfterExistingPoChange = useCallback(() => {
-    if (result?.ok && (result.rows?.length ?? 0) > 0) {
+  useEffect(() => {
+    if (!existingPoNeedsRecalc && !existingPoLooksAggregated) return
+    setSkipSharedCacheOnce(true)
+    if (
+      existingPoLooksAggregated &&
+      result?.ok &&
+      (result.rows?.length ?? 0) > 0
+    ) {
       setResult({
         ok: false,
         message:
-          'Existing PO sheet was updated. Click Calculate PO to refresh Pending Cutting, pipeline, and In Production columns.',
+          'Existing PO looks bundled-only. Re-upload the full export on Upload, then Calculate PO.',
       })
     }
-    setSkipSharedCacheOnce(true)
-  }, [result, setResult, setSkipSharedCacheOnce])
-
-  useEffect(() => {
-    if (!existingPoNeedsRecalc && !existingPoLooksAggregated) return
-    markPoTableStaleAfterExistingPoChange()
-  }, [existingPoNeedsRecalc, existingPoLooksAggregated, markPoTableStaleAfterExistingPoChange])
+  }, [existingPoNeedsRecalc, existingPoLooksAggregated, result, setResult, setSkipSharedCacheOnce])
 
   const refreshRaiseLedger = useCallback(
     async (serverMessage?: string) => {
@@ -1308,7 +1308,7 @@ export default function POEngine() {
               ) : null}
               {existingPoNeedsRecalc ? (
                 <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 font-medium">
-                  Existing PO sheet was updated
+                  Existing PO saved
                   {existingPoFilename ? (
                     <>
                       {' '}
@@ -1322,39 +1322,43 @@ export default function POEngine() {
                       )
                     </>
                   ) : null}
-                  . Click <strong>Calculate PO</strong> — the table still shows the previous run until you recalculate.
+                  {existingPoRows > 0 ? (
+                    <span className="font-normal text-amber-800">
+                      {' '}
+                      · {existingPoRows.toLocaleString()} SKUs
+                    </span>
+                  ) : null}
+                  . Click <strong>Calculate PO</strong> to refresh pipeline columns —{' '}
+                  <strong>no re-upload needed</strong> until you load a newer file on Upload.
                 </p>
               ) : existingPoLoaded ? (
-                <p className="text-[11px] text-slate-600">
-                  Existing PO loaded
+                <p className="text-[11px] text-emerald-900 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5 font-medium">
+                  Existing PO saved
                   {existingPoFilename ? (
                     <>
-                      : <strong>{existingPoFilename}</strong>
+                      {' '}
+                      — <strong>{existingPoFilename}</strong>
                     </>
                   ) : null}
                   {existingPoRows > 0 ? (
-                    <span className="text-slate-500">
+                    <span className="font-normal text-emerald-800">
                       {' '}
                       · {existingPoRows.toLocaleString()} SKUs
                     </span>
                   ) : null}
                   {existingPoUploadedAt ? (
-                    <span className="text-slate-400">
+                    <span className="font-normal text-emerald-700">
                       {' '}
                       ({new Date(existingPoUploadedAt).toLocaleString()})
                     </span>
                   ) : null}
+                  . Stored on the server — no re-upload needed until you load a newer file on Upload.
                   {existingPoRows > 0 && existingPoRows < 5000 ? (
-                    <span className="text-amber-800 font-medium">
+                    <span className="text-amber-900 font-medium">
                       {' '}
-                      — sheet looks partial; re-upload the full Existing PO file on Upload, then Calculate PO.
+                      Sheet looks partial; upload the full export if counts look too low.
                     </span>
-                  ) : (
-                    <>
-                      {' — '}
-                      click <strong>Calculate PO</strong> after re-uploading to refresh pipeline columns.
-                    </>
-                  )}
+                  ) : null}
                 </p>
               ) : (
                 <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
