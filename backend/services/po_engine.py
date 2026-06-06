@@ -1155,6 +1155,13 @@ def calculate_po_base(
             po_df = unbundle_inventory_rows_for_existing_po(
                 po_df, _ep_prepared, _breakdown_cols, canonical_fn=existing_po_merge_key
             )
+            # Unbundled per-size rows keep pipeline qty only — not parent/bundled Eff_Days.
+            _no_row_demand = (
+                pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0) <= 0
+            ) & (
+                pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0) <= 0
+            )
+            po_df.loc[_no_row_demand, "Eff_Days"] = 0
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
         ).fillna(0).astype(int)

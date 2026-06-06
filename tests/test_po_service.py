@@ -1944,6 +1944,55 @@ def test_po_uses_inventory_history_eff_days_to_lift_ads():
     assert float(short["Recent_ADS"]) > float(plain["Recent_ADS"])
 
 
+def test_unbundled_per_size_rows_do_not_inherit_bundled_eff_days():
+    """1917YKBLUE-L-XL unbundle must not copy Eff_Days=30 onto L/XL with net sold 0."""
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-L", "1917YKBLUE-XL", "1917YKBLUE-L-XL"],
+            "PO_Pipeline_Total": [120, 100, 4],
+            "Balance_to_Dispatch": [120, 100, 4],
+        }
+    )
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1917YKBLUE-L-XL"] * 20,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["1917YKBLUE-L-XL"], "Total_Inventory": [56]})
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-L-XL"] * 25 + ["1917YKBLUE-L"] * 25,
+            "Date": list(pd.date_range("2026-05-01", periods=25, freq="D")) * 2,
+            "Qty": [5] * 50,
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Net",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        inventory_history_df=inv_hist,
+    )
+    bundled = po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
+    assert int(bundled["Net_Units"]) > 0
+    assert int(bundled["Eff_Days"]) == 30
+    for sku in ("1917YKBLUE-L", "1917YKBLUE-XL"):
+        row = po.loc[po["OMS_SKU"] == sku].iloc[0]
+        assert int(row["Net_Units"]) == 0
+        assert int(row["Eff_Days"]) == 0
+        assert float(row["Recent_ADS"]) == 0.0
+
+
 def test_eff_days_zero_when_no_sales_despite_inventory_history():
     """Per-size rows with zero demand must not show active or extrapolated Eff_Days."""
     inv_hist = pd.DataFrame(

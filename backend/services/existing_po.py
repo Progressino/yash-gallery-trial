@@ -742,6 +742,8 @@ def unbundle_inventory_rows_for_existing_po(
         "Flat30_ADS",
         "Ship_Units_150d",
         "Gross_PO_Qty",
+        # Bundled rows may inherit style-level active days; per-size sheet rows must not.
+        "Eff_Days",
     ]
 
     drop_idx: list = []
