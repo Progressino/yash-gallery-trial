@@ -135,7 +135,7 @@ export default function ItemMaster() {
     id: number; item_code: string; item_name: string; item_type_id: number
     hsn_code: string; season: string; merchant_code: string
     selling_price: string; purchase_price: string; launch_date: string; uom: string
-    procurement_type: string
+    procurement_type: string; routing_step_ids: number[]
   }>(null)
   const [editItemErr,  setEditItemErr]  = useState('')
 
@@ -225,6 +225,54 @@ export default function ItemMaster() {
         : [...p.routing_step_ids, stepId],
     }))
   }
+  async function openEditItem(item: Item) {
+    try {
+      const { data } = await api.get(`/items/${item.id}`)
+      const routingIds = [...(data.routing || [])]
+        .sort((a: { sort_order: number }, b: { sort_order: number }) => a.sort_order - b.sort_order)
+        .map((r: { id: number }) => r.id)
+      setEditItem({
+        id: item.id,
+        item_code: item.item_code,
+        item_name: item.item_name,
+        item_type_id: item.item_type_id,
+        hsn_code: item.hsn_code,
+        season: item.season,
+        merchant_code: item.merchant_code,
+        selling_price: String(item.selling_price),
+        purchase_price: String(item.purchase_price),
+        launch_date: item.launch_date,
+        uom: item.uom || 'PCS',
+        procurement_type: item.procurement_type ?? '',
+        routing_step_ids: routingIds,
+      })
+      setShowEditItem(true)
+      setEditItemErr('')
+    } catch {
+      setEditItemErr('Could not load item details.')
+    }
+  }
+
+  function toggleEditRoutingStep(stepId: number) {
+    setEditItem(p => p ? {
+      ...p,
+      routing_step_ids: p.routing_step_ids.includes(stepId)
+        ? p.routing_step_ids.filter(x => x !== stepId)
+        : [...p.routing_step_ids, stepId],
+    } : p)
+  }
+
+  function moveEditRoutingStep(idx: number, dir: -1 | 1) {
+    setEditItem(p => {
+      if (!p) return p
+      const arr = [...p.routing_step_ids]
+      const j = idx + dir
+      if (j < 0 || j >= arr.length) return p
+      ;[arr[idx], arr[j]] = [arr[j], arr[idx]]
+      return { ...p, routing_step_ids: arr }
+    })
+  }
+
   function moveRoutingStep(idx: number, dir: -1 | 1) {
     setNewItem(p => {
       const arr = [...p.routing_step_ids]
@@ -515,8 +563,10 @@ const totalCost = useMemo(() =>
     const fd = new FormData(); fd.append('file', importFile)
     try {
       const { data } = await api.post('/items/import/confirm', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-      setImportMsg(`✓ Created ${data.created} items. Skipped ${data.skipped} duplicates.${data.errors.length ? ' Errors: ' + data.errors.slice(0, 3).join('; ') : ''}`)
+      const routingNote = data.routing_set ? ` Routing set on ${data.routing_set} items.` : ''
+      setImportMsg(`✓ Created ${data.created} items. Skipped ${data.skipped} duplicates.${routingNote}${data.errors.length ? ' Errors: ' + data.errors.slice(0, 3).join('; ') : ''}`)
       qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['item-meta'] })
       setImportPreview(null); setImportFile(null)
     } catch (e: any) {
       setImportMsg('✗ ' + (e?.response?.data?.detail ?? 'Import failed.'))
@@ -796,7 +846,7 @@ const totalCost = useMemo(() =>
                               <div className="flex items-center justify-center gap-1">
                                  <button onClick={e=>{e.stopPropagation();setStockItem({code:item.item_code,name:item.item_name})}} className="text-purple-500 hover:text-purple-700 text-xs px-2 py-1 rounded hover:bg-purple-50">📊 Stock</button>
                                 <button
-                                  onClick={e => { e.stopPropagation(); setEditItem({ id: item.id, item_code: item.item_code, item_name: item.item_name, item_type_id: item.item_type_id, hsn_code: item.hsn_code, season: item.season, merchant_code: item.merchant_code, selling_price: String(item.selling_price), purchase_price: String(item.purchase_price), launch_date: item.launch_date, uom: item.uom || 'PCS', procurement_type: item.procurement_type ?? '' }); setShowEditItem(true); setEditItemErr('') }}
+                                  onClick={e => { e.stopPropagation(); openEditItem(item) }}
                                   className="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 rounded hover:bg-blue-50 transition-colors">
                                   Edit
                                 </button>
@@ -1148,6 +1198,44 @@ const totalCost = useMemo(() =>
                         </select>
                       </div>
                     </div>
+
+                    <div className="space-y-2">
+                      <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Production Routing (in order)</label>
+                      <div className="flex flex-wrap gap-1">
+                        {routingSteps
+                          .filter(r => !editItem.routing_step_ids.includes(r.id))
+                          .map(r => (
+                            <button key={r.id} type="button" onClick={() => toggleEditRoutingStep(r.id)}
+                              className="px-2 py-0.5 rounded border text-xs font-medium bg-white text-gray-600 border-gray-200 hover:border-[#002B5B] hover:text-[#002B5B] transition-colors">
+                              + {r.name}
+                            </button>
+                          ))}
+                      </div>
+                      {editItem.routing_step_ids.length > 0 ? (
+                        <div className="space-y-1 mt-1">
+                          {editItem.routing_step_ids.map((stepId, idx) => {
+                            const step = routingSteps.find(r => r.id === stepId)
+                            return step ? (
+                              <div key={stepId} className="flex items-center gap-2 bg-[#002B5B]/5 border border-[#002B5B]/20 rounded-lg px-3 py-1.5">
+                                <span className="text-xs font-bold text-[#002B5B] w-4">{idx + 1}.</span>
+                                <span className="text-xs font-medium text-gray-800 flex-1">{step.name}</span>
+                                <div className="flex gap-1">
+                                  <button type="button" onClick={() => moveEditRoutingStep(idx, -1)} disabled={idx === 0}
+                                    className="text-gray-400 hover:text-gray-600 disabled:opacity-30 text-xs px-1">↑</button>
+                                  <button type="button" onClick={() => moveEditRoutingStep(idx, 1)} disabled={idx === editItem.routing_step_ids.length - 1}
+                                    className="text-gray-400 hover:text-gray-600 disabled:opacity-30 text-xs px-1">↓</button>
+                                  <button type="button" onClick={() => toggleEditRoutingStep(stepId)}
+                                    className="text-red-400 hover:text-red-600 text-xs px-1 ml-1">✕</button>
+                                </div>
+                              </div>
+                            ) : null
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-400">No routing assigned — add processes above.</p>
+                      )}
+                    </div>
+
                     {editItemErr && <p className="text-red-500 text-sm">{editItemErr}</p>}
                     <button
                       onClick={() => updateItemMut.mutate({
@@ -1163,6 +1251,7 @@ const totalCost = useMemo(() =>
                           launch_date:    editItem.launch_date,
                           uom:            editItem.uom,
                           procurement_type: editItem.procurement_type || '',
+                          routing_step_ids: editItem.routing_step_ids,
                         }
                       })}
                       disabled={updateItemMut.isPending}
@@ -1814,13 +1903,14 @@ const totalCost = useMemo(() =>
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
                 <p className="text-xs font-semibold text-blue-800 mb-2">Expected columns (Excel / CSV)</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {['item_code *', 'item_name *', 'item_type', 'hsn_code', 'season', 'merchant_code', 'selling_price', 'purchase_price', 'sizes', 'launch_date'].map(c => (
+                  {['item_code *', 'item_name *', 'item_type', 'hsn_code', 'season', 'merchant_code', 'selling_price', 'purchase_price', 'sizes', 'launch_date', 'routing'].map(c => (
                     <span key={c} className={`px-2 py-0.5 rounded text-xs font-mono ${c.includes('*') ? 'bg-blue-600 text-white' : 'bg-white border border-blue-200 text-blue-700'}`}>{c}</span>
                   ))}
                 </div>
                 <p className="text-xs text-blue-600 mt-2">
                   <strong>item_type</strong> values: FG, SFG, RM, ACC, PKG, FUEL, SVC &nbsp;·&nbsp;
-                  <strong>sizes</strong>: comma-separated e.g. "S,M,L,XL"
+                  <strong>sizes</strong>: comma-separated e.g. "S,M,L,XL" &nbsp;·&nbsp;
+                  <strong>routing</strong>: comma-separated process names e.g. "Cutting,Printing,Stitching,Finishing,Packing"
                 </p>
               </div>
 
@@ -1862,7 +1952,7 @@ const totalCost = useMemo(() =>
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="bg-gray-50 border-b border-gray-200">
-                          {['item_code', 'item_name', 'item_type', 'hsn_code', 'season', 'sizes', 'selling_price', 'purchase_price'].map(h => (
+                          {['item_code', 'item_name', 'item_type', 'routing_steps', 'hsn_code', 'season', 'sizes', 'selling_price', 'purchase_price'].map(h => (
                             <th key={h} className="px-3 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                           ))}
                         </tr>
@@ -1873,6 +1963,7 @@ const totalCost = useMemo(() =>
                             <td className="px-3 py-2 font-mono font-medium text-[#002B5B]">{row.item_code}</td>
                             <td className="px-3 py-2 text-gray-700">{row.item_name}</td>
                             <td className="px-3 py-2 text-gray-500">{row.item_type}</td>
+                            <td className="px-3 py-2 text-purple-700">{(row.routing_steps ?? []).join(' → ') || '—'}</td>
                             <td className="px-3 py-2 text-gray-500">{row.hsn_code || '—'}</td>
                             <td className="px-3 py-2 text-gray-500">{row.season || '—'}</td>
                             <td className="px-3 py-2 text-blue-600">{(row.sizes ?? []).join(', ') || '—'}</td>

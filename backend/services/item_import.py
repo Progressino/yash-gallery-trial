@@ -3,7 +3,7 @@ Excel / CSV bulk import parser for the Item Master module.
 
 Expected columns (fuzzy-matched, case-insensitive):
   item_code, item_name, item_type, hsn_code, season,
-  merchant_code, selling_price, purchase_price, sizes, launch_date
+  merchant_code, selling_price, purchase_price, sizes, launch_date, routing
 
 Returns a list of dicts ready to pass to item_db.bulk_create_items().
 """
@@ -88,6 +88,8 @@ def parse_item_import(file_bytes: bytes, filename: str) -> list[dict]:
                   _find_col_fuzzy(cols, ["sizes", "size range"])
     launch_col  = _find_col(cols, ["launch_date", "launch date", "launch"]) or \
                   _find_col_fuzzy(cols, ["launch"])
+    routing_col = _find_col(cols, ["routing", "process routing", "production routing", "processes", "routing_steps"]) or \
+                  _find_col_fuzzy(cols, ["routing", "process routing", "production routing"])
 
     def _val(row, col: Optional[str], default: str = "") -> str:
         if col is None:
@@ -104,6 +106,12 @@ def parse_item_import(file_bytes: bytes, filename: str) -> list[dict]:
 
         sizes_raw = _val(row, sizes_col)
         sizes = [s.strip() for s in sizes_raw.split(",") if s.strip()] if sizes_raw else []
+
+        routing_raw = _val(row, routing_col)
+        routing_steps: list[str] = []
+        if routing_raw:
+            sep = ">" if ">" in routing_raw else "|" if "|" in routing_raw else ","
+            routing_steps = [s.strip() for s in routing_raw.split(sep) if s.strip()]
 
         try:
             sp = float(_val(row, sell_col) or 0)
@@ -125,6 +133,7 @@ def parse_item_import(file_bytes: bytes, filename: str) -> list[dict]:
             "purchase_price": pp,
             "sizes":          sizes,
             "launch_date":    _val(row, launch_col),
+            "routing_steps":  routing_steps,
         })
 
     if not results:

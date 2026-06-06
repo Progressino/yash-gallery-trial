@@ -23,6 +23,15 @@ from ..db.hrm_db import (
     get_appraisal,
     get_performance,
     employee_department_id,
+    list_one_time_tasks,
+    create_one_time_task,
+    update_one_time_task,
+    cancel_one_time_task,
+    get_one_time_task_owner,
+    start_one_time_task,
+    complete_one_time_task,
+    approve_one_time_task,
+    reject_one_time_task,
 )
 from ..db.users_db import get_user_auth_profile
 from ..services.rbac import (
@@ -121,6 +130,31 @@ class IssueIn(BaseModel):
 
 class IssueResolveIn(BaseModel):
     resolution: str
+
+
+class OneTimeTaskIn(BaseModel):
+    employee_id: int
+    department_id: Optional[int] = None
+    title: str
+    description: Optional[str] = ""
+    due_date: Optional[str] = ""
+    assigned_by: Optional[str] = ""
+
+
+class OneTimeTaskUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    employee_id: Optional[int] = None
+
+
+class OneTimeTaskNotesIn(BaseModel):
+    notes: Optional[str] = ""
+
+
+class OneTimeTaskApprovalIn(BaseModel):
+    approved_by: Optional[str] = ""
+    notes: Optional[str] = ""
 
 
 @router.get("/scope")
@@ -368,3 +402,112 @@ def performance(
     if emp_f is not None and emp_f > 0:
         rows = [r for r in rows if int(r.get("employee_id") or 0) == int(emp_f)]
     return rows
+
+
+@router.get("/one-time-tasks")
+def get_one_time_tasks(
+    request: Request,
+    employee_id: Optional[int] = None,
+    department_id: Optional[int] = None,
+    status: Optional[str] = None,
+):
+    scope = _scope_from_request(request)
+    dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
+    if emp_f == -1 or dept_f == -1:
+        return []
+    return list_one_time_tasks(emp_f, dept_f, status=status)
+
+
+@router.post("/one-time-tasks")
+def post_one_time_task(body: OneTimeTaskIn, request: Request):
+    scope = _scope_from_request(request)
+    assert_employee_in_scope(scope, body.employee_id)
+    if scope.is_employee:
+        raise HTTPException(403, "Employees cannot assign one-time tasks")
+    tid = create_one_time_task(body.model_dump())
+    return {"ok": True, "id": tid}
+
+
+@router.patch("/one-time-tasks/{task_id}")
+def patch_one_time_task(task_id: int, body: OneTimeTaskUpdate, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee:
+        raise HTTPException(403, "Employees cannot edit task assignments")
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "employee_id" in data:
+        assert_employee_in_scope(scope, int(data["employee_id"]))
+    update_one_time_task(task_id, data)
+    return {"ok": True}
+
+
+@router.delete("/one-time-tasks/{task_id}")
+def del_one_time_task(task_id: int, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee:
+        raise HTTPException(403, "Employees cannot cancel assigned tasks")
+    cancel_one_time_task(task_id)
+    return {"ok": True}
+
+
+@router.post("/one-time-tasks/{task_id}/start")
+def post_start_one_time_task(task_id: int, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee and scope.employee_id != owner:
+        raise HTTPException(403, "You can only start your own tasks")
+    if not start_one_time_task(task_id):
+        raise HTTPException(400, "Task cannot be started (must be Pending or Rejected)")
+    return {"ok": True}
+
+
+@router.post("/one-time-tasks/{task_id}/complete")
+def post_complete_one_time_task(task_id: int, body: OneTimeTaskNotesIn, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee and scope.employee_id != owner:
+        raise HTTPException(403, "You can only complete your own tasks")
+    if not complete_one_time_task(task_id, body.notes or ""):
+        raise HTTPException(400, "Task must be In Progress to mark complete")
+    return {"ok": True}
+
+
+@router.post("/one-time-tasks/{task_id}/approve")
+def post_approve_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee:
+        raise HTTPException(403, "HOD approval required")
+    if not approve_one_time_task(task_id, body.approved_by or "", body.notes or ""):
+        raise HTTPException(400, "Task must be Done to approve")
+    return {"ok": True}
+
+
+@router.post("/one-time-tasks/{task_id}/reject")
+def post_reject_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee:
+        raise HTTPException(403, "HOD approval required")
+    if not reject_one_time_task(task_id, body.approved_by or "", body.notes or ""):
+        raise HTTPException(400, "Task must be Done to reject")
+    return {"ok": True}

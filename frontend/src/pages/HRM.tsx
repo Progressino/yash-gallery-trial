@@ -3,9 +3,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useAuth } from '../store/auth'
 
-type Tab = 'dashboard' | 'employees' | 'responsibilities' | 'hod' | 'issues' | 'appraisal' | 'performance'
+type Tab = 'dashboard' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance'
 
-const FREQUENCIES = ['Daily', 'Weekly', 'Monthly', 'One-time']
+const FREQUENCIES = ['Daily', 'Weekly', 'Monthly']
+const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected'] as const
+type ItemType = 'responsibility' | 'task'
 const CATEGORIES = ['General', 'Quality', 'Production', 'Accounts', 'Purchase', 'Sales', 'Store', 'HR', 'Other']
 const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviour', 'Task Failure', 'Dependency Missed']
 const SEVERITIES = ['Minor', 'Moderate', 'Major']
@@ -38,6 +40,30 @@ const statusBg = (s: string) => {
   return 'bg-gray-200 text-gray-500'
 }
 
+const oneTimeStatusStyle = (s: string) => {
+  if (s === 'Pending') return 'bg-gray-100 text-gray-700'
+  if (s === 'In Progress') return 'bg-blue-100 text-blue-700'
+  if (s === 'Done') return 'bg-amber-100 text-amber-800'
+  if (s === 'Approved') return 'bg-green-100 text-green-700'
+  if (s === 'Rejected') return 'bg-red-100 text-red-700'
+  return 'bg-gray-100 text-gray-600'
+}
+
+const fmtDuration = (mins: number) => {
+  if (!mins || mins <= 0) return '—'
+  if (mins < 60) return `${mins}m`
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return m ? `${h}h ${m}m` : `${h}h`
+}
+
+const fmtDateTime = (iso: string) => {
+  if (!iso) return '—'
+  const d = new Date(iso.replace(' ', 'T'))
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
 export default function HRM() {
   const qc = useQueryClient()
   const authUser = useAuth(s => s.user)
@@ -48,6 +74,8 @@ export default function HRM() {
   const scope = scopeApi || authUser?.hrm_scope
   const canManageOrg = scope?.can_manage_org ?? (authUser?.role === 'Super Admin' || authUser?.role === 'Admin' || authUser?.role === 'Sir')
   const scopeLevel = scope?.level || 'all'
+  const isEmployeeScope = scopeLevel === 'self'
+  const canAssignTasks = !isEmployeeScope
 
   const [tab, setTab] = useState<Tab>('dashboard')
   const [selDept, setSelDept] = useState<number | ''>('')
@@ -62,7 +90,14 @@ export default function HRM() {
   const [showDeptForm, setShowDeptForm] = useState(false)
   const [showEmpForm, setShowEmpForm] = useState(false)
   const [showRespForm, setShowRespForm] = useState(false)
+  const [showTaskForm, setShowTaskForm] = useState(false)
   const [showIssueForm, setShowIssueForm] = useState(false)
+  const [taskStatusFilter, setTaskStatusFilter] = useState('')
+  const [completeModal, setCompleteModal] = useState<{ id: number; title: string } | null>(null)
+  const [completeNotes, setCompleteNotes] = useState('')
+  const [approvalModal, setApprovalModal] = useState<{ id: number; title: string; action: 'approve' | 'reject' } | null>(null)
+  const [approvalNotes, setApprovalNotes] = useState('')
+  const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
   const [editDept, setEditDept] = useState<any>(null)
   const [editEmp, setEditEmp] = useState<any>(null)
 
@@ -72,11 +107,12 @@ export default function HRM() {
 
   const [deptForm, setDeptForm] = useState({ name: '', description: '', hod_name: '' })
   const [empForm, setEmpForm] = useState({ name: '', department_id: '' as any, designation: '', phone: '', email: '', join_date: '' })
-  const [respForm, setRespForm] = useState({ employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '' })
+  const [respForm, setRespForm] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
+  const [taskForm, setTaskForm] = useState({ employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '' })
   const [issueForm, setIssueForm] = useState({ employee_id: '' as any, issue_type: 'General', severity: 'Minor', title: '', description: '', recorded_by: '', caused_by_employee_id: '' as any })
 
   // Quick resp + voice
-  const [quickResp, setQuickResp] = useState({ employee_id: '' as any, department_id: '' as any, title: '', frequency: 'Daily', category: 'General', added_by: '' })
+  const [quickResp, setQuickResp] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, department_id: '' as any, title: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
   const [showQuickResp, setShowQuickResp] = useState(false)
   const [voiceText, setVoiceText] = useState('')
   const [isListening, setIsListening] = useState(false)
@@ -97,7 +133,20 @@ export default function HRM() {
     let frequency = 'Daily'
     if (lowerText.includes('weekly')) frequency = 'Weekly'
     else if (lowerText.includes('monthly')) frequency = 'Monthly'
-    else if (lowerText.includes('one time') || lowerText.includes('one-time')) frequency = 'One-time'
+    const taskHints = ['by friday', 'by monday', 'by tuesday', 'by wednesday', 'by thursday', 'by saturday', 'by sunday', 'one time', 'one-time', 'audit', 'complete the', 'finish the', 'before ']
+    let itemType: ItemType = taskHints.some(h => lowerText.includes(h)) ? 'task' : 'responsibility'
+    let dueDate = ''
+    if (itemType === 'task') {
+      const dayMatch = lowerText.match(/by\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i)
+      if (dayMatch) {
+        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+        const target = days.indexOf(dayMatch[1].toLowerCase())
+        const d = new Date()
+        const diff = (target - d.getDay() + 7) % 7 || 7
+        d.setDate(d.getDate() + diff)
+        dueDate = d.toISOString().split('T')[0]
+      }
+    }
     let title = text
     if (matchedEmp) {
       matchedEmp.name.split(' ').forEach((part: string) => {
@@ -106,9 +155,9 @@ export default function HRM() {
     }
     title = title.replace(/\b(from now on|daily|weekly|monthly|will|shall|must|the|and|or)\b/gi, '').replace(/\s+/g, ' ').trim()
     if (!title) title = text
-    const parsed = { employee_id: matchedEmp?.id || null, employee_name: matchedEmp?.name || '', department_id: matchedEmp?.department_id || null, title, frequency, category: 'General' }
+    const parsed = { item_type: itemType, employee_id: matchedEmp?.id || null, employee_name: matchedEmp?.name || '', department_id: matchedEmp?.department_id || null, title, frequency, category: 'General', due_date: dueDate }
     setAiParsed(parsed)
-    setQuickResp({ employee_id: parsed.employee_id || '', department_id: parsed.department_id || '', title: parsed.title, frequency: parsed.frequency, category: 'General', added_by: '' })
+    setQuickResp({ item_type: itemType, employee_id: parsed.employee_id || '', department_id: parsed.department_id || '', title: parsed.title, frequency: parsed.frequency, category: 'General', added_by: '', due_date: dueDate })
     setShowQuickResp(true)
     setAiParsing(false)
   }
@@ -168,6 +217,29 @@ export default function HRM() {
     queryFn: () => api.get(`/hrm/performance?from_date=${fromDate}&to_date=${toDate}${selDept ? `&department_id=${selDept}` : ''}`).then(r => r.data),
     enabled: tab === 'performance',
   })
+  const myTaskEmpId = isEmployeeScope ? scope?.employee_id : null
+  const { data: myTasks = [] } = useQuery({
+    queryKey: ['hrm-my-tasks', myTaskEmpId],
+    queryFn: () => api.get(`/hrm/one-time-tasks?employee_id=${myTaskEmpId}`).then(r => r.data),
+    enabled: tab === 'dashboard' && !!myTaskEmpId,
+  })
+  const { data: oneTimeTasks = [] } = useQuery({
+    queryKey: ['hrm-one-time-tasks', selDept, selEmp, taskStatusFilter],
+    queryFn: () => {
+      const params = new URLSearchParams()
+      if (selDept) params.set('department_id', String(selDept))
+      if (selEmp) params.set('employee_id', String(selEmp))
+      if (taskStatusFilter) params.set('status', taskStatusFilter)
+      const q = params.toString()
+      return api.get(`/hrm/one-time-tasks${q ? `?${q}` : ''}`).then(r => r.data)
+    },
+    enabled: tab === 'tasks' && !isEmployeeScope,
+  })
+  const { data: hodPendingTasks = [] } = useQuery({
+    queryKey: ['hrm-hod-pending-tasks', hodDept],
+    queryFn: () => api.get(`/hrm/one-time-tasks?department_id=${hodDept}&status=Done`).then(r => r.data),
+    enabled: tab === 'hod' && !!hodDept,
+  })
 
   // ── Mutations ─────────────────────────────────────────────────────────────────
   const createDeptMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/departments', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-depts'] }); setShowDeptForm(false); setDeptForm({ name: '', description: '', hod_name: '' }) } })
@@ -182,6 +254,78 @@ export default function HRM() {
   })
   const createIssueMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/issues', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-issues'] }); setShowIssueForm(false) } })
   const resolveIssueMut = useMutation({ mutationFn: ({ id, res }: { id: number; res: string }) => api.patch(`/hrm/issues/${id}/resolve`, { resolution: res }), onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-issues'] }) })
+  const invalidateTaskMetrics = () => {
+    qc.invalidateQueries({ queryKey: ['hrm-one-time-tasks'] })
+    qc.invalidateQueries({ queryKey: ['hrm-my-tasks'] })
+    qc.invalidateQueries({ queryKey: ['hrm-hod-pending-tasks'] })
+    qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
+    qc.invalidateQueries({ queryKey: ['hrm-perf'] })
+  }
+  const createOneTimeTaskMut = useMutation({
+    mutationFn: (b: object) => api.post('/hrm/one-time-tasks', b),
+    onSuccess: () => {
+      invalidateTaskMetrics()
+      setShowTaskForm(false)
+      setShowQuickResp(false)
+      setShowRespForm(false)
+      setAiParsed(null)
+      setVoiceText('')
+      setTaskForm({ employee_id: '', title: '', description: '', due_date: '', assigned_by: '' })
+    },
+  })
+  const startOneTimeTaskMut = useMutation({
+    mutationFn: (id: number) => api.post(`/hrm/one-time-tasks/${id}/start`),
+    onSuccess: invalidateTaskMetrics,
+  })
+  const completeOneTimeTaskMut = useMutation({
+    mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/complete`, { notes }),
+    onSuccess: () => {
+      invalidateTaskMetrics()
+      setCompleteModal(null)
+      setCompleteNotes('')
+    },
+  })
+  const approveOneTimeTaskMut = useMutation({
+    mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/approve`, { notes }),
+    onSuccess: () => {
+      invalidateTaskMetrics()
+      setApprovalModal(null)
+      setApprovalNotes('')
+    },
+  })
+  const rejectOneTimeTaskMut = useMutation({
+    mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/reject`, { notes }),
+    onSuccess: () => {
+      invalidateTaskMetrics()
+      setApprovalModal(null)
+      setApprovalNotes('')
+    },
+  })
+  const cancelOneTimeTaskMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/hrm/one-time-tasks/${id}`),
+    onSuccess: invalidateTaskMetrics,
+  })
+  const submitAssign = (form: typeof quickResp) => {
+    if (!form.employee_id || !form.title) return
+    if (form.item_type === 'task') {
+      createOneTimeTaskMut.mutate({
+        employee_id: +form.employee_id,
+        title: form.title,
+        description: '',
+        due_date: form.due_date || '',
+        assigned_by: form.added_by || '',
+      })
+    } else {
+      createRespMut.mutate({
+        employee_id: +form.employee_id,
+        department_id: form.department_id ? +form.department_id : null,
+        title: form.title,
+        frequency: form.frequency,
+        category: form.category,
+        added_by: form.added_by || '',
+      })
+    }
+  }
 
   const deptName = (id: any) => (depts as any[]).find(d => d.id === id)?.name || '—'
 
@@ -189,6 +333,7 @@ export default function HRM() {
     ['dashboard', '📊 Dashboard'],
     ['employees', '👥 Employees'],
     ['responsibilities', '📋 Responsibilities'],
+    ['tasks', '✅ Tasks'],
     ['hod', '🏢 HOD View'],
     ['issues', '⚠️ Issues'],
     ['appraisal', '📁 Appraisal'],
@@ -211,7 +356,7 @@ export default function HRM() {
 
   const scopeHint =
     scopeLevel === 'self'
-      ? 'You see only your own tasks and performance.'
+      ? 'You see only your own responsibilities, one-time tasks, and appraisal.'
       : scopeLevel === 'department'
         ? 'You see your department team only.'
         : null
@@ -252,12 +397,53 @@ export default function HRM() {
             ))}
           </div>
 
+          {/* My Tasks — employee dashboard */}
+          {isEmployeeScope && (
+            <div className="bg-white rounded-xl border overflow-hidden">
+              <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between items-center">
+                <h3 className="font-semibold">✅ My Tasks</h3>
+                <span className="text-xs text-blue-200">Start → Done → HOD approval</span>
+              </div>
+              {(myTasks as any[]).filter((t: any) => t.status !== 'Approved').length === 0 ? (
+                <p className="text-center text-gray-400 py-8 text-sm">No active tasks assigned.</p>
+              ) : (
+                <div className="divide-y">
+                  {(myTasks as any[]).filter((t: any) => t.status !== 'Approved').map((t: any) => (
+                    <div key={t.id} className="px-4 py-3 flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-gray-800">{t.title}</p>
+                        {t.description && <p className="text-xs text-gray-400">{t.description}</p>}
+                        <div className="flex flex-wrap gap-2 mt-1 text-xs text-gray-500">
+                          <span>Due: {t.due_date || '—'}</span>
+                          <span>Time: {fmtDuration(t.duration_minutes)}</span>
+                          {t.started_at && <span>Started {fmtDateTime(t.started_at)}</span>}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
+                        {(t.status === 'Pending' || t.status === 'Rejected') && (
+                          <button onClick={() => startOneTimeTaskMut.mutate(t.id)} className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg">Start</button>
+                        )}
+                        {t.status === 'In Progress' && (
+                          <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
+                            className="text-xs px-3 py-1.5 bg-amber-500 text-white rounded-lg">Done</button>
+                        )}
+                        {t.status === 'Done' && <span className="text-xs text-amber-700">Awaiting HOD approval</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Voice Add */}
+          {canAssignTasks && (
           <div className="bg-gradient-to-r from-[#002B5B] to-blue-700 rounded-xl p-4 text-white">
             <div className="flex items-center justify-between mb-3">
               <div>
-                <h3 className="font-bold">🎙️ Add responsibility by voice</h3>
-                <p className="text-blue-200 text-xs mt-0.5">Example: &quot;Vikash will enter delivery dates on bills daily&quot;</p>
+                <h3 className="font-bold">🎙️ Assign by voice</h3>
+                <p className="text-blue-200 text-xs mt-0.5">Responsibility: &quot;Vikash will enter delivery dates daily&quot; · Task: &quot;Complete warehouse audit by Friday&quot;</p>
               </div>
               <button onClick={startListening} disabled={isListening || aiParsing}
                 className={`px-4 py-2 rounded-xl font-bold text-sm ${isListening ? 'bg-red-500 animate-pulse' : aiParsing ? 'bg-yellow-500' : 'bg-white text-[#002B5B] hover:bg-blue-50'} disabled:cursor-wait`}>
@@ -274,17 +460,21 @@ export default function HRM() {
               <div className="bg-white rounded-lg p-3 text-gray-800 text-sm space-y-2">
                 <p className="font-semibold text-[#002B5B] text-xs uppercase">✅ Parsed — please confirm:</p>
                 <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div><span className="text-gray-500">Item Type:</span> <b>{aiParsed.item_type === 'task' ? 'Task' : 'Responsibility'}</b></div>
                   <div><span className="text-gray-500">Employee:</span> <b>{aiParsed.employee_name || '—'}</b></div>
-                  <div><span className="text-gray-500">Task:</span> <b>{aiParsed.title || '—'}</b></div>
-                  <div><span className="text-gray-500">Frequency:</span> <b>{aiParsed.frequency}</b></div>
-                  <div><span className="text-gray-500">Category:</span> <b>{aiParsed.category}</b></div>
+                  <div className="col-span-2"><span className="text-gray-500">Title:</span> <b>{aiParsed.title || '—'}</b></div>
+                  {aiParsed.item_type === 'responsibility' ? (
+                    <div><span className="text-gray-500">Frequency:</span> <b>{aiParsed.frequency}</b></div>
+                  ) : (
+                    <div><span className="text-gray-500">Due Date:</span> <b>{aiParsed.due_date || '—'}</b></div>
+                  )}
                 </div>
                 {!aiParsed.employee_id && <p className="text-amber-600 text-xs">⚠️ Employee not matched — select below</p>}
                 <div className="flex gap-2 flex-wrap">
-                  <button onClick={() => createRespMut.mutate({ ...quickResp, employee_id: quickResp.employee_id ? +quickResp.employee_id : undefined, department_id: quickResp.department_id ? +quickResp.department_id : null })}
-                    disabled={createRespMut.isPending || !quickResp.employee_id || !quickResp.title}
+                  <button onClick={() => submitAssign(quickResp)}
+                    disabled={createRespMut.isPending || createOneTimeTaskMut.isPending || !quickResp.employee_id || !quickResp.title}
                     className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-medium disabled:opacity-50">
-                    {createRespMut.isPending ? 'Saving…' : '✅ Save'}
+                    {(createRespMut.isPending || createOneTimeTaskMut.isPending) ? 'Saving…' : '✅ Save'}
                   </button>
                   <button onClick={() => setShowQuickResp(!showQuickResp)} className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs bg-white">✏️ Edit</button>
                   <button onClick={() => { setAiParsed(null); setVoiceText('') }} className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs bg-white">✕</button>
@@ -292,12 +482,20 @@ export default function HRM() {
               </div>
             )}
           </div>
+          )}
 
           {/* Quick form */}
-          {showQuickResp && (
+          {canAssignTasks && showQuickResp && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">Responsibility Details</h3>
+              <h3 className="font-semibold text-gray-700">Assignment Details</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div><label className="text-xs text-gray-500">Item Type *</label>
+                  <select value={quickResp.item_type} onChange={e => setQuickResp(f => ({ ...f, item_type: e.target.value as ItemType }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="responsibility">Responsibility (recurring)</option>
+                    <option value="task">Task (one-time)</option>
+                  </select>
+                </div>
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={quickResp.employee_id} onChange={e => setQuickResp(f => ({ ...f, employee_id: e.target.value }))}
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -305,30 +503,38 @@ export default function HRM() {
                     {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} — {e.department_name || '—'}</option>)}
                   </select>
                 </div>
-                <div className="col-span-2"><label className="text-xs text-gray-500">Task Title *</label>
+                <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
                   <input value={quickResp.title} onChange={e => setQuickResp(f => ({ ...f, title: e.target.value }))}
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                <div><label className="text-xs text-gray-500">Frequency</label>
-                  <select value={quickResp.frequency} onChange={e => setQuickResp(f => ({ ...f, frequency: e.target.value }))}
-                    className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
-                  </select>
-                </div>
-                <div><label className="text-xs text-gray-500">Category</label>
-                  <select value={quickResp.category} onChange={e => setQuickResp(f => ({ ...f, category: e.target.value }))}
-                    className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    {CATEGORIES.map(c => <option key={c}>{c}</option>)}
-                  </select>
-                </div>
-                <div><label className="text-xs text-gray-500">Added By</label>
+                {quickResp.item_type === 'responsibility' ? (
+                  <>
+                    <div><label className="text-xs text-gray-500">Frequency</label>
+                      <select value={quickResp.frequency} onChange={e => setQuickResp(f => ({ ...f, frequency: e.target.value }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">Category</label>
+                      <select value={quickResp.category} onChange={e => setQuickResp(f => ({ ...f, category: e.target.value }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <div><label className="text-xs text-gray-500">Due Date</label>
+                    <input type="date" value={quickResp.due_date} onChange={e => setQuickResp(f => ({ ...f, due_date: e.target.value }))}
+                      className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                )}
+                <div><label className="text-xs text-gray-500">Assigned By</label>
                   <input value={quickResp.added_by} onChange={e => setQuickResp(f => ({ ...f, added_by: e.target.value }))}
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => createRespMut.mutate({ ...quickResp, employee_id: quickResp.employee_id ? +quickResp.employee_id : undefined, department_id: quickResp.department_id ? +quickResp.department_id : null })}
-                  disabled={createRespMut.isPending || !quickResp.employee_id || !quickResp.title}
+                <button onClick={() => submitAssign(quickResp)}
+                  disabled={createRespMut.isPending || createOneTimeTaskMut.isPending || !quickResp.employee_id || !quickResp.title}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
-                  {createRespMut.isPending ? 'Saving…' : '✅ Assign'}
+                  {(createRespMut.isPending || createOneTimeTaskMut.isPending) ? 'Saving…' : '✅ Assign'}
                 </button>
                 <button onClick={() => setShowQuickResp(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
@@ -486,35 +692,48 @@ export default function HRM() {
                 {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
               </select>
             </div>
-            <button onClick={() => setShowRespForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Add Responsibility</button>
+            <button onClick={() => setShowRespForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Assign Item</button>
           </div>
           {showRespForm && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">Assign Responsibility</h3>
+              <h3 className="font-semibold text-gray-700">Assign Responsibility or Task</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div><label className="text-xs text-gray-500">Item Type *</label>
+                  <select value={respForm.item_type} onChange={e => setRespForm(f => ({ ...f, item_type: e.target.value as ItemType }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="responsibility">Responsibility (recurring)</option>
+                    <option value="task">Task (one-time)</option>
+                  </select>
+                </div>
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={respForm.employee_id} onChange={e => setRespForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
                     {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
                 </div>
-                <div className="col-span-2"><label className="text-xs text-gray-500">Task Title *</label>
+                <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
                   <input value={respForm.title} onChange={e => setRespForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Enter delivery date on bills" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                <div><label className="text-xs text-gray-500">Frequency</label>
-                  <select value={respForm.frequency} onChange={e => setRespForm(f => ({ ...f, frequency: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
-                  </select>
-                </div>
-                <div><label className="text-xs text-gray-500">Category</label>
-                  <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    {CATEGORIES.map(c => <option key={c}>{c}</option>)}
-                  </select>
-                </div>
-                <div><label className="text-xs text-gray-500">Added By</label>
+                {respForm.item_type === 'responsibility' ? (
+                  <>
+                    <div><label className="text-xs text-gray-500">Frequency</label>
+                      <select value={respForm.frequency} onChange={e => setRespForm(f => ({ ...f, frequency: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">Category</label>
+                      <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <div><label className="text-xs text-gray-500">Due Date</label>
+                    <input type="date" value={respForm.due_date} onChange={e => setRespForm(f => ({ ...f, due_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                )}
+                <div><label className="text-xs text-gray-500">Assigned By</label>
                   <input value={respForm.added_by} onChange={e => setRespForm(f => ({ ...f, added_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => createRespMut.mutate({ ...respForm, employee_id: +respForm.employee_id, department_id: null })} disabled={!respForm.employee_id || !respForm.title} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
+                <button onClick={() => submitAssign({ ...respForm, department_id: '' })} disabled={!respForm.employee_id || !respForm.title || createRespMut.isPending || createOneTimeTaskMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
                 <button onClick={() => setShowRespForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
@@ -550,6 +769,138 @@ export default function HRM() {
         </div>
       )}
 
+      {/* ── ONE-TIME TASKS ── */}
+      {tab === 'tasks' && (
+        <div className="space-y-4">
+          <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 text-sm text-blue-900">
+            <b>Tasks</b> are one-time assignments with time tracking and HOD approval.
+            Recurring daily/weekly work stays under <b>Responsibilities</b> and the HOD view.
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex gap-2 flex-wrap">
+              {!isEmployeeScope && (
+                <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">All Departments</option>
+                  {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+              )}
+              {!isEmployeeScope && (
+                <select value={selEmp} onChange={e => setSelEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">All Employees</option>
+                  {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                </select>
+              )}
+              <select value={taskStatusFilter} onChange={e => setTaskStatusFilter(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
+                <option value="">All Statuses</option>
+                {ONE_TIME_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            {canAssignTasks && (
+              <button onClick={() => setShowTaskForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Assign Task</button>
+            )}
+          </div>
+
+          {showTaskForm && canAssignTasks && (
+            <div className="bg-white rounded-xl border p-4 space-y-3">
+              <h3 className="font-semibold text-gray-700">Assign One-Time Task</h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div><label className="text-xs text-gray-500">Employee *</label>
+                  <select value={taskForm.employee_id} onChange={e => setTaskForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Select</option>
+                    {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
+                  </select>
+                </div>
+                <div className="col-span-2"><label className="text-xs text-gray-500">Task Title *</label>
+                  <input value={taskForm.title} onChange={e => setTaskForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Complete warehouse audit by Friday" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
+                  <input value={taskForm.description} onChange={e => setTaskForm(f => ({ ...f, description: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div><label className="text-xs text-gray-500">Due Date</label>
+                  <input type="date" value={taskForm.due_date} onChange={e => setTaskForm(f => ({ ...f, due_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div><label className="text-xs text-gray-500">Assigned By</label>
+                  <input value={taskForm.assigned_by} onChange={e => setTaskForm(f => ({ ...f, assigned_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => createOneTimeTaskMut.mutate({ ...taskForm, employee_id: +taskForm.employee_id })}
+                  disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
+                  className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
+                  Assign
+                </button>
+                <button onClick={() => setShowTaskForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white rounded-xl border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="text-gray-400 text-xs uppercase bg-gray-50">
+                <tr>
+                  <th className="text-left px-4 py-2">Task</th>
+                  <th className="text-left px-4 py-2">Employee</th>
+                  <th className="text-left px-4 py-2">Due</th>
+                  <th className="text-left px-4 py-2">Status</th>
+                  <th className="text-left px-4 py-2">Time</th>
+                  <th className="px-4 py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(oneTimeTasks as any[]).map((t: any) => (
+                  <tr key={t.id} className="border-t hover:bg-gray-50 align-top">
+                    <td className="px-4 py-3">
+                      <p className="font-medium text-gray-800">{t.title}</p>
+                      {t.description && <p className="text-xs text-gray-400 mt-0.5">{t.description}</p>}
+                      {t.completion_notes && <p className="text-xs text-amber-700 mt-1">Done: {t.completion_notes}</p>}
+                      {t.approval_notes && <p className="text-xs text-gray-500 mt-1">HOD: {t.approval_notes}</p>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <p className="font-medium">{t.employee_name}</p>
+                      <p className="text-xs text-gray-400">{t.department_name || '—'}</p>
+                      {t.assigned_by && <p className="text-xs text-gray-400 mt-0.5">By {t.assigned_by}</p>}
+                    </td>
+                    <td className="px-4 py-3 text-gray-600">{t.due_date || '—'}</td>
+                    <td className="px-4 py-3">
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-500">
+                      <p>Start: {fmtDateTime(t.started_at)}</p>
+                      <p>End: {fmtDateTime(t.completed_at)}</p>
+                      <p className="font-semibold text-[#002B5B] mt-0.5">{fmtDuration(t.duration_minutes)}</p>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1 justify-end">
+                        {(t.status === 'Pending' || t.status === 'Rejected') && (
+                          <button onClick={() => startOneTimeTaskMut.mutate(t.id)} disabled={startOneTimeTaskMut.isPending}
+                            className="text-xs px-2 py-1 bg-blue-600 text-white rounded">▶ Start</button>
+                        )}
+                        {t.status === 'In Progress' && (
+                          <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
+                            className="text-xs px-2 py-1 bg-amber-500 text-white rounded">✓ Mark Done</button>
+                        )}
+                        {t.status === 'Done' && canAssignTasks && (
+                          <>
+                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes('') }}
+                              className="text-xs px-2 py-1 bg-green-600 text-white rounded">Approve</button>
+                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes('') }}
+                              className="text-xs px-2 py-1 bg-red-500 text-white rounded">Reject</button>
+                          </>
+                        )}
+                        {canAssignTasks && t.status !== 'Approved' && (
+                          <button onClick={() => { if (window.confirm('Cancel this task?')) cancelOneTimeTaskMut.mutate(t.id) }}
+                            className="text-xs px-2 py-1 border rounded text-red-600">Cancel</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {(oneTimeTasks as any[]).length === 0 && (
+              <p className="text-center text-gray-400 py-8 text-sm">No one-time tasks yet.</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── HOD VIEW ── */}
       {tab === 'hod' && (
         <div className="space-y-4">
@@ -558,12 +909,70 @@ export default function HRM() {
               <option value="">Select Department</option>
               {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
-            <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
-            <span className="text-gray-400 text-xs">to</span>
-            <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+            {hodSubTab === 'responsibilities' && (
+              <>
+                <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+                <span className="text-gray-400 text-xs">to</span>
+                <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+              </>
+            )}
+          </div>
+          <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
+            <button onClick={() => setHodSubTab('responsibilities')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium ${hodSubTab === 'responsibilities' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
+              📋 Responsibilities
+            </button>
+            <button onClick={() => setHodSubTab('tasks')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium ${hodSubTab === 'tasks' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
+              ✅ Tasks {hodPendingTasks.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 rounded-full">{hodPendingTasks.length}</span>}
+            </button>
           </div>
           {!hodDept && <p className="text-center text-gray-400 py-8 text-sm">Select a department</p>}
-          {hodDept && hodData && (
+          {hodDept && hodSubTab === 'tasks' && (
+            <div className="bg-white rounded-xl border overflow-hidden">
+              <div className="px-4 py-3 bg-amber-600 text-white font-semibold">Tasks pending approval</div>
+              {(hodPendingTasks as any[]).length === 0 ? (
+                <p className="text-center text-gray-400 py-8 text-sm">No tasks awaiting approval.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="text-gray-400 text-xs uppercase bg-gray-50">
+                    <tr>
+                      <th className="text-left px-4 py-2">Task</th>
+                      <th className="text-left px-4 py-2">Employee</th>
+                      <th className="text-left px-4 py-2">Due</th>
+                      <th className="text-left px-4 py-2">Time Taken</th>
+                      <th className="px-4 py-2 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(hodPendingTasks as any[]).map((t: any) => (
+                      <tr key={t.id} className="border-t">
+                        <td className="px-4 py-3">
+                          <p className="font-medium">{t.title}</p>
+                          {t.completion_notes && <p className="text-xs text-gray-500 mt-0.5">{t.completion_notes}</p>}
+                        </td>
+                        <td className="px-4 py-3">{t.employee_name}</td>
+                        <td className="px-4 py-3">{t.due_date || '—'}</td>
+                        <td className="px-4 py-3 text-xs">
+                          <p>{fmtDuration(t.duration_minutes)}</p>
+                          <p className="text-gray-400">{fmtDateTime(t.completed_at)}</p>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex gap-1 justify-end">
+                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes('') }}
+                              className="text-xs px-2 py-1 bg-green-600 text-white rounded">Approve</button>
+                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes('') }}
+                              className="text-xs px-2 py-1 bg-red-500 text-white rounded">Reject</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+          {hodDept && hodSubTab === 'responsibilities' && hodData && (
             <div className="bg-white rounded-xl border overflow-hidden">
               <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between">
                 <span className="font-semibold">{deptName(hodDept)} — Task Dashboard</span>
@@ -740,15 +1149,15 @@ export default function HRM() {
                 <p className="text-blue-200 text-sm">{appraisalData.employee?.department_name} · {appraisalData.employee?.designation}</p>
                 <p className="text-blue-300 text-xs mt-1">{appraisalData.period?.from} to {appraisalData.period?.to}</p>
               </div>
-              {/* Task summary */}
+              {/* Responsibility summary */}
               <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
                 {[
-                  ['Total Tasks', appraisalData.task_summary?.total, 'text-gray-700'],
+                  ['Resp. Total', appraisalData.task_summary?.total, 'text-gray-700'],
                   ['Done ✅', appraisalData.task_summary?.done, 'text-green-600'],
                   ['Partial ⚠️', appraisalData.task_summary?.partial, 'text-amber-600'],
                   ['Missed ❌', appraisalData.task_summary?.missed, 'text-red-600'],
                   ['Blocked 🔴', appraisalData.task_summary?.blocked, 'text-purple-600'],
-                  ['Score', `${appraisalData.task_summary?.performance_pct}%`, appraisalData.task_summary?.performance_pct >= 80 ? 'text-green-600' : appraisalData.task_summary?.performance_pct >= 50 ? 'text-amber-600' : 'text-red-600'],
+                  ['Resp. Score', `${appraisalData.task_summary?.responsibility_performance_pct ?? appraisalData.task_summary?.performance_pct}%`, 'text-blue-600'],
                 ].map(([l, v, c]) => (
                   <div key={l as string} className="bg-white rounded-xl border p-3 text-center">
                     <p className={`text-xl font-bold ${c}`}>{v}</p>
@@ -756,6 +1165,23 @@ export default function HRM() {
                   </div>
                 ))}
               </div>
+              {appraisalData.one_time_summary?.total > 0 && (
+                <div className="bg-white rounded-xl border p-4 space-y-3">
+                  <h4 className="font-semibold text-[#002B5B]">✅ One-Time Tasks (impacts score)</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center text-sm">
+                    <div><p className="text-xl font-bold text-green-600">{appraisalData.one_time_summary.approved_on_time}</p><p className="text-xs text-gray-400">On time ✅</p></div>
+                    <div><p className="text-xl font-bold text-amber-600">{appraisalData.one_time_summary.awaiting_approval}</p><p className="text-xs text-gray-400">Awaiting HOD</p></div>
+                    <div><p className="text-xl font-bold text-red-600">{appraisalData.one_time_summary.overdue + appraisalData.one_time_summary.pending}</p><p className="text-xs text-gray-400">Pending / Overdue</p></div>
+                    <div><p className="text-xl font-bold text-red-700">{appraisalData.one_time_summary.rejected}</p><p className="text-xs text-gray-400">Rejected</p></div>
+                  </div>
+                  <p className="text-sm text-center">
+                    Task score: <b className={appraisalData.one_time_summary.performance_pct >= 80 ? 'text-green-600' : appraisalData.one_time_summary.performance_pct >= 50 ? 'text-amber-600' : 'text-red-600'}>
+                      {appraisalData.one_time_summary.performance_pct}%
+                    </b>
+                    {' · '}Combined: <b className="text-[#002B5B]">{appraisalData.task_summary?.performance_pct}%</b>
+                  </p>
+                </div>
+              )}
               {/* Issues */}
               {appraisalData.issues?.length > 0 && (
                 <div className="bg-white rounded-xl border p-4">
@@ -814,10 +1240,17 @@ export default function HRM() {
                   <div>
                     <p className="font-semibold text-gray-800">{p.employee_name}</p>
                     <p className="text-xs text-gray-500">{p.department_name}</p>
-                    <div className="flex gap-3 text-xs mt-1">
+                    <div className="flex gap-3 text-xs mt-1 flex-wrap">
                       <span className="text-green-600">✅ Done: {p.done_tasks}</span>
                       <span className="text-red-500">❌ Missed: {p.missed_tasks}</span>
                       <span className="text-purple-600">🔴 Blocked: {p.blocked_tasks}</span>
+                      {p.one_time_summary?.total > 0 && (
+                        <>
+                          <span className="text-green-700">✅ Tasks on time: {p.one_time_summary.approved_on_time}</span>
+                          <span className="text-red-600">⏳ Overdue/Pending: {(p.one_time_summary.overdue || 0) + (p.one_time_summary.pending || 0)}</span>
+                          {p.one_time_summary.rejected > 0 && <span className="text-red-700">↩ Rejected: {p.one_time_summary.rejected}</span>}
+                        </>
+                      )}
                       {p.issues_total > 0 && <span className="text-amber-600">⚠️ Issues: {p.issues_total} ({p.issues_major} major)</span>}
                       {p.blockers_caused > 0 && <span className="text-purple-700">🔴 Caused blocks: {p.blockers_caused}</span>}
                     </div>
@@ -833,6 +1266,61 @@ export default function HRM() {
               </div>
             ))}
             {(perfData as any[]).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No data yet. Mark tasks in HOD view first.</p>}
+          </div>
+        </div>
+      )}
+
+      {/* ── COMPLETE TASK MODAL ── */}
+      {completeModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <h3 className="font-semibold text-amber-700">✓ Mark task complete</h3>
+            <p className="text-sm text-gray-600">{completeModal.title}</p>
+            <div>
+              <label className="text-xs text-gray-500">Completion notes (optional)</label>
+              <textarea value={completeNotes} onChange={e => setCompleteNotes(e.target.value)} rows={3}
+                className="w-full border rounded px-2 py-1.5 text-sm mt-1" placeholder="What was done?" />
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => completeOneTimeTaskMut.mutate({ id: completeModal.id, notes: completeNotes })}
+                disabled={completeOneTimeTaskMut.isPending}
+                className="flex-1 py-2 bg-amber-500 text-white rounded-lg text-sm disabled:opacity-50">
+                {completeOneTimeTaskMut.isPending ? 'Saving…' : 'Submit for approval'}
+              </button>
+              <button onClick={() => setCompleteModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── APPROVAL MODAL ── */}
+      {approvalModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <h3 className={`font-semibold ${approvalModal.action === 'approve' ? 'text-green-700' : 'text-red-700'}`}>
+              {approvalModal.action === 'approve' ? '✅ Approve task' : '↩ Reject task'}
+            </h3>
+            <p className="text-sm text-gray-600">{approvalModal.title}</p>
+            <div>
+              <label className="text-xs text-gray-500">Notes (optional)</label>
+              <textarea value={approvalNotes} onChange={e => setApprovalNotes(e.target.value)} rows={3}
+                className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  if (approvalModal.action === 'approve') {
+                    approveOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes })
+                  } else {
+                    rejectOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes })
+                  }
+                }}
+                disabled={approveOneTimeTaskMut.isPending || rejectOneTimeTaskMut.isPending}
+                className={`flex-1 py-2 text-white rounded-lg text-sm disabled:opacity-50 ${approvalModal.action === 'approve' ? 'bg-green-600' : 'bg-red-500'}`}>
+                {approvalModal.action === 'approve' ? 'Approve & close' : 'Reject — send back'}
+              </button>
+              <button onClick={() => setApprovalModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
           </div>
         </div>
       )}

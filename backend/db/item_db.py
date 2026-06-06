@@ -570,6 +570,36 @@ def delete_item(item_id: int) -> bool:
     return deleted
 
 
+def resolve_routing_step_names(names: list[str]) -> list[int]:
+    """Map process names to routing_steps IDs; auto-create unknown steps."""
+    if not names:
+        return []
+    conn = _connect()
+    by_lower = {
+        r["name"].lower(): int(r["id"])
+        for r in conn.execute("SELECT id, name FROM routing_steps").fetchall()
+    }
+    step_ids: list[int] = []
+    for i, raw in enumerate(names):
+        name = (raw or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in by_lower:
+            step_ids.append(by_lower[key])
+            continue
+        cur = conn.execute(
+            "INSERT INTO routing_steps (name, description, sort_order) VALUES (?, ?, ?)",
+            (name, "Auto-created from import", 100 + i),
+        )
+        new_id = int(cur.lastrowid)
+        by_lower[key] = new_id
+        step_ids.append(new_id)
+    conn.commit()
+    conn.close()
+    return step_ids
+
+
 def set_item_routing(item_id: int, step_ids: list[int]) -> None:
     conn = _connect()
     conn.execute("DELETE FROM item_routing WHERE item_id = ?", (item_id,))
@@ -794,10 +824,11 @@ def copy_bom(bom_id: int, target_item_id: int, new_name: str) -> int:
 
 def bulk_create_items(items: list[dict]) -> dict:
     """
-    Bulk insert items from import. Each dict may have 'sizes' list.
-    Returns {created, skipped, errors}.
+    Bulk insert items from import. Each dict may have 'sizes' list and
+    'routing_steps' (ordered process names).
+    Returns {created, skipped, routing_set, errors}.
     """
-    created = skipped = 0
+    created = skipped = routing_set = 0
     errors: list[str] = []
     conn = _connect()
     type_map = {r["code"].upper(): r["id"] for r in
@@ -836,10 +867,19 @@ def bulk_create_items(items: list[dict]) -> dict:
                 sizes = [s.strip() for s in sizes.split(",") if s.strip()]
             if sizes:
                 create_size_variants(parent_id, sizes)
+            routing_names = row.get("routing_steps") or []
+            if isinstance(routing_names, str):
+                sep = ">" if ">" in routing_names else "|" if "|" in routing_names else ","
+                routing_names = [s.strip() for s in routing_names.split(sep) if s.strip()]
+            if routing_names:
+                step_ids = resolve_routing_step_names(routing_names)
+                if step_ids:
+                    set_item_routing(parent_id, step_ids)
+                    routing_set += 1
         except Exception as exc:
             errors.append(f"{row.get('item_code', '?')}: {exc}")
 
-    return {"created": created, "skipped": skipped, "errors": errors}
+    return {"created": created, "skipped": skipped, "routing_set": routing_set, "errors": errors}
 
 
 def get_item_stats() -> dict:

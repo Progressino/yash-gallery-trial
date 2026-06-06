@@ -93,6 +93,27 @@ def init_db():
         status              TEXT DEFAULT 'Open',
         created_at          TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS one_time_tasks (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id         INTEGER NOT NULL REFERENCES employees(id),
+        department_id       INTEGER REFERENCES departments(id),
+        title               TEXT NOT NULL,
+        description         TEXT DEFAULT '',
+        due_date            TEXT DEFAULT '',
+        assigned_by         TEXT DEFAULT '',
+        status              TEXT DEFAULT 'Pending',
+        started_at          TEXT DEFAULT '',
+        completed_at        TEXT DEFAULT '',
+        approved_at         TEXT DEFAULT '',
+        approved_by         TEXT DEFAULT '',
+        duration_minutes    INTEGER DEFAULT 0,
+        completion_notes    TEXT DEFAULT '',
+        approval_notes      TEXT DEFAULT '',
+        active              INTEGER DEFAULT 1,
+        created_at          TEXT DEFAULT (datetime('now')),
+        updated_at          TEXT DEFAULT (datetime('now'))
+    );
     """)
 
     for sql in (
@@ -104,6 +125,9 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+    conn.execute(
+        "UPDATE one_time_tasks SET status='Done' WHERE status='Completed'"
+    )
     conn.commit()
     conn.close()
 
@@ -651,6 +675,15 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
         (employee_id, fd, td),
     ).fetchall()
 
+    ot_rows = conn.execute(
+        """
+        SELECT * FROM one_time_tasks
+        WHERE employee_id=? AND active=1
+        ORDER BY created_at DESC
+        """,
+        (employee_id,),
+    ).fetchall()
+
     conn.close()
 
     total = len(task_logs)
@@ -658,7 +691,12 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
     partial = sum(1 for t in task_logs if t["status"] == "Partial")
     missed = sum(1 for t in task_logs if t["status"] == "Missed")
     blocked = sum(1 for t in task_logs if t["status"] == "Blocked")
-    pct = round((done + partial * 0.5) / total * 100, 1) if total > 0 else 0
+    resp_pct = round((done + partial * 0.5) / total * 100, 1) if total > 0 else 0
+
+    ot_summary, ot_period = _summarize_one_time_tasks(
+        [_one_time_task_row(r) for r in ot_rows], fd, td, today
+    )
+    combined_pct = _combined_performance_pct(resp_pct, ot_summary)
 
     return {
         "employee": emp,
@@ -669,8 +707,12 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
             "partial": partial,
             "missed": missed,
             "blocked": blocked,
-            "performance_pct": pct,
+            "responsibility_performance_pct": resp_pct,
+            "one_time_performance_pct": ot_summary["performance_pct"],
+            "performance_pct": combined_pct,
         },
+        "one_time_summary": ot_summary,
+        "one_time_tasks": ot_period,
         "issues": [dict(i) for i in issues],
         "blockers_caused": [dict(b) for b in blockers_caused],
         "task_logs": [dict(t) for t in task_logs],
@@ -745,6 +787,22 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         [fd, td],
     ).fetchall()
 
+    ot_cond = "WHERE t.active=1"
+    ot_params: list = []
+    if department_id:
+        ot_cond += " AND t.department_id=?"
+        ot_params.append(department_id)
+    ot_rows = conn.execute(
+        f"""
+        SELECT t.*, e.name as employee_name, d.name as department_name
+        FROM one_time_tasks t
+        LEFT JOIN employees e ON e.id=t.employee_id
+        LEFT JOIN departments d ON d.id=t.department_id
+        {ot_cond}
+        """,
+        ot_params,
+    ).fetchall()
+
     conn.close()
 
     log_map = {(l["responsibility_id"], l["log_date"]): l["status"] for l in logs}
@@ -757,6 +815,11 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         issue_map[eid]["total"] += i["cnt"]
 
     blocker_map = {b["blocker_employee_id"]: b["cnt"] for b in blocker_counts}
+
+    ot_by_emp: dict[int, list] = {}
+    for row in ot_rows:
+        task = _one_time_task_row(row)
+        ot_by_emp.setdefault(int(task["employee_id"]), []).append(task)
 
     emp_stats: dict = {}
     for r in resps:
@@ -783,11 +846,27 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         emp_stats[eid]["missed_tasks"] += missed
         emp_stats[eid]["blocked_tasks"] += blocked
 
+    all_eids = set(emp_stats) | set(ot_by_emp)
     result = []
-    for eid, stats in emp_stats.items():
+    for eid in all_eids:
+        stats = emp_stats.get(
+            eid,
+            {
+                "employee_name": ot_by_emp.get(eid, [{}])[0].get("employee_name", ""),
+                "department_name": ot_by_emp.get(eid, [{}])[0].get("department_name", ""),
+                "total_tasks": 0,
+                "done_tasks": 0,
+                "missed_tasks": 0,
+                "blocked_tasks": 0,
+            },
+        )
         total = stats["total_tasks"]
         done = stats["done_tasks"]
-        pct = round((done / total * 100) if total > 0 else 0, 1)
+        resp_pct = round((done / total * 100) if total > 0 else 0, 1)
+        ot_summary, _ = _summarize_one_time_tasks(
+            ot_by_emp.get(eid, []), fd, td, today
+        )
+        combined_pct = _combined_performance_pct(resp_pct, ot_summary)
         issues = issue_map.get(eid, {"Minor": 0, "Moderate": 0, "Major": 0, "total": 0})
         result.append(
             {
@@ -799,7 +878,10 @@ def get_performance(department_id=None, from_date=None, to_date=None):
                 "missed_tasks": stats["missed_tasks"],
                 "blocked_tasks": stats["blocked_tasks"],
                 "pending_tasks": total - done,
-                "performance_pct": pct,
+                "responsibility_performance_pct": resp_pct,
+                "one_time_performance_pct": ot_summary["performance_pct"],
+                "one_time_summary": ot_summary,
+                "performance_pct": combined_pct,
                 "issues_total": issues["total"],
                 "issues_minor": issues.get("Minor", 0),
                 "issues_moderate": issues.get("Moderate", 0),
@@ -809,3 +891,318 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         )
 
     return sorted(result, key=lambda x: -x["performance_pct"])
+
+
+# ── One-time Tasks (distinct from recurring responsibilities) ─────────────────
+
+
+def _normalize_one_time_status(status: str) -> str:
+    return "Done" if status == "Completed" else status
+
+
+def _task_in_appraisal_period(task: dict, fd: str, td: str, today: str) -> bool:
+    created = (task.get("created_at") or "")[:10]
+    due = task.get("due_date") or ""
+    completed = (task.get("completed_at") or "")[:10]
+    approved = (task.get("approved_at") or "")[:10]
+    status = _normalize_one_time_status(task.get("status") or "")
+    if created and fd <= created <= td:
+        return True
+    if due and fd <= due <= td:
+        return True
+    if completed and fd <= completed <= td:
+        return True
+    if approved and fd <= approved <= td:
+        return True
+    if status in ("Pending", "In Progress", "Rejected") and due and due < today:
+        return True
+    if status == "Done" and completed and fd <= completed <= td:
+        return True
+    return False
+
+
+def _task_completed_on_time(task: dict) -> bool:
+    due = task.get("due_date") or ""
+    completed = (task.get("completed_at") or "")[:10]
+    if not due:
+        return True
+    return bool(completed and completed <= due)
+
+
+def _summarize_one_time_tasks(tasks: list, fd: str, td: str, today: str):
+    period_tasks = [t for t in tasks if _task_in_appraisal_period(t, fd, td, today)]
+    approved_on_time = 0
+    approved_late = 0
+    awaiting_approval = 0
+    pending = 0
+    overdue = 0
+    in_progress = 0
+    rejected = 0
+
+    for task in period_tasks:
+        status = _normalize_one_time_status(task.get("status") or "")
+        due = task.get("due_date") or ""
+        is_overdue = bool(due and due < today and status in ("Pending", "In Progress"))
+        if status == "Approved":
+            if _task_completed_on_time(task):
+                approved_on_time += 1
+            else:
+                approved_late += 1
+        elif status == "Done":
+            awaiting_approval += 1
+        elif status == "Rejected":
+            rejected += 1
+        elif status == "In Progress":
+            in_progress += 1
+            if is_overdue:
+                overdue += 1
+        elif status == "Pending":
+            pending += 1
+            if is_overdue:
+                overdue += 1
+
+    total = len(period_tasks)
+    positive = approved_on_time + approved_late * 0.6 + awaiting_approval * 0.25
+    negative = rejected + overdue + pending * 0.35 + in_progress * 0.15
+    if total == 0:
+        ot_pct = None
+    else:
+        ot_pct = round(max(0, min(100, (positive / max(positive + negative, 0.1)) * 100)), 1)
+
+    summary = {
+        "total": total,
+        "approved_on_time": approved_on_time,
+        "approved_late": approved_late,
+        "awaiting_approval": awaiting_approval,
+        "pending": pending,
+        "overdue": overdue,
+        "in_progress": in_progress,
+        "rejected": rejected,
+        "performance_pct": ot_pct,
+    }
+    return summary, period_tasks
+
+
+def _combined_performance_pct(resp_pct: float, ot_summary: dict) -> float:
+    ot_pct = ot_summary.get("performance_pct")
+    if ot_summary.get("total", 0) == 0 or ot_pct is None:
+        return resp_pct
+    if resp_pct == 0 and ot_summary.get("total", 0) > 0:
+        return ot_pct
+    return round(resp_pct * 0.7 + ot_pct * 0.3, 1)
+
+
+def _now_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _duration_minutes(started_at: str, completed_at: str) -> int:
+    if not started_at or not completed_at:
+        return 0
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        t0 = datetime.strptime(started_at[:19], fmt)
+        t1 = datetime.strptime(completed_at[:19], fmt)
+        return max(0, int((t1 - t0).total_seconds() // 60))
+    except ValueError:
+        return 0
+
+
+def _one_time_task_row(row) -> dict:
+    d = dict(row)
+    d["status"] = _normalize_one_time_status(d.get("status") or "")
+    if not d.get("duration_minutes") and d.get("started_at") and d.get("completed_at"):
+        d["duration_minutes"] = _duration_minutes(d["started_at"], d["completed_at"])
+    return d
+
+
+def get_one_time_task_owner(task_id: int) -> int | None:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT employee_id FROM one_time_tasks WHERE id=? AND active=1",
+        (task_id,),
+    ).fetchone()
+    conn.close()
+    return int(row["employee_id"]) if row else None
+
+
+def list_one_time_tasks(
+    employee_id=None,
+    department_id=None,
+    status: str | None = None,
+    active_only=True,
+):
+    conn = _connect()
+    conditions = []
+    params: list = []
+    if active_only:
+        conditions.append("t.active=1")
+    if employee_id:
+        conditions.append("t.employee_id=?")
+        params.append(int(employee_id))
+    if department_id:
+        conditions.append("t.department_id=?")
+        params.append(int(department_id))
+    if status:
+        conditions.append("t.status=?")
+        params.append(status)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    rows = conn.execute(
+        f"""
+        SELECT t.*, e.name as employee_name, d.name as department_name
+        FROM one_time_tasks t
+        LEFT JOIN employees e ON e.id=t.employee_id
+        LEFT JOIN departments d ON d.id=t.department_id
+        {where}
+        ORDER BY
+            CASE t.status
+                WHEN 'Pending' THEN 1
+                WHEN 'In Progress' THEN 2
+                WHEN 'Done' THEN 3
+                WHEN 'Completed' THEN 3
+                WHEN 'Rejected' THEN 4
+                WHEN 'Approved' THEN 5
+                ELSE 6
+            END,
+            t.due_date ASC,
+            t.created_at DESC
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+    return [_one_time_task_row(r) for r in rows]
+
+
+def create_one_time_task(data: dict) -> int:
+    conn = _connect()
+    dept_id = data.get("department_id")
+    if not dept_id and data.get("employee_id"):
+        row = conn.execute(
+            "SELECT department_id FROM employees WHERE id=?",
+            (data["employee_id"],),
+        ).fetchone()
+        if row:
+            dept_id = row["department_id"]
+    cur = conn.execute(
+        """INSERT INTO one_time_tasks(
+            employee_id, department_id, title, description, due_date, assigned_by, status, active
+        ) VALUES(?,?,?,?,?,?,?,1)""",
+        (
+            data["employee_id"],
+            dept_id,
+            data["title"],
+            data.get("description", ""),
+            data.get("due_date", ""),
+            data.get("assigned_by", ""),
+            "Pending",
+        ),
+    )
+    tid = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+    return tid
+
+
+def update_one_time_task(task_id: int, data: dict):
+    conn = _connect()
+    allowed = ["title", "description", "due_date", "employee_id", "department_id", "active"]
+    sets = ", ".join(f"{k}=?" for k in data if k in allowed)
+    vals = [data[k] for k in data if k in allowed]
+    if sets:
+        vals.append(_now_iso())
+        vals.append(task_id)
+        conn.execute(f"UPDATE one_time_tasks SET {sets}, updated_at=? WHERE id=?", vals)
+        conn.commit()
+    conn.close()
+
+
+def cancel_one_time_task(task_id: int):
+    update_one_time_task(task_id, {"active": 0})
+
+
+def start_one_time_task(task_id: int) -> bool:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT status FROM one_time_tasks WHERE id=? AND active=1",
+        (task_id,),
+    ).fetchone()
+    if not row or row["status"] not in ("Pending", "Rejected"):
+        conn.close()
+        return False
+    now = _now_iso()
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET status='In Progress', started_at=?, completed_at='', approved_at='',
+               duration_minutes=0, updated_at=?
+           WHERE id=?""",
+        (now, now, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def complete_one_time_task(task_id: int, completion_notes: str = "") -> bool:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT status, started_at FROM one_time_tasks WHERE id=? AND active=1",
+        (task_id,),
+    ).fetchone()
+    if not row or row["status"] != "In Progress":
+        conn.close()
+        return False
+    now = _now_iso()
+    started = row["started_at"] or now
+    mins = _duration_minutes(started, now)
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET status='Done', completed_at=?, duration_minutes=?,
+               completion_notes=?, updated_at=?
+           WHERE id=?""",
+        (now, mins, completion_notes or "", now, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def approve_one_time_task(task_id: int, approved_by: str = "", approval_notes: str = "") -> bool:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT status FROM one_time_tasks WHERE id=? AND active=1",
+        (task_id,),
+    ).fetchone()
+    if not row or _normalize_one_time_status(row["status"]) != "Done":
+        conn.close()
+        return False
+    now = _now_iso()
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET status='Approved', approved_at=?, approved_by=?, approval_notes=?, updated_at=?
+           WHERE id=?""",
+        (now, approved_by or "", approval_notes or "", now, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def reject_one_time_task(task_id: int, approved_by: str = "", approval_notes: str = "") -> bool:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT status FROM one_time_tasks WHERE id=? AND active=1",
+        (task_id,),
+    ).fetchone()
+    if not row or _normalize_one_time_status(row["status"]) != "Done":
+        conn.close()
+        return False
+    now = _now_iso()
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET status='Rejected', approved_by=?, approval_notes=?, updated_at=?
+           WHERE id=?""",
+        (approved_by or "", approval_notes or "", now, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
