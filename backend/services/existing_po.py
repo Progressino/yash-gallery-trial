@@ -658,6 +658,18 @@ def ensure_existing_po_hydrated(sess) -> bool:
     return changed
 
 
+def _existing_po_sheet_has_per_size_children(ep: pd.DataFrame) -> bool:
+    """True when any bundled band already has a separate per-size row on the sheet."""
+    sku_set = set(ep["OMS_SKU"].astype(str))
+    for sku in sku_set:
+        if not is_bundled_size_range_sku(sku):
+            continue
+        for child in _split_bundled_po_sku(sku):
+            if child in sku_set:
+                return True
+    return False
+
+
 def prepare_existing_po_for_merge(
     existing_po_df: pd.DataFrame,
     canonical_fn,
@@ -666,7 +678,10 @@ def prepare_existing_po_for_merge(
     Canonicalize Existing PO rows for exact OMS_SKU merge.
 
     Operator sheets list bundled listings (4XL-5XL) and individual sizes (4XL, 5XL)
-    as separate rows with separate quantities — do not fan out or sum across them.
+    as separate rows with separate quantities — do not fan out when both exist.
+
+    When the sheet only has bundled size-range rows (e.g. 1917YKBLUE-L-XL with no L/XL
+    lines), fan out to per-size SKUs so PO Engine shows separate pending/balance.
     """
     if existing_po_df is None or existing_po_df.empty:
         return pd.DataFrame()
@@ -688,6 +703,9 @@ def prepare_existing_po_for_merge(
         ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
     else:
         ep = ep.drop_duplicates(subset=["OMS_SKU"], keep="last")
+    if not ep.empty and not _existing_po_sheet_has_per_size_children(ep):
+        if any(is_bundled_size_range_sku(s) for s in ep["OMS_SKU"].astype(str)):
+            ep = expand_bundled_po_skus(ep)
     return ep
 
 

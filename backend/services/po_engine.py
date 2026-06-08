@@ -1295,7 +1295,13 @@ def calculate_po_base(
             _no_inv_hist = (
                 pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0) <= 0
             )
-            po_df.loc[_no_row_demand & _no_inv_hist, "Eff_Days"] = 0
+            _has_ship_ctx = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0) > 0
+            _has_stock = pd.to_numeric(po_df.get("Total_Inventory"), errors="coerce").fillna(0) > 0
+            # Keep ship-150 / in-stock Eff_Days set earlier — do not wipe after unbundle.
+            po_df.loc[
+                _no_row_demand & _no_inv_hist & ~_has_ship_ctx & ~_has_stock,
+                "Eff_Days",
+            ] = 0
         po_df["PO_Pipeline_Total"] = pd.to_numeric(
             po_df["PO_Pipeline_Total"], errors="coerce"
         ).fillna(0).astype(int)

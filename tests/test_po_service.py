@@ -550,8 +550,8 @@ def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 77
 
 
-def test_existing_po_bundled_sheet_row_stays_on_bundled_sku_not_split():
-    """A bundled PO line (XXL-3XL) is not split across individual inventory sizes."""
+def test_bundled_only_sheet_splits_pipeline_to_per_size_inventory():
+    """Bundled-only PO sheet (XXL-3XL) fans out to per-size rows when no L/XL lines exist."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")
     sales = pd.DataFrame(
         {
@@ -584,13 +584,12 @@ def test_existing_po_bundled_sheet_row_stays_on_bundled_sku_not_split():
         safety_pct=0.0,
         existing_po_df=existing_po,
     )
+    assert po[po["OMS_SKU"] == "1917YKBLUE-XXL-3XL"].empty
     for sku in ("1917YKBLUE-3XL", "1917YKBLUE-XXL"):
         row = po.loc[po["OMS_SKU"] == sku].iloc[0]
-        assert int(row["PO_Pipeline_Total"]) == 0
-    ghost = po.loc[po["OMS_SKU"] == "1917YKBLUE-XXL-3XL"].iloc[0]
-    assert int(ghost["PO_Pipeline_Total"]) == 200
-    assert int(ghost["Pending_Cutting"]) == 196
-    assert int(ghost["Balance_to_Dispatch"]) == 4
+        assert int(row["PO_Pipeline_Total"]) == 100
+        assert int(row["Pending_Cutting"]) == 98
+        assert int(row["Balance_to_Dispatch"]) == 2
 
 
 def test_po_1917ykblue_pipeline_matches_sheet_with_sku_mapping():
@@ -2330,6 +2329,115 @@ def test_in_stock_sku_shows_inventory_eff_days_without_ads_window_sales():
     assert int(row["Eff_Days_Inventory"]) == 25
     assert int(row["Eff_Days"]) > 0
     assert float(row["Recent_ADS"]) == 0.0
+
+
+def test_in_stock_ship150_keeps_eff_days_after_existing_po_unbundle():
+    """30d-quiet SKU with stock + 150d shipments must keep Eff_Days after pipeline merge."""
+    end = pd.Timestamp("2026-06-08")
+    old_dates = pd.date_range(end - pd.Timedelta(days=55), periods=12, freq="D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "QUIET-STOCK",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 8,
+                "Units_Effective": 8,
+                "Source": "Amazon",
+            }
+            for d in old_dates
+        ]
+        + [
+            {
+                "Sku": "OTHER",
+                "TxnDate": end,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["QUIET-STOCK", "OTHER"], "Total_Inventory": [4, 1]})
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["QUIET-STOCK"],
+            "PO_Pipeline_Total": [180],
+            "Pending_Cutting": [180],
+            "Balance_to_Dispatch": [0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=40,
+        target_days=135,
+        demand_basis="Sold",
+        existing_po_df=existing_po,
+    )
+    row = po.loc[po["OMS_SKU"] == "QUIET-STOCK"].iloc[0]
+    assert int(row["Sold_Units"]) == 0
+    assert int(row["Ship_Units_150d"]) == 96
+    assert int(row["Total_Inventory"]) == 4
+    assert float(row["Eff_Days"]) > 0
+
+
+def test_bundled_only_existing_po_fans_out_to_per_size_pipeline():
+    """1917-style sheet with only L-XL bands → separate L and XL pipeline rows."""
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-L-XL", "1917YKBLUE-4XL-5XL"],
+            "PO_Pipeline_Total": [324, 274],
+            "Pending_Cutting": [320, 270],
+            "Balance_to_Dispatch": [4, 4],
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-L-XL", "1917YKBLUE-4XL-5XL"],
+            "Total_Inventory": [46, 21],
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1917YKBLUE-L-XL",
+                "TxnDate": pd.Timestamp("2026-06-01"),
+                "Transaction Type": "Shipment",
+                "Quantity": 5,
+                "Units_Effective": 5,
+                "Source": "Amazon",
+            },
+            {
+                "Sku": "OTHER",
+                "TxnDate": pd.Timestamp("2026-06-08"),
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            },
+        ]
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=90,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        existing_po_df=existing_po,
+    )
+    assert "1917YKBLUE-L" in set(po["OMS_SKU"].astype(str))
+    assert "1917YKBLUE-XL" in set(po["OMS_SKU"].astype(str))
+    assert "1917YKBLUE-4XL" in set(po["OMS_SKU"].astype(str))
+    assert "1917YKBLUE-5XL" in set(po["OMS_SKU"].astype(str))
+    l_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
+    xl_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
+    assert int(l_row["Pending_Cutting"]) == 160
+    assert int(xl_row["Pending_Cutting"]) == 160
+    assert int(l_row["Balance_to_Dispatch"]) == 2
+    assert int(xl_row["Balance_to_Dispatch"]) == 2
 
 
 def test_ship150_span_fallback_when_no_inventory_history():
