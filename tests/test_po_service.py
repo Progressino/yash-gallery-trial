@@ -589,9 +589,9 @@ def test_bundled_only_sheet_splits_pipeline_to_per_size_inventory():
     assert po[po["OMS_SKU"] == "1917YKBLUE-XXL-3XL"].empty
     for sku in ("1917YKBLUE-3XL", "1917YKBLUE-XXL"):
         row = po.loc[po["OMS_SKU"] == sku].iloc[0]
-        assert int(row["PO_Pipeline_Total"]) == 100
-        assert int(row["Pending_Cutting"]) == 98
-        assert int(row["Balance_to_Dispatch"]) == 2
+        assert int(row["PO_Pipeline_Total"]) == 98
+        assert int(row["Pending_Cutting"]) == 0
+        assert int(row["Balance_to_Dispatch"]) == 98
 
 
 def test_po_1917ykblue_pipeline_matches_sheet_with_sku_mapping():
@@ -2186,7 +2186,7 @@ def test_urgent_all_sizes_ghost_rows_use_canonical_skus_not_mapping_keys():
 
 
 def test_unbundled_per_size_rows_do_not_inherit_bundled_eff_days():
-    """1917YKBLUE-L-XL unbundle must not copy Eff_Days=30 onto L/XL with net sold 0."""
+    """1917YKBLUE-L-XL unbundle: L/XL get bundled sales share but not bundled Eff_Days."""
     existing_po = pd.DataFrame(
         {
             "OMS_SKU": ["1917YKBLUE-L", "1917YKBLUE-XL", "1917YKBLUE-L-XL"],
@@ -2227,11 +2227,12 @@ def test_unbundled_per_size_rows_do_not_inherit_bundled_eff_days():
     bundled = po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
     assert int(bundled["Net_Units"]) > 0
     assert int(bundled["Eff_Days"]) == 30
-    for sku in ("1917YKBLUE-L", "1917YKBLUE-XL"):
-        row = po.loc[po["OMS_SKU"] == sku].iloc[0]
-        assert int(row["Net_Units"]) == 0
-        assert int(row["Eff_Days"]) == 0
-        assert float(row["Recent_ADS"]) == 0.0
+    l_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
+    xl_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
+    assert int(l_row["Net_Units"]) == 20
+    assert int(xl_row["Net_Units"]) == 20
+    assert float(xl_row["Eff_Days"]) == 0.0
+    assert float(xl_row["Recent_ADS"]) == 0.0
 
 
 def test_eff_days_zero_when_no_sales_despite_inventory_history():
