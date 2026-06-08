@@ -76,6 +76,7 @@ export default function HRM() {
   const scopeLevel = scope?.level || 'all'
   const isEmployeeScope = scopeLevel === 'self'
   const canAssignTasks = !isEmployeeScope
+  const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || scope?.role === 'HOD')
 
   const [tab, setTab] = useState<Tab>('dashboard')
   const [selDept, setSelDept] = useState<number | ''>('')
@@ -100,6 +101,8 @@ export default function HRM() {
   const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
   const [editDept, setEditDept] = useState<any>(null)
   const [editEmp, setEditEmp] = useState<any>(null)
+  const [editResp, setEditResp] = useState<any>(null)
+  const [editTask, setEditTask] = useState<any>(null)
 
   // Blocked modal
   const [blockedModal, setBlockedModal] = useState<{ respId: number; date: string } | null>(null)
@@ -247,6 +250,10 @@ export default function HRM() {
   const createEmpMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/employees', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setShowEmpForm(false) } })
   const updateEmpMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/employees/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setEditEmp(null) } })
   const createRespMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/responsibilities', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-resps'] }); qc.invalidateQueries({ queryKey: ['hrm-hod'] }); setShowRespForm(false); setShowQuickResp(false); setAiParsed(null); setVoiceText('') } })
+  const updateRespMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/responsibilities/${id}`, data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-resps'] }); qc.invalidateQueries({ queryKey: ['hrm-hod'] }); setEditResp(null) },
+  })
   const deleteRespMut = useMutation({ mutationFn: (id: number) => api.delete(`/hrm/responsibilities/${id}`), onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-resps'] }) })
   const markTaskMut = useMutation({
     mutationFn: (b: object) => api.post('/hrm/tasks/mark', b),
@@ -261,6 +268,10 @@ export default function HRM() {
     qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
     qc.invalidateQueries({ queryKey: ['hrm-perf'] })
   }
+  const updateOneTimeTaskMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/one-time-tasks/${id}`, data),
+    onSuccess: () => { invalidateTaskMetrics(); setEditTask(null) },
+  })
   const createOneTimeTaskMut = useMutation({
     mutationFn: (b: object) => api.post('/hrm/one-time-tasks', b),
     onSuccess: () => {
@@ -754,11 +765,42 @@ export default function HRM() {
                   <tbody>
                     {resps.map((r: any) => (
                       <tr key={r.id} className="border-t hover:bg-gray-50">
-                        <td className="px-4 py-2 font-medium">{r.title}{r.description && <p className="text-xs text-gray-400">{r.description}</p>}</td>
-                        <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}</span></td>
-                        <td className="px-4 py-2 text-xs text-gray-500">{r.category}</td>
-                        <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
-                        <td className="px-4 py-2"><button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button></td>
+                        {editResp?.id === r.id ? (
+                          <td colSpan={5} className="px-4 py-3">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                              <input value={editResp.title} onChange={e => setEditResp((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Title" />
+                              <input value={editResp.description || ''} onChange={e => setEditResp((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
+                              <select value={editResp.frequency} onChange={e => setEditResp((x: any) => ({ ...x, frequency: e.target.value }))} className="border rounded px-2 py-1 text-sm">
+                                {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
+                              </select>
+                              <select value={editResp.category} onChange={e => setEditResp((x: any) => ({ ...x, category: e.target.value }))} className="border rounded px-2 py-1 text-sm">
+                                {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                              </select>
+                              <select value={editResp.employee_id} onChange={e => setEditResp((x: any) => ({ ...x, employee_id: +e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2">
+                                {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                              </select>
+                              <div className="flex gap-2 col-span-2">
+                                <button onClick={() => updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id } })} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                                <button onClick={() => setEditResp(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
+                              </div>
+                            </div>
+                          </td>
+                        ) : (
+                          <>
+                            <td className="px-4 py-2 font-medium">{r.title}{r.description && <p className="text-xs text-gray-400">{r.description}</p>}</td>
+                            <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}</span></td>
+                            <td className="px-4 py-2 text-xs text-gray-500">{r.category}</td>
+                            <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
+                            <td className="px-4 py-2">
+                              {canEditAssignments && (
+                                <div className="flex gap-2">
+                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id })} className="text-xs text-blue-600">✏️</button>
+                                  <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
+                                </div>
+                              )}
+                            </td>
+                          </>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -846,50 +888,72 @@ export default function HRM() {
               <tbody>
                 {(oneTimeTasks as any[]).map((t: any) => (
                   <tr key={t.id} className="border-t hover:bg-gray-50 align-top">
-                    <td className="px-4 py-3">
-                      <p className="font-medium text-gray-800">{t.title}</p>
-                      {t.description && <p className="text-xs text-gray-400 mt-0.5">{t.description}</p>}
-                      {t.completion_notes && <p className="text-xs text-amber-700 mt-1">Done: {t.completion_notes}</p>}
-                      {t.approval_notes && <p className="text-xs text-gray-500 mt-1">HOD: {t.approval_notes}</p>}
-                    </td>
-                    <td className="px-4 py-3">
-                      <p className="font-medium">{t.employee_name}</p>
-                      <p className="text-xs text-gray-400">{t.department_name || '—'}</p>
-                      {t.assigned_by && <p className="text-xs text-gray-400 mt-0.5">By {t.assigned_by}</p>}
-                    </td>
-                    <td className="px-4 py-3 text-gray-600">{t.due_date || '—'}</td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-500">
-                      <p>Start: {fmtDateTime(t.started_at)}</p>
-                      <p>End: {fmtDateTime(t.completed_at)}</p>
-                      <p className="font-semibold text-[#002B5B] mt-0.5">{fmtDuration(t.duration_minutes)}</p>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1 justify-end">
-                        {(t.status === 'Pending' || t.status === 'Rejected') && (
-                          <button onClick={() => startOneTimeTaskMut.mutate(t.id)} disabled={startOneTimeTaskMut.isPending}
-                            className="text-xs px-2 py-1 bg-blue-600 text-white rounded">▶ Start</button>
-                        )}
-                        {t.status === 'In Progress' && (
-                          <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
-                            className="text-xs px-2 py-1 bg-amber-500 text-white rounded">✓ Mark Done</button>
-                        )}
-                        {t.status === 'Done' && canAssignTasks && (
-                          <>
-                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes('') }}
-                              className="text-xs px-2 py-1 bg-green-600 text-white rounded">Approve</button>
-                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes('') }}
-                              className="text-xs px-2 py-1 bg-red-500 text-white rounded">Reject</button>
-                          </>
-                        )}
-                        {canAssignTasks && t.status !== 'Approved' && (
-                          <button onClick={() => { if (window.confirm('Cancel this task?')) cancelOneTimeTaskMut.mutate(t.id) }}
-                            className="text-xs px-2 py-1 border rounded text-red-600">Cancel</button>
-                        )}
-                      </div>
-                    </td>
+                    {editTask?.id === t.id ? (
+                      <td colSpan={6} className="px-4 py-3">
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                          <input value={editTask.title} onChange={e => setEditTask((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Task title" />
+                          <input value={editTask.description || ''} onChange={e => setEditTask((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
+                          <input type="date" value={editTask.due_date || ''} onChange={e => setEditTask((x: any) => ({ ...x, due_date: e.target.value }))} className="border rounded px-2 py-1 text-sm" />
+                          <select value={editTask.employee_id} onChange={e => setEditTask((x: any) => ({ ...x, employee_id: +e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2">
+                            {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                          </select>
+                          <div className="flex gap-2 col-span-3">
+                            <button onClick={() => updateOneTimeTaskMut.mutate({ id: t.id, data: { title: editTask.title, description: editTask.description, due_date: editTask.due_date, employee_id: editTask.employee_id } })} disabled={!editTask.title || updateOneTimeTaskMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                            <button onClick={() => setEditTask(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
+                          </div>
+                        </div>
+                      </td>
+                    ) : (
+                      <>
+                        <td className="px-4 py-3">
+                          <p className="font-medium text-gray-800">{t.title}</p>
+                          {t.description && <p className="text-xs text-gray-400 mt-0.5">{t.description}</p>}
+                          {t.completion_notes && <p className="text-xs text-amber-700 mt-1">Done: {t.completion_notes}</p>}
+                          {t.approval_notes && <p className="text-xs text-gray-500 mt-1">HOD: {t.approval_notes}</p>}
+                        </td>
+                        <td className="px-4 py-3">
+                          <p className="font-medium">{t.employee_name}</p>
+                          <p className="text-xs text-gray-400">{t.department_name || '—'}</p>
+                          {t.assigned_by && <p className="text-xs text-gray-400 mt-0.5">By {t.assigned_by}</p>}
+                        </td>
+                        <td className="px-4 py-3 text-gray-600">{t.due_date || '—'}</td>
+                        <td className="px-4 py-3">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
+                        </td>
+                        <td className="px-4 py-3 text-xs text-gray-500">
+                          <p>Start: {fmtDateTime(t.started_at)}</p>
+                          <p>End: {fmtDateTime(t.completed_at)}</p>
+                          <p className="font-semibold text-[#002B5B] mt-0.5">{fmtDuration(t.duration_minutes)}</p>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-1 justify-end">
+                            {canEditAssignments && t.status !== 'Approved' && (
+                              <button onClick={() => setEditTask({ id: t.id, title: t.title, description: t.description || '', due_date: t.due_date || '', employee_id: t.employee_id })} className="text-xs px-2 py-1 border rounded text-blue-600">✏️ Edit</button>
+                            )}
+                            {(t.status === 'Pending' || t.status === 'Rejected') && (
+                              <button onClick={() => startOneTimeTaskMut.mutate(t.id)} disabled={startOneTimeTaskMut.isPending}
+                                className="text-xs px-2 py-1 bg-blue-600 text-white rounded">▶ Start</button>
+                            )}
+                            {t.status === 'In Progress' && (
+                              <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
+                                className="text-xs px-2 py-1 bg-amber-500 text-white rounded">✓ Mark Done</button>
+                            )}
+                            {t.status === 'Done' && canAssignTasks && (
+                              <>
+                                <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes('') }}
+                                  className="text-xs px-2 py-1 bg-green-600 text-white rounded">Approve</button>
+                                <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes('') }}
+                                  className="text-xs px-2 py-1 bg-red-500 text-white rounded">Reject</button>
+                              </>
+                            )}
+                            {canAssignTasks && t.status !== 'Approved' && (
+                              <button onClick={() => { if (window.confirm('Cancel this task?')) cancelOneTimeTaskMut.mutate(t.id) }}
+                                className="text-xs px-2 py-1 border rounded text-red-600">Cancel</button>
+                            )}
+                          </div>
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>

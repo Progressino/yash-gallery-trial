@@ -98,6 +98,11 @@ class HrmScope:
     def is_employee(self) -> bool:
         return self.role == ROLE_EMPLOYEE
 
+    @property
+    def can_edit_assignments(self) -> bool:
+        """HOD or Admin (incl. Super Admin / Sir) may edit responsibilities and one-time tasks."""
+        return self.can_manage_org or self.is_hod
+
 
 def _parse_module_access(raw: str | None) -> list[str] | None:
     if not raw or not str(raw).strip():
@@ -239,6 +244,13 @@ def assert_hrm_write_org(scope: HrmScope) -> None:
 
     if not scope.can_manage_org:
         raise HTTPException(403, "Only Admin or management can manage departments and employees")
+
+
+def assert_hrm_hod_or_admin(scope: HrmScope) -> None:
+    from fastapi import HTTPException
+
+    if not scope.can_edit_assignments:
+        raise HTTPException(403, "Only HOD or Admin can edit tasks and responsibilities")
 
 
 def assert_responsibility_in_scope(scope: HrmScope, responsibility_id: int) -> int:

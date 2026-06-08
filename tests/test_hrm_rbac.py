@@ -53,6 +53,13 @@ def test_hrm_scope_levels():
     assert build_hrm_scope(_profile("Employee", employee_id=9)).level == "self"
 
 
+def test_hrm_edit_assignment_permission_flags():
+    assert build_hrm_scope(_profile("Admin")).can_edit_assignments is True
+    assert build_hrm_scope(_profile("Super Admin")).can_edit_assignments is True
+    assert build_hrm_scope(_profile("HOD", hrm_department_id=2)).can_edit_assignments is True
+    assert build_hrm_scope(_profile("Employee", employee_id=1)).can_edit_assignments is False
+
+
 def _make_client(monkeypatch, username: str, profile: dict):
     def _decode(token: str | None):
         if token == "tok":
@@ -124,6 +131,50 @@ def test_employee_cannot_create_department(monkeypatch):
     client = _make_client(monkeypatch, "emp2", _profile("Employee", employee_id=1))
     r = client.post("/api/hrm/departments", json={"name": "Hack"})
     assert r.status_code == 403
+
+
+def _seed_resp_and_task():
+    dept_name = f"D-{uuid.uuid4().hex[:6]}"
+    hrm_db.create_department({"name": dept_name})
+    dept_id = hrm_db.list_departments()[-1]["id"]
+    hrm_db.create_employee({"name": "Worker", "department_id": dept_id})
+    emp_id = hrm_db.list_employees(dept_id)[0]["id"]
+    hrm_db.create_responsibility({"employee_id": emp_id, "title": "Daily check", "frequency": "Daily"})
+    rid = hrm_db.list_responsibilities(employee_id=emp_id)[0]["id"]
+    tid = hrm_db.create_one_time_task({"employee_id": emp_id, "title": "One-off audit"})
+    return dept_id, emp_id, rid, tid
+
+
+def test_hod_can_edit_responsibility_and_task(monkeypatch):
+    dept_id, emp_id, rid, tid = _seed_resp_and_task()
+    client = _make_client(
+        monkeypatch,
+        "hod_edit",
+        _profile("HOD", hrm_department_id=dept_id),
+    )
+    assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Updated daily check"}).status_code == 200
+    assert client.patch(f"/api/hrm/one-time-tasks/{tid}", json={"title": "Updated audit"}).status_code == 200
+    assert hrm_db.list_responsibilities(employee_id=emp_id)[0]["title"] == "Updated daily check"
+    assert hrm_db.list_one_time_tasks(employee_id=emp_id)[0]["title"] == "Updated audit"
+
+
+def test_employee_cannot_edit_responsibility_or_task(monkeypatch):
+    dept_id, emp_id, rid, tid = _seed_resp_and_task()
+    client = _make_client(
+        monkeypatch,
+        "emp_edit",
+        _profile("Employee", employee_id=emp_id, hrm_department_id=dept_id),
+    )
+    assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Hack"}).status_code == 403
+    assert client.patch(f"/api/hrm/one-time-tasks/{tid}", json={"title": "Hack"}).status_code == 403
+    assert client.delete(f"/api/hrm/responsibilities/{rid}").status_code == 403
+
+
+def test_admin_can_edit_responsibility(monkeypatch):
+    _, emp_id, rid, _ = _seed_resp_and_task()
+    client = _make_client(monkeypatch, "admin_edit", _profile("Admin"))
+    assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Admin edit"}).status_code == 200
+    assert hrm_db.list_responsibilities(employee_id=emp_id)[0]["title"] == "Admin edit"
 
 
 def test_create_hod_user_seeded_roles():

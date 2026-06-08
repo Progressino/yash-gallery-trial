@@ -40,6 +40,7 @@ from ..services.rbac import (
     assert_department_in_scope,
     assert_employee_in_scope,
     assert_hrm_write_org,
+    assert_hrm_hod_or_admin,
     assert_responsibility_in_scope,
     HrmScope,
 )
@@ -167,6 +168,7 @@ def get_hrm_scope(request: Request):
         "employee_id": scope.employee_id,
         "department_id": scope.department_id,
         "can_manage_org": scope.can_manage_org,
+        "can_edit_assignments": scope.can_edit_assignments,
     }
 
 
@@ -260,6 +262,7 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
 @router.patch("/responsibilities/{rid}")
 def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request):
     scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
     from ..db.hrm_db import get_responsibility_owner
 
     owner = get_responsibility_owner(rid)
@@ -275,14 +278,13 @@ def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request)
 @router.delete("/responsibilities/{rid}")
 def del_responsibility(rid: int, request: Request):
     scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
     from ..db.hrm_db import get_responsibility_owner
 
     owner = get_responsibility_owner(rid)
     if owner is None:
         raise HTTPException(404, "Responsibility not found")
     assert_employee_in_scope(scope, owner)
-    if scope.is_employee:
-        raise HTTPException(403, "Employees cannot delete responsibilities")
     delete_responsibility(rid)
     return {"ok": True}
 
@@ -431,12 +433,11 @@ def post_one_time_task(body: OneTimeTaskIn, request: Request):
 @router.patch("/one-time-tasks/{task_id}")
 def patch_one_time_task(task_id: int, body: OneTimeTaskUpdate, request: Request):
     scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
     owner = get_one_time_task_owner(task_id)
     if owner is None:
         raise HTTPException(404, "Task not found")
     assert_employee_in_scope(scope, owner)
-    if scope.is_employee:
-        raise HTTPException(403, "Employees cannot edit task assignments")
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     if "employee_id" in data:
         assert_employee_in_scope(scope, int(data["employee_id"]))
