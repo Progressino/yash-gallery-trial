@@ -510,7 +510,7 @@ def test_po_4_jun_fixture_pending_cutting_flows_to_calculate():
 
 
 def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
-    """Duplicate inventory rows collapse; bundled inventory unbundles to per-size PO rows."""
+    """Duplicate inventory rows collapse; bundled listing keeps stock, per-size gets pipeline."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")
     sales = pd.DataFrame(
         {
@@ -545,7 +545,9 @@ def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
         safety_pct=0.0,
         existing_po_df=existing_po,
     )
-    assert po[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"].empty
+    bundled = po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"].iloc[0]
+    assert float(bundled["Total_Inventory"]) == 22
+    assert int(bundled["PO_Pipeline_Total"]) == 0
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL", "PO_Pipeline_Total"].iloc[0]) == 85
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 77
 
@@ -2438,6 +2440,15 @@ def test_bundled_only_existing_po_fans_out_to_per_size_pipeline():
     assert int(xl_row["Pending_Cutting"]) == 160
     assert int(l_row["Balance_to_Dispatch"]) == 2
     assert int(xl_row["Balance_to_Dispatch"]) == 2
+    lxl = po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
+    band45 = po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"].iloc[0]
+    assert float(lxl["Total_Inventory"]) == 46
+    assert int(lxl["Pending_Cutting"]) == 0
+    assert float(band45["Total_Inventory"]) == 21
+    assert int(band45["Pending_Cutting"]) == 0
+    assert l_row["Bundle_Size"] == "L-XL"
+    assert xl_row["Bundle_Size"] == "L-XL"
+    assert lxl["Bundle_Size"] == "L-XL"
 
 
 def test_ship150_span_fallback_when_no_inventory_history():

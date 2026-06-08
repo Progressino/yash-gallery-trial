@@ -93,7 +93,7 @@ interface QuarterlyResult {
 }
 
 const PO_DISPLAY_COLS = [
-  'Priority', 'OMS_SKU', 'SKU_Sheet_Status', 'Lead_Time_Days', 'Total_Inventory', 'Days_Left',
+  'Priority', 'OMS_SKU', 'Bundle_Size', 'SKU_Sheet_Status', 'Lead_Time_Days', 'Total_Inventory', 'Days_Left',
   'Sold_Units', 'Return_Units', 'Return_Overlay_Units', 'Net_Units',
   'Ship_Units_150d', 'Eff_Days', 'Eff_Days_Inventory',
   'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
@@ -107,6 +107,7 @@ const PO_DISPLAY_COLS = [
 ]
 
 const COL_LABEL: Record<string, string> = {
+  'Bundle_Size':              '📦 Bundle size',
   'Sold_Units':               '📦 Sold Units',
   'Return_Units':             '↩️ Returns (sales)',
   'Return_Overlay_Units':     '↩️ Returns (upload)',

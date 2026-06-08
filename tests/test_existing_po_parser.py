@@ -126,6 +126,61 @@ def test_prepare_existing_po_expands_bundled_only_parent_on_mixed_sheet():
     assert int(out.loc[out["OMS_SKU"] == "1361YKBLUE-L", "PO_Pipeline_Total"].iloc[0]) == 100
 
 
+def test_build_bundle_listing_map_links_children_to_band():
+    from backend.services.existing_po import build_bundle_listing_map
+
+    m = build_bundle_listing_map(
+        ["1917YKBLUE-L-XL", "1917YKBLUE-S-M", "1361YKBLUE-XL"],
+    )
+    assert m["1917YKBLUE-L"] == "L-XL"
+    assert m["1917YKBLUE-XL"] == "L-XL"
+    assert m["1917YKBLUE-L-XL"] == "L-XL"
+    assert m["1917YKBLUE-S"] == "S-M"
+    assert "1361YKBLUE-XL" not in m
+
+
+def test_unbundle_keeps_bundled_inventory_row_when_sheet_expanded():
+    from backend.services.existing_po import (
+        existing_po_merge_key,
+        prepare_existing_po_for_merge,
+        unbundle_inventory_rows_for_existing_po,
+    )
+
+    ep = prepare_existing_po_for_merge(
+        pd.DataFrame(
+            {
+                "OMS_SKU": ["1917YKBLUE-L-XL"],
+                "PO_Pipeline_Total": [324],
+                "Pending_Cutting": [320],
+                "Balance_to_Dispatch": [4],
+            }
+        ),
+        existing_po_merge_key,
+    )
+    po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-L-XL"],
+            "Total_Inventory": [46],
+            "Sold_Units": [19],
+            "Net_Units": [19],
+            "ADS": [1.0],
+            "Eff_Days": [30],
+            "PO_Pipeline_Total": [0],
+            "Pending_Cutting": [0],
+            "Balance_to_Dispatch": [0],
+        }
+    )
+    out = unbundle_inventory_rows_for_existing_po(
+        po,
+        ep,
+        ["Pending_Cutting", "Balance_to_Dispatch"],
+        canonical_fn=existing_po_merge_key,
+    )
+    assert "1917YKBLUE-L-XL" in set(out["OMS_SKU"])
+    assert float(out.loc[out["OMS_SKU"] == "1917YKBLUE-L-XL", "Total_Inventory"].iloc[0]) == 46
+    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "Pending_Cutting"].iloc[0]) == 160
+
+
 def test_prepare_existing_po_keeps_bundled_when_per_size_children_exist():
     from backend.services.existing_po import existing_po_merge_key, prepare_existing_po_for_merge
 

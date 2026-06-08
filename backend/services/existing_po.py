@@ -321,6 +321,44 @@ def is_bundled_size_range_sku(sku: object) -> bool:
     )
 
 
+def bundle_band_label(sku: object) -> str:
+    """L-XL from 1917YKBLUE-L-XL; empty when not a bundled size-range SKU."""
+    parts = _DASH_SPLIT_RE.split(_normalize_sku_text(sku))
+    if (
+        len(parts) >= 3
+        and parts[-1] in _PO_SIZE_TOKENS
+        and parts[-2] in _PO_SIZE_TOKENS
+        and parts[-1] != parts[-2]
+    ):
+        return f"{parts[-2]}-{parts[-1]}"
+    return ""
+
+
+def build_bundle_listing_map(*sku_sources) -> dict[str, str]:
+    """Map per-size and bundled OMS_SKU → bundle band label (e.g. L-XL)."""
+    out: dict[str, str] = {}
+    for source in sku_sources:
+        if source is None:
+            continue
+        try:
+            skus = source
+            if hasattr(source, "astype"):
+                skus = source.astype(str)
+            for raw in skus:
+                sku = _normalize_sku_text(raw)
+                if not is_bundled_size_range_sku(sku):
+                    continue
+                band = bundle_band_label(sku)
+                if not band:
+                    continue
+                out[sku] = band
+                for child in _split_bundled_po_sku(sku):
+                    out[_normalize_sku_text(child)] = band
+        except Exception:
+            continue
+    return out
+
+
 def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fan out combined size-range PO lines (S-M, XXL-3XL) to individual OMS SKUs
@@ -768,6 +806,10 @@ def unbundle_inventory_rows_for_existing_po(
     if not breakdown:
         return po_df
 
+    for col in breakdown:
+        if col not in po_df.columns:
+            po_df[col] = 0
+
     merge_key = canonical_fn or existing_po_merge_key
     ep_idx = ep.set_index("OMS_SKU")
     split_metrics = [
@@ -840,7 +882,14 @@ def unbundle_inventory_rows_for_existing_po(
                     val = pd.to_numeric(ep_idx.at[bundled_key, col], errors="coerce")
                     po_df.at[idx, col] = 0 if pd.isna(val) else val
         else:
-            drop_idx.append(idx)
+            # Keep bundled listing rows when they still hold marketplace inventory.
+            inv_on_row = pd.to_numeric(row.get("Total_Inventory"), errors="coerce")
+            if pd.isna(inv_on_row) or float(inv_on_row) <= 0:
+                drop_idx.append(idx)
+            else:
+                for col in breakdown:
+                    if col in po_df.columns:
+                        po_df.at[idx, col] = 0
 
     if not drop_idx and not new_rows:
         return po_df

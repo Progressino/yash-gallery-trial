@@ -2110,6 +2110,29 @@ def calculate_po_base(
 
         po_df["OMS_SKU"] = po_df["OMS_SKU"].astype(str).map(_output_oms_key)
 
-    from .existing_po import dedupe_po_rows_by_sku
+    from .existing_po import (
+        build_bundle_listing_map,
+        dedupe_po_rows_by_sku,
+        existing_po_merge_key,
+    )
+
+    _bundle_sources = []
+    if inv_df is not None and not getattr(inv_df, "empty", True) and "OMS_SKU" in inv_df.columns:
+        _bundle_sources.append(inv_df["OMS_SKU"])
+    if (
+        existing_po_df is not None
+        and not getattr(existing_po_df, "empty", True)
+        and "OMS_SKU" in existing_po_df.columns
+    ):
+        _bundle_sources.append(existing_po_df["OMS_SKU"])
+    if "OMS_SKU" in po_df.columns:
+        _bundle_sources.append(po_df["OMS_SKU"])
+    _bundle_map = build_bundle_listing_map(*_bundle_sources)
+    if _bundle_map:
+        po_df["Bundle_Size"] = po_df["OMS_SKU"].astype(str).map(
+            lambda s: _bundle_map.get(existing_po_merge_key(s), "")
+        )
+    else:
+        po_df["Bundle_Size"] = ""
 
     return dedupe_po_rows_by_sku(po_df)
