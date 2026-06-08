@@ -43,11 +43,12 @@ LATE_OUT_GRACE_MINUTES = 5
 # If worker leaves early at/before 16:00, apply extra 30-minute deduction.
 EARLY_LEAVE_16_PENALTY_MINUTES = 30
 
-# Sunday policy: 7-hour shift including 1-hour lunch, so payable basis is 6 hours.
-SUNDAY_WORK_END = time(17, 0)
+# Sunday policy: 09:00–16:00 wall clock, 13:00–14:00 lunch → 6h payable basis.
+SUNDAY_WORK_END = time(16, 0)
 SUNDAY_LUNCH_START = time(13, 0)
 SUNDAY_LUNCH_END = time(14, 0)
 SUNDAY_PAYABLE_MINUTES = 6 * 60
+SUNDAY_LAST_PRODUCTION_HOUR = "H_15_16"
 # work_minutes uses WORK_BLOCKS (already excludes lunch/tea slots); near-full days skip extra lunch cut
 NEAR_FULL_BLOCK_MINUTES = STANDARD_PAY_MINUTES - 15
 
@@ -59,8 +60,31 @@ WORK_BLOCKS = (
 )
 
 
+def _as_date(on_date: str | date | None) -> date:
+    if isinstance(on_date, date):
+        return on_date
+    return pd.to_datetime(on_date or date.today()).date()
+
+
+def hourly_rate_from_daily(daily_rate: float, on_date: str | date | None = None) -> float:
+    """Hourly rate for payroll/costing: daily ÷ 8 on weekdays, daily ÷ 6 on Sunday."""
+    pol = _policy_for_date(_as_date(on_date))
+    hours = pol["standard_pay_minutes"] / 60.0
+    return round(float(daily_rate or 0) / hours, 4) if hours > 0 else 0.0
+
+
+def production_hour_cols_for_date(on_date: str | date) -> list[str]:
+    """Production hour columns allowed on this date (Sunday ends at 15–16 / 16:00)."""
+    from ..db.stitching_db import HOUR_COLS
+
+    base = _as_date(on_date)
+    if base.weekday() != 6:
+        return list(HOUR_COLS)
+    return [h for h in HOUR_COLS if h <= SUNDAY_LAST_PRODUCTION_HOUR or h == "H_13_14"]
+
+
 def _policy_for_date(base: date) -> dict[str, Any]:
-    """Dynamic shift policy. Sunday uses 09:00–17:00 with 13:00–14:00 lunch (6h payable basis)."""
+    """Dynamic shift policy. Sunday uses 09:00–16:00 with 13:00–14:00 lunch (6h payable basis)."""
     is_sunday = base.weekday() == 6
     if not is_sunday:
         return {
@@ -224,7 +248,7 @@ def deserialize_punch_pairs(raw: Any) -> list[tuple[time, time | None]]:
 
 def _intervals_from_pairs(pairs: list[tuple[time, time | None]], base: date) -> list[tuple[datetime, datetime]]:
     intervals: list[tuple[datetime, datetime]] = []
-    default_out = WORK_END
+    default_out = _policy_for_date(base)["work_end"]
     for tin, tout in pairs:
         start = _dt_on(base, tin)
         if tout is None:
@@ -271,10 +295,12 @@ def calc_salary_from_punches(
     """
     Apply karigar attendance / OT policy to clock-in/out punches.
 
-    Regular pay uses 8 hours/day; hourly rate = daily_rate / 8.
+    Regular pay uses 8h/day (weekday) or 6h/day (Sunday); hourly = daily ÷ shift hours.
     OT uses the same hourly rate (no multiplier).
     """
-    hourly = round(float(daily_rate or 0) / 8, 4)
+    base = _as_date(on_date)
+    pol = _policy_for_date(base)
+    hourly = hourly_rate_from_daily(daily_rate, base)
     zero = {
         "Status": status,
         "Total_Presence_Hrs": 0.0,
@@ -292,8 +318,6 @@ def calc_salary_from_punches(
     if status in ("A", "WO") or daily_rate <= 0 or not punch_pairs:
         return zero
 
-    base = pd.to_datetime(on_date or date.today()).date()
-    pol = _policy_for_date(base)
     intervals = _intervals_from_pairs(punch_pairs, base)
     if not intervals:
         return zero
@@ -411,8 +435,10 @@ def calc_salary_from_punches(
             datetime.combine(base, pol["work_end"]) - datetime.combine(base, last_out)
         ).total_seconds() / 60.0
     early_min_payable = 0.0 if early_min <= EARLY_LEAVE_GRACE_MINUTES else early_min
-    # Rulebook: if out at/before 16:00, deduct extra 30 minutes.
-    early_16_penalty = float(EARLY_LEAVE_16_PENALTY_MINUTES) if last_out <= time(16, 0) else 0.0
+    # Rulebook: weekday early-out at/before 16:00 → extra 30m; Sunday shift ends at 16:00 (no penalty).
+    early_16_penalty = 0.0
+    if not pol.get("is_sunday") and last_out <= time(16, 0):
+        early_16_penalty = float(EARLY_LEAVE_16_PENALTY_MINUTES)
 
     work_net_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
 

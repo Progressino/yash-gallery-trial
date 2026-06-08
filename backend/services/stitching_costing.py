@@ -1384,13 +1384,16 @@ def save_production_entry(
                 "Hourly_Target": max(1, int(row["Target"])),
             }
 
+        from .karigar_attendance import production_hour_cols_for_date
+
+        allowed_hours = set(production_hour_cols_for_date(date_str))
         h_vals = resolve_session_hour_pieces(hour_entries)
         si_vals: dict[str, int] = {}
         so_vals: dict[str, int] = {}
         op_vals: dict[str, str | None] = {}
         for e in hour_entries:
             hc = e.get("hour_col") or e.get("hour")
-            if hc not in HOUR_COLS:
+            if hc not in HOUR_COLS or hc not in allowed_hours:
                 continue
             si_vals[hc] = int(e.get("sticker_in") or 0)
             so_vals[hc] = int(e.get("sticker_out") or 0)
@@ -1406,7 +1409,7 @@ def save_production_entry(
                     op_vals[hc] = only_op
 
         op_totals: dict[str, dict] = defaultdict(lambda: {"pieces": 0, "hours": 0, "value": 0.0})
-        for hc in HOUR_COLS:
+        for hc in production_hour_cols_for_date(date_str):
             if hc == "H_13_14":
                 continue
             op = op_vals.get(hc)
@@ -2109,8 +2112,12 @@ def import_zip_bytes(zb: bytes) -> dict:
     return {"ok": True, "message": "All data restored"}
 
 
-def hour_labels() -> list[dict]:
-    return [{"col": c, "label": l} for c, l in zip(HOUR_COLS, HOUR_LBLS)]
+def hour_labels(for_date: str | None = None) -> list[dict]:
+    from .karigar_attendance import production_hour_cols_for_date
+
+    cols = production_hour_cols_for_date(for_date) if for_date else HOUR_COLS
+    allowed = set(cols)
+    return [{"col": c, "label": l} for c, l in zip(HOUR_COLS, HOUR_LBLS) if c in allowed]
 
 
 def _get_daily_salary(karigar_id: str, as_of_date: str | None = None) -> float:
@@ -2286,10 +2293,16 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
 
     recent = history_rows[:5] if history_rows else []
 
-    orig_hour_cols = [h for h in HOUR_COLS if h != "H_13_14" and h in day_pl.columns]
+    from .karigar_attendance import production_hour_cols_for_date
+
+    valid_hour_cols = [
+        h
+        for h in production_hour_cols_for_date(date_str)
+        if h != "H_13_14" and h in day_pl.columns
+    ]
 
     def working_hours(row) -> int:
-        return sum(1 for h in orig_hour_cols if safe_num(pd.Series([row.get(h, 0)])).iloc[0] > 0)
+        return sum(1 for h in valid_hour_cols if safe_num(pd.Series([row.get(h, 0)])).iloc[0] > 0)
 
     report1_rows = []
     for _, row in day_pl.iterrows():
@@ -2299,7 +2312,9 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         rate = float(row.get("Rate_Rs") or 0)
         kid = str(row.get("Karigar_ID", ""))
         daily_salary = _daily_salary_for_row(kid, date_str, row)
-        hourly_salary = round(daily_salary / 8, 2)
+        from .karigar_attendance import hourly_rate_from_daily
+
+        hourly_salary = round(hourly_rate_from_daily(daily_salary, date_str), 2)
         adj_target = round(applied_ltl * wh, 0)
         total_pcs = float(row.get("Total_Pieces") or 0)
         efficiency = round(total_pcs / adj_target * 100, 1) if adj_target > 0 else 0.0
@@ -2353,10 +2368,12 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         applied_ltl = float(row.get("Applied_LTL") or row.get("Target") or 0)
 
         daily_rate = _daily_salary_for_row(kid, date_str, row)
-        hourly_sal = round(daily_rate / 8, 2)
+        from .karigar_attendance import hourly_rate_from_daily
+
+        hourly_sal = round(hourly_rate_from_daily(daily_rate, date_str), 2)
 
         for hcol, hlbl in zip(HOUR_COLS, HOUR_LBLS):
-            if hcol == "H_13_14" or hcol not in row.index:
+            if hcol == "H_13_14" or hcol not in row.index or hcol not in valid_hour_cols:
                 continue
             pcs = int(safe_num(pd.Series([row.get(hcol, 0)])).iloc[0])
             if pcs <= 0:

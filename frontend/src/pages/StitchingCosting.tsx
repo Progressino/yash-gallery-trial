@@ -65,6 +65,21 @@ interface HourDef {
   label: string
 }
 
+/** Sunday shift is 09:00–16:00 — hide 16–17 and later production hours. */
+const SUNDAY_CLOSED_HOUR_COLS = new Set([
+  'H_16_17',
+  'H_17_18',
+  'H_18_19',
+  'H_19_20',
+  'H_20_21',
+])
+
+function hoursForEntryDate(allHours: HourDef[], dateStr: string): HourDef[] {
+  const d = new Date(`${dateStr}T12:00:00`)
+  if (Number.isNaN(d.getTime()) || d.getDay() !== 0) return allHours
+  return allHours.filter(h => !SUNDAY_CLOSED_HOUR_COLS.has(h.col))
+}
+
 interface DashboardData {
   date: string
   metrics: {
@@ -482,6 +497,7 @@ function ProductionTab({
   lockedKarigarId?: string
 }) {
   const [entryDate, setEntryDate] = useState(todayStr())
+  const activeHours = useMemo(() => hoursForEntryDate(hours, entryDate), [hours, entryDate])
   const [karigarId, setKarigarId] = useState(lockedKarigarId || '')
   const [style, setStyle] = useState('')
   const [challanNo, setChallanNo] = useState('')
@@ -635,7 +651,7 @@ function ProductionTab({
         timeout: 30_000,
       })
       const next: Record<string, HourEntryState> = {}
-      for (const h of hours) {
+      for (const h of activeHours) {
         next[h.col] = normalizeLoadedHourEntry(data.hours?.[h.col] ?? {})
       }
       setHourState(next)
@@ -645,7 +661,7 @@ function ProductionTab({
       loadInProgressRef.current = false
       skipAutoSaveRef.current = true
     }
-  }, [entryDate, karigarId, challanNo, style, hours])
+  }, [entryDate, karigarId, challanNo, style, activeHours])
 
   useEffect(() => {
     void loadEntry()
@@ -796,13 +812,13 @@ function ProductionTab({
   }, [karigars, karigarId])
 
   const liveSummary = useMemo(
-    () => computeEntrySummary(hourState, hours, operations, karigarDailyRate),
-    [hourState, hours, operations, karigarDailyRate],
+    () => computeEntrySummary(hourState, activeHours, operations, karigarDailyRate),
+    [hourState, activeHours, operations, karigarDailyRate],
   )
 
   const buildHourEntries = useCallback(() => {
-    const sessionPcs = resolveSessionHourPieces(hours, hourState)
-    return hours
+    const sessionPcs = resolveSessionHourPieces(activeHours, hourState)
+    return activeHours
       .filter(h => h.col !== 'H_13_14')
       .map(h => {
         const st = hourState[h.col] ?? emptyHourEntry()
@@ -815,7 +831,7 @@ function ProductionTab({
           manual_pieces: st.manual_pieces,
         }
       })
-  }, [hours, hourState])
+  }, [activeHours, hourState])
 
   const normalizeHourEntriesForSave = useCallback(() => {
     const entries = buildHourEntries()
@@ -830,14 +846,14 @@ function ProductionTab({
 
   const piecesWithoutOp = useMemo(() => {
     let n = 0
-    for (const h of hours) {
+    for (const h of activeHours) {
       if (h.col === 'H_13_14') continue
       const st = hourState[h.col]
       const pcs = resolveHourPieces(st)
       if (pcs > 0 && !st?.operation) n += pcs
     }
     return n
-  }, [hours, hourState])
+  }, [activeHours, hourState])
 
   const saveBlockReason = useMemo(() => {
     if (!karigarId) return 'Select karigar'
@@ -937,8 +953,8 @@ function ProductionTab({
     skipAutoSaveRef.current = false
     setHourState(prev => {
       const merged = { ...prev, [col]: applyHourEntryPatch(prev[col], patch) }
-      const sessionPcs = resolveSessionHourPieces(hours, merged)
-      for (const h of hours) {
+      const sessionPcs = resolveSessionHourPieces(activeHours, merged)
+      for (const h of activeHours) {
         if (h.col === 'H_13_14') continue
         const st = merged[h.col]
         if (!st || st.manual_pieces) continue
@@ -1116,7 +1132,7 @@ function ProductionTab({
         </p>
 
         <div className="space-y-2 mb-3 md:hidden">
-          {hours.map(h => {
+          {activeHours.map(h => {
             if (h.col === 'H_13_14') {
               return (
                 <div key={h.col} className="rounded-lg bg-gray-50 border border-dashed px-3 py-2 text-xs text-gray-400 italic text-center">
@@ -1206,7 +1222,7 @@ function ProductionTab({
               </tr>
             </thead>
             <tbody>
-              {hours.map(h => {
+              {activeHours.map(h => {
                 if (h.col === 'H_13_14') {
                   return (
                     <tr key={h.col} className="bg-gray-50 text-gray-400 italic">
@@ -2240,8 +2256,8 @@ function StitchingReportsTab() {
       <Section title="How payroll is calculated">
         <div className="text-xs text-gray-600 space-y-2 max-w-3xl">
           <p>
-            <strong>Attendance pay</strong> comes from biometric punches (09:00–18:00 blocks, lunch/tea deductions,
-            late/early rules, OT after 18:00 billed in whole hours at daily rate ÷ 8). Stored in{' '}
+            <strong>Attendance pay</strong> comes from biometric punches (weekdays 09:00–18:00; Sunday 09:00–16:00
+            with 13:00–14:00 lunch; hourly = daily ÷ 8 weekdays, daily ÷ 6 Sunday). Stored in{' '}
             <em>Karigar Attendance</em> as Normal + OT = Total_Pay.
           </p>
           <p>

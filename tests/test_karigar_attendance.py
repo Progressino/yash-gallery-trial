@@ -101,17 +101,26 @@ def test_late_out_grace_2059_counts_as_21():
     assert out["Total_Pay"] == 715.0
 
 
-def test_sunday_7_hour_basis_6_hour_payable_full_day():
-    """Sunday: shift 09:00–17:00 with 13:00–14:00 lunch => 6h payable basis = full daily rate."""
+def test_sunday_9_to_4_full_day_payable_and_hourly_basis():
+    """Sunday: shift 09:00–16:00 with 13:00–14:00 lunch => 6h payable = full daily rate."""
     # 2026-06-07 is a Sunday.
     out = att.calc_salary_from_punches(
-        [(time(9, 0), time(17, 0))],
+        [(time(9, 0), time(16, 0))],
         400.0,
         on_date="2026-06-07",
         status="P",
     )
     assert out["Payable_Hrs"] == 6.0
     assert out["Normal_Pay"] == 400.0
+    assert out["Hourly_Rate_Rs"] == round(400 / 6, 2)
+    assert out["Early_Deduction_Hrs"] == 0.0
+
+
+def test_sunday_production_hours_end_at_15_16():
+    cols = att.production_hour_cols_for_date("2026-06-07")
+    assert "H_15_16" in cols
+    assert "H_16_17" not in cols
+    assert "H_13_14" in cols
 
 
 def test_early_leave_before_16_adds_30_min_penalty():

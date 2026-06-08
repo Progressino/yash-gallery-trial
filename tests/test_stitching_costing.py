@@ -713,3 +713,30 @@ def test_challan_snapshot_and_production_log_description():
 
     rep = svc.production_entry_reports("2026-05-15", "K001")
     assert rep["report1"][0]["Challan_Description"]
+
+
+def test_sunday_production_report_uses_six_hour_salary_basis():
+    """Sunday costing: hourly salary = daily ÷ 6 (09:00–16:00 shift)."""
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "SKU-SUN", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    save_sheet_df(
+        "karigar_master",
+        pd.DataFrame([{"Karigar_ID": "K001", "Name": "Sun", "Skill": "Stitch", "Daily_Rate_Rs": 480}]),
+    )
+    out = svc.save_production_entry(
+        date_str="2026-06-07",
+        karigar_id="K001",
+        karigar_name="Sun",
+        challan_no="CH-SUN",
+        style="SKU-SUN",
+        hour_entries=[
+            {"hour_col": "H_09_10", "operation": "Stitch", "pieces": 10},
+            {"hour_col": "H_10_11", "operation": "Stitch", "pieces": 10},
+        ],
+    )
+    assert out["ok"] is True
+    rep = svc.production_entry_reports("2026-06-07", "K001")
+    assert float(rep["report2_hourly"][0]["Hourly_Salary_Rs"]) == round(480 / 6, 2)
+    assert int(rep["report1"][0]["Working_Hours"]) == 2
