@@ -689,11 +689,13 @@ export default function POEngine() {
         if (!ver || cancelled) return
         const seen = Number(sessionStorage.getItem(PO_MERGE_VERSION_KEY) || 0)
         if (seen >= ver) return
-        sessionStorage.setItem(PO_MERGE_VERSION_KEY, String(ver))
         const seq = ++poRunSeqRef.current
-        setLoading(true)
-        setPoProgress('PO engine updated — loading shared calculation…')
-        setPoProgressPct(5)
+        const hasTable = Boolean(result?.ok && (result.rows?.length ?? 0) > 0)
+        if (!hasTable) {
+          setLoading(true)
+          setPoProgress('PO engine updated — loading shared calculation…')
+          setPoProgressPct(5)
+        }
         const poRes = await startPoCalculate(
           {
             ...params,
@@ -704,12 +706,15 @@ export default function POEngine() {
           },
           (msg, pct) => {
             if (cancelled || seq !== poRunSeqRef.current) return
-            setPoProgress(msg)
-            if (pct != null && Number.isFinite(pct)) setPoProgressPct(pct)
+            if (!hasTable) {
+              setPoProgress(msg)
+              if (pct != null && Number.isFinite(pct)) setPoProgressPct(pct)
+            }
           },
         )
         if (cancelled || seq !== poRunSeqRef.current) return
         if (poRes?.ok) {
+          sessionStorage.setItem(PO_MERGE_VERSION_KEY, String(ver))
           setResult(poRes as POResult)
           void loadQuarterlyForRun(seq)
         }

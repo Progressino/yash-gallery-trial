@@ -325,6 +325,41 @@ def calculate_quarterly_history(
     )
     pivot["Units_90d"] = pivot["Units_90d"].astype(int)
     pivot["Units_30d"] = pivot["Units_30d"].astype(int)
+
+    if not group_by_parent:
+        from .existing_po import fan_out_bundled_listing_metrics
+
+        q_metric_cols = ordered_q_cols + ["Avg_Monthly", "Units_90d", "Units_30d", "Freq_30d", "ADS"]
+        fan = fan_out_bundled_listing_metrics(pivot, q_metric_cols)
+        if fan is not None and not fan.empty:
+            pivot = pivot.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
+            for c in q_metric_cols:
+                base = pd.to_numeric(pivot.get(c), errors="coerce").fillna(0)
+                fb = pd.to_numeric(pivot.get(f"{c}__bund"), errors="coerce").fillna(0)
+                pivot[c] = np.where(base > 0, base, fb)
+            pivot.drop(
+                columns=[f"{c}__bund" for c in q_metric_cols],
+                inplace=True,
+                errors="ignore",
+            )
+            existing = set(pivot["OMS_SKU"].astype(str))
+            missing = fan[~fan["OMS_SKU"].astype(str).isin(existing)]
+            if not missing.empty:
+                extra = missing.copy()
+                for col in pivot.columns:
+                    if col not in extra.columns:
+                        extra[col] = 0 if col in q_metric_cols else ""
+                pivot = pd.concat([pivot, extra[pivot.columns]], ignore_index=True)
+            _ads = pivot["ADS"]
+            pivot["Status"] = np.select(
+                [_ads >= 1.0, _ads >= 0.33, _ads >= 0.10],
+                ["Fast Moving", "Moderate", "Slow Selling"],
+                default="Not Moving",
+            )
+            pivot["Units_90d"] = pivot["Units_90d"].astype(int)
+            pivot["Units_30d"] = pivot["Units_30d"].astype(int)
+            pivot["Freq_30d"] = pivot["Freq_30d"].astype(int)
+
     return pivot
 
 
@@ -743,6 +778,28 @@ def calculate_po_base(
         out.drop(columns=drop_cols, inplace=True, errors="ignore")
         return out
 
+    def _merge_metric_with_bundled_listing_fallback(
+        base_df: pd.DataFrame,
+        metric_df: pd.DataFrame,
+        metric_cols: list[str],
+    ) -> pd.DataFrame:
+        """Exact merge + parent fallback + bundled listing (L-XL) share for zero rows."""
+        from .existing_po import fan_out_bundled_listing_metrics
+
+        out = _merge_metric_with_parent_fallback(base_df, metric_df, metric_cols)
+        if group_by_parent or metric_df is None or metric_df.empty:
+            return out
+        fan = fan_out_bundled_listing_metrics(metric_df, metric_cols)
+        if fan is None or fan.empty:
+            return out
+        out = out.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
+        for c in metric_cols:
+            base = pd.to_numeric(out.get(c), errors="coerce").fillna(0)
+            fb = pd.to_numeric(out.get(f"{c}__bund"), errors="coerce").fillna(0)
+            out[c] = np.where(base > 0, base, fb)
+        out.drop(columns=[f"{c}__bund" for c in metric_cols], inplace=True, errors="ignore")
+        return out
+
     # ── Unique-SKU cache: normalize once per unique raw value, not per row ──────
     # With 225k rows but only ~7-8k unique SKUs, this is ~28x faster than row-by-row.
     _unique_sales_skus = df["Sku"].unique()
@@ -843,7 +900,7 @@ def calculate_po_base(
     net.columns = ["OMS_SKU", "Net_Units"]
 
     summary = sold.merge(returns, on="OMS_SKU", how="outer").merge(net, on="OMS_SKU", how="outer").fillna(0)
-    po_df = _merge_metric_with_parent_fallback(
+    po_df = _merge_metric_with_bundled_listing_fallback(
         inv_work, summary, ["Sold_Units", "Return_Units", "Net_Units"]
     ).fillna({"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0})
 
@@ -885,7 +942,7 @@ def calculate_po_base(
         .groupby("Sku")["Quantity"].sum().reset_index()
         .rename(columns={"Sku": "OMS_SKU", "Quantity": "Ship_Units_150d"})
     )
-    po_df = _merge_metric_with_parent_fallback(
+    po_df = _merge_metric_with_bundled_listing_fallback(
         po_df, ship_150, ["Ship_Units_150d"]
     )
     po_df["Ship_Units_150d"] = pd.to_numeric(po_df["Ship_Units_150d"], errors="coerce").fillna(0).astype(int)
@@ -932,7 +989,7 @@ def calculate_po_base(
         ).astype(int)
 
     ads_summary = ads_sold.merge(ads_net, on="OMS_SKU", how="outer").fillna(0)
-    po_df = _merge_metric_with_parent_fallback(
+    po_df = _merge_metric_with_bundled_listing_fallback(
         po_df, ads_summary, ["ADS_Sold_Units", "ADS_Net_Units"]
     )
     po_df = po_df.merge(ads_active_span[["OMS_SKU", "_eff_days_active"]], on="OMS_SKU", how="left")

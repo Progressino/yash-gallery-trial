@@ -24,7 +24,7 @@ _log = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Bump when Existing PO → PO Engine merge semantics change (invalidates shared cache).
-PO_MERGE_LOGIC_VERSION = 12
+PO_MERGE_LOGIC_VERSION = 13
 
 _CALC_PARAM_KEYS = (
     "period_days",

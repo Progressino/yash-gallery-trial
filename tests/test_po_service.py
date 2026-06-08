@@ -2436,10 +2436,10 @@ def test_bundled_only_existing_po_fans_out_to_per_size_pipeline():
     assert "1917YKBLUE-5XL" in set(po["OMS_SKU"].astype(str))
     l_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
     xl_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
-    assert int(l_row["Pending_Cutting"]) == 160
-    assert int(xl_row["Pending_Cutting"]) == 160
-    assert int(l_row["Balance_to_Dispatch"]) == 2
-    assert int(xl_row["Balance_to_Dispatch"]) == 2
+    assert int(l_row["Balance_to_Dispatch"]) == 160
+    assert int(xl_row["Balance_to_Dispatch"]) == 160
+    assert int(l_row["Pending_Cutting"]) == 0
+    assert int(xl_row["Pending_Cutting"]) == 0
     lxl = po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
     band45 = po.loc[po["OMS_SKU"] == "1917YKBLUE-4XL-5XL"].iloc[0]
     assert float(lxl["Total_Inventory"]) == 46
@@ -2449,6 +2449,40 @@ def test_bundled_only_existing_po_fans_out_to_per_size_pipeline():
     assert l_row["Bundle_Size"] == "L-XL"
     assert xl_row["Bundle_Size"] == "L-XL"
     assert lxl["Bundle_Size"] == "L-XL"
+    assert int(l_row["Sold_Units"]) >= 2
+    assert int(xl_row["Sold_Units"]) >= 2
+
+
+def test_calculate_quarterly_history_fans_out_bundled_listing_sales():
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1917YKBLUE-L-XL",
+                "TxnDate": pd.Timestamp("2026-05-15"),
+                "Transaction Type": "Shipment",
+                "Quantity": 10,
+            },
+            {
+                "Sku": "1917YKBLUE-L-XL",
+                "TxnDate": pd.Timestamp("2024-08-10"),
+                "Transaction Type": "Shipment",
+                "Quantity": 20,
+            },
+        ]
+    )
+    pivot = calculate_quarterly_history(
+        sales_df=sales,
+        mtr_df=None,
+        sku_mapping=None,
+        group_by_parent=False,
+        n_quarters=8,
+    )
+    l = pivot.loc[pivot["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
+    xl = pivot.loc[pivot["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
+    assert int(l.get("Apr-Jun 2026", 0)) == 5
+    assert int(xl.get("Apr-Jun 2026", 0)) == 5
+    assert int(l.get("Jul-Sep 2024", 0)) == 10
+    assert int(xl.get("Jul-Sep 2024", 0)) == 10
 
 
 def test_ship150_span_fallback_when_no_inventory_history():

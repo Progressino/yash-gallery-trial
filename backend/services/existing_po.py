@@ -359,6 +359,30 @@ def build_bundle_listing_map(*sku_sources) -> dict[str, str]:
     return out
 
 
+def _split_integer_qty(total: int, n: int) -> list[int]:
+    """Split a whole quantity across *n* sizes, preserving the sum."""
+    total = int(total or 0)
+    n = int(n or 1)
+    if n <= 1:
+        return [total]
+    base, rem = divmod(max(0, total), n)
+    return [base + (1 if i < rem else 0) for i in range(n)]
+
+
+def _bundled_dispatch_qty_mislabeled_as_pending(pending: int, balance: int) -> bool:
+    """
+    Bundled-only PO exports put dispatch balance in Pending_Cutting; Balance_to_Dispatch
+    is the size-count in the band (2–4), not units to dispatch.
+    """
+    pending = int(pending or 0)
+    balance = int(balance or 0)
+    if pending <= 0 or balance <= 0:
+        return False
+    if balance > 8:
+        return False
+    return pending >= balance * 10
+
+
 def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fan out combined size-range PO lines (S-M, XXL-3XL) to individual OMS SKUs
@@ -378,8 +402,33 @@ def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
             continue
         expanded = _split_bundled_po_sku(sku)
         n = len(expanded)
+        pending = int(pd.to_numeric(r.get("Pending_Cutting"), errors="coerce") or 0) if "Pending_Cutting" in df.columns else 0
+        balance = int(pd.to_numeric(r.get("Balance_to_Dispatch"), errors="coerce") or 0) if "Balance_to_Dispatch" in df.columns else 0
+        ordered = int(pd.to_numeric(r.get("PO_Qty_Ordered"), errors="coerce") or 0) if "PO_Qty_Ordered" in df.columns else 0
+        pipeline = int(pd.to_numeric(r.get("PO_Pipeline_Total"), errors="coerce") or 0) if "PO_Pipeline_Total" in df.columns else 0
+
+        if n > 1 and _bundled_dispatch_qty_mislabeled_as_pending(pending, balance):
+            cutting_qty = 0
+            dispatch_qty = pending
+            pipeline_qty = dispatch_qty + cutting_qty
+            ordered_shares = _split_integer_qty(ordered, n)
+            dispatch_shares = _split_integer_qty(dispatch_qty, n)
+            pipeline_shares = _split_integer_qty(pipeline_qty, n)
+            for i, esku in enumerate(expanded):
+                row: dict = {"OMS_SKU": esku}
+                if "PO_Qty_Ordered" in breakdown:
+                    row["PO_Qty_Ordered"] = ordered_shares[i]
+                if "Pending_Cutting" in breakdown:
+                    row["Pending_Cutting"] = 0
+                if "Balance_to_Dispatch" in breakdown:
+                    row["Balance_to_Dispatch"] = dispatch_shares[i]
+                if "PO_Pipeline_Total" in breakdown:
+                    row["PO_Pipeline_Total"] = pipeline_shares[i]
+                rows.append(row)
+            continue
+
         for esku in expanded:
-            row: dict = {"OMS_SKU": esku}
+            row = {"OMS_SKU": esku}
             for c in breakdown:
                 val = pd.to_numeric(r.get(c), errors="coerce")
                 val = 0 if pd.isna(val) else int(val)
@@ -391,6 +440,65 @@ def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     if breakdown:
         out = out.groupby("OMS_SKU", as_index=False)[breakdown].sum()
     return out
+
+
+def fan_out_bundled_listing_metrics(
+    metric_df: pd.DataFrame,
+    metric_cols: list[str],
+) -> pd.DataFrame:
+    """
+    Split bundled-listing metrics (e.g. 1917YKBLUE-L-XL sales) across per-size children.
+    Used when marketplace sales are recorded on the combined listing, not each size.
+    """
+    if metric_df is None or metric_df.empty or "OMS_SKU" not in metric_df.columns:
+        return pd.DataFrame(columns=["OMS_SKU"] + list(metric_cols))
+    m = metric_df.copy()
+    m["OMS_SKU"] = m["OMS_SKU"].astype(str).map(_normalize_sku_text)
+    for c in metric_cols:
+        if c in m.columns:
+            m[c] = pd.to_numeric(m[c], errors="coerce").fillna(0)
+    bundled = m[m["OMS_SKU"].map(is_bundled_size_range_sku)]
+    if bundled.empty:
+        return pd.DataFrame(columns=["OMS_SKU"] + list(metric_cols))
+    rows: list[dict] = []
+    for _, br in bundled.iterrows():
+        bk = str(br["OMS_SKU"])
+        children = _split_bundled_po_sku(bk)
+        n = len(children)
+        if n <= 1:
+            continue
+        shares_by_col: dict[str, list[int | float]] = {}
+        for c in metric_cols:
+            if c not in br.index:
+                shares_by_col[c] = [0] * n
+                continue
+            val = float(br[c] or 0)
+            if val <= 0:
+                shares_by_col[c] = [0] * n
+            elif c.endswith("d") or c.endswith("_Units") or "Units" in c or c in {
+                "Sold_Units",
+                "Return_Units",
+                "Net_Units",
+                "Ship_Units_150d",
+                "ADS_Sold_Units",
+                "ADS_Net_Units",
+                "Units_90d",
+                "Units_30d",
+                "Freq_30d",
+            }:
+                shares_by_col[c] = _split_integer_qty(int(val), n)
+            else:
+                shares_by_col[c] = [val / n] * n
+        for i, kid in enumerate(children):
+            row: dict = {"OMS_SKU": _normalize_sku_text(kid)}
+            for c in metric_cols:
+                sh = shares_by_col.get(c, [0] * n)
+                row[c] = sh[i] if i < len(sh) else 0
+            rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=["OMS_SKU"] + list(metric_cols))
+    out = pd.DataFrame(rows)
+    return out.groupby("OMS_SKU", as_index=False)[metric_cols].sum()
 
 
 def session_has_fresh_existing_po(sess) -> bool:

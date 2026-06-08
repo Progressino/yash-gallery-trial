@@ -70,6 +70,14 @@ def test_parse_existing_po_generic_numeric_columns():
     assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-3XL", "PO_Pipeline_Total"].iloc[0]) == 130
 
 
+def test_bundled_dispatch_mislabel_detection():
+    from backend.services.existing_po import _bundled_dispatch_qty_mislabeled_as_pending
+
+    assert _bundled_dispatch_qty_mislabeled_as_pending(320, 4) is True
+    assert _bundled_dispatch_qty_mislabeled_as_pending(110, 10) is False
+    assert _bundled_dispatch_qty_mislabeled_as_pending(0, 4) is False
+
+
 def test_expand_bundled_po_skus_splits_size_ranges():
     from backend.services.existing_po import expand_bundled_po_skus
 
@@ -83,7 +91,9 @@ def test_expand_bundled_po_skus_splits_size_ranges():
     )
     out = expand_bundled_po_skus(ep)
     assert set(out["OMS_SKU"]) == {"1917YKBLUE-XXL", "1917YKBLUE-3XL"}
-    assert int(out["PO_Pipeline_Total"].sum()) == 194
+    assert int(out["Balance_to_Dispatch"].sum()) == 190
+    assert int(out["Pending_Cutting"].sum()) == 0
+    assert int(out["PO_Pipeline_Total"].sum()) == 190
 
 
 def test_expand_bundled_po_skus_handles_unicode_dashes():
@@ -178,7 +188,8 @@ def test_unbundle_keeps_bundled_inventory_row_when_sheet_expanded():
     )
     assert "1917YKBLUE-L-XL" in set(out["OMS_SKU"])
     assert float(out.loc[out["OMS_SKU"] == "1917YKBLUE-L-XL", "Total_Inventory"].iloc[0]) == 46
-    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "Pending_Cutting"].iloc[0]) == 160
+    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "Balance_to_Dispatch"].iloc[0]) == 160
+    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "Pending_Cutting"].iloc[0]) == 0
 
 
 def test_prepare_existing_po_keeps_bundled_when_per_size_children_exist():
