@@ -66,6 +66,15 @@ def test_hrm_router_import():
 
 def test_one_time_task_lifecycle(hrm_db):
     import uuid
+    from datetime import timedelta
+
+    today = date.today()
+    due_date = (today + timedelta(days=7)).isoformat()
+    period_start = today.replace(day=1).isoformat()
+    if today.month == 12:
+        period_end = today.replace(day=31).isoformat()
+    else:
+        period_end = (today.replace(day=1, month=today.month + 1) - timedelta(days=1)).isoformat()
 
     hrm_db.create_department({"name": f"Store-{uuid.uuid4().hex[:8]}", "hod_name": "HOD"})
     dept_id = hrm_db.list_departments()[0]["id"]
@@ -77,7 +86,7 @@ def test_one_time_task_lifecycle(hrm_db):
             "employee_id": emp_id,
             "title": "Warehouse audit",
             "description": "Complete by Friday",
-            "due_date": "2026-06-06",
+            "due_date": due_date,
             "assigned_by": "HOD",
         }
     )
@@ -114,6 +123,6 @@ def test_one_time_task_lifecycle(hrm_db):
     assert hrm_db.start_one_time_task(tid2) is True
     assert hrm_db.list_one_time_tasks(employee_id=emp_id, status="In Progress")
 
-    appraisal = hrm_db.get_appraisal(emp_id, "2026-06-01", "2026-06-30")
+    appraisal = hrm_db.get_appraisal(emp_id, period_start, period_end)
     assert appraisal["one_time_summary"]["approved_on_time"] >= 1
     assert appraisal["task_summary"]["performance_pct"] is not None
