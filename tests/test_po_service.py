@@ -2257,7 +2257,7 @@ def test_eff_days_zero_when_no_sales_despite_inventory_history():
     inv = pd.DataFrame(
         {
             "OMS_SKU": ["ZERO-SALES", "OTHER-SKU"],
-            "Total_Inventory": [10, 5],
+            "Total_Inventory": [0, 5],
         }
     )
     po = calculate_po_base(
@@ -2278,7 +2278,101 @@ def test_eff_days_zero_when_no_sales_despite_inventory_history():
     assert float(row["Recent_ADS"]) == 0.0
 
 
-def test_po_extrapolates_eff_days_when_sheet_covers_less_than_window():
+def test_in_stock_sku_shows_inventory_eff_days_without_ads_window_sales():
+    """SKUs with on-hand stock + inventory history must show Eff_Days even when ADS-window sold=0."""
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["STALE-SELLER"] * 25,
+            "Date": pd.date_range("2026-01-03", periods=25, freq="D"),
+            "Qty": [5] * 25,
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "STALE-SELLER",
+                "TxnDate": pd.Timestamp("2025-10-15"),
+                "Transaction Type": "Shipment",
+                "Quantity": 12,
+                "Units_Effective": 12,
+                "Source": "Amazon",
+            },
+            {
+                "Sku": "RECENT-OTHER",
+                "TxnDate": pd.Timestamp("2026-02-01"),
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            },
+        ]
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["STALE-SELLER", "RECENT-OTHER"],
+            "Total_Inventory": [18, 1],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist,
+    )
+    row = po.loc[po["OMS_SKU"] == "STALE-SELLER"].iloc[0]
+    assert int(row["Sold_Units"]) == 0
+    assert int(row["Ship_Units_150d"]) == 12
+    assert int(row["Eff_Days_Inventory"]) == 25
+    assert int(row["Eff_Days"]) > 0
+    assert float(row["Recent_ADS"]) == 0.0
+
+
+def test_ship150_span_fallback_when_no_inventory_history():
+    """SKUs missing from daily inventory history still show Eff_Days from 150d shipments."""
+    old_dates = pd.date_range("2025-11-01", periods=10, freq="D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "NO-HIST",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+                "Source": "Amazon",
+            }
+            for d in old_dates
+        ]
+        + [
+            {
+                "Sku": "RECENT-OTHER",
+                "TxnDate": pd.Timestamp("2026-02-01"),
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["NO-HIST", "RECENT-OTHER"], "Total_Inventory": [8, 1]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+    )
+    row = po.loc[po["OMS_SKU"] == "NO-HIST"].iloc[0]
+    assert int(row["Sold_Units"]) == 0
+    assert int(row["Ship_Units_150d"]) == 20
+    assert int(row["Eff_Days"]) == 10
     """Real-world bug: daily-inventory sheet had only 24 of 30 snapshot dates.
 
     Every SKU in-stock for all 24 snapshot days was getting Eff_Days = 24 (the

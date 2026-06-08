@@ -1077,7 +1077,13 @@ def calculate_po_base(
                         else po_df["Sold_Units"].fillna(0) > 0
                     )
                     _oos_restock = _oos_restock_mask(po_df)
-                    use_inv = inv_days.notna() & (inv_days > 0) & (_has_demand | _oos_restock)
+                    _ship150 = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0) > 0
+                    _has_stock = pd.to_numeric(po_df.get("Total_Inventory"), errors="coerce").fillna(0) > 0
+                    # Apply in-stock-day denominator when the SKU is active (demand/OOS restock),
+                    # has recent shipment context, or still carries inventory with history.
+                    use_inv = inv_days.notna() & (inv_days > 0) & (
+                        _has_demand | _oos_restock | _ship150 | _has_stock
+                    )
                     inv_eff = (inv_days * scale).round()
                     inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
                     po_df["Eff_Days"] = np.where(
@@ -1101,6 +1107,32 @@ def calculate_po_base(
     else:
         po_df["Eff_Days_Inventory"] = 0
         po_df["Inv_Coverage_Days"] = 0
+
+    # SKUs with no ADS-window sales may still show Eff_Days from the 150d ship context
+    # when inventory history is missing (common for SKUs not in the daily snapshot file).
+    _eff_now = pd.to_numeric(po_df.get("Eff_Days"), errors="coerce").fillna(0)
+    _ship150_u = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0)
+    _need_ship_span = (_eff_now <= 0) & (_ship150_u > 0)
+    if bool(_need_ship_span.any()) and not df.empty:
+        ship150_act = df[(df["TxnDate"] >= ship_150_cutoff) & (df["_is_ship"])].copy()
+        if not ship150_act.empty:
+            span150 = (
+                ship150_act.groupby("Sku", as_index=False)
+                .agg(_ship_first=("TxnDate", "min"), _ship_last=("TxnDate", "max"))
+                .rename(columns={"Sku": "OMS_SKU"})
+            )
+            span150["_ship_span_days"] = (
+                (span150["_ship_last"] - span150["_ship_first"]).dt.days + 1
+            ).astype(int)
+            po_df = _merge_metric_with_parent_fallback(
+                po_df, span150[["OMS_SKU", "_ship_span_days"]], ["_ship_span_days"]
+            )
+            span_vals = pd.to_numeric(po_df["_ship_span_days"], errors="coerce")
+            po_df.loc[_need_ship_span & span_vals.notna() & (span_vals > 0), "Eff_Days"] = (
+                span_vals.clip(lower=1.0, upper=150.0)
+            )
+            po_df.drop(columns=["_ship_span_days"], inplace=True, errors="ignore")
+
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = np.where(
         po_df["Eff_Days"] > 0,
