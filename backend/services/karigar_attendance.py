@@ -667,24 +667,53 @@ def _cell_to_report_date(cell: Any) -> str:
     return ""
 
 
+_SKIP_DATE_ROW_KEYWORDS = (
+    "generated",
+    "printed",
+    "export",
+    "run at",
+    "created at",
+    "downloaded",
+    "prepared by",
+    "report time",
+    "print time",
+)
+
+
+def _is_attendance_date_label(cell: Any) -> bool:
+    """True for header cells that label the attendance day (not arbitrary 'update date' text)."""
+    s = str(cell or "").strip().lower()
+    if not s:
+        return False
+    if re.fullmatch(r"date\s*:?", s):
+        return True
+    return bool(re.match(r"^(report|attendance)\s+date\s*:?", s))
+
+
 def _extract_report_date(raw: pd.DataFrame) -> str:
     """Read attendance report date from biometric export header (not upload day)."""
     if raw is None or raw.empty:
         return ""
     max_rows = min(25, len(raw))
     max_cols = min(16, raw.shape[1])
-    # Prefer cells on the same row as a "date" label.
+    # Pass 1: explicit Date label row (value may be same cell or next columns).
     for i in range(max_rows):
         for j in range(max_cols):
-            label = str(raw.iloc[i, j] or "").strip().lower()
-            if "date" not in label:
+            cell = raw.iloc[i, j]
+            if not _is_attendance_date_label(cell):
                 continue
-            for k in range(j, min(j + 6, max_cols)):
+            found = _cell_to_report_date(cell)
+            if found:
+                return found
+            for k in range(j + 1, min(j + 6, max_cols)):
                 found = _cell_to_report_date(raw.iloc[i, k])
                 if found:
                     return found
-    # Fallback: any date-like value in the header block (common when label is merged).
+    # Pass 2: header block — skip rows that look like print/export timestamps.
     for i in range(max_rows):
+        row_text = " ".join(str(raw.iloc[i, j] or "") for j in range(max_cols)).lower()
+        if any(kw in row_text for kw in _SKIP_DATE_ROW_KEYWORDS):
+            continue
         for j in range(max_cols):
             found = _cell_to_report_date(raw.iloc[i, j])
             if found:
@@ -717,7 +746,22 @@ def _find_header_row(raw: pd.DataFrame) -> int:
     return 8
 
 
-def parse_inout_punch_report(raw: bytes, filename: str = "") -> tuple[str, pd.DataFrame, list[str]]:
+def _normalize_report_date_override(value: str) -> str:
+    """Optional YYYY-MM-DD from upload form — must not default to today."""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    try:
+        return pd.Timestamp(pd.to_datetime(s).normalize()).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def parse_inout_punch_report(
+    raw: bytes,
+    filename: str = "",
+    report_date_override: str = "",
+) -> tuple[str, pd.DataFrame, list[str]]:
     """Parse Daily Attendance IN/OUT Punch Report (.xls / .xlsx)."""
     warnings: list[str] = []
     bio = BytesIO(raw)
@@ -730,11 +774,16 @@ def parse_inout_punch_report(raw: bytes, filename: str = "") -> tuple[str, pd.Da
         preview = pd.read_excel(bio, sheet_name=0, header=None, engine="xlrd")
     else:
         preview = pd.read_excel(bio, sheet_name=0, header=None)
-    report_date = _extract_report_date(preview) or _date_from_filename(filename)
+    override = _normalize_report_date_override(report_date_override)
+    if override:
+        report_date = override
+    else:
+        report_date = _extract_report_date(preview) or _date_from_filename(filename)
     if not report_date:
         raise ValueError(
             "Could not read attendance date from the sheet or filename. "
-            "Use a file named like 03-06-2026.xls or ensure the report header shows the attendance date."
+            "Use a file named like 03-06-2026.xls, ensure the report header shows the attendance date, "
+            "or pick the attendance date before uploading."
         )
     header_row = _find_header_row(preview)
     bio.seek(0)
@@ -785,11 +834,17 @@ def recalculate_attendance_for_date(on_date: str) -> dict[str, Any]:
     }
 
 
-def import_karigar_attendance_bytes(raw: bytes, filename: str = "") -> dict[str, Any]:
+def import_karigar_attendance_bytes(
+    raw: bytes,
+    filename: str = "",
+    report_date_override: str = "",
+) -> dict[str, Any]:
     """Import biometric attendance; upserts by Date + E_Code."""
     warnings: list[str] = []
     try:
-        report_date, df, warnings = parse_inout_punch_report(raw, filename)
+        report_date, df, warnings = parse_inout_punch_report(
+            raw, filename, report_date_override=report_date_override
+        )
     except ValueError as exc:
         return {"ok": False, "message": str(exc), "warnings": warnings}
     if df.empty:

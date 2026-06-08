@@ -1424,6 +1424,7 @@ def save_production_entry(
         log_df = _drop_production_session_rows(log_df, date_str, karigar_id, challan_no, style)
 
         save_time = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+        chal_meta = challan_snapshot(challan_no)
         ltl_overrides = _load_ltl_override_map()
         daily_rate = get_daily_rate_for_date(karigar_id, date_str)
         new_op_pieces = {op: int(data["pieces"]) for op, data in op_totals.items()}
@@ -1486,6 +1487,8 @@ def save_production_entry(
                     "Karigar_ID": karigar_id,
                     "Karigar_Name": karigar_name,
                     "Challan_No": challan_no,
+                    "Challan_Party": chal_meta.get("Party", ""),
+                    "Challan_Description": chal_meta.get("Challan_Description", ""),
                     "Style": style,
                     "Operation": op_name,
                     **hour_row,
@@ -2233,6 +2236,23 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         if c in day_pl.columns:
             day_pl[c] = safe_num(day_pl[c])
 
+    def _chal_party(row) -> str:
+        p = str(row.get("Challan_Party") or "").strip()
+        if p:
+            return p
+        return challan_snapshot(str(row.get("Challan_No") or "")).get("Party", "")
+
+    def _chal_desc(row) -> str:
+        d = str(row.get("Challan_Description") or "").strip()
+        if d:
+            return d
+        return challan_snapshot(str(row.get("Challan_No") or "")).get("Challan_Description", "")
+
+    if "Challan_Party" not in day_pl.columns:
+        day_pl["Challan_Party"] = day_pl.apply(_chal_party, axis=1)
+    if "Challan_Description" not in day_pl.columns:
+        day_pl["Challan_Description"] = day_pl.apply(_chal_desc, axis=1)
+
     hist_cols = [
         c
         for c in [
@@ -2242,6 +2262,8 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
             "Karigar_Name",
             "Karigar_ID",
             "Challan_No",
+            "Challan_Party",
+            "Challan_Description",
             "Style",
             "Operation",
             "Total_Pieces",
@@ -2297,6 +2319,8 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
                 "Karigar_Name": row.get("Karigar_Name", ""),
                 "Karigar_ID": kid,
                 "Challan_No": row.get("Challan_No", ""),
+                "Challan_Party": row.get("Challan_Party", ""),
+                "Challan_Description": row.get("Challan_Description", ""),
                 "Style": row.get("Style", ""),
                 "Operation": row.get("Operation", ""),
                 "Base_Target": int(base_target),
@@ -2347,6 +2371,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
                     "Karigar": kar_name,
                     "Karigar_ID": kid,
                     "Challan_No": str(row.get("Challan_No", "")),
+                    "Challan_Description": str(row.get("Challan_Description", "") or ""),
                     "Style": str(row.get("Style", "")),
                     "Hour": hlbl,
                     "Operation": op_name,
@@ -2888,6 +2913,120 @@ def stitching_reports_hub(date_from: str, date_to: str) -> dict:
         "karigar_profitability": karigar_profitability_report(date_from, date_to),
         "challan_labour": challan_labour_payroll_report(date_from, date_to),
     }
+
+
+def _replace_id_in_sheet(sheet_key: str, col: str, old_id: str, new_id: str) -> int:
+    """Replace clean_key-matched IDs in one sheet column. Returns rows updated."""
+    df = get_sheet_df(sheet_key)
+    if df.empty or col not in df.columns:
+        return 0
+    mask = df[col].apply(clean_key) == clean_key(old_id)
+    n = int(mask.sum())
+    if n:
+        df.loc[mask, col] = new_id
+        save_sheet_df(sheet_key, df)
+    return n
+
+
+def rename_karigar_id(old_id: str, new_id: str) -> dict:
+    """Rename Karigar_ID and update E_Code / attendance / production references."""
+    old = clean_key(old_id)
+    new = clean_key(new_id)
+    if not old or not new:
+        return {"ok": False, "message": "Invalid karigar code"}
+    if old == new:
+        return {"ok": True, "message": "No change"}
+    km = get_sheet_df("karigar_master")
+    if km.empty or "Karigar_ID" not in km.columns:
+        return {"ok": False, "message": "Karigar master empty"}
+    if not (km["Karigar_ID"].apply(clean_key) == old).any():
+        return {"ok": False, "message": f"Karigar {old} not found"}
+    if (km["Karigar_ID"].apply(clean_key) == new).any():
+        return {"ok": False, "message": f"Karigar ID {new} already exists"}
+
+    updated = 0
+    for sheet, col in (
+        ("karigar_master", "Karigar_ID"),
+        ("employee_master", "E_Code"),
+        ("karigar_attendance", "E_Code"),
+        ("production_log", "Karigar_ID"),
+        ("karigar_rate_history", "Karigar_ID"),
+        ("target_ltl_override", "Karigar_ID"),
+        ("karigar_expenses", "Karigar_ID"),
+        ("operating_attendance", "E_Code"),
+    ):
+        updated += _replace_id_in_sheet(sheet, col, old, new)
+
+    return {
+        "ok": True,
+        "message": f"Karigar ID {old} → {new} ({updated} reference(s) updated)",
+        "old_id": old,
+        "new_id": new,
+        "references_updated": updated,
+    }
+
+
+def rename_employee_e_code(old_code: str, new_code: str) -> dict:
+    """Rename employee E_Code; also renames linked karigar when codes match."""
+    old = clean_key(old_code)
+    new = clean_key(new_code)
+    if not old or not new:
+        return {"ok": False, "message": "Invalid employee code"}
+    if old == new:
+        return {"ok": True, "message": "No change"}
+    em = get_sheet_df("employee_master")
+    if em.empty or "E_Code" not in em.columns:
+        return {"ok": False, "message": "Employee master empty"}
+    if not (em["E_Code"].apply(clean_key) == old).any():
+        return {"ok": False, "message": f"Employee {old} not found"}
+    if (em["E_Code"].apply(clean_key) == new).any():
+        return {"ok": False, "message": f"E_Code {new} already exists"}
+
+    km = get_sheet_df("karigar_master")
+    if not km.empty and (km["Karigar_ID"].apply(clean_key) == old).any():
+        return rename_karigar_id(old, new)
+
+    updated = 0
+    for sheet, col in (
+        ("employee_master", "E_Code"),
+        ("karigar_attendance", "E_Code"),
+        ("operating_attendance", "E_Code"),
+    ):
+        updated += _replace_id_in_sheet(sheet, col, old, new)
+
+    return {
+        "ok": True,
+        "message": f"E_Code {old} → {new} ({updated} reference(s) updated)",
+        "old_id": old,
+        "new_id": new,
+        "references_updated": updated,
+    }
+
+
+def challan_snapshot(challan_no: str) -> dict[str, str]:
+    """Party + human-readable description from challan_master for production log."""
+    cn = str(challan_no or "").strip()
+    if not cn:
+        return {"Party": "", "Challan_Description": ""}
+    cm = get_sheet_df("challan_master")
+    if cm.empty or "Challan_No" not in cm.columns:
+        return {"Party": "", "Challan_Description": cn}
+    hit = cm[cm["Challan_No"].astype(str).map(clean_key) == clean_key(cn)]
+    if hit.empty:
+        return {"Party": "", "Challan_Description": cn}
+    row = hit.iloc[-1]
+    party = str(row.get("Party") or "").strip()
+    style = str(row.get("Style") or "").strip()
+    total = int(safe_num(pd.Series([row.get("Total_Qty", 0)])).iloc[0])
+    received = int(safe_num(pd.Series([row.get("Received_Qty", 0)])).iloc[0])
+    rate = float(safe_num(pd.Series([row.get("Rate_Per_Pc", 0)])).iloc[0])
+    parts = [p for p in [party, style, f"Qty {total}"] if p]
+    if received and received != total:
+        parts.append(f"Recv {received}")
+    if rate > 0:
+        parts.append(f"₹{rate}/pc")
+    desc = " · ".join(parts) if parts else cn
+    return {"Party": party, "Challan_Description": desc}
 
 
 def update_employee_master(

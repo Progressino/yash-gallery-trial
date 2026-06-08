@@ -691,6 +691,7 @@ function ProductionTab({
       'Save_Time',
       'Karigar_Name',
       'Challan_No',
+      'Challan_Description',
       'Style',
       'Operation',
       'Base_Target',
@@ -709,13 +710,13 @@ function ProductionTab({
   }, [])
 
   const report2SummaryCols = useMemo(() => {
-    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']
+    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Challan_Description', 'Operation', 'Hours_Worked', 'Total_Pieces', 'Total_Net_PL', 'Result']
     base.splice(4, 0, 'Daily_Salary_Rs', 'Total_Salary_Cost')
     return base
   }, [])
 
   const report2HourlyCols = useMemo(() => {
-    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Daily_Salary_Rs', 'Hourly_Salary_Rs', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
+    const base = ['Date', 'Save_Time', 'Karigar', 'Style', 'Challan_No', 'Challan_Description', 'Daily_Salary_Rs', 'Hourly_Salary_Rs', 'Hour', 'Operation', 'Pieces_Done', 'Actual_Piece_Val_Rs', 'Net_PL_Rs', 'Status']
     return base
   }, [])
 
@@ -1832,7 +1833,7 @@ function ChallanRegisterTable({
   onSaved: () => void
   onDelete?: () => void
 }) {
-  const [draft, setDraft] = useState<Record<string, { received?: number; total?: number }>>({})
+  const [draft, setDraft] = useState<Record<string, { received?: number; total?: number; rate?: number }>>({})
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   useEffect(() => {
@@ -1841,7 +1842,7 @@ function ChallanRegisterTable({
     }
   }, [])
 
-  const scheduleSave = (challanNo: string, patch: { Received_Qty?: number; Total_Qty?: number }) => {
+  const scheduleSave = (challanNo: string, patch: { Received_Qty?: number; Total_Qty?: number; Rate_Per_Pc?: number }) => {
     if (saveTimers.current[challanNo]) clearTimeout(saveTimers.current[challanNo])
     saveTimers.current[challanNo] = setTimeout(() => {
       void api
@@ -1874,6 +1875,7 @@ function ChallanRegisterTable({
             const no = String(r.Challan_No ?? '')
             const total = draft[no]?.total ?? Number(r.Total_Qty ?? 0)
             const received = draft[no]?.received ?? Number(r.Received_Qty ?? 0)
+            const rate = draft[no]?.rate ?? Number(r.Rate_Per_Pc ?? 0)
             const pending = Math.max(0, total - received)
             return (
               <tr key={no || i} className="border-b border-gray-50 hover:bg-gray-50/80">
@@ -1909,7 +1911,20 @@ function ChallanRegisterTable({
                 <td className={`px-2 py-1.5 font-semibold ${pending > 0 ? 'text-amber-700' : 'text-green-700'}`}>
                   {pending}
                 </td>
-                <td className="px-2 py-1.5">{String(r.Rate_Per_Pc ?? '')}</td>
+                <td className="px-2 py-1.5">
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.5}
+                    className="w-20 border rounded px-1 py-0.5 text-right bg-amber-50"
+                    value={rate}
+                    onChange={e => {
+                      const v = +e.target.value || 0
+                      setDraft(d => ({ ...d, [no]: { ...d[no], rate: v, total, received } }))
+                      scheduleSave(no, { Rate_Per_Pc: v, Total_Qty: total, Received_Qty: received })
+                    }}
+                  />
+                </td>
                 <td className="px-2 py-1.5 whitespace-nowrap">{String(r.Date ?? '')}</td>
                 <td className="px-2 py-1.5 text-right">
                   <button
@@ -3257,6 +3272,8 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   const [form, setForm] = useState({ Date: todayStr(), E_Code: '', In_Punch: '09:00', Out_Punch: '18:00' })
   const [uploadMsg, setUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [uploadBusy, setUploadBusy] = useState(false)
+  /** Blank = use date from sheet header / filename (not today). */
+  const [uploadReportDate, setUploadReportDate] = useState('')
   const [missDrafts, setMissDrafts] = useState<Record<string, MissPunchDraft>>({})
   const fileRef = useRef<HTMLInputElement>(null)
   const allRows = (data?.rows ?? []) as Record<string, unknown>[]
@@ -3301,7 +3318,8 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
     try {
       const fd = new FormData()
       fd.append('file', file)
-      const { data: res } = await api.post<{ ok?: boolean; message?: string; warnings?: string[] }>(
+      if (uploadReportDate.trim()) fd.append('report_date', uploadReportDate.trim())
+      const { data: res } = await api.post<{ ok?: boolean; message?: string; date?: string; warnings?: string[] }>(
         '/stitching/attendance/karigar/upload',
         fd,
         { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 },
@@ -3378,12 +3396,19 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
       {type === 'karigar' && (
         <Section title="Upload biometric attendance (IN/OUT punch report)">
           <p className="text-xs text-gray-500 mb-2">
-            Upload the daily <strong>Daily Attendance IN/OUT Punch Report</strong> (.xls / .xlsx). Workers are matched by{' '}
-            <strong>E. Code</strong> to Master Data. Re-uploading the same day replaces existing rows. Regular 09:00–18:00 (8h pay),
-            lunch 13:00–13:30 (30 min), tea 11:00–11:15 and 16:00–16:15 (15 min each). All IN/OUT pairs on the sheet are summed.
-            OT after 18:00 is paid at the same hourly rate (daily÷8), rounded up to whole hours
-            (e.g. out 20:59 → 3h OT).
+            Upload the daily <strong>Daily Attendance IN/OUT Punch Report</strong> (.xls / .xlsx). The attendance date is taken from the{' '}
+            <strong>Date</strong> row on the sheet (or the filename like <code>07-06-2026.xls</code>) — not from when you upload.
+            You can upload Saturday&apos;s sheet on Monday; leave the date picker blank to use the sheet date, or pick the day manually if the header is unclear.
           </p>
+          <label className="text-xs text-gray-600 block mb-2 max-w-xs">
+            Attendance date (optional override)
+            <input
+              type="date"
+              className="w-full border rounded mt-1 px-2 py-1.5"
+              value={uploadReportDate}
+              onChange={e => setUploadReportDate(e.target.value)}
+            />
+          </label>
           <input
             ref={fileRef}
             type="file"
@@ -4106,11 +4131,13 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
     Skill: '',
     Daily_Rate_Rs: 420,
     Effective_From: todayStr(),
+    New_Karigar_ID: '',
   })
   const [empEdit, setEmpEdit] = useState({
     Name: '',
     Type: 'Karigar',
     Daily_Rate_Rs: 420,
+    New_E_Code: '',
   })
   const [styleEdit, setStyleEdit] = useState({
     Target: 80,
@@ -4208,6 +4235,7 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
         Skill: karEdit.Skill,
         Daily_Rate_Rs: karEdit.Daily_Rate_Rs,
         Effective_From: karEdit.Effective_From || todayStr(),
+        New_Karigar_ID: karEdit.New_Karigar_ID.trim() || undefined,
       }),
     onSuccess: r => {
       onFlash('ok', r.data.message || 'Updated')
@@ -4240,6 +4268,7 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
         Name: empEdit.Name,
         Type: empEdit.Type,
         Daily_Rate_Rs: empEdit.Daily_Rate_Rs,
+        New_E_Code: empEdit.New_E_Code.trim() || undefined,
         admin_password: pw,
       })
     },
@@ -4309,6 +4338,7 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
       Skill: String(row.Skill ?? ''),
       Daily_Rate_Rs: Number(row.Daily_Rate_Rs) || 420,
       Effective_From: todayStr(),
+      New_Karigar_ID: '',
     })
   }
 
@@ -4320,6 +4350,7 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
       Name: String(row.Name ?? ''),
       Type: String(row.Type ?? 'Karigar'),
       Daily_Rate_Rs: Number(row.Daily_Rate_Rs) || 420,
+      New_E_Code: '',
     })
   }
 
@@ -4450,6 +4481,15 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
                   Effective from
                   <input type="date" className="w-full border rounded mt-1 px-2 py-1" value={karEdit.Effective_From} onChange={e => setKarEdit(f => ({ ...f, Effective_From: e.target.value }))} />
                 </label>
+                <label>
+                  New E. Code (rename)
+                  <input
+                    className="w-full border rounded mt-1 px-2 py-1 font-mono"
+                    placeholder={String(editKarigar.Karigar_ID ?? '')}
+                    value={karEdit.New_Karigar_ID}
+                    onChange={e => setKarEdit(f => ({ ...f, New_Karigar_ID: e.target.value }))}
+                  />
+                </label>
                 <div className="flex gap-2 self-end">
                   <button type="button" onClick={() => updateKarMut.mutate()} disabled={updateKarMut.isPending} className="px-3 py-2 bg-violet-700 text-white rounded-lg font-semibold disabled:opacity-50">
                     Save
@@ -4496,6 +4536,15 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
             <label>
               Daily rate ₹
               <input type="number" className="w-full border rounded mt-1 px-2 py-1" value={empEdit.Daily_Rate_Rs} onChange={e => setEmpEdit(f => ({ ...f, Daily_Rate_Rs: +e.target.value }))} />
+            </label>
+            <label>
+              New E. Code (rename)
+              <input
+                className="w-full border rounded mt-1 px-2 py-1 font-mono"
+                placeholder={String(editEmployee.E_Code ?? '')}
+                value={empEdit.New_E_Code}
+                onChange={e => setEmpEdit(f => ({ ...f, New_E_Code: e.target.value }))}
+              />
             </label>
             <div className="flex gap-2 self-end">
               <button type="button" onClick={() => updateEmpMut.mutate()} disabled={updateEmpMut.isPending} className="px-3 py-2 bg-teal-700 text-white rounded-lg font-semibold disabled:opacity-50">

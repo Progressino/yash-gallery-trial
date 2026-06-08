@@ -644,3 +644,72 @@ def test_production_entry_reports_dedupes_legacy_duplicate_rows():
     assert len(rep["report1"]) == 1
     assert int(rep["report1"][0]["Total_Pieces"]) == 12
     assert float(rep["report2_hourly"][0]["Hourly_Salary_Rs"]) == 60.0
+
+
+def test_rename_karigar_id_updates_references():
+    save_sheet_df(
+        "karigar_master",
+        pd.DataFrame([{"Karigar_ID": "K001", "Name": "Ali", "Skill": "Stitch", "Daily_Rate_Rs": 400}]),
+    )
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame([{"E_Code": "K001", "Name": "Ali", "Type": "Karigar", "Daily_Rate_Rs": 400}]),
+    )
+    save_sheet_df(
+        "production_log",
+        pd.DataFrame([{"Date": "2026-05-15", "Karigar_ID": "K001", "Challan_No": "CH-1", "Total_Pieces": 10}]),
+    )
+    save_sheet_df(
+        "karigar_attendance",
+        pd.DataFrame([{"Date": "2026-05-15", "E_Code": "K001", "Status": "P"}]),
+    )
+    out = svc.rename_karigar_id("K001", "K099")
+    assert out["ok"] is True
+    assert get_sheet_df("karigar_master").iloc[0]["Karigar_ID"] == "K099"
+    assert get_sheet_df("employee_master").iloc[0]["E_Code"] == "K099"
+    assert get_sheet_df("production_log").iloc[0]["Karigar_ID"] == "K099"
+    assert get_sheet_df("karigar_attendance").iloc[0]["E_Code"] == "K099"
+
+
+def test_challan_snapshot_and_production_log_description():
+    save_sheet_df(
+        "challan_master",
+        pd.DataFrame(
+            [
+                {
+                    "Challan_No": "CH-100",
+                    "Party": "ABC Garments",
+                    "Style": "STYLE-X",
+                    "Total_Qty": 200,
+                    "Received_Qty": 150,
+                    "Rate_Per_Pc": 35,
+                }
+            ]
+        ),
+    )
+    snap = svc.challan_snapshot("CH-100")
+    assert snap["Party"] == "ABC Garments"
+    assert "ABC Garments" in snap["Challan_Description"]
+    assert "STYLE-X" in snap["Challan_Description"]
+    assert "₹35" in snap["Challan_Description"]
+
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "STYLE-X", "Operation": "Stitch", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    out = svc.save_production_entry(
+        date_str="2026-05-15",
+        karigar_id="K001",
+        karigar_name="Test",
+        challan_no="CH-100",
+        style="STYLE-X",
+        hour_entries=[{"hour_col": "H_09_10", "operation": "Stitch", "pieces": 10}],
+    )
+    assert out["ok"] is True
+    pl = get_sheet_df("production_log")
+    row = pl.iloc[-1]
+    assert row["Challan_Party"] == "ABC Garments"
+    assert "STYLE-X" in str(row["Challan_Description"])
+
+    rep = svc.production_entry_reports("2026-05-15", "K001")
+    assert rep["report1"][0]["Challan_Description"]

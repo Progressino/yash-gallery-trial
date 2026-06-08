@@ -1,5 +1,6 @@
 """Karigar attendance policy and biometric import tests."""
 
+import io
 from datetime import time
 from pathlib import Path
 
@@ -244,6 +245,44 @@ def test_extract_report_date_from_header_label():
         ]
     )
     assert att._extract_report_date(raw) == "2026-06-03"
+
+
+def test_extract_report_date_ignores_generated_timestamp_row():
+    """Saturday sheet uploaded Monday must use attendance date, not print/export date."""
+    raw = pd.DataFrame(
+        [
+            ["Daily Attendance IN/OUT Punch Report", "", ""],
+            ["Generated on", "09-Jun-2026", ""],
+            ["Date", "07-Jun-2026", ""],
+            ["", "", ""],
+        ]
+    )
+    assert att._extract_report_date(raw) == "2026-06-07"
+
+
+def test_import_uses_report_date_override_not_sheet_header():
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame([{"E_Code": "901", "Name": "Test", "Type": "Karigar", "Daily_Rate_Rs": 400, "Hourly_Rate_Rs": 50}]),
+    )
+    raw = pd.DataFrame(
+        [
+            ["Date", "09-Jun-2026"],
+            ["E. Code", "Name", "IN-1", "OUT-1"],
+            ["901", "Test", "09:00", "18:00"],
+        ]
+    )
+    bio = io.BytesIO()
+    raw.to_excel(bio, index=False, header=False)
+    out = att.import_karigar_attendance_bytes(
+        bio.getvalue(),
+        "attendance.xlsx",
+        report_date_override="2026-06-07",
+    )
+    assert out["ok"] is True
+    assert out["date"] == "2026-06-07"
+    pl = get_sheet_df("karigar_attendance")
+    assert pl.iloc[0]["Date"] == "2026-06-07"
 
 
 def test_employee_845_late_arrival_reduces_normal_pay():

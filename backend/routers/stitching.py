@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 import pandas as pd
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -107,6 +107,7 @@ class KarigarUpdateBody(BaseModel):
     Skill: Optional[str] = None
     Daily_Rate_Rs: Optional[float] = None
     Effective_From: Optional[str] = None
+    New_Karigar_ID: Optional[str] = None
 
 
 class MasterDeleteBody(BaseModel):
@@ -153,6 +154,7 @@ class EmployeeUpdateBody(BaseModel):
     Name: Optional[str] = None
     Type: Optional[str] = None
     Daily_Rate_Rs: Optional[float] = None
+    New_E_Code: Optional[str] = None
     admin_password: str = ""
 
 
@@ -646,7 +648,10 @@ def recalculate_karigar_attendance(date: str):
 
 
 @router.post("/attendance/karigar/upload")
-async def upload_karigar_attendance(file: UploadFile = File(...)):
+async def upload_karigar_attendance(
+    file: UploadFile = File(...),
+    report_date: str = Form(""),
+):
     """Import Daily Attendance IN/OUT Punch Report (.xls / .xlsx)."""
     from ..services import karigar_attendance as att_svc
 
@@ -654,7 +659,11 @@ async def upload_karigar_attendance(file: UploadFile = File(...)):
     if not raw:
         raise HTTPException(400, "Empty file.")
     try:
-        out = att_svc.import_karigar_attendance_bytes(raw, file.filename or "attendance.xls")
+        out = att_svc.import_karigar_attendance_bytes(
+            raw,
+            file.filename or "attendance.xls",
+            report_date_override=report_date,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:
@@ -757,6 +766,11 @@ def add_karigar(body: KarigarBody):
 
 @router.patch("/master/karigar/{karigar_id}")
 def update_karigar(karigar_id: str, body: KarigarUpdateBody):
+    if body.New_Karigar_ID and str(body.New_Karigar_ID).strip():
+        out = svc.rename_karigar_id(karigar_id, body.New_Karigar_ID)
+        if not out.get("ok"):
+            raise HTTPException(400, out.get("message", "Rename failed"))
+        karigar_id = str(body.New_Karigar_ID).strip()
     out = svc.update_karigar_master(
         karigar_id,
         name=body.Name,
@@ -773,6 +787,11 @@ def update_karigar(karigar_id: str, body: KarigarUpdateBody):
 def update_employee(e_code: str, body: EmployeeUpdateBody):
     if not verify_admin_password(body.admin_password):
         raise HTTPException(403, "Admin password required")
+    if body.New_E_Code and str(body.New_E_Code).strip():
+        out = svc.rename_employee_e_code(e_code, body.New_E_Code)
+        if not out.get("ok"):
+            raise HTTPException(400, out.get("message", "Rename failed"))
+        e_code = str(body.New_E_Code).strip()
     out = svc.update_employee_master(
         e_code,
         name=body.Name,
