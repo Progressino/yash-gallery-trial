@@ -100,6 +100,48 @@ def test_expand_bundled_po_skus_handles_unicode_dashes():
     assert int(out["PO_Pipeline_Total"].sum()) == 200
 
 
+def test_prepare_existing_po_expands_bundled_only_parent_on_mixed_sheet():
+    """1917 bundled-only rows expand even when another parent has per-size lines."""
+    from backend.services.existing_po import existing_po_merge_key, prepare_existing_po_for_merge
+
+    ep = pd.DataFrame(
+        {
+            "OMS_SKU": [
+                "1361YKBLUE-L",
+                "1361YKBLUE-XL",
+                "1917YKBLUE-L-XL",
+                "1917YKBLUE-4XL-5XL",
+            ],
+            "PO_Pipeline_Total": [100, 120, 324, 274],
+            "Pending_Cutting": [90, 110, 320, 270],
+            "Balance_to_Dispatch": [10, 10, 4, 4],
+        }
+    )
+    out = prepare_existing_po_for_merge(ep, existing_po_merge_key)
+    assert "1917YKBLUE-L" in set(out["OMS_SKU"])
+    assert "1917YKBLUE-XL" in set(out["OMS_SKU"])
+    assert "1917YKBLUE-4XL" in set(out["OMS_SKU"])
+    assert "1917YKBLUE-5XL" in set(out["OMS_SKU"])
+    assert "1917YKBLUE-L-XL" not in set(out["OMS_SKU"])
+    assert int(out.loc[out["OMS_SKU"] == "1361YKBLUE-L", "PO_Pipeline_Total"].iloc[0]) == 100
+
+
+def test_prepare_existing_po_keeps_bundled_when_per_size_children_exist():
+    from backend.services.existing_po import existing_po_merge_key, prepare_existing_po_for_merge
+
+    ep = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-L", "1917YKBLUE-XL", "1917YKBLUE-L-XL"],
+            "PO_Pipeline_Total": [120, 100, 4],
+            "Pending_Cutting": [110, 90, 4],
+            "Balance_to_Dispatch": [10, 10, 0],
+        }
+    )
+    out = prepare_existing_po_for_merge(ep, existing_po_merge_key)
+    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L-XL", "PO_Pipeline_Total"].iloc[0]) == 4
+    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "PO_Pipeline_Total"].iloc[0]) == 120
+
+
 def test_parse_existing_po_vendor_article_column():
     df = pd.DataFrame(
         {

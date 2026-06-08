@@ -658,16 +658,40 @@ def ensure_existing_po_hydrated(sess) -> bool:
     return changed
 
 
-def _existing_po_sheet_has_per_size_children(ep: pd.DataFrame) -> bool:
-    """True when any bundled band already has a separate per-size row on the sheet."""
-    sku_set = set(ep["OMS_SKU"].astype(str))
-    for sku in sku_set:
-        if not is_bundled_size_range_sku(sku):
-            continue
-        for child in _split_bundled_po_sku(sku):
-            if child in sku_set:
-                return True
+def _bundled_row_has_per_size_children(sku: str, sku_set: set[str]) -> bool:
+    """True when this bundled band already has separate per-size rows on the sheet."""
+    if not is_bundled_size_range_sku(sku):
+        return False
+    for child in _split_bundled_po_sku(sku):
+        if child in sku_set:
+            return True
     return False
+
+
+def _expand_bundled_po_rows_without_children(ep: pd.DataFrame) -> pd.DataFrame:
+    """Fan out only bundled rows whose per-size children are absent from the sheet."""
+    if ep is None or ep.empty:
+        return ep
+    sku_set = set(ep["OMS_SKU"].astype(str))
+    to_expand = ep[
+        ep["OMS_SKU"].astype(str).map(
+            lambda s: is_bundled_size_range_sku(s)
+            and not _bundled_row_has_per_size_children(s, sku_set)
+        )
+    ]
+    if to_expand.empty:
+        return ep
+    keep = ep[~ep.index.isin(to_expand.index)]
+    expanded = expand_bundled_po_skus(to_expand)
+    out = pd.concat([keep, expanded], ignore_index=True)
+    breakdown = [
+        c
+        for c in ("PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch", "PO_Pipeline_Total")
+        if c in out.columns
+    ]
+    if breakdown:
+        out = out.groupby("OMS_SKU", as_index=False)[breakdown].sum()
+    return out
 
 
 def prepare_existing_po_for_merge(
@@ -703,9 +727,8 @@ def prepare_existing_po_for_merge(
         ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
     else:
         ep = ep.drop_duplicates(subset=["OMS_SKU"], keep="last")
-    if not ep.empty and not _existing_po_sheet_has_per_size_children(ep):
-        if any(is_bundled_size_range_sku(s) for s in ep["OMS_SKU"].astype(str)):
-            ep = expand_bundled_po_skus(ep)
+    if not ep.empty and any(is_bundled_size_range_sku(s) for s in ep["OMS_SKU"].astype(str)):
+        ep = _expand_bundled_po_rows_without_children(ep)
     return ep
 
 
