@@ -1638,6 +1638,145 @@ def style_costing_report(
     }
 
 
+def challan_detail_report(challan_no: str) -> dict[str, Any]:
+    """Full challan snapshot: master, costing P&L, production log, and karigar expenses."""
+    cn_raw = str(challan_no or "").strip()
+    cn_key = clean_key(cn_raw)
+    if not cn_key:
+        return {"ok": False, "message": "Challan number required"}
+
+    cm = get_sheet_df("challan_master")
+    if cm.empty or "Challan_No" not in cm.columns:
+        return {"ok": False, "message": f"Challan {cn_raw} not found"}
+    hit = cm[cm["Challan_No"].astype(str).map(clean_key) == cn_key]
+    if hit.empty:
+        return {"ok": False, "message": f"Challan {cn_raw} not found"}
+    master_row = hit.iloc[-1].fillna("").to_dict()
+
+    costing_rows = style_costing_report().get("rows", [])
+    costing = next(
+        (r for r in costing_rows if clean_key(str(r.get("Challan_No", ""))) == cn_key),
+        {},
+    )
+
+    pl = get_sheet_df("production_log")
+    production_detail: list[dict[str, Any]] = []
+    by_operation: list[dict[str, Any]] = []
+    by_karigar: list[dict[str, Any]] = []
+    prod_summary = {"pieces": 0, "piece_value_rs": 0.0, "karigars": 0, "operations": 0}
+
+    if not pl.empty and "Challan_No" in pl.columns:
+        work = pl[pl["Challan_No"].astype(str).map(clean_key) == cn_key].copy()
+        if not work.empty:
+            work = _production_log_latest_rows(work)
+            for c in ("Total_Pieces", "Piece_Value_Rs", "Budgeted_Expense_Rs", "Actual_Expense_Rs", "PL_Rs"):
+                if c in work.columns:
+                    work[c] = safe_num(work[c])
+            snap = challan_snapshot(cn_raw)
+            if "Challan_Party" not in work.columns:
+                work["Challan_Party"] = snap.get("Party", "")
+            if "Challan_Description" not in work.columns:
+                work["Challan_Description"] = snap.get("Challan_Description", "")
+
+            prod_summary = {
+                "pieces": int(safe_num(work.get("Total_Pieces", 0)).sum()),
+                "piece_value_rs": round(float(safe_num(work.get("Piece_Value_Rs", 0)).sum()), 2),
+                "karigars": int(work["Karigar_ID"].nunique()) if "Karigar_ID" in work.columns else 0,
+                "operations": int(work["Operation"].nunique()) if "Operation" in work.columns else 0,
+            }
+
+            detail_cols = [
+                c
+                for c in [
+                    "Date",
+                    "Karigar_ID",
+                    "Karigar_Name",
+                    "Operation",
+                    "Style",
+                    "Total_Pieces",
+                    "Avg_Efficiency_%",
+                    "Piece_Value_Rs",
+                    "Budgeted_Expense_Rs",
+                    "Actual_Expense_Rs",
+                    "PL_Rs",
+                    "Challan_Party",
+                    "Challan_Description",
+                ]
+                if c in work.columns
+            ]
+            production_detail = work[detail_cols].fillna("").to_dict(orient="records")
+
+            if "Operation" in work.columns:
+                op = work.copy()
+                op["_op_norm"] = op["Operation"].apply(normalize_operation_name)
+                by_operation = (
+                    op.groupby("_op_norm", as_index=False)
+                    .agg(
+                        Operation=("_op_norm", "first"),
+                        Pieces=("Total_Pieces", "sum"),
+                        Piece_Value_Rs=("Piece_Value_Rs", "sum"),
+                        PL_Rs=("PL_Rs", "sum"),
+                    )
+                    .fillna("")
+                    .to_dict(orient="records")
+                )
+
+            if "Karigar_ID" in work.columns:
+                kg = work.copy()
+                kg["_kid"] = kg["Karigar_ID"].apply(clean_key)
+                by_karigar = (
+                    kg.groupby("_kid", as_index=False)
+                    .agg(
+                        Karigar_ID=("_kid", "first"),
+                        Karigar_Name=("Karigar_Name", "first"),
+                        Pieces=("Total_Pieces", "sum"),
+                        Piece_Value_Rs=("Piece_Value_Rs", "sum"),
+                        PL_Rs=("PL_Rs", "sum"),
+                    )
+                    .fillna("")
+                    .to_dict(orient="records")
+                )
+
+    exp = get_sheet_df("karigar_expenses")
+    expenses: list[dict[str, Any]] = []
+    expense_total = 0.0
+    if not exp.empty and "Challan_No" in exp.columns:
+        ex = exp[exp["Challan_No"].astype(str).map(clean_key) == cn_key].copy()
+        if not ex.empty and "Amount_Rs" in ex.columns:
+            ex["Amount_Rs"] = safe_num(ex["Amount_Rs"])
+            expense_total = round(float(ex["Amount_Rs"].sum()), 2)
+            exp_cols = [
+                c
+                for c in [
+                    "Date",
+                    "Karigar_ID",
+                    "Karigar_Name",
+                    "Task_Type",
+                    "Description",
+                    "Amount_Rs",
+                    "Style",
+                ]
+                if c in ex.columns
+            ]
+            sort_col = "Date" if "Date" in ex.columns else exp_cols[0]
+            expenses = ex.sort_values(sort_col, ascending=False)[exp_cols].fillna("").to_dict(orient="records")
+
+    return {
+        "ok": True,
+        "challan_no": cn_raw,
+        "master": master_row,
+        "costing": costing,
+        "production": {
+            "summary": prod_summary,
+            "by_operation": by_operation,
+            "by_karigar": by_karigar,
+            "detail": production_detail,
+        },
+        "expenses": expenses,
+        "expense_total_rs": expense_total,
+    }
+
+
 STYLE_MASTER_COLUMN_SETS: dict[str, list[str]] = {
     "master_operations": ["Operation", "Target", "Rate_Rs"],
     "production_by_operation": [

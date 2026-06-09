@@ -2055,9 +2055,209 @@ function ComparisonDashboardTab() {
   )
 }
 
+function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose: () => void }) {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['stitching-challan-detail', challanNo],
+    queryFn: () =>
+      api.get(`/stitching/challans/${encodeURIComponent(challanNo)}/detail`).then(r => r.data),
+    enabled: !!challanNo,
+  })
+  const master = (data?.master ?? {}) as Record<string, unknown>
+  const costing = (data?.costing ?? {}) as Record<string, unknown>
+  const production = (data?.production ?? {}) as {
+    summary?: Record<string, number>
+    by_operation?: Record<string, unknown>[]
+    by_karigar?: Record<string, unknown>[]
+    detail?: Record<string, unknown>[]
+  }
+  const expenses = (data?.expenses ?? []) as Record<string, unknown>[]
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 overflow-y-auto"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Challan ${challanNo} details`}
+    >
+      <div
+        className="bg-white rounded-xl shadow-xl max-w-5xl w-full my-8 p-4 space-y-4"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-2 border-b pb-3">
+          <div>
+            <p className="text-lg font-bold text-[#002B5B]">Challan {challanNo}</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {String(master.Style ?? '')}
+              {master.Party ? ` · ${String(master.Party)}` : ''}
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="px-3 py-1.5 border rounded-lg text-sm">
+            Close
+          </button>
+        </div>
+        {isLoading && <p className="text-sm text-gray-500">Loading challan details…</p>}
+        {isError && <p className="text-sm text-red-600">Could not load challan details.</p>}
+        {data?.ok && (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+              {(
+                [
+                  ['Ordered qty', String(master.Total_Qty ?? '—')],
+                  ['Received', String(master.Received_Qty ?? '—')],
+                  ['Rate/pc', master.Rate_Per_Pc != null ? `₹${master.Rate_Per_Pc}` : '—'],
+                  ['Deposit ₹', master.Deposit_Rs != null ? `₹${Number(master.Deposit_Rs).toLocaleString()}` : '—'],
+                  ['Date', String(master.Date ?? '—')],
+                  ['Delivery by', String(master.Delivery_By ?? '—')],
+                  ['Party value', costing.Party_Value_Rs != null ? `₹${Number(costing.Party_Value_Rs).toLocaleString()}` : '—'],
+                  ['Net P&L', costing.PL_Rs != null ? `₹${Number(costing.PL_Rs).toLocaleString()}` : '—'],
+                ] as const
+              ).map(([l, v]) => (
+                <div key={l} className="bg-gray-50 border rounded-lg p-2.5">
+                  <p className="text-[10px] text-gray-500">{l}</p>
+                  <p className="font-semibold text-[#2c5aa0]">{v}</p>
+                </div>
+              ))}
+            </div>
+            {Object.keys(costing).length > 0 && (
+              <Section title="Costing breakdown">
+                <DataTable
+                  rows={[costing]}
+                  cols={[
+                    'Challan_No',
+                    'Style',
+                    'Party',
+                    'Total_Qty',
+                    'Received_Qty',
+                    'Pending',
+                    'Party_Value_Ordered_Rs',
+                    'Party_Value_Received_Rs',
+                    'Party_Value_Rs',
+                    'Actual_Labour_Rs',
+                    'Target_Labour_Rs',
+                    'Deposit_Rs',
+                    'Total_Expense_Rs',
+                    'PL_Rs',
+                    'Margin_%',
+                  ]}
+                />
+              </Section>
+            )}
+            {production.summary && (
+              <p className="text-xs text-gray-600">
+                Production: {production.summary.pieces} pcs · ₹
+                {Number(production.summary.piece_value_rs ?? 0).toLocaleString()} ·{' '}
+                {production.summary.karigars} karigar(s) · {production.summary.operations} operation(s)
+              </p>
+            )}
+            {(production.by_operation?.length ?? 0) > 0 && (
+              <Section title="Production by operation">
+                <DataTable
+                  rows={production.by_operation ?? []}
+                  cols={['Operation', 'Pieces', 'Piece_Value_Rs', 'PL_Rs']}
+                />
+              </Section>
+            )}
+            {(production.by_karigar?.length ?? 0) > 0 && (
+              <Section title="Production by karigar">
+                <DataTable
+                  rows={production.by_karigar ?? []}
+                  cols={['Karigar_ID', 'Karigar_Name', 'Pieces', 'Piece_Value_Rs', 'PL_Rs']}
+                />
+              </Section>
+            )}
+            {(production.detail?.length ?? 0) > 0 && (
+              <Section title="Production log (detail)">
+                <DataTable
+                  rows={production.detail ?? []}
+                  cols={[
+                    'Date',
+                    'Karigar_ID',
+                    'Karigar_Name',
+                    'Operation',
+                    'Total_Pieces',
+                    'Avg_Efficiency_%',
+                    'Piece_Value_Rs',
+                    'PL_Rs',
+                  ]}
+                />
+              </Section>
+            )}
+            {expenses.length > 0 && (
+              <Section title={`Karigar expenses (₹${Number(data.expense_total_rs ?? 0).toLocaleString()})`}>
+                <DataTable
+                  rows={expenses}
+                  cols={['Date', 'Karigar_ID', 'Karigar_Name', 'Task_Type', 'Description', 'Amount_Rs']}
+                />
+              </Section>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ClickableChallanDataTable({
+  rows,
+  cols,
+  onChallanClick,
+}: {
+  rows: Record<string, unknown>[]
+  cols: string[]
+  onChallanClick: (challanNo: string) => void
+}) {
+  if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No rows</p>
+  const useCols = cols.length ? cols : Object.keys(rows[0] ?? {})
+  return (
+    <div className="overflow-x-auto max-h-[min(420px,50vh)]">
+      <p className="text-[10px] text-gray-500 mb-1">Click a row to open full challan details.</p>
+      <table className="w-full text-xs">
+        <thead className="sticky top-0 bg-gray-50 border-b">
+          <tr>
+            {useCols.map(c => (
+              <th key={c} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+                {c.replace(/_/g, ' ')}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const challanNo = String(r.Challan_No ?? '')
+            return (
+              <tr
+                key={i}
+                className="border-b border-gray-50 hover:bg-sky-50/80 cursor-pointer"
+                onClick={() => {
+                  if (challanNo) onChallanClick(challanNo)
+                }}
+                title={challanNo ? `View challan ${challanNo}` : undefined}
+              >
+                {useCols.map(c => (
+                  <td key={c} className="px-2 py-1.5 whitespace-nowrap">
+                    {c === 'Challan_No' && challanNo ? (
+                      <span className="text-[#2c5aa0] font-semibold underline decoration-dotted">{String(r[c] ?? '')}</span>
+                    ) : r[c] === 0 || r[c] === '0' ? (
+                      '0'
+                    ) : (
+                      String(r[c] ?? '')
+                    )}
+                  </td>
+                ))}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function StyleCostingTab() {
   const [month, setMonth] = useState('All')
   const [style, setStyle] = useState('All')
+  const [detailChallan, setDetailChallan] = useState('')
   const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['stitching-style-costing', month, style],
     queryFn: () => api.get('/stitching/style-costing', { params: { month, style } }).then(r => r.data),
@@ -2103,7 +2303,7 @@ function StyleCostingTab() {
         </div>
       )}
       <Section title="Detail">
-        <DataTable
+        <ClickableChallanDataTable
           rows={data?.rows ?? []}
           cols={[
             'Challan_No',
@@ -2120,6 +2320,7 @@ function StyleCostingTab() {
             'PL_Rs',
             'Margin_%',
           ]}
+          onChallanClick={setDetailChallan}
         />
       </Section>
       <Section title="Style roll-up">
@@ -2128,6 +2329,7 @@ function StyleCostingTab() {
           cols={['Style', 'Challans', 'Qty_Ordered', 'Qty_Received', 'Qty', 'PL', 'Margin_%', 'Result']}
         />
       </Section>
+      {detailChallan && <ChallanDetailModal challanNo={detailChallan} onClose={() => setDetailChallan('')} />}
     </div>
   )
 }
@@ -3290,9 +3492,36 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   const [uploadBusy, setUploadBusy] = useState(false)
   /** Blank = use date from sheet header / filename (not today). */
   const [uploadReportDate, setUploadReportDate] = useState('')
+  const [recordsDate, setRecordsDate] = useState('')
+  const [recalcBusy, setRecalcBusy] = useState(false)
   const [missDrafts, setMissDrafts] = useState<Record<string, MissPunchDraft>>({})
   const fileRef = useRef<HTMLInputElement>(null)
   const allRows = (data?.rows ?? []) as Record<string, unknown>[]
+  const availableDates = useMemo(() => {
+    const dates = new Set(allRows.map(r => String(r.Date ?? '').slice(0, 10)).filter(Boolean))
+    return [...dates].sort((a, b) => b.localeCompare(a))
+  }, [allRows])
+  useEffect(() => {
+    if (!availableDates.length) return
+    if (!recordsDate || !availableDates.includes(recordsDate)) {
+      setRecordsDate(availableDates[0])
+    }
+  }, [availableDates, recordsDate])
+  const filteredRows = useMemo(() => {
+    const toNum = (v: unknown) => {
+      const n = Number(String(v ?? '').trim())
+      return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY
+    }
+    const dayRows = recordsDate
+      ? allRows.filter(r => String(r.Date ?? '').slice(0, 10) === recordsDate)
+      : allRows
+    return [...dayRows].sort((a, b) => toNum(a.E_Code) - toNum(b.E_Code))
+  }, [allRows, recordsDate])
+  const daySummary = useMemo(() => {
+    const present = filteredRows.filter(r => String(r.Status ?? '').toUpperCase() === 'P').length
+    const absent = filteredRows.filter(r => String(r.Status ?? '').toUpperCase() === 'A').length
+    return { present, absent, total: filteredRows.length }
+  }, [filteredRows])
   const needsMissPunch = type === 'karigar'
     ? allRows.filter(r => r.Needs_Miss_Punch === true || r.Needs_Miss_Punch === 'true')
     : []
@@ -3342,6 +3571,7 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
       )
       const warn = res.warnings?.length ? ` ${res.warnings.join(' ')}` : ''
       setUploadMsg({ type: 'ok', text: `${res.message || 'Imported.'}${warn}` })
+      if (res.date) setRecordsDate(String(res.date).slice(0, 10))
       qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
       qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
       refetch()
@@ -3602,26 +3832,64 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
         </button>
       </Section>
       <Section title="Records">
-        <DataTable
-          rows={(() => {
-            const all = (data?.rows ?? []) as Record<string, unknown>[]
-            const toNum = (v: unknown) => {
-              const n = Number(String(v ?? '').trim())
-              return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY
-            }
-            // Show the most recent attendance day first; within the day sort by E_Code ascending.
-            // Cap to 250 rows to avoid huge renders.
-            return [...all]
-              .sort((a, b) => {
-                const da = String(a.Date ?? '')
-                const db = String(b.Date ?? '')
-                if (da !== db) return db.localeCompare(da) // newest date first
-                return toNum(a.E_Code) - toNum(b.E_Code)
-              })
-              .slice(0, 250)
-          })()}
-          cols={type === 'karigar' ? karigarCols : ['Date', 'E_Code', 'Name', 'Total_Hours', 'Total_Pay']}
-        />
+        <div className="flex flex-wrap items-end gap-3 mb-3 text-xs">
+          <label>
+            Attendance date
+            <select
+              className="w-full min-w-[10rem] border rounded mt-1 px-2 py-1.5"
+              value={recordsDate}
+              onChange={e => setRecordsDate(e.target.value)}
+            >
+              <option value="">All dates (latest 250)</option>
+              {availableDates.map(d => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </label>
+          {type === 'karigar' && recordsDate && (
+            <>
+              <div className="flex flex-wrap gap-2">
+                <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-800 border border-emerald-100">
+                  Present <b>{daySummary.present}</b>
+                </span>
+                <span className="px-2 py-1 rounded bg-rose-50 text-rose-800 border border-rose-100">
+                  Absent <b>{daySummary.absent}</b>
+                </span>
+                <span className="px-2 py-1 rounded bg-gray-50 text-gray-700 border">
+                  Total <b>{daySummary.total}</b>
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={recalcBusy}
+                onClick={async () => {
+                  setRecalcBusy(true)
+                  try {
+                    await api.post('/stitching/attendance/karigar/recalculate', null, { params: { date: recordsDate } })
+                    qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
+                    qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
+                    await refetch()
+                  } finally {
+                    setRecalcBusy(false)
+                  }
+                }}
+                className="px-3 py-1.5 border rounded-lg text-[#002B5B] font-medium disabled:opacity-50"
+              >
+                {recalcBusy ? 'Recalculating…' : 'Recalculate this day'}
+              </button>
+            </>
+          )}
+        </div>
+        {type === 'karigar' ? (
+          <AttendanceRecordsTable rows={filteredRows} cols={karigarCols} />
+        ) : (
+          <DataTable
+            rows={recordsDate ? filteredRows : filteredRows.slice(0, 250)}
+            cols={['Date', 'E_Code', 'Name', 'Total_Hours', 'Total_Pay']}
+          />
+        )}
       </Section>
     </div>
   )
@@ -3943,6 +4211,7 @@ function StyleMasterReportPanel({
   const [showByDate, setShowByDate] = useState(true)
   const [showDetail, setShowDetail] = useState(false)
   const [showCostingTable, setShowCostingTable] = useState(true)
+  const [detailChallan, setDetailChallan] = useState('')
 
   useEffect(() => {
     if (focusStyle) setReportStyle(focusStyle)
@@ -4118,10 +4387,26 @@ function StyleMasterReportPanel({
             </p>
           )}
           {showCostingTable && (
-            <DataTable rows={costing.challans ?? []} cols={columnSets.costing_challans ?? ['Challan_No', 'Party_Value_Rs', 'PL_Rs']} />
+            <ClickableChallanDataTable
+              rows={costing.challans ?? []}
+              cols={
+                columnSets.costing_challans ?? [
+                  'Challan_No',
+                  'Party',
+                  'Total_Qty',
+                  'Received_Qty',
+                  'Party_Value_Rs',
+                  'Actual_Labour_Rs',
+                  'PL_Rs',
+                  'Margin_%',
+                ]
+              }
+              onChallanClick={setDetailChallan}
+            />
           )}
         </div>
       )}
+      {detailChallan && <ChallanDetailModal challanNo={detailChallan} onClose={() => setDetailChallan('')} />}
     </div>
   )
 }
@@ -5164,6 +5449,61 @@ function ReportTableSection({
       </div>
       {children ?? <DataTable rows={rows} cols={cols} />}
     </Section>
+  )
+}
+
+function AttendanceRecordsTable({ rows, cols }: { rows: Record<string, unknown>[]; cols: string[] }) {
+  if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No rows for this date</p>
+  return (
+    <div className="overflow-x-auto max-h-[min(420px,50vh)]">
+      <table className="w-full text-xs">
+        <thead className="sticky top-0 bg-gray-50 border-b">
+          <tr>
+            {cols.map(c => (
+              <th key={c} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+                {c.replace(/_/g, ' ')}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const status = String(r.Status ?? '').toUpperCase()
+            const rowClass =
+              status === 'A'
+                ? 'bg-rose-50/60 text-rose-950'
+                : status === 'P'
+                  ? 'bg-white'
+                  : 'bg-gray-50'
+            return (
+              <tr key={i} className={`border-b border-gray-50 hover:bg-gray-50/80 ${rowClass}`}>
+                {cols.map(c => (
+                  <td key={c} className="px-2 py-1.5 whitespace-nowrap">
+                    {c === 'Status' ? (
+                      <span
+                        className={`inline-block px-1.5 py-0.5 rounded font-semibold ${
+                          status === 'P'
+                            ? 'bg-emerald-100 text-emerald-900'
+                            : status === 'A'
+                              ? 'bg-rose-200 text-rose-900'
+                              : 'bg-gray-200 text-gray-800'
+                        }`}
+                      >
+                        {String(r[c] ?? '')}
+                      </span>
+                    ) : r[c] === 0 || r[c] === '0' ? (
+                      '0'
+                    ) : (
+                      String(r[c] ?? '')
+                    )}
+                  </td>
+                ))}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
   )
 }
 

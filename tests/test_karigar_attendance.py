@@ -367,6 +367,78 @@ def test_calc_salary_wrapper():
     assert out["Normal_Pay"] == 400.0
 
 
+def test_full_day_import_replaces_stale_rows():
+    """Re-importing a day must remove workers not in the new sheet (full snapshot)."""
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame(
+            [
+                {"E_Code": "801", "Name": "A", "Type": "Karigar", "Daily_Rate_Rs": 400, "Hourly_Rate_Rs": 50},
+                {"E_Code": "802", "Name": "B", "Type": "Karigar", "Daily_Rate_Rs": 400, "Hourly_Rate_Rs": 50},
+            ]
+        ),
+    )
+    save_sheet_df(
+        "karigar_attendance",
+        pd.DataFrame(
+            [
+                {"Date": "2026-06-08", "E_Code": "801", "Status": "P", "Total_Pay": 400},
+                {"Date": "2026-06-08", "E_Code": "802", "Status": "P", "Total_Pay": 400},
+                {"Date": "2026-06-07", "E_Code": "801", "Status": "P", "Total_Pay": 400},
+            ]
+        ),
+    )
+    raw = pd.DataFrame(
+        [
+            ["Jun 08 2026  To  Jun 08 2026", None, None, None, None, None, None],
+            ["SNo", "E. Code", "Name", "Department", "Shift", " IN-1", "OUT-1"],
+            [1, 801, "A", "Default", "GS", "09:00", "18:00"],
+        ]
+    )
+    bio = io.BytesIO()
+    raw.to_excel(bio, index=False, header=False)
+    out = att.import_karigar_attendance_bytes(bio.getvalue(), "8-6-26.xlsx")
+    assert out["ok"] is True
+    pl = get_sheet_df("karigar_attendance")
+    day = pl[pl["Date"].astype(str) == "2026-06-08"]
+    assert len(day) == 1
+    assert str(day.iloc[0]["E_Code"]) == "801"
+    assert len(pl[pl["Date"].astype(str) == "2026-06-07"]) == 1
+
+
+def test_recalculate_fixes_present_without_punch():
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame(
+            [{"E_Code": "960", "Name": "Rinku", "Type": "Karigar", "Daily_Rate_Rs": 400, "Hourly_Rate_Rs": 50}]
+        ),
+    )
+    save_sheet_df(
+        "karigar_attendance",
+        pd.DataFrame(
+            [
+                {
+                    "Date": "2026-06-08",
+                    "E_Code": "960",
+                    "Name": "Rinku",
+                    "Shift": "GS",
+                    "Status": "P",
+                    "In_Punch": "",
+                    "Out_Punch": "",
+                    "Punch_Pairs": "",
+                    "Total_Pay": 0,
+                    "Daily_Rate_Rs": 400,
+                }
+            ]
+        ),
+    )
+    out = att.recalculate_attendance_for_date("2026-06-08")
+    assert out["ok"] is True
+    row = get_sheet_df("karigar_attendance").iloc[0]
+    assert row["Status"] == "A"
+    assert float(row["Total_Pay"]) == 0.0
+
+
 def test_import_8_jun_26_xlsx_absent_workers_not_present():
     """Regression: 8-6-26.xlsx — NS / blank punches absent; date is 2026-06-08 not punch day."""
     save_sheet_df(

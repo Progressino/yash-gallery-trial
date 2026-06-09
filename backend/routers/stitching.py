@@ -563,6 +563,14 @@ def delete_challan(challan_no: str):
     return out
 
 
+@router.get("/challans/{challan_no}/detail")
+def get_challan_detail(challan_no: str):
+    out = svc.challan_detail_report(challan_no)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Challan not found"))
+    return out
+
+
 @router.patch("/challans/{challan_no}")
 def update_challan(challan_no: str, body: ChallanUpdateBody):
     df = get_sheet_df("challan_master")

@@ -714,6 +714,12 @@ def test_challan_snapshot_and_production_log_description():
     rep = svc.production_entry_reports("2026-05-15", "K001")
     assert rep["report1"][0]["Challan_Description"]
 
+    detail = svc.challan_detail_report("CH-100")
+    assert detail["ok"] is True
+    assert detail["master"]["Style"] == "STYLE-X"
+    assert detail["production"]["summary"]["pieces"] >= 10
+    assert detail["costing"]["Challan_No"] == "CH-100"
+
 
 def test_sunday_production_report_uses_six_hour_salary_basis():
     """Sunday costing: hourly salary = daily ÷ 6 (09:00–16:00 shift)."""

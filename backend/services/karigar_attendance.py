@@ -281,6 +281,31 @@ def needs_miss_punch(punch_pairs: list[tuple[time, time | None]]) -> bool:
     return any(tout is None for _, tout in punch_pairs)
 
 
+def row_has_in_punch(
+    punch_pairs: list[tuple[time, time | None]] | None = None,
+    *,
+    in_punch: Any = None,
+) -> bool:
+    """True when the row has at least one valid clock-in."""
+    if punch_pairs and any(tin is not None for tin, _ in punch_pairs):
+        return True
+    return _parse_clock(in_punch) is not None
+
+
+def attendance_status_from_punches(
+    punch_pairs: list[tuple[time, time | None]] | None,
+    *,
+    in_punch: Any = None,
+    status: str = "P",
+) -> str:
+    """No IN punch → absent; otherwise present unless explicitly marked absent."""
+    if not row_has_in_punch(punch_pairs, in_punch=in_punch):
+        return "A"
+    if str(status or "P").strip().upper() == "A":
+        return "A"
+    return "P"
+
+
 def calc_salary_from_punches(
     punch_pairs: list[tuple[time, time | None]],
     daily_rate: float,
@@ -890,9 +915,13 @@ def recalculate_attendance_for_date(on_date: str) -> dict[str, Any]:
             tout = _parse_clock(row.get("Out_Punch"))
             if tin is not None:
                 pairs = [(tin, tout)]
+        status = attendance_status_from_punches(pairs, in_punch=row.get("In_Punch"), status=status)
+        if status == "A":
+            pairs = []
         calc = calc_salary_from_punches(pairs, daily, on_date=on_date, status=status)
         for key, val in calc.items():
             df.at[idx, key] = val
+        df.at[idx, "Status"] = status
         df.at[idx, "Daily_Rate_Rs"] = daily
         df.at[idx, "Needs_Miss_Punch"] = needs_miss_punch(pairs)
         updated += 1
@@ -971,11 +1000,8 @@ def import_karigar_attendance_bytes(
 
     existing = get_sheet_df("karigar_attendance")
     if not existing.empty:
-        keep = ~(
-            (existing["Date"].astype(str) == report_date)
-            & (existing["E_Code"].astype(str).map(clean_key).isin([clean_key(x["E_Code"]) for x in rows]))
-        )
-        existing = existing[keep]
+        # Full-day snapshot: drop every row for this date, then load the sheet as-is.
+        existing = existing[existing["Date"].astype(str) != str(report_date)]
     merged = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True)
     save_sheet_df("karigar_attendance", merged)
 
