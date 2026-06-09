@@ -37,6 +37,22 @@ def test_returns_import_accepts_rar_and_queues_followup(client, auth_token, monk
         lambda *a, **k: None,
     )
 
+    # DAILY_UPLOAD_EXECUTOR has max_workers=1. In the full test suite, previous
+    # tests can leave queued work that saturates the executor for > 5s.  Patch
+    # submit() to run the callable synchronously in this thread instead.
+    import concurrent.futures
+    from backend.concurrency import DAILY_UPLOAD_EXECUTOR
+
+    class _SyncFuture:
+        def result(self, timeout=None):
+            return None
+
+    def _sync_submit(fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        return _SyncFuture()
+
+    monkeypatch.setattr(DAILY_UPLOAD_EXECUTOR, "submit", _sync_submit)
+
     r = client.post(
         "/api/po/returns/import-file",
         files=[("file", ("Return Data.rar", BytesIO(b"Rar!" + b"\x1a\x07\x00" + b"x"), "application/x-rar"))],
@@ -47,12 +63,6 @@ def test_returns_import_accepts_rar_and_queues_followup(client, auth_token, monk
     assert body.get("sales_rebuild") == "pending"
     assert body.get("sales_rebuilt") is False
     assert "background" in (body.get("message") or "").lower()
-    # The followup runs in a background executor — wait up to 5 s for the thread.
-    # Full test-suite runs can saturate the executor; a short 2-s window is not enough.
-    for _ in range(50):
-        if queued:
-            break
-        time.sleep(0.1)
     assert len(queued) == 1
 
 

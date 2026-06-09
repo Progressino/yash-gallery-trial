@@ -59,6 +59,10 @@ def test_bundle_session_builder_uses_auto_dashboard_when_sales_empty(monkeypatch
 def test_intelligence_bundle_warming_when_no_data_anywhere(client, monkeypatch):
     from backend.services import daily_store
 
+    # Clear the module-level global cache so previous tests' cached "ready" payloads
+    # don't leak into this test and cause a false "ready" response.
+    data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
+
     monkeypatch.setattr(
         daily_store, "platforms_with_uploads_in_range", lambda s, e: []
     )
@@ -70,6 +74,8 @@ def test_intelligence_bundle_warming_when_no_data_anywhere(client, monkeypatch):
     monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _: None)
     monkeypatch.setattr(data_router, "_schedule_persist_tier3_window", lambda *a, **k: None)
     monkeypatch.setattr(data_router, "_hydrate_session_for_intelligence", lambda _s: False)
+    # Skip the global cache lookup so no previous test's result is reused.
+    monkeypatch.setattr(data_router, "_bundle_cache_lookup", lambda *a, **k: None)
 
     r = client.get(
         "/api/data/intelligence-bundle",
