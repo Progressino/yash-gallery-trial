@@ -369,6 +369,60 @@ def _split_integer_qty(total: int, n: int) -> list[int]:
     return [base + (1 if i < rem else 0) for i in range(n)]
 
 
+def bundled_listing_skus(skus) -> set[str]:
+    """Normalized bundled size-range SKUs from any iterable."""
+    out: set[str] = set()
+    if skus is None:
+        return out
+    if hasattr(skus, "tolist"):
+        items = skus.tolist()
+    elif isinstance(skus, (str, bytes)):
+        items = [skus]
+    else:
+        items = list(skus)
+    for raw in items:
+        sku = _normalize_sku_text(raw)
+        if sku and is_bundled_size_range_sku(sku):
+            out.add(sku)
+    return out
+
+
+def per_size_covered_by_bundled_listing(child_sku: object, bundled_skus: set[str]) -> bool:
+    """True when *child_sku* is a size inside a bundled listing present in *bundled_skus*."""
+    if not bundled_skus:
+        return False
+    ck = _normalize_sku_text(child_sku)
+    if not ck:
+        return False
+    for band in bundled_skus:
+        children = {_normalize_sku_text(c) for c in _split_bundled_po_sku(band)}
+        if ck in children:
+            return True
+    return False
+
+
+def normalize_mislabeled_bundled_breakdown(ep: pd.DataFrame) -> pd.DataFrame:
+    """Fix bundled rows where dispatch qty was uploaded in Pending_Cutting."""
+    if ep is None or ep.empty:
+        return ep
+    ep = ep.copy()
+    for idx, row in ep.iterrows():
+        sku = _normalize_sku_text(row.get("OMS_SKU"))
+        if not is_bundled_size_range_sku(sku):
+            continue
+        pending_raw = pd.to_numeric(row.get("Pending_Cutting"), errors="coerce") if "Pending_Cutting" in ep.columns else 0
+        balance_raw = pd.to_numeric(row.get("Balance_to_Dispatch"), errors="coerce") if "Balance_to_Dispatch" in ep.columns else 0
+        pending = 0 if pd.isna(pending_raw) else int(pending_raw)
+        balance = 0 if pd.isna(balance_raw) else int(balance_raw)
+        if not _bundled_dispatch_qty_mislabeled_as_pending(pending, balance):
+            continue
+        ep.at[idx, "Balance_to_Dispatch"] = pending
+        ep.at[idx, "Pending_Cutting"] = 0
+        if "PO_Pipeline_Total" in ep.columns:
+            ep.at[idx, "PO_Pipeline_Total"] = pending
+    return ep
+
+
 def _bundled_dispatch_qty_mislabeled_as_pending(pending: int, balance: int) -> bool:
     """
     Bundled-only PO exports put dispatch balance in Pending_Cutting; Balance_to_Dispatch
@@ -445,10 +499,12 @@ def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
 def fan_out_bundled_listing_metrics(
     metric_df: pd.DataFrame,
     metric_cols: list[str],
+    *,
+    retain_bundled_listing_skus: set[str] | None = None,
 ) -> pd.DataFrame:
     """
     Split bundled-listing metrics (e.g. 1917YKBLUE-L-XL sales) across per-size children.
-    Used when marketplace sales are recorded on the combined listing, not each size.
+    Skips children when inventory still lists the bundled listing (pipeline/sales stay on band).
     """
     if metric_df is None or metric_df.empty or "OMS_SKU" not in metric_df.columns:
         return pd.DataFrame(columns=["OMS_SKU"] + list(metric_cols))
@@ -489,8 +545,12 @@ def fan_out_bundled_listing_metrics(
                 shares_by_col[c] = _split_integer_qty(int(val), n)
             else:
                 shares_by_col[c] = [val / n] * n
+        retain = retain_bundled_listing_skus or set()
         for i, kid in enumerate(children):
-            row: dict = {"OMS_SKU": _normalize_sku_text(kid)}
+            kid_norm = _normalize_sku_text(kid)
+            if per_size_covered_by_bundled_listing(kid_norm, retain):
+                continue
+            row: dict = {"OMS_SKU": kid_norm}
             for c in metric_cols:
                 sh = shares_by_col.get(c, [0] * n)
                 row[c] = sh[i] if i < len(sh) else 0
@@ -814,15 +874,20 @@ def _bundled_row_has_per_size_children(sku: str, sku_set: set[str]) -> bool:
     return False
 
 
-def _expand_bundled_po_rows_without_children(ep: pd.DataFrame) -> pd.DataFrame:
+def _expand_bundled_po_rows_without_children(
+    ep: pd.DataFrame,
+    inventory_skus: set[str] | None = None,
+) -> pd.DataFrame:
     """Fan out only bundled rows whose per-size children are absent from the sheet."""
     if ep is None or ep.empty:
         return ep
     sku_set = set(ep["OMS_SKU"].astype(str))
+    inv = {_normalize_sku_text(s) for s in (inventory_skus or set())}
     to_expand = ep[
         ep["OMS_SKU"].astype(str).map(
             lambda s: is_bundled_size_range_sku(s)
             and not _bundled_row_has_per_size_children(s, sku_set)
+            and _normalize_sku_text(s) not in inv
         )
     ]
     if to_expand.empty:
@@ -843,6 +908,7 @@ def _expand_bundled_po_rows_without_children(ep: pd.DataFrame) -> pd.DataFrame:
 def prepare_existing_po_for_merge(
     existing_po_df: pd.DataFrame,
     canonical_fn,
+    inventory_skus: set[str] | None = None,
 ) -> pd.DataFrame:
     """
     Canonicalize Existing PO rows for exact OMS_SKU merge.
@@ -850,8 +916,8 @@ def prepare_existing_po_for_merge(
     Operator sheets list bundled listings (4XL-5XL) and individual sizes (4XL, 5XL)
     as separate rows with separate quantities — do not fan out when both exist.
 
-    When the sheet only has bundled size-range rows (e.g. 1917YKBLUE-L-XL with no L/XL
-    lines), fan out to per-size SKUs so PO Engine shows separate pending/balance.
+    When the sheet only has bundled size-range rows, fan out to per-size SKUs only if
+    inventory does not still list the bundled listing (e.g. 1917YKBLUE-L-XL with stock).
     """
     if existing_po_df is None or existing_po_df.empty:
         return pd.DataFrame()
@@ -873,8 +939,9 @@ def prepare_existing_po_for_merge(
         ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
     else:
         ep = ep.drop_duplicates(subset=["OMS_SKU"], keep="last")
+    ep = normalize_mislabeled_bundled_breakdown(ep)
     if not ep.empty and any(is_bundled_size_range_sku(s) for s in ep["OMS_SKU"].astype(str)):
-        ep = _expand_bundled_po_rows_without_children(ep)
+        ep = _expand_bundled_po_rows_without_children(ep, inventory_skus=inventory_skus)
     return ep
 
 

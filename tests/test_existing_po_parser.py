@@ -188,8 +188,20 @@ def test_unbundle_keeps_bundled_inventory_row_when_sheet_expanded():
     )
     assert "1917YKBLUE-L-XL" in set(out["OMS_SKU"])
     assert float(out.loc[out["OMS_SKU"] == "1917YKBLUE-L-XL", "Total_Inventory"].iloc[0]) == 46
-    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "Balance_to_Dispatch"].iloc[0]) == 160
-    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "Pending_Cutting"].iloc[0]) == 0
+    ep = prepare_existing_po_for_merge(
+        pd.DataFrame(
+            {
+                "OMS_SKU": ["1917YKBLUE-L-XL"],
+                "PO_Pipeline_Total": [324],
+                "Pending_Cutting": [320],
+                "Balance_to_Dispatch": [4],
+            }
+        ),
+        existing_po_merge_key,
+        inventory_skus={"1917YKBLUE-L-XL"},
+    )
+    assert int(ep.loc[ep["OMS_SKU"] == "1917YKBLUE-L-XL", "Balance_to_Dispatch"].iloc[0]) == 320
+    assert int(ep.loc[ep["OMS_SKU"] == "1917YKBLUE-L-XL", "Pending_Cutting"].iloc[0]) == 0
 
 
 def test_prepare_existing_po_keeps_bundled_when_per_size_children_exist():

@@ -213,6 +213,7 @@ def calculate_quarterly_history(
     sku_mapping: Optional[Dict[str, str]] = None,
     group_by_parent: bool = False,
     n_quarters: int = 8,
+    retain_bundled_listing_skus: Optional[set[str]] = None,
 ) -> pd.DataFrame:
     sales_part = _sales_shipment_history_part(sales_df)
     plat_parts = _collect_platform_shipment_history_parts(
@@ -330,7 +331,11 @@ def calculate_quarterly_history(
         from .existing_po import fan_out_bundled_listing_metrics
 
         q_metric_cols = ordered_q_cols + ["Avg_Monthly", "Units_90d", "Units_30d", "Freq_30d", "ADS"]
-        fan = fan_out_bundled_listing_metrics(pivot, q_metric_cols)
+        fan = fan_out_bundled_listing_metrics(
+            pivot,
+            q_metric_cols,
+            retain_bundled_listing_skus=retain_bundled_listing_skus,
+        )
         if fan is not None and not fan.empty:
             pivot = pivot.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
             for c in q_metric_cols:
@@ -784,12 +789,17 @@ def calculate_po_base(
         metric_cols: list[str],
     ) -> pd.DataFrame:
         """Exact merge + parent fallback + bundled listing (L-XL) share for zero rows."""
-        from .existing_po import fan_out_bundled_listing_metrics
+        from .existing_po import bundled_listing_skus, fan_out_bundled_listing_metrics
 
         out = _merge_metric_with_parent_fallback(base_df, metric_df, metric_cols)
         if group_by_parent or metric_df is None or metric_df.empty:
             return out
-        fan = fan_out_bundled_listing_metrics(metric_df, metric_cols)
+        retain = bundled_listing_skus(base_df["OMS_SKU"].astype(str))
+        fan = fan_out_bundled_listing_metrics(
+            metric_df,
+            metric_cols,
+            retain_bundled_listing_skus=retain,
+        )
         if fan is None or fan.empty:
             return out
         out = out.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
@@ -839,7 +849,15 @@ def calculate_po_base(
     if existing_po_df is not None and not existing_po_df.empty:
         from .existing_po import existing_po_merge_key, prepare_existing_po_for_merge
 
-        _ep_seed = prepare_existing_po_for_merge(existing_po_df, existing_po_merge_key)
+        _inv_keys = {
+            str(existing_po_merge_key(s)).strip().upper()
+            for s in inv_work["OMS_SKU"].astype(str)
+        }
+        _ep_seed = prepare_existing_po_for_merge(
+            existing_po_df,
+            existing_po_merge_key,
+            inventory_skus=_inv_keys,
+        )
         if not _ep_seed.empty and "PO_Pipeline_Total" in _ep_seed.columns:
             _have_inv = set(inv_work["OMS_SKU"].astype(str))
             _ep_active = pd.to_numeric(_ep_seed["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
@@ -1328,7 +1346,15 @@ def calculate_po_base(
             unbundle_inventory_rows_for_existing_po,
         )
 
-        _ep_prepared = prepare_existing_po_for_merge(existing_po_df, existing_po_merge_key)
+        _inv_keys = {
+            str(existing_po_merge_key(s)).strip().upper()
+            for s in inv_work["OMS_SKU"].astype(str)
+        }
+        _ep_prepared = prepare_existing_po_for_merge(
+            existing_po_df,
+            existing_po_merge_key,
+            inventory_skus=_inv_keys,
+        )
         _breakdown_cols = [
             c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
             if c in _ep_prepared.columns

@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 6
+QUARTERLY_CACHE_SCHEMA = 7
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
@@ -101,6 +101,12 @@ def _pivot_from_session_frames(
         if include_sales
         else pd.DataFrame()
     )
+    from .existing_po import bundled_listing_skus
+
+    inv = getattr(sess, "inventory_df_variant", None)
+    retain_bundled = bundled_listing_skus(
+        inv["OMS_SKU"].astype(str) if inv is not None and not getattr(inv, "empty", True) else []
+    )
     return calculate_quarterly_history(
         sales_df=sales if sales is not None else pd.DataFrame(),
         mtr_df=getattr(sess, "mtr_df", pd.DataFrame()),
@@ -111,6 +117,7 @@ def _pivot_from_session_frames(
         sku_mapping=sess.sku_mapping or None,
         group_by_parent=group_by_parent,
         n_quarters=n_quarters,
+        retain_bundled_listing_skus=retain_bundled,
     )
 
 
