@@ -256,6 +256,25 @@ def test_extract_report_date_from_header_label():
     assert att._extract_report_date(raw) == "2026-06-03"
 
 
+def test_cell_to_report_date_rejects_clock_times():
+    assert att._cell_to_report_date("08:58") == ""
+    assert att._cell_to_report_date("21:00") == ""
+    assert att._cell_to_report_date("Jun 08 2026  To  Jun 08 2026") == "2026-06-08"
+
+
+def test_extract_report_date_from_jun_range_header_not_punch_times():
+    """Biometric export: title row has the day; punch times must not become the report date."""
+    raw = pd.DataFrame(
+        [
+            ["Jun 08 2026  To  Jun 08 2026", None, None, None, None, None, None],
+            ["SNo", "E. Code", "Name", "Department", "Shift", "IN-1", "OUT-1"],
+            [1, 800, "Worker", "Default", "GS", "08:58", "18:29"],
+            [2, 803, "Absent", "Default", "NS", None, None],
+        ]
+    )
+    assert att._extract_report_date(raw) == "2026-06-08"
+
+
 def test_extract_report_date_ignores_generated_timestamp_row():
     """Saturday sheet uploaded Monday must use attendance date, not print/export date."""
     raw = pd.DataFrame(
@@ -346,6 +365,48 @@ def test_calc_salary_wrapper():
     out = svc.calc_salary("09:00", "18:00", 400.0)
     assert out["Payable_Hrs"] == 8.0
     assert out["Normal_Pay"] == 400.0
+
+
+def test_import_8_jun_26_xlsx_absent_workers_not_present():
+    """Regression: 8-6-26.xlsx — NS / blank punches absent; date is 2026-06-08 not punch day."""
+    save_sheet_df(
+        "employee_master",
+        pd.DataFrame(
+            [
+                {"E_Code": "803", "Name": "Sunita", "Type": "Karigar", "Daily_Rate_Rs": 400, "Hourly_Rate_Rs": 50},
+                {"E_Code": "804", "Name": "Sohan", "Type": "Karigar", "Daily_Rate_Rs": 460, "Hourly_Rate_Rs": 57.5},
+            ]
+        ),
+    )
+    fixture = Path("/Users/samraisinghani/Downloads/8-6-26.xlsx")
+    if not fixture.is_file():
+        raw = pd.DataFrame(
+            [
+                ["Jun 08 2026  To  Jun 08 2026", None, None, None, None, None, None],
+                ["SNo", "E. Code", "Name", "Department", "Shift", " IN-1", "OUT-1"],
+                [1, 804, "Sohan S/o Bihari", "Default", "GS", "08:56", "20:59"],
+                [2, 803, "Sunita W/O Harjeet Singh", "Default", "NS", None, None],
+            ]
+        )
+        bio = io.BytesIO()
+        raw.to_excel(bio, index=False, header=False)
+        payload = bio.getvalue()
+        filename = "8-6-26.xlsx"
+    else:
+        payload = fixture.read_bytes()
+        filename = fixture.name
+
+    out = att.import_karigar_attendance_bytes(payload, filename)
+    assert out["ok"] is True
+    assert out["date"] == "2026-06-08"
+    pl = get_sheet_df("karigar_attendance")
+    day = pl[pl["Date"].astype(str) == "2026-06-08"]
+    absent = day[day["E_Code"].astype(str) == "803"].iloc[0]
+    present = day[day["E_Code"].astype(str) == "804"].iloc[0]
+    assert absent["Status"] == "A"
+    assert float(absent["Total_Pay"]) == 0.0
+    assert present["Status"] == "P"
+    assert float(present["Total_Pay"]) > 0.0
 
 
 @pytest.mark.skipif(

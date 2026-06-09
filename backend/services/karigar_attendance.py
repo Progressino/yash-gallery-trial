@@ -654,18 +654,48 @@ def match_employee_code(raw_code: Any, name: str = "") -> tuple[str, str, float]
     return code, nm, 0.0
 
 
+_CLOCK_ONLY_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
+
+
+def _parse_month_day_year_text(text: str) -> str:
+    """Jun 08 2026 or Jun 08 2026  To  Jun 08 2026 → YYYY-MM-DD (uses first date)."""
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"([A-Za-z]{3,})\s+(\d{1,2})\s+(\d{4})", s, re.I)
+    if not m:
+        return ""
+    token = f"{m.group(1)} {int(m.group(2))} {m.group(3)}"
+    for fmt in ("%b %d %Y", "%B %d %Y"):
+        try:
+            return pd.to_datetime(token, format=fmt).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    return ""
+
+
 def _cell_to_report_date(cell: Any) -> str:
     """Parse one spreadsheet cell as YYYY-MM-DD when possible."""
     if cell is None or (isinstance(cell, float) and pd.isna(cell)):
         return ""
     if isinstance(cell, (datetime, pd.Timestamp)):
         try:
-            return pd.Timestamp(cell).strftime("%Y-%m-%d")
+            ts = pd.Timestamp(cell)
+            # Excel time-only cells can become 1899-12-30 / today's date — reject clock times.
+            if ts.hour or ts.minute or ts.second:
+                if ts.year < 1900 or (ts.hour, ts.minute) != (0, 0):
+                    return ""
+            return ts.strftime("%Y-%m-%d")
         except Exception:
             return ""
     s = str(cell).strip()
     if not s or s.lower() in ("nan", "none", "-"):
         return ""
+    if _CLOCK_ONLY_RE.match(s):
+        return ""
+    month_hit = _parse_month_day_year_text(s)
+    if month_hit:
+        return month_hit
     m = re.search(r"(\d{1,2}-[A-Za-z]{3}-\d{4})", s, re.I)
     if m:
         try:
@@ -722,8 +752,11 @@ def _extract_report_date(raw: pd.DataFrame) -> str:
         return ""
     max_rows = min(25, len(raw))
     max_cols = min(16, raw.shape[1])
+    header_row = _find_header_row(raw)
+    # Never scan punch rows (IN/OUT times like 08:58 were mis-read as the report date).
+    header_scan_end = min(max_rows, max(1, header_row))
     # Pass 1: explicit Date label row (value may be same cell or next columns).
-    for i in range(max_rows):
+    for i in range(header_scan_end):
         for j in range(max_cols):
             cell = raw.iloc[i, j]
             if not _is_attendance_date_label(cell):
@@ -735,10 +768,12 @@ def _extract_report_date(raw: pd.DataFrame) -> str:
                 found = _cell_to_report_date(raw.iloc[i, k])
                 if found:
                     return found
-    # Pass 2: header block — skip rows that look like print/export timestamps.
-    for i in range(max_rows):
+    # Pass 2: title/header block only — skip rows that look like print/export timestamps.
+    for i in range(header_scan_end):
         row_text = " ".join(str(raw.iloc[i, j] or "") for j in range(max_cols)).lower()
         if any(kw in row_text for kw in _SKIP_DATE_ROW_KEYWORDS):
+            continue
+        if "e. code" in row_text or row_text.strip() == "e code":
             continue
         for j in range(max_cols):
             found = _cell_to_report_date(raw.iloc[i, j])
@@ -804,7 +839,17 @@ def parse_inout_punch_report(
     if override:
         report_date = override
     else:
-        report_date = _extract_report_date(preview) or _date_from_filename(filename)
+        from_header = _extract_report_date(preview)
+        from_name = _date_from_filename(filename)
+        if from_header and from_name and from_header != from_name:
+            # Filename is usually operator-named for the attendance day (e.g. 8-6-26.xlsx).
+            report_date = from_name
+            warnings.append(
+                f"Sheet header implied {from_header} but filename implies {from_name}; "
+                f"using {from_name}."
+            )
+        else:
+            report_date = from_header or from_name
     if not report_date:
         raise ValueError(
             "Could not read attendance date from the sheet or filename. "
@@ -818,6 +863,7 @@ def parse_inout_punch_report(
     else:
         df = pd.read_excel(bio, sheet_name=0, header=header_row)
     df = df.dropna(how="all")
+    df.columns = [str(c).strip() for c in df.columns]
     return report_date, df, warnings
 
 
@@ -891,20 +937,19 @@ def import_karigar_attendance_bytes(
         emp_name = str(r.get(name_col, "") or "").strip() if name_col else ""
         shift = str(r.get(shift_col, "") or "").strip().upper() if shift_col else ""
         pairs = extract_punch_pairs(r, list(df.columns))
+        has_in_punch = any(tin is not None for tin, _ in pairs)
         e_code, name, master_rate = match_employee_code(raw_code, emp_name)
         daily = master_rate or get_daily_rate_for_date(e_code, report_date)
         if daily <= 0 and master_rate <= 0:
             unmatched.append(f"{raw_code} {emp_name}".strip())
 
-        if shift == "NS" and not pairs:
+        if not has_in_punch:
             status = "A"
+            pairs = []
             calc = calc_salary_from_punches([], daily, on_date=report_date, status=status)
-        elif pairs:
+        else:
             status = "P"
             calc = calc_salary_from_punches(pairs, daily, on_date=report_date, status=status)
-        else:
-            status = "A"
-            calc = calc_salary_from_punches([], daily, on_date=report_date, status=status)
 
         miss = needs_miss_punch(pairs)
         rows.append(
