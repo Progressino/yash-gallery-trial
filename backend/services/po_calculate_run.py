@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -85,6 +86,14 @@ def execute_po_calculate(
 
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 
+    _set_po_calculate_progress(sess, session_id, 18, "Loading existing PO sheet…")
+    try:
+        from .existing_po import ensure_existing_po_hydrated
+
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        logger.exception("ensure_existing_po_hydrated before calculate failed")
+
     # ── Inventory-history memory management ───────────────────────────────────
     # Two-stage trim so the heavy calculate_po_base call starts lean.
     #
@@ -103,15 +112,32 @@ def execute_po_calculate(
     _raw_ih = getattr(sess, "daily_inventory_history_df", None)
     _inv_history_for_calc: pd.DataFrame | None = None
 
+    _rows_dropped = 0
     if _raw_ih is not None and not _raw_ih.empty:
-        from .daily_inventory_upload_run import _MAX_HISTORY_DAYS, _trim_history_to_recent
+        from .daily_inventory_upload_run import (
+            _MAX_HISTORY_DAYS,
+            _series_as_dates,
+            _trim_history_to_recent,
+        )
 
-        _set_po_calculate_progress(sess, session_id, 22, "Preparing daily inventory history…")
+        _ih_rows = len(_raw_ih)
+        _set_po_calculate_progress(
+            sess,
+            session_id,
+            22,
+            f"Preparing daily inventory history ({_ih_rows:,} rows)…",
+        )
         # Stage 1: migrate oversized sessions (warm-cache restore with old data).
-        if len(_raw_ih) > (_MAX_HISTORY_DAYS + 10) * 500:
-            # threshold ~ _MAX_HISTORY_DAYS days × 500 SKUs (very conservative)
+        if _ih_rows > (_MAX_HISTORY_DAYS + 10) * 500:
+            _set_po_calculate_progress(
+                sess,
+                session_id,
+                24,
+                f"Trimming oversized inventory history ({_ih_rows:,} rows)…",
+            )
             _trimmed_sess, _trim_note = _trim_history_to_recent(_raw_ih, _MAX_HISTORY_DAYS)
             if len(_trimmed_sess) < len(_raw_ih):
+                _rows_dropped += len(_raw_ih) - len(_trimmed_sess)
                 logger.info(
                     "PO calc: session inventory history over-sized (%s rows) — "
                     "trimming to %d days in-place (%s rows). %s",
@@ -125,42 +151,57 @@ def execute_po_calculate(
             del _trimmed_sess, _trim_note
 
         # Stage 2: calc-time pre-trim (bounded by DAILY_INV_MAX_DAYS / _MAX_HISTORY_DAYS).
-        _inv_dates = pd.to_datetime(_raw_ih["Date"], errors="coerce")
+        _inv_dates = _series_as_dates(_raw_ih["Date"])
         _max_inv = _inv_dates.max()
         if pd.notna(_max_inv):
             _depth_days = min(_period + 14, _MAX_HISTORY_DAYS)
             _pretrim_cutoff = pd.Timestamp(_max_inv).normalize() - pd.Timedelta(
                 days=_depth_days
             )
-            _mask = _inv_dates >= _pretrim_cutoff
-            _inv_history_for_calc = _raw_ih[_mask].reset_index(drop=True)
-            if len(_inv_history_for_calc) < len(_raw_ih):
-                logger.info(
-                    "PO calc pre-trim: %s → %s inventory-history rows (period=%d days, depth_cap=%d)",
-                    f"{len(_raw_ih):,}",
-                    f"{len(_inv_history_for_calc):,}",
-                    _period,
-                    _depth_days,
-                )
-            del _mask
+            _min_inv = _inv_dates.min()
+            if pd.notna(_min_inv) and _min_inv >= _pretrim_cutoff:
+                _inv_history_for_calc = _raw_ih
+            else:
+                _mask = _inv_dates >= _pretrim_cutoff
+                _inv_history_for_calc = _raw_ih.loc[_mask].reset_index(drop=True)
+                if len(_inv_history_for_calc) < len(_raw_ih):
+                    _rows_dropped += len(_raw_ih) - len(_inv_history_for_calc)
+                    logger.info(
+                        "PO calc pre-trim: %s → %s inventory-history rows (period=%d days, depth_cap=%d)",
+                        f"{len(_raw_ih):,}",
+                        f"{len(_inv_history_for_calc):,}",
+                        _period,
+                        _depth_days,
+                    )
+                del _mask
         else:
             _inv_history_for_calc = _raw_ih
         del _inv_dates
-        _gc.collect()
-
-    try:
-        from .existing_po import ensure_existing_po_hydrated
-
-        ensure_existing_po_hydrated(sess)
-    except Exception:
-        logger.exception("ensure_existing_po_hydrated before calculate failed")
+        if _rows_dropped >= 100_000:
+            _set_po_calculate_progress(sess, session_id, 27, "Releasing trimmed inventory memory…")
+            _gc.collect()
 
     _set_po_calculate_progress(
         sess,
         session_id,
         30,
-        "Running PO calculation engine (this step may take 1–3 minutes)…",
+        "Running PO calculation engine (large catalogs may take 5–15 minutes)…",
     )
+    _hb_stop = threading.Event()
+
+    def _calc_heartbeat() -> None:
+        pct = 32
+        while not _hb_stop.wait(45):
+            pct = min(pct + 4, 78)
+            _set_po_calculate_progress(
+                sess,
+                session_id,
+                pct,
+                f"Running PO engine… ({pct}%)",
+            )
+
+    _hb_thread = threading.Thread(target=_calc_heartbeat, daemon=True, name="po-calc-hb")
+    _hb_thread.start()
     try:
         po_df = calculate_po_base(
             sales_df=sess.sales_df,
@@ -195,6 +236,8 @@ def execute_po_calculate(
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
+    finally:
+        _hb_stop.set()
 
     if po_df is None or po_df.empty:
         return {"ok": False, "message": "PO result is empty."}

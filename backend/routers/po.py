@@ -925,17 +925,41 @@ def _po_calculate_status_payload(job: dict, *, sid: str = "") -> dict:
     return out
 
 
+def _fail_stale_po_job_if_needed(sess, sid: str) -> dict | None:
+    """Mark long-idle running jobs as failed so the UI can retry."""
+    if not sid:
+        return None
+    from ..services.po_calculate_jobs import get_po_job, po_job_is_stale, set_po_job
+
+    if not po_job_is_stale(sid):
+        return None
+    msg = (
+        "PO calculation stopped responding (server may have restarted or run out of memory). "
+        "Refresh the page and click Calculate PO again."
+    )
+    if sess is not None:
+        sess.po_calculate_status = "error"
+        sess.po_calculate_progress = 0
+        sess.po_calculate_message = msg
+        sess.po_calculate_result = {"ok": False, "message": msg}
+    set_po_job(sid, status="error", ok=False, progress=0, message=msg)
+    return {"status": "error", "message": msg, "progress": 0, "ok": False}
+
+
 @router.get("/calculate/status")
 def po_calculate_status(request: Request):
     """Lightweight poll — in-memory job store; session fallback if job row was lost."""
     from ..services.po_calculate_jobs import get_po_job
 
     sid = getattr(request.state, "session_id", None) or ""
+    sess = getattr(request.state, "session", None)
+    stale = _fail_stale_po_job_if_needed(sess, sid)
+    if stale:
+        return stale
     job = get_po_job(sid)
     if job:
         return _po_calculate_status_payload(job)
 
-    sess = getattr(request.state, "session", None)
     if sess is not None:
         st = getattr(sess, "po_calculate_status", "idle") or "idle"
         if st and st != "idle":
@@ -1069,7 +1093,11 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
             )
             return cached
 
-    if getattr(sess, "po_calculate_status", "idle") == "running":
+    sid_running = getattr(request.state, "session_id", None) or ""
+    stale = _fail_stale_po_job_if_needed(sess, sid_running)
+    if stale:
+        pass  # allow a fresh Calculate PO below
+    elif getattr(sess, "po_calculate_status", "idle") == "running":
         return {
             "ok": True,
             "status": "running",

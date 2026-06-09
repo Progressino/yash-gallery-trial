@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 _MAX_HISTORY_DAYS = int(os.environ.get("DAILY_INV_MAX_DAYS", "30"))
 
 
+def _series_as_dates(col: pd.Series) -> pd.Series:
+    """Parse Date column once; reuse when already datetime64."""
+    if pd.api.types.is_datetime64_any_dtype(col):
+        return col
+    return pd.to_datetime(col, errors="coerce")
+
+
 def _trim_history_to_recent(df: pd.DataFrame, max_days: int) -> tuple[pd.DataFrame, str]:
     """
     Keep only the most-recent ``max_days`` calendar days in the history.
@@ -28,17 +35,20 @@ def _trim_history_to_recent(df: pd.DataFrame, max_days: int) -> tuple[pd.DataFra
     """
     if max_days <= 0 or df.empty or "Date" not in df.columns:
         return df, ""
-    dates = pd.to_datetime(df["Date"], errors="coerce")
+    dates = _series_as_dates(df["Date"])
     max_date = dates.max()
     if pd.isna(max_date):
         return df, ""
     cutoff = pd.Timestamp(max_date).normalize() - pd.Timedelta(days=max_days)
+    min_date = dates.min()
+    if pd.notna(min_date) and min_date >= cutoff:
+        return df, ""
     mask = dates >= cutoff
     kept = int(mask.sum())
     orig = int(len(df))
     if kept >= orig:
         return df, ""
-    trimmed = df[mask].reset_index(drop=True)
+    trimmed = df.loc[mask].reset_index(drop=True)
     note = (
         f"Trimmed to last {max_days} days ({cutoff.date()} → {pd.Timestamp(max_date).date()}): "
         f"{orig:,} → {kept:,} rows. "

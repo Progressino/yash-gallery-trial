@@ -31,3 +31,17 @@ def clear_po_job(session_id: str) -> None:
         return
     with _lock:
         _jobs.pop(session_id, None)
+
+
+def po_job_is_stale(session_id: str, *, max_idle_sec: float = 1200.0) -> bool:
+    """True when a running job has not updated progress recently (likely crashed or OOM)."""
+    if not session_id:
+        return False
+    with _lock:
+        row = _jobs.get(session_id) or {}
+    if str(row.get("status") or "") != "running":
+        return False
+    updated = float(row.get("updated_at") or 0)
+    if updated <= 0:
+        return False
+    return (time.time() - updated) >= max_idle_sec
