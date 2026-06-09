@@ -12,7 +12,7 @@ from backend.session import AppSession
 
 
 def test_quarterly_cache_schema_bumped():
-    assert quarterly_cache_key(False, 8)[0] == 5
+    assert quarterly_cache_key(False, 8)[0] == 7
 
 
 def test_calculate_quarterly_platform_primary_despite_wide_sales_span():
