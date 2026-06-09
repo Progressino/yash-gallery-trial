@@ -90,10 +90,9 @@ services:
       retries: 10
       start_period: 600s
 
-  # ── Stitching backend — isolated, zero-downtime service ─────────────────────
-  # Handles ONLY /api/stitching/* and /api/auth/* requests.
-  # NOT restarted when the main backend deploys — karigar entries never go down.
-  # Shares the same database volume; starts in < 3 seconds (no warm cache).
+  # ── Stitching backend — isolated service for /api/stitching/* and /api/auth/* ─
+  # Separate process from main backend; rebuilt on deploy with the same backend image.
+  # Shares the finance data volume (stitching_costing.db).
   stitching-backend:
     build:
       context: ./backend

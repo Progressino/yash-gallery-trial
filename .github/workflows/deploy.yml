@@ -99,12 +99,13 @@ jobs:
             done
           }
           _prune_stale_compose_containers backend
+          _prune_stale_compose_containers stitching-backend
           _prune_stale_compose_containers frontend
           _prune_stale_compose_containers autoheal
           docker container prune -f 2>/dev/null || true
           # Stop app containers before rebuild — avoids "No such container" ghost IDs on compose up.
-          _dc -f docker-compose.prod.yml stop backend frontend autoheal 2>/dev/null || true
-          docker rm -f app-backend-1 app-frontend-1 app-autoheal-1 2>/dev/null || true
+          _dc -f docker-compose.prod.yml stop backend stitching-backend frontend autoheal 2>/dev/null || true
+          docker rm -f app-backend-1 app-stitching-backend-1 app-frontend-1 app-autoheal-1 2>/dev/null || true
 
           # Exit 137 on small VPS is usually OOM during build. Avoid --no-cache on every push;
           # use workflow_dispatch checkbox "no_cache" when you need a clean rebuild.
@@ -114,6 +115,7 @@ jobs:
             _NO_CACHE="--no-cache"
           fi
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
+          _dc -f docker-compose.prod.yml build ${_NO_CACHE} stitching-backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
           _dc -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
