@@ -271,6 +271,37 @@ def test_calculate_po_base_non_empty():
     assert row["Sold_Units"] >= 30
 
 
+def test_calculate_po_ignores_sales_outside_catalog():
+    """Historical sales for SKUs not in inventory must not slow or skew PO math."""
+    sales = _minimal_sales()
+    days = pd.date_range("2025-11-01", periods=30, freq="D")
+    noise = []
+    for i in range(200):
+        for d in days:
+            noise.append(
+                {
+                    "Sku": f"LEGACY-SKU-{i}",
+                    "TxnDate": d,
+                    "Transaction Type": "Shipment",
+                    "Quantity": 3,
+                    "Units_Effective": 3,
+                }
+            )
+    sales = pd.concat([sales, pd.DataFrame(noise)], ignore_index=True)
+    inv = _minimal_inventory()
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=7,
+        target_days=60,
+        demand_basis="Sold",
+        safety_pct=0.0,
+    )
+    row = po[po["OMS_SKU"] == "TEST-SKU-1"].iloc[0]
+    assert int(row["Sold_Units"]) >= 30
+
+
 def _sales_two_sizes_same_parent():
     """Shared parent CUTPARENT; L moves more units than XL."""
     days = pd.date_range("2025-11-01", periods=30, freq="D")

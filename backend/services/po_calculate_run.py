@@ -185,7 +185,7 @@ def execute_po_calculate(
         sess,
         session_id,
         30,
-        "Running PO calculation engine (large catalogs may take 5–15 minutes)…",
+        "Running PO calculation engine (typically 1–5 minutes)…",
     )
     _hb_stop = threading.Event()
 

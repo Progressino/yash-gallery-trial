@@ -630,6 +630,73 @@ def _impute_oos_restock_recent_ads(
     return out.round(3)
 
 
+def _catalog_sku_allowlist(
+    inv_skus: set[str],
+    ep_prepared: pd.DataFrame | None = None,
+) -> set[str]:
+    """SKUs whose sales rows are needed for PO math (inventory + pipeline ghosts)."""
+    allow: set[str] = set()
+    for raw in inv_skus:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        allow.add(s)
+        par = str(get_parent_sku(s) or "").strip()
+        if par:
+            allow.add(par)
+        fp = str(_fallback_parent_key(s) or "").strip()
+        if fp:
+            allow.add(fp)
+    if ep_prepared is not None and not ep_prepared.empty and "OMS_SKU" in ep_prepared.columns:
+        for raw in ep_prepared["OMS_SKU"].astype(str):
+            s = str(raw or "").strip()
+            if s:
+                allow.add(s)
+    return allow
+
+
+def _sales_sku_in_catalog(sku: object, allow: set[str]) -> bool:
+    """Keep sales for catalog SKUs, parents, and bundled listings that fan out to them."""
+    from .existing_po import _split_bundled_po_sku, is_bundled_size_range_sku
+
+    s = str(sku or "").strip()
+    if not s:
+        return False
+    if s in allow:
+        return True
+    par = str(get_parent_sku(s) or "").strip()
+    if par and par in allow:
+        return True
+    fp = str(_fallback_parent_key(s) or "").strip()
+    if fp and fp in allow:
+        return True
+    if is_bundled_size_range_sku(s):
+        for kid in _split_bundled_po_sku(s):
+            if str(kid).strip() in allow:
+                return True
+    return False
+
+
+def _filter_sales_df_to_catalog(df: pd.DataFrame, allow: set[str]) -> pd.DataFrame:
+    """Drop historical sales for SKUs outside the active catalog — largest PO calc win."""
+    if df.empty or not allow:
+        return df
+    uniq = df["Sku"].unique()
+    keep = {u: _sales_sku_in_catalog(u, allow) for u in uniq}
+    mask = df["Sku"].map(keep).fillna(False)
+    n_before = len(df)
+    out = df.loc[mask]
+    if len(out) < n_before:
+        import logging
+
+        logging.getLogger(__name__).info(
+            "PO calc: sales rows %s → %s after catalog SKU filter",
+            f"{n_before:,}",
+            f"{len(out):,}",
+        )
+    return out
+
+
 def _fallback_parent_key(sku: str) -> str:
     """
     Parent key for sales↔inventory mismatch fallback.
@@ -784,6 +851,8 @@ def calculate_po_base(
         out.drop(columns=drop_cols, inplace=True, errors="ignore")
         return out
 
+    _fan_out_cache: dict[tuple[tuple[str, ...], int], pd.DataFrame] = {}
+
     def _merge_metric_with_bundled_listing_fallback(
         base_df: pd.DataFrame,
         metric_df: pd.DataFrame,
@@ -803,10 +872,11 @@ def calculate_po_base(
             return out
         # Do NOT restrict by bundled-listing inventory: sales history must always
         # fan out so individual sizes get ADS and quarterly-history data.
-        fan = fan_out_bundled_listing_metrics(
-            metric_df,
-            metric_cols,
-        )
+        fan_key = (tuple(metric_cols), id(metric_df))
+        fan = _fan_out_cache.get(fan_key)
+        if fan is None:
+            fan = fan_out_bundled_listing_metrics(metric_df, metric_cols)
+            _fan_out_cache[fan_key] = fan
         if fan is None or fan.empty:
             return out
         out = out.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
@@ -844,6 +914,7 @@ def calculate_po_base(
         df = df[df["Sku"].str.len() > 0]
 
     inv_work = inv_df.copy()
+    _ep_prepared = pd.DataFrame()
     _unique_inv_skus = inv_work["OMS_SKU"].unique()
     _inv_canon_cache = {s: _canonical_oms_key(s) for s in _unique_inv_skus}
     inv_work["OMS_SKU"] = inv_work["OMS_SKU"].map(_inv_canon_cache).fillna("")
@@ -860,11 +931,12 @@ def calculate_po_base(
             str(existing_po_merge_key(s)).strip().upper()
             for s in inv_work["OMS_SKU"].astype(str)
         }
-        _ep_seed = prepare_existing_po_for_merge(
+        _ep_prepared = prepare_existing_po_for_merge(
             existing_po_df,
             existing_po_merge_key,
             inventory_skus=_inv_keys,
         )
+        _ep_seed = _ep_prepared
         if not _ep_seed.empty and "PO_Pipeline_Total" in _ep_seed.columns:
             _have_inv = set(inv_work["OMS_SKU"].astype(str))
             _ep_active = pd.to_numeric(_ep_seed["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
@@ -883,6 +955,12 @@ def calculate_po_base(
                         _pad[_c] = 0
                 inv_work = pd.concat([inv_work, _pad[inv_work.columns]], ignore_index=True)
 
+    _catalog_allow = _catalog_sku_allowlist(
+        set(inv_work["OMS_SKU"].astype(str)),
+        _ep_prepared if not _ep_prepared.empty else None,
+    )
+    df = _filter_sales_df_to_catalog(df, _catalog_allow)
+
     _plan = None
     if planning_date:
         try:
@@ -890,7 +968,10 @@ def calculate_po_base(
         except Exception:
             _plan = None
 
-    max_date = df["TxnDate"].max()
+    if df.empty:
+        max_date = _plan if _plan is not None else pd.Timestamp.now().normalize()
+    else:
+        max_date = df["TxnDate"].max()
     # Guard against stray future-dated rows (parse quirks / bad source dates).
     # A single outlier can shift the global recent window and zero-out ADS for most SKUs.
     _today = pd.Timestamp.now().normalize()
@@ -914,7 +995,7 @@ def calculate_po_base(
     if pd.notna(_df_min) and _df_min < hist_cutoff:
         df = df[df["TxnDate"] >= hist_cutoff].copy()
     cutoff   = max_date - timedelta(days=period_days)
-    recent   = df[df["TxnDate"] >= cutoff].copy()
+    recent   = df[df["TxnDate"] >= cutoff]
 
     sold = recent[recent["_is_ship"]].groupby("Sku")["Quantity"].sum().reset_index()
     sold.columns = ["OMS_SKU", "Sold_Units"]
@@ -983,7 +1064,7 @@ def calculate_po_base(
     # seasonal same-month+next-month history, and by Flat30_ADS (Req.xlsx FREQ).
     ADS_WINDOW = period_days
     ads_cutoff = max_date - timedelta(days=ADS_WINDOW)
-    ads_recent = df[df["TxnDate"] >= ads_cutoff].copy()
+    ads_recent = df[df["TxnDate"] >= ads_cutoff]
 
     ads_sold = (
         ads_recent[ads_recent["_is_ship"]]
@@ -1345,23 +1426,12 @@ def calculate_po_base(
 
     # Pipeline deduction from existing PO sheet
     _breakdown_cols: list[str] = []
-    _ep_prepared = pd.DataFrame()
-    if existing_po_df is not None and not existing_po_df.empty and "PO_Pipeline_Total" in existing_po_df.columns:
+    if not _ep_prepared.empty and "PO_Pipeline_Total" in _ep_prepared.columns:
         from .existing_po import (
             existing_po_merge_key,
-            prepare_existing_po_for_merge,
             unbundle_inventory_rows_for_existing_po,
         )
 
-        _inv_keys = {
-            str(existing_po_merge_key(s)).strip().upper()
-            for s in inv_work["OMS_SKU"].astype(str)
-        }
-        _ep_prepared = prepare_existing_po_for_merge(
-            existing_po_df,
-            existing_po_merge_key,
-            inventory_skus=_inv_keys,
-        )
         _breakdown_cols = [
             c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
             if c in _ep_prepared.columns
@@ -1491,38 +1561,41 @@ def calculate_po_base(
             def _is_closed_st(_x: object) -> bool:
                 return False
 
-        par_status_candidates: dict[str, list[tuple[str, bool]]] = defaultdict(list)
-        for _, rw in m.iterrows():
-            par = str(rw.get("_par_key") or "").strip()
-            if not par:
-                continue
-            st = str(rw.get("SKU_Sheet_Status") or "").strip()
-            cl_row = bool(rw.get("SKU_Sheet_Closed", False)) or (bool(st) and _is_closed_st(st))
-            par_status_candidates[par].append((st, cl_row))
+        m["_st_clean"] = m["SKU_Sheet_Status"].astype(str).str.strip()
+        m["_closed_row"] = (
+            m["SKU_Sheet_Closed"].fillna(False).astype(bool) | m["_st_clean"].map(_is_closed_st)
+        )
         status_by_parent: dict[str, str] = {}
         closed_by_parent: dict[str, bool] = {}
-        for par, lst in par_status_candidates.items():
-            closed_by_parent[par] = any(x[1] for x in lst)
-            closed_statuses = [x[0] for x in lst if x[1] and x[0]]
-            if closed_statuses:
-                status_by_parent[par] = closed_statuses[0]
+        for par, grp in m.groupby("_par_key", sort=False):
+            par_s = str(par or "").strip()
+            if not par_s:
+                continue
+            closed_by_parent[par_s] = bool(grp["_closed_row"].any())
+            closed_st = grp.loc[grp["_closed_row"] & grp["_st_clean"].str.len().gt(0), "_st_clean"]
+            if not closed_st.empty:
+                status_by_parent[par_s] = str(closed_st.iloc[0])
             else:
-                nonempty = [x[0] for x in lst if x[0]]
-                status_by_parent[par] = nonempty[-1] if nonempty else ""
+                nonempty = grp.loc[grp["_st_clean"].str.len().gt(0), "_st_clean"]
+                status_by_parent[par_s] = str(nonempty.iloc[-1]) if not nonempty.empty else ""
 
         lead_by_digit_token: dict[str, float] = {}
-        for _, rw in m.iterrows():
-            lt_one = float(pd.to_numeric(rw.get("Lead_Time_From_Sheet"), errors="coerce"))
-            if not np.isfinite(lt_one) or lt_one <= 0:
-                continue
-            oms = str(rw.get("OMS_SKU") or "")
-            par = str(rw.get("_par_key") or "")
-            for tok in {_style_digit_token(oms), _style_digit_token(par)}:
-                if not tok:
+        m["_lt_pos"] = pd.to_numeric(m["Lead_Time_From_Sheet"], errors="coerce")
+        m_lt = m[m["_lt_pos"] > 0]
+        if not m_lt.empty:
+            tok_frames = [
+                m_lt.assign(_tok=m_lt["OMS_SKU"].map(_style_digit_token)),
+                m_lt.assign(_tok=m_lt["_par_key"].map(_style_digit_token)),
+            ]
+            for tf in tok_frames:
+                sub = tf[tf["_tok"].astype(str).str.len().gt(0)]
+                if sub.empty:
                     continue
-                prev = lead_by_digit_token.get(tok, float("nan"))
-                if not np.isfinite(prev) or lt_one > prev:
-                    lead_by_digit_token[tok] = float(lt_one)
+                for tok, val in sub.groupby("_tok")["_lt_pos"].max().items():
+                    tok_s = str(tok)
+                    prev = lead_by_digit_token.get(tok_s, float("nan"))
+                    if not np.isfinite(prev) or float(val) > prev:
+                        lead_by_digit_token[tok_s] = float(val)
 
         # Sheet rows whose entire OMS key is a style numeric (e.g. ``1394``) are a direct
         # factory style code — match inventory by the same style digit token as parent/OMS.
@@ -1530,19 +1603,16 @@ def calculate_po_base(
         # token from keys like ``PREFIX-4002`` and must not satisfy the sheet PO gate alone).
         lead_by_pure_digit_style: dict[str, float] = {}
         status_by_pure_digit_style: dict[str, tuple[str, bool]] = {}
-        for _, rw in m.iterrows():
-            oms_c = str(rw.get("OMS_SKU") or "").strip()
-            if not oms_c or not re.fullmatch(r"\d{3,}", oms_c):
-                continue
-            st_one = str(rw.get("SKU_Sheet_Status") or "").strip()
-            cl_one = bool(rw.get("SKU_Sheet_Closed", False)) or (bool(st_one) and _is_closed_st(st_one))
-            status_by_pure_digit_style[oms_c] = (st_one, cl_one)
-            lt_one = float(pd.to_numeric(rw.get("Lead_Time_From_Sheet"), errors="coerce"))
-            if not np.isfinite(lt_one) or lt_one <= 0:
-                continue
-            prev = lead_by_pure_digit_style.get(oms_c, float("nan"))
-            if not np.isfinite(prev) or lt_one > prev:
-                lead_by_pure_digit_style[oms_c] = float(lt_one)
+        pure = m[m["OMS_SKU"].astype(str).str.strip().str.fullmatch(r"\d{3,}", na=False)].copy()
+        if not pure.empty:
+            pure["_oms_c"] = pure["OMS_SKU"].astype(str).str.strip()
+            for oms_c, grp in pure.groupby("_oms_c", sort=False):
+                st_one = str(grp["_st_clean"].iloc[-1])
+                cl_one = bool(grp["_closed_row"].any())
+                status_by_pure_digit_style[oms_c] = (st_one, cl_one)
+                lt_max = float(pd.to_numeric(grp["Lead_Time_From_Sheet"], errors="coerce").max())
+                if np.isfinite(lt_max) and lt_max > 0:
+                    lead_by_pure_digit_style[oms_c] = lt_max
 
         if group_by_parent:
             m = (
@@ -1560,12 +1630,18 @@ def calculate_po_base(
         keep = [c for c in ["OMS_SKU", "SKU_Sheet_Status", "SKU_Sheet_Closed", "Lead_Time_From_Sheet"] if c in m.columns]
         m = m[keep].drop_duplicates(subset=["OMS_SKU"], keep="last")
         sheet_key_meta: dict[str, tuple[str, bool]] = {}
-        for _, rw in m.iterrows():
-            k = str(rw["OMS_SKU"]).strip()
-            stc = str(rw.get("SKU_Sheet_Status") or "").strip()
-            clc = bool(rw.get("SKU_Sheet_Closed", False)) or (bool(stc) and _is_closed_st(stc))
+        mk = m.copy()
+        mk["_stc"] = mk["SKU_Sheet_Status"].astype(str).str.strip()
+        mk["_clc"] = (
+            mk["SKU_Sheet_Closed"].fillna(False).astype(bool) | mk["_stc"].map(_is_closed_st)
+        )
+        for k, stc, clc in zip(
+            mk["OMS_SKU"].astype(str).str.strip(),
+            mk["_stc"],
+            mk["_clc"],
+        ):
             if k:
-                sheet_key_meta[k] = (stc, clc)
+                sheet_key_meta[k] = (str(stc), bool(clc))
         _sorted_sheet_keys_for_status = sorted((x for x in sheet_key_meta if x), key=len, reverse=True)
 
         po_df = po_df.merge(m, on="OMS_SKU", how="left")
