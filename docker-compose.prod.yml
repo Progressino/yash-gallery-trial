@@ -45,6 +45,8 @@ services:
       # Set SESSION_PG_PERSIST=0 to disable multi‑GB session ZIP writes (warm cache + Tier‑3 hold data).
       - SESSION_PG_PERSIST=${SESSION_PG_PERSIST:-1}
       - SESSION_PG_MAX_BUNDLE_MB=${SESSION_PG_MAX_BUNDLE_MB:-200}
+      # Disable MTR row-count guard so accounts with <500K rows use fast-path from disk cache.
+      - WARM_CACHE_MIN_MTR_ROWS=0
       - FINANCE_DB_PATH=/data/finance.db
       - ITEM_DB_PATH=/data/items.db
       - SALES_DB_PATH=/data/sales.db
