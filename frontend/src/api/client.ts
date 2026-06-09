@@ -89,7 +89,7 @@ export interface CoverageResponse {
   daily_auto_ingest_saved_files?: number
   daily_auto_ingest_file_results?: Array<{
     filename: string
-    status: 'saved' | 'skipped'
+    status: 'saved' | 'skipped' | 'error'
     reason?: string
     platform?: string
     rows?: number

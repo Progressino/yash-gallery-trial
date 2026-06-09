@@ -34,7 +34,7 @@ type UploadAlert = {
   validationWarnings: string[]
   fileResults?: Array<{
     filename: string
-    status: 'saved' | 'skipped' | 'loaded'
+    status: 'saved' | 'skipped' | 'loaded' | 'error'
     reason?: string
     platform?: string
     category?: string
@@ -476,6 +476,19 @@ export default function Upload() {
                 )
                 await refresh({ light: true })
               } else {
+                // Ingest ended with error status — fetch final coverage so the
+                // import-completeness box is shown with file-level details.
+                try {
+                  const { getCoverageResilient } = await import('../api/client')
+                  const finalCov = await getCoverageResilient({ light: true, timeout: 10_000 })
+                  finalizeDailyAutoUpload('daily', finalCov, res)
+                } catch {
+                  captureGenericAlert('daily', [msg], {
+                    parsed: res.processed_files,
+                    kept: res.detected_files ?? 0,
+                    dropped: res.unknown_files,
+                  })
+                }
                 throw pollErr
               }
             }
@@ -1287,12 +1300,36 @@ export default function Upload() {
             }`}>
               <p className="font-medium">{uploadAlertsBySource['daily'].title} · {uploadAlertsBySource['daily'].at}</p>
               <p className="mt-0.5">
-                Processed: {uploadAlertsBySource['daily'].parsed ?? '—'} · Detected: {uploadAlertsBySource['daily'].kept ?? '—'} · Missing/Unknown: {uploadAlertsBySource['daily'].dropped ?? 0}
+                Processed: {uploadAlertsBySource['daily'].parsed ?? '—'} · Saved: {uploadAlertsBySource['daily'].kept ?? '—'} · Skipped: {uploadAlertsBySource['daily'].dropped ?? 0}
               </p>
+              {/* Per-file breakdown — skipped/failed files */}
+              {(uploadAlertsBySource['daily'].fileResults?.length ?? 0) > 0 && (
+                <div className="mt-1 space-y-0.5">
+                  {uploadAlertsBySource['daily'].fileResults!
+                    .filter(r => r.status !== 'saved')
+                    .slice(0, 6)
+                    .map((r, i) => (
+                      <p key={i} className="text-amber-700">
+                        ⚠ {r.filename?.split('/').pop() ?? r.filename} — {r.reason ?? r.status}
+                      </p>
+                    ))}
+                  {uploadAlertsBySource['daily'].fileResults!.filter(r => r.status === 'saved').length > 0 && (
+                    <p className="text-green-700">
+                      ✓ {uploadAlertsBySource['daily'].fileResults!.filter(r => r.status === 'saved').length} file(s) saved successfully
+                    </p>
+                  )}
+                </div>
+              )}
+              {/* Warnings (RAR extract errors, parse issues, etc.) */}
               {uploadAlertsBySource['daily'].validationWarnings.length > 0 && (
-                <p className="mt-1">
-                  {uploadAlertsBySource['daily'].validationWarnings.slice(0, 5).join(' | ')}
-                </p>
+                <div className="mt-1 space-y-0.5">
+                  {uploadAlertsBySource['daily'].validationWarnings.slice(0, 4).map((w, i) => (
+                    <p key={i} className="truncate" title={w}>{w}</p>
+                  ))}
+                  {uploadAlertsBySource['daily'].validationWarnings.length > 4 && (
+                    <p>…and {uploadAlertsBySource['daily'].validationWarnings.length - 4} more warning(s)</p>
+                  )}
+                </div>
               )}
             </div>
           )}

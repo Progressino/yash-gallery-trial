@@ -759,8 +759,13 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
 
     _store_daily_auto_ingest_result(sess, payload)
     if not payload.get("ok"):
-        sess.daily_auto_ingest_status = "error"
-        sess.daily_auto_ingest_message = str(payload.get("message") or "Ingest failed")
+        # Use "done" (not "error") so the frontend's waitForDailyAutoIngest returns
+        # normally and captureGenericAlert shows the import-completeness box with
+        # per-file details and warnings.  The result payload has ok=False so the
+        # frontend still shows an error toast via the `failed` flag.
+        sess.daily_auto_ingest_status = "done"
+        sess.daily_auto_ingest_message = str(payload.get("message") or "No files detected.")
+        sess.daily_auto_ingest_started = 0.0
         sess.sales_rebuild_status = "idle"
         sess.sales_rebuild_message = ""
         return
@@ -2906,7 +2911,13 @@ def _process_daily_auto_sync(
                         try:
                             inner_files = _extract_rar_files(raw)
                             if not inner_files:
-                                warnings.append(f"{fname}: RAR archive extracted to zero files — check archive is not corrupt.")
+                                reason = "RAR archive extracted to zero files — archive may be corrupt or empty."
+                                warnings.append(f"{fname}: {reason}")
+                                file_results.append({
+                                    "filename": fname,
+                                    "status": "skipped",
+                                    "reason": reason,
+                                })
                             defer_rar: List[_DeferredSlice] = []
                             for inner_name, inner_bytes in inner_files:
                                 if not inner_bytes:
@@ -2917,8 +2928,19 @@ def _process_daily_auto_sync(
                                     continue
                                 _handle_one(inner_name, inner_bytes, defer_rar)
                             _flush_deferred_session_slices(sess, defer_rar)
+                            _log.info(
+                                "RAR extract complete: %s — %d inner files, %d saved",
+                                fname, expanded_files, sum(1 for r in file_results if r.get("status") == "saved"),
+                            )
                         except Exception as e:
+                            reason = f"Could not extract RAR: {e}"
                             warnings.append(f"{fname} (RAR extract): {e}")
+                            file_results.append({
+                                "filename": fname,
+                                "status": "skipped",
+                                "reason": reason,
+                            })
+                            _log.warning("RAR extraction failed for %s: %s", fname, e)
                     elif fl.endswith(".zip"):
                         if "snapdeal" in fl:
                             _handle_one(fname, raw)
