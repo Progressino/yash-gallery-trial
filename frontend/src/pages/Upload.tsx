@@ -479,8 +479,8 @@ export default function Upload() {
                 // Ingest ended with error status — fetch final coverage so the
                 // import-completeness box is shown with file-level details.
                 try {
-                  const { getCoverageResilient } = await import('../api/client')
-                  const finalCov = await getCoverageResilient({ light: true, timeout: 10_000 })
+                  const { getCoverage } = await import('../api/client')
+                  const finalCov = await getCoverage({ light: true, timeout: 10_000 })
                   finalizeDailyAutoUpload('daily', finalCov, res)
                 } catch {
                   captureGenericAlert('daily', [msg], {
