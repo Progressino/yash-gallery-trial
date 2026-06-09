@@ -2185,8 +2185,13 @@ def test_urgent_all_sizes_ghost_rows_use_canonical_skus_not_mapping_keys():
     assert int(xxl["Net_Units"]) > 0
 
 
-def test_unbundled_per_size_rows_do_not_inherit_bundled_eff_days():
-    """1917YKBLUE-L-XL listing keeps sales; per-size rows do not inherit bundled Eff_Days."""
+def test_unbundled_per_size_rows_get_proportional_sales_not_bundled_eff_days():
+    """Individual sizes get proportional sales from bundled listing fan-out, not inherited Eff_Days.
+
+    1917YKBLUE-L-XL has 40 net units sold (20 days × 2). L and XL each get 20 via fan-out.
+    Per-size Eff_Days stays 0 for XL (no direct sales key, no inventory history for XL).
+    The bundled listing row keeps its full Eff_Days from inventory history.
+    """
     existing_po = pd.DataFrame(
         {
             "OMS_SKU": ["1917YKBLUE-L", "1917YKBLUE-XL", "1917YKBLUE-L-XL"],
@@ -2229,8 +2234,10 @@ def test_unbundled_per_size_rows_do_not_inherit_bundled_eff_days():
     assert int(bundled["Eff_Days"]) == 30
     l_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
     xl_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
-    assert int(l_row["Net_Units"]) == 0
-    assert int(xl_row["Net_Units"]) == 0
+    # Individual sizes receive proportional sales from bundled-listing fan-out (20 each from 40 total).
+    assert int(l_row["Net_Units"]) > 0, "L should inherit proportional Net_Units from L-XL bundle"
+    assert int(xl_row["Net_Units"]) > 0, "XL should inherit proportional Net_Units from L-XL bundle"
+    # XL has no direct sales key or inventory history → Eff_Days stays 0 (no diluted denominator).
     assert float(xl_row["Eff_Days"]) == 0.0
     assert float(xl_row["Recent_ADS"]) == 0.0
 
@@ -2386,8 +2393,13 @@ def test_in_stock_ship150_keeps_eff_days_after_existing_po_unbundle():
     assert float(row["Eff_Days"]) > 0
 
 
-def test_bundled_inventory_keeps_pipeline_and_sales_on_listing_band():
-    """1917-style: bundled inventory rows keep dispatch + sales; per-size stays clean."""
+def test_bundled_inventory_pipeline_stays_on_band_sales_fan_out_to_per_size():
+    """1917-style: dispatch stays on listing bands; individual sizes get proportional sales.
+
+    Pipeline (Balance_to_Dispatch, Pending_Cutting) must stay on the bundled listing rows.
+    Sales data fans out to individual sizes so they have ADS / historical data for PO math —
+    even when both the bundled listing AND individual rows are in inventory.
+    """
     existing_po = pd.DataFrame(
         {
             "OMS_SKU": [
@@ -2445,14 +2457,17 @@ def test_bundled_inventory_keeps_pipeline_and_sales_on_listing_band():
     )
     lxl = po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
     sm = po.loc[po["OMS_SKU"] == "1917YKBLUE-S-M"].iloc[0]
+    # Pipeline stays on bundled listing rows — not fanned out to individual sizes.
     assert int(lxl["Balance_to_Dispatch"]) == 320
     assert int(sm["Balance_to_Dispatch"]) == 320
     assert int(lxl["Pending_Cutting"]) == 0
     assert int(lxl["Sold_Units"]) == 12
     m_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-M"].iloc[0]
     s_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-S"].iloc[0]
-    assert int(m_row["Sold_Units"]) == 0
-    assert int(s_row["Sold_Units"]) == 0
+    # Individual sizes get proportional sales from bundled-listing fan-out (S-M=16 → M=8, S=8).
+    assert int(m_row["Sold_Units"]) > 0, "M should get proportional Sold_Units from S-M bundle fan-out"
+    assert int(s_row["Sold_Units"]) > 0, "S should get proportional Sold_Units from S-M bundle fan-out"
+    # Pipeline must NOT flow to individual sizes (only to the bundled listing rows).
     assert int(m_row["Balance_to_Dispatch"]) == 0
     assert int(s_row["Balance_to_Dispatch"]) == 0
 
@@ -2526,7 +2541,13 @@ def test_calculate_quarterly_history_fans_out_bundled_listing_sales():
     assert int(xl.get("Jul-Sep 2024", 0)) == 10
 
 
-def test_calculate_quarterly_history_keeps_sales_on_bundled_when_inventory_lists_band():
+def test_calculate_quarterly_history_fans_out_to_individual_sizes_even_when_inventory_lists_band():
+    """Historical sales must always fan out to individual sizes so they get ADS / quarterly data.
+
+    Even when inventory has a bundled listing (1917YKBLUE-L-XL), the individual size rows
+    (L, XL) need proportional sales history for PO calculation.  The retain_bundled_listing_skus
+    parameter is accepted for backward compatibility but no longer suppresses fan-out.
+    """
     sales = pd.DataFrame(
         [
             {
@@ -2543,11 +2564,18 @@ def test_calculate_quarterly_history_keeps_sales_on_bundled_when_inventory_lists
         sku_mapping=None,
         group_by_parent=False,
         n_quarters=8,
-        retain_bundled_listing_skus={"1917YKBLUE-L-XL"},
+        retain_bundled_listing_skus={"1917YKBLUE-L-XL"},  # retained for API compat, not used
     )
     band = pivot.loc[pivot["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
     assert int(band.get("Apr-Jun 2026", 0)) == 10
-    assert "1917YKBLUE-L" not in set(pivot["OMS_SKU"].astype(str))
+    # Individual sizes must also appear with proportional sales (5 each from 10 band units).
+    skus = set(pivot["OMS_SKU"].astype(str))
+    assert "1917YKBLUE-L" in skus, "Individual L size must get historical sales from bundled listing"
+    assert "1917YKBLUE-XL" in skus, "Individual XL size must get historical sales from bundled listing"
+    l_row = pivot.loc[pivot["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
+    xl_row = pivot.loc[pivot["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
+    assert int(l_row.get("Apr-Jun 2026", 0)) == 5
+    assert int(xl_row.get("Apr-Jun 2026", 0)) == 5
 
 
 def test_ship150_span_fallback_when_no_inventory_history():

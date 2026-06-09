@@ -331,10 +331,11 @@ def calculate_quarterly_history(
         from .existing_po import fan_out_bundled_listing_metrics
 
         q_metric_cols = ordered_q_cols + ["Avg_Monthly", "Units_90d", "Units_30d", "Freq_30d", "ADS"]
+        # Always fan out for quarterly history — individual sizes need proportional
+        # sales history regardless of whether inventory lists a bundled SKU.
         fan = fan_out_bundled_listing_metrics(
             pivot,
             q_metric_cols,
-            retain_bundled_listing_skus=retain_bundled_listing_skus,
         )
         if fan is not None and not fan.empty:
             pivot = pivot.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
@@ -788,17 +789,23 @@ def calculate_po_base(
         metric_df: pd.DataFrame,
         metric_cols: list[str],
     ) -> pd.DataFrame:
-        """Exact merge + parent fallback + bundled listing (L-XL) share for zero rows."""
-        from .existing_po import bundled_listing_skus, fan_out_bundled_listing_metrics
+        """Exact merge + parent fallback + bundled listing (L-XL) share for zero rows.
+
+        Sales and ship metrics are always fanned out to individual sizes from bundled
+        listings (e.g. 1917YKBLUE-L-XL → L and XL share).  Pipeline data
+        (Gross_PO_Qty / PO_Pipeline_Total) is handled through the existing-PO merge
+        path and is never passed here, so there is no double-count risk.
+        """
+        from .existing_po import fan_out_bundled_listing_metrics
 
         out = _merge_metric_with_parent_fallback(base_df, metric_df, metric_cols)
         if group_by_parent or metric_df is None or metric_df.empty:
             return out
-        retain = bundled_listing_skus(base_df["OMS_SKU"].astype(str))
+        # Do NOT restrict by bundled-listing inventory: sales history must always
+        # fan out so individual sizes get ADS and quarterly-history data.
         fan = fan_out_bundled_listing_metrics(
             metric_df,
             metric_cols,
-            retain_bundled_listing_skus=retain,
         )
         if fan is None or fan.empty:
             return out
