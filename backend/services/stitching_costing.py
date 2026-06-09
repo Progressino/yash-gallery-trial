@@ -1542,6 +1542,8 @@ def style_costing_report(
         return {"rows": [], "summary": {}, "style_rollup": []}
 
     cm_sc = cm.copy()
+    if "Date" not in cm_sc.columns:
+        cm_sc["Date"] = pd.NaT
     cm_sc["Date_dt"] = pd.to_datetime(cm_sc["Date"], errors="coerce")
     if month != "All":
         cm_sc = cm_sc[cm_sc["Date_dt"].dt.strftime("%Y-%m") == month]
@@ -1555,6 +1557,8 @@ def style_costing_report(
             cm_sc[col] = safe_num(cm_sc[col])
     if "Received_Qty" not in cm_sc.columns:
         cm_sc["Received_Qty"] = 0.0
+    if "Deposit_Rs" not in cm_sc.columns:
+        cm_sc["Deposit_Rs"] = 0.0
     cm_sc["Pending"] = cm_sc["Total_Qty"] - cm_sc["Received_Qty"]
     cm_sc["Is_Pending"] = cm_sc["Pending"] > 0
 

@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 
 import pandas as pd
 import pytest
 
 from backend.services import po_shared_cache as psc
 from backend.services.po_result_spill import has_spill, spill_row_count
+
+# Use today + 1 day as the planning date so _meta_is_fresh always passes.
+# (The cache considers planning dates older than yesterday stale.)
+_PLAN_DATE = (date.today() + timedelta(days=1)).isoformat()
+_PLAN_DATE_ALT = (date.today() + timedelta(days=2)).isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +47,7 @@ def _minimal_session():
 
 def test_cache_key_changes_when_params_differ():
     sess = _minimal_session()
-    body = {"planning_date": "2025-12-20", "period_days": 30, "lead_time": 7}
+    body = {"planning_date": _PLAN_DATE, "period_days": 30, "lead_time": 7}
     k1, _ = psc.build_cache_key(sess, body)
     body2 = {**body, "period_days": 45}
     k2, _ = psc.build_cache_key(sess, body2)
@@ -51,7 +57,7 @@ def test_cache_key_changes_when_params_differ():
 def test_save_lookup_and_apply_to_session():
     sess = _minimal_session()
     body = {
-        "planning_date": "2025-12-20",
+        "planning_date": _PLAN_DATE,
         "period_days": 30,
         "lead_time": 7,
         "target_days": 60,
@@ -66,7 +72,7 @@ def test_save_lookup_and_apply_to_session():
     result = {
         "ok": True,
         "sales_through": "2025-12-10",
-        "planning_date": "2025-12-20",
+        "planning_date": _PLAN_DATE,
         "raise_ledger_rows": 0,
     }
     key = psc.save_shared_cache(sess, body, po_df, result)
@@ -84,7 +90,7 @@ def test_save_lookup_and_apply_to_session():
 
 def test_cache_key_changes_when_merge_version_changes():
     sess = _minimal_session()
-    body = {"planning_date": "2025-12-20", "period_days": 30}
+    body = {"planning_date": _PLAN_DATE, "period_days": 30}
     k1, fp1 = psc.build_cache_key(sess, body)
     assert fp1.get("po_merge_version") == psc.PO_MERGE_LOGIC_VERSION
     assert "git_sha" in fp1
@@ -92,7 +98,7 @@ def test_cache_key_changes_when_merge_version_changes():
 
 def test_apply_miss_when_merge_version_in_meta_differs():
     sess = _minimal_session()
-    body = {"planning_date": "2025-12-20", "period_days": 30}
+    body = {"planning_date": _PLAN_DATE, "period_days": 30}
     po_df = pd.DataFrame({"OMS_SKU": ["SKU-A"], "PO_Qty": [1], "Pending_Cutting": [99]})
     key = psc.save_shared_cache(sess, body, po_df, {"ok": True})
     assert key
@@ -105,7 +111,7 @@ def test_apply_miss_when_merge_version_in_meta_differs():
 
 def test_cache_key_changes_when_existing_po_changes():
     sess = _minimal_session()
-    body = {"planning_date": "2025-12-20", "period_days": 30}
+    body = {"planning_date": _PLAN_DATE, "period_days": 30}
     k1, _ = psc.build_cache_key(sess, body)
     sess.existing_po_df = pd.DataFrame(
         {
@@ -123,7 +129,7 @@ def test_cache_key_changes_when_existing_po_changes():
 
 def test_apply_miss_when_existing_po_changes():
     sess = _minimal_session()
-    body = {"planning_date": "2025-12-20", "period_days": 30}
+    body = {"planning_date": _PLAN_DATE, "period_days": 30}
     po_df = pd.DataFrame({"OMS_SKU": ["SKU-A"], "PO_Qty": [1], "Pending_Cutting": [99]})
     psc.save_shared_cache(sess, body, po_df, {"ok": True})
 
@@ -137,7 +143,7 @@ def test_apply_miss_when_existing_po_changes():
 
 def test_apply_miss_when_inventory_changes():
     sess = _minimal_session()
-    body = {"planning_date": "2025-12-20", "period_days": 30}
+    body = {"planning_date": _PLAN_DATE, "period_days": 30}
     po_df = pd.DataFrame({"OMS_SKU": ["SKU-A"], "PO_Qty": [1]})
     psc.save_shared_cache(sess, body, po_df, {"ok": True})
 
@@ -151,6 +157,8 @@ def test_apply_miss_when_inventory_changes():
 def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_client):
     """Second session should get immediate done from shared cache without running engine."""
     import time
+
+    from backend.routers.po import PORequest
 
     _, sess = session_for_client
     days = pd.date_range("2025-12-01", periods=10, freq="D")
@@ -167,19 +175,16 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
     sess.inventory_df_variant = pd.DataFrame(
         {"OMS_SKU": ["CACHE-SKU"], "Total_Inventory": [99]}
     )
-    body = {
-        "planning_date": "2025-12-20",
-        "period_days": 30,
-        "lead_time": 7,
-        "target_days": 60,
-        "use_shared_cache": True,
-    }
+    # Use model_dump() so the fingerprint has the same Pydantic defaults as the API.
+    body = PORequest(
+        planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60
+    ).model_dump()
     po_df = pd.DataFrame({"OMS_SKU": ["CACHE-SKU"], "PO_Qty": [7]})
     psc.save_shared_cache(
         sess,
         body,
         po_df,
-        {"ok": True, "sales_through": "2025-12-10", "planning_date": "2025-12-20"},
+        {"ok": True, "sales_through": "2025-12-10", "planning_date": _PLAN_DATE},
     )
 
     ran = {"n": 0}
@@ -226,6 +231,8 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
     """Existing PO in session must not block shared cache (fingerprint already tracks the sheet)."""
     import time
 
+    from backend.routers.po import PORequest
+
     _, sess = session_for_client
     days = pd.date_range("2025-12-01", periods=10, freq="D")
     sess.sales_df = pd.DataFrame(
@@ -252,18 +259,15 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
     sess.existing_po_uploaded_at = "2026-06-06T10:00:00"
     sess.po_calculate_existing_po_generation = 3
 
-    body = {
-        "planning_date": "2025-12-20",
-        "period_days": 30,
-        "lead_time": 7,
-        "target_days": 60,
-        "use_shared_cache": True,
-    }
+    # Use model_dump() so the fingerprint has the same Pydantic defaults as the API.
+    body = PORequest(
+        planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60
+    ).model_dump()
     psc.save_shared_cache(
         sess,
         body,
         pd.DataFrame({"OMS_SKU": ["CACHE-SKU"], "PO_Qty": [9]}),
-        {"ok": True, "sales_through": "2025-12-10", "planning_date": "2025-12-20"},
+        {"ok": True, "sales_through": "2025-12-10", "planning_date": _PLAN_DATE},
     )
 
     ran = {"n": 0}
@@ -286,7 +290,16 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
 
 def test_shared_cache_info_endpoint(client, session_for_client):
     _, sess = session_for_client
-    body = {"planning_date": "2025-12-21", "period_days": 30}
+    # Use the same body shape as the GET /shared-cache endpoint so fingerprints match.
+    body = {
+        "planning_date": _PLAN_DATE_ALT,
+        "period_days": 30,
+        "lead_time": 30,
+        "target_days": 135,
+        "demand_basis": "Sold",
+        "group_by_parent": False,
+        "raise_ledger_lookback_days": 14,
+    }
     psc.save_shared_cache(
         sess,
         body,
@@ -295,7 +308,7 @@ def test_shared_cache_info_endpoint(client, session_for_client):
     )
     r = client.get(
         "/api/po/calculate/shared-cache",
-        params={"planning_date": "2025-12-21", "period_days": 30},
+        params={"planning_date": _PLAN_DATE_ALT, "period_days": 30},
     )
     assert r.status_code == 200
     assert r.json().get("available") is True

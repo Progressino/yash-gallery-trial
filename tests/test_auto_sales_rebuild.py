@@ -25,7 +25,8 @@ def test_ensure_sales_rebuilt_from_platform_history():
     assert not sess.sales_df.empty
 
 
-def test_light_coverage_rebuilds_sales(client, session_for_client):
+def test_full_coverage_rebuilds_sales(client, session_for_client):
+    """Full (non-light) coverage must rebuild sales when platform history is loaded."""
     _, sess = session_for_client
     sess.sku_mapping = {"SKU1": "SKU1"}
     sess.mtr_df = pd.DataFrame(
@@ -40,7 +41,7 @@ def test_light_coverage_rebuilds_sales(client, session_for_client):
     )
     sess.sales_df = pd.DataFrame()
 
-    r = client.get("/api/data/coverage", params={"light": "1"})
+    r = client.get("/api/data/coverage")
     assert r.status_code == 200
     body = r.json()
     assert body["sales"] is True
