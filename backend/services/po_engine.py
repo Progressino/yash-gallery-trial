@@ -179,22 +179,26 @@ def _merge_sales_and_platform_history_parts(
         return [plat_hist]
     plat_hist = plat_hist.copy()
     plat_hist["_day"] = pd.to_datetime(plat_hist["Date"], errors="coerce").dt.normalize()
-    plat_keys = set(
-        zip(
-            plat_hist["SKU"].astype(str).str.strip(),
-            plat_hist["_day"].astype("int64"),
-        )
-    )
+
     sales_part = sales_part.copy()
     sales_part["_day"] = pd.to_datetime(sales_part["Date"], errors="coerce").dt.normalize()
+    sales_part["_skukey"] = sales_part["SKU"].astype(str).str.strip()
 
-    def _sales_only(row) -> bool:
-        key = (str(row["SKU"]).strip(), int(row["_day"].value) if pd.notna(row["_day"]) else -1)
-        return key not in plat_keys
+    plat_keys = (
+        plat_hist[["SKU", "_day"]]
+        .assign(_skukey=lambda d: d["SKU"].astype(str).str.strip())
+        [["_skukey", "_day"]]
+        .drop_duplicates()
+    )
+    plat_keys["_in_plat"] = True
 
-    extra_sales = sales_part[sales_part.apply(_sales_only, axis=1)]
-    drop_cols = ["_day"]
-    plat_out = plat_hist.drop(columns=drop_cols, errors="ignore")
+    # Vectorized hash-join membership check (replaces a per-row .apply, which was
+    # the dominant cost for large multi-year sales frames).
+    merged = sales_part.merge(plat_keys, on=["_skukey", "_day"], how="left")
+    extra_sales = sales_part[merged["_in_plat"].isna().to_numpy()]
+
+    drop_cols = ["_day", "_skukey"]
+    plat_out = plat_hist.drop(columns=["_day"], errors="ignore")
     if extra_sales.empty:
         return [plat_out]
     return [plat_out, extra_sales.drop(columns=drop_cols, errors="ignore")]
