@@ -11,23 +11,6 @@ def _disable_dashboard_upload_day_gate_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolated_warm_cache(tmp_path, monkeypatch):
-    """Point WARM_CACHE_DIR at an empty per-test dir and clear the in-memory warm cache.
-
-    Without this, ``hydrate_po_session_for_calculate`` (and similar helpers) read the
-    developer/CI host's real ``/data/warm_cache`` (production inventory/sales) into
-    test sessions, making "no data" tests see real data.
-    """
-    import backend.main as main_mod
-
-    warm = tmp_path / "warm_cache"
-    warm.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
-    main_mod.clear_warm_cache()
-    yield
-
-
-@pytest.fixture(autouse=True)
 def isolated_daily_sales_sqlite(tmp_path, monkeypatch):
     """Tier-3 store path is resolved at import time; point it at an empty per-test DB.
 

@@ -41,7 +41,14 @@ def test_platform_summary_with_mtr(client, session_for_client):
     assert amz["total_units"] == 7
 
 
-def test_po_calculate_needs_inventory(client, session_for_client):
+def test_po_calculate_needs_inventory(client, session_for_client, monkeypatch):
+    # Without this, hydrate_po_session_for_calculate would pull the host's real
+    # warm-cache inventory (e.g. on the CI/VPS runner) into this session, masking
+    # the "no inventory anywhere" case this test is checking.
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate.hydrate_po_session_for_calculate",
+        lambda sess: {},
+    )
     _, sess = session_for_client
     sess.sales_df = pd.DataFrame(
         {
