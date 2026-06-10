@@ -972,10 +972,12 @@ def unbundle_inventory_rows_for_existing_po(
     new_rows: list[dict] = []
     po_skus = po_df["OMS_SKU"].astype(str).str.strip()
 
-    for idx, row in po_df.iterrows():
+    # Pre-filter to bundled-SKU rows (vectorized) — iterrows() over the full
+    # po_df (thousands of rows) is the dominant cost when almost all rows
+    # are non-bundled and would just `continue`.
+    _is_bundled = po_df["OMS_SKU"].astype(str).map(_normalize_sku_text).map(is_bundled_size_range_sku)
+    for idx, row in po_df[_is_bundled].iterrows():
         sku = _normalize_sku_text(row.get("OMS_SKU"))
-        if not is_bundled_size_range_sku(sku):
-            continue
         children = _split_bundled_po_sku(sku)
         if len(children) < 2:
             continue
@@ -1064,10 +1066,11 @@ def rollup_pipeline_onto_bundled_rows(
     for col in breakdown:
         if col not in out.columns:
             out[col] = 0
-    for idx, row in out.iterrows():
+    # Pre-filter to bundled-SKU rows (vectorized) — see comment in
+    # unbundle_inventory_rows_for_existing_po for why this matters.
+    _is_bundled = out["OMS_SKU"].astype(str).map(_normalize_sku_text).map(is_bundled_size_range_sku)
+    for idx, row in out[_is_bundled].iterrows():
         sku = _normalize_sku_text(row.get("OMS_SKU"))
-        if not is_bundled_size_range_sku(sku):
-            continue
         children = _split_bundled_po_sku(sku)
         if len(children) < 2:
             continue
