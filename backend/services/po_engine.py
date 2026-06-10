@@ -44,11 +44,26 @@ def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
     )
 
 
+_YKN_TYPO_RE = re.compile(r"YKN", re.I)
+
+
+def _ykn_typo_canonical(sku: str) -> str:
+    """1059YKNMUSTARD → 1059YKMUSTARD (common marketplace listing typo)."""
+    return _YKN_TYPO_RE.sub("YK", str(sku).strip().upper(), count=1)
+
+
 def _strip_pl(sku: str, mapping: Dict[str, str]) -> str:
     """Map an Amazon seller SKU to OMS SKU, stripping PL infix if needed."""
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
-    return mapping.get(stripped, mapping.get(raw, stripped))
+    if stripped in mapping:
+        return mapping[stripped]
+    if raw in mapping:
+        return mapping[raw]
+    fixed = _ykn_typo_canonical(stripped)
+    if fixed != stripped:
+        return mapping.get(fixed, mapping.get(stripped, fixed))
+    return stripped
 
 
 def get_indian_fy_quarter(date: pd.Timestamp) -> tuple:
@@ -596,7 +611,13 @@ def _impute_oos_restock_recent_ads(
     mask: pd.Series,
     demand_basis: str,
 ) -> pd.Series:
-    """Spread style demand across OOS per-size rows that recently had stock."""
+    """Spread style demand across OOS per-size rows that recently had stock.
+
+    Caps imputed ADS so a size with a very short Eff_Days window (e.g. 3 days
+    in-stock) cannot inherit the full style's unit total and outrank siblings
+    that actually sold in the ADS window — a common source of 1000+ unit PO
+    outliers on zero-stock rows.
+    """
     style = po_df["OMS_SKU"].astype(str).map(_fallback_parent_key)
     from .existing_po import is_bundled_size_range_sku
 
@@ -610,11 +631,18 @@ def _impute_oos_restock_recent_ads(
     )
     ship = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0)
     eff = pd.to_numeric(po_df.get("Eff_Days"), errors="coerce").fillna(0)
-    out = pd.to_numeric(po_df.get("Recent_ADS"), errors="coerce").fillna(0.0).copy()
+    recent_before = pd.to_numeric(po_df.get("Recent_ADS"), errors="coerce").fillna(0.0)
+    out = recent_before.copy()
+    _min_eff = 14.0
     for st, idx in po_df.loc[mask].groupby(style, sort=False).groups.items():
         sell_total = float(style_sell_net.get(st, 0))
         if sell_total <= 0:
             continue
+        style_mask = style == st
+        net_style = net_u.loc[style_mask]
+        recent_style = recent_before.loc[style_mask]
+        selling = net_style > 0
+        cap = float(recent_style[selling].max()) if bool(selling.any()) else 0.0
         oos_idx = pd.Index(idx)
         ship_w = ship.loc[oos_idx]
         if float(ship_w.sum()) > 0:
@@ -622,11 +650,11 @@ def _impute_oos_restock_recent_ads(
         else:
             weights = pd.Series(1.0 / len(oos_idx), index=oos_idx)
         imputed_units = sell_total * weights
-        out.loc[oos_idx] = np.where(
-            eff.loc[oos_idx] > 0,
-            imputed_units / eff.loc[oos_idx],
-            0.0,
-        )
+        eff_denom = eff.loc[oos_idx].clip(lower=_min_eff)
+        raw_ads = np.where(eff_denom > 0, imputed_units / eff_denom, 0.0)
+        if cap > 0:
+            raw_ads = np.minimum(raw_ads, cap)
+        out.loc[oos_idx] = raw_ads
     return out.round(3)
 
 

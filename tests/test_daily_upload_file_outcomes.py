@@ -54,6 +54,49 @@ def test_build_sales_returns_pending(client, auth_token, monkeypatch):
     assert submitted[0][0] is upload_router._run_sales_rebuild_worker
 
 
+def test_junk_upload_filename_detection():
+    from backend.routers.upload import _is_junk_upload_filename
+
+    assert _is_junk_upload_filename(".DS_Store")
+    assert _is_junk_upload_filename("Sales 8-Jun-26/.DS_Store")
+    assert _is_junk_upload_filename("__MACOSX/._foo.csv")
+    assert _is_junk_upload_filename("._Seller_Orders.csv")
+    assert not _is_junk_upload_filename("Sales 8-Jun-26/myntra.csv")
+
+
+def test_process_daily_auto_ignores_ds_store_only():
+    from backend.routers import upload as upload_router
+    from backend.session import AppSession
+
+    sess = AppSession()
+    payload = upload_router._process_daily_auto_sync(
+        sess,
+        [(".DS_Store", b"\x00\x05\x16\x07")],
+        rebuild_sales=False,
+    )
+    assert payload["ok"] is False
+    assert payload["saved_files"] == 0
+    assert "system/metadata" in payload["message"].lower()
+    assert payload["file_results"][0]["reason"]
+
+
+def test_zip_is_myntra_monthly_not_meesho(monkeypatch):
+    import zipfile
+    from io import BytesIO
+
+    from backend.routers.upload import _zip_is_meesho_monthly, _zip_is_myntra_monthly
+
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "report.csv",
+            "order_created_date,sku id,quantity\n2026-06-09,123,1\n",
+        )
+    raw = buf.getvalue()
+    assert _zip_is_myntra_monthly(raw, "daily.zip")
+    assert not _zip_is_meesho_monthly(raw, "daily.zip")
+
+
 def test_store_ingest_result_includes_file_results():
     sess = MagicMock()
     upload_router._store_daily_auto_ingest_result(

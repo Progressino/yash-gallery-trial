@@ -50,6 +50,12 @@ def execute_po_calculate(
     sync_sidecars: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     """Run full PO engine math and return the same payload as the legacy sync endpoint."""
+    from .po_session_hydrate import (
+        effective_sku_status_df_for_engine,
+        hydrate_po_session_for_calculate,
+    )
+
+    hydrate_po_session_for_calculate(sess)
     _set_po_calculate_progress(sess, session_id, 5, "Validating sales and inventory…")
     if sess.sales_df.empty:
         return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
@@ -218,7 +224,7 @@ def execute_po_calculate(
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=group_by_parent,
             existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
-            sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
+            sku_status_df=effective_sku_status_df_for_engine(sess),
             enforce_two_size_minimum=bool(body.get("enforce_two_size_minimum", False)),
             enforce_lead_time_release_gate=bool(body.get("enforce_lead_time_release_gate", False)),
             inventory_history_df=_inv_history_for_calc,
@@ -291,6 +297,16 @@ def execute_po_calculate(
         auto_msg = ledger_auto_import.get("message")
 
     cols = list(po_df.columns)
+
+    def _num_col(name: str) -> pd.Series:
+        if name not in po_df.columns:
+            return pd.Series(0.0, index=po_df.index)
+        return pd.to_numeric(po_df[name], errors="coerce").fillna(0)
+
+    _po_qty = _num_col("PO_Qty")
+    _pipe = _num_col("PO_Pipeline_Total")
+    _ordered = _num_col("PO_Qty_Ordered")
+    _ep_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
     return {
         "ok": True,
         "columns": cols,
@@ -299,6 +315,16 @@ def execute_po_calculate(
         "planning_date": planning_out,
         "raise_ledger_rows": ledger_n,
         "ledger_auto_import": auto_msg,
+        "summary": {
+            "new_po_qty_sum": int(_po_qty.sum()),
+            "new_po_sku_count": int((_po_qty > 0).sum()),
+            "pipeline_qty_sum": int(_pipe.sum()),
+            "pipeline_sku_count": int((_pipe > 0).sum()),
+            "sheet_po_ordered_sum": int(_ordered.sum()),
+            "existing_po_applied": _ep_gen > 0 and int((_pipe > 0).sum()) > 0,
+            "existing_po_generation": _ep_gen,
+            "existing_po_filename": str(getattr(sess, "existing_po_filename", "") or ""),
+        },
     }
 
 
@@ -312,6 +338,13 @@ def background_po_calculate(session_id: str, body: dict) -> None:
     if sess is None:
         set_po_job(session_id, status="error", ok=False, message="Session not found.")
         return
+
+    try:
+        from .po_session_hydrate import hydrate_po_session_for_calculate
+
+        hydrate_po_session_for_calculate(sess)
+    except Exception:
+        logger.exception("hydrate_po_session_for_calculate in background worker failed")
 
     sess.po_calculate_progress = 2
     try:

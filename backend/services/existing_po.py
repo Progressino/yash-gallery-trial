@@ -28,10 +28,35 @@ _OMS_SKU_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,}$", re.I)
 _PO_SIZE_TOKENS = frozenset(
     {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "8XL"}
 )
+_SUMMARY_SKU_TOKENS = frozenset(
+    {
+        "TOTAL",
+        "GRANDTOTAL",
+        "SUBTOTAL",
+        "SUMMARY",
+        "SUM",
+        "GRAND",
+    }
+)
 
 # Accept common unicode dash variants from Excel/WhatsApp copies.
 _DASH_RE = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2212]")
 _DASH_SPLIT_RE = re.compile(r"[\-\u2010\u2011\u2012\u2013\u2014\u2212]+")
+
+
+def _is_summary_sku(value: object) -> bool:
+    """True for sheet footer/header aggregate rows (Total, Grand Total, …)."""
+    s = str(value or "").strip().upper()
+    if not s:
+        return False
+    compact = re.sub(r"[\s\-_]+", "", s)
+    if compact in _SUMMARY_SKU_TOKENS:
+        return True
+    if compact.startswith("GRANDTOTAL") or compact.startswith("SUBTOTAL"):
+        return True
+    if re.fullmatch(r"TOTAL\S*", compact):
+        return True
+    return False
 
 
 def _normalize_sku_text(value: object) -> str:
@@ -1164,6 +1189,7 @@ def _build_po_dataframe(
     df[sku_col] = df[sku_col].map(_normalize_sku_text)
     df = df[df[sku_col].str.len() > 0]
     df = df[~df[sku_col].isin(["SKU", "OMS_SKU", "NAN", "NONE", ""])]
+    df = df[~df[sku_col].map(_is_summary_sku)]
 
     if df.empty:
         raise ValueError("No valid SKU rows found after parsing.")
@@ -1368,3 +1394,81 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
         total_col=total_col,
         fallback_col=fallback_col,
     )
+
+
+def audit_existing_po_upload(
+    file_bytes: bytes,
+    filename: str,
+    parsed: pd.DataFrame,
+) -> dict:
+    """
+    Compare parsed Existing PO totals with the sheet's own Total / summary row.
+
+    Used on first upload so operators can confirm pending cutting, balance to dispatch,
+    and total balance match before PO math runs.
+    """
+    out: dict = {
+        "sku_rows": int(len(parsed)),
+        "pipeline_units": int(pd.to_numeric(parsed.get("PO_Pipeline_Total"), errors="coerce").fillna(0).sum()),
+        "pending_cutting_units": int(
+            pd.to_numeric(parsed.get("Pending_Cutting"), errors="coerce").fillna(0).sum()
+        )
+        if "Pending_Cutting" in parsed.columns
+        else None,
+        "balance_to_dispatch_units": int(
+            pd.to_numeric(parsed.get("Balance_to_Dispatch"), errors="coerce").fillna(0).sum()
+        )
+        if "Balance_to_Dispatch" in parsed.columns
+        else None,
+        "sheet_total_row": None,
+        "totals_match": True,
+        "warnings": [],
+    }
+    try:
+        raw = _read_raw_po(file_bytes, filename)
+        cols = list(raw.columns)
+        sku_col = _resolve_sku_column(cols) or "_c0"
+        if sku_col not in raw.columns and "_c0" in raw.columns:
+            sku_col = "_c0"
+        sku_series = raw[sku_col].astype(str).map(_normalize_sku_text)
+        summary_mask = sku_series.map(_is_summary_sku)
+        if not summary_mask.any():
+            return out
+        row = raw.loc[summary_mask].iloc[0]
+        sheet: dict[str, int] = {}
+        cutting_col = _find_col(cols, ["Pending Cutting", "Pending Cut", "Cutting Pending"]) or _find_col_fuzzy(
+            cols, ["pending cut", "pending cutting"]
+        )
+        dispatch_col = _find_col(
+            cols,
+            ["Balance to dispatch", "Dispatch Balance", "Bal to Dispatch", "Pending dispatch"],
+        ) or _find_col_fuzzy(cols, ["balance to dispatch", "pending dispatch"])
+        total_col = _find_col(
+            cols,
+            ["TOTAL BALANCE From Latest Status", "Total Balance From Latest Status", "Total Balance"],
+        ) or _find_col_fuzzy(cols, ["total balance"])
+        if cutting_col and cutting_col in row.index:
+            sheet["pending_cutting_units"] = int(pd.to_numeric(row[cutting_col], errors="coerce") or 0)
+        if dispatch_col and dispatch_col in row.index:
+            sheet["balance_to_dispatch_units"] = int(pd.to_numeric(row[dispatch_col], errors="coerce") or 0)
+        if total_col and total_col in row.index:
+            sheet["total_balance_units"] = int(pd.to_numeric(row[total_col], errors="coerce") or 0)
+            sheet["pipeline_units"] = sheet["total_balance_units"]
+        out["sheet_total_row"] = sheet
+        tol = 1
+        for key, parsed_key in (
+            ("pipeline_units", "pipeline_units"),
+            ("pending_cutting_units", "pending_cutting_units"),
+            ("balance_to_dispatch_units", "balance_to_dispatch_units"),
+        ):
+            if key not in sheet or out.get(parsed_key) is None:
+                continue
+            if abs(int(sheet[key]) - int(out[parsed_key])) > tol:
+                out["totals_match"] = False
+                out["warnings"].append(
+                    f"Parsed {parsed_key.replace('_', ' ')} ({out[parsed_key]:,}) "
+                    f"≠ sheet Total row ({sheet[key]:,})."
+                )
+    except Exception as exc:
+        out["warnings"].append(f"Could not read sheet Total row for audit: {exc}")
+    return out

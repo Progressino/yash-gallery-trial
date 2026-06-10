@@ -57,6 +57,17 @@ interface ParentGroup {
   worstStatus: string
 }
 
+interface POSummary {
+  new_po_qty_sum?: number
+  new_po_sku_count?: number
+  pipeline_qty_sum?: number
+  pipeline_sku_count?: number
+  sheet_po_ordered_sum?: number
+  existing_po_applied?: boolean
+  existing_po_generation?: number
+  existing_po_filename?: string
+}
+
 interface POResult {
   ok: boolean
   message?: string
@@ -66,6 +77,7 @@ interface POResult {
   planning_date?: string
   raise_ledger_rows?: number
   ledger_auto_import?: string | null
+  summary?: POSummary
 }
 interface PORiskRow extends PORow {
   risk_reasons: string
@@ -127,7 +139,7 @@ const COL_LABEL: Record<string, string> = {
   'PO_Raised_Today':         '📌 Raised qty (today)',
   'PO_Confirmed_Raise_Pipeline': '📌 Confirmed raises (window)',
   'PO_Pipeline_Effective':   '🏭 Eff. pipeline (sheet + raises)',
-  'PO_Qty_Ordered':           '📋 PO Ordered',
+  'PO_Qty_Ordered':           '📋 PO Ordered (on sheet)',
   'Pending_Cutting':          '✂️ Pend. Cutting',
   'Balance_to_Dispatch':      '📦 Bal. Dispatch',
   'Projected_Running_Days':   '📅 Proj. run (Tot inv + pipe) / ADS',
@@ -145,7 +157,7 @@ const PRIORITY_ORDER: Record<string, number> = {
 }
 
 function poColHeaderLabel(col: string, raiseViewDate: string): ReactNode {
-  if (col === 'PO_Qty') return <span>PO Qty ✏️</span>
+  if (col === 'PO_Qty') return <span title="New units to raise today (after pipeline deduction)">New PO Qty ✏️</span>
   if (col === 'PO_Raised_On_View_Date') {
     return (
       <span className="text-sky-800" title="Qty raised on the Raise date picker (recalculate after changing the date)">
@@ -735,7 +747,6 @@ export default function POEngine() {
   const confirmRaiseAndExport = async (rows: Array<PORow & { Final_PO_Qty: number }>) => {
     setRaiseConfirmErr(null)
     setRaiseConfirmBusy(true)
-    exportRaisePO(rows)
     const payloadRows = rows
       .map(r => ({
         oms_sku: String(r['OMS_SKU'] ?? ''),
@@ -748,7 +759,13 @@ export default function POEngine() {
       return
     }
     try {
-      const { data } = await api.post<{ ok?: boolean; message?: string }>('/po/raise-confirm', {
+      const { data } = await api.post<{
+        ok?: boolean
+        message?: string
+        po_number?: string
+        raised_date?: string
+        total_qty?: number
+      }>('/po/raise-confirm', {
         rows: payloadRows,
         raised_date: planningDate,
         group_by_parent: params.group_by_parent,
@@ -757,6 +774,18 @@ export default function POEngine() {
         setRaiseConfirmErr(data?.message || 'Could not save raise ledger.')
         return
       }
+      const poNumber = data.po_number || `PO-${planningDate}`
+      exportRaisePO(rows, poNumber)
+      const { buildPoRaiseReportHtml, downloadPoRaiseReport } = await import('../utils/poRaiseReport')
+      downloadPoRaiseReport(
+        buildPoRaiseReportHtml({
+          poNumber,
+          raisedDate: data.raised_date || planningDate,
+          rows,
+          totalQty: data.total_qty ?? rows.reduce((s, r) => s + r.Final_PO_Qty, 0),
+        }),
+        poNumber,
+      )
       setRaiseModal(false)
       const c = await getCoverage()
       setCoverage(c)
@@ -1517,8 +1546,24 @@ export default function POEngine() {
                 <KpiCard label="🟡 HIGH"        value={high}         accent="border-l-yellow-400" />
                 <KpiCard label="🟢 MEDIUM"      value={medium}       accent="border-l-green-500" />
                 <KpiCard label="🔄 In Pipeline" value={pipeline}     accent="border-l-blue-400" />
-                <KpiCard label="Total PO Units" value={totalPOUnits} accent="border-l-[#002B5B]" />
+                <KpiCard
+                  label="New PO to raise"
+                  value={totalPOUnits}
+                  accent="border-l-[#002B5B]"
+                  title="Fresh units to raise today (PO Qty). Already-ordered / pipeline units from your Existing PO sheet are separate."
+                />
               </div>
+              {result?.summary?.existing_po_applied ? (
+                <p className="text-[11px] text-slate-700 bg-slate-50 border border-slate-200 rounded px-2 py-1.5">
+                  <strong>{result.summary.existing_po_filename || existingPoFilename || 'Existing PO'}</strong>
+                  {' '}is applied in this run:{' '}
+                  <strong>{(result.summary.pipeline_sku_count ?? 0).toLocaleString()}</strong> SKUs with pipeline
+                  ({(result.summary.pipeline_qty_sum ?? 0).toLocaleString()} units on sheet),{' '}
+                  <strong>{(result.summary.sheet_po_ordered_sum ?? 0).toLocaleString()}</strong> units marked PO Ordered.
+                  {' '}Engine recommends <strong>{(result.summary.new_po_qty_sum ?? totalPOUnits).toLocaleString()}</strong> additional units
+                  ({(result.summary.new_po_sku_count ?? 0).toLocaleString()} SKUs) to reach your target cover.
+                </p>
+              ) : null}
 
               {/* Toolbar */}
               <div className="flex items-center gap-3 flex-wrap">
@@ -2846,9 +2891,22 @@ const QtyInput = memo(function QtyInput({
   )
 })
 
-const KpiCard = memo(function KpiCard({ label, value, accent }: { label: string; value: number; accent?: string }) {
+const KpiCard = memo(function KpiCard({
+  label,
+  value,
+  accent,
+  title,
+}: {
+  label: string
+  value: number
+  accent?: string
+  title?: string
+}) {
   return (
-    <div className={`bg-white rounded-xl border border-gray-200 p-4 shadow-sm border-l-4 ${accent ?? 'border-l-[#002B5B]'}`}>
+    <div
+      className={`bg-white rounded-xl border border-gray-200 p-4 shadow-sm border-l-4 ${accent ?? 'border-l-[#002B5B]'}`}
+      title={title}
+    >
       <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">{label}</p>
       <p className="text-2xl font-bold text-[#002B5B] mt-1">{value.toLocaleString()}</p>
     </div>
@@ -2913,12 +2971,16 @@ function exportPOCsv(
   void archivePoExportOnServer(csv, day)
 }
 
-function exportRaisePO(rows: Array<PORow & { Final_PO_Qty: number }>) {
-  const cols  = ['OMS_SKU', 'Priority', 'Days_Left', 'ADS', 'Gross_PO_Qty', 'PO_Pipeline_Total', 'Final_PO_Qty']
+function exportRaisePO(rows: Array<PORow & { Final_PO_Qty: number }>, poNumber: string) {
+  const cols  = ['PO_No', 'OMS_SKU', 'Priority', 'Days_Left', 'ADS', 'Gross_PO_Qty', 'PO_Pipeline_Total', 'Final_PO_Qty']
   const header = cols.join(',')
-  const body = rows.map(r => cols.map(c => JSON.stringify(r[c as keyof typeof r] ?? '')).join(',')).join('\n')
+  const body = rows.map(r => cols.map(c => {
+    if (c === 'PO_No') return JSON.stringify(poNumber)
+    return JSON.stringify(r[c as keyof typeof r] ?? '')
+  }).join(',')).join('\n')
   const csv = header + '\n' + body
-  const fname = 'raise_po_' + calendarDateIST() + '.csv'
+  const safeNo = poNumber.replace(/[^\w-]+/g, '_')
+  const fname = `${safeNo}_raise.csv`
   trigger(csv, fname)
   void archivePoExportOnServer(csv, calendarDateIST())
 }

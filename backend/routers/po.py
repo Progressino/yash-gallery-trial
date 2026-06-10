@@ -148,6 +148,9 @@ def po_get_sku_status_lead(request: Request):
     if sess is None:
         return {"ok": False, "loaded": False}
     try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+
+        ensure_po_sidecars_hydrated(sess)
         import backend.main as _main
 
         _main.restore_po_sidecars_from_warm(sess)
@@ -241,6 +244,9 @@ def po_get_daily_inventory_history(request: Request):
     if sess is None:
         return {"ok": False, "loaded": False}
     try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+
+        ensure_po_sidecars_hydrated(sess)
         import backend.main as _main
 
         _main.restore_po_sidecars_from_warm(sess)
@@ -437,6 +443,10 @@ def po_raise_confirm(request: Request, body: RaiseConfirmBody):
     except Exception:
         as_dt = pd.Timestamp.now().normalize()
 
+    from ..services.po_raise_batch import allocate_po_number
+
+    po_number = allocate_po_number(str(as_dt.date()))
+    total_qty = int(sum(int(r.qty) for r in body.rows))
     tuples = [(r.oms_sku, int(r.qty)) for r in body.rows]
     sess.po_raise_ledger_df = append_raise_confirm_rows(
         getattr(sess, "po_raise_ledger_df", pd.DataFrame()),
@@ -455,8 +465,15 @@ def po_raise_confirm(request: Request, body: RaiseConfirmBody):
     n = int(len(sess.po_raise_ledger_df))
     return {
         "ok": True,
+        "po_number": po_number,
+        "raised_date": str(as_dt.date()),
+        "sku_count": len(body.rows),
+        "total_qty": total_qty,
         "ledger_rows": n,
-        "message": f"Recorded {len(body.rows)} SKU line(s); ledger now has {n} SKU-day row(s).",
+        "message": (
+            f"{po_number}: recorded {len(body.rows)} SKU line(s) "
+            f"({total_qty:,} units); ledger now has {n} SKU-day row(s)."
+        ),
     }
 
 
@@ -1065,10 +1082,25 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
+
+    from ..services.po_session_hydrate import hydrate_po_session_for_calculate
+
+    hydrate_stats = hydrate_po_session_for_calculate(sess)
+
     if sess.sales_df.empty:
-        return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
+        return {
+            "ok": False,
+            "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales).",
+        }
     if sess.inventory_df_variant.empty:
-        return {"ok": False, "message": "Upload Inventory first."}
+        return {
+            "ok": False,
+            "message": (
+                "Upload Inventory first."
+                if hydrate_stats.get("inventory_rows", 0) == 0
+                else "Inventory could not be loaded into this session — refresh and retry."
+            ),
+        }
 
     sid = getattr(request.state, "session_id", None)
     if not sid:

@@ -237,9 +237,17 @@ def test_parse_existing_po_vendor_article_column():
 
 def test_parse_po_4_jun_26_fixture():
     """Regression: operator Po 4-Jun-26 export — pending cutting + balance columns."""
+    from backend.services.existing_po import audit_existing_po_upload
+
     assert _FIXTURE_PO.is_file(), "fixture missing"
-    out = parse_existing_po(_FIXTURE_PO.read_bytes(), _FIXTURE_PO.name)
+    raw = _FIXTURE_PO.read_bytes()
+    out = parse_existing_po(raw, _FIXTURE_PO.name)
     assert len(out) > 10_000
+    assert "TOTAL" not in set(out["OMS_SKU"].astype(str))
+    assert int(out["PO_Pipeline_Total"].sum()) == 373_193
+    audit = audit_existing_po_upload(raw, _FIXTURE_PO.name, out)
+    assert audit["totals_match"] is True
+    assert audit["sheet_total_row"]["total_balance_units"] == 373_193
     assert "Pending_Cutting" in out.columns
     assert "Balance_to_Dispatch" in out.columns
     row = out.loc[out["OMS_SKU"] == "1003YKMUSTARD-3XL"].iloc[0]
@@ -249,6 +257,20 @@ def test_parse_po_4_jun_26_fixture():
     yk = out.loc[out["OMS_SKU"] == "1917YKBLUE-3XL"].iloc[0]
     assert int(yk["Pending_Cutting"]) == 0
     assert int(yk["Balance_to_Dispatch"]) == 130
+    beige = out.loc[out["OMS_SKU"] == "1001YKBEIGE-5XL"].iloc[0]
+    assert int(beige["Balance_to_Dispatch"]) == 20
+    assert int(beige["PO_Pipeline_Total"]) == 20
+
+
+def test_parse_existing_po_excludes_total_summary_row():
+    csv = (
+        "OMS SKU,Pending Cutting,Balance to dispatch,TOTAL BALANCE From Latest Status\n"
+        "ABC-RED-L,5,2,7\n"
+        "Total,10,4,14\n"
+    )
+    out = parse_existing_po(csv.encode("utf-8"), "po.csv")
+    assert len(out) == 1
+    assert int(out["PO_Pipeline_Total"].sum()) == 7
 
 
 def test_collapse_duplicate_trailing_size_suffix():

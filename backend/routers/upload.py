@@ -2353,7 +2353,10 @@ async def upload_existing_po(
         orig_fn = file.filename or "existing_po.xlsx"
 
         def work():
+            from ..services.existing_po import audit_existing_po_upload
+
             df = parse_existing_po(file_bytes, orig_fn)
+            audit = audit_existing_po_upload(file_bytes, orig_fn, df)
             sess.existing_po_df = df
             sess.existing_po_filename = orig_fn
             sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1
@@ -2374,15 +2377,32 @@ async def upload_existing_po(
             active = 0
             if "PO_Pipeline_Total" in df.columns:
                 active = int((pd.to_numeric(df["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0).sum())
+            pipe = int(audit.get("pipeline_units") or 0)
+            msg = (
+                f"Existing PO loaded: {len(df):,} SKUs ({active:,} with pipeline, "
+                f"{pipe:,} total balance units). "
+                "Click Calculate PO on PO Engine to refresh pipeline columns."
+            )
+            warnings = list(audit.get("warnings") or [])
+            if audit.get("sheet_total_row"):
+                st = audit["sheet_total_row"]
+                msg += (
+                    f" Sheet Total row: {st.get('total_balance_units', st.get('pipeline_units', 0)):,} balance"
+                )
+                if st.get("pending_cutting_units") is not None:
+                    msg += f", {st['pending_cutting_units']:,} pending cutting"
+                if st.get("balance_to_dispatch_units") is not None:
+                    msg += f", {st['balance_to_dispatch_units']:,} balance to dispatch"
+                msg += "."
+            if not audit.get("totals_match", True):
+                msg += " ⚠ Parsed totals differ from sheet Total row — review before Calculate PO."
             return UploadResponse(
                 ok=True,
-                message=(
-                    f"Existing PO loaded: {len(df):,} SKUs ({active:,} with pipeline). "
-                    "Click Calculate PO on PO Engine to refresh pipeline columns."
-                ),
+                message=msg,
                 rows=len(df),
                 existing_po_uploaded_at=sess.existing_po_uploaded_at or None,
                 existing_po_generation=sess.existing_po_generation,
+                validation_warnings=warnings or None,
             )
 
         resp = await _session_lock_apply(sess, work)
@@ -2418,6 +2438,47 @@ async def upload_cogs(request: Request, file: UploadFile = File(...)):
 
 # ── Daily Orders — Auto-detect (drop all files, we figure it out) ─
 
+_JUNK_UPLOAD_BASENAMES = frozenset({
+    ".ds_store",
+    "thumbs.db",
+    "desktop.ini",
+    ".localized",
+})
+
+
+def _upload_basename(filename: str) -> str:
+    norm = (filename or "").replace("\\", "/").strip()
+    return norm.rsplit("/", 1)[-1] if norm else ""
+
+
+def _is_junk_upload_filename(filename: str) -> bool:
+    """macOS/Windows metadata accidentally dropped with sales folders."""
+    norm = (filename or "").replace("\\", "/").strip().lower()
+    if not norm:
+        return True
+    if "__macosx/" in norm or norm.startswith("__macosx/"):
+        return True
+    base = _upload_basename(norm).lower()
+    if base in _JUNK_UPLOAD_BASENAMES:
+        return True
+    if base.startswith("._"):
+        return True
+    return False
+
+
+def _filter_junk_daily_upload_parts(
+    file_parts: list[tuple[str, bytes]],
+) -> tuple[list[tuple[str, bytes]], list[str]]:
+    kept: list[tuple[str, bytes]] = []
+    ignored: list[str] = []
+    for fname, raw in file_parts:
+        if _is_junk_upload_filename(fname):
+            ignored.append(fname)
+        else:
+            kept.append((fname, raw))
+    return kept, ignored
+
+
 def _zip_member_paths(file_bytes: bytes) -> tuple[list[str], str]:
     """Non-directory ZIP members (no __MACOSX); returns (paths, space-joined lowercase)."""
     try:
@@ -2431,7 +2492,33 @@ def _zip_member_paths(file_bytes: bytes) -> tuple[list[str], str]:
         return [], ""
 
 
+def _zip_is_myntra_monthly(file_bytes: bytes, outer_fn: str) -> bool:
+    """Myntra PPMP / Seller Orders ZIP — must not be routed to Meesho."""
+    fn = outer_fn.lower()
+    if any(k in fn for k in ("myntra", "ppmp", "sjit", "seller_orders", "seller orders")):
+        return True
+    _names, joined = _zip_member_paths(file_bytes)
+    if any(k in joined for k in ("myntra", "ppmp", "sjit", "seller_orders")):
+        return True
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            for n in zf.namelist():
+                if not n.lower().endswith(".csv"):
+                    continue
+                head = zf.read(n)[:4000].decode("utf-8", errors="ignore").lower()
+                if "order_created_date" in head or (
+                    "sub order id" in head and "sku" in head
+                ):
+                    return True
+                break
+    except Exception:
+        pass
+    return False
+
+
 def _zip_is_meesho_monthly(file_bytes: bytes, outer_fn: str) -> bool:
+    if _zip_is_myntra_monthly(file_bytes, outer_fn):
+        return False
     if "meesho" in outer_fn.lower():
         return True
     _names, joined = _zip_member_paths(file_bytes)
@@ -2451,6 +2538,8 @@ def _detect_platform_zip(file_bytes: bytes, fn: str) -> str:
     Distinguish Meesho monthly ZIP vs Amazon MTR master ZIP (nested CSV/ZIPs).
     Used only when the **entire** archive is passed to ``_handle_one`` (see daily-auto ZIP routing).
     """
+    if _zip_is_myntra_monthly(file_bytes, fn):
+        return "myntra"
     if "meesho" in fn:
         return "meesho"
     _names, joined = _zip_member_paths(file_bytes)
@@ -2507,7 +2596,14 @@ def _detect_platform(filename: str, file_bytes: bytes) -> str:
 
     header_bytes = file_bytes[:3000]
     # CSV — filename hints first
-    if "myntra" in fn or "ppmp" in fn or "seller_orders" in fn or "seller orders" in fn or "my ppmp" in fn:
+    if (
+        "myntra" in fn
+        or "ppmp" in fn
+        or "sjit" in fn
+        or "seller_orders" in fn
+        or "seller orders" in fn
+        or "my ppmp" in fn
+    ):
         return "myntra"
     if "b2b" in fn:
         return "amazon_b2b"
@@ -2585,6 +2681,7 @@ def _record_file_skip(
     *,
     platform: str = "",
 ) -> None:
+    _log.info("daily-auto skip %s: %s", fname[:120], reason[:200])
     warnings.append(f"{fname}: {reason}")
     entry: dict = {"filename": fname, "status": "skipped", "reason": reason}
     if platform:
@@ -2711,6 +2808,38 @@ def _process_daily_auto_sync(
             sess._daily_auto_platforms_touched = set()
             sess._daily_auto_parsed_buffers = {}
 
+            file_parts, ignored_names = _filter_junk_daily_upload_parts(file_parts)
+            if ignored_names:
+                bit = ", ".join(_upload_basename(n) for n in ignored_names[:5])
+                warnings.append(
+                    f"Ignored {len(ignored_names)} system/metadata file(s): {bit}"
+                )
+            if not file_parts:
+                msg = (
+                    "No sales files to import — only system/metadata files were received "
+                    f"({', '.join(_upload_basename(n) for n in ignored_names[:3])}). "
+                    "Drop your Sales RAR/ZIP or marketplace CSV/XLSX exports instead."
+                )
+                return {
+                    "ok": False,
+                    "message": msg,
+                    "detected_platforms": [],
+                    "warnings": warnings,
+                    "processed_files": len(ignored_names),
+                    "detected_files": 0,
+                    "unknown_files": len(ignored_names),
+                    "expanded_files": len(ignored_names),
+                    "saved_files": 0,
+                    "file_results": [
+                        {
+                            "filename": n,
+                            "status": "skipped",
+                            "reason": "System/metadata file — not a sales report",
+                        }
+                        for n in ignored_names
+                    ],
+                }
+
             def _apply_parsed_slice(
                 p: str,
                 df: pd.DataFrame,
@@ -2771,10 +2900,18 @@ def _process_daily_auto_sync(
                                 warnings.append(f"{fname}: {msg}")
 
                     elif platform == "myntra":
-                        from ..services.myntra import _parse_myntra_csv
-                        df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
-                        if not df.empty:
-                            df = apply_dsr_segment_from_upload_filename(df, fname, "Myntra")
+                        from ..services.myntra import _parse_myntra_csv, load_myntra_from_zip
+                        if fname.lower().endswith(".zip"):
+                            df, _n_csv, sk_m = load_myntra_from_zip(
+                                raw, sess.sku_mapping or {}, source_filename=fname,
+                            )
+                            msg = "OK"
+                            if sk_m:
+                                warnings.append(f"{fname}: {'; '.join(sk_m[:2])}")
+                        else:
+                            df, msg = _parse_myntra_csv(raw, fname, sess.sku_mapping)
+                            if not df.empty:
+                                df = apply_dsr_segment_from_upload_filename(df, fname, "Myntra")
                         if _save_daily_file_tracked(
                             "myntra", fname, df,
                             detected=detected, warnings=warnings, file_results=file_results,
@@ -2943,6 +3080,8 @@ def _process_daily_auto_sync(
                             _log.warning("RAR extraction failed for %s: %s", fname, e)
                     elif fl.endswith(".zip"):
                         if "snapdeal" in fl:
+                            _handle_one(fname, raw)
+                        elif _zip_is_myntra_monthly(raw, fname):
                             _handle_one(fname, raw)
                         elif _zip_is_meesho_monthly(raw, fname):
                             _handle_one(fname, raw)

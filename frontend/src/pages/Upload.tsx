@@ -2006,6 +2006,15 @@ function _bumpProgress(prevPct: number, cap: number, step = 2): number {
   return Math.min(cap, Math.max(prevPct, prevPct + step))
 }
 
+function _isJunkUploadFile(name: string): boolean {
+  const norm = name.replace(/\\/g, '/').trim().toLowerCase()
+  const base = norm.includes('/') ? norm.slice(norm.lastIndexOf('/') + 1) : norm
+  if (!base || norm.includes('__macosx/')) return true
+  if (base === '.ds_store' || base === 'thumbs.db' || base === 'desktop.ini') return true
+  if (base.startsWith('._')) return true
+  return false
+}
+
 function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
   uploading: boolean
   chunkProgress?: { pct: number; sent: number; total: number; msg: string } | null
@@ -2015,11 +2024,20 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
   const [queued, setQueued] = useState<File[]>([])
 
   const onDrop = useCallback((accepted: File[]) => {
+    const sales = accepted.filter(f => !_isJunkUploadFile(f.name))
+    const junk = accepted.length - sales.length
+    if (junk > 0 && onReject) {
+      onReject(
+        `Ignored ${junk} system file(s) (.DS_Store, etc.). ` +
+          `${sales.length ? 'Sales file(s) queued.' : 'Select your Sales RAR/ZIP or CSV/XLSX exports.'}`,
+      )
+    }
+    if (!sales.length) return
     setQueued(prev => {
       const names = new Set(prev.map(f => f.name))
-      return [...prev, ...accepted.filter(f => !names.has(f.name))]
+      return [...prev, ...sales.filter(f => !names.has(f.name))]
     })
-  }, [])
+  }, [onReject])
 
   const onDropRejected = useCallback((rej: FileRejection[]) => {
     if (!rej.length || !onReject) return

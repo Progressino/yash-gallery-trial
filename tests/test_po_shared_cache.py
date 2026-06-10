@@ -18,9 +18,15 @@ _PLAN_DATE_ALT = (date.today() + timedelta(days=2)).isoformat()
 
 @pytest.fixture(autouse=True)
 def isolated_shared_cache(tmp_path, monkeypatch):
+    import backend.main as main_mod
+
+    warm = tmp_path / "warm"
+    warm.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("PO_SHARED_CACHE_DIR", str(tmp_path / "shared"))
     monkeypatch.setenv("PO_RESULT_SPILL_DIR", str(tmp_path / "spill"))
     monkeypatch.setenv("PO_SHARED_CACHE_ENABLED", "1")
+    monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
+    main_mod.clear_warm_cache()
     yield
 
 
@@ -180,6 +186,9 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
         planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60
     ).model_dump()
     po_df = pd.DataFrame({"OMS_SKU": ["CACHE-SKU"], "PO_Qty": [7]})
+    from backend.services.po_session_hydrate import hydrate_po_session_for_calculate
+
+    hydrate_po_session_for_calculate(sess)
     psc.save_shared_cache(
         sess,
         body,
@@ -204,6 +213,14 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
     sid2, sess2 = store.get_or_create(None)
     sess2.sales_df = sess.sales_df.copy()
     sess2.inventory_df_variant = sess.inventory_df_variant.copy()
+    sess2.daily_inventory_history_df = getattr(
+        sess, "daily_inventory_history_df", pd.DataFrame()
+    ).copy()
+    sess2.sku_status_lead_df = getattr(sess, "sku_status_lead_df", pd.DataFrame()).copy()
+    sess2.inventory_snapshot_date = getattr(sess, "inventory_snapshot_date", "") or ""
+    sess2.inventory_snapshot_uploaded_at = (
+        getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+    )
     store._sessions[sid2] = sess2
 
     c2 = client.__class__(client.app)
@@ -263,6 +280,9 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
     body = PORequest(
         planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60
     ).model_dump()
+    from backend.services.po_session_hydrate import hydrate_po_session_for_calculate
+
+    hydrate_po_session_for_calculate(sess)
     psc.save_shared_cache(
         sess,
         body,
