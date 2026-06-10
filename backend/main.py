@@ -262,15 +262,22 @@ def persist_po_sidecars_to_disk() -> None:
         keys = set(manifest.get("keys") or [])
         for key in _PO_SIDECAR_KEYS:
             df = _warm_cache.get(key)
+            path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
             if df is None or not hasattr(df, "empty") or df.empty:
+                # Stale disk parquet from a previous (now-deleted) sidecar must not
+                # be re-read on the next restore — delete it so an empty/cleared
+                # ledger or sheet stays cleared.
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        log.warning("Failed to remove stale PO sidecar parquet: %s", path)
+                keys.discard(key)
                 continue
             from .services.helpers import _coerce_df_for_parquet
 
-            path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
             _coerce_df_for_parquet(df).to_parquet(path, index=False)
             keys.add(key)
-        if not keys:
-            return
         manifest["keys"] = sorted(keys)
         manifest["saved_at"] = datetime.now(IST).isoformat()
         with open(manifest_path, "w", encoding="utf-8") as f:

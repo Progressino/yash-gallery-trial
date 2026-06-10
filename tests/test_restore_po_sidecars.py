@@ -77,3 +77,46 @@ def test_merge_po_optional_sheets_updates_warm_cache():
     merge_po_optional_sheets_into_warm_cache(sess)
     assert not main._warm_cache["sku_status_lead_df"].empty
     assert main._warm_cache["sku_status_lead_df"].iloc[0]["SKU"] == "B2"
+
+
+def test_clearing_raise_ledger_removes_stale_disk_parquet(tmp_path, monkeypatch):
+    """A deleted raise ledger must not be resurrected from a stale disk parquet.
+
+    Reproduces: admin deletes a raise ledger day (ledger becomes empty), then a
+    later /api/po/calculate hydrate reads ``po_raise_ledger_df.parquet`` from disk
+    and restores the deleted row because the stale parquet was never removed.
+    """
+    import backend.main as main
+
+    monkeypatch.setattr(main, "_DISK_CACHE_DIR", str(tmp_path))
+    main._warm_cache = {}
+
+    sess = AppSession()
+    sess.po_raise_ledger_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["1234YKBLACK-XL"],
+            "Raised_Qty": [59466],
+            "Raised_Date": pd.to_datetime(["2026-05-14"]),
+        }
+    )
+    merge_po_optional_sheets_into_warm_cache(sess)
+    parquet_path = tmp_path / "po_raise_ledger_df.parquet"
+    assert parquet_path.is_file()
+
+    # Admin deletes the raise — ledger becomes empty.
+    sess.po_raise_ledger_df = pd.DataFrame()
+    merge_po_optional_sheets_into_warm_cache(sess)
+
+    assert not parquet_path.is_file()
+    assert main._warm_cache["po_raise_ledger_df"].empty
+
+    # Disk hydrate must not bring the deleted row back.
+    from backend.services.po_session_hydrate import load_po_calc_essentials_from_disk
+
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate._warm_cache_dir", lambda: tmp_path
+    )
+    disk = load_po_calc_essentials_from_disk()
+    assert "po_raise_ledger_df" not in disk
+
+    main._warm_cache = {}
