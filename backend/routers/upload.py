@@ -557,10 +557,30 @@ def _clear_stuck_sales_rebuild(sess: AppSession, *, force: bool = False) -> bool
     return True
 
 
+def _clear_stuck_session_restore(sess: AppSession, *, force: bool = False) -> bool:
+    """Reset session_restore when stuck in running (orphan worker thread or crash)."""
+    if getattr(sess, "session_restore_status", "idle") != "running":
+        return False
+    started = float(getattr(sess, "session_restore_started", 0) or 0)
+    age = time.monotonic() - started if started > 0 else 999999
+    # Restores can legitimately take several minutes on a large GitHub cache.
+    stuck_sec = int(os.environ.get("SESSION_RESTORE_STUCK_SEC", "900"))
+    if not force and age < stuck_sec:
+        return False
+    sess.session_restore_status = "error"
+    sess.session_restore_message = (
+        "Previous session restore did not finish (server was busy or restarted). "
+        "Retrying automatically…"
+    )
+    sess.session_restore_started = 0.0
+    return True
+
+
 def clear_stale_background_jobs(sess: AppSession) -> None:
-    """Clear orphan/timed-out ingest and sales-rebuild flags (safe on every light poll)."""
+    """Clear orphan/timed-out ingest, sales-rebuild, and restore flags (safe on every light poll)."""
     _clear_stuck_daily_ingest(sess, force=False)
     _clear_stuck_sales_rebuild(sess, force=False)
+    _clear_stuck_session_restore(sess, force=False)
 
 
 def _run_daily_auto_sales_rebuild(session_id: str) -> None:

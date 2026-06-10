@@ -296,6 +296,8 @@ export default function POEngine() {
   const returnFileRef = useRef<HTMLInputElement>(null)
   /** Bumps on each Calculate / quarterly load so stale async responses are ignored. */
   const poRunSeqRef = useRef(0)
+  /** True once we've auto-retried a stuck/stale PO calculate, so we only retry once. */
+  const poStaleRetryRef = useRef(false)
   // Per-SKU inventory history drill-down (lets the user verify the "Eff Days" math).
   const [effInvSku, setEffInvSku] = useState<string | null>(null)
   const [effInvLoading, setEffInvLoading] = useState(false)
@@ -461,6 +463,14 @@ export default function POEngine() {
             e instanceof Error
               ? e.message
               : 'PO calculation failed. Wait a minute and try Calculate PO again.'
+          if (!poStaleRetryRef.current && /stopped responding|timed out/i.test(msg)) {
+            poStaleRetryRef.current = true
+            setLoading(false)
+            setPoProgress('')
+            setPoProgressPct(null)
+            void run()
+            return
+          }
           setResult({ ok: false, message: msg })
         }
       } finally {
@@ -638,16 +648,18 @@ export default function POEngine() {
     [queryClient, setCoverage, markPoTableStaleAfterLedgerChange, result],
   )
 
-  const run = async () => {
+  const run = async (isRetry = false) => {
     const seq = ++poRunSeqRef.current
+    if (!isRetry) poStaleRetryRef.current = false
     setLoading(true)
-    setPoProgress('Starting PO calculation…')
+    setPoProgress(isRetry ? 'PO calculation stalled — restarting automatically…' : 'Starting PO calculation…')
     setPoProgressPct(2)
     setEditedQty({})
     setSelected(new Set())
     let poRes: POResult | null = null
+    let staleRetry = false
     try {
-      const useSharedCache = !skipSharedCacheOnce && !existingPoNeedsRecalc
+      const useSharedCache = !skipSharedCacheOnce && !existingPoNeedsRecalc && !isRetry
       if (skipSharedCacheOnce) setSkipSharedCacheOnce(false)
       poRes = (await startPoCalculate(
         {
@@ -671,7 +683,12 @@ export default function POEngine() {
           e instanceof Error
             ? e.message
             : 'PO calculation failed. If you saw 502, wait a minute and try again — the job may still finish on the server.'
-        setResult({ ok: false, message: msg })
+        if (!poStaleRetryRef.current && /stopped responding|timed out/i.test(msg)) {
+          poStaleRetryRef.current = true
+          staleRetry = true
+        } else {
+          setResult({ ok: false, message: msg })
+        }
       }
     } finally {
       if (seq === poRunSeqRef.current) {
@@ -679,6 +696,12 @@ export default function POEngine() {
         setPoProgress('')
         setPoProgressPct(null)
       }
+    }
+
+    if (staleRetry && seq === poRunSeqRef.current) {
+      await new Promise(r => setTimeout(r, 1500))
+      if (seq === poRunSeqRef.current) void run(true)
+      return
     }
 
     if (seq === poRunSeqRef.current && poRes?.ledger_auto_import) {

@@ -2711,6 +2711,12 @@ def intelligence_bundle(
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
     has_dates = bool(start_date or end_date)
+    try:
+        from ..routers.upload import clear_stale_background_jobs
+
+        clear_stale_background_jobs(sess)
+    except Exception:
+        pass
     _ensure_sku_mapping_for_dashboard(sess)
 
     span_days = _report_span_days(start_date, end_date)

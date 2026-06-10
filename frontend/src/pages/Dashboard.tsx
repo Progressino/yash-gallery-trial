@@ -9,6 +9,7 @@ import api, {
   downloadDailyDsrCsv,
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
+  getCoverage,
   invalidateDataQueries,
 } from '../api/client'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
@@ -790,6 +791,7 @@ export default function Dashboard() {
   const qc = useQueryClient()
   const prevSalesRebuild = useRef<string>('idle')
   const bundleLoadStartedAt = useRef<number | null>(null)
+  const bundleKickedRef = useRef(false)
   const [bundleLoadTick, setBundleLoadTick] = useState(0)
   const salesRebuild = useSession(s => s.sales_rebuild ?? 'idle')
   const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
@@ -984,12 +986,35 @@ export default function Dashboard() {
 
   useEffect(() => {
     bundleLoadStartedAt.current = null
+    bundleKickedRef.current = false
   }, [dateStart, dateEnd, salesBasis])
 
   const bundleLoadElapsedMs = awaitingFirstBundle && bundleLoadStartedAt.current
     ? Date.now() - bundleLoadStartedAt.current
     : 0
   void bundleLoadTick
+
+  /** Watchdog: if the dashboard is still "loading marketplace data" after 75s,
+   *  ask the server to clear any orphaned/stuck background jobs and re-queue
+   *  the hydrate, then force a fresh fetch — so a stuck load self-heals. */
+  useEffect(() => {
+    if (!awaitingFirstBundle) {
+      bundleKickedRef.current = false
+      return
+    }
+    if (bundleLoadElapsedMs < 75_000 || bundleKickedRef.current) return
+    bundleKickedRef.current = true
+    ;(async () => {
+      try {
+        await getCoverage({ light: true })
+      } catch {
+        /* best-effort kick — fall through to refetch regardless */
+      }
+      void qc.invalidateQueries({
+        queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis, 'core'],
+      })
+    })()
+  }, [awaitingFirstBundle, bundleLoadElapsedMs, qc, dateStart, dateEnd, topSkuLimit, salesBasis])
 
   const bundleLoadPercent = useMemo(() => {
     if (!awaitingFirstBundle) return null
