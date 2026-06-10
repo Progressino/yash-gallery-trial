@@ -46,3 +46,44 @@ def test_accumulate_frame_counts_quarters():
     )
     assert n == 1
     assert quarter_sums[("1001YKBEIGE-M", "Oct-Dec 2024")] == 40
+
+
+def test_accumulate_frame_skips_quarters_outside_label_map():
+    """Tier-3 history can include FY quarters older than the requested n_quarters window."""
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    q_label_map = {(2025, 4): "Jan-Mar 2025", (2025, 3): "Oct-Dec 2024"}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+
+    df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2024-05-15", "2024-11-15"]),
+            "SKU": ["OLD-SKU-M", "1001YKBEIGE-M"],
+            "Transaction_Type": ["Shipment", "Shipment"],
+            "Quantity": [99, 40],
+        }
+    )
+    n = _accumulate_shipment_frame(
+        df,
+        "amazon",
+        None,
+        strip_pl=True,
+        canonical_oms=False,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+    )
+    assert n == 1
+    assert ("OLD-SKU-M", "Oct-Dec 2024") not in quarter_sums
+    assert quarter_sums[("1001YKBEIGE-M", "Oct-Dec 2024")] == 40

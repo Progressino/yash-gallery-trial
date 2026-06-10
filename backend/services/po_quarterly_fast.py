@@ -134,6 +134,18 @@ def _accumulate_shipment_frame(
         [1, 2, 3],
         default=4,
     )
+    # Only aggregate quarters in the requested window (n_quarters). Older Tier-3
+    # rows outside that window must not KeyError the label map.
+    valid = np.array(
+        [q_label_map.get((int(f), int(q))) is not None for f, q in zip(fy, qn)],
+        dtype=bool,
+    )
+    if not valid.any():
+        return 0
+    if not valid.all():
+        work = work.loc[valid].reset_index(drop=True)
+        fy = fy[valid]
+        qn = qn[valid]
     cols_lbl = [q_label_map[(int(f), int(q))] for f, q in zip(fy, qn)]
     skus = work["SKU"].astype(str).values
     qtys = work["Qty"].astype(int).values

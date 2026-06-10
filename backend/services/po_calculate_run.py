@@ -339,20 +339,6 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         set_po_job(session_id, status="error", ok=False, message="Session not found.")
         return
 
-    try:
-        from .po_session_hydrate import hydrate_po_session_for_calculate
-
-        hydrate_po_session_for_calculate(sess)
-    except Exception:
-        logger.exception("hydrate_po_session_for_calculate in background worker failed")
-
-    sess.po_calculate_progress = 2
-    try:
-        from .po_result_spill import clear_spill
-
-        clear_spill(session_id)
-    except Exception:
-        pass
     set_po_job(
         session_id,
         status="running",
@@ -360,6 +346,24 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         progress=2,
         message="Calculating PO recommendations…",
     )
+    sess.po_calculate_status = "running"
+    sess.po_calculate_progress = 2
+    sess.po_calculate_message = "Calculating PO recommendations…"
+
+    try:
+        from .po_result_spill import clear_spill
+
+        clear_spill(session_id)
+    except Exception:
+        pass
+
+    try:
+        from .po_session_hydrate import hydrate_po_session_for_calculate
+
+        _set_po_calculate_progress(sess, session_id, 3, "Loading sales, inventory, and PO sheets…")
+        hydrate_po_session_for_calculate(sess)
+    except Exception:
+        logger.exception("hydrate_po_session_for_calculate in background worker failed")
 
     def _sync() -> None:
         try:

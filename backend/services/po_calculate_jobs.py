@@ -44,4 +44,11 @@ def po_job_is_stale(session_id: str, *, max_idle_sec: float = 1200.0) -> bool:
     updated = float(row.get("updated_at") or 0)
     if updated <= 0:
         return False
-    return (time.time() - updated) >= max_idle_sec
+    progress = int(row.get("progress") or 0)
+    # Stuck at the initial 2% POST ack usually means the worker never started or died.
+    idle_limit = max_idle_sec
+    if progress <= 10:
+        idle_limit = min(idle_limit, 180.0)
+    elif progress <= 30:
+        idle_limit = min(idle_limit, 600.0)
+    return (time.time() - updated) >= idle_limit
