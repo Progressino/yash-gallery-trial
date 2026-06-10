@@ -620,9 +620,9 @@ def test_bundled_only_sheet_splits_pipeline_to_per_size_inventory():
     assert po[po["OMS_SKU"] == "1917YKBLUE-XXL-3XL"].empty
     for sku in ("1917YKBLUE-3XL", "1917YKBLUE-XXL"):
         row = po.loc[po["OMS_SKU"] == sku].iloc[0]
-        assert int(row["PO_Pipeline_Total"]) == 98
-        assert int(row["Pending_Cutting"]) == 0
-        assert int(row["Balance_to_Dispatch"]) == 98
+        assert int(row["PO_Pipeline_Total"]) == 100
+        assert int(row["Pending_Cutting"]) == 98
+        assert int(row["Balance_to_Dispatch"]) == 2
 
 
 def test_po_1917ykblue_pipeline_matches_sheet_with_sku_mapping():
@@ -2489,9 +2489,9 @@ def test_bundled_inventory_pipeline_stays_on_band_sales_fan_out_to_per_size():
     lxl = po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
     sm = po.loc[po["OMS_SKU"] == "1917YKBLUE-S-M"].iloc[0]
     # Pipeline stays on bundled listing rows — not fanned out to individual sizes.
-    assert int(lxl["Balance_to_Dispatch"]) == 320
-    assert int(sm["Balance_to_Dispatch"]) == 320
-    assert int(lxl["Pending_Cutting"]) == 0
+    assert int(lxl["Pending_Cutting"]) == 320
+    assert int(sm["Pending_Cutting"]) == 320
+    assert int(lxl["Balance_to_Dispatch"]) == 4
     assert int(lxl["Sold_Units"]) == 12
     m_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-M"].iloc[0]
     s_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-S"].iloc[0]
@@ -2536,8 +2536,10 @@ def test_bundled_only_sheet_expands_when_inventory_is_per_size_only():
     )
     l_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
     xl_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
-    assert int(l_row["Balance_to_Dispatch"]) == 160
-    assert int(xl_row["Balance_to_Dispatch"]) == 160
+    assert int(l_row["Pending_Cutting"]) == 160
+    assert int(xl_row["Pending_Cutting"]) == 160
+    assert int(l_row["Balance_to_Dispatch"]) == 2
+    assert int(xl_row["Balance_to_Dispatch"]) == 2
 
 
 def test_calculate_quarterly_history_fans_out_bundled_listing_sales():

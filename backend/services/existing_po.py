@@ -426,42 +426,6 @@ def per_size_covered_by_bundled_listing(child_sku: object, bundled_skus: set[str
     return False
 
 
-def normalize_mislabeled_bundled_breakdown(ep: pd.DataFrame) -> pd.DataFrame:
-    """Fix bundled rows where dispatch qty was uploaded in Pending_Cutting."""
-    if ep is None or ep.empty:
-        return ep
-    ep = ep.copy()
-    for idx, row in ep.iterrows():
-        sku = _normalize_sku_text(row.get("OMS_SKU"))
-        if not is_bundled_size_range_sku(sku):
-            continue
-        pending_raw = pd.to_numeric(row.get("Pending_Cutting"), errors="coerce") if "Pending_Cutting" in ep.columns else 0
-        balance_raw = pd.to_numeric(row.get("Balance_to_Dispatch"), errors="coerce") if "Balance_to_Dispatch" in ep.columns else 0
-        pending = 0 if pd.isna(pending_raw) else int(pending_raw)
-        balance = 0 if pd.isna(balance_raw) else int(balance_raw)
-        if not _bundled_dispatch_qty_mislabeled_as_pending(pending, balance):
-            continue
-        ep.at[idx, "Balance_to_Dispatch"] = pending
-        ep.at[idx, "Pending_Cutting"] = 0
-        if "PO_Pipeline_Total" in ep.columns:
-            ep.at[idx, "PO_Pipeline_Total"] = pending
-    return ep
-
-
-def _bundled_dispatch_qty_mislabeled_as_pending(pending: int, balance: int) -> bool:
-    """
-    Bundled-only PO exports put dispatch balance in Pending_Cutting; Balance_to_Dispatch
-    is the size-count in the band (2–4), not units to dispatch.
-    """
-    pending = int(pending or 0)
-    balance = int(balance or 0)
-    if pending <= 0 or balance <= 0:
-        return False
-    if balance > 8:
-        return False
-    return pending >= balance * 10
-
-
 def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fan out combined size-range PO lines (S-M, XXL-3XL) to individual OMS SKUs
@@ -481,30 +445,6 @@ def expand_bundled_po_skus(df: pd.DataFrame) -> pd.DataFrame:
             continue
         expanded = _split_bundled_po_sku(sku)
         n = len(expanded)
-        pending = int(pd.to_numeric(r.get("Pending_Cutting"), errors="coerce") or 0) if "Pending_Cutting" in df.columns else 0
-        balance = int(pd.to_numeric(r.get("Balance_to_Dispatch"), errors="coerce") or 0) if "Balance_to_Dispatch" in df.columns else 0
-        ordered = int(pd.to_numeric(r.get("PO_Qty_Ordered"), errors="coerce") or 0) if "PO_Qty_Ordered" in df.columns else 0
-        pipeline = int(pd.to_numeric(r.get("PO_Pipeline_Total"), errors="coerce") or 0) if "PO_Pipeline_Total" in df.columns else 0
-
-        if n > 1 and _bundled_dispatch_qty_mislabeled_as_pending(pending, balance):
-            cutting_qty = 0
-            dispatch_qty = pending
-            pipeline_qty = dispatch_qty + cutting_qty
-            ordered_shares = _split_integer_qty(ordered, n)
-            dispatch_shares = _split_integer_qty(dispatch_qty, n)
-            pipeline_shares = _split_integer_qty(pipeline_qty, n)
-            for i, esku in enumerate(expanded):
-                row: dict = {"OMS_SKU": esku}
-                if "PO_Qty_Ordered" in breakdown:
-                    row["PO_Qty_Ordered"] = ordered_shares[i]
-                if "Pending_Cutting" in breakdown:
-                    row["Pending_Cutting"] = 0
-                if "Balance_to_Dispatch" in breakdown:
-                    row["Balance_to_Dispatch"] = dispatch_shares[i]
-                if "PO_Pipeline_Total" in breakdown:
-                    row["PO_Pipeline_Total"] = pipeline_shares[i]
-                rows.append(row)
-            continue
 
         for esku in expanded:
             row = {"OMS_SKU": esku}
@@ -964,7 +904,6 @@ def prepare_existing_po_for_merge(
         ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
     else:
         ep = ep.drop_duplicates(subset=["OMS_SKU"], keep="last")
-    ep = normalize_mislabeled_bundled_breakdown(ep)
     if not ep.empty and any(is_bundled_size_range_sku(s) for s in ep["OMS_SKU"].astype(str)):
         ep = _expand_bundled_po_rows_without_children(ep, inventory_skus=inventory_skus)
     return ep
