@@ -141,6 +141,69 @@ def test_parse_return_data_rar_bundle(rar_name):
     assert int(df["Return_Units"].sum()) > 100
 
 
+def test_amazon_mtr_refund_rows_only_not_shipments():
+    """MTR_B2C/B2B GST reports list every transaction — only Refund rows are returns."""
+    csv_body = (
+        "Transaction Type,Order Date,Invoice Date,Sku,Quantity\n"
+        "Shipment,2026-04-20,2026-04-21,SKU-A,5\n"
+        "Refund,2026-04-24,2026-04-25,SKU-A,1\n"
+        "Cancel,2026-04-22,2026-04-22,SKU-B,3\n"
+        "Refund,2026-04-26,2026-04-27,SKU-B,2\n"
+    ).encode()
+    out, err = _parse_single_return_file(csv_body, "MTR_B2C-APRIL-2026-XYZ.csv")
+    assert err is None
+    assert int(out["Return_Units"].sum()) == 3
+    assert set(out["OMS_SKU"]) == {"SKU-A", "SKU-B"}
+    assert (out["Return_Platform"] == "amazon").all()
+    assert "2026-04-25" in set(out["Return_Date"].astype(str))
+    assert "2026-04-27" in set(out["Return_Date"].astype(str))
+
+
+def test_amazon_fba_returns_per_row_return_date():
+    """Amazon FBA "Manage Returns" export — per-row return-date, not filename date."""
+    csv_body = (
+        "return-date,order-id,sku,asin,quantity\n"
+        "2026-02-25T09:13:07+00:00,406-1,1065PLYKBLUE-4XL,B08S3VXM36,1\n"
+        "2026-03-10T06:36:18+00:00,405-2,1300YKNORANGE-XXL,B092R1HPFJ,2\n"
+    ).encode()
+    out, err = _parse_single_return_file(csv_body, "Feb 4.csv")
+    assert err is None
+    assert (out["Return_Platform"] == "amazon").all()
+    dates = set(out["Return_Date"].astype(str))
+    assert dates == {"2026-02-25", "2026-03-10"}
+    assert int(out["Return_Units"].sum()) == 3
+
+
+def test_meesho_uses_return_created_date_not_filename_date():
+    """Meesho panel CSV rows are dated by "Return Created Date", not the export filename."""
+    csv_body = (
+        '"Meesho Supplier Panel"\n'
+        '"Supplier ID","1662411"\n'
+        '\n'
+        '"S No","Product Name","SKU","Qty","Dispatch Date","Return Created Date"\n'
+        '"1","Product","206PLYKN324MUSTARD","2","2026-05-25","2026-06-09"\n'
+        '"2","Product2","165YKN251MUSTRAD","1","2026-05-27","2026-06-08"\n'
+    ).encode()
+    out, err = _parse_single_return_file(
+        csv_body, "YG Meesho Jan to jun-26/Yash Gallery__2026-06-11_13_0-13_59_1662411__.csv"
+    )
+    assert err is None
+    assert int(out["Return_Units"].sum()) == 3
+    dates = set(out["Return_Date"].astype(str))
+    assert dates == {"2026-06-09", "2026-06-08"}
+    assert (out["Return_Platform"] == "meesho").all()
+
+
+def test_attach_return_platform_preserves_parser_assigned_platform():
+    from backend.services.po_return_import import _attach_return_platform
+
+    df = pd.DataFrame(
+        {"OMS_SKU": ["A"], "Return_Units": [1], "Return_Platform": ["amazon"]}
+    )
+    out = _attach_return_platform(df, "Feb 4.csv")
+    assert out.iloc[0]["Return_Platform"] == "amazon"
+
+
 def test_meesho_lost_skipped_in_rar(monkeypatch):
     from backend.services.po_return_import import _expand_upload_to_member_files
 

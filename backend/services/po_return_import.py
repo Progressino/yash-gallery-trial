@@ -69,12 +69,34 @@ def _strip_flipkart_sku(val: str) -> str:
     return re.sub(r"^SKU:\s*", "", s, flags=re.IGNORECASE).strip()
 
 
+def _extract_zip_members(raw: bytes, prefix: str = "") -> List[Tuple[str, bytes]]:
+    """Recursively pull CSV/Excel members out of a ZIP (and any ZIPs nested inside it)."""
+    out: List[Tuple[str, bytes]] = []
+    try:
+        with zipfile.ZipFile(BytesIO(raw)) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                inner_name = info.filename.replace("\\", "/")
+                full_name = f"{prefix}{inner_name}"
+                if inner_name.lower().endswith(".zip"):
+                    out.extend(_extract_zip_members(zf.read(info), prefix=f"{full_name}/"))
+                elif inner_name.lower().endswith(_DATA_EXTS):
+                    out.append((full_name, zf.read(info)))
+    except Exception:
+        _log.exception("Nested ZIP extract failed for return upload")
+    return out
+
+
 def _extract_rar_members_local(raw: bytes) -> List[Tuple[str, bytes]]:
-    """Extract RAR via bsdtar without importing the upload router."""
+    """Extract RAR (incl. ZIPs nested inside it) without importing the upload router.
+
+    ``unar`` is tried first: ``bsdtar``/libarchive silently misreads some RAR5
+    archives that bundle a top-level CSV alongside several nested ZIP entries —
+    it "sees" only the last ZIP's contents and drops everything else (including
+    the Meesho/Amazon return files we actually need).
+    """
     if raw[:6] != _RAR_MAGIC:
-        return []
-    bsdtar = shutil.which("bsdtar")
-    if not bsdtar:
         return []
     out: List[Tuple[str, bytes]] = []
     try:
@@ -82,24 +104,52 @@ def _extract_rar_members_local(raw: bytes) -> List[Tuple[str, bytes]]:
             rar_path = os.path.join(td, "upload.rar")
             with open(rar_path, "wb") as fh:
                 fh.write(raw)
-            subprocess.run(
-                [bsdtar, "-xf", rar_path, "-C", td],
-                check=True,
-                capture_output=True,
-                timeout=120,
-            )
-            for root, _dirs, files in os.walk(td):
+            extract_dir = os.path.join(td, "out")
+            os.makedirs(extract_dir, exist_ok=True)
+            extracted = False
+            unar = shutil.which("unar")
+            if unar:
+                try:
+                    subprocess.run(
+                        [unar, "-q", "-o", extract_dir, "-f", rar_path],
+                        check=True,
+                        capture_output=True,
+                        timeout=120,
+                    )
+                    extracted = True
+                except Exception:
+                    _log.exception("unar RAR extract failed for return upload")
+            if not extracted:
+                bsdtar = shutil.which("bsdtar")
+                if bsdtar:
+                    try:
+                        subprocess.run(
+                            [bsdtar, "-xf", rar_path, "-C", extract_dir],
+                            check=True,
+                            capture_output=True,
+                            timeout=120,
+                        )
+                        extracted = True
+                    except Exception:
+                        _log.exception("bsdtar RAR extract failed for return upload")
+            if not extracted:
+                return []
+            for root, _dirs, files in os.walk(extract_dir):
                 for fname in files:
                     if fname == "upload.rar":
                         continue
                     full = os.path.join(root, fname)
-                    rel = os.path.relpath(full, td).replace("\\", "/")
+                    rel = os.path.relpath(full, extract_dir).replace("\\", "/")
+                    if rel.lower().endswith(".zip"):
+                        with open(full, "rb") as fh:
+                            out.extend(_extract_zip_members(fh.read(), prefix=f"{rel}/"))
+                        continue
                     if not rel.lower().endswith(_DATA_EXTS):
                         continue
                     with open(full, "rb") as fh:
                         out.append((rel, fh.read()))
     except Exception:
-        _log.exception("bsdtar RAR extract failed for return upload")
+        _log.exception("RAR extract failed for return upload")
     return out
 
 
@@ -121,17 +171,7 @@ def _expand_upload_to_member_files(raw: bytes, filename: str) -> List[Tuple[str,
                 except Exception:
                     _log.exception("RAR extract failed for return upload")
         if not members and (raw[:2] == b"PK" or name.endswith(".zip")):
-            try:
-                with zipfile.ZipFile(BytesIO(raw)) as zf:
-                    for info in zf.infolist():
-                        if info.is_dir():
-                            continue
-                        inner_name = info.filename.replace("\\", "/")
-                        if not inner_name.lower().endswith(_DATA_EXTS):
-                            continue
-                        members.append((inner_name, zf.read(info)))
-            except Exception:
-                _log.exception("ZIP extract failed for return upload")
+            members = _extract_zip_members(raw)
         if members:
             return [
                 (n, b)
@@ -220,6 +260,39 @@ def _parse_meesho_panel_csv(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
         if sku_col and qty_col:
             return df, None
     return pd.DataFrame(), "Meesho return CSV: could not find SKU/Qty header row."
+
+
+def _parse_meesho_return_table(
+    df: pd.DataFrame,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Meesho Supplier Panel return sheet — dated by per-row "Return Created Date"."""
+    sku_col = pick_csv_column(list(df.columns), _SKU_CANDS)
+    qty_col = pick_csv_column(list(df.columns), _QTY_CANDS)
+    if not sku_col or not qty_col:
+        return pd.DataFrame(), None
+    out = pd.DataFrame()
+    out["OMS_SKU"] = df[sku_col].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+    out["Return_Units"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0).astype(int)
+    out["Return_Date"] = _coalesce_return_date_columns(
+        df, ("return created date", "dispatch date")
+    )
+    out["Return_Platform"] = "meesho"
+    out = out[
+        out["OMS_SKU"].str.len().gt(0)
+        & out["Return_Units"].gt(0)
+        & out["Return_Date"].map(_valid_return_iso)
+    ]
+    if out.empty:
+        return pd.DataFrame(), "No dated Meesho return rows found."
+    return (
+        out.groupby(
+            ["OMS_SKU", "Return_Platform", "Return_Date"], as_index=False
+        )["Return_Units"]
+        .sum(),
+        None,
+    )
 
 
 def _valid_return_iso(d: str) -> bool:
@@ -315,6 +388,84 @@ def _parse_amazon_business_return(df: pd.DataFrame) -> Tuple[pd.DataFrame, Optio
     return out.groupby("OMS_SKU", as_index=False)["Return_Units"].sum(), None
 
 
+def _parse_amazon_mtr_returns(
+    df: pd.DataFrame,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Amazon MTR (B2B/B2C) GST report — only ``Transaction Type == Refund`` rows are returns.
+
+    These reports list every transaction (Shipment, Refund, Cancel, ...) for the
+    period; summing ``Quantity`` across all rows would count regular sales as
+    returns, so refund rows must be filtered out first.
+    """
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    txn_col = cols.get("transaction type")
+    sku_col = cols.get("sku")
+    qty_col = cols.get("quantity")
+    if not (txn_col and sku_col and qty_col):
+        return pd.DataFrame(), None
+    work = df[df[txn_col].astype(str).str.strip().str.casefold() == "refund"].copy()
+    if work.empty:
+        return pd.DataFrame(), "No Amazon MTR Refund rows found."
+    work["Return_Units"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0).astype(int)
+    work = work[work["Return_Units"] > 0]
+    if work.empty:
+        return pd.DataFrame(), "No Amazon MTR Refund rows with positive quantity."
+    out = pd.DataFrame()
+    out["OMS_SKU"] = work[sku_col].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+    out["Return_Units"] = work["Return_Units"]
+    out["Return_Date"] = _coalesce_return_date_columns(work, ("invoice date", "order date"))
+    out["Return_Platform"] = "amazon"
+    out = out[
+        out["OMS_SKU"].str.len().gt(0)
+        & out["Return_Units"].gt(0)
+        & out["Return_Date"].map(_valid_return_iso)
+    ]
+    if out.empty:
+        return pd.DataFrame(), "No dated Amazon MTR refund rows found."
+    return (
+        out.groupby(
+            ["OMS_SKU", "Return_Platform", "Return_Date"], as_index=False
+        )["Return_Units"]
+        .sum(),
+        None,
+    )
+
+
+def _parse_amazon_fba_returns(
+    df: pd.DataFrame,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Amazon FBA "Manage Returns" export — return-date, order-id, sku, ..., quantity."""
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    sku_col = cols.get("sku")
+    qty_col = cols.get("quantity")
+    date_col = cols.get("return-date") or cols.get("return date")
+    if not (sku_col and qty_col and date_col):
+        return pd.DataFrame(), None
+    out = pd.DataFrame()
+    out["OMS_SKU"] = df[sku_col].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
+    out["Return_Units"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0).astype(int)
+    out["Return_Date"] = _coalesce_return_date_columns(df, (str(date_col).strip().lower(),))
+    out["Return_Platform"] = "amazon"
+    out = out[
+        out["OMS_SKU"].str.len().gt(0)
+        & out["Return_Units"].gt(0)
+        & out["Return_Date"].map(_valid_return_iso)
+    ]
+    if out.empty:
+        return pd.DataFrame(), "No dated Amazon FBA return rows found."
+    return (
+        out.groupby(
+            ["OMS_SKU", "Return_Platform", "Return_Date"], as_index=False
+        )["Return_Units"]
+        .sum(),
+        None,
+    )
+
+
 def _infer_return_platform_from_filename(filename: str) -> str:
     """Map return export filename to Tier-3 platform key (amazon, myntra, …)."""
     low = (filename or "").lower()
@@ -335,6 +486,10 @@ def _attach_return_platform(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     out = df.copy()
+    if "Return_Platform" in out.columns:
+        existing = out["Return_Platform"].astype(str).str.strip().str.lower()
+        if (existing != "").all() and not existing.isin(["nan", "none"]).any():
+            return out
     out["Return_Platform"] = _infer_return_platform_from_filename(filename)
     return out
 
@@ -418,6 +573,9 @@ def _parse_single_return_file(
         df, err = _parse_meesho_panel_csv(raw)
         if err:
             return pd.DataFrame(), err
+        part, err = _parse_meesho_return_table(df, sku_mapping=sku_mapping)
+        if part is not None and not part.empty:
+            return _finish(part)
         part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
         if err:
             return pd.DataFrame(), err
@@ -445,6 +603,20 @@ def _parse_single_return_file(
         part, err = _parse_myntra_seller_returns_csv(raw, sku_mapping=sku_mapping)
         if part is not None and not part.empty:
             return part, None
+        if err:
+            return pd.DataFrame(), err
+
+    if {"transaction type", "sku", "quantity"} <= col_low:
+        partial, err = _parse_amazon_mtr_returns(df, sku_mapping=sku_mapping)
+        if partial is not None and not partial.empty:
+            return _finish(partial)
+        if err:
+            return pd.DataFrame(), err
+
+    if {"return-date", "sku", "quantity"} <= col_low:
+        partial, err = _parse_amazon_fba_returns(df, sku_mapping=sku_mapping)
+        if partial is not None and not partial.empty:
+            return _finish(partial)
         if err:
             return pd.DataFrame(), err
 
