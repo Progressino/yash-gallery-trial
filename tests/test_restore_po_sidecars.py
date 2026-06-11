@@ -120,3 +120,57 @@ def test_clearing_raise_ledger_removes_stale_disk_parquet(tmp_path, monkeypatch)
     assert "po_raise_ledger_df" not in disk
 
     main._warm_cache = {}
+
+
+def test_uploaded_return_overlay_survives_restart_without_reupload(tmp_path, monkeypatch):
+    """A return-overlay upload must persist like sales data — no re-upload after restart.
+
+    Reproduces the admin workflow: upload a return file via Upload → Returns (for PO),
+    then a later request (new session / after a process restart) must still see the
+    overlay via warm cache + disk parquet, without the operator uploading it again.
+    """
+    import backend.main as main
+    from backend.services.po_return_import import apply_return_overlay_import
+
+    monkeypatch.setattr(main, "_DISK_CACHE_DIR", str(tmp_path))
+    main._warm_cache = {}
+
+    sess = AppSession()
+    overlay = pd.DataFrame(
+        {
+            "OMS_SKU": ["1234YKBLACK-XL"],
+            "Return_Platform": ["amazon"],
+            "Return_Date": ["2026-04-25"],
+            "Return_Units": [3],
+        }
+    )
+    out = apply_return_overlay_import(sess, overlay, replace=True, filename="MTR_B2C-APRIL-2026.csv")
+    assert out["ok"] is True
+    assert not sess.po_return_overlay_df.empty
+
+    main.merge_po_optional_sheets_into_warm_cache(sess)
+    parquet_path = tmp_path / "po_return_overlay_df.parquet"
+    assert parquet_path.is_file()
+    assert not main._warm_cache["po_return_overlay_df"].empty
+
+    # Simulate a brand-new session (new login / new browser tab) after the upload —
+    # warm cache (in-memory, populated above) must restore the overlay automatically.
+    fresh_sess = AppSession()
+    assert fresh_sess.po_return_overlay_df.empty
+    changed = main.restore_po_sidecars_from_warm(fresh_sess)
+    assert changed is True
+    assert not fresh_sess.po_return_overlay_df.empty
+    assert int(fresh_sess.po_return_overlay_df["Return_Units"].sum()) == 3
+
+    # Simulate a process restart — in-memory warm cache is gone, only disk remains.
+    main._warm_cache = {}
+    from backend.services.po_session_hydrate import load_po_calc_essentials_from_disk
+
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate._warm_cache_dir", lambda: tmp_path
+    )
+    disk = load_po_calc_essentials_from_disk()
+    assert "po_return_overlay_df" in disk
+    assert int(disk["po_return_overlay_df"]["Return_Units"].sum()) == 3
+
+    main._warm_cache = {}
