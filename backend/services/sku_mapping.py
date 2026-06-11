@@ -69,6 +69,27 @@ def load_sku_mapping_from_disk() -> Dict[str, str]:
         return {}
 
 
+def merge_sku_mapping_upload(
+    existing: Optional[Dict[str, str]],
+    parsed: Dict[str, str],
+) -> Dict[str, str]:
+    """Overlay uploaded rows onto the current master map (uploaded keys win)."""
+    merged = dict(existing or {})
+    merged.update(parsed or {})
+    return merged
+
+
+def resolve_sku_mapping_base(sess) -> Dict[str, str]:
+    """Best-effort master map before merging a supplemental upload."""
+    cur = getattr(sess, "sku_mapping", None) or {}
+    if cur:
+        return dict(cur)
+    disk = load_sku_mapping_from_disk()
+    if disk:
+        return dict(disk)
+    return dict(load_bundled_sku_mapping())
+
+
 def persist_sku_mapping_globally(mapping: Dict[str, str]) -> None:
     """Write SKU map to disk warm-cache and in-memory warm cache (shared across sessions)."""
     if not mapping:
@@ -216,12 +237,24 @@ def _is_oms_column(name: str) -> bool:
     return False
 
 
+def _is_right_sku_target_column(name: str) -> bool:
+    """Target/canonical SKU column on supplemental replace sheets (typo 'Righ Sku' included)."""
+    s = str(name).lower().strip()
+    if _is_oms_column(name):
+        return False
+    return ("right" in s or "righ" in s) and "sku" in s
+
+
 def _ordered_oms_columns(df: pd.DataFrame, primary: Optional[object]) -> List[object]:
-    """Try preferred OMS column first, then every other OMS-like column left-to-right."""
+    """Try preferred target column first, then every other OMS-like column left-to-right."""
     all_oms = [c for c in df.columns if _is_oms_column(str(c))]
-    if primary is not None and primary in all_oms:
-        return [primary] + [c for c in all_oms if c != primary]
-    return all_oms or ([primary] if primary is not None else [])
+    if primary is not None:
+        rest = [c for c in all_oms if c != primary]
+        if primary in all_oms:
+            return [primary] + rest
+        # Supplemental sheets use "Right/Righ Sku" as the canonical target, not OMS-named cols.
+        return [primary] + rest
+    return all_oms
 
 
 def _is_replace_sku_column(name: str) -> bool:
@@ -287,6 +320,10 @@ def _pick_seller_oms_columns(
 
     oms_col = oms_candidates[-1] if oms_candidates else None
     seller_col: Optional[object] = None
+    # Supplemental replace workbook: old OMS_SKU → Right/Righ Sku (canonical).
+    right_col = next((c for c in cols if _is_right_sku_target_column(str(c))), None)
+    if right_col is not None and oms_candidates:
+        return oms_candidates[0], right_col
     # Replace SKU column = primary listing/order token (Meesho combined SKU, etc.).
     replace_col = next((c for c in cols if _is_replace_sku_column(str(c))), None)
     if replace_col is not None:

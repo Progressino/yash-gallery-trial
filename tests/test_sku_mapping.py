@@ -7,6 +7,7 @@ from backend.services.sku_mapping import (
     bundled_sku_mapping_json_path,
     clear_bundled_sku_mapping_cache,
     load_bundled_sku_mapping,
+    merge_sku_mapping_upload,
     parse_sku_mapping,
 )
 
@@ -119,6 +120,34 @@ def test_replace_sku_column_registers_meesho_sku_too(tmp_path):
     m = parse_sku_mapping(p.read_bytes())
     assert m["1158YKGREEN-XL"] == "1001YKGREEN-XL"
     assert m["ALT-MEESHO-KEY"] == "1001YKGREEN-XL"
+
+
+def test_righ_sku_supplemental_sheet_maps_old_oms_to_canonical(tmp_path):
+    """OMS_SKU → Righ Sku sheets must not self-map via the OMS-named column."""
+    import pandas as pd
+
+    p = tmp_path / "more_replace.xlsx"
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["1915YKBLACK-3XL", "1917YKBLUE-4XL"],
+            "Righ Sku": ["1915YKBLACK-XXL-3XL", "1917YKBLUE-4XL-5XL"],
+        }
+    )
+    df.to_excel(p, sheet_name="Sheet1", index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["1915YKBLACK-3XL"] == "1915YKBLACK-XXL-3XL"
+    assert m["1917YKBLUE-4XL"] == "1917YKBLUE-4XL-5XL"
+    assert m.get("1915YKBLACK-XXL-3XL") is None
+
+
+def test_merge_sku_mapping_upload_overlays_updates():
+    base = {"OLD-A": "OMS-A", "KEEP": "OMS-KEEP", "1915YKBLACK-3XL": "1915YKBLACK-3XL"}
+    parsed = {"1915YKBLACK-3XL": "1915YKBLACK-XXL-3XL", "NEW-B": "OMS-B"}
+    merged = merge_sku_mapping_upload(base, parsed)
+    assert merged["1915YKBLACK-3XL"] == "1915YKBLACK-XXL-3XL"
+    assert merged["KEEP"] == "OMS-KEEP"
+    assert merged["NEW-B"] == "OMS-B"
+    assert merged["OLD-A"] == "OMS-A"
 
 
 def test_replace_sku_sheet_tab_two_column_fallback(tmp_path):

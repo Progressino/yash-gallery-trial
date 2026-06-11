@@ -24,7 +24,12 @@ from ..concurrency import HEAVY_EXECUTOR, DAILY_UPLOAD_EXECUTOR, _UPLOAD_MEMORY_
 
 from ..session import store, resume_auto_data_restore, AppSession
 from ..models.schemas import UploadResponse
-from ..services.sku_mapping import parse_sku_mapping, persist_sku_mapping_globally
+from ..services.sku_mapping import (
+    merge_sku_mapping_upload,
+    parse_sku_mapping,
+    persist_sku_mapping_globally,
+    resolve_sku_mapping_base,
+)
 from ..services.mtr import load_mtr_from_zip, load_mtr_from_extracted_files, parse_mtr_csv
 from ..services.myntra import load_myntra_from_zip
 from ..services.meesho import (
@@ -1023,7 +1028,10 @@ async def upload_sku_mapping(
         file_bytes = await file.read()
 
         def work():
-            mapping = parse_sku_mapping(file_bytes)
+            parsed = parse_sku_mapping(file_bytes)
+            base = resolve_sku_mapping_base(sess)
+            mapping = merge_sku_mapping_upload(base, parsed)
+            updated = sum(1 for k, v in parsed.items() if base.get(k) != v)
             sess.sku_mapping = mapping
 
             had_platform = (
@@ -1045,7 +1053,14 @@ async def upload_sku_mapping(
                 )
 
             gaps = list_sku_mapping_gaps(sess.sales_df, mapping)
-            msg = f"SKU mapping loaded: {len(mapping):,} entries"
+            msg = f"SKU mapping loaded: {len(parsed):,} rows from file"
+            if base:
+                msg += f" merged into master ({len(mapping):,} total"
+                if updated:
+                    msg += f", {updated:,} updated"
+                msg += ")"
+            else:
+                msg += f" ({len(mapping):,} total entries)"
             if had_platform:
                 msg += f"; sales rebuilt ({len(sess.sales_df):,} rows)"
             if gaps:
