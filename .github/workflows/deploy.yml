@@ -65,6 +65,20 @@ jobs:
           set -eu
           SKIP_E2E=1 bash scripts/predeploy_sanity.sh
 
+      - name: Ensure firewall allows web traffic
+        run: |
+          set -eu
+          if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+            # UFW default-deny blocks some HTTPS SYN on INPUT unless 80/443 are explicit
+            # (Docker publish alone is not enough for all clients).
+            ufw allow 80/tcp comment 'HTTP public web' >/dev/null 2>&1 || true
+            ufw allow 443/tcp comment 'HTTPS public web' >/dev/null 2>&1 || true
+            echo "UFW web rules:"
+            ufw status numbered | sed -n '1,15p'
+          else
+            echo "UFW not active — skipping web allow rules"
+          fi
+
       - name: Rebuild and restart containers
         run: |
           set -eu
