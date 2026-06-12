@@ -296,11 +296,45 @@ def ensure_po_calc_server_data_in_warm_cache() -> bool:
     return changed
 
 
+def ensure_po_return_overlay_from_server(sess) -> bool:
+    """Load saved return overlay from warm cache or disk when the session is empty."""
+    cur = getattr(sess, "po_return_overlay_df", None)
+    if cur is not None and not getattr(cur, "empty", True):
+        return False
+    import backend.main as _main
+
+    try:
+        _main.restore_po_sidecars_from_warm(sess)
+    except Exception:
+        _log.exception("restore_po_sidecars_from_warm for return overlay failed")
+    cur = getattr(sess, "po_return_overlay_df", None)
+    if cur is not None and not getattr(cur, "empty", True):
+        return True
+
+    path = _warm_cache_dir() / "po_return_overlay_df.parquet"
+    if not path.is_file():
+        return False
+    try:
+        df = pd.read_parquet(path)
+    except Exception:
+        _log.exception("read po_return_overlay_df.parquet failed")
+        return False
+    if df is None or getattr(df, "empty", True):
+        return False
+    sess.po_return_overlay_df = df.copy()
+    if not isinstance(_main._warm_cache, dict):
+        _main._warm_cache = {}
+    _main._warm_cache["po_return_overlay_df"] = df.copy()
+    _log.info("PO return overlay hydrated from disk (%s rows)", len(df))
+    return True
+
+
 def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
     """Ensure session has sales, inventory, existing PO, and PO sidecars before calculate."""
     import backend.main as _main
 
     ensure_po_calc_server_data_in_warm_cache()
+    ensure_po_return_overlay_from_server(sess)
 
     inv_before = _df_row_count(getattr(sess, "inventory_df_variant", None))
     sales_before = _df_row_count(getattr(sess, "sales_df", None))
@@ -351,6 +385,7 @@ def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
         "sales_rows": _df_row_count(getattr(sess, "sales_df", None)),
         "inventory_rows": _df_row_count(getattr(sess, "inventory_df_variant", None)),
         "existing_po_rows": _df_row_count(getattr(sess, "existing_po_df", None)),
+        "return_overlay_rows": _df_row_count(getattr(sess, "po_return_overlay_df", None)),
         "sku_status_rows": sidecar_stats.get("sku_status_lead_df", _df_row_count(getattr(sess, "sku_status_lead_df", None))),
         "daily_inventory_rows": sidecar_stats.get(
             "daily_inventory_history_df",

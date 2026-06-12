@@ -2161,6 +2161,8 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         return_sheet_skus=int(len(_ret_ov)) if _ret_ok else 0,
         return_sheet_units=int(_ret_ov["Return_Units"].sum()) if _ret_ok else 0,
         pause_auto_data_restore=paused,
+        returns_import_status=getattr(sess, "returns_import_status", "idle") or "idle",
+        returns_import_message=getattr(sess, "returns_import_message", "") or "",
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
         daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
@@ -2407,7 +2409,10 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
             return
         try:
             import backend.main as _main
+            from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
 
+            _main.restore_po_sidecars_from_warm(sess)
+            ensure_po_return_overlay_from_server(sess)
             if _main.session_needs_warm_cache_topup(sess):
                 if _main.session_needs_operational_data(sess):
                     _main.force_restore_session_from_server_cache(
@@ -2480,7 +2485,10 @@ def get_coverage(request: Request, light: bool = False):
     if light:
         try:
             import backend.main as _main
+            from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
 
+            _main.restore_po_sidecars_from_warm(sess)
+            ensure_po_return_overlay_from_server(sess)
             if _main.session_needs_warm_cache_topup(sess):
                 _main._apply_warm_cache_if_needed(
                     sess, _main._warm_cache_generation

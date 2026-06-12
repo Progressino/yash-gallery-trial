@@ -1,4 +1,4 @@
-"""Returns RAR import returns immediately; net sales rebuild runs in background."""
+"""Returns RAR import returns immediately; parse + net sales rebuild run in background."""
 
 import time
 from io import BytesIO
@@ -7,51 +7,9 @@ from unittest.mock import MagicMock
 import pandas as pd
 
 
-def test_returns_import_accepts_rar_and_queues_followup(client, auth_token, monkeypatch):
-    queued: list[str] = []
-
-    def _fake_followup(session_id: str):
-        queued.append(session_id)
-
-    monkeypatch.setattr(
-        "backend.routers.upload._run_returns_import_followup",
-        _fake_followup,
-    )
-
-    overlay = pd.DataFrame({"OMS_SKU": ["SKU-A"], "Return_Units": [2]})
-    monkeypatch.setattr(
-        "backend.services.po_return_import.parse_return_upload_bytes",
-        lambda *a, **k: (overlay, None),
-    )
-    monkeypatch.setattr(
-        "backend.services.po_return_import.apply_return_overlay_import",
-        lambda sess, df, **k: {
-            "ok": True,
-            "message": "Return sheet: 1 SKU(s), 2 return units.",
-            "skus": 1,
-            "total_units": 2,
-        },
-    )
-    monkeypatch.setattr(
-        "backend.routers.po._sync_po_sidecars_to_durable_storage",
-        lambda *a, **k: None,
-    )
-
-    # DAILY_UPLOAD_EXECUTOR has max_workers=1. In the full test suite, previous
-    # tests can leave queued work that saturates the executor for > 5s.  Patch
-    # submit() to run the callable synchronously in this thread instead.
-    import concurrent.futures
-    from backend.concurrency import DAILY_UPLOAD_EXECUTOR
-
-    class _SyncFuture:
-        def result(self, timeout=None):
-            return None
-
-    def _sync_submit(fn, *args, **kwargs):
-        fn(*args, **kwargs)
-        return _SyncFuture()
-
-    monkeypatch.setattr(DAILY_UPLOAD_EXECUTOR, "submit", _sync_submit)
+def test_returns_import_accepts_rar_and_queues_worker(client, auth_token, monkeypatch):
+    submit_mock = MagicMock()
+    monkeypatch.setattr("backend.concurrency.RETURNS_IMPORT_EXECUTOR.submit", submit_mock)
 
     r = client.post(
         "/api/po/returns/import-file",
@@ -60,10 +18,111 @@ def test_returns_import_accepts_rar_and_queues_followup(client, auth_token, monk
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True
+    assert body.get("returns_import") == "running"
     assert body.get("sales_rebuild") == "pending"
-    assert body.get("sales_rebuilt") is False
+    assert body.get("status") == "running"
     assert "background" in (body.get("message") or "").lower()
-    assert len(queued) == 1
+    assert submit_mock.call_count == 1
+    assert submit_mock.call_args[0][0].__name__ == "_run_returns_import_worker"
+
+
+def test_returns_import_worker_persists_overlay(monkeypatch, tmp_path):
+    from backend.session import AppSession, store
+
+    overlay = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"],
+            "Return_Platform": ["amazon"],
+            "Return_Date": ["2026-06-01"],
+            "Return_Units": [2],
+        }
+    )
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path / "warm"))
+    monkeypatch.setattr(
+        "backend.services.po_return_import.parse_return_upload_bytes",
+        lambda *a, **k: (overlay, None),
+    )
+    def _apply(sess, df, **k):
+        sess.po_return_overlay_df = df.copy()
+        return {
+            "ok": True,
+            "message": "Return sheet: 1 SKU(s), 2 return units.",
+            "skus": 1,
+            "total_units": 2,
+        }
+
+    monkeypatch.setattr(
+        "backend.services.po_return_import.apply_return_overlay_import",
+        _apply,
+    )
+    import backend.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_DISK_CACHE_DIR", str(tmp_path / "warm"))
+    followup: list[str] = []
+    monkeypatch.setattr(
+        "backend.routers.upload._run_returns_import_followup",
+        lambda sid: followup.append(sid),
+    )
+    monkeypatch.setattr(
+        "backend.db.forecast_session_pg.pg_session_persist_enabled",
+        lambda: False,
+    )
+
+    sid, sess = store.get_or_create(None)
+    sess.sku_mapping = {"SKU-A": "SKU-A"}
+    store._sessions[sid] = sess
+
+    from backend.routers.po import _run_returns_import_worker
+
+    _run_returns_import_worker(
+        sid,
+        b"raw",
+        "Return Data.rar",
+        group_by_parent=False,
+        replace=True,
+        sku_mapping=sess.sku_mapping,
+    )
+    assert sess.returns_import_status == "done"
+    assert not sess.po_return_overlay_df.empty
+    assert (tmp_path / "warm" / "po_return_overlay_df.parquet").is_file()
+    assert followup == [sid]
+
+
+def test_light_coverage_restores_return_overlay_from_disk(client, monkeypatch, tmp_path):
+    import pandas as pd
+
+    from backend.session import store
+
+    import backend.main as main_mod
+
+    warm = tmp_path / "warm"
+    warm.mkdir(parents=True)
+    monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
+    monkeypatch.setattr(main_mod, "_DISK_CACHE_DIR", str(warm))
+    main_mod._warm_cache = {}
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["1001YKBEIGE-M"],
+            "Return_Platform": ["meesho"],
+            "Return_Date": ["2026-06-01"],
+            "Return_Units": [3],
+        }
+    )
+    df.to_parquet(warm / "po_return_overlay_df.parquet", index=False)
+
+    sid, sess = store.get_or_create(None)
+    sess.po_return_overlay_df = pd.DataFrame()
+    store._sessions[sid] = sess
+
+    c2 = client.__class__(client.app)
+    c2.cookies.set("auth_token", "test-token")
+    c2.cookies.set("session_id", sid)
+
+    r = c2.get("/api/data/coverage?light=1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("return_sheet") is True
+    assert body.get("return_sheet_units") == 3
 
 
 def test_skip_meesho_lost_member():

@@ -581,9 +581,28 @@ def _clear_stuck_session_restore(sess: AppSession, *, force: bool = False) -> bo
     return True
 
 
+def _clear_stuck_returns_import(sess: AppSession, *, force: bool = False) -> bool:
+    """Reset returns_import when stuck in running (orphan worker or crash)."""
+    if getattr(sess, "returns_import_status", "idle") != "running":
+        return False
+    started = float(getattr(sess, "returns_import_started", 0) or 0)
+    age = time.monotonic() - started if started > 0 else 999999
+    stuck_sec = int(os.environ.get("RETURNS_IMPORT_STUCK_SEC", "900"))
+    if not force and age < stuck_sec:
+        return False
+    sess.returns_import_status = "error"
+    sess.returns_import_message = (
+        "Return import stopped responding (server may have restarted). "
+        "Refresh and upload again, or check Upload → Returns status."
+    )
+    sess.returns_import_started = 0.0
+    return True
+
+
 def clear_stale_background_jobs(sess: AppSession) -> None:
     """Clear orphan/timed-out ingest, sales-rebuild, and restore flags (safe on every light poll)."""
     _clear_stuck_daily_ingest(sess, force=False)
+    _clear_stuck_returns_import(sess, force=False)
     _clear_stuck_sales_rebuild(sess, force=False)
     _clear_stuck_session_restore(sess, force=False)
 

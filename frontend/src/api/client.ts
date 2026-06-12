@@ -67,6 +67,8 @@ export interface CoverageResponse {
   po_raise_ledger_rows?: number
   return_sheet_skus?: number
   return_sheet_units?: number
+  returns_import_status?: 'idle' | 'running' | 'done' | 'error'
+  returns_import_message?: string
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
   /** Tier-3 daily-auto background sales rebuild */
@@ -343,21 +345,28 @@ export async function uploadInventory(files: {
 export async function uploadPoReturnsImport(
   file: File,
   opts?: { groupByParent?: boolean; replace?: boolean },
-): Promise<{ ok: boolean; message: string; sales_rebuild?: string }> {
+): Promise<{ ok: boolean; message: string; sales_rebuild?: string; returns_import?: string }> {
   const fd = new FormData()
   fd.append('file', file)
   fd.append('group_by_parent', opts?.groupByParent ? 'true' : 'false')
   fd.append('replace', opts?.replace === false ? 'false' : 'true')
   try {
-    const { data } = await api.post<{ ok?: boolean; message?: string; sales_rebuild?: string }>(
+    const { data } = await api.post<{
+      ok?: boolean
+      message?: string
+      sales_rebuild?: string
+      returns_import?: string
+      status?: string
+    }>(
       '/po/returns/import-file',
       fd,
-      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: UPLOAD_TIMEOUT_MS },
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 },
     )
     return {
       ok: !!data?.ok,
-      message: data?.message || (data?.ok ? 'Returns imported.' : 'Import failed.'),
+      message: data?.message || (data?.ok ? 'Returns import queued.' : 'Import failed.'),
       sales_rebuild: data?.sales_rebuild,
+      returns_import: data?.returns_import || data?.status,
     }
   } catch (e: unknown) {
     throw new Error(_errMessage(e, 'Returns import failed'))
@@ -591,6 +600,36 @@ export async function waitForInventoryUpload(
     await new Promise(r => setTimeout(r, 1500))
   }
   throw new Error('Inventory upload timed out — refresh the page in a minute.')
+}
+
+/** Poll until async return overlay import finishes and return_sheet is loaded. */
+export async function waitForReturnsImport(
+  onTick?: (message: string) => void,
+  maxMs = UPLOAD_BACKGROUND_WAIT_MS,
+): Promise<CoverageResponse> {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
+    const st = cov.returns_import_status ?? 'idle'
+    if (st === 'running') {
+      onTick?.(cov.returns_import_message || 'Importing return data…')
+      await new Promise(r => setTimeout(r, 2500))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(cov.returns_import_message || 'Return import failed')
+    }
+    if (cov.return_sheet) {
+      return cov
+    }
+    if (st === 'done' && !cov.return_sheet) {
+      onTick?.('Finalizing return sheet…')
+      await new Promise(r => setTimeout(r, 2000))
+      continue
+    }
+    await new Promise(r => setTimeout(r, 2000))
+  }
+  throw new Error('Return import timed out — refresh the page in a minute.')
 }
 
 /** Poll until Tier-3 background sales rebuild finishes (daily-auto). */

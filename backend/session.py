@@ -68,6 +68,11 @@ class AppSession:
     # ── Daily-store restore flag ──────────────────────────────
     daily_restored: bool = False   # True once daily SQLite data has been loaded into session
 
+    # Async return overlay import (RAR extract + parse can take several minutes).
+    returns_import_status: str = "idle"  # idle | running | done | error
+    returns_import_message: str = ""
+    returns_import_started: float = 0.0
+
     # Async sales rebuild after Tier-3 daily-auto (avoids 502 on long build_sales_df).
     sales_rebuild_status: str = "idle"   # idle | running | done | error
     sales_rebuild_message: str = ""

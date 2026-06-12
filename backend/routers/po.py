@@ -668,6 +668,65 @@ def po_get_raise_ledger(request: Request):
     }
 
 
+def _run_returns_import_worker(
+    session_id: str,
+    raw: bytes,
+    filename: str,
+    *,
+    group_by_parent: bool,
+    replace: bool,
+    sku_mapping: dict | None,
+) -> None:
+    """Parse return archive, persist overlay to disk, rebuild net sales — off the HTTP thread."""
+    from ..session import store
+
+    sess = store.get(session_id)
+    if sess is None:
+        return
+    try:
+        from ..services.po_return_import import apply_return_overlay_import, parse_return_upload_bytes
+
+        sess.returns_import_message = "Extracting and parsing return files…"
+        overlay, err = parse_return_upload_bytes(
+            raw,
+            filename,
+            sku_mapping=sku_mapping or None,
+            group_by_parent=group_by_parent,
+        )
+        if err:
+            sess.returns_import_status = "error"
+            sess.returns_import_message = err
+            return
+        out = apply_return_overlay_import(sess, overlay, replace=replace, filename=filename)
+        try:
+            import backend.main as _main
+
+            _main.merge_po_optional_sheets_into_warm_cache(sess)
+        except Exception:
+            logging.getLogger(__name__).exception("merge return overlay into warm cache failed")
+        try:
+            from ..db.forecast_session_pg import (
+                persist_session_bundle_thread_safe,
+                pg_session_persist_enabled,
+            )
+
+            if pg_session_persist_enabled():
+                persist_session_bundle_thread_safe(session_id, sess)
+        except Exception:
+            logging.getLogger(__name__).exception("PostgreSQL persist after return import failed")
+        sess.returns_import_status = "done"
+        sess.returns_import_message = str(out.get("message") or "Return sheet imported.")
+        from ..routers.upload import _run_returns_import_followup
+
+        _run_returns_import_followup(session_id)
+    except Exception as e:
+        logging.getLogger(__name__).exception("return import worker failed")
+        sess.returns_import_status = "error"
+        sess.returns_import_message = str(e)
+    finally:
+        sess.returns_import_started = 0.0
+
+
 @router.post("/returns/import-file")
 async def po_returns_import_file(
     request: Request,
@@ -677,7 +736,7 @@ async def po_returns_import_file(
     replace: str = Form("true"),
 ):
     """Import return units by SKU (CSV / Excel / RAR / ZIP). Reduces PO qty and feeds Net demand."""
-    from ..services.po_return_import import apply_return_overlay_import, parse_return_upload_bytes
+    from ..concurrency import RETURNS_IMPORT_EXECUTOR
 
     sess = request.state.session
     if sess is None:
@@ -687,35 +746,43 @@ async def po_returns_import_file(
         return {"ok": False, "message": "Empty file."}
     gbp = str(group_by_parent).strip().lower() in ("1", "true", "yes", "on")
     rep = str(replace).strip().lower() in ("1", "true", "yes", "on")
-    overlay, err = parse_return_upload_bytes(
+    session_id = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
+    if not session_id:
+        return {"ok": False, "message": "No session id — refresh and try again."}
+    if getattr(sess, "returns_import_status", "idle") == "running":
+        return {
+            "ok": False,
+            "message": "A return import is already running on this session. Wait for it to finish.",
+            "returns_import": "running",
+        }
+
+    import time
+
+    sess.returns_import_status = "running"
+    sess.returns_import_message = "Queued return import…"
+    sess.returns_import_started = time.monotonic()
+    sku_mapping = dict(sess.sku_mapping or {})
+    RETURNS_IMPORT_EXECUTOR.submit(
+        _run_returns_import_worker,
+        session_id,
         raw,
         file.filename or "",
-        sku_mapping=sess.sku_mapping or None,
         group_by_parent=gbp,
+        replace=rep,
+        sku_mapping=sku_mapping,
     )
-    if err:
-        return {"ok": False, "message": err}
-    out = apply_return_overlay_import(sess, overlay, replace=rep, filename=file.filename or "")
-    _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
-
-    session_id = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
-    base_msg = str(out.get("message") or "").strip()
-    try:
-        from ..concurrency import DAILY_UPLOAD_EXECUTOR
-        from ..routers.upload import _run_returns_import_followup
-
-        if session_id:
-            DAILY_UPLOAD_EXECUTOR.submit(_run_returns_import_followup, session_id)
-    except Exception:
-        logging.getLogger(__name__).exception("queue return import follow-up")
-
-    out["sales_rebuilt"] = False
-    out["sales_rebuild"] = "pending"
-    out["message"] = (
-        f"{base_msg} Dashboard net sales are updating in the background (usually under a minute). "
-        "Run Calculate PO on PO Engine to refresh PO qty columns."
-    ).strip()
-    return out
+    return {
+        "ok": True,
+        "status": "running",
+        "returns_import": "running",
+        "sales_rebuilt": False,
+        "sales_rebuild": "pending",
+        "message": (
+            "Return file accepted — extracting and saving in the background (large RAR archives "
+            "can take a few minutes). This page will update when finished; run Calculate PO "
+            "afterward to refresh PO qty."
+        ),
+    }
 
 
 @router.delete("/returns/overlay")

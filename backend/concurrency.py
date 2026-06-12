@@ -35,6 +35,12 @@ PO_CALC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="po-calc",
 )
 
+# Return overlay RAR/ZIP parse — must not block AUX (auth/session) or daily ingest queues.
+RETURNS_IMPORT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="returns-import",
+)
+
 # Session warm-cache copy, SKU bundle, PG persist helpers.
 AUX_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2,

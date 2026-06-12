@@ -9,7 +9,7 @@ import {
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile,
-  waitForDailyAutoIngest, waitForSalesRebuild, verifyDailyUpload,
+  waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, verifyDailyUpload,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
   type DailyUploadVerifyResponse,
   type CoverageResponse,
@@ -1541,9 +1541,14 @@ export default function Upload() {
             }}
             onUpload={handle('returns_po', async (file: File) => {
               const data = await uploadPoReturnsImport(file)
-              if (data.ok && data.sales_rebuild === 'pending') {
+              if (data.ok) {
                 try {
-                  await waitForSalesRebuild(msg => setBuildingMsg(msg))
+                  if (data.returns_import === 'running') {
+                    await waitForReturnsImport(msg => setBuildingMsg(msg))
+                  }
+                  if (data.sales_rebuild === 'pending') {
+                    await waitForSalesRebuild(msg => setBuildingMsg(msg))
+                  }
                 } catch {
                   /* coverage poll will pick up rebuild */
                 } finally {
@@ -1551,8 +1556,8 @@ export default function Upload() {
                 }
               }
               const msg =
-                data.sales_rebuild === 'pending'
-                  ? `${data.message} Refresh the dashboard in a minute if net sales look stale.`
+                data.ok && (data.returns_import === 'running' || data.sales_rebuild === 'pending')
+                  ? `${data.message} Return data saves automatically for PO — run Calculate PO when done.`
                   : data.message
               return { ok: data.ok, message: msg } as UploadResponse
             })}
