@@ -1597,7 +1597,7 @@ export default function Upload() {
           subtitle={
             coverage.return_sheet_skus && coverage.return_sheet_skus > 0
               ? `${coverage.return_sheet_skus.toLocaleString()} SKUs · ${(coverage.return_sheet_units ?? 0).toLocaleString()} return units combined — upload more files for other brands/platforms below`
-              : 'Upload return files per platform (Amazon, Flipkart, Myntra, Meesho…) and brand (Akiko, YG…). Each file is merged; re-uploading the same filename replaces that file only.'
+              : 'Upload return files per platform — Flipkart: monthly Sales Report XLSX (Return rows), Amazon/MTR, Myntra, Meesho, etc. Each file is merged; re-uploading the same filename replaces that file only.'
           }
           loaded={!!coverage.return_sheet}
           rows={coverage.return_sheet_skus}

@@ -47,6 +47,52 @@ def test_parse_flipkart_xlsx_not_treated_as_zip_archive():
     assert str(df.iloc[0]["Return_Date"]) == "2026-03-05"
 
 
+def test_parse_flipkart_sales_report_returns_event_type():
+    """Monthly Flipkart B2C Sales Report — Return rows only (not Sale)."""
+    openpyxl = pytest.importorskip("openpyxl")
+    raw_xlsx = BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sales Report"
+    ws.append(
+        [
+            "Event Type",
+            "Event Sub Type",
+            "SKU",
+            "Item Quantity",
+            "Order Date",
+            "Buyer Invoice Date",
+        ]
+    )
+    ws.append(["Return", "Return", '"""SKU:1899YKOFFWHITE-XXL"""', 1, "2026-04-30", "2026-05-12"])
+    ws.append(["Sale", "Sale", '"""SKU:190YK214MEHROON-XXL"""', 1, "2026-05-12", "2026-05-12"])
+    ws.append(["Return", "Return", '"""SKU:1057YKBLUE-M"""', 2, "2026-05-09", "2026-05-12"])
+    wb.save(raw_xlsx)
+    raw_xlsx.seek(0)
+    out, err = _parse_flipkart_returns_xlsx(raw_xlsx.read())
+    assert err is None, err
+    assert int(out["Return_Units"].sum()) == 3
+    assert "1899YKOFFWHITE-XXL" in set(out["OMS_SKU"])
+    assert "190YK214MEHROON-XXL" not in set(out["OMS_SKU"])
+    assert (out["Return_Platform"] == "flipkart").all()
+    assert "2026-04-30" in set(out["Return_Date"].astype(str))
+
+
+def test_parse_flipkart_sales_report_uuid_filename():
+    """Seller Hub download names are UUIDs — detect via Sales Report sheet."""
+    fixture = Path(__file__).resolve().parent / "fixtures" / "flipkart_sales_report_returns_sample.xlsx"
+    if not fixture.is_file():
+        pytest.skip("flipkart sales report fixture missing")
+    raw = fixture.read_bytes()
+    df, err = parse_return_upload_bytes(raw, "0bedba5d-12da-4468-80bc-1368872b2087_1780814425000.xlsx")
+    assert err is None, err
+    assert not df.empty
+    assert int(df["Return_Units"].sum()) == 657
+    assert df["Return_Platform"].eq("flipkart").all()
+    months = sorted({str(d)[:7] for d in df["Return_Date"] if str(d)[:4] >= "2020"})
+    assert any(m >= "2026-04" for m in months), months
+
+
 def test_flipkart_sku_prefix_stripped():
     openpyxl = pytest.importorskip("openpyxl")
     raw_xlsx = BytesIO()

@@ -63,10 +63,12 @@ _QTY_CANDS = (
 
 
 def _strip_flipkart_sku(val: str) -> str:
-    s = str(val or "").strip()
+    from .helpers import clean_sku
+
+    s = clean_sku(val)
     if not s or s.lower() in ("nan", "none"):
         return ""
-    return re.sub(r"^SKU:\s*", "", s, flags=re.IGNORECASE).strip()
+    return s
 
 
 def _extract_zip_members(raw: bytes, prefix: str = "") -> List[Tuple[str, bytes]]:
@@ -318,24 +320,21 @@ def _coalesce_return_date_columns(df: pd.DataFrame, col_names: tuple[str, ...]) 
     return dates
 
 
-def _parse_flipkart_returns_xlsx(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
+def _parse_flipkart_legacy_returns_sheet(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Flipkart Seller Hub dedicated Returns export (sku + quantity columns)."""
     try:
-        xl = pd.ExcelFile(BytesIO(raw))
-    except Exception as e:
-        return pd.DataFrame(), str(e)
-    sheet = "Returns" if "Returns" in xl.sheet_names else xl.sheet_names[0]
-    try:
-        df = pd.read_excel(BytesIO(raw), sheet_name=sheet)
+        df = pd.read_excel(BytesIO(raw), sheet_name="Returns")
     except Exception as e:
         return pd.DataFrame(), str(e)
     if df is None or df.empty:
         return pd.DataFrame(), "Flipkart Returns sheet is empty."
-    cols = [str(c).strip().lower() for c in df.columns]
-    if "sku" not in cols or "quantity" not in cols:
+    sku_col = pick_csv_column(list(df.columns), ("sku", "seller sku", "listing sku"))
+    qty_col = pick_csv_column(list(df.columns), ("quantity", "qty", "item quantity", "units"))
+    if not sku_col or not qty_col:
         return pd.DataFrame(), "Flipkart Returns sheet missing sku/quantity columns."
     out = pd.DataFrame()
-    out["OMS_SKU"] = df["sku"].map(_strip_flipkart_sku)
-    out["Return_Units"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0).astype(int)
+    out["OMS_SKU"] = df[sku_col].map(_strip_flipkart_sku)
+    out["Return_Units"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0).astype(int)
     out["Return_Date"] = _coalesce_return_date_columns(
         df,
         (
@@ -360,6 +359,84 @@ def _parse_flipkart_returns_xlsx(raw: bytes) -> Tuple[pd.DataFrame, Optional[str
         .sum(),
         None,
     )
+
+
+def _parse_flipkart_sales_report_returns(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Flipkart monthly B2C Sales Report — filter Event Type = Return."""
+    from .flipkart import (
+        _fk_coalesced_listing_sku_series,
+        _fk_is_sku_placeholder,
+        _fk_parse_excel_order_dates,
+        _fk_sales_report_date_column,
+    )
+
+    try:
+        df = pd.read_excel(BytesIO(raw), sheet_name="Sales Report")
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+    if df is None or df.empty:
+        return pd.DataFrame(), "Flipkart Sales Report is empty."
+    df = df.copy()
+    df.columns = df.columns.astype(str).str.strip()
+    event_col = pick_csv_column(
+        list(df.columns),
+        ("event type", "event sub type", "document sub type"),
+    )
+    if not event_col:
+        return pd.DataFrame(), "Flipkart Sales Report missing Event Type column."
+    df = df[df[event_col].astype(str).str.strip().str.lower().eq("return")]
+    if df.empty:
+        return pd.DataFrame(), "No Return rows in Flipkart Sales Report."
+    date_col = _fk_sales_report_date_column(df)
+    if not date_col:
+        return pd.DataFrame(), "Flipkart Sales Report missing order/invoice date column."
+    qty_col = pick_csv_column(list(df.columns), ("item quantity", "quantity", "qty"))
+    if not qty_col:
+        return pd.DataFrame(), "Flipkart Sales Report missing Item Quantity column."
+    raw_skus = _fk_coalesced_listing_sku_series(df)
+    out = pd.DataFrame()
+    out["OMS_SKU"] = raw_skus.map(_strip_flipkart_sku)
+    out["Return_Units"] = (
+        pd.to_numeric(df[qty_col], errors="coerce").fillna(0).astype(int).clip(lower=0)
+    )
+    out["Return_Date"] = (
+        _fk_parse_excel_order_dates(df[date_col]).dt.strftime("%Y-%m-%d").fillna("")
+    )
+    out["Return_Platform"] = "flipkart"
+    placeholder = raw_skus.map(_fk_is_sku_placeholder)
+    out = out[
+        out["OMS_SKU"].str.len().gt(0)
+        & out["Return_Units"].gt(0)
+        & out["Return_Date"].map(_valid_return_iso)
+        & ~placeholder
+    ]
+    if out.empty:
+        return pd.DataFrame(), "No dated Flipkart return rows found in Sales Report."
+    return (
+        out.groupby(
+            ["OMS_SKU", "Return_Platform", "Return_Date"], as_index=False
+        )["Return_Units"]
+        .sum(),
+        None,
+    )
+
+
+def _parse_flipkart_returns_xlsx(raw: bytes) -> Tuple[pd.DataFrame, Optional[str]]:
+    try:
+        xl = pd.ExcelFile(BytesIO(raw))
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+    if "Returns" in xl.sheet_names:
+        out, err = _parse_flipkart_legacy_returns_sheet(raw)
+        if out is not None and not out.empty:
+            return out, None
+        if err and "missing" not in err.lower():
+            return out, err
+    if "Sales Report" in xl.sheet_names:
+        return _parse_flipkart_sales_report_returns(raw)
+    if "Returns" in xl.sheet_names:
+        return _parse_flipkart_legacy_returns_sheet(raw)
+    return pd.DataFrame(), "Flipkart workbook missing Returns or Sales Report sheet."
 
 
 def _parse_amazon_business_return(df: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str]]:
@@ -655,7 +732,23 @@ def _parse_single_return_file(
         part = _stamp_return_filename_fallback(part, filename)
         return _attach_return_platform(part, filename), None
 
-    if "flipkart" in low and low.endswith((".xlsx", ".xls")):
+    if low.endswith((".xlsx", ".xls", ".xlsb")):
+        try:
+            xl = pd.ExcelFile(BytesIO(raw))
+            if "Returns" in xl.sheet_names or "Sales Report" in xl.sheet_names:
+                partial, err = _parse_flipkart_returns_xlsx(raw)
+                if partial is not None and not partial.empty:
+                    if sku_mapping:
+                        partial["OMS_SKU"] = partial["OMS_SKU"].map(
+                            lambda s: canonical_oms_key(s, sku_mapping)
+                        )
+                    return _finish(partial)
+                if err:
+                    return pd.DataFrame(), err
+        except Exception:
+            pass
+
+    if "flipkart" in low and low.endswith((".xlsx", ".xls", ".xlsb")):
         partial, err = _parse_flipkart_returns_xlsx(raw)
         if partial is not None and not partial.empty:
             if sku_mapping:
@@ -727,20 +820,6 @@ def _parse_single_return_file(
             return _finish(partial)
         if err:
             return pd.DataFrame(), err
-
-    if low.endswith((".xlsx", ".xls")):
-        try:
-            xl = pd.ExcelFile(BytesIO(raw))
-            if "Returns" in xl.sheet_names:
-                partial, err = _parse_flipkart_returns_xlsx(raw)
-                if partial is not None and not partial.empty:
-                    if sku_mapping:
-                        partial["OMS_SKU"] = partial["OMS_SKU"].map(
-                            lambda s: canonical_oms_key(s, sku_mapping)
-                        )
-                    return _finish(partial)
-        except Exception:
-            pass
 
     part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
     if err:
