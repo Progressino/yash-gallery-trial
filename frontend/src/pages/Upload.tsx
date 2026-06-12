@@ -290,6 +290,76 @@ export default function Upload() {
     }
   }
 
+  const uploadReturnsFile = async (
+    file: File,
+    onProgress?: (p: { pct: number; msg: string; loaded?: number; total?: number }) => void,
+  ): Promise<UploadResponse> => {
+    const data = await uploadPoReturnsImport(file, {
+      replace: false,
+      onUploadProgress: (pct, loaded, total) => {
+        onProgress?.({
+          pct,
+          msg: `Uploading ${file.name}…`,
+          loaded,
+          total,
+        })
+      },
+    })
+    if (data.ok) {
+      try {
+        if (data.returns_import === 'running') {
+          await waitForReturnsImport((msg, prog) => {
+            setBuildingMsg(msg)
+            onProgress?.({
+              pct: Math.max(45, prog ?? 50),
+              msg: msg || 'Importing return data…',
+            })
+          })
+        }
+        if (data.sales_rebuild === 'pending') {
+          await waitForSalesRebuild(msg => setBuildingMsg(msg))
+        }
+      } catch {
+        /* coverage poll will pick up rebuild */
+      } finally {
+        setBuildingMsg('')
+      }
+    }
+    const msg =
+      data.ok && (data.returns_import === 'running' || data.sales_rebuild === 'pending')
+        ? `${data.message} Return data saves automatically for PO — run Calculate PO when done.`
+        : data.message
+    return { ok: data.ok, message: msg } as UploadResponse
+  }
+
+  const handleReturnsUpload = async (
+    file: File,
+    onProgress?: (p: { pct: number; msg: string; loaded?: number; total?: number }) => void,
+  ): Promise<UploadResponse> => {
+    setL('returns_po', true)
+    try {
+      let outcome: UploadResponse = { ok: false, message: 'Upload failed' }
+      await withUploadGuard(async () => {
+        const res = await uploadReturnsFile(file, onProgress)
+        outcome = res
+        if (res.ok) {
+          captureUploadAlerts('returns_po', res)
+          showToast('success', res.message)
+          await refresh()
+        } else {
+          showToast('error', res.message)
+        }
+      })
+      return outcome
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Upload failed'
+      showToast('error', msg)
+      return { ok: false, message: msg }
+    } finally {
+      setL('returns_po', false)
+    }
+  }
+
   const handle = (key: string, fn: (file: File) => Promise<UploadResponse>) => async (file: File) => {
     setL(key, true)
     try {
@@ -1526,8 +1596,8 @@ export default function Upload() {
           title="↩ Returns (for PO)"
           subtitle={
             coverage.return_sheet_skus && coverage.return_sheet_skus > 0
-              ? `${coverage.return_sheet_skus.toLocaleString()} SKUs · ${(coverage.return_sheet_units ?? 0).toLocaleString()} return units saved on server — drop a newer file below to replace`
-              : 'Upload Return Data.rar (or CSV/Excel inside) — all marketplaces merged; dashboard net sales update automatically. Run Calculate PO for PO qty.'
+              ? `${coverage.return_sheet_skus.toLocaleString()} SKUs · ${(coverage.return_sheet_units ?? 0).toLocaleString()} return units combined — upload more files for other brands/platforms below`
+              : 'Upload return files per platform (Amazon, Flipkart, Myntra, Meesho…) and brand (Akiko, YG…). Each file is merged; re-uploading the same filename replaces that file only.'
           }
           loaded={!!coverage.return_sheet}
           rows={coverage.return_sheet_skus}
@@ -1535,62 +1605,10 @@ export default function Upload() {
           alert={showImportCompleteness ? uploadAlertsBySource['returns_po'] : undefined}
           onClearAlert={() => clearUploadAlert('returns_po')}
         >
-          {(coverage.return_overlay_filename ||
-            coverage.return_overlay_uploaded_at ||
-            (coverage.return_sheet_skus && coverage.return_sheet_skus > 0)) && (
-            <div className="text-[11px] text-gray-500 mb-2">
-              Last uploaded:{' '}
-              <span className="font-semibold text-gray-700">
-                {coverage.return_overlay_filename || 'Return data'}
-              </span>
-              {coverage.return_sheet_skus && coverage.return_sheet_skus > 0 ? (
-                <span className="text-gray-600">
-                  {' '}
-                  · {coverage.return_sheet_skus.toLocaleString()} SKUs ·{' '}
-                  {(coverage.return_sheet_units ?? 0).toLocaleString()} return units
-                </span>
-              ) : null}
-              {coverage.return_overlay_uploaded_at ? (
-                <span className="text-gray-400">
-                  {' '}
-                  ({new Date(coverage.return_overlay_uploaded_at).toLocaleString()})
-                </span>
-              ) : null}
-            </div>
-          )}
-          <FileUpload
-            label="Upload returns file"
-            accept={{
-              'text/csv': ['.csv'],
-              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-              'application/vnd.ms-excel': ['.xls'],
-              'application/octet-stream': ['.xlsx', '.xls', '.rar', '.zip'],
-              'application/x-rar-compressed': ['.rar'],
-              'application/zip': ['.zip'],
-            }}
-            onUpload={handle('returns_po', async (file: File) => {
-              const data = await uploadPoReturnsImport(file)
-              if (data.ok) {
-                try {
-                  if (data.returns_import === 'running') {
-                    await waitForReturnsImport(msg => setBuildingMsg(msg))
-                  }
-                  if (data.sales_rebuild === 'pending') {
-                    await waitForSalesRebuild(msg => setBuildingMsg(msg))
-                  }
-                } catch {
-                  /* coverage poll will pick up rebuild */
-                } finally {
-                  setBuildingMsg('')
-                }
-              }
-              const msg =
-                data.ok && (data.returns_import === 'running' || data.sales_rebuild === 'pending')
-                  ? `${data.message} Return data saves automatically for PO — run Calculate PO when done.`
-                  : data.message
-              return { ok: data.ok, message: msg } as UploadResponse
-            })}
+          <ReturnsUploadPanel
+            coverage={coverage}
             uploading={loading['returns_po']}
+            onUpload={handleReturnsUpload}
           />
         </UploadCard>
 
@@ -2047,6 +2065,199 @@ function _isJunkUploadFile(name: string): boolean {
   if (base === '.ds_store' || base === 'thumbs.db' || base === 'desktop.ini') return true
   if (base.startsWith('._')) return true
   return false
+}
+
+const _RETURN_PLATFORM_LABEL: Record<string, string> = {
+  amazon: 'Amazon',
+  flipkart: 'Flipkart',
+  myntra: 'Myntra',
+  meesho: 'Meesho',
+  snapdeal: 'Snapdeal',
+  unknown: 'Other',
+}
+
+function ReturnsUploadPanel({
+  coverage,
+  uploading,
+  onUpload,
+}: {
+  coverage: CoverageResponse
+  uploading: boolean
+  onUpload: (
+    file: File,
+    onProgress?: (p: { pct: number; msg: string; loaded?: number; total?: number }) => void,
+  ) => Promise<UploadResponse>
+}) {
+  const [queued, setQueued] = useState<File[]>([])
+  const [progress, setProgress] = useState<{
+    pct: number
+    msg: string
+    loaded?: number
+    total?: number
+  } | null>(null)
+
+  const sources = coverage.return_overlay_sources ?? []
+  const byPlatform = coverage.return_overlay_by_platform ?? []
+
+  const onDrop = useCallback((accepted: File[]) => {
+    if (!accepted.length) return
+    setQueued(prev => {
+      const names = new Set(prev.map(f => f.name))
+      return [...prev, ...accepted.filter(f => !names.has(f.name))]
+    })
+  }, [])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'text/csv': ['.csv'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+      'application/octet-stream': ['.xlsx', '.xls', '.rar', '.zip'],
+      'application/x-rar-compressed': ['.rar'],
+      'application/zip': ['.zip'],
+    },
+    multiple: true,
+    disabled: uploading,
+  })
+
+  const submit = async () => {
+    if (!queued.length) return
+    for (let i = 0; i < queued.length; i++) {
+      const file = queued[i]
+      setProgress({
+        pct: 2,
+        msg: `Starting ${i + 1}/${queued.length}: ${file.name}`,
+      })
+      const res = await onUpload(file, p => setProgress(p))
+      if (!res.ok) break
+      setProgress({ pct: 100, msg: `Finished ${file.name}` })
+    }
+    setQueued([])
+    setProgress(null)
+  }
+
+  return (
+    <div className="space-y-3">
+      {sources.length > 0 ? (
+        <div className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-2.5 space-y-2">
+          <p className="text-[11px] font-semibold text-emerald-900">
+            Loaded return files ({sources.length})
+          </p>
+          <div className="max-h-36 overflow-y-auto space-y-1">
+            {sources.map(src => (
+              <div
+                key={src.filename}
+                className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px] text-gray-700 bg-white/80 rounded px-2 py-1"
+              >
+                <span className="font-medium truncate max-w-[55%]" title={src.filename}>
+                  {src.filename}
+                </span>
+                <span className="text-gray-500">
+                  {_RETURN_PLATFORM_LABEL[src.platform || 'unknown'] || src.platform || 'Other'}
+                  {src.brand ? ` · ${src.brand}` : ''}
+                </span>
+                <span className="text-gray-600 tabular-nums">
+                  {(src.skus ?? 0).toLocaleString()} SKUs · {(src.units ?? 0).toLocaleString()} units
+                </span>
+                {src.uploaded_at ? (
+                  <span className="text-gray-400">
+                    {new Date(src.uploaded_at).toLocaleString()}
+                  </span>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          {byPlatform.length > 0 ? (
+            <p className="text-[10px] text-gray-500 pt-1 border-t border-emerald-100">
+              By platform:{' '}
+              {byPlatform
+                .map(p => {
+                  const label = _RETURN_PLATFORM_LABEL[p.platform] || p.platform
+                  return `${label} ${(p.units ?? 0).toLocaleString()} units`
+                })
+                .join(' · ')}
+            </p>
+          ) : null}
+        </div>
+      ) : coverage.return_sheet ? (
+        <p className="text-[11px] text-gray-500">
+          {(coverage.return_sheet_skus ?? 0).toLocaleString()} SKUs ·{' '}
+          {(coverage.return_sheet_units ?? 0).toLocaleString()} return units on server.
+        </p>
+      ) : null}
+
+      <div className="space-y-1">
+        <p className="text-sm font-medium text-gray-700">Upload returns file(s)</p>
+        <div
+          {...getRootProps()}
+          className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-colors ${
+            isDragActive
+              ? 'border-blue-400 bg-blue-50'
+              : 'border-gray-300 hover:border-gray-400 bg-white'
+          } ${uploading ? 'opacity-60 cursor-not-allowed' : ''}`}
+        >
+          <input {...getInputProps()} />
+          {uploading && progress ? (
+            <div className="space-y-2 text-left px-1">
+              <div className="flex items-center justify-between text-xs text-blue-700">
+                <span className="font-medium truncate max-w-[70%]">{progress.msg}</span>
+                <span className="shrink-0 ml-2 tabular-nums">{progress.pct}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.min(100, Math.max(0, progress.pct))}%` }}
+                />
+              </div>
+              {progress.total && progress.total > 0 ? (
+                <p className="text-[10px] text-gray-500 tabular-nums">
+                  {_fmtBytes(progress.loaded ?? 0)} / {_fmtBytes(progress.total)}
+                </p>
+              ) : null}
+            </div>
+          ) : isDragActive ? (
+            <p className="text-sm text-blue-600">Drop return file(s) here</p>
+          ) : (
+            <p className="text-sm text-gray-500">
+              Drag & drop one or more files or{' '}
+              <span className="text-blue-600 underline">browse</span>
+            </p>
+          )}
+        </div>
+      </div>
+
+      {queued.length > 0 && !uploading ? (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 space-y-2">
+          <p className="text-[11px] font-medium text-gray-700">
+            Queued ({queued.length} file{queued.length > 1 ? 's' : ''})
+          </p>
+          <ul className="text-[11px] text-gray-600 space-y-0.5 max-h-24 overflow-y-auto">
+            {queued.map(f => (
+              <li key={f.name} className="flex justify-between gap-2">
+                <span className="truncate">{f.name}</span>
+                <button
+                  type="button"
+                  className="text-red-500 hover:underline shrink-0"
+                  onClick={() => setQueued(q => q.filter(x => x.name !== f.name))}
+                >
+                  remove
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            className="w-full text-sm font-medium rounded-lg bg-[#002B5B] text-white py-2 hover:bg-[#003d7a] disabled:opacity-50"
+            disabled={uploading}
+            onClick={submit}
+          >
+            Upload {queued.length} return file{queued.length > 1 ? 's' : ''}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {

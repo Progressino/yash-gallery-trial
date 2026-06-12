@@ -126,8 +126,11 @@ def _run_sync(platform: str, creds: dict, days_back: int, session=None) -> None:
             setattr(session, session_attr, merged)
             # Rebuild unified sales_df
             from ..services.sales import build_sales_df
-            ro = getattr(session, "po_return_overlay_df", None)
-            ov = None if ro is None or getattr(ro, "empty", True) else ro
+            from ..services.po_return_import import aggregate_return_overlay_for_use
+
+            ov = aggregate_return_overlay_for_use(getattr(session, "po_return_overlay_df", None))
+            if ov is not None and getattr(ov, "empty", True):
+                ov = None
             session.sales_df = build_sales_df(
                 mtr_df=session.mtr_df,
                 myntra_df=session.myntra_df,

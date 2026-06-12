@@ -67,11 +67,14 @@ class CoverageResponse(BaseModel):
     return_sheet_units: int = 0
     return_overlay_uploaded_at: Optional[str] = None
     return_overlay_filename: Optional[str] = None
+    return_overlay_sources: Optional[list[dict]] = None
+    return_overlay_by_platform: Optional[list[dict]] = None
     # After full wipe: True until user uploads or clicks Load Cache (blocks auto-restore)
     pause_auto_data_restore: bool = False
     # Return overlay import (Upload → Returns for PO) — async RAR/CSV parse
     returns_import_status: str = "idle"
     returns_import_message: str = ""
+    returns_import_progress: int = 0
     # Tier-3 daily-auto background sales rebuild (idle | running | done | error)
     sales_rebuild: str = "idle"
     sales_rebuild_message: str = ""

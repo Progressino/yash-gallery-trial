@@ -40,6 +40,7 @@ class AppSession:
     return_overlay_as_of: Optional[str] = None
     return_overlay_uploaded_at: str = ""
     return_overlay_filename: str = ""
+    return_overlay_sources: list = field(default_factory=list)
     sku_status_lead_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     daily_inventory_history_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     transfer_df: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -73,6 +74,7 @@ class AppSession:
     # Async return overlay import (RAR extract + parse can take several minutes).
     returns_import_status: str = "idle"  # idle | running | done | error
     returns_import_message: str = ""
+    returns_import_progress: int = 0
     returns_import_started: float = 0.0
 
     # Async sales rebuild after Tier-3 daily-auto (avoids 502 on long build_sales_df).
@@ -157,6 +159,7 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.return_overlay_as_of = None
     sess.return_overlay_uploaded_at = ""
     sess.return_overlay_filename = ""
+    sess.return_overlay_sources = []
     sess.sku_status_lead_df = pd.DataFrame()
     sess.daily_inventory_history_df = pd.DataFrame()
     sess.transfer_df = pd.DataFrame()

@@ -202,8 +202,11 @@ def _rebuild_sales_in_session(sess) -> int:
     if not sess.sku_mapping:
         return 0
     try:
-        ro = getattr(sess, "po_return_overlay_df", None)
-        ov = None if ro is None or getattr(ro, "empty", True) else ro
+        from ..services.po_return_import import aggregate_return_overlay_for_use
+
+        ov = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
+        if ov is not None and getattr(ov, "empty", True):
+            ov = None
         sess.sales_df = build_sales_df(
             mtr_df=sess.mtr_df,
             myntra_df=sess.myntra_df,

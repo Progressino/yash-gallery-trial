@@ -1043,7 +1043,11 @@ def calculate_po_base(
     ).fillna({"Sold_Units": 0, "Return_Units": 0, "Net_Units": 0})
 
     if po_return_overlay_df is not None and not po_return_overlay_df.empty:
-        ov = po_return_overlay_df.copy()
+        from .po_return_import import aggregate_return_overlay_for_use
+
+        ov = aggregate_return_overlay_for_use(po_return_overlay_df.copy())
+        if ov is None or ov.empty:
+            ov = po_return_overlay_df.copy()
         if "OMS_SKU" in ov.columns and "Return_Units" in ov.columns:
             ov["OMS_SKU"] = ov["OMS_SKU"].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
             ov = ov[ov["OMS_SKU"].str.len() > 0]

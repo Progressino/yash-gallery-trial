@@ -902,7 +902,7 @@ export default function POEngine() {
     try {
       const data = await uploadPoReturnsImport(file, {
         groupByParent: params.group_by_parent,
-        replace: true,
+        replace: false,
       })
       if (data?.ok) {
         if (data.returns_import === 'running') {

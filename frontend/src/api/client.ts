@@ -69,8 +69,22 @@ export interface CoverageResponse {
   return_sheet_units?: number
   return_overlay_uploaded_at?: string | null
   return_overlay_filename?: string | null
+  return_overlay_sources?: Array<{
+    filename: string
+    uploaded_at?: string
+    platform?: string
+    brand?: string
+    skus?: number
+    units?: number
+  }>
+  return_overlay_by_platform?: Array<{
+    platform: string
+    skus: number
+    units: number
+  }>
   returns_import_status?: 'idle' | 'running' | 'done' | 'error'
   returns_import_message?: string
+  returns_import_progress?: number
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
   /** Tier-3 daily-auto background sales rebuild */
@@ -346,12 +360,16 @@ export async function uploadInventory(files: {
 /** Import return units overlay for PO (same as PO Engine → Import returns). */
 export async function uploadPoReturnsImport(
   file: File,
-  opts?: { groupByParent?: boolean; replace?: boolean },
+  opts?: {
+    groupByParent?: boolean
+    replace?: boolean
+    onUploadProgress?: (pct: number, loaded: number, total: number) => void
+  },
 ): Promise<{ ok: boolean; message: string; sales_rebuild?: string; returns_import?: string }> {
   const fd = new FormData()
   fd.append('file', file)
   fd.append('group_by_parent', opts?.groupByParent ? 'true' : 'false')
-  fd.append('replace', opts?.replace === false ? 'false' : 'true')
+  fd.append('replace', opts?.replace ? 'true' : 'false')
   try {
     const { data } = await api.post<{
       ok?: boolean
@@ -362,7 +380,17 @@ export async function uploadPoReturnsImport(
     }>(
       '/po/returns/import-file',
       fd,
-      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 },
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120_000,
+        onUploadProgress: (evt) => {
+          if (!opts?.onUploadProgress) return
+          const total = evt.total || file.size || 0
+          const loaded = evt.loaded || 0
+          const pct = total > 0 ? Math.min(40, Math.round((loaded / total) * 40)) : 5
+          opts.onUploadProgress(pct, loaded, total)
+        },
+      },
     )
     return {
       ok: !!data?.ok,
@@ -606,7 +634,7 @@ export async function waitForInventoryUpload(
 
 /** Poll until async return overlay import finishes and return_sheet is loaded. */
 export async function waitForReturnsImport(
-  onTick?: (message: string) => void,
+  onTick?: (message: string, progress?: number) => void,
   maxMs = UPLOAD_BACKGROUND_WAIT_MS,
 ): Promise<CoverageResponse> {
   const start = Date.now()
@@ -614,7 +642,8 @@ export async function waitForReturnsImport(
     const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
     const st = cov.returns_import_status ?? 'idle'
     if (st === 'running') {
-      onTick?.(cov.returns_import_message || 'Importing return data…')
+      const prog = cov.returns_import_progress ?? 0
+      onTick?.(cov.returns_import_message || 'Importing return data…', prog > 0 ? prog : undefined)
       await new Promise(r => setTimeout(r, 2500))
       continue
     }

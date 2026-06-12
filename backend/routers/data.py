@@ -1429,9 +1429,11 @@ def _build_intelligence_bundle_payload_from_session(
         if win_gated is not None and not win_gated.empty
         else sales_slice
     )
+    from ..services.po_return_import import aggregate_return_overlay_for_use
+
     platform_summary = merge_return_data_into_platform_summaries(
         platform_summary,
-        getattr(sess, "po_return_overlay_df", None),
+        aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None)),
         sales_for_returns if sales_for_returns is not None and not sales_for_returns.empty else None,
         s,
         e,
@@ -1603,8 +1605,10 @@ def _session_sales_stale_vs_platforms(sess: AppSession) -> bool:
 
 
 def _sales_overlay_build_kwargs(sess: AppSession) -> dict:
+    from ..services.po_return_import import aggregate_return_overlay_for_use
+
     kw: dict = {}
-    ov = getattr(sess, "po_return_overlay_df", None)
+    ov = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
     if ov is not None and not getattr(ov, "empty", True):
         kw["return_overlay_df"] = ov
     as_of = getattr(sess, "return_overlay_as_of", None)
@@ -2139,13 +2143,27 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
     _ret_ov = getattr(sess, "po_return_overlay_df", None)
     _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True)
+    _ret_agg = None
+    _ret_sources: list[dict] = []
+    _ret_by_platform: list[dict] = []
     if _ret_ok:
         try:
-            from ..services.po_return_import import ensure_return_overlay_meta_hydrated
+            from ..services.po_return_import import (
+                aggregate_return_overlay_for_use,
+                ensure_return_overlay_meta_hydrated,
+                rebuild_return_overlay_sources,
+                summarize_return_overlay_by_platform,
+            )
 
             ensure_return_overlay_meta_hydrated(sess)
+            _ret_agg = aggregate_return_overlay_for_use(_ret_ov)
+            _ret_sources = list(getattr(sess, "return_overlay_sources", None) or [])
+            if not _ret_sources:
+                _ret_sources = rebuild_return_overlay_sources(sess)
+                sess.return_overlay_sources = _ret_sources
+            _ret_by_platform = summarize_return_overlay_by_platform(_ret_ov)
         except Exception:
-            pass
+            _ret_agg = _ret_ov
     _ingest = getattr(sess, "daily_auto_ingest_result", None) or {}
     _has_ingest = bool(_ingest)
     return CoverageResponse(
@@ -2177,17 +2195,28 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
             else 0
         ),
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
-        return_sheet_skus=int(len(_ret_ov)) if _ret_ok else 0,
-        return_sheet_units=int(_ret_ov["Return_Units"].sum()) if _ret_ok else 0,
+        return_sheet_skus=(
+            int(len(_ret_agg))
+            if _ret_ok and _ret_agg is not None and not getattr(_ret_agg, "empty", True)
+            else (int(len(_ret_ov)) if _ret_ok else 0)
+        ),
+        return_sheet_units=(
+            int(_ret_agg["Return_Units"].sum())
+            if _ret_ok and _ret_agg is not None and not getattr(_ret_agg, "empty", True)
+            else (int(_ret_ov["Return_Units"].sum()) if _ret_ok else 0)
+        ),
         return_overlay_uploaded_at=(
             (getattr(sess, "return_overlay_uploaded_at", "") or None) or None
         ),
         return_overlay_filename=(
             (getattr(sess, "return_overlay_filename", "") or None) or None
         ),
+        return_overlay_sources=_ret_sources or None,
+        return_overlay_by_platform=_ret_by_platform or None,
         pause_auto_data_restore=paused,
         returns_import_status=getattr(sess, "returns_import_status", "idle") or "idle",
         returns_import_message=getattr(sess, "returns_import_message", "") or "",
+        returns_import_progress=int(getattr(sess, "returns_import_progress", 0) or 0),
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
         daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
@@ -3453,7 +3482,9 @@ def _patch_analytics_monthly_returns(
         overlay_refunds_by_calendar_month,
     )
 
-    overlay = getattr(sess, "po_return_overlay_df", None)
+    from ..services.po_return_import import aggregate_return_overlay_for_use
+
+    overlay = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
     sales = getattr(sess, "sales_df", None)
     fallback = str(getattr(sess, "return_overlay_as_of", "") or "")[:10] or None
     _, sales_by_month, _ = _refund_buckets_for_platform(

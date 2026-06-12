@@ -127,6 +127,47 @@ def test_light_coverage_restores_return_overlay_from_disk(client, monkeypatch, t
     assert body.get("return_overlay_uploaded_at")
 
 
+def test_merge_return_uploads_accumulate_multiple_files(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from backend.services.po_return_import import apply_return_overlay_import
+    from backend.session import AppSession
+
+    warm = tmp_path / "warm"
+    warm.mkdir(parents=True)
+    monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
+    import backend.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_DISK_CACHE_DIR", str(warm))
+    main_mod._warm_cache = {}
+
+    sess = AppSession()
+    akiko = pd.DataFrame(
+        {
+            "OMS_SKU": ["AK-1"],
+            "Return_Platform": ["amazon"],
+            "Return_Date": ["2026-06-01"],
+            "Return_Units": [10],
+        }
+    )
+    yg = pd.DataFrame(
+        {
+            "OMS_SKU": ["YG-1"],
+            "Return_Platform": ["amazon"],
+            "Return_Date": ["2026-06-02"],
+            "Return_Units": [7],
+        }
+    )
+    apply_return_overlay_import(sess, akiko, replace=False, filename="Akiko Amazon Jan 2026.rar")
+    apply_return_overlay_import(sess, yg, replace=False, filename="YG Amazon Jan 2026.rar")
+    assert len(sess.return_overlay_sources) == 2
+    assert int(sess.po_return_overlay_df["Return_Units"].sum()) == 17
+    assert "Source_File" in sess.po_return_overlay_df.columns
+    filenames = {s["filename"] for s in sess.return_overlay_sources}
+    assert "Akiko Amazon Jan 2026.rar" in filenames
+    assert "YG Amazon Jan 2026.rar" in filenames
+
+
 def test_apply_return_overlay_import_persists_upload_meta(monkeypatch, tmp_path):
     import pandas as pd
 

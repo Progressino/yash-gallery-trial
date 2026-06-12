@@ -64,6 +64,7 @@ _META_JSON_FIELDS = (
     "existing_po_uploaded_at",
     "return_overlay_uploaded_at",
     "return_overlay_filename",
+    "return_overlay_sources",
     "existing_po_generation",
     "po_calculate_existing_po_generation",
     "daily_restored",

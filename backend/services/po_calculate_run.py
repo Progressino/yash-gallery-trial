@@ -11,6 +11,15 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _po_return_overlay_for_calc(sess) -> pd.DataFrame | None:
+    from .po_return_import import aggregate_return_overlay_for_use
+
+    ov = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
+    if ov is None or getattr(ov, "empty", True):
+        return None
+    return ov
+
+
 def _set_po_calculate_progress(
     sess,
     session_id: Optional[str],
@@ -232,12 +241,7 @@ def execute_po_calculate(
             planning_date=body.get("planning_date"),
             raise_ledger_lookback_days=lookback,
             raise_view_date=body.get("raise_view_date"),
-            po_return_overlay_df=(
-                getattr(sess, "po_return_overlay_df", None)
-                if getattr(sess, "po_return_overlay_df", None) is not None
-                and not getattr(sess, "po_return_overlay_df", pd.DataFrame()).empty
-                else None
-            ),
+            po_return_overlay_df=_po_return_overlay_for_calc(sess),
             urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
         )
     except Exception as e:

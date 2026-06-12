@@ -482,6 +482,103 @@ def _infer_return_platform_from_filename(filename: str) -> str:
     return "unknown"
 
 
+def _infer_return_brand_from_filename(filename: str) -> str:
+    """Best-effort brand/company label from return export filename."""
+    import re
+
+    low = (filename or "").lower().replace("_", " ")
+    if "akiko" in low:
+        return "Akiko"
+    if "yash gallery" in low or re.search(r"\byg\b", low):
+        return "YG"
+    if "raisinghani" in low:
+        return "Raisinghani"
+    return ""
+
+
+def _normalize_source_filename(filename: str) -> str:
+    import os
+
+    return os.path.basename(str(filename or "").strip())
+
+
+def _stamp_overlay_source_file(df: pd.DataFrame, filename: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out["Source_File"] = _normalize_source_filename(filename)
+    return out
+
+
+def aggregate_return_overlay_for_use(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Collapse stored per-file rows into SKU+platform+date totals for sales/PO."""
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+    return _finalize_return_overlay_df(df)
+
+
+def _overlay_aggregate_totals(df: pd.DataFrame | None) -> tuple[int, int]:
+    agg = aggregate_return_overlay_for_use(df)
+    if agg is None or agg.empty:
+        return 0, 0
+    return int(len(agg)), int(pd.to_numeric(agg["Return_Units"], errors="coerce").fillna(0).sum())
+
+
+def summarize_return_overlay_by_platform(df: pd.DataFrame | None) -> list[dict]:
+    agg = aggregate_return_overlay_for_use(df)
+    if agg is None or agg.empty or "Return_Platform" not in agg.columns:
+        return []
+    plat = agg["Return_Platform"].astype(str).str.strip().str.lower()
+    plat = plat.replace({"": "unknown", "nan": "unknown", "none": "unknown"})
+    work = agg.copy()
+    work["Return_Platform"] = plat
+    rows: list[dict] = []
+    for platform, part in work.groupby("Return_Platform", sort=True):
+        rows.append(
+            {
+                "platform": str(platform),
+                "skus": int(part["OMS_SKU"].nunique()),
+                "units": int(pd.to_numeric(part["Return_Units"], errors="coerce").fillna(0).sum()),
+            }
+        )
+    return rows
+
+
+def _source_entry_from_overlay(
+    filename: str,
+    overlay_part: pd.DataFrame,
+    *,
+    uploaded_at: str,
+) -> dict:
+    skus, units = _overlay_aggregate_totals(overlay_part)
+    return {
+        "filename": _normalize_source_filename(filename),
+        "uploaded_at": uploaded_at,
+        "platform": _infer_return_platform_from_filename(filename),
+        "brand": _infer_return_brand_from_filename(filename),
+        "skus": skus,
+        "units": units,
+    }
+
+
+def rebuild_return_overlay_sources(sess) -> list[dict]:
+    """Rebuild upload registry from stored overlay rows (legacy or after disk restore)."""
+    ov = getattr(sess, "po_return_overlay_df", None)
+    if ov is None or getattr(ov, "empty", True):
+        return []
+    uploaded_at = str(getattr(sess, "return_overlay_uploaded_at", "") or "")
+    if "Source_File" in ov.columns:
+        out: list[dict] = []
+        for fn in sorted(ov["Source_File"].astype(str).unique()):
+            if not str(fn).strip():
+                continue
+            part = ov[ov["Source_File"].astype(str) == fn]
+            out.append(_source_entry_from_overlay(fn, part, uploaded_at=uploaded_at))
+        return out
+    fn = str(getattr(sess, "return_overlay_filename", "") or "").strip() or "Return data"
+    return [_source_entry_from_overlay(fn, ov, uploaded_at=uploaded_at)]
+
+
 def _attach_return_platform(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -779,17 +876,16 @@ def infer_return_overlay_as_of(filename: str, overlay_df: pd.DataFrame | None = 
 
 def return_overlay_meta_bundle(sess) -> dict:
     ov = getattr(sess, "po_return_overlay_df", None)
-    skus = int(len(ov)) if ov is not None and not getattr(ov, "empty", True) else 0
-    units = (
-        int(pd.to_numeric(ov["Return_Units"], errors="coerce").fillna(0).sum())
-        if skus and ov is not None and "Return_Units" in ov.columns
-        else 0
-    )
+    skus, units = _overlay_aggregate_totals(ov)
+    sources = list(getattr(sess, "return_overlay_sources", None) or [])
+    if not sources and ov is not None and not getattr(ov, "empty", True):
+        sources = rebuild_return_overlay_sources(sess)
     return {
         "return_overlay_uploaded_at": str(getattr(sess, "return_overlay_uploaded_at", "") or ""),
         "return_overlay_filename": str(getattr(sess, "return_overlay_filename", "") or ""),
         "return_overlay_skus": skus,
         "return_overlay_units": units,
+        "return_overlay_sources": sources,
     }
 
 
@@ -837,6 +933,9 @@ def apply_return_overlay_meta_to_session(sess, meta: dict | None) -> None:
         sess.return_overlay_uploaded_at = str(meta["return_overlay_uploaded_at"])
     if meta.get("return_overlay_filename"):
         sess.return_overlay_filename = str(meta["return_overlay_filename"])
+    raw_sources = meta.get("return_overlay_sources")
+    if isinstance(raw_sources, list):
+        sess.return_overlay_sources = [s for s in raw_sources if isinstance(s, dict)]
 
 
 def ensure_return_overlay_meta_hydrated(sess) -> None:
@@ -844,6 +943,8 @@ def ensure_return_overlay_meta_hydrated(sess) -> None:
     ov = getattr(sess, "po_return_overlay_df", None)
     if ov is None or getattr(ov, "empty", True):
         return
+    if not list(getattr(sess, "return_overlay_sources", None) or []):
+        sess.return_overlay_sources = rebuild_return_overlay_sources(sess)
     if str(getattr(sess, "return_overlay_uploaded_at", "") or "").strip():
         return
     meta = load_return_overlay_meta_from_disk()
@@ -889,6 +990,7 @@ def ensure_return_overlay_meta_hydrated(sess) -> None:
 def clear_return_overlay_meta(sess) -> None:
     sess.return_overlay_uploaded_at = ""
     sess.return_overlay_filename = ""
+    sess.return_overlay_sources = []
     import os
 
     try:
@@ -910,7 +1012,7 @@ def apply_return_overlay_import(
     sess,
     overlay_df: pd.DataFrame,
     *,
-    replace: bool = True,
+    replace: bool = False,
     filename: str = "",
 ) -> dict:
     from datetime import datetime, timedelta, timezone
@@ -918,13 +1020,28 @@ def apply_return_overlay_import(
 
     if overlay_df is None or overlay_df.empty:
         return {"ok": False, "message": "No return rows to import."}
-    overlay_df = _finalize_return_overlay_df(overlay_df)
+    prepared = _stamp_overlay_source_file(_finalize_return_overlay_df(overlay_df), filename)
+    file_key = _normalize_source_filename(filename)
+    uploaded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if replace:
-        sess.po_return_overlay_df = overlay_df.copy()
+        sess.po_return_overlay_df = prepared.copy()
+        sess.return_overlay_sources = [
+            _source_entry_from_overlay(file_key, prepared, uploaded_at=uploaded_at)
+        ]
     else:
         base = getattr(sess, "po_return_overlay_df", pd.DataFrame())
-        merged = pd.concat([base, overlay_df], ignore_index=True)
-        sess.po_return_overlay_df = _finalize_return_overlay_df(merged)
+        sources = list(getattr(sess, "return_overlay_sources", None) or [])
+        if base is not None and not getattr(base, "empty", True) and file_key:
+            if "Source_File" in base.columns:
+                base = base[base["Source_File"].astype(str) != file_key]
+            sources = [
+                s
+                for s in sources
+                if _normalize_source_filename(str(s.get("filename") or "")) != file_key
+            ]
+        sess.po_return_overlay_df = pd.concat([base, prepared], ignore_index=True)
+        sources.append(_source_entry_from_overlay(file_key, prepared, uploaded_at=uploaded_at))
+        sess.return_overlay_sources = sources
     as_of = infer_return_overlay_as_of(filename, overlay_df)
     if not as_of and (
         overlay_df is None
@@ -934,23 +1051,24 @@ def apply_return_overlay_import(
         # Legacy bundle with no per-row dates — anchor refunds to prior IST day.
         as_of = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)).isoformat()
     sess.return_overlay_as_of = as_of or ""
-    sess.return_overlay_uploaded_at = (
-        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    )
-    sess.return_overlay_filename = str(filename or "").strip()
-    n = int(len(sess.po_return_overlay_df))
-    units = int(sess.po_return_overlay_df["Return_Units"].sum())
+    sess.return_overlay_uploaded_at = uploaded_at
+    sess.return_overlay_filename = file_key
+    file_skus, file_units = _overlay_aggregate_totals(prepared)
+    n, units = _overlay_aggregate_totals(sess.po_return_overlay_df)
     try:
         persist_return_overlay_meta(sess)
     except Exception:
         _log.exception("persist_return_overlay_meta after import failed")
     sess._quarterly_cache.clear()
+    action = "Replaced" if replace else "Added"
     return {
         "ok": True,
         "message": (
-            f"Return sheet: {n} SKU(s), {units:,} return units. "
-            "Dashboard net sales and PO return overlay updated."
+            f"{action} {file_key or 'return file'}: {file_skus} SKU(s), {file_units:,} units. "
+            f"Combined total: {n} SKU(s), {units:,} return units across all uploads."
         ),
         "skus": n,
         "total_units": units,
+        "file_skus": file_skus,
+        "file_units": file_units,
     }

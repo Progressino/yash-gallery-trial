@@ -63,7 +63,9 @@ _log = logging.getLogger(__name__)
 
 def _sess_return_overlay(sess):
     """Optional PO return-sheet overlay (OMS_SKU + Return_Units) merged into unified sales."""
-    ov = getattr(sess, "po_return_overlay_df", None)
+    from ..services.po_return_import import aggregate_return_overlay_for_use
+
+    ov = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
     if ov is None or getattr(ov, "empty", True):
         return None
     return ov

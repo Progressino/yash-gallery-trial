@@ -20,6 +20,15 @@ router = APIRouter()
 _IST = ZoneInfo("Asia/Kolkata")
 
 
+def _return_overlay_for_po_calc(sess):
+    from ..services.po_return_import import aggregate_return_overlay_for_use
+
+    ov = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
+    if ov is None or getattr(ov, "empty", True):
+        return None
+    return ov
+
+
 def _sync_po_sidecars_to_durable_storage(
     request: Request,
     sess,
@@ -686,6 +695,7 @@ def _run_returns_import_worker(
     try:
         from ..services.po_return_import import apply_return_overlay_import, parse_return_upload_bytes
 
+        sess.returns_import_progress = 20
         sess.returns_import_message = "Extracting and parsing return files…"
         overlay, err = parse_return_upload_bytes(
             raw,
@@ -696,7 +706,10 @@ def _run_returns_import_worker(
         if err:
             sess.returns_import_status = "error"
             sess.returns_import_message = err
+            sess.returns_import_progress = 0
             return
+        sess.returns_import_progress = 55
+        sess.returns_import_message = "Saving return data…"
         out = apply_return_overlay_import(sess, overlay, replace=replace, filename=filename)
         try:
             import backend.main as _main
@@ -714,15 +727,19 @@ def _run_returns_import_worker(
                 persist_session_bundle_thread_safe(session_id, sess)
         except Exception:
             logging.getLogger(__name__).exception("PostgreSQL persist after return import failed")
-        sess.returns_import_status = "done"
-        sess.returns_import_message = str(out.get("message") or "Return sheet imported.")
+        sess.returns_import_progress = 75
+        sess.returns_import_message = "Updating net sales…"
         from ..routers.upload import _run_returns_import_followup
 
         _run_returns_import_followup(session_id)
+        sess.returns_import_status = "done"
+        sess.returns_import_message = str(out.get("message") or "Return sheet imported.")
+        sess.returns_import_progress = 100
     except Exception as e:
         logging.getLogger(__name__).exception("return import worker failed")
         sess.returns_import_status = "error"
         sess.returns_import_message = str(e)
+        sess.returns_import_progress = 0
     finally:
         sess.returns_import_started = 0.0
 
@@ -733,7 +750,7 @@ async def po_returns_import_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     group_by_parent: str = Form("false"),
-    replace: str = Form("true"),
+    replace: str = Form("false"),
 ):
     """Import return units by SKU (CSV / Excel / RAR / ZIP). Reduces PO qty and feeds Net demand."""
     from ..concurrency import RETURNS_IMPORT_EXECUTOR
@@ -760,6 +777,7 @@ async def po_returns_import_file(
 
     sess.returns_import_status = "running"
     sess.returns_import_message = "Queued return import…"
+    sess.returns_import_progress = 5
     sess.returns_import_started = time.monotonic()
     sku_mapping = dict(sess.sku_mapping or {})
     RETURNS_IMPORT_EXECUTOR.submit(
@@ -799,6 +817,7 @@ def po_clear_returns_overlay(request: Request):
 
     sess.po_return_overlay_df = pd.DataFrame()
     sess.return_overlay_as_of = None
+    sess.return_overlay_sources = []
     clear_return_overlay_meta(sess)
     sess._quarterly_cache.clear()
     sales_note = ""
@@ -942,12 +961,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             planning_date=body.planning_date,
             raise_ledger_lookback_days=body.raise_ledger_lookback_days,
             raise_view_date=body.raise_view_date,
-            po_return_overlay_df=(
-                getattr(sess, "po_return_overlay_df", None)
-                if getattr(sess, "po_return_overlay_df", None) is not None
-                and not getattr(sess, "po_return_overlay_df", pd.DataFrame()).empty
-                else None
-            ),
+            po_return_overlay_df=_return_overlay_for_po_calc(sess),
             urgent_all_sizes_days=body.urgent_all_sizes_days,
         )
     except Exception as e:
