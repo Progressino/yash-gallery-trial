@@ -297,6 +297,171 @@ def _parse_meesho_return_table(
     )
 
 
+def _looks_like_meesho_tcs_return_export(df: pd.DataFrame) -> bool:
+    """Meesho GST/TCS monthly return workbook (no listing SKU — uses sub_order_num)."""
+    cols = {str(c).strip().lower() for c in df.columns}
+    return "sub_order_num" in cols and "quantity" in cols and (
+        "cancel_return_date" in cols or "order_date" in cols
+    )
+
+
+def _meesho_panel_suborder_sku_map_from_bytes(raw: bytes) -> Dict[str, str]:
+    """Sub-order → listing SKU from Meesho supplier panel return CSV in the same archive."""
+    df, _ = _parse_meesho_panel_csv(raw)
+    if df is None or df.empty:
+        return {}
+    sub_col = pick_csv_column(
+        list(df.columns),
+        (
+            "suborder number",
+            "sub order no",
+            "sub_order_no",
+            "sub order number",
+            "sub order",
+        ),
+    )
+    sku_col = pick_csv_column(list(df.columns), _SKU_CANDS)
+    if not sub_col or not sku_col:
+        return {}
+    from .helpers import clean_line_id_series
+    from .meesho import _combine_meesho_sku_size, _meesho_size_column
+
+    subs = clean_line_id_series(df[sub_col])
+    skus = df[sku_col].astype(str).str.strip()
+    sz_col = _meesho_size_column(df)
+    if sz_col:
+        skus = _combine_meesho_sku_size(skus, df[sz_col])
+    out: Dict[str, str] = {}
+    for sub, sku in zip(subs, skus):
+        sub_s = str(sub or "").strip()
+        sku_s = str(sku or "").strip()
+        if sub_s and sku_s and sku_s.lower() not in ("nan", "none"):
+            out.setdefault(sub_s, sku_s)
+    return out
+
+
+def _meesho_return_suborder_sku_lookups(
+    meesho_df: pd.DataFrame | None,
+    panel_maps: Optional[Dict[str, str]] = None,
+) -> Tuple[Dict[Tuple[str, str], str], Dict[str, str]]:
+    day_map: Dict[Tuple[str, str], str] = {}
+    oid_map: Dict[str, str] = {}
+    if meesho_df is not None and not getattr(meesho_df, "empty", True):
+        from .meesho import meesho_export_sku_recovery_maps
+
+        day_map, oid_map = meesho_export_sku_recovery_maps(meesho_df)
+    if panel_maps:
+        for sub, sku in panel_maps.items():
+            oid_map.setdefault(str(sub), str(sku))
+    return day_map, oid_map
+
+
+def _parse_meesho_tcs_sales_return_table(
+    df: pd.DataFrame,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+    day_suborder_sku_map: Optional[Dict[Tuple[str, str], str]] = None,
+    suborder_sku_map: Optional[Dict[str, str]] = None,
+    seen_sub_orders: Optional[set[str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str], dict]:
+    """Meesho ``tcs_sales_return.xlsx`` — dated by cancel_return_date; SKU via sub-order lookup."""
+    if df is None or df.empty:
+        return pd.DataFrame(), "Empty Meesho TCS return sheet.", {}
+    from .helpers import clean_line_id_series
+    from .meesho import (
+        _combine_meesho_sku_size,
+        _meesho_size_column,
+        _meesho_sku_base_series,
+    )
+
+    qty = pd.to_numeric(df.get("quantity"), errors="coerce").fillna(0).astype(int)
+    total_units = int(qty.sum())
+    subs = clean_line_id_series(df.get("sub_order_num", pd.Series(dtype=str)))
+    return_dates = _coalesce_return_date_columns(
+        df,
+        (
+            "cancel_return_date",
+            "cancel return date",
+            "return_date",
+            "return created date",
+            "order_date",
+        ),
+    )
+    sz_col = _meesho_size_column(df)
+    direct_sku = _combine_meesho_sku_size(
+        _meesho_sku_base_series(df),
+        df[sz_col] if sz_col else None,
+    )
+    day_map = day_suborder_sku_map or {}
+    oid_map = suborder_sku_map or {}
+    seen = seen_sub_orders if seen_sub_orders is not None else set()
+
+    rows: List[dict] = []
+    dup_subs = 0
+    unresolved_units = 0
+    for i in df.index:
+        q = int(qty.loc[i])
+        if q <= 0:
+            continue
+        sub = str(subs.loc[i] or "").strip()
+        if sub:
+            if sub in seen:
+                dup_subs += 1
+                continue
+            seen.add(sub)
+        rd = str(return_dates.loc[i] or "").strip()[:10]
+        if not _valid_return_iso(rd):
+            continue
+        sku = str(direct_sku.loc[i] or "").strip()
+        if not sku and sub:
+            sku = str(day_map.get((sub, rd), "") or oid_map.get(sub, "")).strip()
+        if not sku:
+            unresolved_units += q
+            continue
+        rows.append(
+            {
+                "OMS_SKU": canonical_oms_key(sku, sku_mapping),
+                "Return_Units": q,
+                "Return_Date": rd,
+                "Return_Platform": "meesho",
+            }
+        )
+    stats = {
+        "total_units": total_units,
+        "parsed_units": int(sum(r["Return_Units"] for r in rows)),
+        "unresolved_units": unresolved_units,
+        "duplicate_sub_orders": dup_subs,
+    }
+    if not rows:
+        if total_units > 0 and unresolved_units >= total_units:
+            return (
+                pd.DataFrame(),
+                (
+                    f"Meesho TCS return file has {total_units:,} units but none could be mapped to a "
+                    "listing SKU. Upload Meesho sales/DSR data first, or include the supplier panel "
+                    "return CSV in the same archive."
+                ),
+                stats,
+            )
+        return pd.DataFrame(), "No dated Meesho TCS return rows found.", stats
+    out = pd.DataFrame(rows)
+    out = out[
+        out["OMS_SKU"].str.len().gt(0)
+        & out["Return_Units"].gt(0)
+        & out["Return_Date"].map(_valid_return_iso)
+    ]
+    if out.empty:
+        return pd.DataFrame(), "No dated Meesho TCS return rows found.", stats
+    return (
+        out.groupby(
+            ["OMS_SKU", "Return_Platform", "Return_Date"], as_index=False
+        )["Return_Units"]
+        .sum(),
+        None,
+        stats,
+    )
+
+
 def _valid_return_iso(d: str) -> bool:
     """Reject epoch placeholders and pre-2018 junk from marketplace exports."""
     s = str(d or "").strip()[:10]
@@ -721,16 +886,42 @@ def _parse_single_return_file(
     filename: str,
     *,
     sku_mapping: Optional[Dict[str, str]] = None,
-) -> Tuple[pd.DataFrame, Optional[str]]:
+    meesho_day_suborder_sku_map: Optional[Dict[Tuple[str, str], str]] = None,
+    meesho_suborder_sku_map: Optional[Dict[str, str]] = None,
+    seen_meesho_sub_orders: Optional[set[str]] = None,
+) -> Tuple[pd.DataFrame, Optional[str], dict]:
     if not raw:
-        return pd.DataFrame(), "Empty file."
+        return pd.DataFrame(), "Empty file.", {}
     low = (filename or "").lower()
+    base_name = low.split("/")[-1]
 
-    def _finish(part: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str]]:
+    def _finish(part: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str], dict]:
         if part is None or part.empty:
-            return pd.DataFrame(), None
+            return pd.DataFrame(), None, {}
         part = _stamp_return_filename_fallback(part, filename)
-        return _attach_return_platform(part, filename), None
+        return _attach_return_platform(part, filename), None, {}
+
+    if base_name == "tcs_sales_return.xlsx" or (
+        low.endswith((".xlsx", ".xls", ".xlsb")) and "tcs_sales_return" in base_name
+    ):
+        df, read_err = _read_tabular(raw, filename)
+        if read_err:
+            return pd.DataFrame(), f"Could not read file: {read_err}", {}
+        if df is None or df.empty:
+            return pd.DataFrame(), "No rows in file.", {}
+        if not _looks_like_meesho_tcs_return_export(df):
+            return pd.DataFrame(), "Not a Meesho TCS return export (missing sub_order_num / quantity).", {}
+        part, err, stats = _parse_meesho_tcs_sales_return_table(
+            df,
+            sku_mapping=sku_mapping,
+            day_suborder_sku_map=meesho_day_suborder_sku_map,
+            suborder_sku_map=meesho_suborder_sku_map,
+            seen_sub_orders=seen_meesho_sub_orders,
+        )
+        if part is not None and not part.empty:
+            finished, ferr, _ = _finish(part)
+            return finished, ferr, stats
+        return pd.DataFrame(), err, stats
 
     if low.endswith((".xlsx", ".xls", ".xlsb")):
         try:
@@ -744,7 +935,7 @@ def _parse_single_return_file(
                         )
                     return _finish(partial)
                 if err:
-                    return pd.DataFrame(), err
+                    return pd.DataFrame(), err, {}
         except Exception:
             pass
 
@@ -757,18 +948,18 @@ def _parse_single_return_file(
                 )
             return _finish(partial)
         if err:
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
 
     if "meesho" in low and low.endswith(".csv"):
         df, err = _parse_meesho_panel_csv(raw)
         if err:
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
         part, err = _parse_meesho_return_table(df, sku_mapping=sku_mapping)
         if part is not None and not part.empty:
             return _finish(part)
         part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
         if err:
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
         return _finish(part)
 
     if low.endswith(".csv") and (
@@ -776,15 +967,28 @@ def _parse_single_return_file(
     ):
         part, err = _parse_myntra_seller_returns_csv(raw, sku_mapping=sku_mapping)
         if part is not None and not part.empty:
-            return part, None
+            return part, None, {}
         if err and "missing" not in err.lower():
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
 
     df, read_err = _read_tabular(raw, filename)
     if read_err:
-        return pd.DataFrame(), f"Could not read file: {read_err}"
+        return pd.DataFrame(), f"Could not read file: {read_err}", {}
     if df is None or df.empty:
-        return pd.DataFrame(), "No rows in file."
+        return pd.DataFrame(), "No rows in file.", {}
+
+    if _looks_like_meesho_tcs_return_export(df):
+        part, err, stats = _parse_meesho_tcs_sales_return_table(
+            df,
+            sku_mapping=sku_mapping,
+            day_suborder_sku_map=meesho_day_suborder_sku_map,
+            suborder_sku_map=meesho_suborder_sku_map,
+            seen_sub_orders=seen_meesho_sub_orders,
+        )
+        if part is not None and not part.empty:
+            return _finish(part)
+        if err:
+            return pd.DataFrame(), err, stats
 
     col_low = {str(c).strip().lower() for c in df.columns}
     if "return_created_date" in col_low and (
@@ -792,23 +996,23 @@ def _parse_single_return_file(
     ):
         part, err = _parse_myntra_seller_returns_csv(raw, sku_mapping=sku_mapping)
         if part is not None and not part.empty:
-            return part, None
+            return part, None, {}
         if err:
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
 
     if {"transaction type", "sku", "quantity"} <= col_low:
         partial, err = _parse_amazon_mtr_returns(df, sku_mapping=sku_mapping)
         if partial is not None and not partial.empty:
             return _finish(partial)
         if err:
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
 
     if {"return-date", "sku", "quantity"} <= col_low:
         partial, err = _parse_amazon_fba_returns(df, sku_mapping=sku_mapping)
         if partial is not None and not partial.empty:
             return _finish(partial)
         if err:
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
 
     if "amazon" in low or "businessreport" in low.replace(" ", ""):
         partial, err = _parse_amazon_business_return(df)
@@ -819,12 +1023,35 @@ def _parse_single_return_file(
                 )
             return _finish(partial)
         if err:
-            return pd.DataFrame(), err
+            return pd.DataFrame(), err, {}
 
     part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
     if err:
-        return pd.DataFrame(), err
+        return pd.DataFrame(), err, {}
     return _finish(part)
+
+
+def _format_meesho_tcs_import_warning(inner_name: str, stats: dict) -> Optional[str]:
+    if not stats:
+        return None
+    short = inner_name.split("/")[-1]
+    total = int(stats.get("total_units") or 0)
+    parsed = int(stats.get("parsed_units") or 0)
+    unresolved = int(stats.get("unresolved_units") or 0)
+    dupes = int(stats.get("duplicate_sub_orders") or 0)
+    parts: List[str] = []
+    if total > 0 and parsed == 0:
+        parts.append(
+            f"{short}: {total:,} return units in file but 0 mapped to SKU — "
+            "upload Meesho sales/DSR data first"
+        )
+    elif unresolved > 0:
+        parts.append(
+            f"{short}: {unresolved:,} of {total:,} units could not be mapped to a listing SKU"
+        )
+    if dupes > 0:
+        parts.append(f"{short}: skipped {dupes:,} duplicate sub-order row(s)")
+    return "; ".join(parts) if parts else None
 
 
 def parse_return_upload_bytes(
@@ -832,14 +1059,17 @@ def parse_return_upload_bytes(
     filename: str,
     sku_mapping: Optional[Dict[str, str]] = None,
     group_by_parent: bool = False,
-) -> Tuple[pd.DataFrame, Optional[str]]:
+    meesho_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, Optional[str], List[str]]:
     """Return DataFrame with OMS_SKU, Return_Units (summed per SKU).
 
     Accepts a single CSV/Excel, or a RAR/ZIP containing marketplace return exports
     (Amazon Business Report, Myntra, Meesho, Flipkart, etc.).
+    Third tuple element is a list of user-visible import warnings.
     """
+    warnings: List[str] = []
     if not raw:
-        return pd.DataFrame(), "Empty file."
+        return pd.DataFrame(), "Empty file.", warnings
 
     members = _expand_upload_to_member_files(raw, filename)
     if not members:
@@ -848,26 +1078,61 @@ def parse_return_upload_bytes(
             return (
                 pd.DataFrame(),
                 "Could not extract return files from archive. On the server, install unar, bsdtar, or p7zip — or upload CSV/Excel directly.",
+                warnings,
             )
         members = [(filename or "upload.csv", raw)]
 
-    frames: List[pd.DataFrame] = []
-    errors: List[str] = []
+    panel_maps: Dict[str, str] = {}
     for inner_name, inner_raw in members:
         if _skip_return_archive_member(inner_name):
             continue
-        # Keep archive path (e.g. "Akiko Flipkart Return/foo.xlsx") for platform detection.
-        part, err = _parse_single_return_file(
-            inner_raw, inner_name.replace("\\", "/"), sku_mapping=sku_mapping
+        if inner_name.lower().endswith(".csv"):
+            panel_maps.update(_meesho_panel_suborder_sku_map_from_bytes(inner_raw))
+
+    day_sub_map, sub_map = _meesho_return_suborder_sku_lookups(meesho_df, panel_maps)
+    seen_sub_orders: set[str] = set()
+
+    frames: List[pd.DataFrame] = []
+    errors: List[str] = []
+    tcs_files = 0
+    tcs_total_units = 0
+    tcs_parsed_units = 0
+    for inner_name, inner_raw in members:
+        if _skip_return_archive_member(inner_name):
+            continue
+        inner_path = inner_name.replace("\\", "/")
+        part, err, stats = _parse_single_return_file(
+            inner_raw,
+            inner_path,
+            sku_mapping=sku_mapping,
+            meesho_day_suborder_sku_map=day_sub_map,
+            meesho_suborder_sku_map=sub_map,
+            seen_meesho_sub_orders=seen_sub_orders,
         )
+        if "tcs_sales_return" in inner_path.lower() and stats:
+            tcs_files += 1
+            tcs_total_units += int(stats.get("total_units") or 0)
+            tcs_parsed_units += int(stats.get("parsed_units") or 0)
+        warn = _format_meesho_tcs_import_warning(inner_path, stats)
+        if warn:
+            warnings.append(warn)
         if part is not None and not part.empty:
             frames.append(part)
         elif err:
-            errors.append(f"{inner_name.split('/')[-1]}: {err}")
+            errors.append(f"{inner_path.split('/')[-1]}: {err}")
+
+    if tcs_files > 0 and not sub_map and not day_sub_map:
+        warnings.insert(
+            0,
+            (
+                f"Meesho TCS return file(s) found ({tcs_files}) but no Meesho sales data is loaded — "
+                "SKU mapping uses sub-order lookup from sales/DSR uploads."
+            ),
+        )
 
     if not frames:
         detail = "; ".join(errors[:4]) if errors else "No return rows found."
-        return pd.DataFrame(), detail
+        return pd.DataFrame(), detail, warnings
 
     out = pd.concat(frames, ignore_index=True)
     out = _finalize_return_overlay_df(out)
@@ -880,14 +1145,27 @@ def parse_return_upload_bytes(
         )
         out = _finalize_return_overlay_df(out)
 
+    imported_units = int(out["Return_Units"].sum())
+    if tcs_total_units > 0 and tcs_parsed_units < tcs_total_units:
+        gap = tcs_total_units - tcs_parsed_units
+        warnings.append(
+            f"Meesho TCS: imported {tcs_parsed_units:,} of {tcs_total_units:,} units "
+            f"({gap:,} unmapped — ensure Meesho sales data covers Jan–Jun 2026)"
+        )
+    elif tcs_files > 0 and imported_units > 0:
+        warnings.append(
+            f"Meesho: imported {imported_units:,} return units from "
+            f"{tcs_files} TCS file(s) + supplier panel CSV"
+        )
+
     sources = len(frames)
     _log.info(
         "Return import: %d SKU(s), %d units from %d file(s)",
         len(out),
-        int(out["Return_Units"].sum()),
+        imported_units,
         sources,
     )
-    return out, None
+    return out, None, warnings
 
 
 def _stamp_return_filename_fallback(df: pd.DataFrame, filename: str) -> pd.DataFrame:

@@ -76,6 +76,7 @@ class AppSession:
     returns_import_message: str = ""
     returns_import_progress: int = 0
     returns_import_started: float = 0.0
+    returns_import_warnings: list = field(default_factory=list)
 
     # Async sales rebuild after Tier-3 daily-auto (avoids 502 on long build_sales_df).
     sales_rebuild_status: str = "idle"   # idle | running | done | error

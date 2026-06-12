@@ -40,7 +40,7 @@ def test_returns_import_worker_persists_overlay(monkeypatch, tmp_path):
     monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path / "warm"))
     monkeypatch.setattr(
         "backend.services.po_return_import.parse_return_upload_bytes",
-        lambda *a, **k: (overlay, None),
+        lambda *a, **k: (overlay, None, []),
     )
     def _apply(sess, df, **k):
         sess.po_return_overlay_df = df.copy()

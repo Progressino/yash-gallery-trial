@@ -38,7 +38,7 @@ def test_parse_flipkart_xlsx_not_treated_as_zip_archive():
     wb.save(raw_xlsx)
     raw_xlsx.seek(0)
     body = raw_xlsx.read()
-    df, err = parse_return_upload_bytes(body, "Akiko Flipkart Return.xlsx")
+    df, err, _warn = parse_return_upload_bytes(body, "Akiko Flipkart Return.xlsx")
     assert err is None, err
     assert not df.empty
     assert int(df["Return_Units"].sum()) == 4
@@ -84,7 +84,7 @@ def test_parse_flipkart_sales_report_uuid_filename():
     if not fixture.is_file():
         pytest.skip("flipkart sales report fixture missing")
     raw = fixture.read_bytes()
-    df, err = parse_return_upload_bytes(raw, "0bedba5d-12da-4468-80bc-1368872b2087_1780814425000.xlsx")
+    df, err, _warn = parse_return_upload_bytes(raw, "0bedba5d-12da-4468-80bc-1368872b2087_1780814425000.xlsx")
     assert err is None, err
     assert not df.empty
     assert int(df["Return_Units"].sum()) == 657
@@ -137,7 +137,7 @@ def test_user_return_rars_have_calendar_dates(rar_name):
     rar = Path("/Users/samraisinghani/Downloads") / rar_name
     if not rar.is_file():
         pytest.skip(f"{rar_name} not on disk")
-    df, err = parse_return_upload_bytes(rar.read_bytes(), rar.name)
+    df, err, _warn = parse_return_upload_bytes(rar.read_bytes(), rar.name)
     assert err is None, err
     assert "Return_Date" in df.columns
     months = sorted({str(d)[:7] for d in df["Return_Date"] if str(d)[:4] >= "2020"})
@@ -167,7 +167,7 @@ def test_meesho_csv_header_skip():
         '"1","Product","206PLYKN324MUSTARD","2"\n'
         '"2","Product2","165YKN251MUSTRAD","1"\n'
     ).encode()
-    out, err = _parse_single_return_file(csv_body, "meesho_return.csv")
+    out, err, _stats = _parse_single_return_file(csv_body, "meesho_return.csv")
     assert err is None
     assert int(out["Return_Units"].sum()) == 3
 
@@ -181,7 +181,7 @@ def test_parse_return_data_rar_bundle(rar_name):
     if not rar.is_file():
         pytest.skip(f"{rar_name} not on disk")
     raw = rar.read_bytes()
-    df, err = parse_return_upload_bytes(raw, rar.name)
+    df, err, _warn = parse_return_upload_bytes(raw, rar.name)
     assert err is None, err
     assert not df.empty
     assert int(df["Return_Units"].sum()) > 100
@@ -196,7 +196,7 @@ def test_amazon_mtr_refund_rows_only_not_shipments():
         "Cancel,2026-04-22,2026-04-22,SKU-B,3\n"
         "Refund,2026-04-26,2026-04-27,SKU-B,2\n"
     ).encode()
-    out, err = _parse_single_return_file(csv_body, "MTR_B2C-APRIL-2026-XYZ.csv")
+    out, err, _stats = _parse_single_return_file(csv_body, "MTR_B2C-APRIL-2026-XYZ.csv")
     assert err is None
     assert int(out["Return_Units"].sum()) == 3
     assert set(out["OMS_SKU"]) == {"SKU-A", "SKU-B"}
@@ -212,7 +212,7 @@ def test_amazon_fba_returns_per_row_return_date():
         "2026-02-25T09:13:07+00:00,406-1,1065PLYKBLUE-4XL,B08S3VXM36,1\n"
         "2026-03-10T06:36:18+00:00,405-2,1300YKNORANGE-XXL,B092R1HPFJ,2\n"
     ).encode()
-    out, err = _parse_single_return_file(csv_body, "Feb 4.csv")
+    out, err, _stats = _parse_single_return_file(csv_body, "Feb 4.csv")
     assert err is None
     assert (out["Return_Platform"] == "amazon").all()
     dates = set(out["Return_Date"].astype(str))
@@ -230,7 +230,7 @@ def test_meesho_uses_return_created_date_not_filename_date():
         '"1","Product","206PLYKN324MUSTARD","2","2026-05-25","2026-06-09"\n'
         '"2","Product2","165YKN251MUSTRAD","1","2026-05-27","2026-06-08"\n'
     ).encode()
-    out, err = _parse_single_return_file(
+    out, err, _stats = _parse_single_return_file(
         csv_body, "YG Meesho Jan to jun-26/Yash Gallery__2026-06-11_13_0-13_59_1662411__.csv"
     )
     assert err is None
@@ -266,11 +266,117 @@ def test_meesho_lost_skipped_in_rar(monkeypatch):
 
     def fake_single(raw, name, **k):
         if "lost" in name.lower():
-            return pd.DataFrame({"OMS_SKU": ["BAD"], "Return_Units": [99]}), None
-        return pd.DataFrame({"OMS_SKU": ["GOOD"], "Return_Units": [1]}), None
+            return pd.DataFrame({"OMS_SKU": ["BAD"], "Return_Units": [99]}), None, {}
+        return pd.DataFrame({"OMS_SKU": ["GOOD"], "Return_Units": [1]}), None, {}
 
     monkeypatch.setattr(pri, "_parse_single_return_file", fake_single)
-    df, err = parse_return_upload_bytes(b"fake", "bundle.rar")
+    df, err, _warn = parse_return_upload_bytes(b"fake", "bundle.rar")
     assert err is None
     assert "BAD" not in df["OMS_SKU"].tolist()
     assert int(df["Return_Units"].sum()) == 1
+
+
+def test_meesho_tcs_sales_return_maps_suborder_to_sku():
+    openpyxl = pytest.importorskip("openpyxl")
+    raw_xlsx = BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "identifier",
+            "sub_order_num",
+            "order_date",
+            "quantity",
+            "cancel_return_date",
+            "end_customer_state_new",
+        ]
+    )
+    ws.append(["vvxpj", "246113537743954370_1", "2026-01-23", 2, "2026-01-29", "MH"])
+    ws.append(["vvxpj", "243005505897928640_1", "2026-01-14", 1, "2026-01-14", "KA"])
+    wb.save(raw_xlsx)
+    raw_xlsx.seek(0)
+    meesho_df = pd.DataFrame(
+        {
+            "OrderId": ["246113537743954370_1", "243005505897928640_1"],
+            "SKU": ["1158YKGREEN-XL", "999YKRED-M"],
+            "Date": pd.to_datetime(["2026-01-23", "2026-01-14"]),
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [2, 1],
+        }
+    )
+    out, err, warns = parse_return_upload_bytes(
+        raw_xlsx.read(),
+        "gst_1662411_1_2026.zip/tcs_sales_return.xlsx",
+        meesho_df=meesho_df,
+    )
+    assert err is None, err
+    assert int(out["Return_Units"].sum()) == 3
+    assert set(out["OMS_SKU"]) == {"1158YKGREEN-XL", "999YKRED-M"}
+    assert (out["Return_Platform"] == "meesho").all()
+
+
+def test_meesho_tcs_sales_return_warns_without_sales_lookup():
+    openpyxl = pytest.importorskip("openpyxl")
+    raw_xlsx = BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["identifier", "sub_order_num", "quantity", "cancel_return_date"])
+    ws.append(["vvxpj", "SO-UNMAPPED-1", 5, "2026-02-01"])
+    wb.save(raw_xlsx)
+    raw_xlsx.seek(0)
+    out, err, warns = parse_return_upload_bytes(
+        raw_xlsx.read(),
+        "folder/tcs_sales_return.xlsx",
+    )
+    assert out.empty
+    assert err is not None
+    assert any("mapped to SKU" in w or "mapped to a listing SKU" in w for w in warns + [err])
+
+
+def _synthetic_meesho_df_from_tcs_rar(rar_path: Path) -> pd.DataFrame:
+    from backend.services.po_return_import import _expand_upload_to_member_files
+
+    raw = rar_path.read_bytes()
+    members = _expand_upload_to_member_files(raw, rar_path.name)
+    rows = []
+    for name, data in members:
+        if "tcs_sales_return" not in name.lower():
+            continue
+        tdf = pd.read_excel(BytesIO(data), sheet_name=0)
+        for _, r in tdf.iterrows():
+            sub = str(r.get("sub_order_num") or "").strip()
+            if not sub:
+                continue
+            rows.append(
+                {
+                    "OrderId": sub,
+                    "SKU": "1158YKGREEN-XL",
+                    "Date": pd.to_datetime(r.get("cancel_return_date") or "2026-01-01"),
+                    "TxnType": "Shipment",
+                    "Quantity": 1,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize(
+    "rar_name,min_units",
+    [
+        ("YG Meesho Jan to jun-26 1.rar", 9400),
+        ("Akiko Meesho Jan to jun-26 1.rar", 1800),
+        ("Ashirwad Meesho Jan to jun-26 1.rar", 4500),
+    ],
+)
+def test_meesho_jan_jun_rar_tcs_units_with_sales_lookup(rar_name, min_units):
+    rar = Path("/Users/samraisinghani/Downloads") / rar_name
+    if not rar.is_file():
+        pytest.skip(f"{rar_name} not on disk")
+    meesho_df = _synthetic_meesho_df_from_tcs_rar(rar)
+    df, err, warns = parse_return_upload_bytes(
+        rar.read_bytes(),
+        rar.name,
+        meesho_df=meesho_df,
+    )
+    assert err is None, err
+    assert int(df["Return_Units"].sum()) >= min_units
+    assert (df["Return_Platform"] == "meesho").all()

@@ -75,6 +75,7 @@ class CoverageResponse(BaseModel):
     returns_import_status: str = "idle"
     returns_import_message: str = ""
     returns_import_progress: int = 0
+    returns_import_warnings: Optional[list[str]] = None
     # Tier-3 daily-auto background sales rebuild (idle | running | done | error)
     sales_rebuild: str = "idle"
     sales_rebuild_message: str = ""

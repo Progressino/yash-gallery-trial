@@ -2179,6 +2179,19 @@ function ReturnsUploadPanel({
                 .join(' · ')}
             </p>
           ) : null}
+          {(coverage.returns_import_warnings?.length ?? 0) > 0 ? (
+            <div className="rounded border border-amber-200 bg-amber-50/80 px-2 py-1.5 text-[10px] text-amber-900 space-y-0.5">
+              <p className="font-semibold">Import warnings</p>
+              {coverage.returns_import_warnings!.slice(0, 6).map((w, i) => (
+                <p key={i}>{w}</p>
+              ))}
+              {(coverage.returns_import_warnings!.length ?? 0) > 6 ? (
+                <p className="text-amber-700">
+                  …and {coverage.returns_import_warnings!.length - 6} more
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : coverage.return_sheet ? (
         <p className="text-[11px] text-gray-500">

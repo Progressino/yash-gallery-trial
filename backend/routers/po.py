@@ -697,15 +697,20 @@ def _run_returns_import_worker(
 
         sess.returns_import_progress = 20
         sess.returns_import_message = "Extracting and parsing return files…"
-        overlay, err = parse_return_upload_bytes(
+        overlay, err, import_warnings = parse_return_upload_bytes(
             raw,
             filename,
             sku_mapping=sku_mapping or None,
             group_by_parent=group_by_parent,
+            meesho_df=getattr(sess, "meesho_df", None),
         )
+        sess.returns_import_warnings = list(import_warnings or [])
         if err:
             sess.returns_import_status = "error"
-            sess.returns_import_message = err
+            warn_tail = ""
+            if import_warnings:
+                warn_tail = " " + "; ".join(import_warnings[:3])
+            sess.returns_import_message = f"{err}{warn_tail}"
             sess.returns_import_progress = 0
             return
         sess.returns_import_progress = 55
@@ -733,7 +738,14 @@ def _run_returns_import_worker(
 
         _run_returns_import_followup(session_id)
         sess.returns_import_status = "done"
-        sess.returns_import_message = str(out.get("message") or "Return sheet imported.")
+        done_msg = str(out.get("message") or "Return sheet imported.")
+        if import_warnings:
+            preview = "; ".join(import_warnings[:4])
+            extra = len(import_warnings) - 4
+            if extra > 0:
+                preview += f" (+{extra} more)"
+            done_msg = f"{done_msg} ⚠ {preview}"
+        sess.returns_import_message = done_msg
         sess.returns_import_progress = 100
     except Exception as e:
         logging.getLogger(__name__).exception("return import worker failed")

@@ -85,6 +85,7 @@ export interface CoverageResponse {
   returns_import_status?: 'idle' | 'running' | 'done' | 'error'
   returns_import_message?: string
   returns_import_progress?: number
+  returns_import_warnings?: string[]
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */
   pause_auto_data_restore?: boolean
   /** Tier-3 daily-auto background sales rebuild */

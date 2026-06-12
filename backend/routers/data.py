@@ -2217,6 +2217,7 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         returns_import_status=getattr(sess, "returns_import_status", "idle") or "idle",
         returns_import_message=getattr(sess, "returns_import_message", "") or "",
         returns_import_progress=int(getattr(sess, "returns_import_progress", 0) or 0),
+        returns_import_warnings=list(getattr(sess, "returns_import_warnings", None) or []) or None,
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
         daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
