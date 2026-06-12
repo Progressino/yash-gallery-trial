@@ -88,20 +88,38 @@ jobs:
           # that block the next "up" with: container name "/app-backend-1" is already in use.
           _prune_stale_compose_containers() {
             local svc="$1"
-            local canonical="/app-${svc}-1"
-            docker ps -a --filter "name=app-${svc}" -q | while read -r id; do
+            local canonical="app-${svc}-1"
+            docker ps -a --format '{{.ID}}\t{{.Names}}' | while IFS=$'\t' read -r id name; do
               [ -n "$id" ] || continue
-              name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null || true)"
-              if [ "$name" != "$canonical" ]; then
-                echo "Removing stale container: ${name:-$id}"
-                docker rm -f "$id" 2>/dev/null || true
-              fi
+              name="${name#/}"
+              case "$name" in
+                *app-${svc}*)
+                  if [ "$name" != "$canonical" ]; then
+                    echo "Removing stale container: ${name} (${id})"
+                    docker rm -f "$id" 2>/dev/null || true
+                  fi
+                  ;;
+              esac
+            done
+          }
+          _prune_ghost_recreate_containers() {
+            # Failed compose recreates leave hash-prefixed names like 425ccd91a2be_app-frontend-1.
+            docker ps -a --format '{{.ID}}\t{{.Names}}' | while IFS=$'\t' read -r id name; do
+              [ -n "$id" ] || continue
+              name="${name#/}"
+              case "$name" in
+                *_app-*)
+                  echo "Removing ghost recreate container: ${name} (${id})"
+                  docker rm -f "$id" 2>/dev/null || true
+                  ;;
+              esac
             done
           }
           _prune_stale_compose_containers backend
           _prune_stale_compose_containers stitching-backend
           _prune_stale_compose_containers frontend
           _prune_stale_compose_containers autoheal
+          _prune_ghost_recreate_containers
           docker container prune -f 2>/dev/null || true
           # Stop app containers before rebuild — avoids "No such container" ghost IDs on compose up.
           _dc -f docker-compose.prod.yml stop backend stitching-backend frontend autoheal 2>/dev/null || true
@@ -117,7 +135,16 @@ jobs:
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} stitching-backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          _dc -f docker-compose.prod.yml up -d --remove-orphans
+          if ! _dc -f docker-compose.prod.yml up -d --remove-orphans; then
+            echo "compose up failed — pruning ghost containers and retrying once"
+            _prune_stale_compose_containers backend
+            _prune_stale_compose_containers stitching-backend
+            _prune_stale_compose_containers frontend
+            _prune_stale_compose_containers autoheal
+            _prune_ghost_recreate_containers
+            docker rm -f app-backend-1 app-stitching-backend-1 app-frontend-1 app-autoheal-1 2>/dev/null || true
+            _dc -f docker-compose.prod.yml up -d --remove-orphans
+          fi
           docker image prune -f || true
 
       - name: Renew TLS certificate (app.progressino.com)
