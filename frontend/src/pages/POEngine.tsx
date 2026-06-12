@@ -2,7 +2,16 @@ import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffec
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 import axios from 'axios'
-import { api, getCoverage, getPoCalculateStatus, startPoCalculate, waitForPoCalculate } from '../api/client'
+import {
+  api,
+  getCoverage,
+  getPoCalculateStatus,
+  startPoCalculate,
+  uploadPoReturnsImport,
+  waitForPoCalculate,
+  waitForReturnsImport,
+  waitForSalesRebuild,
+} from '../api/client'
 import { useSession } from '../store/session'
 import { useAuth, mayResetSharedData } from '../store/auth'
 import { usePOStore, type Tab } from '../store/po'
@@ -891,17 +900,26 @@ export default function POEngine() {
     setReturnImportBusy(true)
     setReturnImportMsg(null)
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append('group_by_parent', params.group_by_parent ? 'true' : 'false')
-      fd.append('replace', 'true')
-      const { data } = await api.post<{ ok?: boolean; message?: string; sales_rebuild?: string }>(
-        '/po/returns/import-file',
-        fd,
-        { timeout: 900_000, headers: { 'Content-Type': 'multipart/form-data' } },
-      )
+      const data = await uploadPoReturnsImport(file, {
+        groupByParent: params.group_by_parent,
+        replace: true,
+      })
       if (data?.ok) {
-        setReturnImportMsg({ type: 'ok', text: data.message || 'Returns imported.' })
+        if (data.returns_import === 'running') {
+          setReturnImportMsg({ type: 'ok', text: 'Importing return data…' })
+          await waitForReturnsImport(msg =>
+            setReturnImportMsg({ type: 'ok', text: msg || 'Importing return data…' }),
+          )
+        }
+        if (data.sales_rebuild === 'pending') {
+          await waitForSalesRebuild(msg =>
+            setReturnImportMsg({ type: 'ok', text: msg || 'Updating net sales…' }),
+          )
+        }
+        setReturnImportMsg({
+          type: 'ok',
+          text: data.message || 'Returns saved for PO — run Calculate PO to refresh qty.',
+        })
         await run()
       } else {
         setReturnImportMsg({ type: 'err', text: data?.message || 'Import failed.' })
