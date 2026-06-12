@@ -1524,11 +1524,40 @@ export default function Upload() {
 
         <UploadCard
           title="↩ Returns (for PO)"
-          subtitle="Upload Return Data.rar (or CSV/Excel inside) — all marketplaces merged; dashboard net sales update automatically. Run Calculate PO for PO qty."
+          subtitle={
+            coverage.return_sheet_skus && coverage.return_sheet_skus > 0
+              ? `${coverage.return_sheet_skus.toLocaleString()} SKUs · ${(coverage.return_sheet_units ?? 0).toLocaleString()} return units saved on server — drop a newer file below to replace`
+              : 'Upload Return Data.rar (or CSV/Excel inside) — all marketplaces merged; dashboard net sales update automatically. Run Calculate PO for PO qty.'
+          }
           loaded={!!coverage.return_sheet}
+          rows={coverage.return_sheet_skus}
+          rowsUnit="SKUs"
           alert={showImportCompleteness ? uploadAlertsBySource['returns_po'] : undefined}
           onClearAlert={() => clearUploadAlert('returns_po')}
         >
+          {(coverage.return_overlay_filename ||
+            coverage.return_overlay_uploaded_at ||
+            (coverage.return_sheet_skus && coverage.return_sheet_skus > 0)) && (
+            <div className="text-[11px] text-gray-500 mb-2">
+              Last uploaded:{' '}
+              <span className="font-semibold text-gray-700">
+                {coverage.return_overlay_filename || 'Return data'}
+              </span>
+              {coverage.return_sheet_skus && coverage.return_sheet_skus > 0 ? (
+                <span className="text-gray-600">
+                  {' '}
+                  · {coverage.return_sheet_skus.toLocaleString()} SKUs ·{' '}
+                  {(coverage.return_sheet_units ?? 0).toLocaleString()} return units
+                </span>
+              ) : null}
+              {coverage.return_overlay_uploaded_at ? (
+                <span className="text-gray-400">
+                  {' '}
+                  ({new Date(coverage.return_overlay_uploaded_at).toLocaleString()})
+                </span>
+              ) : null}
+            </div>
+          )}
           <FileUpload
             label="Upload returns file"
             accept={{

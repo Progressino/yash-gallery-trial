@@ -62,6 +62,8 @@ _META_JSON_FIELDS = (
     "inventory_snapshot_uploaded_at",
     "existing_po_filename",
     "existing_po_uploaded_at",
+    "return_overlay_uploaded_at",
+    "return_overlay_filename",
     "existing_po_generation",
     "po_calculate_existing_po_generation",
     "daily_restored",

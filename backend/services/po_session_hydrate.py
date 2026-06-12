@@ -317,6 +317,12 @@ def ensure_po_return_overlay_from_server(sess) -> bool:
         except Exception:
             _log.exception("count po_return_overlay_df.parquet failed")
     if cur_n > 0 and cur_n >= disk_n:
+        try:
+            from .po_return_import import ensure_return_overlay_meta_hydrated
+
+            ensure_return_overlay_meta_hydrated(sess)
+        except Exception:
+            _log.exception("return overlay meta hydrate failed (session already loaded)")
         return False
     if not path.is_file():
         return False
@@ -331,6 +337,20 @@ def ensure_po_return_overlay_from_server(sess) -> bool:
     if not isinstance(_main._warm_cache, dict):
         _main._warm_cache = {}
     _main._warm_cache["po_return_overlay_df"] = df.copy()
+    try:
+        from .po_return_import import ensure_return_overlay_meta_hydrated
+
+        ensure_return_overlay_meta_hydrated(sess)
+        meta = {
+            "return_overlay_uploaded_at": str(getattr(sess, "return_overlay_uploaded_at", "") or ""),
+            "return_overlay_filename": str(getattr(sess, "return_overlay_filename", "") or ""),
+            "return_overlay_skus": int(len(df)),
+            "return_overlay_units": int(pd.to_numeric(df.get("Return_Units"), errors="coerce").fillna(0).sum()),
+        }
+        if meta.get("return_overlay_uploaded_at"):
+            _main._warm_cache[_main._RETURN_OVERLAY_META_WARM_KEY] = meta
+    except Exception:
+        _log.exception("return overlay meta hydrate failed")
     _log.info("PO return overlay hydrated from disk (%s rows)", len(df))
     return True
 

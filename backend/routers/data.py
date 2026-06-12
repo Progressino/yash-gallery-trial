@@ -2139,6 +2139,13 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
     _ret_ov = getattr(sess, "po_return_overlay_df", None)
     _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True)
+    if _ret_ok:
+        try:
+            from ..services.po_return_import import ensure_return_overlay_meta_hydrated
+
+            ensure_return_overlay_meta_hydrated(sess)
+        except Exception:
+            pass
     _ingest = getattr(sess, "daily_auto_ingest_result", None) or {}
     _has_ingest = bool(_ingest)
     return CoverageResponse(
@@ -2172,6 +2179,12 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
         return_sheet_skus=int(len(_ret_ov)) if _ret_ok else 0,
         return_sheet_units=int(_ret_ov["Return_Units"].sum()) if _ret_ok else 0,
+        return_overlay_uploaded_at=(
+            (getattr(sess, "return_overlay_uploaded_at", "") or None) or None
+        ),
+        return_overlay_filename=(
+            (getattr(sess, "return_overlay_filename", "") or None) or None
+        ),
         pause_auto_data_restore=paused,
         returns_import_status=getattr(sess, "returns_import_status", "idle") or "idle",
         returns_import_message=getattr(sess, "returns_import_message", "") or "",

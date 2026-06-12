@@ -67,6 +67,8 @@ export interface CoverageResponse {
   po_raise_ledger_rows?: number
   return_sheet_skus?: number
   return_sheet_units?: number
+  return_overlay_uploaded_at?: string | null
+  return_overlay_filename?: string | null
   returns_import_status?: 'idle' | 'running' | 'done' | 'error'
   returns_import_message?: string
   /** True after "Clear all app data" until an upload or explicit Load Cache / Fresh reload. */

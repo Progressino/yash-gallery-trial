@@ -777,6 +777,135 @@ def infer_return_overlay_as_of(filename: str, overlay_df: pd.DataFrame | None = 
     return ""
 
 
+def return_overlay_meta_bundle(sess) -> dict:
+    ov = getattr(sess, "po_return_overlay_df", None)
+    skus = int(len(ov)) if ov is not None and not getattr(ov, "empty", True) else 0
+    units = (
+        int(pd.to_numeric(ov["Return_Units"], errors="coerce").fillna(0).sum())
+        if skus and ov is not None and "Return_Units" in ov.columns
+        else 0
+    )
+    return {
+        "return_overlay_uploaded_at": str(getattr(sess, "return_overlay_uploaded_at", "") or ""),
+        "return_overlay_filename": str(getattr(sess, "return_overlay_filename", "") or ""),
+        "return_overlay_skus": skus,
+        "return_overlay_units": units,
+    }
+
+
+def persist_return_overlay_meta(sess) -> None:
+    """Write return overlay upload metadata next to the warm-cache parquet."""
+    import json
+    import os
+
+    meta = return_overlay_meta_bundle(sess)
+    if not meta.get("return_overlay_skus"):
+        return
+    try:
+        import backend.main as _main
+
+        if not isinstance(_main._warm_cache, dict):
+            _main._warm_cache = {}
+        _main._warm_cache[_main._RETURN_OVERLAY_META_WARM_KEY] = dict(meta)
+        root = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+        path = os.path.join(root, "return_overlay_meta.json")
+        os.makedirs(root, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False)
+    except Exception:
+        _log.exception("persist return_overlay_meta failed")
+
+
+def load_return_overlay_meta_from_disk() -> dict:
+    import json
+    import os
+
+    path = os.path.join(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"), "return_overlay_meta.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def apply_return_overlay_meta_to_session(sess, meta: dict | None) -> None:
+    if not meta:
+        return
+    if meta.get("return_overlay_uploaded_at"):
+        sess.return_overlay_uploaded_at = str(meta["return_overlay_uploaded_at"])
+    if meta.get("return_overlay_filename"):
+        sess.return_overlay_filename = str(meta["return_overlay_filename"])
+
+
+def ensure_return_overlay_meta_hydrated(sess) -> None:
+    """Fill upload timestamp/filename when overlay exists but session meta is missing."""
+    ov = getattr(sess, "po_return_overlay_df", None)
+    if ov is None or getattr(ov, "empty", True):
+        return
+    if str(getattr(sess, "return_overlay_uploaded_at", "") or "").strip():
+        return
+    meta = load_return_overlay_meta_from_disk()
+    apply_return_overlay_meta_to_session(sess, meta)
+    if str(getattr(sess, "return_overlay_uploaded_at", "") or "").strip():
+        return
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    root = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+    parquet = os.path.join(root, "po_return_overlay_df.parquet")
+    ts: float | None = None
+    if os.path.isfile(parquet):
+        try:
+            ts = os.path.getmtime(parquet)
+        except OSError:
+            ts = None
+    if ts is None:
+        manifest_path = os.path.join(root, "_manifest.json")
+        if os.path.isfile(manifest_path):
+            try:
+                manifest = json.loads(open(manifest_path, encoding="utf-8").read())
+                saved_at = str(manifest.get("saved_at") or "").strip()
+                if saved_at:
+                    dt = datetime.fromisoformat(saved_at.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        from zoneinfo import ZoneInfo
+
+                        dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+                    sess.return_overlay_uploaded_at = dt.astimezone(timezone.utc).isoformat().replace(
+                        "+00:00", "Z"
+                    )
+                    return
+            except Exception:
+                pass
+    if ts is not None:
+        sess.return_overlay_uploaded_at = (
+            datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+
+
+def clear_return_overlay_meta(sess) -> None:
+    sess.return_overlay_uploaded_at = ""
+    sess.return_overlay_filename = ""
+    import os
+
+    try:
+        import backend.main as _main
+
+        if isinstance(_main._warm_cache, dict):
+            _main._warm_cache.pop(_main._RETURN_OVERLAY_META_WARM_KEY, None)
+    except Exception:
+        pass
+    path = os.path.join(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"), "return_overlay_meta.json")
+    if os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            _log.warning("failed to remove return_overlay_meta.json")
+
+
 def apply_return_overlay_import(
     sess,
     overlay_df: pd.DataFrame,
@@ -784,7 +913,7 @@ def apply_return_overlay_import(
     replace: bool = True,
     filename: str = "",
 ) -> dict:
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     from zoneinfo import ZoneInfo
 
     if overlay_df is None or overlay_df.empty:
@@ -805,8 +934,16 @@ def apply_return_overlay_import(
         # Legacy bundle with no per-row dates — anchor refunds to prior IST day.
         as_of = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)).isoformat()
     sess.return_overlay_as_of = as_of or ""
+    sess.return_overlay_uploaded_at = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    sess.return_overlay_filename = str(filename or "").strip()
     n = int(len(sess.po_return_overlay_df))
     units = int(sess.po_return_overlay_df["Return_Units"].sum())
+    try:
+        persist_return_overlay_meta(sess)
+    except Exception:
+        _log.exception("persist_return_overlay_meta after import failed")
     sess._quarterly_cache.clear()
     return {
         "ok": True,

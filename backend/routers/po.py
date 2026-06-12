@@ -795,7 +795,11 @@ def po_clear_returns_overlay(request: Request):
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
+    from ..services.po_return_import import clear_return_overlay_meta
+
     sess.po_return_overlay_df = pd.DataFrame()
+    sess.return_overlay_as_of = None
+    clear_return_overlay_meta(sess)
     sess._quarterly_cache.clear()
     sales_note = ""
     try:

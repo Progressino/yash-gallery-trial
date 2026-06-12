@@ -65,6 +65,8 @@ class CoverageResponse(BaseModel):
     po_raise_ledger_rows: int = 0
     return_sheet_skus: int = 0
     return_sheet_units: int = 0
+    return_overlay_uploaded_at: Optional[str] = None
+    return_overlay_filename: Optional[str] = None
     # After full wipe: True until user uploads or clicks Load Cache (blocks auto-restore)
     pause_auto_data_restore: bool = False
     # Return overlay import (Upload → Returns for PO) — async RAR/CSV parse

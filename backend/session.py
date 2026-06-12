@@ -38,6 +38,8 @@ class AppSession:
     po_raise_ledger_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     po_return_overlay_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     return_overlay_as_of: Optional[str] = None
+    return_overlay_uploaded_at: str = ""
+    return_overlay_filename: str = ""
     sku_status_lead_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     daily_inventory_history_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     transfer_df: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -152,6 +154,9 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.po_calculate_existing_po_generation = -1
     sess.po_raise_ledger_df = pd.DataFrame()
     sess.po_return_overlay_df = pd.DataFrame()
+    sess.return_overlay_as_of = None
+    sess.return_overlay_uploaded_at = ""
+    sess.return_overlay_filename = ""
     sess.sku_status_lead_df = pd.DataFrame()
     sess.daily_inventory_history_df = pd.DataFrame()
     sess.transfer_df = pd.DataFrame()

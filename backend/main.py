@@ -314,6 +314,12 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
         persist_po_sidecars_to_disk()
     except Exception:
         log.exception("persist_po_sidecars_to_disk after merge failed")
+    try:
+        from .services.po_return_import import persist_return_overlay_meta
+
+        persist_return_overlay_meta(sess)
+    except Exception:
+        log.exception("persist_return_overlay_meta after merge failed")
 
 
 _INVENTORY_WARM_KEYS = ("inventory_df_variant", "inventory_df_parent")
@@ -321,6 +327,7 @@ _INVENTORY_META_WARM_KEY = "inventory_session_meta"
 
 
 _EXISTING_PO_META_WARM_KEY = "existing_po_session_meta"
+_RETURN_OVERLAY_META_WARM_KEY = "return_overlay_meta"
 
 
 def merge_existing_po_into_warm_cache(sess) -> None:
@@ -464,6 +471,12 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                     json.dump(val, f, default=str)
                 saved.append("existing_po_meta")
                 saved.append(key)
+            elif key == _RETURN_OVERLAY_META_WARM_KEY and isinstance(val, dict):
+                path = os.path.join(_DISK_CACHE_DIR, "return_overlay_meta.json")
+                with open(path, "w") as f:
+                    json.dump(val, f, default=str)
+                saved.append("return_overlay_meta")
+                saved.append(key)
             elif hasattr(val, "to_parquet") and hasattr(val, "empty") and not val.empty:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 val.to_parquet(path, index=False)
@@ -543,6 +556,11 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                 if os.path.exists(path):
                     with open(path) as f:
                         loaded[_EXISTING_PO_META_WARM_KEY] = json.load(f)
+            elif key in ("return_overlay_meta", _RETURN_OVERLAY_META_WARM_KEY):
+                path = os.path.join(_DISK_CACHE_DIR, "return_overlay_meta.json")
+                if os.path.exists(path):
+                    with open(path) as f:
+                        loaded[_RETURN_OVERLAY_META_WARM_KEY] = json.load(f)
             else:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 if os.path.exists(path):
@@ -1281,6 +1299,14 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 from .services.existing_po import apply_existing_po_session_meta
 
                 apply_existing_po_session_meta(sess, val if isinstance(val, dict) else {})
+            except Exception:
+                pass
+            continue
+        if key == _RETURN_OVERLAY_META_WARM_KEY:
+            try:
+                from .services.po_return_import import apply_return_overlay_meta_to_session
+
+                apply_return_overlay_meta_to_session(sess, val if isinstance(val, dict) else {})
             except Exception:
                 pass
             continue

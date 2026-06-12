@@ -122,7 +122,47 @@ def test_light_coverage_restores_return_overlay_from_disk(client, monkeypatch, t
     assert r.status_code == 200
     body = r.json()
     assert body.get("return_sheet") is True
+    assert body.get("return_sheet_skus") == 1
     assert body.get("return_sheet_units") == 3
+    assert body.get("return_overlay_uploaded_at")
+
+
+def test_apply_return_overlay_import_persists_upload_meta(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from backend.services.po_return_import import (
+        apply_return_overlay_import,
+        load_return_overlay_meta_from_disk,
+    )
+    from backend.session import AppSession
+
+    warm = tmp_path / "warm"
+    warm.mkdir(parents=True)
+    monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
+    import backend.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_DISK_CACHE_DIR", str(warm))
+    main_mod._warm_cache = {}
+
+    sess = AppSession()
+    overlay = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU1", "SKU2"],
+            "Return_Platform": ["flipkart", "flipkart"],
+            "Return_Date": ["2026-06-01", "2026-06-02"],
+            "Return_Units": [5, 7],
+        }
+    )
+    out = apply_return_overlay_import(sess, overlay, replace=True, filename="Return-Data.rar")
+    assert out["ok"] is True
+    assert out["skus"] == 2
+    assert out["total_units"] == 12
+    assert sess.return_overlay_filename == "Return-Data.rar"
+    assert sess.return_overlay_uploaded_at
+    meta = load_return_overlay_meta_from_disk()
+    assert meta.get("return_overlay_filename") == "Return-Data.rar"
+    assert meta.get("return_overlay_skus") == 2
+    assert meta.get("return_overlay_units") == 12
 
 
 def test_skip_meesho_lost_member():

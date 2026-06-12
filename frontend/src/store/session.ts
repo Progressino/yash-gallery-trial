@@ -37,6 +37,8 @@ const empty: CoverageResponse = {
   po_raise_ledger_rows: 0,
   return_sheet_skus: 0,
   return_sheet_units: 0,
+  return_overlay_uploaded_at: undefined,
+  return_overlay_filename: undefined,
   pause_auto_data_restore: false,
   sales_rebuild: 'idle',
   sales_rebuild_message: '',
