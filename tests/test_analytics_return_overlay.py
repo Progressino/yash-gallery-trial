@@ -57,3 +57,32 @@ def test_merge_return_data_into_platform_summaries_jan_2026():
     assert out[0]["total_returns"] == 12
     assert out[0]["return_rate"] == 2.4
     assert out[0]["monthly"][0]["refunds"] == 12
+
+
+def test_intelligence_hydrate_loads_overlay_from_disk(monkeypatch, tmp_path):
+    from backend.routers.data import _hydrate_session_for_intelligence
+    from backend.session import AppSession
+
+    warm = tmp_path / "warm"
+    warm.mkdir(parents=True)
+    monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
+    import backend.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_DISK_CACHE_DIR", str(warm))
+    main_mod._warm_cache = {}
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"],
+            "Return_Platform": ["amazon"],
+            "Return_Date": ["2026-03-10"],
+            "Return_Units": [25],
+        }
+    )
+    df.to_parquet(warm / "po_return_overlay_df.parquet", index=False)
+
+    sess = AppSession()
+    assert sess.po_return_overlay_df.empty
+    _hydrate_session_for_intelligence(sess)
+    assert not sess.po_return_overlay_df.empty
+    assert int(sess.po_return_overlay_df["Return_Units"].sum()) == 25

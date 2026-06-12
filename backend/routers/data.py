@@ -902,6 +902,16 @@ def _resolve_bundle_platform_frames(
     return tuple(out)
 
 
+def _ensure_return_overlay_hydrated(sess: AppSession) -> None:
+    """Load saved PO return overlay from warm cache / disk for dashboard + marketplace tabs."""
+    try:
+        from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
+
+        ensure_po_return_overlay_from_server(sess)
+    except Exception:
+        pass
+
+
 def _hydrate_session_for_intelligence(sess: AppSession) -> bool:
     """
     Synchronously copy warm-cache platform/sales frames into the session before
@@ -911,6 +921,8 @@ def _hydrate_session_for_intelligence(sess: AppSession) -> bool:
     try:
         import backend.main as _main
 
+        _main.restore_po_sidecars_from_warm(sess)
+        _ensure_return_overlay_hydrated(sess)
         if _main.session_needs_warm_cache_topup(sess):
             if _main.session_needs_operational_data(sess):
                 _main.force_restore_session_from_server_cache(
@@ -3500,6 +3512,7 @@ def _finalize_platform_analytics_monthly(
 @router.get("/mtr-analytics")
 def mtr_analytics(request: Request):
     sess = _sess(request)
+    _ensure_return_overlay_hydrated(sess)
     df = sess.mtr_df
     if df.empty:
         return {"loaded": False}
@@ -3577,6 +3590,7 @@ def mtr_analytics(request: Request):
 @router.get("/myntra-analytics")
 def myntra_analytics(request: Request):
     sess = _sess(request)
+    _ensure_return_overlay_hydrated(sess)
     df = sess.myntra_df
     if df.empty:
         return {"loaded": False}
@@ -3632,6 +3646,7 @@ def myntra_analytics(request: Request):
 @router.get("/meesho-analytics")
 def meesho_analytics(request: Request):
     sess = _sess(request)
+    _ensure_return_overlay_hydrated(sess)
     df = sess.meesho_df
     if df.empty:
         return {"loaded": False}
@@ -3680,6 +3695,7 @@ def meesho_analytics(request: Request):
 @router.get("/flipkart-analytics")
 def flipkart_analytics(request: Request):
     sess = _sess(request)
+    _ensure_return_overlay_hydrated(sess)
     df = sess.flipkart_df
     if df.empty:
         return {"loaded": False}
@@ -3805,6 +3821,7 @@ def get_inventory(
 @router.get("/snapdeal-analytics")
 def snapdeal_analytics(request: Request, company: Optional[str] = None):
     sess = _sess(request)
+    _ensure_return_overlay_hydrated(sess)
     df = sess.snapdeal_df
     if df.empty:
         return {"loaded": False}

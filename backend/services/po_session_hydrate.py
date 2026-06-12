@@ -297,10 +297,9 @@ def ensure_po_calc_server_data_in_warm_cache() -> bool:
 
 
 def ensure_po_return_overlay_from_server(sess) -> bool:
-    """Load saved return overlay from warm cache or disk when the session is empty."""
+    """Load saved return overlay from warm cache or disk when the session is empty or stale."""
     cur = getattr(sess, "po_return_overlay_df", None)
-    if cur is not None and not getattr(cur, "empty", True):
-        return False
+    cur_n = _df_row_count(cur)
     import backend.main as _main
 
     try:
@@ -308,10 +307,17 @@ def ensure_po_return_overlay_from_server(sess) -> bool:
     except Exception:
         _log.exception("restore_po_sidecars_from_warm for return overlay failed")
     cur = getattr(sess, "po_return_overlay_df", None)
-    if cur is not None and not getattr(cur, "empty", True):
-        return True
+    cur_n = _df_row_count(cur)
 
     path = _warm_cache_dir() / "po_return_overlay_df.parquet"
+    disk_n = 0
+    if path.is_file():
+        try:
+            disk_n = _df_row_count(pd.read_parquet(path))
+        except Exception:
+            _log.exception("count po_return_overlay_df.parquet failed")
+    if cur_n > 0 and cur_n >= disk_n:
+        return False
     if not path.is_file():
         return False
     try:
