@@ -1168,11 +1168,10 @@ export default function Upload() {
                   if (res.ok) {
                     showToast('success', res.message || 'Finishing receipt applied.', 8000)
                     setCoverage({
+                      ...coverage,
                       existing_po: true,
                       existing_po_generation: res.existing_po_generation ?? coverage.existing_po_generation,
                       existing_po_needs_recalc: true,
-                      finishing_receipt_uploaded_at: new Date().toISOString(),
-                      finishing_receipt_filename: file.name,
                     })
                     await refresh()
                   } else {

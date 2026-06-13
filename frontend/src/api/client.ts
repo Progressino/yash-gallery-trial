@@ -38,6 +38,8 @@ export interface UploadResponse {
   detected_platforms?: string[]
   /** Present after SKU master upload when some sales SKUs are not keys or OMS values in the map */
   unmapped_skus?: string[]
+  existing_po_uploaded_at?: string
+  existing_po_generation?: number
 }
 
 export interface CoverageResponse {

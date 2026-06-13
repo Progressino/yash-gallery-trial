@@ -8,7 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from .existing_po import existing_po_merge_key, persist_existing_po_to_disk
+from .existing_po import (
+    dedupe_po_rows_by_sku,
+    existing_po_merge_key,
+    persist_existing_po_to_disk,
+)
 from .po_engine import canonical_oms_key
 
 _FINISHING_HEADER_MARKERS = frozenset(
@@ -247,12 +251,16 @@ def merge_finishing_into_existing_po(
 ) -> Tuple[pd.DataFrame, dict]:
     """Apply finishing received/balance onto Existing PO pipeline (Balance_to_Dispatch)."""
     ep = _ensure_pipeline_columns(existing_po_df)
+    if not ep.empty and "OMS_SKU" in ep.columns:
+        ep["OMS_SKU"] = ep["OMS_SKU"].map(existing_po_merge_key)
+        ep = ep[ep["OMS_SKU"].astype(str).str.strip().str.len() > 0]
+        ep = dedupe_po_rows_by_sku(ep.reset_index(drop=True))
+
     fin = finishing_df.copy()
     if fin.empty:
         return ep, {"updated_skus": 0, "added_skus": 0, "left_units": 0}
 
     fin["OMS_SKU"] = fin["OMS_SKU"].map(existing_po_merge_key)
-    ep["OMS_SKU"] = ep["OMS_SKU"].map(existing_po_merge_key)
 
     updated = 0
     added = 0
@@ -306,7 +314,9 @@ def merge_finishing_into_existing_po(
     for c in ("PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"):
         ep[c] = pd.to_numeric(ep[c], errors="coerce").fillna(0).astype(int)
 
-    return ep.reset_index(drop=True), {
+    ep = dedupe_po_rows_by_sku(ep.reset_index(drop=True))
+
+    return ep, {
         "updated_skus": updated,
         "added_skus": added,
         "left_units": left_units,
@@ -329,11 +339,19 @@ def apply_finishing_receipt_import(
     ep = getattr(sess, "existing_po_df", None)
     if ep is None or not hasattr(ep, "empty"):
         ep = pd.DataFrame()
+    prev_name = str(getattr(sess, "finishing_receipt_filename", "") or "").strip()
+    file_key = str(filename or "").strip() or "finishing.xls"
+    replaced_previous = bool(prev_name)
+
     merged, apply_stats = merge_finishing_into_existing_po(ep, finishing_df)
 
     sess.existing_po_df = merged
-    sess.finishing_receipt_report = {**dict(report), **apply_stats}
-    sess.finishing_receipt_filename = str(filename or "").strip() or "finishing.xls"
+    sess.finishing_receipt_report = {
+        **dict(report),
+        **apply_stats,
+        "replaced_previous": replaced_previous,
+    }
+    sess.finishing_receipt_filename = file_key
     sess.finishing_receipt_uploaded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1
 
@@ -342,12 +360,15 @@ def apply_finishing_receipt_import(
     persist_existing_po_to_disk(sess)
 
     left = int(apply_stats.get("left_units") or 0)
+    action = "Updated" if replaced_previous else "Applied"
     msg = (
-        f"Finishing receipt applied: {apply_stats.get('updated_skus', 0):,} SKUs updated, "
+        f"Finishing receipt {action.lower()}: {apply_stats.get('updated_skus', 0):,} SKUs updated, "
         f"{apply_stats.get('added_skus', 0):,} added. "
         f"{left:,} units still at finishing (Balance to Dispatch). "
         "Click Calculate PO to refresh the PO table."
     )
+    if replaced_previous:
+        msg = f"Re-uploaded {file_key} — no duplicate rows. " + msg
     if left > 0:
         msg += f" ⚠ {int(report.get('non_clear_skus') or 0):,} SKUs have balance left."
 
