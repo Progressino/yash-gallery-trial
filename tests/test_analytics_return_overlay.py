@@ -167,3 +167,15 @@ def test_intelligence_hydrate_loads_overlay_from_disk(monkeypatch, tmp_path):
     _hydrate_session_for_intelligence(sess)
     assert not sess.po_return_overlay_df.empty
     assert int(sess.po_return_overlay_df["Return_Units"].sum()) == 25
+
+
+def test_annotate_partial_calendar_months_marks_incomplete_trailing_month():
+    from backend.routers.data import _annotate_partial_calendar_months
+
+    monthly = [
+        {"Month": "2026-05", "shipments": 18000, "refunds": 14000},
+        {"Month": "2026-06", "shipments": 2500, "refunds": 900},
+    ]
+    _annotate_partial_calendar_months(monthly, pd.Timestamp("2026-06-04"))
+    assert monthly[1].get("partial") is True
+    assert "2026-06-04" in monthly[1].get("partial_note", "")

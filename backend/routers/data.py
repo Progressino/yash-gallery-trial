@@ -2139,6 +2139,8 @@ def full_restore_session(
 
 def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     """Build coverage flags from current session state (no restore side effects)."""
+    import pandas as pd
+
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
     from ..services.existing_po import (
@@ -3604,7 +3606,7 @@ def _annotate_partial_calendar_months(monthly_records: list, max_date) -> None:
         return
     end = pd.Timestamp(max_date).normalize()
     month_key = "Month" if monthly_records and "Month" in monthly_records[0] else "month"
-    last_period = end.to_period("M").astype(str)
+    last_period = str(end.to_period("M"))
     month_end = (end.to_period("M").to_timestamp("M")).normalize()
     if end >= month_end:
         return
@@ -3893,6 +3895,8 @@ def get_inventory(
     limit: int = 500,
 ):
     sess = _sess(request)
+    import pandas as pd
+
     inv_status = getattr(sess, "inventory_upload_status", "idle") or "idle"
     if inv_status == "running":
         return {
