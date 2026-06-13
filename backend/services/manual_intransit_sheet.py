@@ -357,20 +357,9 @@ def apply_manual_intransit_overlay_to_inventory(sess) -> None:
         else:
             merged[col] = 0
 
-    inv_cols = [
-        c
-        for c in merged.columns
-        if c.endswith("_Inventory")
-        or c.endswith("_Live")
-        or c.endswith("_InTransit")
-        or c == "Buffer_Stock"
-    ]
-    mkt_cols = [c for c in inv_cols if "OMS" not in c and c != "Buffer_Stock"]
-    merged["Marketplace_Total"] = merged[mkt_cols].sum(axis=1) if mkt_cols else 0
-    oms_inv = merged.get("OMS_Inventory", pd.Series(0, index=merged.index))
-    merged["Total_Inventory"] = pd.to_numeric(oms_inv, errors="coerce").fillna(0) + merged[
-        "Marketplace_Total"
-    ]
+    from .inventory import recompute_inventory_totals
+
+    merged = recompute_inventory_totals(merged)
 
     # Keep SKUs that have on-hand stock OR manual in-transit / not-in-inventory qty.
     keep = (

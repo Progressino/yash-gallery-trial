@@ -1442,19 +1442,11 @@ def load_inventory_consolidated(
     for d in inv_dfs[1:]:
         consolidated = pd.merge(consolidated, d, on="OMS_SKU", how="outer")
 
-    inv_cols = [
-        c for c in consolidated.columns
-        if c.endswith("_Inventory") or c.endswith("_Live") or c.endswith("_InTransit")
-           or c == "Buffer_Stock"
-    ]
-    consolidated[inv_cols] = consolidated[inv_cols].fillna(0)
+    inv_cols = inventory_source_columns(consolidated)
+    if inv_cols:
+        consolidated[inv_cols] = consolidated[inv_cols].fillna(0)
 
-    mkt_cols = [c for c in inv_cols if "OMS" not in c and c != "Buffer_Stock"]
-    consolidated["Marketplace_Total"] = consolidated[mkt_cols].sum(axis=1) if mkt_cols else 0
-    oms_inv    = consolidated.get("OMS_Inventory", pd.Series(0, index=consolidated.index))
-    # Buffer_Stock is shown as a separate informational column but NOT added to Total_Inventory.
-    # OMS exports "Inventory" as the complete figure; adding Buffer_Stock would double-count it.
-    consolidated["Total_Inventory"] = oms_inv + consolidated["Marketplace_Total"]
+    consolidated = recompute_inventory_totals(consolidated)
 
     if group_by_parent:
         consolidated["Parent_SKU"] = consolidated["OMS_SKU"].apply(get_parent_sku)
@@ -1474,6 +1466,55 @@ def load_inventory_consolidated(
 
 _COMPUTED_COLS = {"Total_Inventory", "Marketplace_Total"}
 _FIXED_COLS    = {"OMS_SKU", "OMS_Inventory", "Buffer_Stock"}
+_EXTRA_MKT_COLS = frozenset({"Manual_InTransit", "Not_In_Inventory_Qty"})
+
+
+def inventory_source_columns(df: pd.DataFrame) -> list[str]:
+    """Physical stock columns (excludes computed totals like Total_Inventory)."""
+    cols: list[str] = []
+    for c in df.columns:
+        if c in _COMPUTED_COLS or c == "OMS_SKU":
+            continue
+        if (
+            c in _EXTRA_MKT_COLS
+            or c.endswith("_Live")
+            or c.endswith("_InTransit")
+            or c.endswith("_Inventory")
+            or c == "Buffer_Stock"
+        ):
+            cols.append(c)
+    return cols
+
+
+def marketplace_total_columns(df: pd.DataFrame) -> list[str]:
+    """Columns summed into Marketplace_Total (OMS warehouse + buffer are excluded)."""
+    return [
+        c
+        for c in inventory_source_columns(df)
+        if c != "Buffer_Stock" and "oms" not in c.lower()
+    ]
+
+
+def recompute_inventory_totals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Derive Marketplace_Total and Total_Inventory from source columns.
+
+    Buffer_Stock is informational only. Manual in-transit and not-in-inventory qty
+    count toward marketplace total. Never sum the existing Total_Inventory column
+    into Marketplace_Total (that would double-count).
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    src_cols = inventory_source_columns(out)
+    if src_cols:
+        for col in src_cols:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    mkt_cols = marketplace_total_columns(out)
+    out["Marketplace_Total"] = out[mkt_cols].sum(axis=1) if mkt_cols else 0
+    oms_inv = pd.to_numeric(out.get("OMS_Inventory", 0), errors="coerce").fillna(0)
+    out["Total_Inventory"] = oms_inv + out["Marketplace_Total"]
+    return out
 
 
 def merge_inventory_update(existing: pd.DataFrame, update: pd.DataFrame) -> pd.DataFrame:
@@ -1508,15 +1549,6 @@ def merge_inventory_update(existing: pd.DataFrame, update: pd.DataFrame) -> pd.D
             result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
 
     # Recompute totals
-    inv_cols = [
-        c for c in result.columns
-        if c.endswith("_Inventory") or c.endswith("_Live") or c.endswith("_InTransit")
-           or c == "Buffer_Stock"
-    ]
-    mkt_cols = [c for c in inv_cols if "OMS" not in c and c != "Buffer_Stock"]
-    result["Marketplace_Total"] = result[mkt_cols].sum(axis=1) if mkt_cols else 0
-    oms_inv   = result.get("OMS_Inventory", pd.Series(0, index=result.index))
-    # Buffer_Stock is informational only — not added to Total_Inventory (would double-count OMS figure)
-    result["Total_Inventory"] = oms_inv + result["Marketplace_Total"]
+    result = recompute_inventory_totals(result)
 
     return result[result["Total_Inventory"] > 0].reset_index(drop=True)
