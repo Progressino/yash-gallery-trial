@@ -120,6 +120,7 @@ const PO_DISPLAY_COLS = [
   'Recent_ADS', 'LY_ADS', 'Seasonal_Month_ADS', 'Flat30_ADS', 'ADS',
   'Cutting_Ratio', 'Gross_PO_Qty',
   'PO_Qty_Ordered', 'Pending_Cutting', 'Balance_to_Dispatch',
+  'Finishing_Balance', 'Finishing_Received', 'Finishing_Issue_No', 'Finishing_Iss_Date',
   'PO_Pipeline_Total',
   'PO_Raised_On_View_Date', 'PO_Last_Raised_Qty', 'PO_Last_Raised_Date',
   'PO_Raised_Yesterday', 'PO_Raised_Today', 'PO_Confirmed_Raise_Pipeline', 'PO_Pipeline_Effective',
@@ -151,6 +152,10 @@ const COL_LABEL: Record<string, string> = {
   'PO_Qty_Ordered':           '📋 PO Ordered (on sheet)',
   'Pending_Cutting':          '✂️ Pend. Cutting',
   'Balance_to_Dispatch':      '📦 Bal. Dispatch',
+  'Finishing_Balance':        '✨ Finishing left',
+  'Finishing_Received':       '✅ Finishing received',
+  'Finishing_Issue_No':       '🔖 Issue No',
+  'Finishing_Iss_Date':       '📅 Issue date',
   'Projected_Running_Days':   '📅 Proj. run (Tot inv + pipe) / ADS',
   'Post_PO_Cover_Days_Capped':'📏 Post-PO cover (actual)',
   'Cutting_Ratio':            '✂️ Cut Ratio',
@@ -1897,9 +1902,12 @@ export default function POEngine() {
                       const sku      = String(row['OMS_SKU'])
                       const priority = String(row['Priority'] ?? '')
                       const isSelected = selected.has(sku)
+                      const finishingLeft = Number(row['Finishing_Balance'] ?? 0)
                       const rowBg =
                         isSelected
                           ? 'bg-blue-50'
+                          : finishingLeft > 0
+                          ? 'bg-orange-50 ring-1 ring-inset ring-orange-200'
                           : priority === '🔴 URGENT'      ? 'bg-red-50'
                           : priority === '🟡 HIGH'        ? 'bg-yellow-50'
                           : priority === '🟢 MEDIUM'      ? 'bg-amber-50'
@@ -1952,6 +1960,18 @@ export default function POEngine() {
                                           ? Number(row[col] ?? 0) > 0
                                             ? <span className="text-xs font-semibold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{Number(row[col]).toLocaleString()}</span>
                                             : <span className="text-gray-300">—</span>
+                                          : col === 'Finishing_Balance'
+                                            ? Number(row[col] ?? 0) > 0
+                                              ? <span className="text-xs font-bold text-orange-800 bg-orange-100 px-1.5 py-0.5 rounded border border-orange-200">{Number(row[col]).toLocaleString()} left</span>
+                                              : <span className="text-gray-300">—</span>
+                                            : col === 'Finishing_Received'
+                                              ? Number(row[col] ?? 0) > 0
+                                                ? <span className="text-xs font-semibold text-green-700">{Number(row[col]).toLocaleString()}</span>
+                                                : <span className="text-gray-300">—</span>
+                                              : col === 'Finishing_Issue_No' || col === 'Finishing_Iss_Date'
+                                                ? String(row[col] ?? '').trim()
+                                                  ? <span className="text-xs font-mono text-gray-600">{String(row[col])}</span>
+                                                  : <span className="text-gray-300">—</span>
                                           : col === 'Cutting_Ratio'
                                             ? Number(row[col] ?? 0) > 0
                                               ? <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">

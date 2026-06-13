@@ -7,7 +7,7 @@ import type { RestoreProgressTick } from '../api/client'
 import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
-  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
+  uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadFinishingReceipt, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, uploadPoManualIntransitSheet,
   type ManualIntransitParseReport,
   waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, verifyDailyUpload,
@@ -995,6 +995,7 @@ export default function Upload() {
         </UploadCard>
 
         {allowAdminBaseline ? (
+        <>
         <UploadCard
           title="📦 Existing PO Sheet"
           subtitle={
@@ -1108,6 +1109,86 @@ export default function Upload() {
             uploading={loading['existingpo']}
           />
         </UploadCard>
+
+        <UploadCard
+          title="✨ Finishing Receipt (production)"
+          subtitle={
+            coverage.finishing_receipt_report?.balance_units
+              ? `${(coverage.finishing_receipt_report.balance_units ?? 0).toLocaleString()} units still at finishing — updates PO Balance to Dispatch`
+              : 'Finishing Dept export (DesignCd + Size, IssQty / RecQty / BalQty, Issueno, JO No)'
+          }
+          loaded={!!coverage.finishing_receipt_uploaded_at}
+          rows={coverage.finishing_receipt_report?.skus}
+          rowsUnit="SKUs"
+        >
+          {(coverage.finishing_receipt_filename || coverage.finishing_receipt_uploaded_at) && (
+            <div className="text-[11px] text-gray-500 mb-2">
+              Last uploaded:{' '}
+              <span className="font-semibold text-gray-700">
+                {coverage.finishing_receipt_filename || 'Finishing receipt'}
+              </span>
+              {coverage.finishing_receipt_report?.issue_numbers?.length ? (
+                <span className="text-gray-600">
+                  {' '}
+                  · Issue #{coverage.finishing_receipt_report.issue_numbers.join(', ')}
+                </span>
+              ) : null}
+              {coverage.finishing_receipt_uploaded_at ? (
+                <span className="text-gray-400">
+                  {' '}
+                  ({new Date(coverage.finishing_receipt_uploaded_at).toLocaleString()})
+                </span>
+              ) : null}
+            </div>
+          )}
+          {coverage.finishing_receipt_report?.left_units ? (
+            <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-2">
+              <strong>{(coverage.finishing_receipt_report.left_units ?? 0).toLocaleString()}</strong> units still
+              at finishing across{' '}
+              <strong>{(coverage.finishing_receipt_report.non_clear_skus ?? 0).toLocaleString()}</strong> SKUs.
+              Re-upload when more goods are received.
+            </p>
+          ) : null}
+          <p className="text-[11px] text-slate-600 mb-2 leading-relaxed">
+            Upload after production issues goods to Finishing. <strong>BalQty</strong> becomes{' '}
+            <strong>Balance to Dispatch</strong> on the Existing PO sheet. Click <strong>Calculate PO</strong>{' '}
+            to refresh requirements. MTR invoice dates will reduce pipeline when stock is dispatched to marketplaces.
+          </p>
+          <FileUpload
+            label="Upload Finishing .xls / .xlsx"
+            accept={{
+              'application/vnd.ms-excel': ['.xls'],
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            }}
+            onUpload={async (file: File) => {
+              setL('finishing_receipt', true)
+              try {
+                await withUploadGuard(async () => {
+                  const res = await uploadFinishingReceipt(file)
+                  if (res.ok) {
+                    showToast('success', res.message || 'Finishing receipt applied.', 8000)
+                    setCoverage({
+                      existing_po: true,
+                      existing_po_generation: res.existing_po_generation ?? coverage.existing_po_generation,
+                      existing_po_needs_recalc: true,
+                      finishing_receipt_uploaded_at: new Date().toISOString(),
+                      finishing_receipt_filename: file.name,
+                    })
+                    await refresh()
+                  } else {
+                    showToast('error', res.message || 'Upload failed', 10_000)
+                  }
+                })
+              } catch (e: unknown) {
+                showToast('error', e instanceof Error ? e.message : 'Upload failed')
+              } finally {
+                setL('finishing_receipt', false)
+              }
+            }}
+            uploading={loading['finishing_receipt']}
+          />
+        </UploadCard>
+        </>
         ) : (
           <div className="col-span-2 bg-white rounded-xl border border-amber-100 p-5 shadow-sm space-y-2">
             <h3 className="font-semibold text-[#002B5B] text-sm">📦 Existing PO Sheet</h3>

@@ -2477,6 +2477,61 @@ async def upload_existing_po(
         return UploadResponse(ok=False, message=f"Failed to parse Existing PO: {e}")
 
 
+@router.post("/finishing-receipt", response_model=UploadResponse)
+async def upload_finishing_receipt(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
+    """Admin: Finishing Dept receipt export — updates Existing PO Balance_to_Dispatch."""
+    sess = _get_session(request)
+    try:
+        file_bytes = await file.read()
+        orig_fn = file.filename or "finishing.xls"
+
+        def work():
+            from ..services.finishing_receipt import (
+                apply_finishing_receipt_import,
+                parse_finishing_receipt_workbook,
+            )
+
+            finishing_df, report = parse_finishing_receipt_workbook(
+                file_bytes,
+                orig_fn,
+                sku_mapping=sess.sku_mapping or None,
+            )
+            out = apply_finishing_receipt_import(
+                sess,
+                finishing_df,
+                report,
+                filename=orig_fn,
+            )
+            _session_data_changed(sess)
+            return UploadResponse(
+                ok=True,
+                message=out.get("message") or "Finishing receipt applied.",
+                rows=out.get("rows"),
+                existing_po_uploaded_at=getattr(sess, "existing_po_uploaded_at", None),
+                existing_po_generation=out.get("existing_po_generation"),
+                validation_warnings=(
+                    [f"{out.get('left_units', 0):,} units still at finishing"]
+                    if int(out.get("left_units") or 0) > 0
+                    else None
+                ),
+            )
+
+        resp = await _session_lock_apply(sess, work)
+        if resp.ok:
+            sid = getattr(request.state, "session_id", None)
+            background_tasks.add_task(_persist_existing_po_after_upload, sess, sid)
+        return resp
+    except ValueError as e:
+        return UploadResponse(ok=False, message=str(e))
+    except Exception as e:
+        _log.warning("finishing-receipt parse failed: %s", e, exc_info=True)
+        return UploadResponse(ok=False, message=f"Failed to parse Finishing receipt: {e}")
+
+
 @router.post("/cogs", response_model=UploadResponse)
 async def upload_cogs(request: Request, file: UploadFile = File(...)):
     sess = _get_session(request)

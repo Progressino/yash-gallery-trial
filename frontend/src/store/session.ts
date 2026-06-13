@@ -65,6 +65,9 @@ const empty: CoverageResponse = {
   existing_po_needs_recalc: false,
   existing_po_per_size_skus: 0,
   existing_po_looks_aggregated: false,
+  finishing_receipt_uploaded_at: undefined,
+  finishing_receipt_filename: undefined,
+  finishing_receipt_report: undefined,
   daily_inventory_upload_status: 'idle',
   daily_inventory_upload_message: '',
 }

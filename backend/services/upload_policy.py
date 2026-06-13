@@ -52,6 +52,7 @@ _PO_ADMIN_BASELINE_PREFIXES = (
     "/api/po/daily-inventory-history",
     "/api/po/sku-status-lead",
     "/api/po/manual-intransit-sheet",
+    "/api/upload/finishing-receipt",
 )
 
 _DELETE_DENIED_MSG = (

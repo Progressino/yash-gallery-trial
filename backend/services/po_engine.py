@@ -1472,10 +1472,24 @@ def calculate_po_base(
             c for c in ["PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch"]
             if c in _ep_prepared.columns
         ]
-        _merge_cols = ["OMS_SKU", "PO_Pipeline_Total"] + _breakdown_cols
+        _finishing_cols = [
+            c
+            for c in [
+                "Finishing_Issued",
+                "Finishing_Received",
+                "Finishing_Balance",
+                "Finishing_Issue_No",
+                "Finishing_Iss_Date",
+                "Finishing_JO_No",
+                "Finishing_JO_Date",
+                "Finishing_Status",
+            ]
+            if c in _ep_prepared.columns
+        ]
+        _merge_cols = ["OMS_SKU", "PO_Pipeline_Total"] + _breakdown_cols + _finishing_cols
         if not _ep_prepared.empty:
             _ep_merge = _ep_prepared[_merge_cols].drop_duplicates(subset=["OMS_SKU"], keep="last")
-            po_df = po_df.drop(columns=["PO_Pipeline_Total"] + _breakdown_cols, errors="ignore")
+            po_df = po_df.drop(columns=["PO_Pipeline_Total"] + _breakdown_cols + _finishing_cols, errors="ignore")
             po_df = pd.merge(po_df, _ep_merge, on="OMS_SKU", how="left")
             po_df = unbundle_inventory_rows_for_existing_po(
                 po_df, _ep_prepared, _breakdown_cols, canonical_fn=existing_po_merge_key
@@ -1503,6 +1517,17 @@ def calculate_po_base(
         ).fillna(0).astype(int)
         for _bc in _breakdown_cols:
             po_df[_bc] = pd.to_numeric(po_df[_bc], errors="coerce").fillna(0).astype(int)
+        for _fc in _finishing_cols:
+            if _fc in (
+                "Finishing_Issue_No",
+                "Finishing_Iss_Date",
+                "Finishing_JO_No",
+                "Finishing_JO_Date",
+                "Finishing_Status",
+            ):
+                po_df[_fc] = po_df[_fc].fillna("").astype(str)
+            else:
+                po_df[_fc] = pd.to_numeric(po_df[_fc], errors="coerce").fillna(0).astype(int)
     else:
         po_df["PO_Pipeline_Total"] = 0
 

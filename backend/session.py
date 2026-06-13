@@ -47,6 +47,9 @@ class AppSession:
     manual_intransit_parse_report: dict = field(default_factory=dict)
     manual_intransit_uploaded_at: str = ""
     manual_intransit_filename: str = ""
+    finishing_receipt_report: dict = field(default_factory=dict)
+    finishing_receipt_uploaded_at: str = ""
+    finishing_receipt_filename: str = ""
     transfer_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     cogs_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 

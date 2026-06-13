@@ -69,6 +69,9 @@ class CoverageResponse(BaseModel):
     manual_intransit_uploaded_at: Optional[str] = None
     manual_intransit_filename: Optional[str] = None
     manual_intransit_parse_report: Optional[dict] = None
+    finishing_receipt_uploaded_at: Optional[str] = None
+    finishing_receipt_filename: Optional[str] = None
+    finishing_receipt_report: Optional[dict] = None
     po_raise_ledger_rows: int = 0
     return_sheet_skus: int = 0
     return_sheet_units: int = 0

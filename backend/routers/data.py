@@ -2240,6 +2240,15 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         manual_intransit_parse_report=(
             dict(getattr(sess, "manual_intransit_parse_report", None) or {}) or None
         ),
+        finishing_receipt_uploaded_at=(
+            (getattr(sess, "finishing_receipt_uploaded_at", "") or None) or None
+        ),
+        finishing_receipt_filename=(
+            (getattr(sess, "finishing_receipt_filename", "") or None) or None
+        ),
+        finishing_receipt_report=(
+            dict(getattr(sess, "finishing_receipt_report", None) or {}) or None
+        ),
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
         return_sheet_skus=(
             int(len(_ret_agg))

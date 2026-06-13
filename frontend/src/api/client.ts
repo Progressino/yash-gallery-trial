@@ -71,6 +71,9 @@ export interface CoverageResponse {
   manual_intransit_uploaded_at?: string | null
   manual_intransit_filename?: string | null
   manual_intransit_parse_report?: ManualIntransitParseReport | null
+  finishing_receipt_uploaded_at?: string | null
+  finishing_receipt_filename?: string | null
+  finishing_receipt_report?: FinishingReceiptReport | null
   po_raise_ledger_rows?: number
   return_sheet_skus?: number
   return_sheet_units?: number
@@ -309,6 +312,21 @@ export async function uploadExistingPO(
     throw new Error(_errMessage(e, 'Existing PO upload failed'))
   }
 }
+
+export async function uploadFinishingReceipt(file: File): Promise<UploadResponse> {
+  const fd = new FormData()
+  fd.append('file', file)
+  try {
+    const { data } = await api.post<UploadResponse>('/upload/finishing-receipt', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+    })
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'Finishing receipt upload failed'))
+  }
+}
+
 export const uploadSnapdeal   = (file: File) => uploadFile('/upload/snapdeal', file)
 
 export async function uploadInventoryAuto(
@@ -725,6 +743,21 @@ export type UploadSkipDetail = {
   rows_affected?: number
   filename?: string
   status?: string
+}
+
+export type FinishingReceiptReport = {
+  filename?: string
+  rows_read?: number
+  skus?: number
+  issued_units?: number
+  received_units?: number
+  balance_units?: number
+  left_units?: number
+  non_clear_skus?: number
+  issue_numbers?: string[]
+  report_date?: string
+  updated_skus?: number
+  added_skus?: number
 }
 
 export type ManualIntransitParseReport = {
