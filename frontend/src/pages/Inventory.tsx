@@ -299,6 +299,41 @@ export default function Inventory() {
         </ul>
       )}
 
+      {(coverage.inventory_upload_file_results ?? []).some(r => r.status === 'skipped') ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-950 space-y-1">
+          <p className="font-semibold text-amber-900 text-xs uppercase tracking-wide">
+            Skipped files from last inventory upload
+          </p>
+          <div className="max-h-40 overflow-y-auto space-y-1 text-xs">
+            {(coverage.inventory_upload_file_results ?? [])
+              .filter(r => r.status === 'skipped')
+              .map((r, i) => (
+                <p key={i}>
+                  <span className="font-medium">{r.filename}</span>
+                  {r.reason ? `: ${r.reason}` : ''}
+                </p>
+              ))}
+          </div>
+        </div>
+      ) : null}
+
+      {coverage.manual_intransit_sheet &&
+      (coverage.manual_intransit_parse_report?.skip_details?.length ?? 0) > 0 ? (
+        <div className="rounded-lg border border-blue-200 bg-blue-50/80 px-4 py-3 text-sm text-blue-950 space-y-1">
+          <p className="font-semibold text-xs uppercase tracking-wide text-blue-800">
+            Manual in-transit sheet — skip details
+          </p>
+          <div className="max-h-32 overflow-y-auto text-xs space-y-0.5">
+            {(coverage.manual_intransit_parse_report?.skip_details ?? []).map((d, i) => (
+              <p key={i}>
+                <span className="font-medium">{d.sheet}</span>: {d.reason}
+                {d.rows_affected ? ` (${d.rows_affected} rows)` : ''}
+              </p>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {snapshotLabel && snapshotSources.length > 0 && (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
           <span className="font-medium text-gray-700">Date from: </span>

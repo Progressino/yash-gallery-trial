@@ -176,6 +176,99 @@ def po_get_sku_status_lead(request: Request):
     }
 
 
+@router.post("/manual-intransit-sheet")
+async def po_upload_manual_intransit_sheet(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
+    """Admin: upload Intrasit + Not In Inventory workbook (replaces prior upload — no duplicate rows)."""
+    from ..services.manual_intransit_sheet import (
+        apply_manual_intransit_import,
+        parse_manual_intransit_workbook,
+    )
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    raw = await file.read()
+    if not raw:
+        return {"ok": False, "message": "Empty file."}
+
+    intransit_df, not_in_df, report = parse_manual_intransit_workbook(
+        raw,
+        file.filename or "manual_intransit.xlsx",
+        sku_mapping=sess.sku_mapping or None,
+    )
+    if report.get("error") and intransit_df.empty and not_in_df.empty:
+        return {
+            "ok": False,
+            "message": str(report["error"]),
+            "parse_report": report,
+        }
+
+    out = apply_manual_intransit_import(
+        sess,
+        intransit_df,
+        not_in_df,
+        report,
+        filename=file.filename or "manual_intransit.xlsx",
+    )
+    if not out.get("ok"):
+        return out
+
+    sess._quarterly_cache.clear()
+    _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
+    try:
+        import backend.main as _main
+
+        _main.merge_po_optional_sheets_into_warm_cache(sess)
+        _main.merge_inventory_into_warm_cache(sess)
+    except Exception:
+        logging.getLogger(__name__).exception("warm cache after manual intransit upload failed")
+    return out
+
+
+@router.get("/manual-intransit-sheet")
+def po_get_manual_intransit_sheet(request: Request):
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "loaded": False}
+    try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+
+        ensure_po_sidecars_hydrated(sess)
+        import backend.main as _main
+
+        _main.restore_po_sidecars_from_warm(sess)
+    except Exception:
+        pass
+    df = getattr(sess, "manual_intransit_overlay_df", None)
+    report = getattr(sess, "manual_intransit_parse_report", None) or {}
+    if df is None or df.empty:
+        return {
+            "ok": True,
+            "loaded": False,
+            "parse_report": report,
+            "filename": getattr(sess, "manual_intransit_filename", "") or "",
+            "uploaded_at": getattr(sess, "manual_intransit_uploaded_at", "") or "",
+        }
+    return {
+        "ok": True,
+        "loaded": True,
+        "filename": getattr(sess, "manual_intransit_filename", "") or "",
+        "uploaded_at": getattr(sess, "manual_intransit_uploaded_at", "") or "",
+        "columns": list(df.columns),
+        "rows": df.fillna("").to_dict("records"),
+        "skus": int(len(df)),
+        "intransit_units": int(pd.to_numeric(df.get("Manual_InTransit"), errors="coerce").fillna(0).sum()),
+        "not_in_inventory_units": int(
+            pd.to_numeric(df.get("Not_In_Inventory_Qty"), errors="coerce").fillna(0).sum()
+        ),
+        "parse_report": report,
+    }
+
+
 @router.post("/daily-inventory-history")
 async def po_upload_daily_inventory_history(
     request: Request,

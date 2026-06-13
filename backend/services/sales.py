@@ -1661,6 +1661,103 @@ def _refund_buckets_for_platform(
     return total, by_month, by_day
 
 
+def _return_sheet_refund_buckets_for_platform(
+    sales_df: Optional[pd.DataFrame],
+    platform_name: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> tuple[int, Dict[str, int], Dict[str, int]]:
+    """
+    Refund units from PO return overlay already injected into unified sales
+    (OrderId=RETURN_SHEET, Source=marketplace).
+    """
+    total = 0
+    by_month: Dict[str, int] = {}
+    by_day: Dict[str, int] = {}
+    if sales_df is None or sales_df.empty:
+        return total, by_month, by_day
+    if not {"Source", "Transaction Type", "Quantity"}.issubset(sales_df.columns):
+        return total, by_month, by_day
+
+    prep = sales_df.copy()
+    prep["TxnDate"] = txn_reporting_naive_ist(prep["TxnDate"])
+    prep = prep.dropna(subset=["TxnDate"])
+    if start_date or end_date:
+        prep = _filter_by_reporting_days(prep, "TxnDate", start_date, end_date)
+
+    src = prep["Source"].astype(str).str.strip() == platform_name
+    txn = prep["Transaction Type"].astype(str).str.strip() == "Refund"
+    oid = (
+        prep["OrderId"].astype(str).str.strip()
+        if "OrderId" in prep.columns
+        else pd.Series("", index=prep.index, dtype=str)
+    )
+    sub = prep.loc[src & txn & oid.eq(RETURN_SHEET_ORDER_PLACEHOLDER)]
+    if sub.empty:
+        return total, by_month, by_day
+
+    qty = pd.to_numeric(sub["Quantity"], errors="coerce").fillna(0).astype(int)
+    for idx, row in sub.iterrows():
+        q = int(qty.loc[idx] or 0)
+        if q <= 0:
+            continue
+        total += q
+        d = str(txn_reporting_naive_ist(row["TxnDate"]).iloc[0].normalize())[:10]
+        if len(d) == 10:
+            by_day[d] = by_day.get(d, 0) + q
+            by_month[d[:7]] = by_month.get(d[:7], 0) + q
+    return total, by_month, by_day
+
+
+def _subtract_refund_buckets(
+    primary: tuple[int, Dict[str, int], Dict[str, int]],
+    subtract: tuple[int, Dict[str, int], Dict[str, int]],
+) -> tuple[int, Dict[str, int], Dict[str, int]]:
+    """Subtract already-counted return buckets (floor at zero per key)."""
+    p_total, p_month, p_day = primary
+    s_total, s_month, s_day = subtract
+    total = max(0, int(p_total) - int(s_total))
+    by_month = {k: max(0, int(v) - int(s_month.get(k, 0))) for k, v in p_month.items()}
+    by_day = {k: max(0, int(v) - int(s_day.get(k, 0))) for k, v in p_day.items()}
+    by_month = {k: v for k, v in by_month.items() if v > 0}
+    by_day = {k: v for k, v in by_day.items() if v > 0}
+    return total, by_month, by_day
+
+
+def _supplemental_overlay_refund_buckets(
+    platform_name: str,
+    overlay: Optional[pd.DataFrame],
+    sales_df: Optional[pd.DataFrame],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    *,
+    fallback_as_of: Optional[str] = None,
+    subtract_sales_overlay: bool = False,
+) -> tuple[int, Dict[str, int], Dict[str, int]]:
+    """
+    Overlay return units not already counted in unified sales RETURN_SHEET rows.
+
+    Platform analytics (raw flipkart_df base) should pass subtract_sales_overlay=False
+    and sales_df=None — only the overlay file tops up native marketplace refunds.
+    Intelligence cards built from unified sales_df should pass subtract_sales_overlay=True
+    so overlay is not added twice after build_sales_df injected RETURN_SHEET refunds.
+    """
+    ov = _refund_buckets_for_platform(
+        platform_name,
+        overlay,
+        None,
+        start_date,
+        end_date,
+        fallback_as_of=fallback_as_of,
+    )
+    if not subtract_sales_overlay or sales_df is None or sales_df.empty:
+        return ov
+    syn = _return_sheet_refund_buckets_for_platform(
+        sales_df, platform_name, start_date, end_date
+    )
+    return _subtract_refund_buckets(ov, syn)
+
+
 def _patch_monthly_refunds(monthly: List[dict], by_month: Dict[str, int]) -> None:
     for ym, extra in by_month.items():
         if extra <= 0:
@@ -1724,13 +1821,14 @@ def merge_return_data_into_platform_summaries(
     out: List[dict] = []
     for card in summaries:
         name = str(card.get("platform") or "")
-        extra, by_month, by_day = _refund_buckets_for_platform(
+        extra, by_month, by_day = _supplemental_overlay_refund_buckets(
             name,
             overlay,
             sales,
             start_date,
             end_date,
             fallback_as_of=fallback_as_of,
+            subtract_sales_overlay=sales is not None and not sales.empty,
         )
         if extra <= 0:
             out.append(card)
@@ -1756,18 +1854,21 @@ def overlay_refunds_by_calendar_month(
     platform_key: str,
     *,
     fallback_as_of: Optional[str] = None,
+    sales_df: Optional[pd.DataFrame] = None,
+    subtract_sales_overlay: bool = False,
 ) -> Dict[str, int]:
     """Monthly refund totals from overlay for platform analytics (Month -> units)."""
     if overlay is None or overlay.empty:
         return {}
     display = RETURN_PLATFORM_TO_SOURCE.get(platform_key, "")
-    _, by_month, _ = _refund_buckets_for_platform(
+    _, by_month, _ = _supplemental_overlay_refund_buckets(
         display,
         overlay,
-        None,
+        sales_df,
         None,
         None,
         fallback_as_of=fallback_as_of,
+        subtract_sales_overlay=subtract_sales_overlay,
     )
     return by_month
 

@@ -50,6 +50,7 @@ class CoverageResponse(BaseModel):
     existing_po: bool = False
     sku_status_lead: bool = False
     daily_inventory_history: bool = False
+    manual_intransit_sheet: bool = False
     po_raise_ledger: bool = False
     return_sheet: bool = False
     # row counts for loaded datasets
@@ -62,6 +63,12 @@ class CoverageResponse(BaseModel):
     sku_status_lead_rows: int = 0
     daily_inventory_history_rows: int = 0
     daily_inventory_history_skus: int = 0
+    manual_intransit_skus: int = 0
+    manual_intransit_units: int = 0
+    manual_not_in_inventory_units: int = 0
+    manual_intransit_uploaded_at: Optional[str] = None
+    manual_intransit_filename: Optional[str] = None
+    manual_intransit_parse_report: Optional[dict] = None
     po_raise_ledger_rows: int = 0
     return_sheet_skus: int = 0
     return_sheet_units: int = 0

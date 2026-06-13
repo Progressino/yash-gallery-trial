@@ -51,6 +51,7 @@ _HISTORICAL_UPLOAD_PREFIXES = (
 _PO_ADMIN_BASELINE_PREFIXES = (
     "/api/po/daily-inventory-history",
     "/api/po/sku-status-lead",
+    "/api/po/manual-intransit-sheet",
 )
 
 _DELETE_DENIED_MSG = (

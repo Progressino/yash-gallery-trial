@@ -397,6 +397,17 @@ def _platform_df_max_iso(df) -> Optional[str]:
     return None
 
 
+def _platform_df_min_iso(df) -> Optional[str]:
+    import pandas as pd
+
+    from ..services.platform_session_window import platform_df_date_bounds
+
+    lo, _ = platform_df_date_bounds(df)
+    if lo is None:
+        return None
+    return str(pd.Timestamp(lo).date())
+
+
 def _sales_max_for_source(sales_df, source: str) -> Optional[str]:
     """Latest unified-sales calendar day for a marketplace ``Source``."""
     import pandas as pd
@@ -1576,10 +1587,14 @@ def _tier3_session_needs_topup(sess: AppSession) -> bool:
         if cur is None or not hasattr(cur, "empty") or cur.empty:
             return True
         tier_max = str(plat_sum.get("max_date") or "")[:10]
+        tier_min = str(plat_sum.get("min_date") or "")[:10]
         sess_max = _platform_df_max_iso(cur) or ""
+        sess_min = _platform_df_min_iso(cur) or ""
         src = _SOURCE_BY_ATTR.get(attr, "")
         sales_max = _sales_max_for_source(sales, src) or ""
         if tier_max and (not sess_max or tier_max > sess_max):
+            return True
+        if tier_min and (not sess_min or tier_min < sess_min):
             return True
         if tier_max and (not sales_max or tier_max > sales_max):
             return True
@@ -2179,6 +2194,7 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         existing_po=not sess.existing_po_df.empty,
         sku_status_lead=not sess.sku_status_lead_df.empty,
         daily_inventory_history=not sess.daily_inventory_history_df.empty,
+        manual_intransit_sheet=not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty,
         po_raise_ledger=bool(_po_ledger_ok),
         return_sheet=bool(_ret_ok),
         mtr_rows=len(sess.mtr_df),
@@ -2193,6 +2209,34 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
             int(sess.daily_inventory_history_df["OMS_SKU"].nunique())
             if not sess.daily_inventory_history_df.empty
             else 0
+        ),
+        manual_intransit_skus=(
+            int(len(sess.manual_intransit_overlay_df))
+            if not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty
+            else 0
+        ),
+        manual_intransit_units=(
+            int(pd.to_numeric(sess.manual_intransit_overlay_df.get("Manual_InTransit"), errors="coerce").fillna(0).sum())
+            if not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty
+            else 0
+        ),
+        manual_not_in_inventory_units=(
+            int(
+                pd.to_numeric(sess.manual_intransit_overlay_df.get("Not_In_Inventory_Qty"), errors="coerce")
+                .fillna(0)
+                .sum()
+            )
+            if not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty
+            else 0
+        ),
+        manual_intransit_uploaded_at=(
+            (getattr(sess, "manual_intransit_uploaded_at", "") or None) or None
+        ),
+        manual_intransit_filename=(
+            (getattr(sess, "manual_intransit_filename", "") or None) or None
+        ),
+        manual_intransit_parse_report=(
+            dict(getattr(sess, "manual_intransit_parse_report", None) or {}) or None
         ),
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
         return_sheet_skus=(
@@ -3477,27 +3521,19 @@ def _patch_analytics_monthly_returns(
     *,
     display_name: str,
 ) -> None:
-    """Merge PO return overlay + unified Refund rows into platform monthly analytics."""
-    from ..services.sales import (
-        _refund_buckets_for_platform,
-        overlay_refunds_by_calendar_month,
-    )
+    """Merge PO return overlay into platform monthly analytics (no double-count with sales)."""
+    from ..services.sales import overlay_refunds_by_calendar_month
 
     from ..services.po_return_import import aggregate_return_overlay_for_use
 
     overlay = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
-    sales = getattr(sess, "sales_df", None)
     fallback = str(getattr(sess, "return_overlay_as_of", "") or "")[:10] or None
-    _, sales_by_month, _ = _refund_buckets_for_platform(
-        display_name,
-        None,
-        sales,
-        None,
-        None,
-        fallback_as_of=fallback,
-    )
     ov_by_month = overlay_refunds_by_calendar_month(
-        overlay, platform_key, fallback_as_of=fallback
+        overlay,
+        platform_key,
+        fallback_as_of=fallback,
+        sales_df=None,
+        subtract_sales_overlay=False,
     )
     month_key = "Month"
 
@@ -3506,14 +3542,14 @@ def _patch_analytics_monthly_returns(
 
     for row in monthly_records:
         m = _month_of(row)
-        extra = int(ov_by_month.get(m, 0) or 0) + int(sales_by_month.get(m, 0) or 0)
+        extra = int(ov_by_month.get(m, 0) or 0)
         if extra <= 0:
             continue
         row["refunds"] = int(row.get("refunds") or 0) + extra
         row["net"] = int(row.get("shipments") or 0) - int(row["refunds"] or 0)
 
     known = {_month_of(r) for r in monthly_records}
-    for m, extra in {**ov_by_month, **sales_by_month}.items():
+    for m, extra in ov_by_month.items():
         if extra <= 0 or m in known:
             continue
         monthly_records.append(
@@ -3525,6 +3561,59 @@ def _patch_analytics_monthly_returns(
             }
         )
         known.add(m)
+
+
+def _ensure_platform_analytics_frame(sess: AppSession, platform: str, attr: str):
+    """Top up session platform frame from Tier-3 when warm-cache copy was trimmed."""
+    import pandas as pd
+
+    from ..services.daily_store import get_summary, load_platform_data, merge_platform_data
+
+    cur = getattr(sess, attr, None)
+    if cur is None or not hasattr(cur, "empty"):
+        cur = pd.DataFrame()
+    summary = get_summary().get(platform) or {}
+    if int(summary.get("file_count") or 0) <= 0:
+        return cur
+
+    tier_min = str(summary.get("min_date") or "")[:10]
+    tier_max = str(summary.get("max_date") or "")[:10]
+    sess_min = _platform_df_min_iso(cur) or ""
+    sess_max = _platform_df_max_iso(cur) or ""
+    needs_topup = (
+        cur.empty
+        or (tier_min and (not sess_min or tier_min < sess_min))
+        or (tier_max and (not sess_max or tier_max > sess_max))
+    )
+    if not needs_topup:
+        return cur
+
+    full = load_platform_data(platform, months=None, dedup=False)
+    if full.empty:
+        return cur
+    merged = merge_platform_data(cur, full, platform)
+    setattr(sess, attr, merged)
+    return merged
+
+
+def _annotate_partial_calendar_months(monthly_records: list, max_date) -> None:
+    """Mark the trailing calendar month when data does not run through month-end."""
+    import pandas as pd
+
+    if not monthly_records or max_date is None or pd.isna(max_date):
+        return
+    end = pd.Timestamp(max_date).normalize()
+    month_key = "Month" if monthly_records and "Month" in monthly_records[0] else "month"
+    last_period = end.to_period("M").astype(str)
+    month_end = (end.to_period("M").to_timestamp("M")).normalize()
+    if end >= month_end:
+        return
+    for row in monthly_records:
+        m = str(row.get(month_key) or row.get("month") or "")
+        if m == last_period:
+            row["partial"] = True
+            row["partial_note"] = f"Through {end.date().isoformat()} only"
+            break
 
 
 def _finalize_platform_analytics_monthly(
@@ -3636,7 +3725,7 @@ def mtr_analytics(request: Request):
 def myntra_analytics(request: Request):
     sess = _sess(request)
     _ensure_return_overlay_hydrated(sess)
-    df = sess.myntra_df
+    df = _ensure_platform_analytics_frame(sess, "myntra", "myntra_df")
     if df.empty:
         return {"loaded": False}
 
@@ -3671,6 +3760,7 @@ def myntra_analytics(request: Request):
     monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
         sess, monthly, "myntra", display_name="Myntra"
     )
+    _annotate_partial_calendar_months(monthly_records, df["Date"].max())
 
     return {
         "loaded":      True,
@@ -3692,7 +3782,7 @@ def myntra_analytics(request: Request):
 def meesho_analytics(request: Request):
     sess = _sess(request)
     _ensure_return_overlay_hydrated(sess)
-    df = sess.meesho_df
+    df = _ensure_platform_analytics_frame(sess, "meesho", "meesho_df")
     if df.empty:
         return {"loaded": False}
 
@@ -3721,6 +3811,7 @@ def meesho_analytics(request: Request):
     monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
         sess, monthly, "meesho", display_name="Meesho"
     )
+    _annotate_partial_calendar_months(monthly_records, df["Date"].max())
 
     return {
         "loaded":      True,
@@ -3741,7 +3832,7 @@ def meesho_analytics(request: Request):
 def flipkart_analytics(request: Request):
     sess = _sess(request)
     _ensure_return_overlay_hydrated(sess)
-    df = sess.flipkart_df
+    df = _ensure_platform_analytics_frame(sess, "flipkart", "flipkart_df")
     if df.empty:
         return {"loaded": False}
 
@@ -3776,6 +3867,7 @@ def flipkart_analytics(request: Request):
     monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
         sess, monthly, "flipkart", display_name="Flipkart"
     )
+    _annotate_partial_calendar_months(monthly_records, df["Date"].max())
 
     return {
         "loaded":      True,
@@ -3857,6 +3949,24 @@ def get_inventory(
         "marketplaces": marketplaces,
         "missing_marketplace_hints": inventory_missing_marketplace_warnings(dbg),
         "inventory_upload_warnings": upload_warnings,
+        "manual_intransit_loaded": not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty,
+        "manual_intransit_units": int(
+            pd.to_numeric(
+                getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).get("Manual_InTransit"),
+                errors="coerce",
+            ).fillna(0).sum()
+        )
+        if not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty
+        else 0,
+        "manual_not_in_inventory_units": int(
+            pd.to_numeric(
+                getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).get("Not_In_Inventory_Qty"),
+                errors="coerce",
+            ).fillna(0).sum()
+        )
+        if not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty
+        else 0,
+        "manual_intransit_parse_report": getattr(sess, "manual_intransit_parse_report", None) or None,
         **inventory_snapshot_meta_for_api(sess),
     }
 
@@ -3867,7 +3977,7 @@ def get_inventory(
 def snapdeal_analytics(request: Request, company: Optional[str] = None):
     sess = _sess(request)
     _ensure_return_overlay_hydrated(sess)
-    df = sess.snapdeal_df
+    df = _ensure_platform_analytics_frame(sess, "snapdeal", "snapdeal_df")
     if df.empty:
         return {"loaded": False}
 
@@ -3913,6 +4023,7 @@ def snapdeal_analytics(request: Request, company: Optional[str] = None):
     monthly_records, shipped, returned, net_units = _finalize_platform_analytics_monthly(
         sess, monthly, "snapdeal", display_name="Snapdeal"
     )
+    _annotate_partial_calendar_months(monthly_records, df["Date"].max())
 
     return {
         "loaded":      True,

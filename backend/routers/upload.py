@@ -310,7 +310,7 @@ def _incremental_sales_rebuild_from_buffers(
     Build sales only from this upload's parsed buffers (~thousands of rows),
     patch into existing sales_df — no 6-month SQLite reload, no full rebuild.
     """
-    from ..services.platform_session_window import trim_session_platform_frames
+    from ..services.platform_session_window import platform_frames_trimmed_for_sales_build
     from ..services.sales import (
         build_sales_df,
         patch_sales_df_after_daily_upload,
@@ -371,7 +371,6 @@ def _incremental_sales_rebuild_from_buffers(
         cur = getattr(sess, attr)
         setattr(sess, attr, _merge_platform_data(cur, combined, plat, source_filename=None))
 
-    trim_session_platform_frames(sess)
     sess._quarterly_cache.clear()
     _session_data_changed(sess)
     sess.daily_restored = False
@@ -433,7 +432,7 @@ def _rebuild_sales_sync(
 ) -> tuple[bool, str]:
     """Rebuild combined sales_df from platform frames. Caller should hold ``_daily_restore_lock``."""
     try:
-        from ..services.platform_session_window import trim_session_platform_frames
+        from ..services.platform_session_window import platform_frames_trimmed_for_sales_build
 
         if platforms_touched and _daily_auto_fast_ingest_enabled():
             buffers = getattr(sess, "_daily_auto_parsed_buffers", None) or {}
@@ -446,13 +445,13 @@ def _rebuild_sales_sync(
             _replace_touched_platforms_from_sqlite(sess, platforms_touched)
         elif refresh_sqlite:
             _sync_session_platforms_from_sqlite(sess)
-        trim_session_platform_frames(sess)
+        trimmed = platform_frames_trimmed_for_sales_build(sess)
         sess.sales_df = build_sales_df(
-            mtr_df=sess.mtr_df,
-            myntra_df=sess.myntra_df,
-            meesho_df=sess.meesho_df,
-            flipkart_df=sess.flipkart_df,
-            snapdeal_df=sess.snapdeal_df,
+            mtr_df=trimmed["mtr_df"],
+            myntra_df=trimmed["myntra_df"],
+            meesho_df=trimmed["meesho_df"],
+            flipkart_df=trimmed["flipkart_df"],
+            snapdeal_df=trimmed["snapdeal_df"],
             sku_mapping=sess.sku_mapping,
             **_sales_overlay_build_kwargs(sess),
         )
@@ -1973,6 +1972,13 @@ def _inventory_apply_parse_result(
 
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent = df_parent
+    try:
+        from ..services.manual_intransit_sheet import apply_manual_intransit_overlay_to_inventory
+
+        if not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty:
+            apply_manual_intransit_overlay_to_inventory(sess)
+    except Exception:
+        _log.exception("re-apply manual in-transit overlay after inventory snapshot failed")
     apply_inventory_snapshot_metadata(sess, file_parts, debug)
     refresh_inventory_api_cache(sess)
     sess._inventory_pre_upload_backup = None

@@ -64,6 +64,13 @@ export interface CoverageResponse {
   sku_status_lead_rows?: number
   daily_inventory_history_rows?: number
   daily_inventory_history_skus?: number
+  manual_intransit_sheet?: boolean
+  manual_intransit_skus?: number
+  manual_intransit_units?: number
+  manual_not_in_inventory_units?: number
+  manual_intransit_uploaded_at?: string | null
+  manual_intransit_filename?: string | null
+  manual_intransit_parse_report?: ManualIntransitParseReport | null
   po_raise_ledger_rows?: number
   return_sheet_skus?: number
   return_sheet_units?: number
@@ -709,6 +716,60 @@ export type DailyInventoryUploadResult = {
   days?: number
   min_date?: string
   max_date?: string
+}
+
+export type UploadSkipDetail = {
+  sheet?: string
+  kind?: string
+  reason?: string
+  rows_affected?: number
+  filename?: string
+  status?: string
+}
+
+export type ManualIntransitParseReport = {
+  filename?: string
+  sheets_found?: Array<{ sheet: string; kind: string; rows: number }>
+  sheets_skipped?: Array<{ sheet: string; reason: string }>
+  skip_details?: UploadSkipDetail[]
+  warnings?: string[]
+  intransit_units?: number
+  not_in_inventory_units?: number
+  intransit_skus?: number
+  not_in_inventory_skus?: number
+  error?: string
+}
+
+export type ManualIntransitUploadResult = {
+  ok: boolean
+  message?: string
+  skus?: number
+  intransit_units?: number
+  not_in_inventory_units?: number
+  parse_report?: ManualIntransitParseReport
+  replaced_previous?: boolean
+}
+
+/** Admin: Intrasit + Not In Inventory workbook (POST /po/manual-intransit-sheet). */
+export async function uploadPoManualIntransitSheet(
+  file: File,
+): Promise<ManualIntransitUploadResult> {
+  const fd = new FormData()
+  fd.append('file', file)
+  const { data } = await api.post<ManualIntransitUploadResult>(
+    '/po/manual-intransit-sheet',
+    fd,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: UPLOAD_TIMEOUT_MS },
+  )
+  return {
+    ok: !!data?.ok,
+    message: data?.message,
+    skus: data?.skus,
+    intransit_units: data?.intransit_units,
+    not_in_inventory_units: data?.not_in_inventory_units,
+    parse_report: data?.parse_report,
+    replaced_previous: data?.replaced_previous,
+  }
 }
 
 /** SKU / status / lead-time sheet for PO rules (POST /po/sku-status-lead). */

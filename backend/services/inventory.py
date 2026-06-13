@@ -179,6 +179,8 @@ _SNAPSHOT_MARKETPLACE_COLS = (
     ("Buffer_Stock", "Buffer stock"),
     ("Amazon_Inventory", "Amazon"),
     ("FBA_InTransit", "FBA in-transit"),
+    ("Manual_InTransit", "Manual in-transit"),
+    ("Not_In_Inventory_Qty", "Not in inventory"),
     ("Flipkart_Inventory", "Flipkart"),
     ("Myntra_Other_Inventory", "Myntra"),
     ("Meesho_Inventory", "Meesho"),

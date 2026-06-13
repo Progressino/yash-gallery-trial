@@ -122,7 +122,7 @@ def calculate_shipment_plan(
         fb_series = _num_series(fb_col)
         market_inv = np.where(market_inv > 0, market_inv, fb_series)
     out["Marketplace_Inventory"] = pd.Series(market_inv, index=out.index).fillna(0).astype(float)
-    out["In_Transit"] = _num_series(in_transit_col)
+    out["In_Transit"] = _num_series(in_transit_col) + _num_series("Manual_InTransit")
     out["OMS_Inventory"] = _num_series("OMS_Inventory")
 
     coverage_days = max(int(lead_time) + int(target_days), 1)

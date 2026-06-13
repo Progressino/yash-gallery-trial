@@ -44,6 +44,7 @@ _PARQUET_KEYS = (
     "po_return_overlay_df",
     "sku_status_lead_df",
     "daily_inventory_history_df",
+    "manual_intransit_overlay_df",
     "transfer_df",
     "cogs_df",
 )
@@ -65,6 +66,9 @@ _META_JSON_FIELDS = (
     "return_overlay_uploaded_at",
     "return_overlay_filename",
     "return_overlay_sources",
+    "manual_intransit_uploaded_at",
+    "manual_intransit_filename",
+    "manual_intransit_parse_report",
     "existing_po_generation",
     "po_calculate_existing_po_generation",
     "daily_restored",

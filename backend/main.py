@@ -130,7 +130,13 @@ def publish_warm_cache_from_session(sess) -> None:
     _warm_cache_loaded_at = datetime.now(IST)
 
 
-_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "po_raise_ledger_df", "po_return_overlay_df")
+_PO_SIDECAR_KEYS = (
+    "daily_inventory_history_df",
+    "sku_status_lead_df",
+    "po_raise_ledger_df",
+    "po_return_overlay_df",
+    "manual_intransit_overlay_df",
+)
 
 
 def session_needs_operational_data(sess) -> bool:
@@ -240,6 +246,14 @@ def restore_po_sidecars_from_warm(sess) -> bool:
         if key == "po_return_overlay_df":
             sess.daily_restored = False
     if changed:
+        try:
+            from .services.manual_intransit_sheet import apply_manual_intransit_overlay_to_inventory
+
+            ov = getattr(sess, "manual_intransit_overlay_df", None)
+            if ov is not None and hasattr(ov, "empty") and not ov.empty:
+                apply_manual_intransit_overlay_to_inventory(sess)
+        except Exception:
+            log.exception("apply manual intransit overlay after sidecar restore failed")
         sess._quarterly_cache.clear()
         sess._intelligence_bundle_cache.clear()
     return changed
@@ -1072,33 +1086,7 @@ def _do_load_warm_cache() -> bool:
         except Exception as e:
             log.warning("Phase 2 daily-store merge warning: %s", e)
 
-        # ── Trim platform DFs in loaded to 18-month window before build_sales_df ──
-        # Large uploads (e.g. 107 MB MTR) can push build_sales_df memory to 6+ GB.
-        # Trim each platform DF to the most recent 18 months; PO calc uses ≤15 months.
-        try:
-            from .services.platform_session_window import SESSION_PLATFORM_MAX_DAYS
-
-            _trim_cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=SESSION_PLATFORM_MAX_DAYS)
-            for _trim_key, _date_col in [
-                ("mtr_df", "Date"), ("myntra_df", "Date"),
-                ("meesho_df", "Date"), ("flipkart_df", "Date"),
-                ("snapdeal_df", "Date"),
-            ]:
-                _df = loaded.get(_trim_key)
-                if _df is not None and not _df.empty and _date_col in _df.columns:
-                    _dates = pd.to_datetime(_df[_date_col], errors="coerce")
-                    _mask = _dates >= _trim_cutoff
-                    if _mask.sum() < len(_df):
-                        loaded[_trim_key] = _df[_mask].reset_index(drop=True)
-                        log.info(
-                            "Phase 2 trim: %s %d→%d rows (%d-day window)",
-                            _trim_key, len(_df), len(loaded[_trim_key]), SESSION_PLATFORM_MAX_DAYS,
-                        )
-            _gc.collect()
-        except Exception as _trim_err:
-            log.warning("Phase 2 platform trim warning (non-fatal): %s", _trim_err)
-
-        # ── Free daily + old warm cache before build_sales_df (memory peak) ────
+        # Platform frames are kept at full history for dashboards; sales-build trims copies only.
         # build_sales_df is the heaviest allocation in Phase 2. Free everything we
         # no longer need so it doesn't run alongside _warm_cache + loaded + daily.
         try:
@@ -1262,6 +1250,13 @@ def _copy_warm_cache_to_session(sess) -> bool:
     _inv_keys = frozenset(
         {*_INVENTORY_WARM_KEYS, _INVENTORY_META_WARM_KEY}
     )
+    _warm_plat_keys = {
+        "mtr_df": "amazon",
+        "myntra_df": "myntra",
+        "meesho_df": "meesho",
+        "flipkart_df": "flipkart",
+        "snapdeal_df": "snapdeal",
+    }
     for key, val in _warm_cache.items():
         if sess_inv_newer and key in _inv_keys:
             continue
@@ -1277,15 +1272,17 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 continue
             except Exception:
                 pass  # fall through to plain copy on any import / trim error
-        if key in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df") and val is not None and hasattr(val, "empty") and not val.empty:
-            try:
-                from .services.platform_session_window import trim_platform_df
-                before = len(val)
-                val = trim_platform_df(val)
-                if len(val) < before:
-                    log.info("warm-cache copy: trimmed %s %d→%d rows", key, before, len(val))
-            except Exception:
-                pass
+        if key in _warm_plat_keys and val is not None and hasattr(val, "empty") and not val.empty:
+            cur = getattr(sess, key, None)
+            if cur is not None and hasattr(cur, "empty") and not cur.empty:
+                try:
+                    from .services.daily_store import merge_platform_data
+
+                    val = merge_platform_data(val, cur, _warm_plat_keys[key])
+                except Exception:
+                    val = cur
+            setattr(sess, key, val)
+            continue
         if key == "existing_po_df":
             try:
                 from .services.existing_po import session_should_keep_existing_po
@@ -1321,10 +1318,13 @@ def _copy_warm_cache_to_session(sess) -> bool:
         except Exception:
             pass
     sess._quarterly_cache.clear()
-    # Warm cache already contains rebuilt sales + merged platform history.
-    # Mark restored to avoid triggering a heavy synchronous SQLite restore on first
-    # /data/* request right after login (the main cause of "syncing..." slowness).
-    sess.daily_restored = True
+    # Only skip Tier-3 restore when session already spans SQLite min/max dates.
+    try:
+        from .services.platform_session_window import session_platform_shorter_than_tier3
+
+        sess.daily_restored = not session_platform_shorter_than_tier3(sess)
+    except Exception:
+        sess.daily_restored = True
     try:
         from .services.existing_po import ensure_existing_po_hydrated
 

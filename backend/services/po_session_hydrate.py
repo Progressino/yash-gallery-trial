@@ -27,7 +27,7 @@ _PO_CALC_PARQUET_KEYS = (
     "po_return_overlay_df",
 )
 
-_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df")
+_PO_SIDECAR_KEYS = ("daily_inventory_history_df", "sku_status_lead_df", "manual_intransit_overlay_df")
 
 # Placeholder uploads (e.g. a single ``Z-1`` test row) must not override real sheets.
 _PLACEHOLDER_SKUS = frozenset({"Z-1", "TEST", "TEST-SKU", "DEMO-SKU"})

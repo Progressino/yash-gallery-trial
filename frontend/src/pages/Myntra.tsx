@@ -14,7 +14,7 @@ interface MyntraData {
   returned?: number
   net_units?: number
   return_rate?: number
-  monthly?: Array<{ Month: string; shipments?: number; refunds?: number }>
+  monthly?: Array<{ Month: string; shipments?: number; refunds?: number; partial?: boolean; partial_note?: string }>
   top_skus?: Array<{ sku: string; units: number }>
   by_state?: Array<{ state: string; units: number }>
 }
@@ -64,6 +64,11 @@ export default function Myntra() {
       {monthly.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
           <h3 className="font-semibold text-[#002B5B] mb-4">Monthly Shipments vs Returns</h3>
+          {monthly.some(r => r.partial) && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+              {monthly.find(r => r.partial)?.partial_note ?? 'Latest month is still in progress — lower bars are expected until the month closes.'}
+            </p>
+          )}
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={monthly}>
               <CartesianGrid strokeDasharray="3 3" />

@@ -35,6 +35,7 @@ _CACHE_FILES = {
     "sku_status_lead_df":    "sku_status_lead_df.parquet",
     "po_raise_ledger_df":    "po_raise_ledger_df.parquet",
     "po_return_overlay_df": "po_return_overlay_df.parquet",
+    "manual_intransit_overlay_df": "manual_intransit_overlay_df.parquet",
 }
 
 # Restore-full: skip huge / rebuilt assets; download only platform bulk + SKU + inventory.
@@ -56,6 +57,7 @@ RESTORE_SKIP_DOWNLOAD_KEYS = frozenset({
     "sku_status_lead_df",
     "po_raise_ledger_df",
     "po_return_overlay_df",
+    "manual_intransit_overlay_df",
 })
 
 _GITHUB_BLOB_CACHE_DIR = os.environ.get("GITHUB_BLOB_CACHE_DIR", "/data/github_cache")

@@ -43,6 +43,10 @@ class AppSession:
     return_overlay_sources: list = field(default_factory=list)
     sku_status_lead_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     daily_inventory_history_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    manual_intransit_overlay_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    manual_intransit_parse_report: dict = field(default_factory=dict)
+    manual_intransit_uploaded_at: str = ""
+    manual_intransit_filename: str = ""
     transfer_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     cogs_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -163,6 +167,10 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.return_overlay_sources = []
     sess.sku_status_lead_df = pd.DataFrame()
     sess.daily_inventory_history_df = pd.DataFrame()
+    sess.manual_intransit_overlay_df = pd.DataFrame()
+    sess.manual_intransit_parse_report = {}
+    sess.manual_intransit_uploaded_at = ""
+    sess.manual_intransit_filename = ""
     sess.transfer_df = pd.DataFrame()
     sess.cogs_df = pd.DataFrame()
     sess.amazon_date_basis = "Shipment Date"

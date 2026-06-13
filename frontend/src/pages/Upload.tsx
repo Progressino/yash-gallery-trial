@@ -8,7 +8,8 @@ import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadDailyAuto, uploadPoReturnsImport,
-  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile,
+  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, uploadPoManualIntransitSheet,
+  type ManualIntransitParseReport,
   waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, verifyDailyUpload,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
   type DailyUploadVerifyResponse,
@@ -1257,6 +1258,87 @@ export default function Upload() {
                     }
                   }}
                   uploading={loading['po_daily_inv']}
+                />
+              </UploadCard>
+              <UploadCard
+                title="Intrasit &amp; Not In Inventory (admin)"
+                subtitle={
+                  coverage.manual_intransit_skus && coverage.manual_intransit_skus > 0
+                    ? `${coverage.manual_intransit_skus.toLocaleString()} SKUs · ${(coverage.manual_intransit_units ?? 0).toLocaleString()} in-transit · ${(coverage.manual_not_in_inventory_units ?? 0).toLocaleString()} not-in-inventory — re-upload replaces prior file (no duplicate rows)`
+                    : 'Excel with sheets "Intrasit Inventory" and "Not In Inventory" (Sku + Qty). Re-uploading the same file updates counts — duplicate SKU rows are merged, not double-counted.'
+                }
+                loaded={!!coverage.manual_intransit_sheet}
+                rows={coverage.manual_intransit_skus}
+                rowsUnit="SKUs"
+              >
+                {(coverage.manual_intransit_parse_report?.skip_details?.length ?? 0) > 0 ||
+                (coverage.manual_intransit_parse_report?.sheets_skipped?.length ?? 0) > 0 ? (
+                  <UploadSkipDetailsPanel report={coverage.manual_intransit_parse_report} />
+                ) : null}
+                <FileUpload
+                  label="Upload .xlsx or .xls"
+                  accept={{
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+                    'application/vnd.ms-excel': ['.xls'],
+                    'application/octet-stream': ['.xlsx', '.xls'],
+                  }}
+                  onUpload={async (file: File) => {
+                    setL('po_manual_intransit', true)
+                    try {
+                      await withUploadGuard(async () => {
+                        const res = await uploadPoManualIntransitSheet(file)
+                        if (res.ok) {
+                          const skipItems = [
+                            ...(res.parse_report?.warnings ?? []),
+                            ...(res.parse_report?.skip_details ?? []).map(
+                              d =>
+                                `${d.sheet || 'Sheet'}: ${d.reason || 'skipped'}${d.rows_affected ? ` (${d.rows_affected} rows)` : ''}`,
+                            ),
+                            ...(res.parse_report?.sheets_skipped ?? []).map(
+                              s => `${s.sheet}: ${s.reason}`,
+                            ),
+                          ]
+                          captureGenericAlert(
+                            'po_manual_intransit',
+                            skipItems.length ? skipItems : undefined,
+                            {
+                              parsed: res.skus,
+                              kept: res.skus,
+                            },
+                          )
+                          showToast('success', res.message || 'Manual in-transit sheet loaded.')
+                          setCoverage({
+                            ...coverage,
+                            manual_intransit_sheet: true,
+                            manual_intransit_skus: res.skus ?? coverage.manual_intransit_skus,
+                            manual_intransit_units:
+                              res.intransit_units ?? coverage.manual_intransit_units,
+                            manual_not_in_inventory_units:
+                              res.not_in_inventory_units ?? coverage.manual_not_in_inventory_units,
+                            manual_intransit_parse_report: res.parse_report ?? null,
+                            manual_intransit_filename: res.parse_report?.filename,
+                          })
+                          await refresh({ light: true })
+                          qc.invalidateQueries({ queryKey: ['inventory'] })
+                        } else {
+                          const errMsg =
+                            res.message ||
+                            res.parse_report?.error ||
+                            'Upload failed — check sheet names and columns.'
+                          captureGenericAlert('po_manual_intransit', [errMsg], {
+                            parsed: 0,
+                            kept: 0,
+                          })
+                          showToast('error', errMsg)
+                        }
+                      })
+                    } catch (e: unknown) {
+                      showToast('error', e instanceof Error ? e.message : 'Upload failed')
+                    } finally {
+                      setL('po_manual_intransit', false)
+                    }
+                  }}
+                  uploading={loading['po_manual_intransit']}
                 />
               </UploadCard>
             </>
@@ -2625,6 +2707,49 @@ function MonthlyRarUploader({ uploading, onUpload }: {
       >
         {uploading ? 'Processing RAR…' : '⬆ Upload Monthly RAR'}
       </button>
+    </div>
+  )
+}
+
+function UploadSkipDetailsPanel({
+  report,
+  title = 'Import skip details',
+}: {
+  report?: ManualIntransitParseReport | null
+  title?: string
+}) {
+  if (!report) return null
+  const details = report.skip_details ?? []
+  const skippedSheets = report.sheets_skipped ?? []
+  const warnings = report.warnings ?? []
+  if (!details.length && !skippedSheets.length && !warnings.length) return null
+
+  return (
+    <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50/90 px-3 py-2 text-[11px] text-amber-950 space-y-1.5">
+      <p className="font-semibold text-amber-900">{title}</p>
+      {warnings.map((w, i) => (
+        <p key={`w-${i}`} className="text-amber-800">
+          {w}
+        </p>
+      ))}
+      {skippedSheets.map((s, i) => (
+        <p key={`ss-${i}`}>
+          <span className="font-medium">{s.sheet}</span>: {s.reason}
+        </p>
+      ))}
+      {details.length > 0 ? (
+        <div className="max-h-32 overflow-y-auto space-y-1 pt-1 border-t border-amber-200/80">
+          {details.map((d, i) => (
+            <p key={`d-${i}`}>
+              <span className="font-medium">{d.sheet || d.kind || 'Row'}</span>
+              {d.kind && d.sheet ? ` (${d.kind})` : ''}: {d.reason}
+              {d.rows_affected != null && d.rows_affected > 0 ? (
+                <span className="text-amber-700"> — {d.rows_affected.toLocaleString()} row(s)</span>
+              ) : null}
+            </p>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
