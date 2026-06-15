@@ -40,6 +40,7 @@ SKIP_E2E=1 DEPLOY_FAST=1 bash scripts/predeploy_sanity.sh
 
 echo "==> Rebuild and restart"
 _dc -f docker-compose.prod.yml build backend stitching-backend frontend
+docker rm -f app-backend-1 app-stitching-backend-1 app-frontend-1 app-autoheal-1 2>/dev/null || true
 _dc -f docker-compose.prod.yml up -d --remove-orphans
 
 echo "==> Health check"
