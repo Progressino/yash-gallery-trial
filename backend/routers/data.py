@@ -424,7 +424,7 @@ def _restore_daily_if_needed(
                     **_sales_overlay_build_kwargs(sess),
                 )
                 sess._quarterly_cache.clear()
-                _invalidate_shared_quarterly_and_rewarm()
+                _invalidate_shared_quarterly_cache()
                 _invalidate_intelligence_bundle_cache()
             except Exception:
                 pass
@@ -1739,16 +1739,15 @@ def _sales_overlay_build_kwargs(sess: AppSession) -> dict:
     return kw
 
 
-def _invalidate_shared_quarterly_and_rewarm() -> None:
+def _invalidate_shared_quarterly_cache() -> None:
     """Drop the server-wide PO quarterly cache (memory + disk) after sales/
-    platform data actually changes, then rebuild it in the background so
-    other sessions don't pay for a synchronous rebuild on next request."""
+    platform data actually changes. The next ``/po/quarterly`` request already
+    rebuilds on a cache miss (``start_quarterly_background``), so no separate
+    rewarm thread is needed here."""
     try:
         from ..services.po_quarterly_cache import invalidate_shared_quarterly
-        from ..services.po_quarterly_warmup import schedule_shared_quarterly_prewarm
 
         invalidate_shared_quarterly()
-        schedule_shared_quarterly_prewarm()
     except Exception:
         pass
 
@@ -1776,7 +1775,7 @@ def _rebuild_session_sales(sess: AppSession) -> None:
         )
         sess._quarterly_cache.clear()
         sess._intelligence_bundle_cache.clear()
-        _invalidate_shared_quarterly_and_rewarm()
+        _invalidate_shared_quarterly_cache()
         _invalidate_intelligence_bundle_cache()
         _refresh_sales_days_by_source(sess)
         _mark_tier3_sync_applied(sess)
@@ -2018,7 +2017,7 @@ def _ensure_sales_rebuilt(sess: AppSession) -> None:
             **_sales_overlay_build_kwargs(sess),
         )
         sess._quarterly_cache.clear()
-        _invalidate_shared_quarterly_and_rewarm()
+        _invalidate_shared_quarterly_cache()
         _invalidate_intelligence_bundle_cache()
     except Exception:
         pass
