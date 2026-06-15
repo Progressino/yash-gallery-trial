@@ -1237,6 +1237,7 @@ def calculate_po_base(
         _dist_eff.clip(lower=1.0),
         _cal_eff,
     )
+    po_df["_sparse_intermittent"] = _sparse_intermittent
     po_df.drop(columns=["_distinct_days"], inplace=True, errors="ignore")
     po_df["Eff_Days"] = (
         pd.to_numeric(po_df["_eff_days_active"], errors="coerce")
@@ -1349,6 +1350,16 @@ def calculate_po_base(
                     inv_eff = (inv_days * scale).round()
                     inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
                     _active_eff = pd.to_numeric(po_df["Eff_Days"], errors="coerce").fillna(0)
+                    _sparse_flag = po_df["_sparse_intermittent"].fillna(False).astype(bool)
+                    _sold_for_inv = pd.to_numeric(_sold_eff, errors="coerce").fillna(0)
+                    _density = np.where(_active_eff > 0, _sold_for_inv / _active_eff, 0.0)
+                    # Inventory matrix may only shorten Eff_Days (raise ADS) when stock
+                    # was the real bottleneck — sparse/intermittent sellers (4032) or
+                    # sustained sellers with OOS gaps (INV-OVR). Applying matrix in-stock
+                    # counts to every SKU crushed Eff_Days to 1–3 on noise and blew PO up.
+                    _allow_inv_shorten = _sparse_flag | (
+                        (_sold_for_inv >= 8) & (_density >= 0.35)
+                    )
                     # Sparse sales inside a long in-stock window: do not dilute ADS.
                     # When stock was the bottleneck (inv < active span), keep inv-based days.
                     _eff_from_inv = np.where(
@@ -1364,8 +1375,11 @@ def calculate_po_base(
                         ),
                         inv_clipped,
                     )
+                    _apply_inv = use_inv & (
+                        _allow_inv_shorten | _oos_restock
+                    )
                     po_df["Eff_Days"] = np.where(
-                        use_inv,
+                        _apply_inv,
                         _eff_from_inv,
                         po_df["Eff_Days"],
                     )
@@ -1398,7 +1412,7 @@ def calculate_po_base(
         po_df.loc[_low_vol, "Eff_Days"] = np.clip(
             np.maximum(_eff_lv, _floor_lv), 0, float(ADS_WINDOW)
         )
-    po_df.drop(columns=["_cal_span_days"], inplace=True, errors="ignore")
+    po_df.drop(columns=["_cal_span_days", "_sparse_intermittent"], inplace=True, errors="ignore")
 
     # SKUs with no ADS-window sales may still show Eff_Days from the 150d ship context
     # when inventory history is missing (common for SKUs not in the daily snapshot file).

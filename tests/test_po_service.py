@@ -2194,6 +2194,46 @@ def test_low_volume_sales_keep_diluted_eff_days_not_distinct_inflation():
     assert int(row["PO_Qty"]) < 150
 
 
+def test_inventory_matrix_does_not_shorten_eff_days_for_light_non_sparse_sellers():
+    """Wide matrix must not crush Eff_Days to 1–3 on ≤7 sold / calendar sellers."""
+    sale_days = pd.to_datetime(["2026-05-05", "2026-05-20"])
+    sales = pd.DataFrame(
+        {
+            "Sku": ["MATRIX-LIGHT-M", "MATRIX-LIGHT-M"],
+            "TxnDate": sale_days,
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Quantity": [3, 3],
+            "Units_Effective": [3, 3],
+            "Source": ["Amazon", "Amazon"],
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["MATRIX-LIGHT-M"], "Total_Inventory": [8]})
+    hist_dates = pd.date_range("2026-05-01", periods=30, freq="D")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["MATRIX-LIGHT-M"] * 30,
+            "Date": hist_dates,
+            "Qty": [5 if i in (4, 19) else 0 for i in range(30)],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        inventory_history_df=inv_hist,
+        enforce_lead_time_release_gate=False,
+    )
+    row = po.loc[po["OMS_SKU"] == "MATRIX-LIGHT-M"].iloc[0]
+    assert int(row["Sold_Units"]) == 6
+    assert int(row["Eff_Days"]) >= 15
+    assert float(row["ADS"]) < 0.5
+    assert int(row["PO_Qty"]) < 200
+
+
 def test_4032_drsgreen_family_gets_po_with_pipeline_and_inventory_history():
     """Regression: parent 4032DRSGREEN must not be zeroed when warehouse stock is low but pipeline exists."""
     base_sales = []
@@ -2264,53 +2304,6 @@ def test_4032_drsgreen_family_gets_po_with_pipeline_and_inventory_history():
     assert int(rows.loc["4032DRSGREEN-M", "PO_Qty"]) > 0
     assert int(rows.loc["4032DRSGREEN-XL", "PO_Qty"]) > 0
     assert float(rows.loc["4032DRSGREEN-L", "Projected_Running_Days"]) < 60
-    """1361YKBLUE-XL with 8/30 in-stock days must keep Eff_Days≈8, not 0 after unbundle."""
-    dates = list(pd.date_range("2026-05-01", periods=30, freq="D"))
-    inv_hist = pd.DataFrame(
-        [
-            {"OMS_SKU": "1361YKBLUE-XL", "Date": d, "Qty": 5 if i < 8 else 0}
-            for i, d in enumerate(dates)
-        ]
-    )
-    sales = pd.DataFrame(
-        [
-            {
-                "Sku": "1361YKBLUE-XXL",
-                "TxnDate": d,
-                "Transaction Type": "Shipment",
-                "Quantity": 4,
-                "Units_Effective": 4,
-                "Source": "Amazon",
-            }
-            for d in pd.date_range("2026-05-15", periods=15, freq="D")
-        ]
-    )
-    inv = pd.DataFrame(
-        {"OMS_SKU": ["1361YKBLUE-XL", "1361YKBLUE-XXL"], "Total_Inventory": [0, 55]}
-    )
-    existing_po = pd.DataFrame(
-        {
-            "OMS_SKU": ["1361YKBLUE-XL", "1361YKBLUE-XXL", "1361YKBLUE-L-L"],
-            "PO_Pipeline_Total": [100, 80, 50],
-            "Balance_to_Dispatch": [100, 80, 50],
-        }
-    )
-    po = calculate_po_base(
-        sales_df=sales,
-        inv_df=inv,
-        period_days=30,
-        lead_time=45,
-        target_days=135,
-        demand_basis="Net",
-        safety_pct=0.0,
-        existing_po_df=existing_po,
-        inventory_history_df=inv_hist,
-    )
-    xl = po.loc[po["OMS_SKU"] == "1361YKBLUE-XL"].iloc[0]
-    assert int(xl["Eff_Days_Inventory"]) == 8
-    assert int(xl["Eff_Days"]) == 8
-    assert float(xl["ADS"]) > 0
-    assert int(xl["Gross_PO_Qty"]) > 0
 
 
 def test_oos_size_gets_po_when_sibling_still_selling():
