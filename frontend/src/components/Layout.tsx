@@ -265,7 +265,13 @@ export default function Layout() {
             : undefined
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [appVersion, setAppVersion] = useState<string | null>(null)
+  const embeddedSha = (import.meta.env.VITE_APP_GIT_SHA as string | undefined)?.trim()
+  const embeddedBuilt = (import.meta.env.VITE_APP_BUILT_AT as string | undefined)?.trim()
+  const embeddedVersion =
+    embeddedSha && embeddedSha !== 'dev'
+      ? `${embeddedSha}${embeddedBuilt ? ` · ${embeddedBuilt.slice(0, 10)}` : ''}`
+      : null
+  const [appVersion, setAppVersion] = useState<string | null>(embeddedVersion)
   const localHint = readLocalSessionHint()
   const navScrollRef = useRef<HTMLElement>(null)
   const [navCanScroll, setNavCanScroll] = useState(false)
@@ -285,15 +291,29 @@ export default function Layout() {
   )
 
   useEffect(() => {
-    api
-      .get<{ label?: string; git_sha?: string; version?: string; built_at?: string }>('/health')
-      .then((r) => {
-        const sha = r.data.git_sha || r.data.label || r.data.version
-        if (!sha) return
-        const built = r.data.built_at ? ` · ${r.data.built_at.slice(0, 10)}` : ''
-        setAppVersion(`${sha}${built}`)
-      })
-      .catch(() => {})
+    let cancelled = false
+    const load = (attempt: number) => {
+      api
+        .get<{ label?: string; git_sha?: string; version?: string; built_at?: string }>('/health', {
+          timeout: 8_000,
+        })
+        .then((r) => {
+          if (cancelled) return
+          const sha = r.data.git_sha || r.data.label || r.data.version
+          if (!sha || sha === 'dev') return
+          const built = r.data.built_at ? ` · ${r.data.built_at.slice(0, 10)}` : ''
+          setAppVersion(`${sha}${built}`)
+        })
+        .catch(() => {
+          if (!cancelled && attempt < 4) {
+            window.setTimeout(() => load(attempt + 1), 4_000)
+          }
+        })
+    }
+    load(0)
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   // Coverage polling is centralized in CoverageProvider (App.tsx).

@@ -7,9 +7,9 @@ import KarigarLayout from './components/KarigarLayout'
 import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuards'
 import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
-import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries } from './api/client'
+import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
-import { canSkipHeavyServerRestore, readLocalSessionHint } from './lib/localSessionHint'
+import { canSkipHeavyServerRestore, readLocalSessionHint, sessionLooksLoaded } from './lib/localSessionHint'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
@@ -137,9 +137,14 @@ function ProtectedRoute() {
             .length < 2
         if ((coverageEmpty(coverage) && !hasAnyPlatform) || needsWarmHydrate) {
           try {
-            await withTimeout(cacheHydrateWarm(), 90_000)
-            coverage = await getCoverage({ light: true, timeout: 45_000 })
-            setCoverage(coverage)
+            await waitForWarmCacheReady({ maxWaitMs: 180_000 })
+            for (let attempt = 0; attempt < 3; attempt++) {
+              await withTimeout(cacheHydrateWarm(), 90_000)
+              coverage = await getCoverage({ light: true, timeout: 45_000 })
+              setCoverage(coverage)
+              if (sessionLooksLoaded(coverage)) break
+              await waitForWarmCacheReady({ maxWaitMs: 30_000, pollMs: 4_000 })
+            }
           } catch {
             /* warm cache may still be starting after deploy */
           }
@@ -170,6 +175,11 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
+  const coverage = useSession(s => s.coverage)
+  const dataStillLoading =
+    !!coverage &&
+    !sessionLooksLoaded(coverage) &&
+    (coverageNeedsSync(coverage) || coverageJobsRunning(coverage))
 
   if (isLoading && !cachedUser) {
     return (
@@ -203,6 +213,15 @@ function ProtectedRoute() {
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
           </svg>
           Syncing your data…
+        </div>
+      )}
+      {!isRestoring && dataStillLoading && !isKarigar && !invUploadRunning && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
+          <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+          </svg>
+          Loading platform data from server…
         </div>
       )}
       <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>

@@ -1293,6 +1293,26 @@ export async function getJobStatus(): Promise<JobStatusResponse> {
   return data
 }
 
+/** Wait until server warm cache is ready (post-deploy startup can take several minutes). */
+export async function waitForWarmCacheReady(opts?: {
+  maxWaitMs?: number
+  pollMs?: number
+}): Promise<boolean> {
+  const maxWaitMs = opts?.maxWaitMs ?? 180_000
+  const pollMs = opts?.pollMs ?? 3_000
+  const deadline = Date.now() + maxWaitMs
+  while (Date.now() < deadline) {
+    try {
+      const j = await getJobStatus()
+      if (j.warm_cache && j.warm_cache_generation >= 1) return true
+    } catch {
+      /* server may still be starting */
+    }
+    await new Promise(r => setTimeout(r, pollMs))
+  }
+  return false
+}
+
 export async function getCoverage(opts?: {
   timeout?: number
   /** Skip slow SQLite restore on the server (use after PO Engine uploads). */

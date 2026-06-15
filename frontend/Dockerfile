@@ -3,6 +3,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+ARG VITE_APP_GIT_SHA=dev
+ARG VITE_APP_BUILT_AT=
+ENV VITE_APP_GIT_SHA=$VITE_APP_GIT_SHA
+ENV VITE_APP_BUILT_AT=$VITE_APP_BUILT_AT
+
 COPY package.json package-lock.json* ./
 RUN npm ci
 

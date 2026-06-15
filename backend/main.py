@@ -1763,6 +1763,8 @@ _SESSION_LIGHTWEIGHT = frozenset({
     "/api/auth/otp/resend",
     "/api/auth/otp/verify",
     "/api/auth/me",
+    "/api/health",
+    "/api/data/job-status",
 })
 
 @app.middleware("http")
