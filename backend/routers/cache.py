@@ -413,7 +413,7 @@ def _hydrate_session_from_warm(
 
 @router.post("/hydrate-warm", response_model=CacheStatusResponse)
 def cache_hydrate_warm(request: Request):
-    """Fast login path: queue warm cache → session copy; Tier-3 merge runs in background."""
+    """Fast login path: copy warm cache into this session (Tier-3 rebuild via coverage poll)."""
     sess = request.state.session
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
@@ -424,7 +424,7 @@ def cache_hydrate_warm(request: Request):
         import backend.main as _main
 
         if not _main._warm_cache:
-            _main._warm_cache_ready.wait(timeout=5.0)
+            _main._warm_cache_ready.wait(timeout=15.0)
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_from_disk_if_empty()
         if not _main._warm_cache:
@@ -432,17 +432,33 @@ def cache_hydrate_warm(request: Request):
                 ok=False,
                 message="Warm cache is still loading on the server — wait a moment and retry.",
             )
+        if sid in _warm_hydrate_queued:
+            return CacheStatusResponse(ok=True, message="Warm cache hydrate already running…")
+        _warm_hydrate_queued.add(sid)
+        try:
+            _main._copy_warm_cache_to_session(sess)
+            sess._warm_cache_gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
+            sess._warm_cache_only = True
+            sess._quarterly_cache.clear()
+            resume_auto_data_restore(sess)
+            n_sales = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
+            _log.info(
+                "hydrate-warm copy done session=%s sales=%s mtr=%s inv=%s",
+                sid[:8],
+                n_sales,
+                len(sess.mtr_df),
+                len(sess.inventory_df_variant),
+            )
+            return CacheStatusResponse(
+                ok=True,
+                message=f"Loaded from warm cache ({n_sales:,} sales rows). Daily uploads merge in background.",
+            )
+        finally:
+            _warm_hydrate_queued.discard(sid)
     except Exception:
-        _log.exception("hydrate-warm warm-cache check failed")
+        _log.exception("hydrate-warm failed session=%s", sid[:8] if sid else "?")
+        _warm_hydrate_queued.discard(sid)
         return CacheStatusResponse(ok=False, message="Warm cache hydrate failed.")
-
-    if sid in _warm_hydrate_queued:
-        return CacheStatusResponse(ok=True, message="Warm cache hydrate already running…")
-    _warm_hydrate_queued.add(sid)
-    from ..concurrency import DAILY_UPLOAD_EXECUTOR
-
-    DAILY_UPLOAD_EXECUTOR.submit(_run_warm_hydrate_worker, sid)
-    return CacheStatusResponse(ok=True, message="Loading from warm cache in background…")
 
 
 @router.post("/load", response_model=CacheStatusResponse)
