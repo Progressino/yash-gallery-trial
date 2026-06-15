@@ -1734,6 +1734,14 @@ def _session_skip_heavy_warm(path: str) -> bool:
     )
 
 
+def _session_coverage_light(path: str, method: str, query: str) -> bool:
+    """GET /coverage?light=1 must never block on PostgreSQL session blobs."""
+    if method != "GET" or path != "/api/data/coverage":
+        return False
+    q = query or ""
+    return "light=1" in q or "light=true" in q
+
+
 def _session_po_calculate_light(path: str, method: str) -> bool:
     """PO calc poll/start/result/quarterly — avoid PG restore + warm-cache copy during long jobs."""
     if method == "POST" and path == "/api/po/calculate":
@@ -1868,6 +1876,23 @@ async def session_middleware(request: Request, call_next):
                 secure=_cookie_secure_from_request(request),
                 max_age=14 * 24 * 3600,
             )
+        return response
+
+    if _session_coverage_light(path, request.method, request.url.query or ""):
+        sid = request.cookies.get(SESSION_COOKIE)
+        sid, session = await run_aux(store.get_or_empty, sid)
+        request.state.session_id = sid
+        request.state.session = session
+        setattr(session, "_persist_sid", sid)
+        response: Response = await call_next(request)
+        response.set_cookie(
+            key=SESSION_COOKIE,
+            value=sid,
+            httponly=True,
+            samesite="lax",
+            secure=_cookie_secure_from_request(request),
+            max_age=14 * 24 * 3600,
+        )
         return response
 
     sid = request.cookies.get(SESSION_COOKIE)

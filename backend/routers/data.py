@@ -2806,10 +2806,8 @@ def get_coverage(request: Request, light: bool = False):
     if light:
         try:
             import backend.main as _main
-            from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
 
             _main.restore_po_sidecars_from_warm(sess)
-            ensure_po_return_overlay_from_server(sess)
         except Exception:
             pass
         _maybe_queue_light_session_hydrate(sess, sid or None)

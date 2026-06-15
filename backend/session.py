@@ -348,6 +348,22 @@ class SessionStore:
             sess.last_accessed = time.time()
         return sess
 
+    def get_or_empty(self, sid: Optional[str]) -> tuple[str, AppSession]:
+        """In-RAM session only — never blocks on PostgreSQL restore (for fast coverage polls)."""
+        if sid and sid in self._sessions:
+            sess = self._sessions[sid]
+            sess.last_accessed = time.time()
+            return sid, sess
+        if sid:
+            empty = AppSession()
+            empty.last_accessed = time.time()
+            self._sessions[sid] = empty
+            return sid, empty
+        new_id = str(uuid.uuid4())
+        self._sessions[new_id] = AppSession()
+        self._sessions[new_id].last_accessed = time.time()
+        return new_id, self._sessions[new_id]
+
     def delete(self, sid: str) -> None:
         self._sessions.pop(sid, None)
 
