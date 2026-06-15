@@ -2396,8 +2396,13 @@ def queue_session_restore_if_needed(sess: AppSession, session_id: str, *, reason
 
     if not session_id:
         return False
-    if getattr(sess, "session_restore_status", "idle") == "running":
+    status = getattr(sess, "session_restore_status", "idle") or "idle"
+    if status == "running":
         return True
+    if status == "error" and reason.startswith("Auto-restore"):
+        return False
+    if getattr(sess, "_auto_restore_queued", False) and reason.startswith("Auto-restore"):
+        return False
     try:
         import backend.main as _main
 
@@ -2461,6 +2466,7 @@ def _maybe_queue_full_restore_when_empty(sess: AppSession, session_id: str | Non
         session_id,
         reason="Auto-restore — session empty but server history is available…",
     )
+    sess._auto_restore_queued = True
 
 
 def _run_session_restore_worker(session_id: str) -> None:
@@ -2751,6 +2757,8 @@ def restore_full(request: Request, sync: bool = False):
             restore_steps=[],
             restore_async=True,
         )
+
+    sess._auto_restore_queued = False
 
     use_sync = sync or (os.environ.get("RESTORE_FULL_SYNC", "").strip() == "1")
     if use_sync:
