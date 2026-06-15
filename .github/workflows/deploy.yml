@@ -60,6 +60,19 @@ jobs:
           command -v python3 && python3 --version || true
           command -v bash && bash -c 'printf "bash OK (BASH_VERSION=%s)\n" "${BASH_VERSION:-?}"' || true
 
+      # Free ~7 GB before pytest on the small VPS (otherwise exit 137 during test_po_service).
+      - name: Stop app during sanity tests
+        run: |
+          set -eu
+          _dc() {
+            if docker compose version >/dev/null 2>&1; then
+              docker compose "$@"
+            else
+              docker-compose "$@"
+            fi
+          }
+          _dc -f docker-compose.prod.yml stop backend stitching-backend 2>/dev/null || true
+
       - name: Backend sanity tests
         run: |
           set -eu
