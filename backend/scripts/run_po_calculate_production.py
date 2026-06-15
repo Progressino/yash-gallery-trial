@@ -19,10 +19,10 @@ _DUP_SUFFIX_RE = re.compile(
 # Profiles that match PO Engine UI defaults / common operator settings.
 _PROFILES: tuple[dict, ...] = (
     {
-        "label": "ui_default_90",
-        "period_days": 90,
-        "lead_time": 30,
-        "target_days": 135,
+        "label": "ui_default_30",
+        "period_days": 30,
+        "lead_time": 45,
+        "target_days": 180,
         "demand_basis": "Sold",
         "use_seasonality": False,
         "seasonal_weight": 0.5,
@@ -31,16 +31,16 @@ _PROFILES: tuple[dict, ...] = (
         "grace_days": 0,
         "safety_pct": 0.0,
         "enforce_two_size_minimum": True,
-        "enforce_lead_time_release_gate": False,
+        "enforce_lead_time_release_gate": True,
         "urgent_all_sizes_days": 45,
         "auto_import_yesterday_ledger": True,
         "raise_ledger_lookback_days": 14,
     },
     {
-        "label": "ui_period_30",
+        "label": "ui_period_30_gate_off",
         "period_days": 30,
-        "lead_time": 30,
-        "target_days": 135,
+        "lead_time": 45,
+        "target_days": 180,
         "demand_basis": "Sold",
         "use_seasonality": False,
         "seasonal_weight": 0.5,
@@ -114,7 +114,7 @@ def main() -> int:
                 "total_rows": int(len(po_df)),
             }
         )
-        if profile["label"] == "ui_period_30":
+        if profile["label"] == "ui_default_30":
             skus = po_df["OMS_SKU"].astype(str).tolist()
             dups = [s for s in skus if _DUP_SUFFIX_RE.search(s)]
             xl = po_df[po_df["OMS_SKU"].astype(str) == "1361YKBLUE-XL"]
