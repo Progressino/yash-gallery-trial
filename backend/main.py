@@ -1725,7 +1725,12 @@ def _session_skip_heavy_warm(path: str) -> bool:
     """Poll/start endpoints must stay fast while a heavy PO job runs in the background."""
     if path.startswith("/api/po/calculate"):
         return True
-    if path in ("/api/data/coverage", "/api/data/job-status", "/api/data/intelligence-bundle"):
+    if path in (
+        "/api/data/coverage",
+        "/api/data/job-status",
+        "/api/data/intelligence-bundle",
+        "/api/cache/hydrate-warm",
+    ):
         return True
     return path.startswith(
         (
