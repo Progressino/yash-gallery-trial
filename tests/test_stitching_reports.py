@@ -97,3 +97,44 @@ def test_reports_hub_sections():
     assert hub["karigar_profitability"]["rows"]
     assert hub["challan_labour"]["rows"]
     assert hub["comparison"]["summary"]
+    assert "other_tasks" in hub
+    assert "style_challan_expense" in hub
+    assert "karigar_hourly_pl" in hub
+
+
+def test_other_tasks_report_lists_alter_line():
+    _seed_karigar_day()
+    out = svc.other_tasks_report("2026-05-20", "2026-05-20")
+    assert out["summary"]["lines"] >= 1
+    assert any(str(r.get("Work_Type")) == "Alter" for r in out["lines"])
+    assert out["by_work_type"]
+
+
+def test_karigar_hourly_pl_matches_piece_minus_salary():
+    _seed_karigar_day()
+    out = svc.karigar_hourly_pl_report("2026-05-20", "2026-05-20")
+    row = next(r for r in out["rows"] if r["Karigar_ID"] == "K300")
+    assert float(row["Other_Work_Pay"]) == 50.0
+    assert float(row["Total_Payroll_Paid"]) == 530.0
+    assert "Net_PL_Rs" in row
+    assert "Profitable_On_Hourly_PL" in row
+
+
+def test_daily_variance_includes_normal_and_ltl_columns():
+    _seed_karigar_day()
+    out = svc.production_entry_reports("2026-05-20", "K300")
+    assert out["report1"]
+    r0 = out["report1"][0]
+    assert "Normal_Target_Pcs" in r0
+    assert "LTL_Target_Pcs" in r0
+    assert "Normal_Variance_Pcs" in r0
+    assert "LTL_Variance_Pcs" in r0
+    assert out["karigar_summary"]
+
+
+def test_style_challan_expense_includes_alter_on_challan():
+    _seed_karigar_day()
+    out = svc.style_challan_expense_report("2026-05-20", "2026-05-20")
+    hit = next((r for r in out["rows"] if r.get("Challan_No") == "CH-55"), None)
+    assert hit is not None
+    assert float(hit.get("Other_Task_Rs", 0)) == 50.0

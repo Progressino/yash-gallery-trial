@@ -2460,7 +2460,10 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         hourly_salary = round(hourly_rate_from_daily(daily_salary, date_str), 2)
         adj_target = round(applied_ltl * wh, 0)
         total_pcs = float(row.get("Total_Pieces") or 0)
+        normal_target_pcs = int(round(base_target * wh))
+        ltl_target_pcs = int(adj_target)
         efficiency = round(total_pcs / adj_target * 100, 1) if adj_target > 0 else 0.0
+        normal_eff = round(total_pcs / normal_target_pcs * 100, 1) if normal_target_pcs > 0 else 0.0
         fin = _financial_from_log_row(row, date_str=date_str, kid=kid)
 
         hour_vals = {}
@@ -2489,7 +2492,13 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
                 "Working_Hours": wh,
                 "Total_Pieces": int(total_pcs),
                 "Adj_Target": int(adj_target),
+                "Normal_Target_Pcs": normal_target_pcs,
+                "LTL_Target_Pcs": ltl_target_pcs,
+                "Normal_Variance_Pcs": int(total_pcs) - normal_target_pcs,
+                "LTL_Variance_Pcs": int(total_pcs) - ltl_target_pcs,
+                "Normal_Efficiency_%": normal_eff,
                 "Efficiency_%": efficiency,
+                "LTL_Efficiency_%": efficiency,
                 "Daily_Salary_Rs": daily_salary,
                 "Hourly_Salary_Rs": hourly_salary,
                 "Budget_Rate_Per_Piece": fin["budget_rate_per_piece"],
@@ -2590,6 +2599,42 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
             "overall_profit": float(r2_sum["Total_Net_PL"].sum()) >= 0,
         }
 
+    karigar_summary: list[dict[str, Any]] = []
+    if report1_rows:
+        by_k: dict[str, dict[str, Any]] = {}
+        for r in report1_rows:
+            kid = str(r.get("Karigar_ID", "")).strip()
+            if not kid:
+                continue
+            if kid not in by_k:
+                by_k[kid] = {
+                    "Karigar_ID": kid,
+                    "Karigar_Name": r.get("Karigar_Name", kid),
+                    "Sessions": 0,
+                    "Working_Hours": 0,
+                    "Total_Pieces": 0,
+                    "Normal_Target_Pcs": 0,
+                    "LTL_Target_Pcs": 0,
+                    "Normal_Variance_Pcs": 0,
+                    "LTL_Variance_Pcs": 0,
+                }
+            agg = by_k[kid]
+            agg["Sessions"] += 1
+            agg["Working_Hours"] += int(r.get("Working_Hours") or 0)
+            agg["Total_Pieces"] += int(r.get("Total_Pieces") or 0)
+            agg["Normal_Target_Pcs"] += int(r.get("Normal_Target_Pcs") or 0)
+            agg["LTL_Target_Pcs"] += int(r.get("LTL_Target_Pcs") or 0)
+            agg["Normal_Variance_Pcs"] += int(r.get("Normal_Variance_Pcs") or 0)
+            agg["LTL_Variance_Pcs"] += int(r.get("LTL_Variance_Pcs") or 0)
+        for agg in by_k.values():
+            tp = int(agg["Total_Pieces"])
+            nt = int(agg["Normal_Target_Pcs"])
+            lt = int(agg["LTL_Target_Pcs"])
+            agg["Normal_Efficiency_%"] = round(tp / nt * 100, 1) if nt > 0 else 0.0
+            agg["LTL_Efficiency_%"] = round(tp / lt * 100, 1) if lt > 0 else 0.0
+            karigar_summary.append(agg)
+        karigar_summary.sort(key=lambda x: str(x.get("Karigar_Name", "")))
+
     return {
         "date": date_str,
         "karigar_id": karigar_id or "",
@@ -2599,6 +2644,7 @@ def production_entry_reports(date_str: str, karigar_id: str | None = None) -> di
         "report2_hourly": report2_rows,
         "report2_summary": report2_summary,
         "grand_total": grand_total,
+        "karigar_summary": karigar_summary,
     }
 
 
@@ -3061,6 +3107,446 @@ def challan_labour_payroll_report(date_from: str, date_to: str) -> dict:
     }
 
 
+def _production_log_in_range(date_from: str, date_to: str) -> pd.DataFrame:
+    pl = get_sheet_df("production_log")
+    if pl.empty:
+        return pl
+    work = pl.copy()
+    work["Date_dt"] = pd.to_datetime(work["Date"], errors="coerce")
+    d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+    work = work[(work["Date_dt"] >= d0) & (work["Date_dt"] <= d1)]
+    if work.empty:
+        return work
+    return _production_log_latest_rows(work)
+
+
+def _collect_hourly_financial_rows(work: pd.DataFrame) -> list[dict[str, Any]]:
+    """Hour-level piece value vs hourly salary (Report 2 logic) for a production_log slice."""
+    if work.empty:
+        return []
+    from .karigar_attendance import hourly_rate_from_daily, production_hour_cols_for_date
+
+    rows: list[dict[str, Any]] = []
+    for _, row in work.iterrows():
+        date_str = str(row.get("Date", ""))[:10]
+        kid = str(row.get("Karigar_ID", ""))
+        kar_name = str(row.get("Karigar_Name", ""))
+        op_name = str(row.get("Operation", ""))
+        rate_rs = float(row.get("Rate_Rs") or 0)
+        applied_ltl = float(row.get("Applied_LTL") or row.get("Target") or 0)
+        base_target = float(row.get("Base_Target") or applied_ltl)
+        daily_rate = _daily_salary_for_row(kid, date_str, row)
+        hourly_sal = round(hourly_rate_from_daily(daily_rate, date_str), 2)
+        valid_hour_cols = [
+            h
+            for h in production_hour_cols_for_date(date_str)
+            if h != "H_13_14" and h in row.index
+        ]
+        for hcol, hlbl in zip(HOUR_COLS, HOUR_LBLS):
+            if hcol == "H_13_14" or hcol not in valid_hour_cols:
+                continue
+            pcs = int(safe_num(pd.Series([row.get(hcol, 0)])).iloc[0])
+            if pcs <= 0:
+                continue
+            actual_piece_val = round(pcs * rate_rs, 2)
+            target_piece_val = round(applied_ltl * rate_rs, 2)
+            normal_target_val = round(base_target * rate_rs, 2)
+            net_pl = round(actual_piece_val - hourly_sal, 2)
+            rows.append(
+                {
+                    "Date": date_str,
+                    "Karigar_ID": kid,
+                    "Karigar_Name": kar_name,
+                    "Challan_No": str(row.get("Challan_No", "")),
+                    "Style": str(row.get("Style", "")),
+                    "Operation": op_name,
+                    "Hour": hlbl,
+                    "Pieces_Done": pcs,
+                    "Base_Target": int(base_target),
+                    "Applied_LTL": int(applied_ltl),
+                    "Rate_Rs": rate_rs,
+                    "Actual_Piece_Val_Rs": actual_piece_val,
+                    "Target_Piece_Val_Rs": target_piece_val,
+                    "Normal_Target_Val_Rs": normal_target_val,
+                    "Hourly_Salary_Rs": hourly_sal,
+                    "Net_PL_Rs": net_pl,
+                }
+            )
+    return rows
+
+
+def other_tasks_report(
+    date_from: str,
+    date_to: str,
+    *,
+    karigar_id: str | None = None,
+) -> dict:
+    """Other-task / helper / trainee / alter lines with summary by Work_Type."""
+    exp = get_sheet_df("karigar_expenses")
+    empty = {
+        "date_from": date_from,
+        "date_to": date_to,
+        "karigar_id": karigar_id or "",
+        "lines": [],
+        "by_work_type": [],
+        "summary": {"lines": 0, "total_amount_rs": 0.0, "karigars": 0},
+    }
+    if exp.empty:
+        return empty
+
+    ex = exp.copy()
+    ex["Date_dt"] = pd.to_datetime(ex["Date"], errors="coerce")
+    d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+    ex = ex[(ex["Date_dt"] >= d0) & (ex["Date_dt"] <= d1)]
+    if karigar_id:
+        ex = ex[ex["Karigar_ID"].apply(clean_key) == clean_key(karigar_id)]
+    if ex.empty:
+        return empty
+
+    if "Amount_Rs" in ex.columns:
+        ex["Amount_Rs"] = safe_num(ex["Amount_Rs"])
+    else:
+        ex["Amount_Rs"] = 0
+
+    line_cols = [
+        c
+        for c in [
+            "Date",
+            "Karigar_ID",
+            "Karigar_Name",
+            "Work_Type",
+            "Challan_No",
+            "Style",
+            "Operation",
+            "Hours",
+            "Amount_Rs",
+            "Notes",
+        ]
+        if c in ex.columns
+    ]
+    lines = ex[line_cols].fillna("").to_dict(orient="records")
+
+    by_type = (
+        ex.groupby(ex["Work_Type"].astype(str).str.strip().replace("", "Other"))
+        .agg(
+            Lines=("Amount_Rs", "count"),
+            Karigars=("Karigar_ID", "nunique"),
+            Amount_Rs=("Amount_Rs", "sum"),
+            **({"Hours": ("Hours", "sum")} if "Hours" in ex.columns else {}),
+        )
+        .reset_index()
+        .rename(columns={"Work_Type": "Work_Type"})
+    )
+    if "Hours" not in by_type.columns:
+        by_type["Hours"] = 0
+    by_type["Hours"] = safe_num(by_type["Hours"]).round(2)
+    by_type["Amount_Rs"] = safe_num(by_type["Amount_Rs"]).round(2)
+    by_type_rows = by_type.fillna("").to_dict(orient="records")
+
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "karigar_id": karigar_id or "",
+        "lines": lines,
+        "by_work_type": by_type_rows,
+        "summary": {
+            "lines": len(lines),
+            "total_amount_rs": round(float(safe_num(ex["Amount_Rs"]).sum()), 2),
+            "karigars": int(ex["Karigar_ID"].nunique()) if "Karigar_ID" in ex.columns else 0,
+        },
+    }
+
+
+def style_challan_expense_report(date_from: str, date_to: str) -> dict:
+    """
+    Style + challan labour expense: actual hourly salary vs target piece value.
+    Includes other-task amounts tagged to style/challan.
+    """
+    work = _production_log_in_range(date_from, date_to)
+    hourly = _collect_hourly_financial_rows(work)
+    empty = {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": [],
+        "style_rollup": [],
+        "trainee_expense": 0.0,
+        "summary": {},
+    }
+    if not hourly:
+        grp = pd.DataFrame(
+            columns=[
+                "Style",
+                "Challan_No",
+                "Actual_Expense_Rs",
+                "Target_Rs",
+                "Normal_Target_Rs",
+                "Piece_Value_Rs",
+                "Hours_Worked",
+                "Pieces",
+            ]
+        )
+    else:
+        hourly_df = pd.DataFrame(hourly)
+        hourly_df["Style"] = hourly_df["Style"].astype(str).str.strip()
+        hourly_df["Challan_No"] = hourly_df["Challan_No"].astype(str).str.strip()
+        grp = (
+            hourly_df.groupby(["Style", "Challan_No"], as_index=False)
+            .agg(
+                Actual_Expense_Rs=("Hourly_Salary_Rs", "sum"),
+                Target_Rs=("Target_Piece_Val_Rs", "sum"),
+                Normal_Target_Rs=("Normal_Target_Val_Rs", "sum"),
+                Piece_Value_Rs=("Actual_Piece_Val_Rs", "sum"),
+                Hours_Worked=("Hour", "count"),
+                Pieces=("Pieces_Done", "sum"),
+            )
+        )
+
+    exp = get_sheet_df("karigar_expenses")
+    other_by_key: dict[tuple[str, str], float] = {}
+    trainee_total = 0.0
+    if not exp.empty:
+        ex = exp.copy()
+        ex["Date_dt"] = pd.to_datetime(ex["Date"], errors="coerce")
+        d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+        ex = ex[(ex["Date_dt"] >= d0) & (ex["Date_dt"] <= d1)]
+        if not ex.empty and "Amount_Rs" in ex.columns:
+            ex["Amount_Rs"] = safe_num(ex["Amount_Rs"])
+            for _, er in ex.iterrows():
+                wt = str(er.get("Work_Type", "") or "").strip()
+                amt = float(er.get("Amount_Rs", 0) or 0)
+                if wt.lower() == "trainee":
+                    trainee_total += amt
+                st = str(er.get("Style", "") or "").strip()
+                cn = str(er.get("Challan_No", "") or "").strip()
+                if st or cn:
+                    key = (st, cn)
+                    other_by_key[key] = other_by_key.get(key, 0.0) + amt
+
+    if not grp.empty:
+        grp["Other_Task_Rs"] = grp.apply(
+            lambda r: other_by_key.get(
+                (str(r["Style"]).strip(), str(r["Challan_No"]).strip()), 0.0
+            ),
+            axis=1,
+        )
+        grp["Actual_Expense_Rs"] = (
+            safe_num(grp["Actual_Expense_Rs"]) + safe_num(grp["Other_Task_Rs"])
+        ).round(2)
+        grp["Loss_Rs"] = (grp["Actual_Expense_Rs"] - grp["Target_Rs"]).round(2)
+        grp["Normal_Loss_Rs"] = (grp["Actual_Expense_Rs"] - grp["Normal_Target_Rs"]).round(2)
+        grp["Result"] = grp["Loss_Rs"].apply(lambda x: "Loss" if x > 0 else ("Profit" if x < 0 else "Break-even"))
+
+    style_rollup = []
+    if not grp.empty:
+        sr = (
+            grp.groupby("Style")
+            .agg(
+                Challans=("Challan_No", "nunique"),
+                Actual_Expense_Rs=("Actual_Expense_Rs", "sum"),
+                Target_Rs=("Target_Rs", "sum"),
+                Normal_Target_Rs=("Normal_Target_Rs", "sum"),
+                Piece_Value_Rs=("Piece_Value_Rs", "sum"),
+                Loss_Rs=("Loss_Rs", "sum"),
+            )
+            .reset_index()
+            .round(2)
+        )
+        style_rollup = sr.fillna("").to_dict(orient="records")
+
+    rows = grp.fillna("").to_dict(orient="records") if not grp.empty else []
+
+    # Expense-only lines (no production) still appear as rows
+    seen = {(str(r.get("Style", "")), str(r.get("Challan_No", ""))) for r in rows}
+    for (st, cn), amt in other_by_key.items():
+        if (st, cn) in seen or amt <= 0:
+            continue
+        rows.append(
+            {
+                "Style": st,
+                "Challan_No": cn,
+                "Actual_Expense_Rs": round(amt, 2),
+                "Target_Rs": 0.0,
+                "Normal_Target_Rs": 0.0,
+                "Piece_Value_Rs": 0.0,
+                "Other_Task_Rs": round(amt, 2),
+                "Loss_Rs": round(amt, 2),
+                "Normal_Loss_Rs": round(amt, 2),
+                "Result": "Loss",
+                "Hours_Worked": 0,
+                "Pieces": 0,
+            }
+        )
+
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "style_rollup": style_rollup,
+        "trainee_expense": round(trainee_total, 2),
+        "summary": {
+            "style_lines": len(rows),
+            "total_actual_expense": round(
+                sum(float(r.get("Actual_Expense_Rs", 0) or 0) for r in rows), 2
+            ),
+            "total_target": round(sum(float(r.get("Target_Rs", 0) or 0) for r in rows), 2),
+            "total_loss": round(sum(float(r.get("Loss_Rs", 0) or 0) for r in rows), 2),
+            "trainee_expense": round(trainee_total, 2),
+        },
+    }
+
+
+def karigar_hourly_pl_report(date_from: str, date_to: str) -> dict:
+    """
+    Karigar P&L from hourly production (Actual piece value − hourly salary)
+    plus attendance, other-task, trainee, and operating-staff expenses.
+    """
+    work = _production_log_in_range(date_from, date_to)
+    hourly = _collect_hourly_financial_rows(work)
+
+    payroll = payroll_report(date_from, date_to)
+    other = other_tasks_report(date_from, date_to)
+
+    by_k: dict[str, dict[str, Any]] = {}
+
+    if hourly:
+        hdf = pd.DataFrame(hourly)
+        for kid, grp in hdf.groupby(hdf["Karigar_ID"].apply(clean_key)):
+            if not kid:
+                continue
+            nm = str(grp.iloc[0].get("Karigar_Name", kid))
+            by_k[kid] = {
+                "Karigar_ID": kid,
+                "Karigar_Name": nm,
+                "Hours_Worked": int(len(grp)),
+                "Pieces": int(safe_num(grp["Pieces_Done"]).sum()),
+                "Actual_Piece_Val_Rs": round(float(safe_num(grp["Actual_Piece_Val_Rs"]).sum()), 2),
+                "Hourly_Salary_Rs": round(float(safe_num(grp["Hourly_Salary_Rs"]).sum()), 2),
+                "Net_PL_Rs": round(float(safe_num(grp["Net_PL_Rs"]).sum()), 2),
+                "Target_Piece_Val_Rs": round(float(safe_num(grp["Target_Piece_Val_Rs"]).sum()), 2),
+                "Normal_Target_Val_Rs": round(float(safe_num(grp["Normal_Target_Val_Rs"]).sum()), 2),
+            }
+
+    for prow in payroll.get("rows", []):
+        kid = str(prow.get("Karigar_ID", "")).strip()
+        if not kid:
+            continue
+        row = by_k.setdefault(
+            kid,
+            {
+                "Karigar_ID": kid,
+                "Karigar_Name": str(prow.get("Name", kid)),
+                "Hours_Worked": 0,
+                "Pieces": 0,
+                "Actual_Piece_Val_Rs": 0.0,
+                "Hourly_Salary_Rs": 0.0,
+                "Net_PL_Rs": 0.0,
+                "Target_Piece_Val_Rs": 0.0,
+                "Normal_Target_Val_Rs": 0.0,
+            },
+        )
+        row["Karigar_Name"] = str(prow.get("Name", row.get("Karigar_Name", kid)))
+        row["Attendance_Pay"] = round(float(prow.get("Attendance_Pay", 0) or 0), 2)
+        row["Other_Work_Pay"] = round(float(prow.get("Other_Work_Pay", 0) or 0), 2)
+        row["Total_Payroll_Paid"] = round(float(prow.get("Total", 0) or 0), 2)
+        row["Days"] = int(prow.get("Days", 0) or 0)
+
+    expense_by_k: dict[str, dict[str, float]] = {}
+    exp = get_sheet_df("karigar_expenses")
+    if not exp.empty:
+        ex = exp.copy()
+        ex["Date_dt"] = pd.to_datetime(ex["Date"], errors="coerce")
+        d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+        ex = ex[(ex["Date_dt"] >= d0) & (ex["Date_dt"] <= d1)]
+        if not ex.empty and "Amount_Rs" in ex.columns:
+            ex["Amount_Rs"] = safe_num(ex["Amount_Rs"])
+            for _, er in ex.iterrows():
+                kid = str(er.get("Karigar_ID", "")).strip()
+                if not kid:
+                    continue
+                wt = str(er.get("Work_Type", "") or "Other").strip() or "Other"
+                expense_by_k.setdefault(kid, {})
+                expense_by_k[kid][wt] = expense_by_k[kid].get(wt, 0.0) + float(er.get("Amount_Rs", 0) or 0)
+
+    rows: list[dict[str, Any]] = []
+    all_kids = set(by_k.keys()) | set(expense_by_k.keys())
+    for kid in sorted(all_kids):
+        base = by_k.get(
+            kid,
+            {
+                "Karigar_ID": kid,
+                "Karigar_Name": kid,
+                "Hours_Worked": 0,
+                "Pieces": 0,
+                "Actual_Piece_Val_Rs": 0.0,
+                "Hourly_Salary_Rs": 0.0,
+                "Net_PL_Rs": 0.0,
+                "Target_Piece_Val_Rs": 0.0,
+                "Normal_Target_Val_Rs": 0.0,
+            },
+        )
+        exp_map = expense_by_k.get(kid, {})
+        trainee = round(exp_map.get("Trainee", 0.0), 2)
+        helper = round(exp_map.get("Helper", 0.0), 2)
+        other_task = round(
+            exp_map.get("Other Task", 0.0) + exp_map.get("Other", 0.0) + exp_map.get("Alter", 0.0)
+            + exp_map.get("Part Change", 0.0),
+            2,
+        )
+        total_other = round(sum(exp_map.values()), 2)
+        att = float(base.get("Attendance_Pay", 0) or 0)
+        if att <= 0 and kid in {str(r.get("Karigar_ID", "")) for r in payroll.get("rows", [])}:
+            att = float(next((r.get("Attendance_Pay", 0) for r in payroll["rows"] if str(r.get("Karigar_ID")) == kid), 0) or 0)
+        paid = float(base.get("Total_Payroll_Paid", 0) or att + total_other)
+        piece = float(base.get("Actual_Piece_Val_Rs", 0) or 0)
+        net_hr = float(base.get("Net_PL_Rs", 0) or 0)
+        rows.append(
+            {
+                **base,
+                "Attendance_Pay": round(att, 2),
+                "Other_Work_Pay": round(float(base.get("Other_Work_Pay", total_other) or total_other), 2),
+                "Trainee_Pay": trainee,
+                "Helper_Pay": helper,
+                "Other_Task_Pay": other_task,
+                "Total_Payroll_Paid": round(paid, 2),
+                "Pay_vs_Piece_Rs": round(piece - paid, 2),
+                "Net_PL_Rs": net_hr,
+                "Profitable_On_Hourly_PL": "Yes" if net_hr >= -0.01 else "No",
+                "Profitable_On_Payroll": "Yes" if piece >= paid - 0.01 else "No",
+            }
+        )
+
+    rows.sort(key=lambda r: float(r.get("Net_PL_Rs", 0)))
+
+    op_staff = 0.0
+    oa = get_sheet_df("operating_attendance")
+    if not oa.empty and "Total_Pay" in oa.columns:
+        oa2 = oa.copy()
+        oa2["Date_dt"] = pd.to_datetime(oa2["Date"], errors="coerce")
+        d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+        oa2 = oa2[(oa2["Date_dt"] >= d0) & (oa2["Date_dt"] <= d1)]
+        if not oa2.empty:
+            op_staff = round(float(safe_num(oa2["Total_Pay"]).sum()), 2)
+
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "other_tasks_by_type": other.get("by_work_type", []),
+        "summary": {
+            "karigar_count": len(rows),
+            "total_actual_piece_val": round(sum(float(r.get("Actual_Piece_Val_Rs", 0)) for r in rows), 2),
+            "total_hourly_salary": round(sum(float(r.get("Hourly_Salary_Rs", 0)) for r in rows), 2),
+            "total_net_pl_hourly": round(sum(float(r.get("Net_PL_Rs", 0)) for r in rows), 2),
+            "total_payroll_paid": round(sum(float(r.get("Total_Payroll_Paid", 0)) for r in rows), 2),
+            "trainee_expense": round(
+                sum(float(r.get("Trainee_Pay", 0)) for r in rows), 2
+            ),
+            "operating_staff_pay": op_staff,
+            "other_task_total": float(other.get("summary", {}).get("total_amount_rs", 0) or 0),
+        },
+    }
+
+
 def stitching_reports_hub(date_from: str, date_to: str) -> dict:
     """Dynamics-style report pack: payroll, performance, P&L compare, karigar profit, challan labour."""
     return {
@@ -3072,6 +3558,9 @@ def stitching_reports_hub(date_from: str, date_to: str) -> dict:
         "comparison": comparison_dashboard_report(date_from, date_to),
         "karigar_profitability": karigar_profitability_report(date_from, date_to),
         "challan_labour": challan_labour_payroll_report(date_from, date_to),
+        "other_tasks": other_tasks_report(date_from, date_to),
+        "style_challan_expense": style_challan_expense_report(date_from, date_to),
+        "karigar_hourly_pl": karigar_hourly_pl_report(date_from, date_to),
     }
 
 

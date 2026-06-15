@@ -524,6 +524,43 @@ def challan_labour_payroll(date_from: str = "", date_to: str = ""):
     return svc.challan_labour_payroll_report(date_from, date_to)
 
 
+@router.get("/reports/other-tasks")
+def other_tasks_report(date_from: str = "", date_to: str = "", karigar_id: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.other_tasks_report(date_from, date_to, karigar_id=karigar_id or None)
+
+
+@router.get("/reports/style-challan-expense")
+def style_challan_expense(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.style_challan_expense_report(date_from, date_to)
+
+
+@router.get("/reports/karigar-hourly-pl")
+def karigar_hourly_pl(date_from: str = "", date_to: str = "", days: int = 0):
+    if days in (7, 15, 30) and not date_from:
+        date_to = str(date.today())
+        date_from = str(date.today() - timedelta(days=days - 1))
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.karigar_hourly_pl_report(date_from, date_to)
+
+
+@router.get("/reports/daily-variance")
+def daily_variance_report(date: str = "", karigar_id: str = ""):
+    if not date:
+        date = str(date.today())
+    return svc.production_entry_reports(date, karigar_id or None)
+
+
 @router.get("/reports/print")
 def stitching_reports_print(date_from: str = "", date_to: str = ""):
     """Print-ready HTML — open in browser and use Print → Save as PDF."""

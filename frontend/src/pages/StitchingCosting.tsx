@@ -2442,6 +2442,7 @@ function StitchingReportsTab() {
     return d.toISOString().slice(0, 10)
   })
   const [to, setTo] = useState(todayStr())
+  const [dailyDate, setDailyDate] = useState(todayStr())
   const [printing, setPrinting] = useState(false)
   const { data, refetch, isFetching } = useQuery({
     queryKey: ['stitching-reports-hub', from, to],
@@ -2450,8 +2451,25 @@ function StitchingReportsTab() {
     enabled: false,
   })
 
-  const kp = data?.karigar_profitability?.summary
+  const { data: dailyVar, refetch: refetchDaily } = useQuery({
+    queryKey: ['stitching-daily-variance', dailyDate],
+    queryFn: () =>
+      api.get('/stitching/reports/daily-variance', { params: { date: dailyDate } }).then(r => r.data),
+    enabled: false,
+  })
+
+  const setPresetDays = (days: number) => {
+    const end = new Date()
+    const start = new Date()
+    start.setDate(end.getDate() - (days - 1))
+    setFrom(start.toISOString().slice(0, 10))
+    setTo(end.toISOString().slice(0, 10))
+  }
+
+  const kp = data?.karigar_hourly_pl?.summary ?? data?.karigar_profitability?.summary
   const ch = data?.challan_labour?.summary
+  const otherSum = data?.other_tasks?.summary
+  const styleSum = data?.style_challan_expense?.summary
 
   return (
     <div className="space-y-4">
@@ -2482,6 +2500,18 @@ function StitchingReportsTab() {
           To
           <input type="date" className="block border rounded mt-1 px-2 py-1" value={to} onChange={e => setTo(e.target.value)} />
         </label>
+        <div className="flex gap-1 items-center pb-0.5">
+          {([7, 15, 30] as const).map(d => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setPresetDays(d)}
+              className="px-2 py-1 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px]"
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
         <button type="button" onClick={() => void refetch()} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm">
           Run all reports
         </button>
@@ -2507,6 +2537,77 @@ function StitchingReportsTab() {
       <p className="text-xs text-gray-500 -mt-2">
         Print opens a new tab with all sections; choose <strong>Save as PDF</strong> in the print dialog.
       </p>
+
+      <Section title="Daily work vs target (Normal + LTL)">
+        <p className="text-xs text-gray-600 mb-2 max-w-3xl">
+          Per employee / session: pieces done vs <strong>Normal</strong> target (base) and <strong>LTL</strong> target
+          (lower tolerance). Variance = Done − Target (positive = ahead).
+        </p>
+        <div className="flex flex-wrap gap-2 items-end text-xs mb-3">
+          <label>
+            Date
+            <input
+              type="date"
+              className="block border rounded mt-1 px-2 py-1"
+              value={dailyDate}
+              onChange={e => setDailyDate(e.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => void refetchDaily()}
+            className="px-3 py-1.5 bg-[#002B5B] text-white rounded-lg text-sm"
+          >
+            Load day report
+          </button>
+        </div>
+        {dailyVar?.karigar_summary?.length ? (
+          <ReportTableSection
+            title="Karigar summary — Normal vs LTL (all sessions that day)"
+            rows={dailyVar.karigar_summary as Record<string, unknown>[]}
+            cols={[
+              'Karigar_Name',
+              'Sessions',
+              'Working_Hours',
+              'Total_Pieces',
+              'Normal_Target_Pcs',
+              'LTL_Target_Pcs',
+              'Normal_Variance_Pcs',
+              'LTL_Variance_Pcs',
+              'Normal_Efficiency_%',
+              'LTL_Efficiency_%',
+            ]}
+            downloadName={`daily_karigar_summary_${dailyDate}`}
+          />
+        ) : null}
+        {dailyVar?.report1?.length ? (
+          <ReportTableSection
+            title="Session detail — Normal vs LTL targets"
+            rows={dailyVar.report1 as Record<string, unknown>[]}
+            cols={[
+              'Karigar_Name',
+              'Challan_No',
+              'Style',
+              'Operation',
+              'Working_Hours',
+              'Total_Pieces',
+              'Base_Target',
+              'Applied_LTL',
+              'Normal_Target_Pcs',
+              'LTL_Target_Pcs',
+              'Normal_Variance_Pcs',
+              'LTL_Variance_Pcs',
+              'Normal_Efficiency_%',
+              'LTL_Efficiency_%',
+            ]}
+            downloadName={`daily_variance_${dailyDate}`}
+          />
+        ) : null}
+        {dailyVar && !dailyVar.report1?.length && (
+          <p className="text-sm text-gray-500">No production saved for {dailyDate}.</p>
+        )}
+      </Section>
+
       {isFetching && <p className="text-sm text-gray-500">Building report pack…</p>}
       {data && (
         <>
@@ -2514,22 +2615,114 @@ function StitchingReportsTab() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
               <div className="bg-white border rounded-lg p-3">
                 <p className="text-xs text-gray-500">Total payroll paid</p>
-                <p className="font-bold text-[#2c5aa0]">₹{Number(kp.total_payroll_paid).toLocaleString()}</p>
+                <p className="font-bold text-[#2c5aa0]">
+                  ₹{Number(kp.total_payroll_paid ?? 0).toLocaleString()}
+                </p>
               </div>
               <div className="bg-white border rounded-lg p-3">
-                <p className="text-xs text-gray-500">Profitable on payroll</p>
-                <p className="font-bold text-emerald-700">{kp.profitable_on_payroll} / {kp.karigar_count}</p>
+                <p className="text-xs text-gray-500">Net P&amp;L (hourly)</p>
+                <p className="font-bold">
+                  ₹{Number(kp.total_net_pl_hourly ?? kp.total_net_pl_benchmark ?? 0).toLocaleString()}
+                </p>
               </div>
               <div className="bg-white border rounded-lg p-3">
-                <p className="text-xs text-gray-500">Profitable on benchmark</p>
-                <p className="font-bold text-emerald-700">{kp.profitable_on_benchmark} / {kp.karigar_count}</p>
+                <p className="text-xs text-gray-500">Trainee expense</p>
+                <p className="font-bold text-amber-700">
+                  ₹{Number(kp.trainee_expense ?? 0).toLocaleString()}
+                </p>
               </div>
               <div className="bg-white border rounded-lg p-3">
-                <p className="text-xs text-gray-500">Net P&amp;L (benchmark)</p>
-                <p className="font-bold">₹{Number(kp.total_net_pl_benchmark).toLocaleString()}</p>
+                <p className="text-xs text-gray-500">Operating staff pay</p>
+                <p className="font-bold">₹{Number(kp.operating_staff_pay ?? 0).toLocaleString()}</p>
               </div>
             </div>
           )}
+          <ReportTableSection
+            title="Karigar P&amp;L — hourly piece value vs salary (7/15/30 day range above)"
+            rows={(data.karigar_hourly_pl?.rows ?? data.karigar_profitability?.rows ?? []) as Record<string, unknown>[]}
+            cols={[
+              'Karigar_Name',
+              'Actual_Piece_Val_Rs',
+              'Hourly_Salary_Rs',
+              'Net_PL_Rs',
+              'Profitable_On_Hourly_PL',
+              'Attendance_Pay',
+              'Other_Work_Pay',
+              'Trainee_Pay',
+              'Helper_Pay',
+              'Other_Task_Pay',
+              'Total_Payroll_Paid',
+              'Pay_vs_Piece_Rs',
+              'Profitable_On_Payroll',
+              'Pieces',
+              'Hours_Worked',
+            ]}
+            downloadName={`karigar_hourly_pl_${from}_${to}`}
+          />
+          <ReportTableSection
+            title="Other tasks — helper, alter, trainee, part change (line detail)"
+            rows={(data.other_tasks?.lines ?? []) as Record<string, unknown>[]}
+            cols={[
+              'Date',
+              'Karigar_Name',
+              'Work_Type',
+              'Challan_No',
+              'Style',
+              'Hours',
+              'Amount_Rs',
+              'Notes',
+            ]}
+            downloadName={`other_tasks_${from}_${to}`}
+          />
+          {otherSum && (
+            <ReportTableSection
+              title="Other tasks — summary by work type"
+              rows={(data.other_tasks?.by_work_type ?? []) as Record<string, unknown>[]}
+              cols={['Work_Type', 'Lines', 'Karigars', 'Hours', 'Amount_Rs']}
+              downloadName={`other_tasks_summary_${from}_${to}`}
+            />
+          )}
+          <ReportTableSection
+            title="Style + challan expense — actual vs LTL target (includes other-task ₹ on challan)"
+            rows={(data.style_challan_expense?.rows ?? []) as Record<string, unknown>[]}
+            cols={[
+              'Style',
+              'Challan_No',
+              'Pieces',
+              'Hours_Worked',
+              'Piece_Value_Rs',
+              'Actual_Expense_Rs',
+              'Target_Rs',
+              'Normal_Target_Rs',
+              'Loss_Rs',
+              'Normal_Loss_Rs',
+              'Other_Task_Rs',
+              'Result',
+            ]}
+            downloadName={`style_challan_expense_${from}_${to}`}
+          />
+          {styleSum && (
+            <p className="text-xs text-gray-500">
+              Style/challan lines: {styleSum.style_lines} · Total actual expense: ₹
+              {Number(styleSum.total_actual_expense).toLocaleString()} · Trainee (unallocated): ₹
+              {Number(data.style_challan_expense?.trainee_expense ?? 0).toLocaleString()}
+            </p>
+          )}
+          {data.style_challan_expense?.style_rollup?.length ? (
+            <ReportTableSection
+              title="Style rollup — expense summary"
+              rows={data.style_challan_expense.style_rollup as Record<string, unknown>[]}
+              cols={[
+                'Style',
+                'Challans',
+                'Actual_Expense_Rs',
+                'Target_Rs',
+                'Piece_Value_Rs',
+                'Loss_Rs',
+              ]}
+              downloadName={`style_rollup_${from}_${to}`}
+            />
+          ) : null}
           <ReportTableSection
             title="Karigar profitability — payroll paid vs piece value vs benchmark (LTL column)"
             rows={(data.karigar_profitability?.rows ?? []) as Record<string, unknown>[]}
