@@ -26,9 +26,10 @@ POST /api/items/import                            — bulk import from Excel/CSV
 """
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, UploadFile, File, Request
+from pydantic import BaseModel, Field
 
+from ..services.permissions import may_access_erp_admin
 from ..db.item_db import (
     list_item_types, create_item_type,
     list_size_groups, create_size_group,
@@ -42,6 +43,7 @@ from ..db.item_db import (
     add_bom_line, update_bom_line, delete_bom_line, copy_bom,
     list_item_packaging, get_buyer_packaging, add_packaging_line, delete_packaging_line,
     bulk_create_items, get_item_stats, list_all_boms,
+    adjust_item_stock, list_stock_adjustments, book_stock_for_code, get_item_by_code,
 )
 from ..services.item_import import parse_item_import
 
@@ -156,6 +158,15 @@ class PackagingLineCreate(BaseModel):
 
 class StockUpdate(BaseModel):
     stock: float
+
+
+class StockAdjustBody(BaseModel):
+    qty: float = Field(gt=0)
+    direction: str = Field(description="IN to add stock, OUT to remove")
+    entry_date: Optional[str] = None
+    reason: str = ""
+    reference_no: str = ""
+    unit: str = ""
 
 
 # ── Meta ──────────────────────────────────────────────────────────────────────
@@ -324,10 +335,39 @@ def remove_item(item_id: int):
 
 
 @router.put("/{item_id}/stock")
-def update_stock(item_id: int, body: StockUpdate):
+def update_stock(item_id: int, body: StockUpdate, request: Request):
+    role = str((getattr(request.state, "auth", None) or {}).get("role", "") or "")
+    if not may_access_erp_admin(role):
+        raise HTTPException(status_code=403, detail="Admin access required for stock changes.")
     if not update_item_stock(item_id, body.stock):
         raise HTTPException(status_code=404, detail="Item not found")
-    return {"ok": True}
+    return {"ok": True, "stock": body.stock}
+
+
+@router.post("/{item_id}/stock/adjust")
+def adjust_stock(item_id: int, body: StockAdjustBody, request: Request):
+    """Manual stock IN/OUT (+/-) — admin only. Use for opening/existing stock and corrections."""
+    role = str((getattr(request.state, "auth", None) or {}).get("role", "") or "")
+    if not may_access_erp_admin(role):
+        raise HTTPException(status_code=403, detail="Admin access required for stock adjustment.")
+    from datetime import date as _date
+
+    entry_date = (body.entry_date or "").strip() or str(_date.today())
+    created_by = str((getattr(request.state, "auth", None) or {}).get("sub", "") or "")
+    try:
+        out = adjust_item_stock(
+            item_id,
+            body.qty,
+            body.direction,
+            entry_date=entry_date,
+            reason=body.reason,
+            reference_no=body.reference_no,
+            unit=body.unit,
+            created_by=created_by,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, **out}
 
 
 # ── BOM ───────────────────────────────────────────────────────────────────────
@@ -570,24 +610,41 @@ def get_item_tracking(
 
             jwo_filter, jwo_bind = _date_clause("h.jwo_date", frm, to)
             for r in pc.execute(
-                "SELECT h.jwo_number,h.jwo_date,h.processor_name,l.material_code,l.material_name,"
-                "l.quantity as qty,l.unit,l.rate,l.amount "
+                "SELECT h.jwo_number,h.jwo_date,h.processor_name,"
+                "l.input_material,l.output_material,"
+                "l.input_qty,l.output_qty,l.input_unit,l.output_unit,l.rate,l.amount "
                 "FROM jwo_lines l JOIN jwo_headers h ON h.id=l.jwo_id "
-                "WHERE l.material_code LIKE ?" + jwo_filter +
+                "WHERE (l.input_material LIKE ? OR l.output_material LIKE ?)" + jwo_filter +
                 " ORDER BY h.jwo_date DESC",
-                [like, *jwo_bind],
+                [like, like, *jwo_bind],
             ).fetchall():
-                results.append({'date': r['jwo_date'], 'direction': 'OUT', 'txn_type': 'JWO Issue',
-                                'doc_number': r['jwo_number'], 'doc_ref': '',
-                                'party': r['processor_name'], 'item_code': r['material_code'],
-                                'item_name': r['material_name'], 'qty': float(r['qty'] or 0),
-                                'unit': r['unit'], 'rate': float(r['rate'] or 0),
-                                'amount': float(r['amount'] or 0), 'so_ref': ''})
+                if r["input_material"] and like.strip("%") in str(r["input_material"]):
+                    results.append({
+                        'date': r['jwo_date'], 'direction': 'OUT', 'txn_type': 'JWO Issue',
+                        'doc_number': r['jwo_number'], 'doc_ref': '',
+                        'party': r['processor_name'], 'item_code': r['input_material'],
+                        'item_name': r['input_material'],
+                        'qty': float(r['input_qty'] or 0),
+                        'unit': r['input_unit'] or 'MTR',
+                        'rate': float(r['rate'] or 0),
+                        'amount': float(r['amount'] or 0), 'so_ref': '',
+                    })
+                if r["output_material"] and like.strip("%") in str(r["output_material"]):
+                    results.append({
+                        'date': r['jwo_date'], 'direction': 'IN', 'txn_type': 'JWO Receipt',
+                        'doc_number': r['jwo_number'], 'doc_ref': '',
+                        'party': r['processor_name'], 'item_code': r['output_material'],
+                        'item_name': r['output_material'],
+                        'qty': float(r['output_qty'] or 0),
+                        'unit': r['output_unit'] or 'MTR',
+                        'rate': float(r['rate'] or 0),
+                        'amount': float(r['amount'] or 0), 'so_ref': '',
+                    })
 
             min_filter, min_bind = _date_clause("h.min_date", frm, to)
             for r in pc.execute(
-                "SELECT h.min_number,h.min_date,h.issued_to,l.material_code,l.material_name,"
-                "l.qty,l.unit,l.rate "
+                "SELECT h.min_number,h.min_date,h.to_vendor,l.material_code,l.material_name,"
+                "l.issue_qty,l.unit,l.rate,l.amount "
                 "FROM min_lines l JOIN material_issue_notes h ON h.id=l.min_id "
                 "WHERE l.material_code LIKE ?" + min_filter +
                 " ORDER BY h.min_date DESC",
@@ -595,10 +652,12 @@ def get_item_tracking(
             ).fetchall():
                 results.append({'date': r['min_date'], 'direction': 'OUT', 'txn_type': 'MIN',
                                 'doc_number': r['min_number'], 'doc_ref': '',
-                                'party': r['issued_to'] or '', 'item_code': r['material_code'],
-                                'item_name': r['material_name'], 'qty': float(r['qty'] or 0),
-                                'unit': r['unit'], 'rate': float(r['rate'] or 0),
-                                'amount': float(r['qty'] or 0) * float(r['rate'] or 0), 'so_ref': ''})
+                                'party': r['to_vendor'] or '', 'item_code': r['material_code'],
+                                'item_name': r['material_name'] or r['material_code'],
+                                'qty': float(r['issue_qty'] or 0),
+                                'unit': r['unit'] or 'MTR', 'rate': float(r['rate'] or 0),
+                                'amount': float(r['amount'] or 0) * float(r['rate'] or 0),
+                                'so_ref': ''})
             pc.close()
         except Exception:
             pass
@@ -644,6 +703,26 @@ def get_item_tracking(
         except Exception:
             pass
 
+    for adj in list_stock_adjustments(item_code_str, frm, to):
+        label = (adj.get("reason") or "Stock Adjustment").strip() or "Stock Adjustment"
+        if adj.get("reference_no"):
+            label = f"{label} ({adj['reference_no']})"
+        results.append({
+            'date': adj.get('entry_date') or '',
+            'direction': adj.get('direction') or 'IN',
+            'txn_type': 'Stock Adjustment',
+            'doc_number': f"ADJ-{adj.get('id', '')}",
+            'doc_ref': adj.get('reference_no') or '',
+            'party': adj.get('created_by') or 'Admin',
+            'item_code': adj.get('item_code') or item_code_str,
+            'item_name': adj.get('item_code') or item_code_str,
+            'qty': float(adj.get('qty') or 0),
+            'unit': adj.get('unit') or 'PCS',
+            'rate': 0,
+            'amount': 0,
+            'so_ref': label,
+        })
+
     results.sort(key=lambda x: x.get('date') or '', reverse=True)
     bal = 0.0
     for r in reversed(results):
@@ -655,10 +734,14 @@ def get_item_tracking(
     results.reverse()
     in_qty = sum(r['qty'] for r in results if r['direction'] == 'IN')
     out_qty = sum(r['qty'] for r in results if r['direction'] == 'OUT')
+    ledger_stock = round(in_qty - out_qty, 3)
+    book_stock = book_stock_for_code(item_code_str)
     return {
         'item_code': item_code_str,
         'total_in': round(in_qty, 3),
         'total_out': round(out_qty, 3),
-        'current_stock': round(in_qty - out_qty, 3),
+        'current_stock': book_stock,
+        'ledger_stock': ledger_stock,
+        'book_stock': book_stock,
         'transactions': results,
     }

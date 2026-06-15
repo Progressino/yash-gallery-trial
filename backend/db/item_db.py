@@ -144,6 +144,21 @@ def init_db() -> None:
             remarks           TEXT DEFAULT '',
             created_at        TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS item_stock_adjustments (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id       INTEGER NOT NULL REFERENCES items(id),
+            item_code     TEXT NOT NULL,
+            entry_date    TEXT NOT NULL,
+            direction     TEXT NOT NULL,
+            qty           REAL NOT NULL,
+            unit          TEXT DEFAULT 'PCS',
+            reason        TEXT DEFAULT '',
+            reference_no  TEXT DEFAULT '',
+            balance_after REAL DEFAULT 0,
+            created_by    TEXT DEFAULT '',
+            created_at    TEXT DEFAULT (datetime('now'))
+        );
     """)
 
     # Migrate existing items table — add columns if missing
@@ -557,6 +572,127 @@ def update_item_stock(item_id: int, stock: float) -> bool:
     updated = cur.rowcount > 0
     conn.close()
     return updated
+
+
+def get_item_by_code(item_code: str) -> Optional[dict]:
+    conn = _connect()
+    row = conn.execute(
+        """SELECT i.*, t.name AS item_type_name, t.code AS item_type_code
+           FROM items i JOIN item_types t ON i.item_type_id = t.id
+           WHERE i.item_code = ?""",
+        (str(item_code or "").strip(),),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def adjust_item_stock(
+    item_id: int,
+    qty: float,
+    direction: str,
+    *,
+    entry_date: str,
+    reason: str = "",
+    reference_no: str = "",
+    unit: str = "",
+    created_by: str = "",
+) -> dict:
+    """Apply manual stock IN/OUT and append adjustment ledger row."""
+    if qty <= 0:
+        raise ValueError("Quantity must be greater than zero.")
+    dir_u = str(direction or "").strip().upper()
+    if dir_u not in ("IN", "OUT"):
+        raise ValueError("Direction must be IN or OUT.")
+
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT id, item_code, stock, uom FROM items WHERE id = ?",
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Item not found")
+        current = float(row["stock"] or 0)
+        delta = float(qty) if dir_u == "IN" else -float(qty)
+        new_stock = round(current + delta, 3)
+        if new_stock < -1e-9:
+            raise ValueError(
+                f"Insufficient stock — current {current:.3f}, cannot remove {qty:.3f}."
+            )
+        item_code = str(row["item_code"])
+        uom = (unit or row["uom"] or "PCS").strip() or "PCS"
+        conn.execute("UPDATE items SET stock = ? WHERE id = ?", (new_stock, item_id))
+        cur = conn.execute(
+            """INSERT INTO item_stock_adjustments
+               (item_id, item_code, entry_date, direction, qty, unit, reason,
+                reference_no, balance_after, created_by)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                item_id,
+                item_code,
+                entry_date,
+                dir_u,
+                float(qty),
+                uom,
+                str(reason or "").strip(),
+                str(reference_no or "").strip(),
+                new_stock,
+                str(created_by or "").strip(),
+            ),
+        )
+        conn.commit()
+        return {
+            "id": int(cur.lastrowid),
+            "item_id": item_id,
+            "item_code": item_code,
+            "direction": dir_u,
+            "qty": float(qty),
+            "stock_before": round(current, 3),
+            "stock_after": new_stock,
+            "reason": str(reason or "").strip(),
+            "reference_no": str(reference_no or "").strip(),
+            "entry_date": entry_date,
+        }
+    finally:
+        conn.close()
+
+
+def list_stock_adjustments(
+    item_code: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> list[dict]:
+    code = str(item_code or "").strip()
+    conn = _connect()
+    q = """
+        SELECT * FROM item_stock_adjustments
+        WHERE item_code = ? OR item_code LIKE ?
+    """
+    params: list = [code, f"{code}-%"]
+    if from_date:
+        q += " AND entry_date >= ?"
+        params.append(from_date)
+    if to_date:
+        q += " AND entry_date <= ?"
+        params.append(to_date)
+    q += " ORDER BY entry_date DESC, id DESC"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def book_stock_for_code(item_code: str) -> float:
+    """Authoritative on-hand stock from items.stock (exact code + size variants)."""
+    code = str(item_code or "").strip()
+    conn = _connect()
+    row = conn.execute(
+        """SELECT COALESCE(SUM(stock), 0) AS total
+           FROM items
+           WHERE item_code = ? OR item_code LIKE ?""",
+        (code, f"{code}-%"),
+    ).fetchone()
+    conn.close()
+    return round(float(row["total"] if row else 0), 3)
 
 
 def delete_item(item_id: int) -> bool:

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { mayAccessErpAdmin, useAuth } from '../store/auth'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface ItemType    { id: number; name: string; code: string }
@@ -85,7 +86,9 @@ const blankBOMLine = () => ({
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function ItemMaster() {
   const qc = useQueryClient()
-  const [stockItem, setStockItem] = useState<{code:string,name:string}|null>(null)
+  const authUser = useAuth(s => s.user)
+  const canAdjustStock = mayAccessErpAdmin(authUser)
+  const [stockItem, setStockItem] = useState<{ id: number; code: string; name: string } | null>(null)
   const [activeTab, setActiveTab] = useState<'dashboard' | 'items' | 'bom' | 'routing' | 'import' | 'merchants' | 'packaging'>('items')
 
   // ── Meta query ────────────────────────────────────────────────────────────
@@ -844,7 +847,7 @@ const totalCost = useMemo(() =>
                             <td className="px-4 py-3 text-right text-gray-700">{item.purchase_price > 0 ? fmt(item.purchase_price) : '—'}</td>
                             <td className="px-4 py-3 text-center">
                               <div className="flex items-center justify-center gap-1">
-                                 <button onClick={e=>{e.stopPropagation();setStockItem({code:item.item_code,name:item.item_name})}} className="text-purple-500 hover:text-purple-700 text-xs px-2 py-1 rounded hover:bg-purple-50">📊 Stock</button>
+                                 <button onClick={e=>{e.stopPropagation();setStockItem({id:item.id,code:item.item_code,name:item.item_name})}} className="text-purple-500 hover:text-purple-700 text-xs px-2 py-1 rounded hover:bg-purple-50">📊 Stock</button>
                                 <button
                                   onClick={e => { e.stopPropagation(); openEditItem(item) }}
                                   className="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 rounded hover:bg-blue-50 transition-colors">
@@ -2348,7 +2351,7 @@ const totalCost = useMemo(() =>
               </div>
               <button onClick={()=>setStockItem(null)} style={{fontSize:'20px',color:'#999',cursor:'pointer',border:'none',background:'none'}}>x</button>
             </div>
-            <StockLedgerView itemCode={stockItem.code} />
+            <StockLedgerView itemId={stockItem.id} itemCode={stockItem.code} canAdjust={canAdjustStock} />
           </div>
         </div>
       )}
@@ -2383,16 +2386,36 @@ interface StockLedgerResponse {
   total_in: number
   total_out: number
   current_stock: number
+  ledger_stock?: number
+  book_stock?: number
   transactions: StockTxn[]
 }
 
-function StockLedgerView({ itemCode }: { itemCode: string }) {
+const todayIso = () => new Date().toISOString().slice(0, 10)
+
+function StockLedgerView({
+  itemId,
+  itemCode,
+  canAdjust,
+}: {
+  itemId: number
+  itemCode: string
+  canAdjust: boolean
+}) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [data, setData] = useState<StockLedgerResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showAdjust, setShowAdjust] = useState(false);
+  const [adjDir, setAdjDir] = useState<'IN' | 'OUT'>('IN');
+  const [adjQty, setAdjQty] = useState('');
+  const [adjDate, setAdjDate] = useState(todayIso);
+  const [adjReason, setAdjReason] = useState('');
+  const [adjRef, setAdjRef] = useState('');
+  const [adjErr, setAdjErr] = useState('');
+  const [adjBusy, setAdjBusy] = useState(false);
 
-  useEffect(() => {
+  const loadLedger = useCallback(() => {
     setLoading(true);
     const q = (from || to) ? '?from_date=' + from + '&to_date=' + to : '';
     fetch('/api/items/' + encodeURIComponent(itemCode) + '/tracking' + q)
@@ -2401,6 +2424,10 @@ function StockLedgerView({ itemCode }: { itemCode: string }) {
       .catch(() => setLoading(false));
   }, [itemCode, from, to]);
 
+  useEffect(() => {
+    loadLedger();
+  }, [loadLedger]);
+
   const fmtD = (n: number | string | undefined) => (Number(n) || 0).toFixed(2);
 
   const txns: StockTxn[] = data?.transactions || [];
@@ -2408,8 +2435,102 @@ function StockLedgerView({ itemCode }: { itemCode: string }) {
   const [activeSize, setActiveSize] = useState<string>('ALL');
   const displayTxns = activeSize === 'ALL' ? txns : txns.filter((t) => t.item_code === activeSize);
 
+  const submitAdjustment = async () => {
+    const qty = parseFloat(adjQty);
+    if (!qty || qty <= 0) {
+      setAdjErr('Enter a quantity greater than zero.');
+      return;
+    }
+    if (!adjReason.trim()) {
+      setAdjErr('Reason is required (e.g. Opening / existing stock).');
+      return;
+    }
+    setAdjErr('');
+    setAdjBusy(true);
+    try {
+      await api.post(`/items/${itemId}/stock/adjust`, {
+        qty,
+        direction: adjDir,
+        entry_date: adjDate || todayIso(),
+        reason: adjReason.trim(),
+        reference_no: adjRef.trim(),
+      });
+      setAdjQty('');
+      setAdjRef('');
+      setShowAdjust(false);
+      loadLedger();
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setAdjErr(typeof msg === 'string' ? msg : 'Stock adjustment failed.');
+    } finally {
+      setAdjBusy(false);
+    }
+  };
+
   return (
     <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+      {canAdjust && (
+        <div style={{display:'flex',justifyContent:'flex-end'}}>
+          <button
+            type="button"
+            onClick={() => { setShowAdjust(v => !v); setAdjErr(''); }}
+            style={{
+              padding:'8px 14px', borderRadius:'8px', fontSize:'13px', fontWeight:600, cursor:'pointer',
+              border:'1px solid #002B5B', background: showAdjust ? '#002B5B' : 'white',
+              color: showAdjust ? 'white' : '#002B5B',
+            }}>
+            {showAdjust ? 'Cancel' : '+ Stock Adjustment'}
+          </button>
+        </div>
+      )}
+
+      {showAdjust && canAdjust && (
+        <div style={{background:'#f0f7ff', border:'1px solid #bfdbfe', borderRadius:'12px', padding:'16px'}}>
+          <p style={{fontSize:'13px', fontWeight:700, color:'#1e3a5f', marginBottom:'12px'}}>
+            Manual stock adjustment (Admin)
+          </p>
+          <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px, 1fr))', gap:'10px'}}>
+            <label style={{fontSize:'12px', color:'#374151'}}>
+              Direction
+              <select value={adjDir} onChange={e => setAdjDir(e.target.value as 'IN' | 'OUT')}
+                style={{display:'block', width:'100%', marginTop:'4px', padding:'6px 8px', borderRadius:'6px', border:'1px solid #d1d5db', fontSize:'13px'}}>
+                <option value="IN">+ IN (add stock)</option>
+                <option value="OUT">− OUT (remove stock)</option>
+              </select>
+            </label>
+            <label style={{fontSize:'12px', color:'#374151'}}>
+              Quantity *
+              <input type="number" min="0" step="any" value={adjQty} onChange={e => setAdjQty(e.target.value)}
+                placeholder="e.g. 100"
+                style={{display:'block', width:'100%', marginTop:'4px', padding:'6px 8px', borderRadius:'6px', border:'1px solid #d1d5db', fontSize:'13px'}} />
+            </label>
+            <label style={{fontSize:'12px', color:'#374151'}}>
+              Date
+              <input type="date" value={adjDate} onChange={e => setAdjDate(e.target.value)}
+                style={{display:'block', width:'100%', marginTop:'4px', padding:'6px 8px', borderRadius:'6px', border:'1px solid #d1d5db', fontSize:'13px'}} />
+            </label>
+            <label style={{fontSize:'12px', color:'#374151', gridColumn:'1 / -1'}}>
+              Reason *
+              <input type="text" value={adjReason} onChange={e => setAdjReason(e.target.value)}
+                placeholder="Opening / existing stock, physical count correction…"
+                style={{display:'block', width:'100%', marginTop:'4px', padding:'6px 8px', borderRadius:'6px', border:'1px solid #d1d5db', fontSize:'13px'}} />
+            </label>
+            <label style={{fontSize:'12px', color:'#374151', gridColumn:'1 / -1'}}>
+              Reference (optional)
+              <input type="text" value={adjRef} onChange={e => setAdjRef(e.target.value)}
+                placeholder="Doc no., count sheet…"
+                style={{display:'block', width:'100%', marginTop:'4px', padding:'6px 8px', borderRadius:'6px', border:'1px solid #d1d5db', fontSize:'13px'}} />
+            </label>
+          </div>
+          {adjErr && <p style={{color:'#dc2626', fontSize:'12px', marginTop:'8px'}}>{adjErr}</p>}
+          <button type="button" onClick={submitAdjustment} disabled={adjBusy}
+            style={{marginTop:'12px', padding:'8px 16px', borderRadius:'8px', border:'none', cursor:'pointer',
+              background:'#002B5B', color:'white', fontSize:'13px', fontWeight:600, opacity: adjBusy ? 0.6 : 1}}>
+            {adjBusy ? 'Saving…' : 'Apply adjustment'}
+          </button>
+        </div>
+      )}
+
       {/* Summary */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px'}}>
         {[
