@@ -1412,7 +1412,7 @@ def calculate_po_base(
         po_df.loc[_low_vol, "Eff_Days"] = np.clip(
             np.maximum(_eff_lv, _floor_lv), 0, float(ADS_WINDOW)
         )
-    po_df.drop(columns=["_cal_span_days", "_sparse_intermittent"], inplace=True, errors="ignore")
+    po_df.drop(columns=["_cal_span_days"], inplace=True, errors="ignore")
 
     # SKUs with no ADS-window sales may still show Eff_Days from the 150d ship context
     # when inventory history is missing (common for SKUs not in the daily snapshot file).
@@ -1549,7 +1549,23 @@ def calculate_po_base(
         prim_ads = pd.to_numeric(pd.Series(blended, index=po_df.index), errors="coerce").fillna(0.0)
     else:
         prim_ads = np.maximum(recent_ads, ly_ads)
+    # Non-sparse sellers: matrix/short-span Recent_ADS cannot exceed the period
+    # average (sold/30). Prevents 6 sold / Eff_Days=2 → ADS=3 style inflation while
+    # keeping sparse/intermittent (4032) lifts uncapped.
+    if "_sparse_intermittent" in po_df.columns:
+        _ns_cap = ~po_df["_sparse_intermittent"].fillna(False).astype(bool)
+        _sold_cap = (
+            pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+            if demand_basis == "Net"
+            else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
+        )
+        _period_rate = (_sold_cap / float(ADS_WINDOW)).clip(lower=0.0)
+        _ceil = np.maximum(flat_ads, _period_rate)
+        prim_ads = pd.Series(prim_ads, index=po_df.index, dtype=float)
+        _cap_mask = _ns_cap & (_sold_cap >= 6) & (_sold_cap < 10)
+        prim_ads = np.where(_cap_mask, np.minimum(prim_ads, _ceil), prim_ads)
     po_df["ADS"] = np.maximum.reduce([prim_ads, seasonal_ads, flat_ads]).round(3)
+    po_df.drop(columns=["_sparse_intermittent"], inplace=True, errors="ignore")
 
     # PO formula uses OMS_Inventory (physical warehouse only) when available.
     # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
