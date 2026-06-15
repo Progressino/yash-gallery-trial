@@ -27,6 +27,15 @@ _PL_RE = re.compile(r'^(\d+)PL(YK)', re.I)
 _SIZE_SUFFIX_RE = re.compile(r"(?:-|_)?(XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL|6XL)$", re.I)
 
 
+def round_po_pack(qty: float) -> int:
+    """Round PO quantity up to pack size — 5 for small lots, 10 when qty >= 10."""
+    q = max(0.0, float(qty or 0))
+    if q <= 0:
+        return 0
+    pack = 10.0 if q >= 10.0 else 5.0
+    return int(np.floor(np.ceil(q / pack) * pack))
+
+
 def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
     """Module-level twin of the nested ``_canonical_oms_key`` used in ``calculate_po_base``.
 
@@ -1953,17 +1962,17 @@ def calculate_po_base(
     projected_days_now = np.where(ads_num > 0, (inv_for_cover + pipe_num) / ads_num, 999.0)
     balance_days = target_cover_days - projected_days_now
     raw_po = ads_num * balance_days
-    _pack = 5.0
-    po_qty_round = np.ceil(np.maximum(raw_po, 0.0) / _pack) * _pack
-    po_df["Gross_PO_Qty"] = np.floor(np.maximum(po_qty_round, 0.0)).astype(int)
+    po_qty_round = np.vectorize(round_po_pack)(np.maximum(raw_po, 0.0))
+    po_df["Gross_PO_Qty"] = po_qty_round.astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
 
     if "Return_Overlay_Units" in po_df.columns:
         overlay = pd.to_numeric(po_df["Return_Overlay_Units"], errors="coerce").fillna(0).astype(int)
-        po_df["PO_Qty"] = np.maximum(
+        net_po = np.maximum(
             pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0).astype(int) - overlay,
             0,
-        ).astype(int)
+        )
+        po_df["PO_Qty"] = np.vectorize(round_po_pack)(net_po).astype(int)
         po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
 
     # Lead-time release (sheet-resolved lead only): no fresh PO while projected cover
@@ -2042,26 +2051,30 @@ def calculate_po_base(
         )
 
     # SKU Status sheet rules (after every automated PO_Qty adjustment):
-    # • Rows marked CLOSED must never receive a fresh PO release.
+    # • Closed / Doubt / Sales-after-closed must never receive a fresh PO release.
     # • When a status sheet IS loaded, a positive lead must have been resolvable from that
     #   sheet (direct row, parent rollup, longest-prefix, or pure numeric style code row) —
     #   not merely the global default, and not digit-token-only inference from non-numeric
     #   keys (which can borrow an unrelated style).
+    from .sku_status_lead import is_excluded_po_status, po_block_reason_for_excluded_status
+
     _closed = po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
+    _status_excl = po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status)
+    _excluded = (_closed | _status_excl).fillna(False).astype(bool)
     _hot = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
-    _msg_closed = "SKU marked closed on status sheet"
     _msg_nolead = "No lead time resolved from SKU status sheet for this SKU"
-    block_closed = _closed & _hot
-    if block_closed.any():
-        po_df.loc[block_closed, "PO_Qty"] = 0
-        po_df.loc[block_closed, "Gross_PO_Qty"] = 0
-        br = po_df.loc[block_closed, "PO_Block_Reason"].astype(str).str.strip()
-        po_df.loc[block_closed, "PO_Block_Reason"] = np.where(
+    block_excluded = _excluded & _hot
+    if block_excluded.any():
+        po_df.loc[block_excluded, "PO_Qty"] = 0
+        po_df.loc[block_excluded, "Gross_PO_Qty"] = 0
+        br = po_df.loc[block_excluded, "PO_Block_Reason"].astype(str).str.strip()
+        reasons = po_df.loc[block_excluded, "SKU_Sheet_Status"].map(po_block_reason_for_excluded_status)
+        po_df.loc[block_excluded, "PO_Block_Reason"] = np.where(
             br.eq("") | br.eq("nan"),
-            _msg_closed,
-            br + "; " + _msg_closed,
+            reasons,
+            br + "; " + reasons.astype(str),
         )
-        po_df.loc[block_closed, "Lead_Time_Days"] = 0
+        po_df.loc[block_excluded, "Lead_Time_Days"] = 0
     if "Lead_Time_From_Status_Sheet" in po_df.columns:
         _sheet_ok = po_df["Lead_Time_From_Status_Sheet"].fillna(False).astype(bool)
         _hot2 = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
@@ -2231,14 +2244,14 @@ def calculate_po_base(
             & (_ads_a > 0)
             & (_proj_a < _target_eff)
             & po_df["PO_Block_Reason"].astype(str).str.contains(_LT_GATE_MSG, na=False)
-            & ~po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
+            & ~po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status).fillna(False)
         )
         if _lift_mask.any():
             _bal  = (_target_eff - _proj_a[_lift_mask]).clip(lower=0.0)
             _gross = (_bal * _ads_a[_lift_mask]).round(1)
-            _rounded = ((_gross / 5).round() * 5).clip(lower=0).astype(int)
+            _rounded = np.vectorize(round_po_pack)(_gross.to_numpy(dtype=float))
 
-            po_df.loc[_lift_mask, "Gross_PO_Qty"] = _gross
+            po_df.loc[_lift_mask, "Gross_PO_Qty"] = _rounded
             po_df.loc[_lift_mask, "PO_Qty"]       = _rounded
 
             # Recompute Post-PO cover
@@ -2320,6 +2333,20 @@ def calculate_po_base(
                     )
         except Exception as _uas_err:
             _log_mod.getLogger(__name__).warning("all-sizes ghost-row expansion failed (non-fatal): %s", _uas_err)
+
+    # Final pack rounding (overlay / gate-lift can leave non-pack quantities) + refresh cover.
+    _po_final = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0.0)
+    po_df["PO_Qty"] = np.vectorize(round_po_pack)(_po_final.to_numpy(dtype=float)).astype(int)
+    po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
+    if "Total_Inventory" in po_df.columns:
+        _inv_final = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
+    else:
+        _inv_final = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0.0)
+    po_df["Post_PO_Cover_Days_Capped"] = np.where(
+        po_df["ADS"] > 0,
+        ((_inv_final + po_df["PO_Pipeline_Effective"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
+        999.0,
+    )
 
     # Drop intermediate calc columns (datetime/float cols that break router serialisation)
     po_df.drop(

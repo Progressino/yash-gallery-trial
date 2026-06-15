@@ -38,9 +38,10 @@ def hydrate_session_ledger_from_db(
     planning_date: Optional[str] = None,
     lookback_days: int = 14,
 ) -> bool:
-    """Merge durable SQLite raises into the session ledger when missing."""
+    """Merge durable SQLite raises into the session ledger (DB authoritative in lookback window)."""
     try:
-        from ..db.po_raised_db import ledger_rows_as_dataframe
+        from ..db.po_raised_db import ledger_rows_as_dataframe, is_raise_date_suppressed
+        from .po_raise_ledger import normalize_raise_ledger_df
 
         if planning_date and str(planning_date).strip():
             plan = pd.Timestamp(pd.to_datetime(str(planning_date).strip()).normalize())
@@ -48,15 +49,11 @@ def hydrate_session_ledger_from_db(
             plan = pd.Timestamp.now().normalize()
         lb = max(1, int(lookback_days))
         start = plan - pd.Timedelta(days=lb)
-        from ..db.po_raised_db import is_raise_date_suppressed
+        start_s = str(start.date())
+        end_s = str(plan.date())
 
-        db_df = ledger_rows_as_dataframe(
-            start_date=str(start.date()),
-            end_date=str(plan.date()),
-        )
-        if db_df.empty:
-            return False
-        if "Raised_Date" in db_df.columns:
+        db_df = ledger_rows_as_dataframe(start_date=start_s, end_date=end_s)
+        if not db_df.empty and "Raised_Date" in db_df.columns:
             rd = pd.to_datetime(db_df["Raised_Date"], errors="coerce").dt.normalize()
             suppressed_days = {
                 pd.Timestamp(d)
@@ -65,16 +62,26 @@ def hydrate_session_ledger_from_db(
             }
             if suppressed_days:
                 db_df = db_df[~rd.isin(suppressed_days)].reset_index(drop=True)
-        if db_df.empty:
-            return False
 
         base = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
-        if base is None or base.empty:
-            sess.po_raise_ledger_df = db_df.copy()
-            sess._quarterly_cache.clear()
-            return True
+        if base is None:
+            base = pd.DataFrame()
 
-        from .po_raise_ledger import normalize_raise_ledger_df
+        # Drop session rows inside the lookback window — SQLite is source of truth there.
+        if not base.empty and "Raised_Date" in base.columns:
+            ld = pd.to_datetime(base["Raised_Date"], errors="coerce").dt.normalize()
+            in_window = (ld >= start.normalize()) & (ld <= plan.normalize())
+            suppressed_mask = ld.map(
+                lambda d: is_raise_date_suppressed(str(pd.Timestamp(d).date())) if pd.notna(d) else False
+            )
+            base = base.loc[~(in_window | suppressed_mask)].reset_index(drop=True)
+        elif not base.empty:
+            base = base.copy()
+
+        if db_df is None or db_df.empty:
+            sess.po_raise_ledger_df = normalize_raise_ledger_df(base) if not base.empty else pd.DataFrame()
+            sess._quarterly_cache.clear()
+            return not base.empty
 
         merged = pd.concat([base, db_df], ignore_index=True)
         sess.po_raise_ledger_df = normalize_raise_ledger_df(merged)

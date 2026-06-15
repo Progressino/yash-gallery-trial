@@ -144,6 +144,32 @@ def is_closed_sku_status(status) -> bool:
     return False
 
 
+def is_excluded_po_status(status) -> bool:
+    """SKUs that must not receive a fresh PO recommendation (closed, doubt, sales-after-closed)."""
+    if is_closed_sku_status(status):
+        return True
+    t = str(status or "").strip().lower()
+    if not t:
+        return False
+    if "doubt" in t:
+        return True
+    if "sales after closed" in t:
+        return True
+    return False
+
+
+def po_block_reason_for_excluded_status(status) -> str:
+    """Human-readable PO block reason for excluded sheet statuses."""
+    if is_closed_sku_status(status):
+        return "SKU marked closed on status sheet"
+    t = str(status or "").strip().lower()
+    if "doubt" in t:
+        return "Doubt SKU — no PO recommendation"
+    if "sales after closed" in t:
+        return "Sales after closed — no new PO"
+    return "SKU excluded from PO recommendation"
+
+
 def parse_sku_status_lead_dataframe(
     df: pd.DataFrame,
     sku_mapping: Optional[dict] = None,

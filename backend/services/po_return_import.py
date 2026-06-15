@@ -647,7 +647,11 @@ def _parse_amazon_mtr_returns(
     qty_col = cols.get("quantity")
     if not (txn_col and sku_col and qty_col):
         return pd.DataFrame(), None
-    work = df[df[txn_col].astype(str).str.strip().str.casefold() == "refund"].copy()
+    work = df[df[txn_col].astype(str).str.strip().str.casefold().str.contains(
+        r"return|refund|reimbursement|chargeback|reversal|credit\s*note|reimbursed",
+        na=False,
+        regex=True,
+    )].copy()
     if work.empty:
         return pd.DataFrame(), "No Amazon MTR Refund rows found."
     work["Return_Units"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0).astype(int)

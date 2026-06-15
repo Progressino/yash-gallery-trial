@@ -3532,8 +3532,12 @@ def _patch_analytics_monthly_returns(
     *,
     display_name: str,
 ) -> None:
-    """Merge PO return overlay into platform monthly analytics (no double-count with sales)."""
-    from ..services.sales import overlay_refunds_by_calendar_month
+    """Merge PO return overlay + unified sales RETURN_SHEET refunds into platform analytics."""
+    from ..services.sales import (
+        RETURN_PLATFORM_TO_SOURCE,
+        overlay_refunds_by_calendar_month,
+        _return_sheet_refund_buckets_for_platform,
+    )
 
     from ..services.po_return_import import aggregate_return_overlay_for_use
 
@@ -3546,6 +3550,15 @@ def _patch_analytics_monthly_returns(
         sales_df=None,
         subtract_sales_overlay=False,
     )
+    display = RETURN_PLATFORM_TO_SOURCE.get(platform_key, display_name)
+    sales_df = getattr(sess, "sales_df", None)
+    _, sheet_by_month, _ = _return_sheet_refund_buckets_for_platform(
+        sales_df, display, None, None
+    )
+    for m, extra in sheet_by_month.items():
+        cur = int(ov_by_month.get(m, 0) or 0)
+        if int(extra) > cur:
+            ov_by_month[m] = int(extra)
     month_key = "Month"
 
     def _month_of(row: dict) -> str:
@@ -3642,6 +3655,8 @@ def _finalize_platform_analytics_monthly(
         frame["shipments"] = 0
     if "refunds" not in frame.columns:
         frame["refunds"] = 0
+    frame["refunds"] = pd.to_numeric(frame["refunds"], errors="coerce").fillna(0).abs()
+    frame["shipments"] = pd.to_numeric(frame["shipments"], errors="coerce").fillna(0)
     frame["net"] = frame["shipments"] - frame.get("refunds", 0)
     records = frame.to_dict("records")
     _patch_analytics_monthly_returns(
@@ -3694,7 +3709,7 @@ def mtr_analytics(request: Request):
 
     # Summary
     shipped  = float(df[df["Transaction_Type"] == "Shipment"]["Quantity"].sum())
-    returned = float(df[df["Transaction_Type"] == "Refund"]["Quantity"].sum())
+    returned = float(df[df["Transaction_Type"] == "Refund"]["Quantity"].abs().sum())
     net_units = int(shipped - returned)
 
     if "shipments" in monthly.columns and "refunds" in monthly.columns:
