@@ -256,6 +256,11 @@ def _restore_daily_if_needed(
             _auto_max_files = 0
         _auto_max_files = None if _auto_max_files <= 0 else _auto_max_files
 
+        # Restore-full must load all Tier-3 history — bulk uploads live in SQLite and a
+        # 12-month window leaves Myntra/Meesho/Flipkart at ~40–50% of stored rows.
+        _tier3_months = None if (force or restore_full_mode) else _auto_months
+        _tier3_max_files = None if (force or restore_full_mode) else _auto_max_files
+
         changed = False
         platform_attrs = [
             ("amazon",   "mtr_df"),
@@ -269,9 +274,9 @@ def _restore_daily_if_needed(
                 _set_restore_step(sess, "tier3", f"Tier-3 — loading {platform}…")
             df = load_platform_data(
                 platform,
-                months=_auto_months,
+                months=_tier3_months,
                 dedup=False,
-                max_files=_auto_max_files,
+                max_files=_tier3_max_files,
             )
             if not df.empty:
                 cur = getattr(sess, attr)
@@ -293,7 +298,6 @@ def _restore_daily_if_needed(
                 changed = True
 
         # Safety net: if bounded restore found nothing, do one full-history pass.
-        # Skip unbounded full-history scan during restore-full (GitHub already loaded bulk).
         if not changed and not restore_full_mode:
             for _p, _a in platform_attrs:
                 if not getattr(sess, _a).empty:
@@ -1597,6 +1601,11 @@ def _tier3_session_needs_topup(sess: AppSession) -> bool:
         if tier_min and (not sess_min or tier_min < sess_min):
             return True
         if tier_max and (not sales_max or tier_max > sales_max):
+            return True
+        tier_rows = int(plat_sum.get("total_rows") or 0)
+        sess_rows = len(cur) if cur is not None and hasattr(cur, "__len__") else 0
+        # total_rows is pre-dedup sum of uploads; session should reach ~70%+ after full merge.
+        if tier_rows > 500 and sess_rows < int(tier_rows * 0.70):
             return True
     return False
 

@@ -409,21 +409,35 @@ def load_cache_from_drive(
 
 
 def _union_history_dicts(*parts: dict) -> dict:
-    """Keep the largest platform frame from each source (local disk / warm / GitHub)."""
+    """Merge platform frames from each source (disk / warm / GitHub) without dropping rows."""
     import pandas as pd
 
+    from .daily_store import merge_platform_data
+
     out: dict = {}
-    platform_keys = (
-        "mtr_df",
-        "myntra_df",
-        "meesho_df",
-        "flipkart_df",
-        "snapdeal_df",
+    platform_pairs = (
+        ("amazon", "mtr_df"),
+        ("myntra", "myntra_df"),
+        ("meesho", "meesho_df"),
+        ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
+    )
+    other_keys = (
         "sales_df",
         "inventory_df_variant",
         "inventory_df_parent",
     )
-    for key in platform_keys:
+    for plat, key in platform_pairs:
+        merged = pd.DataFrame()
+        for part in parts:
+            if not part:
+                continue
+            df = part.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                merged = merge_platform_data(merged, df, plat)
+        if not merged.empty:
+            out[key] = merged
+    for key in other_keys:
         best = pd.DataFrame()
         for part in parts:
             if not part:

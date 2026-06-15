@@ -15,7 +15,6 @@ from ..services.sales import build_sales_df
 from ..services.github_cache import save_cache_to_drive, load_cache_from_drive, get_cache_manifest, delete_github_cache_assets
 from ..services.daily_store import (
     backfill_dsr_segments_in_store,
-    load_all_platforms,
     merge_platform_data as _merge_platform_data,
     clear_all_daily_uploads,
 )
@@ -180,19 +179,28 @@ def _sanitize_snapdeal_in_loaded(loaded: dict) -> None:
 def _merge_daily_store_into_session(sess) -> str:
     """Layer SQLite daily uploads onto session platform DFs. Returns suffix for messages."""
     try:
-        daily_data = load_all_platforms()
-        if daily_data.get("amazon") is not None and not daily_data["amazon"].empty:
-            sess.mtr_df = _merge_platform_data(sess.mtr_df, daily_data["amazon"], "amazon")
-        if daily_data.get("myntra") is not None and not daily_data["myntra"].empty:
-            sess.myntra_df = _merge_platform_data(sess.myntra_df, daily_data["myntra"], "myntra")
-        if daily_data.get("meesho") is not None and not daily_data["meesho"].empty:
-            sess.meesho_df = _merge_platform_data(sess.meesho_df, daily_data["meesho"], "meesho")
-        if daily_data.get("flipkart") is not None and not daily_data["flipkart"].empty:
-            sess.flipkart_df = _merge_platform_data(sess.flipkart_df, daily_data["flipkart"], "flipkart")
-        if daily_data.get("snapdeal") is not None and not daily_data["snapdeal"].empty:
-            sess.snapdeal_df = _merge_platform_data(sess.snapdeal_df, daily_data["snapdeal"], "snapdeal")
-        n = sum(1 for v in daily_data.values() if hasattr(v, "empty") and not v.empty)
-        return f" + {n} platform(s) daily store merged." if n else ""
+        from ..services.daily_store import load_platform_data, merge_platform_data
+
+        notes: list[str] = []
+        for plat, attr in (
+            ("amazon", "mtr_df"),
+            ("myntra", "myntra_df"),
+            ("meesho", "meesho_df"),
+            ("flipkart", "flipkart_df"),
+            ("snapdeal", "snapdeal_df"),
+        ):
+            df = load_platform_data(plat, months=None, dedup=False)
+            if df is None or df.empty:
+                continue
+            before = len(getattr(sess, attr))
+            merged = merge_platform_data(getattr(sess, attr), df, plat)
+            setattr(sess, attr, merged)
+            after = len(merged)
+            if after > before:
+                notes.append(f"{plat} +{after - before:,}")
+        if not notes:
+            return ""
+        return " Tier-3 merged (" + "; ".join(notes) + ")."
     except Exception as e:
         return f" (daily store warning: {e})"
 
