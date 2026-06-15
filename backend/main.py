@@ -1653,6 +1653,12 @@ async def lifespan(app: FastAPI):
     # Warm-cache load can run many minutes and would starve /api/auth/login → 504.
     asyncio.create_task(run_heavy(_bootstrap_stitching_on_startup))
     asyncio.create_task(run_heavy(_do_load_warm_cache))
+    try:
+        from .routers.data import _load_intelligence_bundle_cache_from_disk
+
+        _load_intelligence_bundle_cache_from_disk()
+    except Exception:
+        log.exception("Failed to restore persisted Intelligence bundle cache")
     # Schedule daily 6AM IST refresh
     task = asyncio.create_task(_warm_cache_scheduler())
     evict_task = asyncio.create_task(_session_eviction_loop())

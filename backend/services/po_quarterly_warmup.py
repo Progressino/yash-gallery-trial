@@ -287,7 +287,27 @@ def schedule_shared_quarterly_prewarm() -> None:
     def _go() -> None:
         try:
             from ..concurrency import upload_memory_lock_held
-            from .po_quarterly_cache import get_shared_quarterly, start_shared_quarterly_build
+            from .po_quarterly_cache import (
+                get_shared_quarterly,
+                load_shared_quarterly_from_disk,
+                start_shared_quarterly_build,
+                store_shared_quarterly,
+            )
+
+            key = quarterly_cache_key(False, 8)
+            if get_shared_quarterly(key):
+                return
+
+            # Fast path: a persisted payload from before the last restart is
+            # still correct (it's invalidated whenever sales/platform data
+            # actually changes) — reuse it instead of paying for a 30-180s
+            # streaming rebuild on every restart.
+            disk_payload = load_shared_quarterly_from_disk(key)
+            if disk_payload:
+                store_shared_quarterly(key, disk_payload)
+                logger.info("Shared quarterly cache restored from disk (%d rows)",
+                            len(disk_payload.get("rows") or []))
+                return
 
             # Let warm-cache Phase 1+2 and session restores finish first.
             for _ in range(120):
@@ -299,7 +319,6 @@ def schedule_shared_quarterly_prewarm() -> None:
                 logger.info("Quarterly prewarm skipped: upload memory lock still held")
                 return
 
-            key = quarterly_cache_key(False, 8)
             if get_shared_quarterly(key):
                 return
             import backend.main as _main

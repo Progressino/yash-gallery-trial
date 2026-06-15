@@ -7,6 +7,7 @@ mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 import csv
 import datetime
 import io
+import json
 import os
 import re
 import time
@@ -57,6 +58,75 @@ router = APIRouter()
 
 # Process-wide Intelligence bundle cache (PG-restore shells share the same Tier-3 window).
 _GLOBAL_INTELLIGENCE_BUNDLE_CACHE: dict = {}
+
+# How long a cached bundle is served without recomputation. Real data changes
+# invalidate this cache directly (see _invalidate_intelligence_bundle_cache),
+# so this TTL only needs to bound staleness from sources that don't trigger
+# invalidation (e.g. anomaly/DSR drift over time) — keep it generous.
+_INTELLIGENCE_BUNDLE_TTL_SEC = 1800.0
+
+_INTEL_BUNDLE_DISK_DIR = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+
+
+def _intel_bundle_disk_path(global_key: tuple) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(repr(global_key).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(_INTEL_BUNDLE_DISK_DIR, f"intel_bundle_{digest}.json")
+
+
+def _save_intelligence_bundle_to_disk(global_key: tuple, entry: dict) -> None:
+    """Best-effort persist of one global bundle-cache entry so the first
+    Intelligence request after a restart can serve instantly."""
+    try:
+        os.makedirs(_INTEL_BUNDLE_DISK_DIR, exist_ok=True)
+        path = _intel_bundle_disk_path(global_key)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"key": list(global_key), "entry": entry}, f, default=str)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _load_intelligence_bundle_cache_from_disk() -> None:
+    """Populate _GLOBAL_INTELLIGENCE_BUNDLE_CACHE from persisted entries at
+    startup so the first request after a restart doesn't recompute."""
+    try:
+        if not os.path.isdir(_INTEL_BUNDLE_DISK_DIR):
+            return
+        for name in os.listdir(_INTEL_BUNDLE_DISK_DIR):
+            if not (name.startswith("intel_bundle_") and name.endswith(".json")):
+                continue
+            try:
+                with open(os.path.join(_INTEL_BUNDLE_DISK_DIR, name)) as f:
+                    data = json.load(f)
+                global_key = tuple(
+                    tuple(x) if isinstance(x, list) else x for x in data.get("key") or []
+                )
+                entry = data.get("entry")
+                if global_key and isinstance(entry, dict):
+                    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[global_key] = entry
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _invalidate_intelligence_bundle_cache() -> None:
+    """Drop the process-wide Intelligence bundle cache (memory + disk) after
+    sales/platform data actually changes."""
+    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
+    try:
+        if os.path.isdir(_INTEL_BUNDLE_DISK_DIR):
+            for name in os.listdir(_INTEL_BUNDLE_DISK_DIR):
+                if name.startswith("intel_bundle_") and name.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(_INTEL_BUNDLE_DISK_DIR, name))
+                    except OSError:
+                        pass
+    except Exception:
+        pass
 
 
 def _sku_deepdive_aliases(raw: str) -> Set[str]:
@@ -327,6 +397,8 @@ def _restore_daily_if_needed(
                     **_sales_overlay_build_kwargs(sess),
                 )
                 sess._quarterly_cache.clear()
+                _invalidate_shared_quarterly_and_rewarm()
+                _invalidate_intelligence_bundle_cache()
             except Exception:
                 pass
 
@@ -1324,7 +1396,7 @@ def _bundle_cache_lookup(
     for hit in candidates:
         age = now - float(hit.get("_ts", 0))
         payload = hit.get("payload") or {}
-        if age >= 300.0 or not _bundle_payload_has_display_data(payload):
+        if age >= _INTELLIGENCE_BUNDLE_TTL_SEC or not _bundle_payload_has_display_data(payload):
             continue
         if _cached_bundle_stale_vs_tier3_uploads(payload, start_date, end_date):
             continue
@@ -1341,7 +1413,9 @@ def _bundle_cache_store(
 ) -> None:
     entry = {"_ts": ts if ts is not None else time.time(), "payload": payload}
     sess_cache[cache_key] = entry
-    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[_bundle_cache_global_key(cache_key)] = entry
+    global_key = _bundle_cache_global_key(cache_key)
+    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[global_key] = entry
+    _save_intelligence_bundle_to_disk(global_key, entry)
 
 
 def _intelligence_warming_payload(message: str = "Loading marketplace data on the server…") -> dict:
@@ -1632,6 +1706,20 @@ def _sales_overlay_build_kwargs(sess: AppSession) -> dict:
     return kw
 
 
+def _invalidate_shared_quarterly_and_rewarm() -> None:
+    """Drop the server-wide PO quarterly cache (memory + disk) after sales/
+    platform data actually changes, then rebuild it in the background so
+    other sessions don't pay for a synchronous rebuild on next request."""
+    try:
+        from ..services.po_quarterly_cache import invalidate_shared_quarterly
+        from ..services.po_quarterly_warmup import schedule_shared_quarterly_prewarm
+
+        invalidate_shared_quarterly()
+        schedule_shared_quarterly_prewarm()
+    except Exception:
+        pass
+
+
 def _rebuild_session_sales(sess: AppSession) -> None:
     if getattr(sess, "inventory_upload_status", "idle") == "running":
         return
@@ -1655,6 +1743,8 @@ def _rebuild_session_sales(sess: AppSession) -> None:
         )
         sess._quarterly_cache.clear()
         sess._intelligence_bundle_cache.clear()
+        _invalidate_shared_quarterly_and_rewarm()
+        _invalidate_intelligence_bundle_cache()
         _refresh_sales_days_by_source(sess)
         _mark_tier3_sync_applied(sess)
     except Exception:
@@ -1895,6 +1985,8 @@ def _ensure_sales_rebuilt(sess: AppSession) -> None:
             **_sales_overlay_build_kwargs(sess),
         )
         sess._quarterly_cache.clear()
+        _invalidate_shared_quarterly_and_rewarm()
+        _invalidate_intelligence_bundle_cache()
     except Exception:
         pass
 

@@ -1,0 +1,71 @@
+"""Shared PO quarterly cache must survive a backend restart via disk persistence."""
+
+import importlib
+
+import pytest
+
+from backend.services import po_quarterly_cache as qc
+
+
+@pytest.fixture
+def tmp_cache_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(qc, "_DISK_CACHE_DIR", str(tmp_path))
+    with qc._lock:
+        qc._payloads.clear()
+    yield tmp_path
+    with qc._lock:
+        qc._payloads.clear()
+
+
+def test_store_persists_to_disk_and_survives_memory_clear(tmp_cache_dir):
+    key = qc.quarterly_cache_key(False, 8) if hasattr(qc, "quarterly_cache_key") else (False, 8)
+    payload = {"loaded": True, "columns": ["SKU", "Q1"], "rows": [{"SKU": "A1", "Q1": 10}]}
+
+    qc.store_shared_quarterly(key, payload)
+    assert qc.get_shared_quarterly(key) == payload
+
+    # Simulate a restart: in-memory cache wiped, disk survives (Docker volume).
+    with qc._lock:
+        qc._payloads.clear()
+    assert qc.get_shared_quarterly(key) is None
+
+    restored = qc.load_shared_quarterly_from_disk(key)
+    assert restored == payload
+
+
+def test_load_from_disk_returns_none_when_absent(tmp_cache_dir):
+    key = (False, 8)
+    assert qc.load_shared_quarterly_from_disk(key) is None
+
+
+def test_load_from_disk_ignores_unloaded_payload(tmp_cache_dir):
+    key = (False, 8)
+    qc.store_shared_quarterly(key, {"loaded": False, "rows": []})
+    assert qc.load_shared_quarterly_from_disk(key) is None
+
+
+def test_invalidate_clears_memory_and_disk(tmp_cache_dir):
+    key = (False, 8)
+    payload = {"loaded": True, "columns": ["SKU"], "rows": [{"SKU": "A1"}]}
+    qc.store_shared_quarterly(key, payload)
+    assert qc.get_shared_quarterly(key) == payload
+    assert qc.load_shared_quarterly_from_disk(key) == payload
+
+    qc.invalidate_shared_quarterly()
+
+    assert qc.get_shared_quarterly(key) is None
+    assert qc.load_shared_quarterly_from_disk(key) is None
+
+
+def test_json_default_handles_numpy_scalars(tmp_cache_dir):
+    import numpy as np
+
+    key = (True, 8)
+    payload = {
+        "loaded": True,
+        "columns": ["SKU", "Q1"],
+        "rows": [{"SKU": "A1", "Q1": np.int64(42)}],
+    }
+    qc.store_shared_quarterly(key, payload)
+    restored = qc.load_shared_quarterly_from_disk(key)
+    assert restored["rows"][0]["Q1"] == 42
