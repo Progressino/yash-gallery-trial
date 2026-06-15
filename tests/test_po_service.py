@@ -2114,6 +2114,44 @@ def test_intermittent_sales_use_distinct_txn_days_not_calendar_span():
     assert float(row["Projected_Running_Days"]) < 45
 
 
+def test_bursty_sales_keep_calendar_eff_days_not_distinct_only():
+    """Bursty demand must not collapse Eff_Days to distinct txn days (inflates ADS / PO)."""
+    sale_days = pd.to_datetime(
+        ["2026-05-01", "2026-05-10", "2026-05-20", "2026-05-30"]
+    )
+    sales_rows = []
+    for d in sale_days:
+        for _ in range(5):
+            sales_rows.append(
+                {
+                    "Sku": "BURST-SKU-M",
+                    "TxnDate": d,
+                    "Transaction Type": "Shipment",
+                    "Quantity": 1,
+                    "Units_Effective": 1,
+                    "Source": "Amazon",
+                }
+            )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame({"OMS_SKU": ["BURST-SKU-M"], "Total_Inventory": [80]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+    )
+    row = po.loc[po["OMS_SKU"] == "BURST-SKU-M"].iloc[0]
+    assert int(row["Sold_Units"]) == 20
+    assert int(row["Eff_Days"]) >= 29, (
+        f"Expected ~30d calendar span for bursty seller, not 4 distinct days; got {row['Eff_Days']}"
+    )
+    assert float(row["ADS"]) < 1.5
+    assert int(row["PO_Qty"]) < 200
+
+
 def test_4032_drsgreen_family_gets_po_with_pipeline_and_inventory_history():
     """Regression: parent 4032DRSGREEN must not be zeroed when warehouse stock is low but pipeline exists."""
     base_sales = []

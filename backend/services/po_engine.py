@@ -1128,7 +1128,7 @@ def calculate_po_base(
     else:
         act = ads_recent
     if act.empty:
-        ads_active_span = pd.DataFrame(columns=["OMS_SKU", "_eff_days_active"])
+        ads_active_span = pd.DataFrame(columns=["OMS_SKU", "_cal_span_days", "_distinct_days"])
     else:
         ads_active_span = (
             act.groupby("Sku", as_index=False)
@@ -1143,20 +1143,19 @@ def calculate_po_base(
             ads_active_span["ADS_Last_Active"] - ads_active_span["ADS_First_Active"]
         ).dt.days + 1
         _distinct = pd.to_numeric(ads_active_span["ADS_Distinct_Active"], errors="coerce").fillna(0)
-        # Intermittent sales spread across a wide calendar (4032DRSGREEN-L: 6 txns over
-        # 26d) must not dilute ADS — use distinct sale days when they are much sparser
-        # than first→last span. Dense daily sellers keep the inclusive calendar span.
-        ads_active_span["_eff_days_active"] = np.where(
-            (_distinct * 2) < _cal_span,
-            _distinct.clip(lower=1.0),
-            _cal_span,
-        ).astype(int)
+        ads_active_span["_cal_span_days"] = _cal_span.astype(int)
+        ads_active_span["_distinct_days"] = _distinct.astype(int)
 
     ads_summary = ads_sold.merge(ads_net, on="OMS_SKU", how="outer").fillna(0)
     po_df = _merge_metric_with_bundled_listing_fallback(
         po_df, ads_summary, ["ADS_Sold_Units", "ADS_Net_Units"]
     )
-    po_df = po_df.merge(ads_active_span[["OMS_SKU", "_eff_days_active"]], on="OMS_SKU", how="left")
+    _span_merge_cols = ["OMS_SKU", "_cal_span_days", "_distinct_days"]
+    if not ads_active_span.empty:
+        po_df = po_df.merge(ads_active_span[_span_merge_cols], on="OMS_SKU", how="left")
+    else:
+        po_df["_cal_span_days"] = 0
+        po_df["_distinct_days"] = 0
     if not group_by_parent and not ads_recent.empty:
         span_exact_keys = set(ads_active_span["OMS_SKU"].astype(str)) if not ads_active_span.empty else set()
         _p_act = act.copy()
@@ -1177,20 +1176,26 @@ def calculate_po_base(
             _p_distinct = pd.to_numeric(
                 p_ads_active_span["P_ADS_Distinct_Active"], errors="coerce"
             ).fillna(0)
-            p_ads_active_span["P__eff_days_active"] = np.where(
-                (_p_distinct * 2) < _p_cal_span,
-                _p_distinct.clip(lower=1.0),
-                _p_cal_span,
-            ).astype(int)
-            po_df = po_df.merge(p_ads_active_span[["OMS_SKU", "P__eff_days_active"]], on="OMS_SKU", how="left")
+            p_ads_active_span["P__cal_span_days"] = _p_cal_span.astype(int)
+            p_ads_active_span["P__distinct_days"] = _p_distinct.astype(int)
+            po_df = po_df.merge(
+                p_ads_active_span[["OMS_SKU", "P__cal_span_days", "P__distinct_days"]],
+                on="OMS_SKU",
+                how="left",
+            )
             out_sku = po_df["OMS_SKU"].astype(str)
             use_parent_days = out_sku.map(_fallback_parent_key).eq(out_sku) | (~out_sku.isin(span_exact_keys))
-            po_df["_eff_days_active"] = np.where(
+            po_df["_cal_span_days"] = np.where(
                 use_parent_days,
-                pd.to_numeric(po_df["P__eff_days_active"], errors="coerce"),
-                pd.to_numeric(po_df["_eff_days_active"], errors="coerce"),
+                pd.to_numeric(po_df["P__cal_span_days"], errors="coerce"),
+                pd.to_numeric(po_df["_cal_span_days"], errors="coerce"),
             )
-            po_df.drop(columns=["P__eff_days_active"], inplace=True, errors="ignore")
+            po_df["_distinct_days"] = np.where(
+                use_parent_days,
+                pd.to_numeric(po_df["P__distinct_days"], errors="coerce"),
+                pd.to_numeric(po_df["_distinct_days"], errors="coerce"),
+            )
+            po_df.drop(columns=["P__cal_span_days", "P__distinct_days"], inplace=True, errors="ignore")
     po_df[["ADS_Sold_Units", "ADS_Net_Units"]] = po_df[["ADS_Sold_Units", "ADS_Net_Units"]].fillna(0)
     # Active span is only meaningful when this row has demand in the ADS window.
     _demand_for_eff = (
@@ -1198,7 +1203,8 @@ def calculate_po_base(
         if demand_basis == "Net"
         else po_df["ADS_Sold_Units"].fillna(0)
     )
-    po_df.loc[_demand_for_eff <= 0, "_eff_days_active"] = np.nan
+    po_df.loc[_demand_for_eff <= 0, "_cal_span_days"] = np.nan
+    po_df.loc[_demand_for_eff <= 0, "_distinct_days"] = np.nan
 
     # Sold_Units / Net_Units reflect the full ADS window (period_days).
     po_df["Sold_Units"] = po_df["ADS_Sold_Units"].astype(int)
@@ -1211,7 +1217,24 @@ def calculate_po_base(
             ).clip(lower=0)
             po_df["Net_Units"] = po_df["ADS_Net_Units"].astype(int)
 
-    # Active demand days only — 0 when the SKU had no sales/net in the ADS window.
+    _cal_eff = pd.to_numeric(po_df["_cal_span_days"], errors="coerce").fillna(0)
+    _dist_eff = pd.to_numeric(po_df["_distinct_days"], errors="coerce").fillna(0)
+    _sold_eff = pd.to_numeric(_demand_for_eff, errors="coerce").fillna(0)
+    # Only collapse to distinct sale days for genuinely sparse sellers (4032DRSGREEN:
+    # 6 units / 26d calendar). Bursty but real demand (e.g. 20 units on 4 days over 40d)
+    # must keep the inclusive calendar span — otherwise ADS inflates 10× and PO explodes.
+    _sparse_intermittent = (
+        (_sold_eff > 0)
+        & (_cal_eff > 0)
+        & ((_sold_eff / _cal_eff) < 0.35)
+        & ((_dist_eff * 2) < _cal_eff)
+    )
+    po_df["_eff_days_active"] = np.where(
+        _sparse_intermittent,
+        _dist_eff.clip(lower=1.0),
+        _cal_eff,
+    )
+    po_df.drop(columns=["_cal_span_days", "_distinct_days"], inplace=True, errors="ignore")
     po_df["Eff_Days"] = (
         pd.to_numeric(po_df["_eff_days_active"], errors="coerce")
         .fillna(0)
