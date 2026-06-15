@@ -887,6 +887,13 @@ def _auto_save_cache(sess) -> None:
     else:
         _log.warning("Auto-save cache skipped/failed: %s", msg)
 
+    try:
+        import backend.main as _main
+
+        _main.publish_warm_cache_from_session(sess)
+    except Exception:
+        _log.exception("warm cache publish after auto-save failed")
+
     sid = getattr(sess, "_persist_sid", None)
     if sid:
         try:

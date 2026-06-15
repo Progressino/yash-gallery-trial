@@ -100,6 +100,25 @@ _WARM_CACHE_KEYS = (
     "po_return_overlay_df",
 )
 
+_PLATFORM_WARM_KEYS: dict[str, str] = {
+    "mtr_df": "amazon",
+    "myntra_df": "myntra",
+    "meesho_df": "meesho",
+    "flipkart_df": "flipkart",
+    "snapdeal_df": "snapdeal",
+}
+
+
+def _warm_frame_has_more_rows(warm_val, sess_val) -> bool:
+    """True when warm cache holds strictly more rows than the session frame."""
+    import pandas as pd
+
+    if not isinstance(warm_val, pd.DataFrame) or warm_val.empty:
+        return False
+    if not isinstance(sess_val, pd.DataFrame) or sess_val.empty:
+        return True
+    return len(warm_val) > len(sess_val)
+
 
 def clear_warm_cache() -> None:
     """Drop app-level warm cache so the next load re-downloads from GitHub / rebuilds from SQLite."""
@@ -111,22 +130,71 @@ def clear_warm_cache() -> None:
 
 
 def publish_warm_cache_from_session(sess) -> None:
-    """Mirror session dataframes into _warm_cache after a full reload or rebuild."""
+    """Merge session data into ``_warm_cache`` without dropping bulk platform history.
+
+    Previously this replaced the entire warm cache from the session, so a partial
+    PostgreSQL restore (e.g. 84K Myntra rows) could overwrite 190K+ bulk history
+    for every later login.
+    """
     global _warm_cache, _warm_cache_loaded_at
     import pandas as pd
+    from .services.daily_store import merge_platform_data
 
-    out: dict = {}
+    if not _warm_cache:
+        _warm_cache = {}
+
     for key in _WARM_CACHE_KEYS:
         val = getattr(sess, key, None)
         if val is None:
             continue
-        if key == "sku_mapping" and not isinstance(val, dict):
-            out[key] = {}
-        elif hasattr(val, "empty"):
-            out[key] = val if isinstance(val, pd.DataFrame) else pd.DataFrame()
-        else:
-            out[key] = val
-    _warm_cache = out
+
+        if key in _PLATFORM_WARM_KEYS:
+            sess_df = val if isinstance(val, pd.DataFrame) else pd.DataFrame()
+            warm_df = _warm_cache.get(key)
+            if not isinstance(warm_df, pd.DataFrame):
+                warm_df = pd.DataFrame()
+            _warm_cache[key] = merge_platform_data(warm_df, sess_df, _PLATFORM_WARM_KEYS[key])
+            continue
+
+        if key == "sku_mapping":
+            sess_sm = val if isinstance(val, dict) else {}
+            if not sess_sm:
+                continue
+            warm_sm = _warm_cache.get(key)
+            if not isinstance(warm_sm, dict) or not warm_sm:
+                _warm_cache[key] = dict(sess_sm)
+            else:
+                _warm_cache[key] = {**warm_sm, **sess_sm}
+            continue
+
+        if key == "daily_inventory_history_df":
+            sess_df = val if isinstance(val, pd.DataFrame) else pd.DataFrame()
+            warm_df = _warm_cache.get(key)
+            if not isinstance(warm_df, pd.DataFrame):
+                warm_df = pd.DataFrame()
+            if sess_df.empty:
+                continue
+            if warm_df.empty:
+                _warm_cache[key] = sess_df.copy()
+            else:
+                from .services.daily_inventory_history import merge_inventory_history
+
+                _warm_cache[key] = merge_inventory_history(warm_df, sess_df)
+            continue
+
+        if hasattr(val, "empty"):
+            sess_df = val if isinstance(val, pd.DataFrame) else pd.DataFrame()
+            warm_df = _warm_cache.get(key)
+            if not isinstance(warm_df, pd.DataFrame):
+                warm_df = pd.DataFrame()
+            if sess_df.empty:
+                continue
+            if warm_df.empty or len(sess_df) >= len(warm_df):
+                _warm_cache[key] = sess_df.copy()
+            continue
+
+        _warm_cache[key] = val
+
     _warm_cache_loaded_at = datetime.now(IST)
 
 
@@ -175,6 +243,8 @@ def session_needs_warm_cache_topup(sess) -> bool:
         wc_ok = wc is not None and hasattr(wc, "empty") and not wc.empty
         cur_ok = cur is not None and hasattr(cur, "empty") and not cur.empty
         if wc_ok and not cur_ok:
+            return True
+        if _warm_frame_has_more_rows(wc, cur):
             return True
     return False
 
@@ -1233,6 +1303,7 @@ def _do_load_warm_cache() -> bool:
 
 def _copy_warm_cache_to_session(sess) -> bool:
     """Copy _warm_cache into an AppSession. Returns True if data was available."""
+    global _warm_cache
     if not _warm_cache:
         return False
     try:
@@ -1290,6 +1361,13 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 except Exception:
                     val = cur
             setattr(sess, key, val)
+            try:
+                wc_cur = _warm_cache.get(key)
+                wc_len = len(wc_cur) if wc_cur is not None and hasattr(wc_cur, "__len__") else 0
+                if wc_len < len(val):
+                    _warm_cache[key] = val
+            except Exception:
+                pass
             continue
         if key == "existing_po_df":
             try:
@@ -1367,6 +1445,8 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
             wc_has_data = hasattr(wc, "empty") and not wc.empty
             cur_has_data = hasattr(cur, "empty") and not cur.empty
             if wc_has_data and not cur_has_data:
+                return True
+            if _warm_frame_has_more_rows(wc, cur):
                 return True
         return False
 
