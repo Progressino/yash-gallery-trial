@@ -90,6 +90,10 @@ main() {
   log "========== weekly maintenance start =========="
   log_disk
   prune_runner_logs
+  if [ -x "${ROOT}/scripts/ensure_github_runner.sh" ]; then
+    log "=== ensure GitHub Actions runner ==="
+    bash "${ROOT}/scripts/ensure_github_runner.sh" 2>&1 | tee -a "$LOG_FILE" || true
+  fi
   prune_docker
   prune_postgres_sessions
   log "=== disk usage (after) ==="

@@ -10,6 +10,11 @@ on:
         type: boolean
         default: false
 
+# Only one deploy at a time; newer pushes cancel older queued/in-progress deploys.
+concurrency:
+  group: deploy-vps-main
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: self-hosted
