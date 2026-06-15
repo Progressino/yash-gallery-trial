@@ -125,6 +125,10 @@ export interface CoverageResponse {
     platform?: string
     rows?: number
   }>
+  /** Tier-1 bulk history ZIP/RAR (MTR, Myntra PPMP, …) — async parse */
+  tier1_bulk_status?: 'idle' | 'running' | 'done' | 'error'
+  tier1_bulk_message?: string
+  tier1_bulk_platform?: string
   inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   inventory_upload_message?: string
   inventory_upload_progress?: number
@@ -658,6 +662,35 @@ export async function waitForInventoryUpload(
     await new Promise(r => setTimeout(r, 1500))
   }
   throw new Error('Inventory upload timed out — refresh the page in a minute.')
+}
+
+/** Poll until Tier-1 bulk history parse finishes (MTR / Myntra / Meesho / Flipkart / Snapdeal). */
+export async function waitForTier1Bulk(
+  onTick?: (message: string) => void,
+  maxMs = UPLOAD_BACKGROUND_WAIT_MS,
+): Promise<CoverageResponse> {
+  const start = Date.now()
+  let sawRunning = false
+  while (Date.now() - start < maxMs) {
+    const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
+    const st = cov.tier1_bulk_status ?? 'idle'
+    if (st === 'running') {
+      sawRunning = true
+      const plat = cov.tier1_bulk_platform ? `${cov.tier1_bulk_platform}: ` : ''
+      onTick?.(cov.tier1_bulk_message || `${plat}Parsing archive on server…`)
+      await new Promise(r => setTimeout(r, 2000))
+      continue
+    }
+    if (st === 'error') {
+      throw new Error(cov.tier1_bulk_message || 'Bulk history upload failed')
+    }
+    if (st === 'done' || (sawRunning && st === 'idle')) {
+      return cov
+    }
+    onTick?.('Waiting for server to start parsing…')
+    await new Promise(r => setTimeout(r, 1500))
+  }
+  throw new Error('Bulk history upload timed out — refresh the page; row counts may still be updating.')
 }
 
 /** Poll until async return overlay import finishes and return_sheet is loaded. */
@@ -1228,6 +1261,8 @@ export type JobStatusResponse = {
   session_restore_status: string
   inventory_upload_status: string
   daily_inventory_upload_status: string
+  tier1_bulk_status: string
+  tier1_bulk_message?: string
 }
 
 export type DailyUploadVerifyResponse = {

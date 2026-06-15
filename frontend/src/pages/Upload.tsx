@@ -10,7 +10,7 @@ import {
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadFinishingReceipt, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, uploadPoManualIntransitSheet,
   type ManualIntransitParseReport,
-  waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, verifyDailyUpload,
+  waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, waitForTier1Bulk, verifyDailyUpload,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
   type DailyUploadVerifyResponse,
   type CoverageResponse,
@@ -361,22 +361,50 @@ export default function Upload() {
     }
   }
 
-  const handle = (key: string, fn: (file: File) => Promise<UploadResponse>) => async (file: File) => {
+  const handle = (
+    key: string,
+    fn: (file: File) => Promise<UploadResponse>,
+    opts?: { tier1?: boolean },
+  ) => async (file: File) => {
     setL(key, true)
+    if (opts?.tier1) setBuildingMsg(`Uploading ${file.name}…`)
     try {
       await withUploadGuard(async () => {
-        const res = await fn(file)
-        if (res.ok) {
-          captureUploadAlerts(key, res)
-          showToast('success', res.message)
-          await refresh()
-        } else {
-          showToast('error', res.message)
+        let res: UploadResponse
+        try {
+          res = await fn(file)
+        } catch (e: unknown) {
+          if (opts?.tier1 && e instanceof Error && /timed out|502|gateway/i.test(e.message)) {
+            showToast('success', 'Upload may still be processing on the server — watching row counts…', 8000)
+            const cov = await waitForTier1Bulk(msg => setBuildingMsg(msg))
+            showToast('success', cov.tier1_bulk_message || 'Archive parsed.')
+            await refresh()
+            return
+          }
+          throw e
         }
+        if (!res.ok) {
+          showToast('error', res.message)
+          return
+        }
+        if (opts?.tier1 && /background|accepted/i.test(res.message)) {
+          showToast('success', res.message, 8000)
+          const cov = await waitForTier1Bulk(msg => setBuildingMsg(msg))
+          if (cov.tier1_bulk_status === 'error') {
+            showToast('error', cov.tier1_bulk_message || 'Bulk upload failed')
+          } else {
+            showToast('success', cov.tier1_bulk_message || res.message)
+          }
+          await refresh()
+          return
+        }
+        captureUploadAlerts(key, res)
+        showToast('success', res.message)
+        await refresh()
       })
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Upload failed')
-    } finally { setL(key, false) }
+    } finally { setL(key, false); setBuildingMsg('') }
   }
 
   const handleBuildSales = async () => {
@@ -918,19 +946,32 @@ export default function Upload() {
               'application/vnd.rar': ['.rar'],
               'application/x-rar-compressed': ['.rar'],
             }}
-            onUpload={handle('mtr', (file: File) => uploadMtr(file))}
+            onUpload={handle('mtr', (file: File) => uploadMtr(file), { tier1: true })}
             uploading={loading['mtr']}
           />
         </UploadCard>
       </Section>}
 
       {showAdminTab && uploadTab === 'admin' && allowHistorical && <Section title="Tier 1 — Platform history (bulk / multi-year)">
+        {(coverage.tier1_bulk_status === 'running' || (buildingMsg && /uploading|parsing/i.test(buildingMsg))) && (
+          <div className="col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+            <div className="flex items-center gap-2 text-xs text-amber-800">
+              <svg className="animate-spin h-3 w-3 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              <span className="flex-1 truncate">
+                {coverage.tier1_bulk_message || buildingMsg || 'Parsing bulk history on server…'}
+              </span>
+            </div>
+          </div>
+        )}
         <UploadCard title="🛍️ Myntra PPMP" subtitle="Upload multiple company ZIPs — data stacks" loaded={coverage.myntra} rows={coverage.myntra_rows} onClear={mayClearPlatform ? handleClear('myntra') : undefined} clearing={loading['clear_myntra']} alert={showImportCompleteness ? uploadAlertsBySource['myntra'] : undefined} onClearAlert={() => clearUploadAlert('myntra')}>
           {!coverage.sku_mapping && <Warn>Upload SKU Mapping first.</Warn>}
           <FileUpload
             label="Upload .zip"
             accept={{ 'application/zip': ['.zip'] }}
-            onUpload={handle('myntra', (file: File) => uploadMyntra(file))}
+            onUpload={handle('myntra', (file: File) => uploadMyntra(file), { tier1: true })}
             uploading={loading['myntra']}
           />
         </UploadCard>
@@ -946,7 +987,7 @@ export default function Upload() {
               // Some browsers report Excel as generic binary when picking files
               'application/octet-stream': ['.xlsx', '.xls'],
             }}
-            onUpload={handle('meesho', (file: File) => uploadMeesho(file))}
+            onUpload={handle('meesho', (file: File) => uploadMeesho(file), { tier1: true })}
             uploading={loading['meesho']}
             multiple
           />
@@ -957,7 +998,7 @@ export default function Upload() {
           <FileUpload
             label="Upload .zip"
             accept={{ 'application/zip': ['.zip'] }}
-            onUpload={handle('flipkart', (file: File) => uploadFlipkart(file))}
+            onUpload={handle('flipkart', (file: File) => uploadFlipkart(file), { tier1: true })}
             uploading={loading['flipkart']}
           />
         </UploadCard>
@@ -966,7 +1007,7 @@ export default function Upload() {
           <FileUpload
             label="Upload files (select multiple)"
             accept={{ 'application/zip': ['.zip'], 'text/csv': ['.csv'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] }}
-            onUpload={handle('snapdeal', (file: File) => uploadSnapdeal(file))}
+            onUpload={handle('snapdeal', (file: File) => uploadSnapdeal(file), { tier1: true })}
             uploading={loading['snapdeal']}
             multiple={true}
           />

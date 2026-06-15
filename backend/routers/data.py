@@ -180,6 +180,8 @@ def _restore_daily_if_needed(
         return
     if getattr(sess, "inventory_upload_status", "idle") == "running" and not force:
         return
+    if getattr(sess, "tier1_bulk_status", "idle") == "running" and not force:
+        return
     try:
         import backend.main as _main
 
@@ -223,6 +225,7 @@ def _restore_daily_if_needed(
     if not acquired:
         return
 
+    lock_held = True
     try:
         if sess.daily_restored and not needs_tier3_refresh and not force:
             return
@@ -269,15 +272,35 @@ def _restore_daily_if_needed(
             ("flipkart", "flipkart_df"),
             ("snapdeal", "snapdeal_df"),
         ]
-        for platform, attr in platform_attrs:
+        lock_reacquire_failed = False
+        for idx, (platform, attr) in enumerate(platform_attrs):
+            if lock_reacquire_failed:
+                break
             if restore_full_mode:
                 _set_restore_step(sess, "tier3", f"Tier-3 — loading {platform}…")
-            df = load_platform_data(
-                platform,
-                months=_tier3_months,
-                dedup=False,
-                max_files=_tier3_max_files,
-            )
+                if lock_held:
+                    sess._daily_restore_lock.release()
+                    lock_held = False
+                try:
+                    df = load_platform_data(
+                        platform,
+                        months=_tier3_months,
+                        dedup=False,
+                        max_files=_tier3_max_files,
+                    )
+                finally:
+                    if not lock_held:
+                        if sess._daily_restore_lock.acquire(blocking=True, timeout=120.0):
+                            lock_held = True
+                        else:
+                            lock_reacquire_failed = True
+            else:
+                df = load_platform_data(
+                    platform,
+                    months=_tier3_months,
+                    dedup=False,
+                    max_files=_tier3_max_files,
+                )
             if not df.empty:
                 cur = getattr(sess, attr)
 
@@ -375,7 +398,8 @@ def _restore_daily_if_needed(
 
         sess.daily_restored = True
     finally:
-        sess._daily_restore_lock.release()
+        if lock_held:
+            sess._daily_restore_lock.release()
 
 
 _SOURCE_BY_ATTR = {
@@ -2314,6 +2338,9 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
         inventory_upload_message=getattr(sess, "inventory_upload_message", "") or "",
         inventory_upload_progress=int(getattr(sess, "inventory_upload_progress", 0) or 0),
+        tier1_bulk_status=getattr(sess, "tier1_bulk_status", "idle") or "idle",
+        tier1_bulk_message=getattr(sess, "tier1_bulk_message", "") or "",
+        tier1_bulk_platform=getattr(sess, "tier1_bulk_platform", "") or "",
         inventory_upload_rows=(
             int(sess.inventory_upload_result["rows"])
             if getattr(sess, "inventory_upload_result", None)
@@ -2666,6 +2693,8 @@ def get_job_status(request: Request):
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
         inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
+        tier1_bulk_status=getattr(sess, "tier1_bulk_status", "idle") or "idle",
+        tier1_bulk_message=getattr(sess, "tier1_bulk_message", "") or "",
     )
 
 

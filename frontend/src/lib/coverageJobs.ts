@@ -6,6 +6,7 @@ export function coverageJobsRunning(c: CoverageResponse | undefined): boolean {
     c.inventory_upload_status === 'running' ||
     c.daily_inventory_upload_status === 'running' ||
     c.daily_auto_ingest_status === 'running' ||
+    c.tier1_bulk_status === 'running' ||
     c.sales_rebuild === 'running' ||
     c.session_restore_status === 'running'
   )

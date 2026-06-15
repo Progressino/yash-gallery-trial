@@ -801,6 +801,7 @@ export default function Dashboard() {
     s.inventory_upload_status === 'running' ||
     s.daily_inventory_upload_status === 'running' ||
     s.daily_auto_ingest_status === 'running' ||
+    s.tier1_bulk_status === 'running' ||
     s.sales_rebuild === 'running',
   )
 

@@ -16,7 +16,7 @@ export default function CoverageProvider({
   useQuery({
     queryKey: ['coverage-poll'],
     queryFn: async () => {
-      const c = await getCoverage({ light: true, timeout: 20_000 })
+      const c = await getCoverage({ light: true, timeout: 45_000 })
       setCoverage(c)
       return c
     },

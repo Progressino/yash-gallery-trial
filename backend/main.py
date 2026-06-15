@@ -1819,6 +1819,9 @@ async def session_middleware(request: Request, call_next):
         and path.startswith("/api/data/")
         and not getattr(session, "sales_df", None) is None
         and not getattr(session, "sales_df").empty
+    ) or (
+        request.method == "POST"
+        and path.startswith("/api/upload/")
     )
     if not _skip_sku_bundle:
         try:

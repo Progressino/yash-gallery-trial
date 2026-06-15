@@ -128,6 +128,13 @@ class AppSession:
     inventory_upload_started: float = 0.0
     inventory_upload_result: dict = field(default_factory=dict)
 
+    # Async Tier-1 bulk ZIP/RAR (MTR / Myntra / etc.) — avoids gateway timeout on large archives.
+    tier1_bulk_status: str = "idle"  # idle | running | done | error
+    tier1_bulk_message: str = ""
+    tier1_bulk_platform: str = ""
+    tier1_bulk_started: float = 0.0
+    tier1_bulk_result: dict = field(default_factory=dict)
+
     # After "Clear all app data", block warm-cache copy, Tier-3 SQLite restore, and
     # frontend auto Load-Cache until the user uploads again or clicks Load Cache.
     pause_auto_data_restore: bool = False
@@ -213,6 +220,11 @@ def wipe_app_session(sess: AppSession) -> None:
     sess.inventory_upload_progress = 0
     sess.inventory_upload_started = 0.0
     sess.inventory_upload_result = {}
+    sess.tier1_bulk_status = "idle"
+    sess.tier1_bulk_message = ""
+    sess.tier1_bulk_platform = ""
+    sess.tier1_bulk_started = 0.0
+    sess.tier1_bulk_result = {}
     sess.pause_auto_data_restore = True
     sess._quarterly_cache.clear()
     sess._intelligence_bundle_cache.clear()
