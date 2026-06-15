@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.conftest import bootstrap_test_session
+
 
 def test_verify_daily_upload_requires_date(client):
     r = client.get("/api/upload/daily-auto/verify")
@@ -15,7 +17,7 @@ def test_verify_daily_upload_requires_date(client):
 def test_daily_auto_reset_clears_sales_rebuild(client, auth_token, monkeypatch):
     from backend.session import store
 
-    r = client.get("/api/health")
+    bootstrap_test_session(client)
     sid = client.cookies.get("session_id")
     sess = store.get(sid)
     assert sess is not None

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from tests.conftest import bootstrap_test_session
+
 from backend.session import AppSession, store
 
 
@@ -20,9 +22,7 @@ def test_intelligence_bundle_uses_cache_without_refresh(client, monkeypatch):
         lambda: {},
     )
 
-    r = client.get("/api/health")
-    assert r.status_code == 200
-    sid = client.cookies.get("session_id")
+    sid = bootstrap_test_session(client)
     assert sid
     sess = store.get(sid)
     assert sess is not None
@@ -81,8 +81,7 @@ def test_short_window_bundle_does_not_block_full_refresh(client, monkeypatch):
         lambda: {"amazon": "1:1:x"},
     )
 
-    client.get("/api/health")
-    sid = client.cookies.get("session_id")
+    sid = bootstrap_test_session(client)
     sess = store.get(sid)
     assert sess is not None
     sess.sales_df = pd.DataFrame(

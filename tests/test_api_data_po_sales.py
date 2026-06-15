@@ -9,6 +9,7 @@ def test_health(client):
     assert r.status_code == 200
     body = r.json()
     assert body.get("status") == "ok"
+    assert client.cookies.get("session_id") is None
 
 
 def test_sales_summary_empty_session(client, session_for_client):

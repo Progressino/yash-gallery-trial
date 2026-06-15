@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from tests.conftest import bootstrap_test_session
 from backend.routers import data as data_router
 from backend.session import AppSession
 
@@ -63,8 +64,7 @@ def test_intelligence_bundle_rejects_empty_cache(client, monkeypatch):
     monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _sid: None)
     monkeypatch.setattr(data_router, "_schedule_persist_tier3_window", lambda *a, **k: None)
 
-    client.get("/api/health")
-    sid = client.cookies.get("session_id")
+    sid = bootstrap_test_session(client)
     sess = store.get(sid)
     assert sess is not None
     sess._intelligence_bundle_cache.clear()

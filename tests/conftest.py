@@ -47,15 +47,21 @@ def client(auth_token):
     return c
 
 
+def bootstrap_test_session(client) -> str:
+    """Activate a browser session cookie (health is intentionally session-free)."""
+    r = client.get("/api/data/coverage", params={"light": True})
+    assert r.status_code == 200
+    sid = client.cookies.get("session_id")
+    assert sid
+    return sid
+
+
 @pytest.fixture
 def session_for_client(client):
     """Return (session_id, AppSession) after one request activates the session."""
     from backend.session import store
 
-    r = client.get("/api/health")
-    assert r.status_code == 200
-    sid = client.cookies.get("session_id")
-    assert sid
+    sid = bootstrap_test_session(client)
     sess = store.get(sid)
     assert sess is not None
     return sid, sess

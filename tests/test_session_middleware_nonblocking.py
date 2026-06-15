@@ -7,8 +7,7 @@ import threading
 def test_upload_does_not_block_event_loop_during_pg_restore(monkeypatch):
     """
     Simulate a slow PG restore (2s). A concurrent /api/health request must not wait on it.
-    Before the fix, store.get_or_create was called synchronously in the async middleware,
-    blocking the event loop for the full PG timeout duration on every request with a stale cookie.
+    /api/health is session-lightweight; the slow restore is triggered via coverage instead.
     """
     barrier = threading.Barrier(2, timeout=5)
     restore_started = threading.Event()
@@ -44,16 +43,14 @@ def test_upload_does_not_block_event_loop_during_pg_restore(monkeypatch):
     token = create_token("tester", role="Admin")
     client_stale.cookies.set("auth_token", token)
 
-    # Fire a request with the stale session ID in a background thread (triggers slow PG restore).
     health_elapsed: list[float] = []
 
     def _do_stale_request():
-        client_stale.get("/api/health")
+        client_stale.get("/api/data/coverage", params={"light": True})
 
     t = threading.Thread(target=_do_stale_request, daemon=True)
     t.start()
 
-    # Wait until PG restore has started, then fire a normal health probe.
     restore_started.wait(timeout=3)
 
     client_fresh = TestClient(app, raise_server_exceptions=False)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from backend.services.po_quarterly_jobs import get_quarterly_job, set_quarterly_job
+from tests.conftest import bootstrap_test_session
 from backend.services.po_quarterly_warmup import (
     QUARTERLY_CACHE_SCHEMA,
     build_quarterly_payload,
@@ -32,8 +32,7 @@ def test_po_quarterly_returns_cached_without_rebuild(client, monkeypatch):
         lambda *a, **k: pytest.fail("should not rebuild when cache warm"),
     )
 
-    client.get("/api/health")
-    sid = client.cookies.get("session_id")
+    sid = bootstrap_test_session(client)
     sess = store.get(sid)
     assert sess is not None
     key = quarterly_cache_key(False, 8)
@@ -62,8 +61,7 @@ def test_po_quarterly_warming_when_sync_times_out(client, monkeypatch):
         lambda sid, **k: True,
     )
 
-    client.get("/api/health")
-    sid = client.cookies.get("session_id")
+    sid = bootstrap_test_session(client)
     sess = store.get(sid)
     assert sess is not None
     sess._quarterly_cache.clear()
