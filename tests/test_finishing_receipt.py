@@ -11,6 +11,7 @@ from backend.services.finishing_receipt import (
 )
 
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "finishing_receipt_sample.xls"
+_RECEIVE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "finishing_receipt_receive_sample.xls"
 
 
 class _FinishingSess:
@@ -32,6 +33,7 @@ def test_parse_finishing_receipt_sample():
     raw = _FIXTURE.read_bytes()
     df, report = parse_finishing_receipt_workbook(raw, _FIXTURE.name)
     assert not df.empty
+    assert report["sheet_format"] == "issue"
     assert report["rows_read"] >= 70
     assert report["skus"] >= 5
     assert report["balance_units"] == 1549
@@ -39,6 +41,26 @@ def test_parse_finishing_receipt_sample():
     assert report["received_units"] == 0
     assert "2493-2627" in report["issue_numbers"]
     assert "5012YKPINK-3XL" in set(df["OMS_SKU"].astype(str))
+
+
+def test_parse_finishing_receive_format_sample():
+    if not _RECEIVE_FIXTURE.is_file():
+        pytest.skip("receive fixture missing")
+    raw = _RECEIVE_FIXTURE.read_bytes()
+    df, report = parse_finishing_receipt_workbook(raw, _RECEIVE_FIXTURE.name)
+    assert not df.empty
+    assert report["sheet_format"] == "receive"
+    assert report["rows_read"] >= 74
+    assert report["skus"] == 61
+    assert report["received_units"] == 1359
+    assert report["balance_units"] == 1359
+    assert "2686-2627" in report["receive_numbers"]
+    assert "2432-2627" in report["issue_numbers"]
+    assert "4018DRSBLUE-L" in set(df["OMS_SKU"].astype(str))
+    row = df.loc[df["OMS_SKU"] == "4018DRSBLUE-L"].iloc[0]
+    assert int(row["Finishing_Received"]) == 98
+    assert int(row["Finishing_Balance"]) == 98
+    assert row["Finishing_Status"] == "Received"
 
 
 def test_merge_finishing_updates_balance_to_dispatch():
@@ -152,7 +174,7 @@ def test_reupload_same_file_no_duplicate_rows(finishing_sess):
     assert int(out2["parse_report"]["added_skus"]) == 0
     assert int(out2["parse_report"]["updated_skus"]) == expected_skus
     assert out2["parse_report"]["replaced_previous"] is True
-    assert "no duplicate rows" in out2["message"].lower()
+    assert "replaced" in out2["message"].lower()
 
 
 def test_reupload_after_existing_po_base_no_duplicate_rows(finishing_sess):
@@ -177,3 +199,89 @@ def test_reupload_after_existing_po_base_no_duplicate_rows(finishing_sess):
     assert int(out2["parse_report"]["added_skus"]) == 0
     assert finishing_sess.existing_po_df["OMS_SKU"].duplicated().sum() == 0
     assert "BASE-SKU" in set(finishing_sess.existing_po_df["OMS_SKU"].astype(str))
+
+
+def test_reupload_replaces_updated_sku_quantities(finishing_sess):
+    """Changed qty in sheet must overwrite prior Balance_to_Dispatch on same SKU."""
+    finishing_sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["5012YKPINK-3XL"],
+            "PO_Qty_Ordered": [100],
+            "Pending_Cutting": [10],
+            "Balance_to_Dispatch": [90],
+            "PO_Pipeline_Total": [100],
+            "Finishing_Balance": [90],
+        }
+    )
+    raw = _FIXTURE.read_bytes()
+    finishing_df, report = parse_finishing_receipt_workbook(raw, _FIXTURE.name)
+    finishing_sess.finishing_receipt_filename = _FIXTURE.name
+    finishing_sess.finishing_receipt_report = {"managed_skus": ["5012YKPINK-3XL"]}
+
+    out = apply_finishing_receipt_import(finishing_sess, finishing_df, report, filename=_FIXTURE.name)
+    row = finishing_sess.existing_po_df.loc[
+        finishing_sess.existing_po_df["OMS_SKU"] == "5012YKPINK-3XL"
+    ].iloc[0]
+    expected = int(
+        finishing_df.loc[finishing_df["OMS_SKU"] == "5012YKPINK-3XL", "Finishing_Balance"].iloc[0]
+    )
+    assert int(row["Balance_to_Dispatch"]) == expected
+    assert int(row["Finishing_Balance"]) == expected
+    assert out["parse_report"]["replaced_previous"] is True
+
+
+def test_reupload_clears_skus_removed_from_sheet(finishing_sess):
+    """SKUs present in prior upload but absent in new sheet must be cleared."""
+    finishing_sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["5012YKPINK-3XL", "STALE-SKU"],
+            "PO_Qty_Ordered": [100, 50],
+            "Pending_Cutting": [10, 5],
+            "Balance_to_Dispatch": [90, 40],
+            "PO_Pipeline_Total": [100, 45],
+            "Finishing_Balance": [90, 40],
+            "Finishing_Issue_No": ["2493-2627", "OLD"],
+        }
+    )
+    finishing_sess.finishing_receipt_filename = "old.xls"
+    finishing_sess.finishing_receipt_report = {
+        "managed_skus": ["5012YKPINK-3XL", "STALE-SKU"],
+    }
+
+    raw = _FIXTURE.read_bytes()
+    finishing_df, report = parse_finishing_receipt_workbook(raw, _FIXTURE.name)
+    assert "STALE-SKU" not in set(finishing_df["OMS_SKU"].astype(str))
+
+    apply_finishing_receipt_import(finishing_sess, finishing_df, report, filename=_FIXTURE.name)
+    stale = finishing_sess.existing_po_df.loc[
+        finishing_sess.existing_po_df["OMS_SKU"] == "STALE-SKU"
+    ].iloc[0]
+    assert int(stale["Balance_to_Dispatch"]) == 0
+    assert int(stale["Finishing_Balance"]) == 0
+    assert stale["Finishing_Issue_No"] == ""
+
+
+def test_receive_format_apply_updates_existing_po(finishing_sess):
+    if not _RECEIVE_FIXTURE.is_file():
+        pytest.skip("receive fixture missing")
+    finishing_sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["4018DRSBLUE-L"],
+            "PO_Qty_Ordered": [200],
+            "Pending_Cutting": [0],
+            "Balance_to_Dispatch": [10],
+            "PO_Pipeline_Total": [10],
+        }
+    )
+    raw = _RECEIVE_FIXTURE.read_bytes()
+    finishing_df, report = parse_finishing_receipt_workbook(raw, _RECEIVE_FIXTURE.name)
+    out = apply_finishing_receipt_import(
+        finishing_sess, finishing_df, report, filename=_RECEIVE_FIXTURE.name
+    )
+    assert out["ok"] is True
+    row = finishing_sess.existing_po_df.loc[
+        finishing_sess.existing_po_df["OMS_SKU"] == "4018DRSBLUE-L"
+    ].iloc[0]
+    assert int(row["Balance_to_Dispatch"]) == 98
+    assert int(row["Finishing_Received"]) == 98
+    assert report["sheet_format"] == "receive"

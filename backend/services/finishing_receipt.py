@@ -1,10 +1,10 @@
-"""Parse Finishing Dept material-issue export and refresh Existing PO pipeline balances."""
+"""Parse Finishing Dept material-issue / receive export and refresh Existing PO pipeline balances."""
 from __future__ import annotations
 
 import io
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -13,9 +13,8 @@ from .existing_po import (
     existing_po_merge_key,
     persist_existing_po_to_disk,
 )
-from .po_engine import canonical_oms_key
 
-_FINISHING_HEADER_MARKERS = frozenset(
+_ISSUE_HEADER_MARKERS = frozenset(
     {
         "designcd",
         "issqty",
@@ -23,9 +22,16 @@ _FINISHING_HEADER_MARKERS = frozenset(
         "balqty",
         "issueno",
         "issdate",
-        "jono",
-        "jodate",
-        "status",
+    }
+)
+
+_RECEIVE_HEADER_MARKERS = frozenset(
+    {
+        "designcd",
+        "receiveqty",
+        "receiveno",
+        "issueno",
+        "issuedate",
     }
 )
 
@@ -39,6 +45,8 @@ _FINISHING_META_COLS = (
     "Finishing_Balance",
     "Finishing_Issue_No",
     "Finishing_Iss_Date",
+    "Finishing_Receive_No",
+    "Finishing_Receive_Date",
     "Finishing_JO_No",
     "Finishing_JO_Date",
     "Finishing_Status",
@@ -51,12 +59,19 @@ def _normalize_col(name: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
 
 
-def _find_header_row(raw: pd.DataFrame) -> Optional[int]:
-    for i in range(min(8, len(raw))):
-        row = {_normalize_col(v) for v in raw.iloc[i].tolist()}
-        if _FINISHING_HEADER_MARKERS.issubset(row):
-            return i
-    return None
+def _header_norm_set(raw: pd.DataFrame, row_idx: int) -> set[str]:
+    return {_normalize_col(v) for v in raw.iloc[row_idx].tolist() if str(v or "").strip()}
+
+
+def _find_header_row(raw: pd.DataFrame) -> Tuple[Optional[int], str]:
+    """Return (header_row_index, format) where format is 'issue' or 'receive'."""
+    for i in range(min(15, len(raw))):
+        row = _header_norm_set(raw, i)
+        if _ISSUE_HEADER_MARKERS.issubset(row):
+            return i, "issue"
+        if _RECEIVE_HEADER_MARKERS.issubset(row):
+            return i, "receive"
+    return None, ""
 
 
 def _parse_report_date(value: object) -> str:
@@ -95,7 +110,7 @@ def _design_size_to_oms(design_cd: object, size: object) -> str:
     return existing_po_merge_key(design)
 
 
-def _read_finishing_table(file_bytes: bytes, filename: str) -> Tuple[pd.DataFrame, int]:
+def _read_finishing_table(file_bytes: bytes, filename: str) -> Tuple[pd.DataFrame, int, str]:
     lower = (filename or "").lower()
     bio = io.BytesIO(file_bytes)
     if lower.endswith(".csv"):
@@ -104,10 +119,12 @@ def _read_finishing_table(file_bytes: bytes, filename: str) -> Tuple[pd.DataFram
         raw = pd.read_excel(bio, sheet_name=0, header=None, dtype=str)
     if raw.empty:
         raise ValueError("Finishing file is empty.")
-    header_row = _find_header_row(raw)
-    if header_row is None:
+    header_row, fmt = _find_header_row(raw)
+    if header_row is None or not fmt:
         raise ValueError(
-            "Could not find Finishing header row (expected DesignCd, IssQty, RecQty, BalQty, Issueno, IssDate)."
+            "Could not find Finishing header row. Expected either "
+            "Issue export (DesignCd, IssQty, RecQty, BalQty) or "
+            "Receive export (DesignCd, ReceiveQty, ReceiveNo, IssueNo)."
         )
     bio.seek(0)
     if lower.endswith(".csv"):
@@ -115,7 +132,7 @@ def _read_finishing_table(file_bytes: bytes, filename: str) -> Tuple[pd.DataFram
     else:
         df = pd.read_excel(bio, sheet_name=0, header=header_row, dtype=str)
     df.columns = [str(c).strip() for c in df.columns]
-    return df.dropna(how="all"), header_row
+    return df.dropna(how="all"), header_row, fmt
 
 
 def _col(df: pd.DataFrame, *names: str) -> Optional[str]:
@@ -127,19 +144,9 @@ def _col(df: pd.DataFrame, *names: str) -> Optional[str]:
     return None
 
 
-def parse_finishing_receipt_workbook(
-    file_bytes: bytes,
-    filename: str,
-    *,
-    sku_mapping: Optional[Dict[str, str]] = None,
+def _build_issue_rows(
+    raw_df: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, dict]:
-    """
-    Parse Yash Gallery Finishing Dept export.
-
-    Returns aggregated rows keyed by OMS_SKU with issued/received/balance quantities
-    and the latest issue / JO metadata per SKU.
-    """
-    raw_df, _header_row = _read_finishing_table(file_bytes, filename)
     design_col = _col(raw_df, "DesignCd", "Design Cd", "Design")
     size_col = _col(raw_df, "Size")
     if not design_col:
@@ -151,7 +158,7 @@ def parse_finishing_receipt_workbook(
         "Finishing_Balance": _col(raw_df, "BalQty", "Bal Qty"),
     }
     if not qty_cols["Finishing_Balance"]:
-        raise ValueError("Finishing file missing BalQty column.")
+        raise ValueError("Finishing issue export missing BalQty column.")
 
     issue_col = _col(raw_df, "Issueno", "Issue No", "IssueNo")
     iss_date_col = _col(raw_df, "IssDate", "Iss Date")
@@ -168,47 +175,83 @@ def parse_finishing_receipt_workbook(
     if work.empty:
         raise ValueError("No valid DesignCd + Size rows found in Finishing file.")
 
-    if sku_mapping:
-        mapped = []
-        for key in work["_oms_key"]:
-            canon = canonical_oms_key(key, sku_mapping)
-            mapped.append(existing_po_merge_key(canon or key))
-        work["_oms_key"] = mapped
-
     for out_col, src in qty_cols.items():
         if src:
             work[out_col] = pd.to_numeric(work[src], errors="coerce").fillna(0).astype(int)
         else:
             work[out_col] = 0
 
-    if issue_col:
-        work["Finishing_Issue_No"] = work[issue_col].astype(str).str.strip()
-    else:
-        work["Finishing_Issue_No"] = ""
-    if iss_date_col:
-        work["Finishing_Iss_Date"] = work[iss_date_col].map(_parse_report_date)
-    else:
-        work["Finishing_Iss_Date"] = ""
-    if jo_no_col:
-        work["Finishing_JO_No"] = work[jo_no_col].astype(str).str.strip()
-    else:
-        work["Finishing_JO_No"] = ""
-    if jo_date_col:
-        work["Finishing_JO_Date"] = work[jo_date_col].map(_parse_report_date)
-    else:
-        work["Finishing_JO_Date"] = ""
-    if status_col:
-        work["Finishing_Status"] = work[status_col].astype(str).str.strip()
-    else:
-        work["Finishing_Status"] = ""
+    work["Finishing_Issue_No"] = work[issue_col].astype(str).str.strip() if issue_col else ""
+    work["Finishing_Iss_Date"] = work[iss_date_col].map(_parse_report_date) if iss_date_col else ""
+    work["Finishing_Receive_No"] = ""
+    work["Finishing_Receive_Date"] = ""
+    work["Finishing_JO_No"] = work[jo_no_col].astype(str).str.strip() if jo_no_col else ""
+    work["Finishing_JO_Date"] = work[jo_date_col].map(_parse_report_date) if jo_date_col else ""
+    work["Finishing_Status"] = work[status_col].astype(str).str.strip() if status_col else ""
 
+    return work, {"sheet_format": "issue"}
+
+
+def _build_receive_rows(
+    raw_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, dict]:
+    """Material Receive Consumption export — ReceiveQty is production received at Finishing."""
+    design_col = _col(raw_df, "DesignCd", "Design Cd", "Design")
+    size_col = _col(raw_df, "Size")
+    receive_qty_col = _col(raw_df, "ReceiveQty", "Receive Qty")
+    if not design_col:
+        raise ValueError("Finishing receive export missing DesignCd column.")
+    if not receive_qty_col:
+        raise ValueError("Finishing receive export missing ReceiveQty column.")
+
+    issue_col = _col(raw_df, "IssueNo", "Issue No", "Issueno", "IssueNo")
+    issue_date_col = _col(raw_df, "IssueDate", "Issue Date", "IssDate", "Iss Date")
+    receive_no_col = _col(raw_df, "ReceiveNo", "Receive No")
+    receive_date_col = _col(raw_df, "ReceiveDate", "Receive Date")
+    jo_no_col = _col(raw_df, "JONo", "JO No")
+    jo_date_col = _col(raw_df, "JODate", "JO Date")
+
+    work = raw_df.copy()
+    work["_oms_key"] = [
+        _design_size_to_oms(d, work.at[i, size_col] if size_col else "")
+        for i, d in enumerate(work[design_col])
+    ]
+    work = work[work["_oms_key"].astype(str).str.len() > 0]
+    if work.empty:
+        raise ValueError("No valid DesignCd + Size rows found in Finishing receive file.")
+
+    recv = pd.to_numeric(work[receive_qty_col], errors="coerce").fillna(0).astype(int)
+    work["Finishing_Received"] = recv
+    work["Finishing_Issued"] = recv
+    work["Finishing_Balance"] = recv
+    work["Finishing_Issue_No"] = work[issue_col].astype(str).str.strip() if issue_col else ""
+    work["Finishing_Iss_Date"] = work[issue_date_col].map(_parse_report_date) if issue_date_col else ""
+    work["Finishing_Receive_No"] = work[receive_no_col].astype(str).str.strip() if receive_no_col else ""
+    work["Finishing_Receive_Date"] = (
+        work[receive_date_col].map(_parse_report_date) if receive_date_col else ""
+    )
+    work["Finishing_JO_No"] = work[jo_no_col].astype(str).str.strip() if jo_no_col else ""
+    work["Finishing_JO_Date"] = work[jo_date_col].map(_parse_report_date) if jo_date_col else ""
+    work["Finishing_Status"] = "Received"
+
+    return work, {"sheet_format": "receive"}
+
+
+def _aggregate_finishing_work(work: pd.DataFrame, meta: dict, *, filename: str) -> Tuple[pd.DataFrame, dict]:
     agg: dict[str, Any] = {
         "Finishing_Issued": "sum",
         "Finishing_Received": "sum",
         "Finishing_Balance": "sum",
     }
-    # Keep the latest issue row metadata (file is usually one day / one issue batch).
-    for meta_col in ("Finishing_Issue_No", "Finishing_Iss_Date", "Finishing_JO_No", "Finishing_JO_Date", "Finishing_Status"):
+    for meta_col in (
+        "Finishing_Issue_No",
+        "Finishing_Iss_Date",
+        "Finishing_Receive_No",
+        "Finishing_Receive_Date",
+        "Finishing_JO_No",
+        "Finishing_JO_Date",
+        "Finishing_Status",
+    ):
         agg[meta_col] = "last"
 
     grouped = (
@@ -216,20 +259,68 @@ def parse_finishing_receipt_workbook(
         .agg(agg)
         .rename(columns={"_oms_key": "OMS_SKU"})
     )
+    grouped["OMS_SKU"] = grouped["OMS_SKU"].map(existing_po_merge_key)
+
+    issue_numbers = sorted(
+        {
+            s
+            for s in grouped["Finishing_Issue_No"].astype(str)
+            if s and s.lower() not in {"nan", "none"}
+        }
+    )
+    receive_numbers = sorted(
+        {
+            s
+            for s in grouped["Finishing_Receive_No"].astype(str)
+            if s and s.lower() not in {"nan", "none"}
+        }
+    )
+    report_date = ""
+    for date_col in ("Finishing_Receive_Date", "Finishing_Iss_Date"):
+        if date_col in grouped.columns and not grouped.empty:
+            report_date = _parse_report_date(grouped[date_col].dropna().iloc[-1])
+            if report_date:
+                break
 
     report = {
+        **meta,
         "filename": filename,
         "rows_read": int(len(work)),
         "skus": int(len(grouped)),
         "issued_units": int(grouped["Finishing_Issued"].sum()),
         "received_units": int(grouped["Finishing_Received"].sum()),
         "balance_units": int(grouped["Finishing_Balance"].sum()),
-        "issue_numbers": sorted({s for s in grouped["Finishing_Issue_No"].astype(str) if s and s.lower() not in {"nan", "none"}}),
-        "report_date": _parse_report_date(grouped["Finishing_Iss_Date"].dropna().iloc[-1] if not grouped.empty else ""),
+        "issue_numbers": issue_numbers,
+        "receive_numbers": receive_numbers,
+        "report_date": report_date,
         "non_clear_skus": int((grouped["Finishing_Balance"] > 0).sum()),
         "cleared_skus": int((grouped["Finishing_Balance"] <= 0).sum()),
     }
     return grouped, report
+
+
+def parse_finishing_receipt_workbook(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    sku_mapping: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Parse Yash Gallery Finishing Dept export (issue or receive layout).
+
+    Returns aggregated rows keyed by OMS_SKU with issued/received/balance quantities
+    and the latest issue / receive / JO metadata per SKU.
+
+    Per-size DesignCd + Size keys are kept as-is (no sku_mapping collapse) so they
+    match Existing PO rows one-to-one.
+    """
+    _ = sku_mapping  # intentionally unused — pipeline keys are per-size OMS SKUs
+    raw_df, _header_row, fmt = _read_finishing_table(file_bytes, filename)
+    if fmt == "issue":
+        work, meta = _build_issue_rows(raw_df)
+    else:
+        work, meta = _build_receive_rows(raw_df)
+    return _aggregate_finishing_work(work, meta, filename=filename)
 
 
 def _ensure_pipeline_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -242,6 +333,30 @@ def _ensure_pipeline_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in _FINISHING_META_COLS:
         if col not in out.columns:
             out[col] = "" if col.endswith(("No", "Date", "Status")) else 0
+    return out
+
+
+def _clear_finishing_from_managed_skus(ep: pd.DataFrame, managed_skus: Set[str]) -> pd.DataFrame:
+    """Reset finishing overlay on SKUs from a prior upload before applying a new snapshot."""
+    if ep.empty or not managed_skus:
+        return ep
+    out = _ensure_pipeline_columns(ep)
+    out["OMS_SKU"] = out["OMS_SKU"].map(existing_po_merge_key)
+    mask = out["OMS_SKU"].astype(str).str.strip().isin(managed_skus)
+    if not mask.any():
+        return out
+
+    for col in _FINISHING_META_COLS:
+        if col not in out.columns:
+            continue
+        if col.endswith(("No", "Date", "Status")):
+            out.loc[mask, col] = ""
+        else:
+            out.loc[mask, col] = 0
+
+    pending = pd.to_numeric(out.loc[mask, "Pending_Cutting"], errors="coerce").fillna(0).astype(int)
+    out.loc[mask, "Balance_to_Dispatch"] = 0
+    out.loc[mask, "PO_Pipeline_Total"] = pending
     return out
 
 
@@ -261,34 +376,40 @@ def merge_finishing_into_existing_po(
         return ep, {"updated_skus": 0, "added_skus": 0, "left_units": 0}
 
     fin["OMS_SKU"] = fin["OMS_SKU"].map(existing_po_merge_key)
+    fin = fin.drop_duplicates(subset=["OMS_SKU"], keep="last")
 
     updated = 0
     added = 0
     left_units = 0
 
-    for _, row in fin.iterrows():
-        sku = str(row["OMS_SKU"]).strip()
-        if not sku:
+    fin_index = fin.set_index("OMS_SKU", drop=False)
+    ep_skus = ep["OMS_SKU"].astype(str).str.strip()
+    ep_index_map = {sku: idx for idx, sku in zip(ep.index, ep_skus)}
+
+    for sku, row in fin_index.iterrows():
+        sku_key = str(sku).strip()
+        if not sku_key:
             continue
         bal = int(pd.to_numeric(row.get("Finishing_Balance"), errors="coerce") or 0)
         rec = int(pd.to_numeric(row.get("Finishing_Received"), errors="coerce") or 0)
         issued = int(pd.to_numeric(row.get("Finishing_Issued"), errors="coerce") or 0)
         left_units += max(0, bal)
 
-        mask = ep["OMS_SKU"].astype(str).str.strip() == sku
         meta = {
             "Finishing_Issued": issued,
             "Finishing_Received": rec,
             "Finishing_Balance": bal,
             "Finishing_Issue_No": str(row.get("Finishing_Issue_No") or "").strip(),
             "Finishing_Iss_Date": str(row.get("Finishing_Iss_Date") or "").strip(),
+            "Finishing_Receive_No": str(row.get("Finishing_Receive_No") or "").strip(),
+            "Finishing_Receive_Date": str(row.get("Finishing_Receive_Date") or "").strip(),
             "Finishing_JO_No": str(row.get("Finishing_JO_No") or "").strip(),
             "Finishing_JO_Date": str(row.get("Finishing_JO_Date") or "").strip(),
             "Finishing_Status": str(row.get("Finishing_Status") or "").strip(),
         }
 
-        if mask.any():
-            idx = ep.index[mask][0]
+        idx = ep_index_map.get(sku_key)
+        if idx is not None:
             ep.at[idx, "Balance_to_Dispatch"] = max(0, bal)
             for k, v in meta.items():
                 ep.at[idx, k] = v
@@ -297,7 +418,7 @@ def merge_finishing_into_existing_po(
             updated += 1
         else:
             new_row = {
-                "OMS_SKU": sku,
+                "OMS_SKU": sku_key,
                 "PO_Qty_Ordered": max(0, issued),
                 "Pending_Cutting": 0,
                 "Balance_to_Dispatch": max(0, bal),
@@ -305,6 +426,7 @@ def merge_finishing_into_existing_po(
                 **meta,
             }
             ep = pd.concat([ep, pd.DataFrame([new_row])], ignore_index=True)
+            ep_index_map[sku_key] = ep.index[-1]
             added += 1
 
     ep["PO_Pipeline_Total"] = (
@@ -343,13 +465,27 @@ def apply_finishing_receipt_import(
     file_key = str(filename or "").strip() or "finishing.xls"
     replaced_previous = bool(prev_name)
 
+    prior_report = dict(getattr(sess, "finishing_receipt_report", None) or {})
+    prior_managed = {
+        existing_po_merge_key(s)
+        for s in (prior_report.get("managed_skus") or [])
+        if str(s or "").strip()
+    }
+    if replaced_previous and prior_managed:
+        ep = _clear_finishing_from_managed_skus(ep, prior_managed)
+
     merged, apply_stats = merge_finishing_into_existing_po(ep, finishing_df)
+    managed_skus = sorted(
+        {existing_po_merge_key(s) for s in finishing_df["OMS_SKU"].astype(str) if str(s).strip()}
+    )
 
     sess.existing_po_df = merged
     sess.finishing_receipt_report = {
         **dict(report),
         **apply_stats,
         "replaced_previous": replaced_previous,
+        "managed_skus": managed_skus,
+        "cleared_prior_skus": len(prior_managed) if replaced_previous else 0,
     }
     sess.finishing_receipt_filename = file_key
     sess.finishing_receipt_uploaded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -361,14 +497,16 @@ def apply_finishing_receipt_import(
 
     left = int(apply_stats.get("left_units") or 0)
     action = "Updated" if replaced_previous else "Applied"
+    fmt = str(report.get("sheet_format") or "issue")
+    fmt_label = "receive" if fmt == "receive" else "issue"
     msg = (
-        f"Finishing receipt {action.lower()}: {apply_stats.get('updated_skus', 0):,} SKUs updated, "
+        f"Finishing {fmt_label} receipt {action.lower()}: {apply_stats.get('updated_skus', 0):,} SKUs updated, "
         f"{apply_stats.get('added_skus', 0):,} added. "
         f"{left:,} units still at finishing (Balance to Dispatch). "
         "Click Calculate PO to refresh the PO table."
     )
     if replaced_previous:
-        msg = f"Re-uploaded {file_key} — no duplicate rows. " + msg
+        msg = f"Re-uploaded {file_key} — prior finishing SKUs replaced (no duplicates). " + msg
     if left > 0:
         msg += f" ⚠ {int(report.get('non_clear_skus') or 0):,} SKUs have balance left."
 

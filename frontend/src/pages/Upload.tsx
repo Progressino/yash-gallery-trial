@@ -1115,7 +1115,7 @@ export default function Upload() {
           subtitle={
             coverage.finishing_receipt_report?.balance_units
               ? `${(coverage.finishing_receipt_report.balance_units ?? 0).toLocaleString()} units still at finishing — updates PO Balance to Dispatch`
-              : 'Finishing Dept export (DesignCd + Size, IssQty / RecQty / BalQty, Issueno, JO No)'
+              : 'Finishing Dept export — issue (IssQty/BalQty) or receive (ReceiveQty) layout'
           }
           loaded={!!coverage.finishing_receipt_uploaded_at}
           rows={coverage.finishing_receipt_report?.skus}
@@ -1127,7 +1127,12 @@ export default function Upload() {
               <span className="font-semibold text-gray-700">
                 {coverage.finishing_receipt_filename || 'Finishing receipt'}
               </span>
-              {coverage.finishing_receipt_report?.issue_numbers?.length ? (
+              {coverage.finishing_receipt_report?.receive_numbers?.length ? (
+                <span className="text-gray-600">
+                  {' '}
+                  · Receive #{coverage.finishing_receipt_report.receive_numbers.join(', ')}
+                </span>
+              ) : coverage.finishing_receipt_report?.issue_numbers?.length ? (
                 <span className="text-gray-600">
                   {' '}
                   · Issue #{coverage.finishing_receipt_report.issue_numbers.join(', ')}

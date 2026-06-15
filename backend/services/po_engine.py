@@ -1480,6 +1480,8 @@ def calculate_po_base(
                 "Finishing_Balance",
                 "Finishing_Issue_No",
                 "Finishing_Iss_Date",
+                "Finishing_Receive_No",
+                "Finishing_Receive_Date",
                 "Finishing_JO_No",
                 "Finishing_JO_Date",
                 "Finishing_Status",
@@ -1521,6 +1523,8 @@ def calculate_po_base(
             if _fc in (
                 "Finishing_Issue_No",
                 "Finishing_Iss_Date",
+                "Finishing_Receive_No",
+                "Finishing_Receive_Date",
                 "Finishing_JO_No",
                 "Finishing_JO_Date",
                 "Finishing_Status",

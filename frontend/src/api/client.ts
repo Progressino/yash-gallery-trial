@@ -749,6 +749,7 @@ export type UploadSkipDetail = {
 
 export type FinishingReceiptReport = {
   filename?: string
+  sheet_format?: 'issue' | 'receive'
   rows_read?: number
   skus?: number
   issued_units?: number
@@ -757,9 +758,11 @@ export type FinishingReceiptReport = {
   left_units?: number
   non_clear_skus?: number
   issue_numbers?: string[]
+  receive_numbers?: string[]
   report_date?: string
   updated_skus?: number
   added_skus?: number
+  replaced_previous?: boolean
 }
 
 export type ManualIntransitParseReport = {
