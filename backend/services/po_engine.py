@@ -1132,11 +1132,24 @@ def calculate_po_base(
     else:
         ads_active_span = (
             act.groupby("Sku", as_index=False)
-            .agg(ADS_First_Active=("TxnDate", "min"), ADS_Last_Active=("TxnDate", "max"))
+            .agg(
+                ADS_First_Active=("TxnDate", "min"),
+                ADS_Last_Active=("TxnDate", "max"),
+                ADS_Distinct_Active=("TxnDate", "nunique"),
+            )
             .rename(columns={"Sku": "OMS_SKU"})
         )
-        ads_active_span["_eff_days_active"] = (
-            (ads_active_span["ADS_Last_Active"] - ads_active_span["ADS_First_Active"]).dt.days + 1
+        _cal_span = (
+            ads_active_span["ADS_Last_Active"] - ads_active_span["ADS_First_Active"]
+        ).dt.days + 1
+        _distinct = pd.to_numeric(ads_active_span["ADS_Distinct_Active"], errors="coerce").fillna(0)
+        # Intermittent sales spread across a wide calendar (4032DRSGREEN-L: 6 txns over
+        # 26d) must not dilute ADS — use distinct sale days when they are much sparser
+        # than first→last span. Dense daily sellers keep the inclusive calendar span.
+        ads_active_span["_eff_days_active"] = np.where(
+            (_distinct * 2) < _cal_span,
+            _distinct.clip(lower=1.0),
+            _cal_span,
         ).astype(int)
 
     ads_summary = ads_sold.merge(ads_net, on="OMS_SKU", how="outer").fillna(0)
@@ -1151,11 +1164,23 @@ def calculate_po_base(
             _p_act["_Parent_SKU"] = _p_act["Sku"].map(_fallback_parent_key)
             p_ads_active_span = (
                 _p_act.groupby("_Parent_SKU", as_index=False)
-                .agg(P_ADS_First_Active=("TxnDate", "min"), P_ADS_Last_Active=("TxnDate", "max"))
+                .agg(
+                    P_ADS_First_Active=("TxnDate", "min"),
+                    P_ADS_Last_Active=("TxnDate", "max"),
+                    P_ADS_Distinct_Active=("TxnDate", "nunique"),
+                )
                 .rename(columns={"_Parent_SKU": "OMS_SKU"})
             )
-            p_ads_active_span["P__eff_days_active"] = (
-                (p_ads_active_span["P_ADS_Last_Active"] - p_ads_active_span["P_ADS_First_Active"]).dt.days + 1
+            _p_cal_span = (
+                p_ads_active_span["P_ADS_Last_Active"] - p_ads_active_span["P_ADS_First_Active"]
+            ).dt.days + 1
+            _p_distinct = pd.to_numeric(
+                p_ads_active_span["P_ADS_Distinct_Active"], errors="coerce"
+            ).fillna(0)
+            p_ads_active_span["P__eff_days_active"] = np.where(
+                (_p_distinct * 2) < _p_cal_span,
+                _p_distinct.clip(lower=1.0),
+                _p_cal_span,
             ).astype(int)
             po_df = po_df.merge(p_ads_active_span[["OMS_SKU", "P__eff_days_active"]], on="OMS_SKU", how="left")
             out_sku = po_df["OMS_SKU"].astype(str)
@@ -1295,20 +1320,19 @@ def calculate_po_base(
                     inv_eff = (inv_days * scale).round()
                     inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
                     _active_eff = pd.to_numeric(po_df["Eff_Days"], errors="coerce").fillna(0)
-                    _sold_for_eff = (
-                        po_df["Net_Units"].fillna(0)
-                        if demand_basis == "Net"
-                        else po_df["Sold_Units"].fillna(0)
-                    )
-                    # When sales are sparse within a long in-stock window (extrapolated
-                    # inventory days ≫ active txn span), do not dilute ADS — e.g.
-                    # 4032DRSGREEN-L with 6 sold over 4 active days but 26 scaled
-                    # in-stock days was getting PO_Qty=0 despite urgent cover.
+                    # Sparse sales inside a long in-stock window: do not dilute ADS.
+                    # When stock was the bottleneck (inv < active span), keep inv-based days.
                     _eff_from_inv = np.where(
-                        _has_demand
-                        & (_active_eff > 0)
-                        & (inv_clipped > _active_eff * 2),
-                        _active_eff.clip(lower=1.0),
+                        _has_demand & (_active_eff > 0),
+                        np.where(
+                            inv_clipped < _active_eff,
+                            inv_clipped,
+                            np.where(
+                                inv_clipped >= _active_eff * 2,
+                                _active_eff.clip(lower=1.0),
+                                inv_clipped,
+                            ),
+                        ),
                         inv_clipped,
                     )
                     po_df["Eff_Days"] = np.where(

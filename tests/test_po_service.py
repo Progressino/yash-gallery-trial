@@ -2041,8 +2041,149 @@ def test_sparse_sales_use_active_eff_days_not_scaled_inventory_span():
     assert int(row["PO_Qty"]) > 0
     assert float(row["Projected_Running_Days"]) < 45
 
+    po_gated = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        sku_status_df=sheet,
+        inventory_history_df=inv_hist,
+        enforce_lead_time_release_gate=True,
+    )
+    gated = po_gated.loc[po_gated["OMS_SKU"] == "4032DRSGREEN-L"].iloc[0]
+    assert int(gated["PO_Qty"]) > 0
+    assert float(gated["Projected_Running_Days"]) < 45
+    assert "lead time" not in str(gated["PO_Block_Reason"]).lower()
 
-def test_oos_size_keeps_inventory_eff_days_after_existing_po_unbundle():
+
+def test_intermittent_sales_use_distinct_txn_days_not_calendar_span():
+    """When few sale days are spread across a wide calendar, ADS must use distinct txn days."""
+    sale_days = pd.to_datetime(
+        ["2026-05-01", "2026-05-06", "2026-05-11", "2026-05-16", "2026-05-21", "2026-05-26"]
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["4032DRSGREEN-L"] * 6,
+            "TxnDate": sale_days,
+            "Transaction Type": ["Shipment"] * 6,
+            "Quantity": [1] * 6,
+            "Units_Effective": [1] * 6,
+            "Source": ["Amazon"] * 6,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["4032DRSGREEN-L"], "Total_Inventory": [1]})
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L"],
+            "PO_Pipeline_Total": [28],
+            "Pending_Cutting": [21],
+            "Balance_to_Dispatch": [7],
+        }
+    )
+    hist_dates = pd.date_range("2026-05-01", periods=30, freq="D")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L"] * 30,
+            "Date": hist_dates,
+            "Qty": [2] * 30,
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        inventory_history_df=inv_hist,
+        enforce_lead_time_release_gate=True,
+    )
+    row = po.loc[po["OMS_SKU"] == "4032DRSGREEN-L"].iloc[0]
+    assert int(row["Sold_Units"]) == 6
+    assert int(row["Eff_Days"]) <= 6, (
+        f"26-day calendar span must collapse to 6 distinct sale days; got {row['Eff_Days']}"
+    )
+    assert float(row["ADS"]) >= 1.0
+    assert int(row["PO_Qty"]) > 0
+    assert float(row["Projected_Running_Days"]) < 45
+
+
+def test_4032_drsgreen_family_gets_po_with_pipeline_and_inventory_history():
+    """Regression: parent 4032DRSGREEN must not be zeroed when warehouse stock is low but pipeline exists."""
+    base_sales = []
+    for sku, units, days in (
+        ("4032DRSGREEN-L", 3, ["2026-05-20", "2026-05-22", "2026-05-25", "2026-05-28"]),
+        ("4032DRSGREEN-M", 2, ["2026-05-18", "2026-05-24", "2026-05-27"]),
+        ("4032DRSGREEN-XL", 4, ["2026-05-19", "2026-05-21", "2026-05-26", "2026-05-29"]),
+    ):
+        for d in days:
+            for _ in range(units):
+                base_sales.append(
+                    {
+                        "Sku": sku,
+                        "TxnDate": pd.Timestamp(d),
+                        "Transaction Type": "Shipment",
+                        "Quantity": 1,
+                        "Units_Effective": 1,
+                        "Source": "Amazon",
+                    }
+                )
+    sales = pd.DataFrame(base_sales)
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L", "4032DRSGREEN-M", "4032DRSGREEN-XL"],
+            "Total_Inventory": [1, 1, 0],
+        }
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L", "4032DRSGREEN-M", "4032DRSGREEN-XL"],
+            "PO_Pipeline_Total": [28, 31, 1],
+            "Pending_Cutting": [21, 21, 0],
+            "Balance_to_Dispatch": [7, 10, 1],
+        }
+    )
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L", "4032DRSGREEN-M", "4032DRSGREEN-XL"],
+            "SKU_Sheet_Status": ["Medium Selling"] * 3,
+            "SKU_Sheet_Closed": [False] * 3,
+            "Lead_Time_From_Sheet": [45.0] * 3,
+        }
+    )
+    hist_dates = pd.date_range("2026-05-15", periods=14, freq="D")
+    inv_hist_rows = []
+    for sku in ("4032DRSGREEN-L", "4032DRSGREEN-M", "4032DRSGREEN-XL"):
+        for i, d in enumerate(hist_dates):
+            inv_hist_rows.append(
+                {"OMS_SKU": sku, "Date": d, "Qty": 2 if i < 12 else 0}
+            )
+    inv_hist = pd.DataFrame(inv_hist_rows)
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        sku_status_df=sheet,
+        inventory_history_df=inv_hist,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=True,
+    )
+    rows = po[po["OMS_SKU"].str.startswith("4032DRSGREEN-")].set_index("OMS_SKU")
+    assert int(rows.loc["4032DRSGREEN-L", "PO_Qty"]) > 0
+    assert int(rows.loc["4032DRSGREEN-M", "PO_Qty"]) > 0
+    assert int(rows.loc["4032DRSGREEN-XL", "PO_Qty"]) > 0
+    assert float(rows.loc["4032DRSGREEN-L", "Projected_Running_Days"]) < 60
     """1361YKBLUE-XL with 8/30 in-stock days must keep Eff_Days≈8, not 0 after unbundle."""
     dates = list(pd.date_range("2026-05-01", periods=30, freq="D"))
     inv_hist = pd.DataFrame(
