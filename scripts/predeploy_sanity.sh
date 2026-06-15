@@ -46,13 +46,20 @@ echo "==> Backend sanity tests"
 "$PYTHON_BIN" -m pytest tests/test_inventory_amazon_parser.py -q
 "$PYTHON_BIN" -m pytest tests/test_sales_services.py -k "myntra" -q
 "$PYTHON_BIN" -m pytest tests/test_myntra_resolve.py -q
-"$PYTHON_BIN" -m pytest tests/test_api_data_po_sales.py -q
-"$PYTHON_BIN" -m pytest tests/test_po_service.py -q
-"$PYTHON_BIN" -m pytest tests/test_finance_sales_entries.py -q
-"$PYTHON_BIN" -m pytest tests/test_finance_accountant_dry_run.py -q
-# Whole file: includes GET /api/finance/inventory-movements (Finance inventory tab).
-"$PYTHON_BIN" -m pytest tests/test_finance_api.py -q
-"$PYTHON_BIN" -m pytest tests/test_hrm_smoke.py -q
+
+if [[ "${DEPLOY_FAST:-}" == "1" ]]; then
+  echo "==> DEPLOY_FAST=1 — VPS deploy gate (critical regressions only; full suite runs in dev/CI)"
+  "$PYTHON_BIN" -m pytest tests/test_po_service.py -k "4032 or sparse or bursty or intermittent or inv_window" -q --timeout=120
+  "$PYTHON_BIN" -m pytest tests/test_hrm_smoke.py -q --timeout=60
+else
+  "$PYTHON_BIN" -m pytest tests/test_api_data_po_sales.py -q --timeout=120
+  "$PYTHON_BIN" -m pytest tests/test_po_service.py -q
+  "$PYTHON_BIN" -m pytest tests/test_finance_sales_entries.py -q
+  "$PYTHON_BIN" -m pytest tests/test_finance_accountant_dry_run.py -q
+  # Whole file: includes GET /api/finance/inventory-movements (Finance inventory tab).
+  "$PYTHON_BIN" -m pytest tests/test_finance_api.py -q
+  "$PYTHON_BIN" -m pytest tests/test_hrm_smoke.py -q
+fi
 
 # Frontend smoke uses npm/npx; missing Node yields shell exit 127 on self-hosted runners.
 if [[ "${SKIP_E2E:-}" == "1" ]]; then
