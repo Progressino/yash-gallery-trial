@@ -22,6 +22,7 @@ from ..session import wipe_app_session, resume_auto_data_restore
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
+_warm_hydrate_queued: set[str] = set()
 
 
 def _apply_loaded_into_session(sess, loaded: dict) -> None:
@@ -313,6 +314,49 @@ def cache_save(request: Request):
     return CacheStatusResponse(ok=ok, message=msg)
 
 
+def _run_warm_hydrate_worker(session_id: str) -> None:
+    """Background warm-cache → session copy (login / hard refresh must not block the HTTP worker)."""
+    from ..session import store
+
+    try:
+        sess = store.get(session_id)
+        if sess is None:
+            return
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main._warm_cache_ready.wait(timeout=60.0)
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_from_disk_if_empty()
+        if not _main._warm_cache:
+            _log.warning("warm hydrate worker: warm cache unavailable session=%s", session_id[:8])
+            return
+        _main._copy_warm_cache_to_session(sess)
+        sess._warm_cache_gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
+        sess._warm_cache_only = True
+        sess._quarterly_cache.clear()
+        resume_auto_data_restore(sess)
+        if sess.sales_df.empty and sess.sku_mapping:
+            _rebuild_sales_in_session(sess)
+        try:
+            note = _merge_daily_store_into_session(sess)
+            _rebuild_sales_in_session(sess)
+            _main.publish_warm_cache_from_session(sess)
+            _log.info(
+                "warm hydrate worker done session=%s sales=%s%s",
+                session_id[:8],
+                len(sess.sales_df),
+                note,
+            )
+        except Exception:
+            _log.exception("warm hydrate worker tier-3/rebuild failed session=%s", session_id[:8])
+        _persist_pg_session_bg(session_id, sess)
+    except Exception:
+        _log.exception("warm hydrate worker failed session=%s", session_id[:8])
+    finally:
+        _warm_hydrate_queued.discard(session_id)
+
+
 def _hydrate_session_from_warm(
     sess,
     session_id: str,
@@ -331,17 +375,20 @@ def _hydrate_session_from_warm(
         if not _main._warm_cache:
             return None
         _main._copy_warm_cache_to_session(sess)
-        n_sales = _rebuild_sales_in_session(sess)
+        sales_from_warm = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
         sess._quarterly_cache.clear()
-        _main.publish_warm_cache_from_session(sess)
         resume_auto_data_restore(sess)
 
         if defer_daily_merge:
+            n_sales = sales_from_warm
+            if n_sales == 0 and sess.sku_mapping:
+                n_sales = _rebuild_sales_in_session(sess)
 
             def _tier3_topup() -> None:
                 try:
                     note = _merge_daily_store_into_session(sess)
                     _rebuild_sales_in_session(sess)
+                    _main.publish_warm_cache_from_session(sess)
                     _log.info("hydrate-warm tier-3 top-up done%s", note)
                 except Exception:
                     _log.exception("hydrate-warm tier-3 top-up failed")
@@ -356,6 +403,8 @@ def _hydrate_session_from_warm(
                 message=f"Loaded from warm cache ({n_sales:,} sales rows). Daily uploads merging in background.",
             )
 
+        n_sales = _rebuild_sales_in_session(sess) if sales_from_warm == 0 else sales_from_warm
+        _main.publish_warm_cache_from_session(sess)
         daily_note = _merge_daily_store_into_session(sess)
         n_sales = _rebuild_sales_in_session(sess)
         background_tasks.add_task(_persist_pg_session_bg, session_id, sess)
@@ -369,21 +418,35 @@ def _hydrate_session_from_warm(
 
 
 @router.post("/hydrate-warm", response_model=CacheStatusResponse)
-def cache_hydrate_warm(request: Request, background_tasks: BackgroundTasks):
-    """Fast login path: warm cache → session, Tier-3 merge in background."""
+def cache_hydrate_warm(request: Request):
+    """Fast login path: queue warm cache → session copy; Tier-3 merge runs in background."""
     sess = request.state.session
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
     sid = getattr(request.state, "session_id", None) or ""
-    out = _hydrate_session_from_warm(
-        sess, sid, background_tasks, defer_daily_merge=True
-    )
-    if out is not None:
-        return out
-    return CacheStatusResponse(
-        ok=False,
-        message="Warm cache is still loading on the server — wait a moment and retry.",
-    )
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main._warm_cache_ready.wait(timeout=5.0)
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_from_disk_if_empty()
+        if not _main._warm_cache:
+            return CacheStatusResponse(
+                ok=False,
+                message="Warm cache is still loading on the server — wait a moment and retry.",
+            )
+    except Exception:
+        _log.exception("hydrate-warm warm-cache check failed")
+        return CacheStatusResponse(ok=False, message="Warm cache hydrate failed.")
+
+    if sid in _warm_hydrate_queued:
+        return CacheStatusResponse(ok=True, message="Warm cache hydrate already running…")
+    _warm_hydrate_queued.add(sid)
+    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+    DAILY_UPLOAD_EXECUTOR.submit(_run_warm_hydrate_worker, sid)
+    return CacheStatusResponse(ok=True, message="Loading from warm cache in background…")
 
 
 @router.post("/load", response_model=CacheStatusResponse)
