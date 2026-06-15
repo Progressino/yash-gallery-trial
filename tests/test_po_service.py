@@ -2152,6 +2152,48 @@ def test_bursty_sales_keep_calendar_eff_days_not_distinct_only():
     assert int(row["PO_Qty"]) < 200
 
 
+def test_low_volume_sales_keep_diluted_eff_days_not_distinct_inflation():
+    """≤5 sold in the ADS window must not collapse to Eff_Days=1–5 (PO explosion)."""
+    sale_days = pd.to_datetime(["2026-05-01", "2026-05-15"])
+    sales = pd.DataFrame(
+        {
+            "Sku": ["LOWVOL-SKU-M", "LOWVOL-SKU-M"],
+            "TxnDate": sale_days,
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Quantity": [2, 3],
+            "Units_Effective": [2, 3],
+            "Source": ["Amazon", "Amazon"],
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["LOWVOL-SKU-M"], "Total_Inventory": [10]})
+    hist_dates = pd.date_range("2026-05-01", periods=30, freq="D")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["LOWVOL-SKU-M"] * 30,
+            "Date": hist_dates,
+            "Qty": [5] * 30,
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        inventory_history_df=inv_hist,
+        enforce_lead_time_release_gate=False,
+    )
+    row = po.loc[po["OMS_SKU"] == "LOWVOL-SKU-M"].iloc[0]
+    assert int(row["Sold_Units"]) == 5
+    assert int(row["Eff_Days"]) >= 15, (
+        f"Low-volume SKU should keep calendar/period Eff_Days, not {row['Eff_Days']}"
+    )
+    assert float(row["ADS"]) < 0.5
+    assert int(row["PO_Qty"]) < 150
+
+
 def test_4032_drsgreen_family_gets_po_with_pipeline_and_inventory_history():
     """Regression: parent 4032DRSGREEN must not be zeroed when warehouse stock is low but pipeline exists."""
     base_sales = []

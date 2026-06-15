@@ -1220,11 +1220,14 @@ def calculate_po_base(
     _cal_eff = pd.to_numeric(po_df["_cal_span_days"], errors="coerce").fillna(0)
     _dist_eff = pd.to_numeric(po_df["_distinct_days"], errors="coerce").fillna(0)
     _sold_eff = pd.to_numeric(_demand_for_eff, errors="coerce").fillna(0)
+    # ≤5 sold in the ADS window: keep calendar/period dilution — distinct-day collapse
+    # would 10× ADS on noise (e.g. 2 units → Eff_Days=1 → PO explosion).
+    _low_vol = (_sold_eff > 0) & (_sold_eff <= 5)
     # Only collapse to distinct sale days for genuinely sparse sellers (4032DRSGREEN:
     # 6 units / 26d calendar). Bursty but real demand (e.g. 20 units on 4 days over 40d)
     # must keep the inclusive calendar span — otherwise ADS inflates 10× and PO explodes.
     _sparse_intermittent = (
-        (_sold_eff > 0)
+        (_sold_eff >= 6)
         & (_cal_eff > 0)
         & ((_sold_eff / _cal_eff) < 0.35)
         & ((_dist_eff * 2) < _cal_eff)
@@ -1234,7 +1237,7 @@ def calculate_po_base(
         _dist_eff.clip(lower=1.0),
         _cal_eff,
     )
-    po_df.drop(columns=["_cal_span_days", "_distinct_days"], inplace=True, errors="ignore")
+    po_df.drop(columns=["_distinct_days"], inplace=True, errors="ignore")
     po_df["Eff_Days"] = (
         pd.to_numeric(po_df["_eff_days_active"], errors="coerce")
         .fillna(0)
@@ -1337,8 +1340,11 @@ def calculate_po_base(
                     _has_stock = pd.to_numeric(po_df.get("Total_Inventory"), errors="coerce").fillna(0) > 0
                     # Apply in-stock-day denominator when the SKU is active (demand/OOS restock),
                     # has recent shipment context, or still carries inventory with history.
-                    use_inv = inv_days.notna() & (inv_days > 0) & (
-                        _has_demand | _oos_restock | _ship150 | _has_stock
+                    use_inv = (
+                        inv_days.notna()
+                        & (inv_days > 0)
+                        & (~_low_vol)
+                        & (_has_demand | _oos_restock | _ship150 | _has_stock)
                     )
                     inv_eff = (inv_days * scale).round()
                     inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
@@ -1379,6 +1385,20 @@ def calculate_po_base(
     else:
         po_df["Eff_Days_Inventory"] = 0
         po_df["Inv_Coverage_Days"] = 0
+
+    if bool(_low_vol.any()) and "_cal_span_days" in po_df.columns:
+        _cal_floor = pd.to_numeric(po_df["_cal_span_days"], errors="coerce").fillna(0)
+        _span_floor = np.where(
+            _cal_floor >= float(min_denominator),
+            _cal_floor,
+            float(ADS_WINDOW),
+        )
+        _eff_lv = pd.to_numeric(po_df.loc[_low_vol, "Eff_Days"], errors="coerce").fillna(0).to_numpy()
+        _floor_lv = pd.Series(_span_floor, index=po_df.index).loc[_low_vol].to_numpy()
+        po_df.loc[_low_vol, "Eff_Days"] = np.clip(
+            np.maximum(_eff_lv, _floor_lv), 0, float(ADS_WINDOW)
+        )
+    po_df.drop(columns=["_cal_span_days"], inplace=True, errors="ignore")
 
     # SKUs with no ADS-window sales may still show Eff_Days from the 150d ship context
     # when inventory history is missing (common for SKUs not in the daily snapshot file).
@@ -2302,25 +2322,31 @@ def calculate_po_base(
         # • the row has real ADS > 0 (it has sales history; not a phantom size)
         # • projected cover is below target_days (otherwise there is nothing to order)
         _target_eff = float(target_days) + float(grace_days)
+        _excl_status = po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status)
+        if not isinstance(_excl_status, pd.Series):
+            _excl_status = pd.Series(_excl_status, index=po_df.index)
         _lift_mask = (
             (_n_active >= 2)
             & (_po_qty_a == 0)
             & (_ads_a > 0)
             & (_proj_a < _target_eff)
             & po_df["PO_Block_Reason"].astype(str).str.contains(_LT_GATE_MSG, na=False)
-            & ~po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status).fillna(False)
+            & ~_excl_status.fillna(False)
         )
         if _lift_mask.any():
-            _bal  = (_target_eff - _proj_a[_lift_mask]).clip(lower=0.0)
-            _gross = (_bal * _ads_a[_lift_mask]).round(1)
+            _lift_idx = po_df.index[_lift_mask]
+            _bal = (_target_eff - _proj_a.loc[_lift_idx]).clip(lower=0.0)
+            _gross = (_bal * _ads_a.loc[_lift_idx]).round(1)
             _rounded = np.vectorize(round_po_pack)(_gross.to_numpy(dtype=float))
 
-            po_df.loc[_lift_mask, "Gross_PO_Qty"] = _rounded
-            po_df.loc[_lift_mask, "PO_Qty"]       = _rounded
+            po_df.loc[_lift_idx, "Gross_PO_Qty"] = _rounded
+            po_df.loc[_lift_idx, "PO_Qty"] = _rounded
 
             # Recompute Post-PO cover
-            _new_post = (_proj_a[_lift_mask] + _rounded / _ads_a[_lift_mask]).round(1)
-            po_df.loc[_lift_mask, "Post_PO_Cover_Days_Capped"] = _new_post
+            _proj_lift = _proj_a.loc[_lift_idx].to_numpy(dtype=float)
+            _ads_lift = _ads_a.loc[_lift_idx].to_numpy(dtype=float)
+            _new_post = (_proj_lift + _rounded / np.maximum(_ads_lift, 1e-9)).round(1)
+            po_df.loc[_lift_idx, "Post_PO_Cover_Days_Capped"] = _new_post
 
             # Strip the lead-time gate message from the block reason; keep any others
             _old_br = po_df.loc[_lift_mask, "PO_Block_Reason"].astype(str)
@@ -2329,8 +2355,9 @@ def calculate_po_base(
                 .str.replace(_LT_GATE_MSG + "[^;]*", "", regex=True)
                 .str.strip("; ").str.strip()
             )
-            po_df.loc[_lift_mask, "PO_Block_Reason"] = _new_br
-            po_df.loc[_lift_mask & (_rounded > 0), "Priority"] = "🟡 HIGH"
+            po_df.loc[_lift_idx, "PO_Block_Reason"] = _new_br
+            if bool((_rounded > 0).any()):
+                po_df.loc[_lift_idx[_rounded > 0], "Priority"] = "🟡 HIGH"
 
             _log_mod.getLogger(__name__).info(
                 "all-sizes gate-lift: %d sibling row(s) unblocked across %d parent(s)",
