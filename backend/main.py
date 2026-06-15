@@ -491,6 +491,60 @@ _DISK_CACHE_MAX_AGE = int(_os_main.environ.get("WARM_CACHE_MAX_AGE_HOURS", "24")
 # recovering automatically from partial-data corruption (e.g. race-condition saves).
 # Override via WARM_CACHE_MIN_MTR_ROWS env var; set to 0 to disable the check.
 _DISK_CACHE_MIN_MTR_ROWS = int(_os_main.environ.get("WARM_CACHE_MIN_MTR_ROWS", "500000"))
+# Absolute, always-on floor that is independent of _DISK_CACHE_MIN_MTR_ROWS.
+# Even when the configurable mtr-row guard is disabled (WARM_CACHE_MIN_MTR_ROWS=0,
+# which production sets so small accounts can fast-path), a disk cache whose
+# platform frames are *all* empty is unambiguously corrupt (e.g. a partial session
+# published an empty/near-empty snapshot over the full one). Without this, every
+# restart reloads the empty disk cache and skips GitHub forever → "0/8 Data loaded".
+# Set WARM_CACHE_HARD_MIN_ROWS=0 to disable even this safety net (not recommended).
+_DISK_CACHE_HARD_MIN_ROWS = int(_os_main.environ.get("WARM_CACHE_HARD_MIN_ROWS", "1"))
+_WARM_PLATFORM_KEYS = ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
+
+
+def _warm_total_platform_rows(cache: dict) -> int:
+    """Total rows across all platform frames in a (warm/disk) cache dict."""
+    if not cache:
+        return 0
+    total = 0
+    for _k in _WARM_PLATFORM_KEYS:
+        _df = cache.get(_k)
+        if _df is not None and hasattr(_df, "__len__"):
+            try:
+                total += len(_df)
+            except Exception:
+                pass
+    return total
+
+
+def _disk_cache_corruption_reason(disk_data: dict) -> str | None:
+    """Return a human-readable reason if the Phase-0 disk cache should be
+    rejected as corrupt (forcing a GitHub Phase-2 rebuild), else ``None``.
+
+    Two independent guards:
+      * configurable mtr-row minimum (``_DISK_CACHE_MIN_MTR_ROWS``; 0 disables) —
+        catches a snapshot saved mid-clear during a reload-fresh race.
+      * always-on hard floor on *total* platform rows (``_DISK_CACHE_HARD_MIN_ROWS``)
+        — catches an all-empty cache even when the mtr guard is disabled
+        (production runs WARM_CACHE_MIN_MTR_ROWS=0 so small accounts can fast-path).
+        Without this an empty cache published by a partial session would be
+        reloaded on every restart, serving "0/8 Data loaded" forever.
+    """
+    if not disk_data:
+        return None
+    if _DISK_CACHE_MIN_MTR_ROWS > 0:
+        _mtr = disk_data.get("mtr_df")
+        _rows = len(_mtr) if _mtr is not None and hasattr(_mtr, "__len__") else 0
+        if _rows < _DISK_CACHE_MIN_MTR_ROWS:
+            return f"disk mtr_df has only {_rows} rows (min {_DISK_CACHE_MIN_MTR_ROWS})"
+    if _DISK_CACHE_HARD_MIN_ROWS > 0:
+        _total = _warm_total_platform_rows(disk_data)
+        if _total < _DISK_CACHE_HARD_MIN_ROWS:
+            return (
+                f"disk cache has {_total} total platform rows "
+                f"(hard min {_DISK_CACHE_HARD_MIN_ROWS}) — all platform frames empty"
+            )
+    return None
 
 
 def _skip_phase2_when_disk_fresh() -> bool:
@@ -853,7 +907,15 @@ def _do_load_warm_cache() -> bool:
                     _p0_m = disk_data.get("mtr_df")
                     _p0_r = len(_p0_m) if _p0_m is not None else 0
                     del _p0_m
-                    if _age_h < _FAST_SKIP_MAX_AGE_HOURS and _p0_r >= _DISK_CACHE_MIN_MTR_ROWS:
+                    # Never fast-path an all-empty disk cache: that would skip the
+                    # GitHub rebuild and serve "0/8" forever even with the mtr guard
+                    # disabled (WARM_CACHE_MIN_MTR_ROWS=0).
+                    _p0_total = _warm_total_platform_rows(disk_data)
+                    if (
+                        _age_h < _FAST_SKIP_MAX_AGE_HOURS
+                        and _p0_r >= _DISK_CACHE_MIN_MTR_ROWS
+                        and _p0_total >= _DISK_CACHE_HARD_MIN_ROWS
+                    ):
                         log.warning(
                             "Warm-cache fast-path: disk is %.0fm old with %d mtr rows — "
                             "serving immediately, skipping Phase 1+2 entirely.",
@@ -877,25 +939,23 @@ def _do_load_warm_cache() -> bool:
                         return True
             except Exception as _fp_err:
                 log.warning("fast-path check failed (non-fatal): %s", _fp_err)
-        # ── Auto-detect corrupt disk cache (too few mtr rows) ─────────────────
-        # If Phase 0 loaded a cache with fewer than _DISK_CACHE_MIN_MTR_ROWS rows
-        # (default 200 K) it was almost certainly saved while the warm cache was
-        # partially cleared (race-condition between reload-fresh and the background
-        # Phase-1+2 thread).  Mark disk_ok=False so Phase 2 runs from GitHub and
-        # rebuilds the full 2-year history automatically.
+        # ── Auto-detect corrupt disk cache ────────────────────────────────────
+        # Two guards (see _disk_cache_corruption_reason): the configurable
+        # mtr-row minimum, plus an always-on hard floor on total platform rows
+        # that catches an all-empty cache even when the mtr guard is disabled
+        # (WARM_CACHE_MIN_MTR_ROWS=0). If the Phase-0 cache is corrupt, mark
+        # disk_ok=False so Phase 2 rebuilds the full history from GitHub instead
+        # of serving "0/8 Data loaded" on every restart.
         _phase0_mtr_rows: int = 0
-        if disk_ok and disk_data and _DISK_CACHE_MIN_MTR_ROWS > 0:
-            _p0_mtr = disk_data.get("mtr_df")
-            _p0_rows = len(_p0_mtr) if _p0_mtr is not None and hasattr(_p0_mtr, "__len__") else 0
-            del _p0_mtr
-            if _p0_rows < _DISK_CACHE_MIN_MTR_ROWS:
-                log.warning(
-                    "Warm-cache Phase 0: disk mtr_df has only %d rows (min %d). "
-                    "Treating disk cache as corrupt — forcing Phase 2 rebuild from GitHub.",
-                    _p0_rows, _DISK_CACHE_MIN_MTR_ROWS,
-                )
-                disk_ok = False
-                disk_data = {}
+        _corrupt_reason = _disk_cache_corruption_reason(disk_data) if disk_ok else None
+        if _corrupt_reason:
+            log.warning(
+                "Warm-cache Phase 0: %s. Treating disk cache as corrupt — "
+                "forcing Phase 2 rebuild from GitHub.",
+                _corrupt_reason,
+            )
+            disk_ok = False
+            disk_data = {}
         if disk_ok and disk_data:
             _warm_cache = disk_data
             _warm_cache_loaded_at = datetime.now(IST)
