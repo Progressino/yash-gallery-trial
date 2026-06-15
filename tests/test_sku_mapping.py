@@ -265,10 +265,9 @@ def test_persist_and_restore_sku_mapping_from_disk(tmp_path, monkeypatch):
     _main._warm_cache = {}
 
 
-def test_restore_skips_bundled_when_paused(monkeypatch, tmp_path):
+def test_restore_skips_github_when_paused_but_uses_bundled(monkeypatch, tmp_path):
     from backend.session import AppSession
 
-    monkeypatch.setenv("SKIP_BUNDLED_SKU_MAPPING", "1")
     monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path / "empty"))
     import backend.main as _main
 
@@ -276,7 +275,9 @@ def test_restore_skips_bundled_when_paused(monkeypatch, tmp_path):
     from backend.services import sku_mapping as sm
 
     sm.clear_bundled_sku_mapping_cache()
+    monkeypatch.setattr(sm, "load_bundled_sku_mapping", lambda: {"BUNDLED": "BUNDLED"})
     sess = AppSession()
     sess.pause_auto_data_restore = True
-    assert sm.restore_sku_mapping_to_session(sess) is False
+    assert sm.restore_sku_mapping_to_session(sess) is True
+    assert sess.sku_mapping == {"BUNDLED": "BUNDLED"}
 

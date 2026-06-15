@@ -2069,6 +2069,7 @@ def full_restore_session(
 
     _set_restore_step(sess, "warm")
     try:
+        _main.bootstrap_warm_cache_from_disk_if_empty()
         _main.restore_po_sidecars_from_warm(sess)
         _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
         steps.append("warm")
@@ -2387,12 +2388,86 @@ def _acquire_upload_lock_with_progress(sess: AppSession, *, timeout_sec: float =
         time.sleep(2.0)
 
 
+def queue_session_restore_if_needed(sess: AppSession, session_id: str, *, reason: str = "") -> bool:
+    """Queue async full restore when the session has no operational data."""
+    import time
+
+    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+    if not session_id:
+        return False
+    if getattr(sess, "session_restore_status", "idle") == "running":
+        return True
+    try:
+        import backend.main as _main
+
+        if not _main.session_needs_operational_data(sess):
+            return False
+    except Exception:
+        pass
+    if getattr(sess, "pause_auto_data_restore", False):
+        return False
+
+    sess.session_restore_status = "running"
+    sess.session_restore_started = time.monotonic()
+    _set_restore_step(
+        sess,
+        "queued",
+        reason or "Queued full restore — loading server history…",
+    )
+    sess.session_restore_result = {}
+    DAILY_UPLOAD_EXECUTOR.submit(_run_session_restore_worker, session_id)
+    return True
+
+
+def _server_has_recoverable_history() -> bool:
+    """True when disk, warm cache, GitHub manifest, or Tier-3 may repopulate a session."""
+    try:
+        import backend.main as _main
+        from ..services.github_cache import get_cache_manifest
+
+        _main.bootstrap_warm_cache_from_disk_if_empty()
+        if _main._warm_cache:
+            for key in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df"):
+                df = _main._warm_cache.get(key)
+                if df is not None and hasattr(df, "empty") and not df.empty:
+                    return True
+        manifest = get_cache_manifest()
+        if manifest and (manifest.get("row_counts") or manifest.get("saved_at")):
+            return True
+        if get_summary():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _maybe_queue_full_restore_when_empty(sess: AppSession, session_id: str | None) -> None:
+    if not session_id:
+        return
+    if getattr(sess, "pause_auto_data_restore", False):
+        return
+    try:
+        import backend.main as _main
+
+        if not _main.session_needs_operational_data(sess):
+            return
+    except Exception:
+        return
+    if not _server_has_recoverable_history():
+        return
+    queue_session_restore_if_needed(
+        sess,
+        session_id,
+        reason="Auto-restore — session empty but server history is available…",
+    )
+
+
 def _run_session_restore_worker(session_id: str) -> None:
-    """Background full restore — holds upload memory lock; may run 10+ minutes on large GitHub cache."""
+    """Background full restore — disk/GitHub/Tier-3 merge without blocking on warm-cache memory lock."""
     import logging
     import time
 
-    from ..concurrency import _UPLOAD_MEMORY_LOCK
     from ..session import store
 
     _log = logging.getLogger(__name__)
@@ -2400,14 +2475,10 @@ def _run_session_restore_worker(session_id: str) -> None:
     if sess is None:
         return
 
-    acquired = False
     try:
         sess.session_restore_status = "running"
         sess.session_restore_started = time.monotonic()
         _set_restore_step(sess, "queued", "Restore worker started…")
-        if not _acquire_upload_lock_with_progress(sess):
-            raise TimeoutError("Timed out waiting for server memory — try again in a few minutes.")
-        acquired = True
         _set_restore_step(sess, "sku")
 
         missing, steps, msg = full_restore_session(sess, defer_sales_rebuild=True)
@@ -2438,9 +2509,6 @@ def _run_session_restore_worker(session_id: str) -> None:
         sess.session_restore_status = "error"
         sess.session_restore_message = str(e)[:500]
         sess.session_restore_progress = 0
-    finally:
-        if acquired:
-            _UPLOAD_MEMORY_LOCK.release()
 
 
 def _run_session_restore_sales_worker(session_id: str) -> None:
@@ -2459,6 +2527,12 @@ def _run_session_restore_sales_worker(session_id: str) -> None:
         msg = (sess.session_restore_result or {}).get("message") or "Full restore complete."
         _set_restore_step(sess, "done", msg)
         sess.session_restore_status = "done"
+        try:
+            import backend.main as _main
+
+            _main.publish_warm_cache_from_session(sess)
+        except Exception:
+            _log.exception("publish warm cache after restore sales")
     except Exception as e:
         _log.exception("restore sales worker failed")
         sess.session_restore_status = "error"
@@ -2606,6 +2680,7 @@ def get_coverage(request: Request, light: bool = False):
         except Exception:
             pass
         _maybe_queue_light_session_hydrate(sess, sid or None)
+        _maybe_queue_full_restore_when_empty(sess, sid or None)
         return _build_coverage_response(sess)
 
     try:

@@ -317,6 +317,10 @@ def _hydrate_session_from_warm(
         import backend.main as _main
 
         if not _main._warm_cache:
+            _main._warm_cache_ready.wait(timeout=15.0)
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_from_disk_if_empty()
+        if not _main._warm_cache:
             return None
         _main._copy_warm_cache_to_session(sess)
         n_sales = _rebuild_sales_in_session(sess)
@@ -384,6 +388,24 @@ def cache_load(request: Request, background_tasks: BackgroundTasks):
     out = _hydrate_session_from_warm(sess, sid, background_tasks, defer_daily_merge=False)
     if out is not None and out.ok:
         return out
+
+    try:
+        from .data import queue_session_restore_if_needed
+
+        if queue_session_restore_if_needed(
+            sess,
+            sid,
+            reason="Load cache — fetching server history in background…",
+        ):
+            return CacheStatusResponse(
+                ok=True,
+                message=(
+                    "Loading full history in background — stay on this page. "
+                    "Row counts will update as each platform finishes."
+                ),
+            )
+    except Exception:
+        _log.exception("queue async restore from cache/load failed")
 
     ok, msg, loaded = load_cache_from_drive()
     if ok:
