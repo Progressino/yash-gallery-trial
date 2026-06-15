@@ -78,9 +78,9 @@ export const usePOStore = create<POState>()(
     (set) => ({
   activeTab: 'po',
   params: {
-    period_days: 90,
-    lead_time: 30,
-    target_days: 135,
+    period_days: 30,
+    lead_time: 45,
+    target_days: 180,
     demand_basis: 'Sold',
     use_seasonality: false,
     seasonal_weight: 0.5,
@@ -89,7 +89,7 @@ export const usePOStore = create<POState>()(
     safety_pct: 0,
     enforce_two_size_minimum: true,
     urgent_all_sizes_days: 45,
-    enforce_lead_time_release_gate: false,
+    enforce_lead_time_release_gate: true,
   },
   result: null,
   quarterly: null,
@@ -117,7 +117,7 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
-      version: 3,
+      version: 4,
       migrate: (persisted, fromVersion) => {
         const p = persisted as Partial<POState> | undefined
         if (!p) return persisted as POState
@@ -126,7 +126,11 @@ export const usePOStore = create<POState>()(
         }
         const params = p.params as POParams | undefined
         if (params && params.enforce_lead_time_release_gate === undefined) {
-          params.enforce_lead_time_release_gate = false
+          params.enforce_lead_time_release_gate = true
+        }
+        // Align with June export behaviour: hold PO while projected cover > sheet lead.
+        if (fromVersion < 4 && params) {
+          params.enforce_lead_time_release_gate = true
         }
         return p as POState
       },
