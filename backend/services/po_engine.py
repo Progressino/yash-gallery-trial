@@ -1294,9 +1294,26 @@ def calculate_po_base(
                     )
                     inv_eff = (inv_days * scale).round()
                     inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
+                    _active_eff = pd.to_numeric(po_df["Eff_Days"], errors="coerce").fillna(0)
+                    _sold_for_eff = (
+                        po_df["Net_Units"].fillna(0)
+                        if demand_basis == "Net"
+                        else po_df["Sold_Units"].fillna(0)
+                    )
+                    # When sales are sparse within a long in-stock window (extrapolated
+                    # inventory days ≫ active txn span), do not dilute ADS — e.g.
+                    # 4032DRSGREEN-L with 6 sold over 4 active days but 26 scaled
+                    # in-stock days was getting PO_Qty=0 despite urgent cover.
+                    _eff_from_inv = np.where(
+                        _has_demand
+                        & (_active_eff > 0)
+                        & (inv_clipped > _active_eff * 2),
+                        _active_eff.clip(lower=1.0),
+                        inv_clipped,
+                    )
                     po_df["Eff_Days"] = np.where(
                         use_inv,
-                        inv_clipped.fillna(po_df["Eff_Days"]),
+                        _eff_from_inv,
                         po_df["Eff_Days"],
                     )
                     po_df["Eff_Days_Inventory"] = inv_days.fillna(0).astype(int)

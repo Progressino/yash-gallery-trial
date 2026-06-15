@@ -1976,6 +1976,72 @@ def test_po_uses_inventory_history_eff_days_to_lift_ads():
     assert float(short["Recent_ADS"]) > float(plain["Recent_ADS"])
 
 
+def test_sparse_sales_use_active_eff_days_not_scaled_inventory_span():
+    """4032DRSGREEN-style: sparse sales over few days must not be diluted by long in-stock span."""
+    sale_days = pd.to_datetime(["2026-05-20", "2026-05-22", "2026-05-25", "2026-05-28"])
+    sales_rows = []
+    for d in sale_days:
+        sales_rows.append(
+            {
+                "Sku": "4032DRSGREEN-L",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 3,
+                "Units_Effective": 3,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame({"OMS_SKU": ["4032DRSGREEN-L"], "Total_Inventory": [1]})
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L"],
+            "PO_Pipeline_Total": [28],
+            "Pending_Cutting": [21],
+            "Balance_to_Dispatch": [7],
+        }
+    )
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L"],
+            "SKU_Sheet_Status": ["Medium Selling"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [45.0],
+        }
+    )
+    # 12 in-stock days inside a 14-day snapshot window → scale would push Eff_Days to ~26.
+    hist_dates = pd.date_range("2026-05-15", periods=14, freq="D")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["4032DRSGREEN-L"] * 14,
+            "Date": hist_dates,
+            "Qty": [2 if i < 12 else 0 for i in range(14)],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        sku_status_df=sheet,
+        inventory_history_df=inv_hist,
+        enforce_lead_time_release_gate=False,
+    )
+    row = po.loc[po["OMS_SKU"] == "4032DRSGREEN-L"].iloc[0]
+    assert int(row["Sold_Units"]) == 12
+    assert int(row["Eff_Days_Inventory"]) == 12
+    assert int(row["Eff_Days"]) <= 9, (
+        f"Expected active sales span (~9d), not scaled inventory span (~26d); got {row['Eff_Days']}"
+    )
+    assert float(row["ADS"]) >= 1.0
+    assert int(row["PO_Qty"]) > 0
+    assert float(row["Projected_Running_Days"]) < 45
+
+
 def test_oos_size_keeps_inventory_eff_days_after_existing_po_unbundle():
     """1361YKBLUE-XL with 8/30 in-stock days must keep Eff_Days≈8, not 0 after unbundle."""
     dates = list(pd.date_range("2026-05-01", periods=30, freq="D"))
@@ -3067,8 +3133,9 @@ def test_po_auto_extends_inventory_history_so_user_uploads_baseline_once():
     assert int(row["Inv_Coverage_Days"]) == 17
     # Stock stays > 0 throughout the 17 covered days, so in_stock = 17.
     assert int(row["Eff_Days_Inventory"]) == 17
-    # Scaling: 17 in-stock / 17 covered = full coverage → Eff_Days = 30.
-    assert int(row["Eff_Days"]) == 30
+    # Active sales span is 7 days; scaled inventory window must not dilute ADS below that.
+    assert int(row["Eff_Days"]) == 7
+    assert float(row["ADS"]) == 5.0
 
 
 def test_po_inv_window_anchors_at_latest_data_not_stale_sales_max():
