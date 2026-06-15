@@ -175,11 +175,9 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
-  const coverage = useSession(s => s.coverage)
-  const dataStillLoading =
-    !!coverage &&
-    !sessionLooksLoaded(coverage) &&
-    (coverageNeedsSync(coverage) || coverageJobsRunning(coverage))
+  const dataStillLoading = useSession(
+    (s) => !sessionLooksLoaded(s) && (coverageNeedsSync(s) || coverageJobsRunning(s)),
+  )
 
   if (isLoading && !cachedUser) {
     return (
