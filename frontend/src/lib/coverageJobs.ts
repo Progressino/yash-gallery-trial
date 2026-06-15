@@ -1,4 +1,5 @@
 import type { CoverageResponse } from '../api/client'
+import { operationalDataComplete } from './localSessionHint'
 
 export function coverageJobsRunning(c: CoverageResponse | undefined): boolean {
   if (!c) return false
@@ -25,6 +26,7 @@ export function coverageNeedsSync(c: CoverageResponse): boolean {
 export function coveragePollIntervalMs(c: CoverageResponse | undefined): number | false {
   if (!c) return 8_000
   if (coverageJobsRunning(c)) return 3_000
+  if (!operationalDataComplete(c)) return 8_000
   if (coverageNeedsSync(c)) return 15_000
   return 60_000
 }

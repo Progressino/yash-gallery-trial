@@ -89,6 +89,19 @@ export function clearLocalSessionHint(): void {
   }
 }
 
+export function operationalDataComplete(c: CoverageResponse): boolean {
+  return !!(
+    c.sku_mapping &&
+    c.sales &&
+    c.inventory &&
+    c.mtr &&
+    c.myntra &&
+    c.meesho &&
+    c.flipkart &&
+    c.snapdeal
+  )
+}
+
 /** True when we can skip GitHub hydrate + full cache download on login. */
 export function canSkipHeavyServerRestore(
   coverage: CoverageResponse,
@@ -97,17 +110,7 @@ export function canSkipHeavyServerRestore(
   if (!hint) return false
   if (Date.now() - hint.savedAt > hintTtlMs()) return false
   if (coverage.pause_auto_data_restore) return false
-  if (!sessionLooksLoaded(coverage)) return false
-  // Partial load (e.g. Amazon only) — always run hydrate-warm for unified sales + all channels.
-  if (!coverage.sales) return false
-  const platformCount = [
-    coverage.mtr,
-    coverage.myntra,
-    coverage.meesho,
-    coverage.flipkart,
-    coverage.snapdeal,
-  ].filter(Boolean).length
-  if (platformCount < 3) return false
+  if (!operationalDataComplete(coverage)) return false
   if (coverage.inventory_upload_status === 'running') return false
   if (coverage.daily_auto_ingest_status === 'running') return false
   if (coverage.tier1_bulk_status === 'running') return false

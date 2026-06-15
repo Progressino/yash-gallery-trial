@@ -2695,6 +2695,8 @@ def _session_needs_background_hydrate(sess: AppSession) -> bool:
     try:
         import backend.main as _main
 
+        if _main.session_needs_warm_cache_topup(sess):
+            return True
         if _main.session_needs_operational_data(sess):
             return True
     except Exception:
@@ -2808,10 +2810,6 @@ def get_coverage(request: Request, light: bool = False):
 
             _main.restore_po_sidecars_from_warm(sess)
             ensure_po_return_overlay_from_server(sess)
-            if _main.session_needs_warm_cache_topup(sess):
-                _main._apply_warm_cache_if_needed(
-                    sess, _main._warm_cache_generation
-                )
         except Exception:
             pass
         _maybe_queue_light_session_hydrate(sess, sid or None)

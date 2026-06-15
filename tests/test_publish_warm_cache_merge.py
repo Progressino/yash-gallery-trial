@@ -66,3 +66,17 @@ def test_warm_cache_has_more_detects_row_gap():
     sess = _tier3_line_df("flipkart", 40)
     assert main_mod._warm_frame_has_more_rows(warm, sess) is True
     assert main_mod._warm_frame_has_more_rows(sess, warm) is False
+
+
+def test_copy_warm_cache_does_not_fail_when_platform_merge_grows_cache():
+    """Regression: merging session rows into warm cache must not mutate _warm_cache during iteration."""
+    _reset_warm()
+    main_mod._warm_cache["mtr_df"] = _tier3_line_df("amazon", 50)
+    main_mod._warm_cache["sales_df"] = pd.DataFrame({"Sku": ["A"], "TxnDate": ["2024-01-01"]})
+
+    sess = AppSession()
+    sess.mtr_df = _tier3_line_df("amazon", 120, start=200)
+
+    assert main_mod._copy_warm_cache_to_session(sess) is True
+    assert len(sess.mtr_df) >= 120
+    assert len(main_mod._warm_cache["mtr_df"]) >= 120

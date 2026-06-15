@@ -640,8 +640,10 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                 saved.append("return_overlay_meta")
                 saved.append(key)
             elif hasattr(val, "to_parquet") and hasattr(val, "empty") and not val.empty:
+                from .services.helpers import _coerce_df_for_parquet
+
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
-                val.to_parquet(path, index=False)
+                _coerce_df_for_parquet(val).to_parquet(path, index=False)
                 saved.append(key)
         # Merge with existing manifest instead of overwriting — prevents partial
         # sidecar saves (inventory-only, 3 keys) from destroying the full 14-key
@@ -1412,7 +1414,8 @@ def _copy_warm_cache_to_session(sess) -> bool:
         "flipkart_df": "flipkart",
         "snapdeal_df": "snapdeal",
     }
-    for key, val in _warm_cache.items():
+    _warm_plat_updates: dict = {}
+    for key, val in list(_warm_cache.items()):
         if sess_inv_newer and key in _inv_keys:
             continue
         # Trim daily_inventory_history_df to _MAX_HISTORY_DAYS when copying from
@@ -1441,7 +1444,7 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 wc_cur = _warm_cache.get(key)
                 wc_len = len(wc_cur) if wc_cur is not None and hasattr(wc_cur, "__len__") else 0
                 if wc_len < len(val):
-                    _warm_cache[key] = val
+                    _warm_plat_updates[key] = val
             except Exception:
                 pass
             continue
@@ -1470,6 +1473,8 @@ def _copy_warm_cache_to_session(sess) -> bool:
                 pass
             continue
         setattr(sess, key, val)
+    for _pk, _pv in _warm_plat_updates.items():
+        _warm_cache[_pk] = _pv
     meta = _warm_cache.get(_INVENTORY_META_WARM_KEY)
     if meta:
         try:
@@ -1881,11 +1886,15 @@ async def session_middleware(request: Request, call_next):
         except Exception:
             log.exception("warm-cache apply failed")
 
-    # SKU bundle merge is expensive; skip on read-only data APIs when sales are already loaded.
+    # SKU bundle merge is expensive; never run on coverage/job-status polls; skip other
+    # read-only data GETs when sales are already loaded.
     _skip_sku_bundle = (
         request.method == "GET"
+        and path in ("/api/data/coverage", "/api/data/job-status")
+    ) or (
+        request.method == "GET"
         and path.startswith("/api/data/")
-        and not getattr(session, "sales_df", None) is None
+        and getattr(session, "sales_df", None) is not None
         and not getattr(session, "sales_df").empty
     ) or (
         request.method == "POST"

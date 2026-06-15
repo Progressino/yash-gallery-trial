@@ -9,7 +9,7 @@ import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
-import { canSkipHeavyServerRestore, readLocalSessionHint, sessionLooksLoaded } from './lib/localSessionHint'
+import { canSkipHeavyServerRestore, operationalDataComplete, readLocalSessionHint, sessionLooksLoaded } from './lib/localSessionHint'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
@@ -131,10 +131,7 @@ function ProtectedRoute() {
         }
         const hasAnyPlatform =
           coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart || coverage.snapdeal
-        const needsWarmHydrate =
-          !coverage.sales ||
-          [coverage.myntra, coverage.meesho, coverage.flipkart, coverage.snapdeal].filter(Boolean)
-            .length < 2
+        const needsWarmHydrate = !operationalDataComplete(coverage)
         if ((coverageEmpty(coverage) && !hasAnyPlatform) || needsWarmHydrate) {
           try {
             await waitForWarmCacheReady({ maxWaitMs: 180_000 })
@@ -142,7 +139,7 @@ function ProtectedRoute() {
               await withTimeout(cacheHydrateWarm(), 90_000)
               coverage = await getCoverage({ light: true, timeout: 45_000 })
               setCoverage(coverage)
-              if (sessionLooksLoaded(coverage)) break
+              if (operationalDataComplete(coverage)) break
               await waitForWarmCacheReady({ maxWaitMs: 30_000, pollMs: 4_000 })
             }
           } catch {
