@@ -684,7 +684,7 @@ def _dedup_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFra
     return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
 
 
-def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
+def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = False) -> pd.DataFrame:
     """
     Deduplicate a concatenated platform DataFrame to remove inflated rows
     caused by overlapping file uploads.
@@ -701,6 +701,12 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
     - Final pass ``_dedup_cross_export_id_twins`` for those channels: rows whose substantive
       columns match but ``LineKey`` / ``OrderId`` differ (duplicate ZIPs, packet vs line id)
       collapse to one row — avoids ~2× counts when exports disagree on ids only.
+    - ``_dedup_shipment_superseded_by_same_day_refund`` only runs when ``is_merge=True``
+      (i.e. concatenating a NEW upload onto EXISTING session data). It removes a stale
+      Shipment row left over from an older snapshot once the same line now shows as
+      Refund/RTO. Within a single freshly-parsed export (``is_merge=False``), a Shipment
+      row and a same-day Refund row for the same order/SKU/qty are both genuine, distinct
+      events (a sale and its later return) and must both be kept for net-sales accuracy.
     """
     if df.empty:
         return df
@@ -766,11 +772,13 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
                 out = _dedup_linekey_legacy_shadow(out)
             if platform == "myntra":
                 out = _dedup_myntra_parent_order_shadow(out)
-                out = _dedup_shipment_superseded_by_same_day_refund(out)
+                if is_merge:
+                    out = _dedup_shipment_superseded_by_same_day_refund(out)
             if platform == "meesho":
                 out = _dedup_meesho_cross_source_overlay(out)
                 out = _dedup_meesho_suborder_cross_source(out)
-                out = _dedup_shipment_superseded_by_same_day_refund(out)
+                if is_merge:
+                    out = _dedup_shipment_superseded_by_same_day_refund(out)
             elif platform == "flipkart":
                 out = _dedup_flipkart_cross_source_overlay(out)
             if platform in ("myntra", "meesho", "flipkart"):
@@ -1093,7 +1101,7 @@ def merge_platform_data(
     if new_df.empty:
         return existing
     combined = pd.concat([existing, new_df], ignore_index=True)
-    return _dedup_platform_df(combined, platform)
+    return _dedup_platform_df(combined, platform, is_merge=True)
 
 
 def list_uploads() -> List[dict]:
