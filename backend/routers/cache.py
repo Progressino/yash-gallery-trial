@@ -321,6 +321,7 @@ def _run_warm_hydrate_worker(session_id: str) -> None:
     try:
         sess = store.get(session_id)
         if sess is None:
+            _log.warning("warm hydrate worker: session not in memory session=%s", session_id[:8])
             return
         import backend.main as _main
 
@@ -336,21 +337,14 @@ def _run_warm_hydrate_worker(session_id: str) -> None:
         sess._warm_cache_only = True
         sess._quarterly_cache.clear()
         resume_auto_data_restore(sess)
-        if sess.sales_df.empty and sess.sku_mapping:
-            _rebuild_sales_in_session(sess)
-        try:
-            note = _merge_daily_store_into_session(sess)
-            _rebuild_sales_in_session(sess)
-            _main.publish_warm_cache_from_session(sess)
-            _log.info(
-                "warm hydrate worker done session=%s sales=%s%s",
-                session_id[:8],
-                len(sess.sales_df),
-                note,
-            )
-        except Exception:
-            _log.exception("warm hydrate worker tier-3/rebuild failed session=%s", session_id[:8])
-        _persist_pg_session_bg(session_id, sess)
+        _log.info(
+            "warm hydrate worker copy done session=%s sales=%s mtr=%s inv=%s",
+            session_id[:8],
+            len(sess.sales_df),
+            len(sess.mtr_df),
+            len(sess.inventory_df_variant),
+        )
+        # Tier-3 merge + sales rebuild run via GET /coverage background hydrate — not here.
     except Exception:
         _log.exception("warm hydrate worker failed session=%s", session_id[:8])
     finally:
@@ -424,6 +418,8 @@ def cache_hydrate_warm(request: Request):
     if sess is None:
         return CacheStatusResponse(ok=False, message="No session")
     sid = getattr(request.state, "session_id", None) or ""
+    if not sid:
+        return CacheStatusResponse(ok=False, message="No session id")
     try:
         import backend.main as _main
 
