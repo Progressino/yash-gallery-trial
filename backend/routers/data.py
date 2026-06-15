@@ -2519,7 +2519,7 @@ def queue_session_restore_if_needed(sess: AppSession, session_id: str, *, reason
     """Queue async full restore when the session has no operational data."""
     import time
 
-    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+    from ..concurrency import SESSION_RESTORE_EXECUTOR
 
     if not session_id:
         return False
@@ -2548,7 +2548,7 @@ def queue_session_restore_if_needed(sess: AppSession, session_id: str, *, reason
         reason or "Queued full restore — loading server history…",
     )
     sess.session_restore_result = {}
-    DAILY_UPLOAD_EXECUTOR.submit(_run_session_restore_worker, session_id)
+    SESSION_RESTORE_EXECUTOR.submit(_run_session_restore_worker, session_id)
     return True
 
 
@@ -2624,12 +2624,12 @@ def _run_session_restore_worker(session_id: str) -> None:
         }
 
         if _session_has_platform_data(sess) and sess.sku_mapping:
-            from .upload import DAILY_UPLOAD_EXECUTOR, _run_sales_rebuild_worker
+            from ..concurrency import SESSION_RESTORE_EXECUTOR
 
             _set_restore_step(sess, "sales", "Rebuilding combined sales (large history)…")
             sess.sales_rebuild_status = "running"
             sess.sales_rebuild_message = sess.session_restore_message
-            DAILY_UPLOAD_EXECUTOR.submit(
+            SESSION_RESTORE_EXECUTOR.submit(
                 _run_session_restore_sales_worker,
                 session_id,
             )
@@ -2867,7 +2867,7 @@ def restore_full(request: Request, sync: bool = False):
 
     import time
 
-    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+    from ..concurrency import SESSION_RESTORE_EXECUTOR
 
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
@@ -2913,8 +2913,9 @@ def restore_full(request: Request, sync: bool = False):
         "Queued full restore — starting worker (not blocked behind warm-cache load)…",
     )
     sess.session_restore_result = {}
-    # DAILY_UPLOAD_EXECUTOR — HEAVY_EXECUTOR is monopolized by warm-cache Phase 2 at startup.
-    DAILY_UPLOAD_EXECUTOR.submit(_run_session_restore_worker, sid)
+    # SESSION_RESTORE_EXECUTOR — its own queue so this isn't stuck behind a
+    # backlog of per-session hydrate-warm/upload jobs on DAILY_UPLOAD_EXECUTOR.
+    SESSION_RESTORE_EXECUTOR.submit(_run_session_restore_worker, sid)
     cov = _build_coverage_response(sess)
     return RestoreFullResponse(
         **cov.model_dump(),

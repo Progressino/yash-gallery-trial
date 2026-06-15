@@ -29,6 +29,16 @@ DAILY_UPLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="erp-upload",
 )
 
+# Session full-restore worker — its own queue so a backlog of per-session
+# hydrate-warm / daily-upload jobs on DAILY_UPLOAD_EXECUTOR (e.g. many tabs
+# reconnecting after a deploy) cannot leave a user's restore stuck at
+# "Queued" for the entire backlog. The heavy memory-bound steps inside the
+# restore still serialize via _UPLOAD_MEMORY_LOCK.
+SESSION_RESTORE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="erp-restore",
+)
+
 # PO calculate runs separately so a daily-inventory parse does not queue behind PO math.
 PO_CALC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
