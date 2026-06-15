@@ -137,20 +137,20 @@ def restore_sku_mapping_to_session(sess) -> bool:
         persist_sku_mapping_globally(disk)
         return True
 
-    try:
-        from .github_cache import load_sku_mapping_from_drive
+    if not paused:
+        try:
+            from .github_cache import load_sku_mapping_from_drive
 
-        gh = load_sku_mapping_from_drive()
-        if gh:
-            sess.sku_mapping = gh
-            persist_sku_mapping_globally(gh)
-            return True
-    except Exception:
-        pass
+            gh = load_sku_mapping_from_drive()
+            if gh:
+                sess.sku_mapping = gh
+                persist_sku_mapping_globally(gh)
+                return True
+        except Exception:
+            pass
 
-    if paused:
-        return False
-
+    # Bundled master map ships with the app — always safe even when pause_auto_data_restore
+    # is set after Delete all (operators still need SKU mapping to upload Tier-1 history).
     bundled = load_bundled_sku_mapping()
     if bundled:
         sess.sku_mapping = bundled

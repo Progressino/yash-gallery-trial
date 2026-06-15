@@ -107,7 +107,7 @@ function ProtectedRoute() {
     queryFn: async () => {
       try {
         return await withTimeout((async () => {
-        let coverage = await getCoverage({ light: true, timeout: 20_000 })
+        let coverage = await getCoverage({ light: true, timeout: 45_000 })
         setCoverage(coverage)
         const localHint = readLocalSessionHint()
         if (canSkipHeavyServerRestore(coverage, localHint)) {
@@ -138,7 +138,7 @@ function ProtectedRoute() {
         if ((coverageEmpty(coverage) && !hasAnyPlatform) || needsWarmHydrate) {
           try {
             await withTimeout(cacheHydrateWarm(), 90_000)
-            coverage = await getCoverage({ light: true, timeout: 20_000 })
+            coverage = await getCoverage({ light: true, timeout: 45_000 })
             setCoverage(coverage)
           } catch {
             /* warm cache may still be starting after deploy */
@@ -147,7 +147,7 @@ function ProtectedRoute() {
         if (coverageEmpty(coverage) && !hasAnyPlatform) {
           try {
             await withTimeout(cacheLoad(), 90_000)
-            coverage = await getCoverage({ light: true, timeout: 20_000 })
+            coverage = await getCoverage({ light: true, timeout: 45_000 })
             setCoverage(coverage)
           } catch {
             /* GitHub cache optional */

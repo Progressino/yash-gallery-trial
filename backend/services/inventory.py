@@ -1512,7 +1512,10 @@ def recompute_inventory_totals(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
     mkt_cols = marketplace_total_columns(out)
     out["Marketplace_Total"] = out[mkt_cols].sum(axis=1) if mkt_cols else 0
-    oms_inv = pd.to_numeric(out.get("OMS_Inventory", 0), errors="coerce").fillna(0)
+    if "OMS_Inventory" in out.columns:
+        oms_inv = pd.to_numeric(out["OMS_Inventory"], errors="coerce").fillna(0)
+    else:
+        oms_inv = 0
     out["Total_Inventory"] = oms_inv + out["Marketplace_Total"]
     return out
 

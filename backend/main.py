@@ -129,6 +129,21 @@ def clear_warm_cache() -> None:
     _warm_cache_ready.clear()  # Reset so next load is awaited correctly
 
 
+def bootstrap_warm_cache_from_disk_if_empty() -> bool:
+    """When in-memory warm cache was cleared (e.g. mid Phase-2), reload from disk snapshot."""
+    global _warm_cache, _warm_cache_loaded_at
+    if _warm_cache:
+        return True
+    disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
+    if not disk_ok or not disk_data:
+        return False
+    _warm_cache = disk_data
+    _warm_cache_loaded_at = datetime.now(IST)
+    _warm_cache_ready.set()
+    log.info("Warm cache bootstrapped from disk (%d keys)", len(_warm_cache))
+    return True
+
+
 def publish_warm_cache_from_session(sess) -> None:
     """Merge session data into ``_warm_cache`` without dropping bulk platform history.
 
@@ -263,6 +278,7 @@ def force_restore_session_from_server_cache(sess, warm_cache_generation: int) ->
     sess.daily_restored = False
     changed = False
     try:
+        bootstrap_warm_cache_from_disk_if_empty()
         restore_po_sidecars_from_warm(sess)
         if _warm_cache and _copy_warm_cache_to_session(sess):
             sess._warm_cache_gen = warm_cache_generation
@@ -1869,6 +1885,9 @@ async def session_middleware(request: Request, call_next):
         and path.startswith("/api/data/")
         and not getattr(session, "sales_df", None) is None
         and not getattr(session, "sales_df").empty
+    ) or (
+        request.method == "POST"
+        and path.startswith("/api/upload/")
     )
     if not _skip_sku_bundle:
         try:

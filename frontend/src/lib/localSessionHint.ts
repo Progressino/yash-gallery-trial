@@ -110,6 +110,7 @@ export function canSkipHeavyServerRestore(
   if (platformCount < 3) return false
   if (coverage.inventory_upload_status === 'running') return false
   if (coverage.daily_auto_ingest_status === 'running') return false
+  if (coverage.tier1_bulk_status === 'running') return false
   if (coverage.sales_rebuild === 'running') return false
   // Server lost most of the data (new session / deploy) — do not skip restore.
   if (hint.sales_rows > 500 && (coverage.sales_rows ?? 0) < hint.sales_rows * 0.4) {

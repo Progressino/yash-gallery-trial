@@ -35,6 +35,8 @@ class JobStatusResponse(BaseModel):
     session_restore_status: str = "idle"
     inventory_upload_status: str = "idle"
     daily_inventory_upload_status: str = "idle"
+    tier1_bulk_status: str = "idle"
+    tier1_bulk_message: str = ""
 
 
 class CoverageResponse(BaseModel):
@@ -101,6 +103,10 @@ class CoverageResponse(BaseModel):
     daily_auto_ingest_expanded_files: Optional[int] = None
     daily_auto_ingest_saved_files: Optional[int] = None
     daily_auto_ingest_file_results: Optional[list[dict]] = None
+    # Tier-1 bulk history ZIP/RAR (MTR, Myntra PPMP, …) — async parse
+    tier1_bulk_status: str = "idle"
+    tier1_bulk_message: str = ""
+    tier1_bulk_platform: str = ""
     # Snapshot inventory-auto background job
     inventory_upload_status: str = "idle"
     inventory_upload_message: str = ""

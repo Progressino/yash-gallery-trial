@@ -250,6 +250,8 @@ def _restore_daily_if_needed(
         return
     if getattr(sess, "inventory_upload_status", "idle") == "running" and not force:
         return
+    if getattr(sess, "tier1_bulk_status", "idle") == "running" and not force:
+        return
     try:
         import backend.main as _main
 
@@ -293,6 +295,7 @@ def _restore_daily_if_needed(
     if not acquired:
         return
 
+    lock_held = True
     try:
         if sess.daily_restored and not needs_tier3_refresh and not force:
             return
@@ -326,6 +329,11 @@ def _restore_daily_if_needed(
             _auto_max_files = 0
         _auto_max_files = None if _auto_max_files <= 0 else _auto_max_files
 
+        # Restore-full must load all Tier-3 history — bulk uploads live in SQLite and a
+        # 12-month window leaves Myntra/Meesho/Flipkart at ~40–50% of stored rows.
+        _tier3_months = None if (force or restore_full_mode) else _auto_months
+        _tier3_max_files = None if (force or restore_full_mode) else _auto_max_files
+
         changed = False
         platform_attrs = [
             ("amazon",   "mtr_df"),
@@ -334,15 +342,35 @@ def _restore_daily_if_needed(
             ("flipkart", "flipkart_df"),
             ("snapdeal", "snapdeal_df"),
         ]
-        for platform, attr in platform_attrs:
+        lock_reacquire_failed = False
+        for idx, (platform, attr) in enumerate(platform_attrs):
+            if lock_reacquire_failed:
+                break
             if restore_full_mode:
                 _set_restore_step(sess, "tier3", f"Tier-3 — loading {platform}…")
-            df = load_platform_data(
-                platform,
-                months=_auto_months,
-                dedup=False,
-                max_files=_auto_max_files,
-            )
+                if lock_held:
+                    sess._daily_restore_lock.release()
+                    lock_held = False
+                try:
+                    df = load_platform_data(
+                        platform,
+                        months=_tier3_months,
+                        dedup=False,
+                        max_files=_tier3_max_files,
+                    )
+                finally:
+                    if not lock_held:
+                        if sess._daily_restore_lock.acquire(blocking=True, timeout=120.0):
+                            lock_held = True
+                        else:
+                            lock_reacquire_failed = True
+            else:
+                df = load_platform_data(
+                    platform,
+                    months=_tier3_months,
+                    dedup=False,
+                    max_files=_tier3_max_files,
+                )
             if not df.empty:
                 cur = getattr(sess, attr)
 
@@ -363,7 +391,6 @@ def _restore_daily_if_needed(
                 changed = True
 
         # Safety net: if bounded restore found nothing, do one full-history pass.
-        # Skip unbounded full-history scan during restore-full (GitHub already loaded bulk).
         if not changed and not restore_full_mode:
             for _p, _a in platform_attrs:
                 if not getattr(sess, _a).empty:
@@ -443,7 +470,8 @@ def _restore_daily_if_needed(
 
         sess.daily_restored = True
     finally:
-        sess._daily_restore_lock.release()
+        if lock_held:
+            sess._daily_restore_lock.release()
 
 
 _SOURCE_BY_ATTR = {
@@ -1672,6 +1700,11 @@ def _tier3_session_needs_topup(sess: AppSession) -> bool:
             return True
         if tier_max and (not sales_max or tier_max > sales_max):
             return True
+        tier_rows = int(plat_sum.get("total_rows") or 0)
+        sess_rows = len(cur) if cur is not None and hasattr(cur, "__len__") else 0
+        # total_rows is pre-dedup sum of uploads; session should reach ~70%+ after full merge.
+        if tier_rows > 500 and sess_rows < int(tier_rows * 0.70):
+            return True
     return False
 
 
@@ -2161,6 +2194,7 @@ def full_restore_session(
 
     _set_restore_step(sess, "warm")
     try:
+        _main.bootstrap_warm_cache_from_disk_if_empty()
         _main.restore_po_sidecars_from_warm(sess)
         _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
         steps.append("warm")
@@ -2396,6 +2430,9 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
         inventory_upload_message=getattr(sess, "inventory_upload_message", "") or "",
         inventory_upload_progress=int(getattr(sess, "inventory_upload_progress", 0) or 0),
+        tier1_bulk_status=getattr(sess, "tier1_bulk_status", "idle") or "idle",
+        tier1_bulk_message=getattr(sess, "tier1_bulk_message", "") or "",
+        tier1_bulk_platform=getattr(sess, "tier1_bulk_platform", "") or "",
         inventory_upload_rows=(
             int(sess.inventory_upload_result["rows"])
             if getattr(sess, "inventory_upload_result", None)
@@ -2479,12 +2516,92 @@ def _acquire_upload_lock_with_progress(sess: AppSession, *, timeout_sec: float =
         time.sleep(2.0)
 
 
+def queue_session_restore_if_needed(sess: AppSession, session_id: str, *, reason: str = "") -> bool:
+    """Queue async full restore when the session has no operational data."""
+    import time
+
+    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+    if not session_id:
+        return False
+    status = getattr(sess, "session_restore_status", "idle") or "idle"
+    if status == "running":
+        return True
+    if status == "error" and reason.startswith("Auto-restore"):
+        return False
+    if getattr(sess, "_auto_restore_queued", False) and reason.startswith("Auto-restore"):
+        return False
+    try:
+        import backend.main as _main
+
+        if not _main.session_needs_operational_data(sess):
+            return False
+    except Exception:
+        pass
+    if getattr(sess, "pause_auto_data_restore", False):
+        return False
+
+    sess.session_restore_status = "running"
+    sess.session_restore_started = time.monotonic()
+    _set_restore_step(
+        sess,
+        "queued",
+        reason or "Queued full restore — loading server history…",
+    )
+    sess.session_restore_result = {}
+    DAILY_UPLOAD_EXECUTOR.submit(_run_session_restore_worker, session_id)
+    return True
+
+
+def _server_has_recoverable_history() -> bool:
+    """True when disk, warm cache, GitHub manifest, or Tier-3 may repopulate a session."""
+    try:
+        import backend.main as _main
+        from ..services.github_cache import get_cache_manifest
+
+        _main.bootstrap_warm_cache_from_disk_if_empty()
+        if _main._warm_cache:
+            for key in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df"):
+                df = _main._warm_cache.get(key)
+                if df is not None and hasattr(df, "empty") and not df.empty:
+                    return True
+        manifest = get_cache_manifest()
+        if manifest and (manifest.get("row_counts") or manifest.get("saved_at")):
+            return True
+        if get_summary():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _maybe_queue_full_restore_when_empty(sess: AppSession, session_id: str | None) -> None:
+    if not session_id:
+        return
+    if getattr(sess, "pause_auto_data_restore", False):
+        return
+    try:
+        import backend.main as _main
+
+        if not _main.session_needs_operational_data(sess):
+            return
+    except Exception:
+        return
+    if not _server_has_recoverable_history():
+        return
+    queue_session_restore_if_needed(
+        sess,
+        session_id,
+        reason="Auto-restore — session empty but server history is available…",
+    )
+    sess._auto_restore_queued = True
+
+
 def _run_session_restore_worker(session_id: str) -> None:
-    """Background full restore — holds upload memory lock; may run 10+ minutes on large GitHub cache."""
+    """Background full restore — disk/GitHub/Tier-3 merge without blocking on warm-cache memory lock."""
     import logging
     import time
 
-    from ..concurrency import _UPLOAD_MEMORY_LOCK
     from ..session import store
 
     _log = logging.getLogger(__name__)
@@ -2492,14 +2609,10 @@ def _run_session_restore_worker(session_id: str) -> None:
     if sess is None:
         return
 
-    acquired = False
     try:
         sess.session_restore_status = "running"
         sess.session_restore_started = time.monotonic()
         _set_restore_step(sess, "queued", "Restore worker started…")
-        if not _acquire_upload_lock_with_progress(sess):
-            raise TimeoutError("Timed out waiting for server memory — try again in a few minutes.")
-        acquired = True
         _set_restore_step(sess, "sku")
 
         missing, steps, msg = full_restore_session(sess, defer_sales_rebuild=True)
@@ -2530,9 +2643,6 @@ def _run_session_restore_worker(session_id: str) -> None:
         sess.session_restore_status = "error"
         sess.session_restore_message = str(e)[:500]
         sess.session_restore_progress = 0
-    finally:
-        if acquired:
-            _UPLOAD_MEMORY_LOCK.release()
 
 
 def _run_session_restore_sales_worker(session_id: str) -> None:
@@ -2551,6 +2661,12 @@ def _run_session_restore_sales_worker(session_id: str) -> None:
         msg = (sess.session_restore_result or {}).get("message") or "Full restore complete."
         _set_restore_step(sess, "done", msg)
         sess.session_restore_status = "done"
+        try:
+            import backend.main as _main
+
+            _main.publish_warm_cache_from_session(sess)
+        except Exception:
+            _log.exception("publish warm cache after restore sales")
     except Exception as e:
         _log.exception("restore sales worker failed")
         sess.session_restore_status = "error"
@@ -2669,6 +2785,8 @@ def get_job_status(request: Request):
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
         inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
+        tier1_bulk_status=getattr(sess, "tier1_bulk_status", "idle") or "idle",
+        tier1_bulk_message=getattr(sess, "tier1_bulk_message", "") or "",
     )
 
 
@@ -2698,6 +2816,7 @@ def get_coverage(request: Request, light: bool = False):
         except Exception:
             pass
         _maybe_queue_light_session_hydrate(sess, sid or None)
+        _maybe_queue_full_restore_when_empty(sess, sid or None)
         return _build_coverage_response(sess)
 
     try:
@@ -2768,6 +2887,8 @@ def restore_full(request: Request, sync: bool = False):
             restore_steps=[],
             restore_async=True,
         )
+
+    sess._auto_restore_queued = False
 
     use_sync = sync or (os.environ.get("RESTORE_FULL_SYNC", "").strip() == "1")
     if use_sync:

@@ -601,11 +601,12 @@ def _clear_stuck_returns_import(sess: AppSession, *, force: bool = False) -> boo
 
 
 def clear_stale_background_jobs(sess: AppSession) -> None:
-    """Clear orphan/timed-out ingest, sales-rebuild, and restore flags (safe on every light poll)."""
+    """Clear orphan/timed-out ingest, sales-rebuild, restore, and tier-1 bulk flags (safe on every light poll)."""
     _clear_stuck_daily_ingest(sess, force=False)
     _clear_stuck_returns_import(sess, force=False)
     _clear_stuck_sales_rebuild(sess, force=False)
     _clear_stuck_session_restore(sess, force=False)
+    _clear_stuck_tier1_bulk(sess, force=False)
 
 
 def _run_daily_auto_sales_rebuild(session_id: str) -> None:
@@ -1044,6 +1045,491 @@ def _session_lock_apply_sync(sess, fn: Callable[[], Any]) -> Any:
         return fn()
 
 
+def _tier1_bulk_busy(sess: AppSession) -> bool:
+    return getattr(sess, "tier1_bulk_status", "idle") == "running"
+
+
+def _mark_tier1_bulk_running(sess: AppSession, platform: str, message: str) -> None:
+    sess.tier1_bulk_status = "running"
+    sess.tier1_bulk_platform = platform
+    sess.tier1_bulk_message = message
+    sess.tier1_bulk_started = time.time()
+    sess.tier1_bulk_result = {}
+
+
+def _finish_tier1_bulk(sess: AppSession, resp: UploadResponse) -> None:
+    sess.tier1_bulk_started = 0.0
+    if resp.ok:
+        sess.tier1_bulk_status = "done"
+        sess.tier1_bulk_message = resp.message
+        try:
+            sess.tier1_bulk_result = resp.model_dump()
+        except Exception:
+            sess.tier1_bulk_result = {"ok": True, "message": resp.message, "rows": resp.rows}
+    else:
+        sess.tier1_bulk_status = "error"
+        sess.tier1_bulk_message = resp.message
+        sess.tier1_bulk_result = {"ok": False, "message": resp.message}
+
+
+def _tier1_rows(sess: AppSession, attr: str) -> int:
+    cur = getattr(sess, attr, None)
+    if cur is None or not hasattr(cur, "__len__"):
+        return 0
+    return len(cur)
+
+
+def _accept_tier1_bulk_async(
+    sess: AppSession,
+    session_id: str,
+    *,
+    platform: str,
+    label: str,
+    filename: str,
+    rows_attr: str,
+    submit,
+) -> UploadResponse:
+    if _tier1_bulk_busy(sess):
+        return UploadResponse(
+            ok=False,
+            message="Another bulk upload is still processing — wait for the row count to update.",
+        )
+    _mark_tier1_bulk_running(sess, platform, f"Queued {label}: {filename or 'upload'}…")
+    submit(session_id)
+    return UploadResponse(
+        ok=True,
+        message=(
+            f"{label} upload accepted — parsing in background. "
+            "Large archives may take several minutes; watch the row count below."
+        ),
+        rows=_tier1_rows(sess, rows_attr),
+    )
+
+
+def _run_tier1_mtr_worker(session_id: str, raw: bytes, orig_name: str) -> None:
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    try:
+        def work():
+            fn = (orig_name or "").lower()
+            if raw[:6] == _RAR_MAGIC or fn.endswith(".rar"):
+                inner = _extract_rar_files(raw)
+                df, csv_count, skipped = load_mtr_from_extracted_files(inner)
+            else:
+                df, csv_count, skipped = load_mtr_from_zip(raw)
+
+            if df.empty:
+                return UploadResponse(
+                    ok=False,
+                    message=f"No valid CSV files found. Issues: {'; '.join(skipped[:5])}",
+                )
+
+            pre_total = len(sess.mtr_df)
+            _fd, saved_rows = save_daily_file("amazon", orig_name or "mtr-upload.zip", df)
+            sess.mtr_df = _merge_platform_data(
+                sess.mtr_df, df, "amazon", source_filename=orig_name or None,
+            )
+            total = len(sess.mtr_df)
+            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+            )
+            val_warn = _collect_validation_warnings(skipped)
+            years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            _session_data_changed(sess)
+            return UploadResponse(
+                ok=True,
+                message=(
+                    f"Amazon MTR: added {kept_rows:,} rows ({csv_count} files). "
+                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                    + (
+                        f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
+                        if dropped_rows > 0 else ""
+                    )
+                    + (
+                        f" Validation issues: {' | '.join(val_warn[:3])}. "
+                        "Please fix file columns/values and re-upload."
+                        if val_warn else ""
+                    )
+                ),
+                rows=total,
+                parsed_rows=len(df),
+                kept_rows=kept_rows,
+                dropped_rows=dropped_rows,
+                dropped_reasons=dropped_reasons or None,
+                validation_warnings=val_warn or None,
+                years=years,
+            )
+
+        resp = _session_lock_apply_sync(sess, work)
+        _finish_tier1_bulk(sess, resp)
+        if resp.ok:
+            _auto_save_cache(sess)
+    except Exception as e:
+        _log.exception("tier1 mtr worker failed")
+        sess.tier1_bulk_status = "error"
+        sess.tier1_bulk_message = str(e)[:500]
+        sess.tier1_bulk_started = 0.0
+    finally:
+        del raw
+        gc.collect()
+
+
+def _run_tier1_myntra_worker(session_id: str, zip_bytes: bytes, orig_fn: str) -> None:
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    try:
+        def work():
+            if not sess.sku_mapping:
+                return UploadResponse(ok=False, message="Upload SKU Mapping first.")
+            df, csv_count, skipped = load_myntra_from_zip(
+                zip_bytes, sess.sku_mapping, orig_fn or None,
+            )
+            if df.empty:
+                return UploadResponse(
+                    ok=False,
+                    message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
+                )
+            pre_total = len(sess.myntra_df)
+            _fd, saved_rows = save_daily_file("myntra", orig_fn or "myntra-upload.zip", df)
+            sess.myntra_df = _merge_platform_data(
+                sess.myntra_df, df, "myntra", source_filename=orig_fn or None,
+            )
+            total = len(sess.myntra_df)
+            years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            _session_data_changed(sess)
+            quality_line = next((s for s in skipped if str(s).startswith("IMPORT_QUALITY:")), "")
+            parsed_rows = None
+            kept_rows = int(len(df))
+            dropped_rows = None
+            dropped_reasons: list[str] = []
+            if quality_line:
+                import re as _re
+                m_parsed = _re.search(r"parsed=(\d+)", quality_line)
+                m_kept = _re.search(r"kept=(\d+)", quality_line)
+                m_drop = _re.search(r"dropped=(\d+)", quality_line)
+                if m_parsed:
+                    parsed_rows = int(m_parsed.group(1))
+                if m_kept:
+                    kept_rows = int(m_kept.group(1))
+                if m_drop:
+                    dropped_rows = int(m_drop.group(1))
+                if ";" in quality_line:
+                    tail = quality_line.split(";", 1)[1].strip()
+                    dropped_reasons = [x.strip() for x in tail.split(";") if x.strip()]
+            merge_kept, merge_dropped, merge_reasons = _upload_quality_from_merge(
+                parsed_rows=(parsed_rows if parsed_rows is not None else len(df)),
+                pre_total=pre_total,
+                post_total=total,
+                saved_rows=saved_rows,
+            )
+            kept_rows = min(int(kept_rows), int(merge_kept))
+            dropped_rows = max(int(dropped_rows or 0), int(merge_dropped))
+            for rr in merge_reasons:
+                if rr not in dropped_reasons:
+                    dropped_reasons.append(rr)
+            val_warn = _collect_validation_warnings(skipped)
+            extra_warn = ""
+            if dropped_rows and dropped_rows > 0:
+                reason_txt = f" ({'; '.join(dropped_reasons)})" if dropped_reasons else ""
+                extra_warn = (
+                    f" Warning: {dropped_rows:,} rows were dropped during import{reason_txt}. "
+                    "Please fix source rows before relying on dashboard totals."
+                )
+            return UploadResponse(
+                ok=True,
+                message=(
+                    f"Myntra: added {kept_rows:,} rows ({csv_count} CSVs). "
+                    f"Parsed: {(parsed_rows if parsed_rows is not None else len(df)):,}, "
+                    f"Kept: {kept_rows:,}. Total: {total:,} rows."
+                    f"{extra_warn}"
+                    + (
+                        f" Validation issues: {' | '.join(val_warn[:3])}. "
+                        "Please fix file columns/values and re-upload."
+                        if val_warn else ""
+                    )
+                ),
+                rows=total,
+                parsed_rows=parsed_rows,
+                kept_rows=kept_rows,
+                dropped_rows=dropped_rows,
+                dropped_reasons=dropped_reasons or None,
+                validation_warnings=val_warn or None,
+                years=years,
+            )
+
+        resp = _session_lock_apply_sync(sess, work)
+        _finish_tier1_bulk(sess, resp)
+        if resp.ok:
+            _auto_save_cache(sess)
+    except Exception as e:
+        _log.exception("tier1 myntra worker failed")
+        sess.tier1_bulk_status = "error"
+        sess.tier1_bulk_message = str(e)[:500]
+        sess.tier1_bulk_started = 0.0
+    finally:
+        del zip_bytes
+        gc.collect()
+
+
+def _run_tier1_meesho_worker(session_id: str, raw_bytes: bytes, fname: str, display_name: str) -> None:
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    try:
+        def work():
+            if fname.endswith((".xlsx", ".xls")):
+                df, msg = parse_meesho_order_export_xlsx(raw_bytes)
+                if not df.empty:
+                    df = apply_dsr_segment_from_upload_filename(df, display_name or None, "Meesho")
+                    pre_total = len(sess.meesho_df)
+                    _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-order.xlsx", df)
+                    sess.meesho_df = _merge_platform_data(
+                        sess.meesho_df, df, "meesho", source_filename=display_name or None,
+                    )
+                    sess.sales_df = build_sales_df(
+                        mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
+                        flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
+                        sku_mapping=sess.sku_mapping, **_sales_overlay_build_kwargs(sess),
+                    )
+                    total = len(sess.meesho_df)
+                    years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+                    skus = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum())
+                    kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                        parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+                    )
+                    _session_data_changed(sess)
+                    return UploadResponse(
+                        ok=True,
+                        message=(
+                            f"Meesho order export (Excel): added {kept_rows:,} rows ({skus:,} with SKU). "
+                            f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                        ),
+                        rows=total, parsed_rows=len(df), kept_rows=kept_rows,
+                        dropped_rows=dropped_rows, dropped_reasons=dropped_reasons or None,
+                        years=years,
+                    )
+                return UploadResponse(
+                    ok=False,
+                    message=(
+                        f"Excel is not a recognised Meesho sales export ({msg}). "
+                        "Expected columns TxnDate, Transaction Type, Sku, Quantity."
+                    ),
+                )
+
+            is_csv = fname.endswith(".csv") or (not fname.endswith(".zip") and raw_bytes[:3] != b"PK\x03")
+            if is_csv:
+                from ..services.meesho import parse_meesho_csv
+                df, msg = parse_meesho_csv(raw_bytes)
+                if df.empty:
+                    return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
+                df = apply_dsr_segment_from_upload_filename(df, display_name or None, "Meesho")
+                pre_total = len(sess.meesho_df)
+                _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-orders.csv", df)
+                sess.meesho_df = _merge_platform_data(
+                    sess.meesho_df, df, "meesho", source_filename=display_name or None,
+                )
+                sess.sales_df = build_sales_df(
+                    mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
+                    flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
+                    sku_mapping=sess.sku_mapping, **_sales_overlay_build_kwargs(sess),
+                )
+                total = len(sess.meesho_df)
+                years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+                kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                    parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+                )
+                _session_data_changed(sess)
+                return UploadResponse(
+                    ok=True,
+                    message=(
+                        f"Meesho Order CSV: added {kept_rows:,} rows. "
+                        f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                    ),
+                    rows=total, parsed_rows=len(df), kept_rows=kept_rows,
+                    dropped_rows=dropped_rows, dropped_reasons=dropped_reasons or None,
+                    years=years,
+                )
+
+            df, zip_count, skipped = load_meesho_from_zip(raw_bytes, source_filename=display_name or None)
+            if df.empty:
+                return UploadResponse(
+                    ok=False, message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
+                )
+            pre_total = len(sess.meesho_df)
+            _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-upload.zip", df)
+            sess.meesho_df = _merge_platform_data(
+                sess.meesho_df, df, "meesho", source_filename=display_name or None,
+            )
+            sess.sales_df = build_sales_df(
+                mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
+                flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
+                sku_mapping=sess.sku_mapping, **_sales_overlay_build_kwargs(sess),
+            )
+            total = len(sess.meesho_df)
+            years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+            )
+            val_warn = _collect_validation_warnings(skipped)
+            _session_data_changed(sess)
+            return UploadResponse(
+                ok=True,
+                message=(
+                    f"Meesho: added {kept_rows:,} rows ({zip_count} monthly ZIPs). "
+                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                ),
+                rows=total, parsed_rows=len(df), kept_rows=kept_rows,
+                dropped_rows=dropped_rows, dropped_reasons=dropped_reasons or None,
+                validation_warnings=val_warn or None, years=years,
+            )
+
+        resp = _session_lock_apply_sync(sess, work)
+        _finish_tier1_bulk(sess, resp)
+        if resp.ok:
+            _auto_save_cache(sess)
+    except Exception as e:
+        _log.exception("tier1 meesho worker failed")
+        sess.tier1_bulk_status = "error"
+        sess.tier1_bulk_message = str(e)[:500]
+        sess.tier1_bulk_started = 0.0
+    finally:
+        del raw_bytes
+        gc.collect()
+
+
+def _run_tier1_flipkart_worker(session_id: str, tmp_path: str, orig_fn: str) -> None:
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    try:
+        def work():
+            if not sess.sku_mapping:
+                return UploadResponse(ok=False, message="Upload SKU Mapping first.")
+            df, xlsx_count, skipped = load_flipkart_from_zip(
+                tmp_path, sess.sku_mapping, source_filename=orig_fn or None,
+            )
+            gc.collect()
+            if df.empty:
+                return UploadResponse(
+                    ok=False, message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
+                )
+            pre_total = len(sess.flipkart_df)
+            _fd2, saved_rows = save_daily_file("flipkart", orig_fn or "flipkart-upload.zip", df)
+            sess.flipkart_df = _merge_platform_data(
+                sess.flipkart_df, df, "flipkart", source_filename=orig_fn or None,
+            )
+            total = len(sess.flipkart_df)
+            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
+            )
+            val_warn = _collect_validation_warnings(skipped)
+            years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            _session_data_changed(sess)
+            return UploadResponse(
+                ok=True,
+                message=(
+                    f"Flipkart: added {kept_rows:,} rows ({xlsx_count} files). "
+                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
+                ),
+                rows=total, parsed_rows=len(df), kept_rows=kept_rows,
+                dropped_rows=dropped_rows, dropped_reasons=dropped_reasons or None,
+                validation_warnings=val_warn or None, years=years,
+            )
+
+        resp = _session_lock_apply_sync(sess, work)
+        _finish_tier1_bulk(sess, resp)
+        if resp.ok:
+            _auto_save_cache(sess)
+    except Exception as e:
+        _log.exception("tier1 flipkart worker failed")
+        sess.tier1_bulk_status = "error"
+        sess.tier1_bulk_message = str(e)[:500]
+        sess.tier1_bulk_started = 0.0
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        gc.collect()
+
+
+def _run_tier1_snapdeal_worker(session_id: str, zip_bytes: bytes, display: str, snap_fn: str) -> None:
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    try:
+        def work():
+            df, file_count, skipped, parse_info = load_snapdeal_from_zip(zip_bytes, sess.sku_mapping, display)
+            sess.snapdeal_parse_info.update(parse_info)
+            if df.empty:
+                return UploadResponse(
+                    ok=False, message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
+                )
+            pre_total = len(sess.snapdeal_df)
+            _fd, saved_rows = save_daily_file("snapdeal", snap_fn or "snapdeal-upload.zip", df)
+            if sess.snapdeal_df.empty:
+                sess.snapdeal_df = df
+            else:
+                sess.snapdeal_df = pd.concat([sess.snapdeal_df, df], ignore_index=True).drop_duplicates()
+            post_total = len(sess.snapdeal_df)
+            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
+                parsed_rows=len(df), pre_total=pre_total, post_total=post_total, saved_rows=saved_rows,
+            )
+            val_warn = _collect_validation_warnings(skipped)
+            if sess.sku_mapping:
+                sess.sales_df = build_sales_df(
+                    mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
+                    flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
+                    sku_mapping=sess.sku_mapping, **_sales_overlay_build_kwargs(sess),
+                )
+                sess._quarterly_cache.clear()
+            years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
+            _session_data_changed(sess)
+            return UploadResponse(
+                ok=True,
+                message=(
+                    f"Snapdeal loaded: added {kept_rows:,} rows from {file_count} file(s). "
+                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}."
+                ),
+                rows=post_total, parsed_rows=len(df), kept_rows=kept_rows,
+                dropped_rows=dropped_rows, dropped_reasons=dropped_reasons or None,
+                validation_warnings=val_warn or None, years=years,
+            )
+
+        resp = _session_lock_apply_sync(sess, work)
+        _finish_tier1_bulk(sess, resp)
+        if resp.ok:
+            _auto_save_cache(sess)
+    except Exception as e:
+        _log.exception("tier1 snapdeal worker failed")
+        sess.tier1_bulk_status = "error"
+        sess.tier1_bulk_message = str(e)[:500]
+        sess.tier1_bulk_started = 0.0
+    finally:
+        del zip_bytes
+        gc.collect()
+
+
+def _clear_stuck_tier1_bulk(sess: AppSession, *, force: bool = False) -> bool:
+    if getattr(sess, "tier1_bulk_status", "idle") != "running":
+        return False
+    started = float(getattr(sess, "tier1_bulk_started", 0) or 0)
+    age = time.time() - started if started > 0 else 999999
+    stuck_sec = int(os.environ.get("TIER1_BULK_STUCK_SEC", "1800"))
+    if not force and age < stuck_sec:
+        return False
+    sess.tier1_bulk_status = "error"
+    sess.tier1_bulk_message = (
+        "Previous bulk upload did not finish (server was busy). "
+        "Check row counts — re-upload if needed."
+    )
+    sess.tier1_bulk_started = 0.0
+    return True
+
+
 # ── SKU Mapping ───────────────────────────────────────────────
 
 @router.post("/sku-mapping", response_model=UploadResponse)
@@ -1116,370 +1602,81 @@ async def upload_sku_mapping(
 # ── Amazon MTR ────────────────────────────────────────────────
 
 @router.post("/mtr", response_model=UploadResponse)
-async def upload_mtr(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_mtr(request: Request, file: UploadFile = File(...)):
     sess = _get_session(request)
+    sid = getattr(request.state, "session_id", "") or ""
     raw = await file.read()
-    orig_name = file.filename
+    orig_name = file.filename or ""
     try:
-
-        def work():
-            fn = (orig_name or "").lower()
-            if raw[:6] == _RAR_MAGIC or fn.endswith(".rar"):
-                inner = _extract_rar_files(raw)
-                df, csv_count, skipped = load_mtr_from_extracted_files(inner)
-            else:
-                df, csv_count, skipped = load_mtr_from_zip(raw)
-
-            if df.empty:
-                return UploadResponse(
-                    ok=False,
-                    message=f"No valid CSV files found. Issues: {'; '.join(skipped[:5])}",
-                )
-
-            pre_total = len(sess.mtr_df)
-            _fd, saved_rows = save_daily_file("amazon", orig_name or "mtr-upload.zip", df)
-            sess.mtr_df = _merge_platform_data(
-                sess.mtr_df, df, "amazon", source_filename=orig_name or None,
-            )
-            total = len(sess.mtr_df)
-            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
-                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
-            )
-            val_warn = _collect_validation_warnings(skipped)
-            years = sorted(sess.mtr_df["Date"].dt.year.dropna().unique().astype(int).tolist())
-            _session_data_changed(sess)
-            return UploadResponse(
-                ok=True,
-                message=(
-                    f"Amazon MTR: added {kept_rows:,} rows ({csv_count} files). "
-                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
-                    + (
-                        f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
-                        if dropped_rows > 0 else ""
-                    )
-                    + (
-                        f" Validation issues: {' | '.join(val_warn[:3])}. "
-                        "Please fix file columns/values and re-upload."
-                        if val_warn else ""
-                    )
-                ),
-                rows=total,
-                parsed_rows=len(df),
-                kept_rows=kept_rows,
-                dropped_rows=dropped_rows,
-                dropped_reasons=dropped_reasons or None,
-                validation_warnings=val_warn or None,
-                years=years,
-            )
-
-        resp = await _session_lock_apply(sess, work)
+        return _accept_tier1_bulk_async(
+            sess,
+            sid,
+            platform="amazon",
+            label="Amazon MTR",
+            filename=orig_name,
+            rows_attr="mtr_df",
+            submit=lambda s: DAILY_UPLOAD_EXECUTOR.submit(_run_tier1_mtr_worker, s, raw, orig_name),
+        )
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse MTR archive (ZIP/RAR): {e}")
-    finally:
-        del raw
-        gc.collect()
-    if resp.ok:
-        background_tasks.add_task(_auto_save_cache, sess)
-    return resp
+        raise HTTPException(status_code=422, detail=f"Failed to accept MTR archive: {e}")
 
 
 # ── Myntra ────────────────────────────────────────────────────
 
 @router.post("/myntra", response_model=UploadResponse)
-async def upload_myntra(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_myntra(request: Request, file: UploadFile = File(...)):
     sess = _get_session(request)
+    sid = getattr(request.state, "session_id", "") or ""
     zip_bytes = await file.read()
-    orig_fn = file.filename
+    orig_fn = file.filename or ""
     try:
-
-        def work():
-            if not sess.sku_mapping:
-                return UploadResponse(ok=False, message="Upload SKU Mapping first.")
-            df, csv_count, skipped = load_myntra_from_zip(
-                zip_bytes, sess.sku_mapping, orig_fn or None,
-            )
-
-            if df.empty:
-                return UploadResponse(
-                    ok=False,
-                    message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
-                )
-
-            pre_total = len(sess.myntra_df)
-            _fd, saved_rows = save_daily_file("myntra", orig_fn or "myntra-upload.zip", df)
-            sess.myntra_df = _merge_platform_data(
-                sess.myntra_df, df, "myntra", source_filename=orig_fn or None,
-            )
-            total = len(sess.myntra_df)
-            years = sorted(sess.myntra_df["Date"].dt.year.dropna().unique().astype(int).tolist())
-            _session_data_changed(sess)
-            quality_line = next((s for s in skipped if str(s).startswith("IMPORT_QUALITY:")), "")
-            parsed_rows = None
-            kept_rows = int(len(df))
-            dropped_rows = None
-            dropped_reasons: list[str] = []
-            if quality_line:
-                import re as _re
-                m_parsed = _re.search(r"parsed=(\d+)", quality_line)
-                m_kept = _re.search(r"kept=(\d+)", quality_line)
-                m_drop = _re.search(r"dropped=(\d+)", quality_line)
-                if m_parsed:
-                    parsed_rows = int(m_parsed.group(1))
-                if m_kept:
-                    kept_rows = int(m_kept.group(1))
-                if m_drop:
-                    dropped_rows = int(m_drop.group(1))
-                if ";" in quality_line:
-                    tail = quality_line.split(";", 1)[1].strip()
-                    dropped_reasons = [x.strip() for x in tail.split(";") if x.strip()]
-            merge_kept, merge_dropped, merge_reasons = _upload_quality_from_merge(
-                parsed_rows=(parsed_rows if parsed_rows is not None else len(df)),
-                pre_total=pre_total,
-                post_total=total,
-                saved_rows=saved_rows,
-            )
-            kept_rows = min(int(kept_rows), int(merge_kept))
-            dropped_rows = max(int(dropped_rows or 0), int(merge_dropped))
-            for rr in merge_reasons:
-                if rr not in dropped_reasons:
-                    dropped_reasons.append(rr)
-            val_warn = _collect_validation_warnings(skipped)
-
-            extra_warn = ""
-            if dropped_rows and dropped_rows > 0:
-                reason_txt = f" ({'; '.join(dropped_reasons)})" if dropped_reasons else ""
-                extra_warn = (
-                    f" Warning: {dropped_rows:,} rows were dropped during import{reason_txt}. "
-                    "Please fix source rows before relying on dashboard totals."
-                )
-
-            return UploadResponse(
-                ok=True,
-                message=(
-                    f"Myntra: added {kept_rows:,} rows ({csv_count} CSVs). "
-                    f"Parsed: {(parsed_rows if parsed_rows is not None else len(df)):,}, "
-                    f"Kept: {kept_rows:,}. Total: {total:,} rows."
-                    f"{extra_warn}"
-                    + (
-                        f" Validation issues: {' | '.join(val_warn[:3])}. "
-                        "Please fix file columns/values and re-upload."
-                        if val_warn else ""
-                    )
-                ),
-                rows=total,
-                parsed_rows=parsed_rows,
-                kept_rows=kept_rows,
-                dropped_rows=dropped_rows,
-                dropped_reasons=dropped_reasons or None,
-                validation_warnings=val_warn or None,
-                years=years,
-            )
-
-        resp = await _session_lock_apply(sess, work)
+        return _accept_tier1_bulk_async(
+            sess,
+            sid,
+            platform="myntra",
+            label="Myntra",
+            filename=orig_fn,
+            rows_attr="myntra_df",
+            submit=lambda s: DAILY_UPLOAD_EXECUTOR.submit(_run_tier1_myntra_worker, s, zip_bytes, orig_fn),
+        )
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse Myntra ZIP: {e}")
-    finally:
-        del zip_bytes
-        gc.collect()
-    if resp.ok:
-        background_tasks.add_task(_auto_save_cache, sess)
-    return resp
+        raise HTTPException(status_code=422, detail=f"Failed to accept Myntra ZIP: {e}")
 
 
 # ── Meesho ────────────────────────────────────────────────────
 
 @router.post("/meesho", response_model=UploadResponse)
-async def upload_meesho(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_meesho(request: Request, file: UploadFile = File(...)):
     sess = _get_session(request)
+    sid = getattr(request.state, "session_id", "") or ""
     raw_bytes = await file.read()
     fname = (file.filename or "").lower()
-    display_name = file.filename
+    display_name = file.filename or ""
     try:
-
-        def work():
-            # Unified sales Excel export (TxnDate, Sku, Sku.1 listing fallback) — must run before PK/ZIP logic
-            if fname.endswith((".xlsx", ".xls")):
-                df, msg = parse_meesho_order_export_xlsx(raw_bytes)
-                if not df.empty:
-                    df = apply_dsr_segment_from_upload_filename(
-                        df, display_name or None, "Meesho",
-                    )
-                    pre_total = len(sess.meesho_df)
-                    _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-order.xlsx", df)
-                    sess.meesho_df = _merge_platform_data(
-                        sess.meesho_df, df, "meesho", source_filename=display_name or None,
-                    )
-                    sess.sales_df = build_sales_df(
-                        mtr_df=sess.mtr_df,
-                        myntra_df=sess.myntra_df,
-                        meesho_df=sess.meesho_df,
-                        flipkart_df=sess.flipkart_df,
-                        snapdeal_df=sess.snapdeal_df,
-                        sku_mapping=sess.sku_mapping,
-                        **_sales_overlay_build_kwargs(sess),
-                    )
-                    total = len(sess.meesho_df)
-                    years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
-                    skus = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum())
-                    kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
-                        parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
-                    )
-                    val_warn: list[str] = []
-                    _session_data_changed(sess)
-                    return UploadResponse(
-                        ok=True,
-                        message=(
-                            f"Meesho order export (Excel): added {kept_rows:,} rows ({skus:,} with SKU). "
-                            f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
-                            + (
-                                f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
-                                if dropped_rows > 0 else ""
-                            )
-                            + (
-                                f" Validation issues: {' | '.join(val_warn[:3])}. "
-                                "Please fix file columns/values and re-upload."
-                                if val_warn else ""
-                            )
-                        ),
-                        rows=total,
-                        parsed_rows=len(df),
-                        kept_rows=kept_rows,
-                        dropped_rows=dropped_rows,
-                        dropped_reasons=dropped_reasons or None,
-                        validation_warnings=val_warn or None,
-                        years=years,
-                    )
-                return UploadResponse(
-                    ok=False,
-                    message=(
-                        f"Excel is not a recognised Meesho sales export ({msg}). "
-                        "Expected columns TxnDate, Transaction Type, Sku, Quantity (and optional Sku.1 listing). "
-                        "Or upload supplier Order CSV / monthly ZIP."
-                    ),
-                )
-
-            # Auto-detect: CSV order report vs ZIP (TCS / monthly archive)
-            is_csv = fname.endswith(".csv") or (not fname.endswith(".zip") and raw_bytes[:3] != b"PK\x03")
-
-            if is_csv:
-                from ..services.meesho import parse_meesho_csv
-                df, msg = parse_meesho_csv(raw_bytes)
-                if df.empty:
-                    return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
-                df = apply_dsr_segment_from_upload_filename(df, display_name or None, "Meesho")
-                pre_total = len(sess.meesho_df)
-                _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-orders.csv", df)
-                sess.meesho_df = _merge_platform_data(
-                    sess.meesho_df, df, "meesho", source_filename=display_name or None,
-                )
-                sess.sales_df = build_sales_df(
-                    mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
-                    flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
-                    sku_mapping=sess.sku_mapping,
-                    **_sales_overlay_build_kwargs(sess),
-                )
-                total = len(sess.meesho_df)
-                years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
-                skus = int((sess.meesho_df["SKU"].astype(str).str.strip() != "").sum()) if "SKU" in sess.meesho_df.columns else 0
-                kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
-                    parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
-                )
-                val_warn: list[str] = []
-                _session_data_changed(sess)
-                return UploadResponse(
-                    ok=True,
-                    message=(
-                        f"Meesho Order CSV: added {kept_rows:,} rows ({skus:,} with SKU). "
-                        f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
-                        + (
-                            f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
-                            if dropped_rows > 0 else ""
-                        )
-                        + (
-                            f" Validation issues: {' | '.join(val_warn[:3])}. "
-                            "Please fix file columns/values and re-upload."
-                            if val_warn else ""
-                        )
-                    ),
-                    rows=total,
-                    parsed_rows=len(df),
-                    kept_rows=kept_rows,
-                    dropped_rows=dropped_rows,
-                    dropped_reasons=dropped_reasons or None,
-                    validation_warnings=val_warn or None,
-                    years=years,
-                )
-            df, zip_count, skipped = load_meesho_from_zip(
-                raw_bytes, source_filename=display_name or None,
-            )
-            if df.empty:
-                return UploadResponse(
-                    ok=False,
-                    message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
-                )
-            pre_total = len(sess.meesho_df)
-            _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-upload.zip", df)
-            sess.meesho_df = _merge_platform_data(
-                sess.meesho_df, df, "meesho", source_filename=display_name or None,
-            )
-            sess.sales_df = build_sales_df(
-                mtr_df=sess.mtr_df, myntra_df=sess.myntra_df, meesho_df=sess.meesho_df,
-                flipkart_df=sess.flipkart_df, snapdeal_df=sess.snapdeal_df,
-                sku_mapping=sess.sku_mapping,
-                **_sales_overlay_build_kwargs(sess),
-            )
-            total = len(sess.meesho_df)
-            years = sorted(sess.meesho_df["Date"].dt.year.dropna().unique().astype(int).tolist())
-            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
-                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
-            )
-            val_warn = _collect_validation_warnings(skipped)
-            _session_data_changed(sess)
-            return UploadResponse(
-                ok=True,
-                message=(
-                    f"Meesho: added {kept_rows:,} rows ({zip_count} monthly ZIPs). "
-                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
-                    + (
-                        f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
-                        if dropped_rows > 0 else ""
-                    )
-                    + (
-                        f" Validation issues: {' | '.join(val_warn[:3])}. "
-                        "Please fix file columns/values and re-upload."
-                        if val_warn else ""
-                    )
-                ),
-                rows=total,
-                parsed_rows=len(df),
-                kept_rows=kept_rows,
-                dropped_rows=dropped_rows,
-                dropped_reasons=dropped_reasons or None,
-                validation_warnings=val_warn or None,
-                years=years,
-            )
-
-        resp = await _session_lock_apply(sess, work)
+        return _accept_tier1_bulk_async(
+            sess,
+            sid,
+            platform="meesho",
+            label="Meesho",
+            filename=display_name,
+            rows_attr="meesho_df",
+            submit=lambda s: DAILY_UPLOAD_EXECUTOR.submit(
+                _run_tier1_meesho_worker, s, raw_bytes, fname, display_name,
+            ),
+        )
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse Meesho file: {e}")
-    finally:
-        del raw_bytes
-        gc.collect()
-    if resp.ok:
-        background_tasks.add_task(_auto_save_cache, sess)
-    return resp
+        raise HTTPException(status_code=422, detail=f"Failed to accept Meesho file: {e}")
 
 
 # ── Flipkart ──────────────────────────────────────────────────
 
 @router.post("/flipkart", response_model=UploadResponse)
-async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_flipkart(request: Request, file: UploadFile = File(...)):
     sess = _get_session(request)
+    sid = getattr(request.state, "session_id", "") or ""
     tmp_path: Optional[str] = None
-    orig_fn = file.filename
-    resp: Optional[UploadResponse] = None
+    orig_fn = file.filename or ""
     try:
-        # Stream to disk so multi-year Tier-1 ZIPs are not held wholly in RAM (reduces OOM → 502).
         _fd, tmp_path = tempfile.mkstemp(suffix=".zip")
         os.close(_fd)
         chunk_size = 8 * 1024 * 1024
@@ -1489,157 +1686,48 @@ async def upload_flipkart(request: Request, background_tasks: BackgroundTasks, f
                 if not chunk:
                     break
                 out.write(chunk)
-
-        def work():
-            if not sess.sku_mapping:
-                return UploadResponse(ok=False, message="Upload SKU Mapping first.")
-            df, xlsx_count, skipped = load_flipkart_from_zip(
-                tmp_path, sess.sku_mapping, source_filename=orig_fn or None,
-            )
-            gc.collect()
-
-            if df.empty:
-                return UploadResponse(
-                    ok=False,
-                    message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
-                )
-
-            pre_total = len(sess.flipkart_df)
-            _fd2, saved_rows = save_daily_file("flipkart", orig_fn or "flipkart-upload.zip", df)
-            sess.flipkart_df = _merge_platform_data(
-                sess.flipkart_df, df, "flipkart", source_filename=orig_fn or None,
-            )
-            total = len(sess.flipkart_df)
-            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
-                parsed_rows=len(df), pre_total=pre_total, post_total=total, saved_rows=saved_rows,
-            )
-            val_warn = _collect_validation_warnings(skipped)
-            years = sorted(sess.flipkart_df["Date"].dt.year.dropna().unique().astype(int).tolist())
-            _session_data_changed(sess)
-            return UploadResponse(
-                ok=True,
-                message=(
-                    f"Flipkart: added {kept_rows:,} rows ({xlsx_count} files). "
-                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}. Total: {total:,} rows."
-                    + (
-                        f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
-                        if dropped_rows > 0 else ""
-                    )
-                    + (
-                        f" Validation issues: {' | '.join(val_warn[:3])}. "
-                        "Please fix file columns/values and re-upload."
-                        if val_warn else ""
-                    )
-                ),
-                rows=total,
-                parsed_rows=len(df),
-                kept_rows=kept_rows,
-                dropped_rows=dropped_rows,
-                dropped_reasons=dropped_reasons or None,
-                validation_warnings=val_warn or None,
-                years=years,
-            )
-
-        resp = await _session_lock_apply(sess, work)
+        path_copy = tmp_path
+        return _accept_tier1_bulk_async(
+            sess,
+            sid,
+            platform="flipkart",
+            label="Flipkart",
+            filename=orig_fn,
+            rows_attr="flipkart_df",
+            submit=lambda s: DAILY_UPLOAD_EXECUTOR.submit(_run_tier1_flipkart_worker, s, path_copy, orig_fn),
+        )
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse Flipkart ZIP: {e}")
-    finally:
         if tmp_path:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
-    if resp and resp.ok:
-        background_tasks.add_task(_auto_save_cache, sess)
-    return resp
+        raise HTTPException(status_code=422, detail=f"Failed to accept Flipkart ZIP: {e}")
 
 
 # ── Snapdeal ──────────────────────────────────────────────────
 
 @router.post("/snapdeal", response_model=UploadResponse)
-async def upload_snapdeal(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_snapdeal(request: Request, file: UploadFile = File(...)):
     sess = _get_session(request)
+    sid = getattr(request.state, "session_id", "") or ""
     zip_bytes = await file.read()
     display = file.filename or "upload"
-    snap_fn = file.filename
+    snap_fn = file.filename or ""
     try:
-
-        def work():
-            df, file_count, skipped, parse_info = load_snapdeal_from_zip(zip_bytes, sess.sku_mapping, display)
-
-            # Store parse diagnostics (merge with existing)
-            sess.snapdeal_parse_info.update(parse_info)
-
-            if df.empty:
-                return UploadResponse(
-                    ok=False,
-                    message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
-                )
-
-            pre_total = len(sess.snapdeal_df)
-            _fd, saved_rows = save_daily_file("snapdeal", snap_fn or "snapdeal-upload.zip", df)
-
-            # Snapdeal may not have OrderId — dedup on all columns
-            if sess.snapdeal_df.empty:
-                sess.snapdeal_df = df
-            else:
-                sess.snapdeal_df = pd.concat([sess.snapdeal_df, df], ignore_index=True).drop_duplicates()
-            post_total = len(sess.snapdeal_df)
-            kept_rows, dropped_rows, dropped_reasons = _upload_quality_from_merge(
-                parsed_rows=len(df), pre_total=pre_total, post_total=post_total, saved_rows=saved_rows,
-            )
-            val_warn = _collect_validation_warnings(skipped)
-
-            # Rebuild sales_df if SKU mapping is loaded
-            if sess.sku_mapping:
-                from ..services.sales import build_sales_df
-                sess.sales_df = build_sales_df(
-                    mtr_df=sess.mtr_df,
-                    myntra_df=sess.myntra_df,
-                    meesho_df=sess.meesho_df,
-                    flipkart_df=sess.flipkart_df,
-                    snapdeal_df=sess.snapdeal_df,
-                    sku_mapping=sess.sku_mapping,
-                    **_sales_overlay_build_kwargs(sess),
-                )
-                sess._quarterly_cache.clear()
-
-            years = sorted(df["Date"].dt.year.dropna().unique().astype(int).tolist())
-            _session_data_changed(sess)
-            return UploadResponse(
-                ok=True,
-                message=(
-                    f"Snapdeal loaded: added {kept_rows:,} rows from {file_count} file(s). "
-                    f"Parsed: {len(df):,}, Kept: {kept_rows:,}."
-                    + (
-                        f" Warning: {dropped_rows:,} rows dropped ({'; '.join(dropped_reasons[:2])})."
-                        if dropped_rows > 0 else ""
-                    )
-                    + (
-                        f" Validation issues: {' | '.join(val_warn[:3])}. "
-                        "Please fix file columns/values and re-upload."
-                        if val_warn else ""
-                    )
-                    + (f" Warnings: {'; '.join(skipped[:3])}" if skipped else "")
-                ),
-                rows=post_total,
-                parsed_rows=len(df),
-                kept_rows=kept_rows,
-                dropped_rows=dropped_rows,
-                dropped_reasons=dropped_reasons or None,
-                validation_warnings=val_warn or None,
-                years=years,
-            )
-
-        resp = await _session_lock_apply(sess, work)
+        return _accept_tier1_bulk_async(
+            sess,
+            sid,
+            platform="snapdeal",
+            label="Snapdeal",
+            filename=snap_fn,
+            rows_attr="snapdeal_df",
+            submit=lambda s: DAILY_UPLOAD_EXECUTOR.submit(
+                _run_tier1_snapdeal_worker, s, zip_bytes, display, snap_fn,
+            ),
+        )
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse Snapdeal ZIP: {e}")
-    finally:
-        del zip_bytes
-        gc.collect()
-    if resp.ok:
-        background_tasks.add_task(_auto_save_cache, sess)
-    return resp
+        raise HTTPException(status_code=422, detail=f"Failed to accept Snapdeal ZIP: {e}")
 
 
 # ── Inventory ─────────────────────────────────────────────────
