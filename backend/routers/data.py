@@ -2641,7 +2641,7 @@ def get_coverage(request: Request, light: bool = False):
     try:
         from ..services.po_raise_import import hydrate_session_ledger_from_db
 
-        hydrate_session_ledger_from_db(sess, lookback_days=30)
+        hydrate_session_ledger_from_db(sess, lookback_days=30, authoritative=False)
     except Exception:
         pass
     _restore_daily_if_needed(sess)

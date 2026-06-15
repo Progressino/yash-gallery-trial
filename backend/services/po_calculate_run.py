@@ -80,7 +80,7 @@ def execute_po_calculate(
 
     lookback = max(int(body.get("raise_ledger_lookback_days") or 14), 14)
     _set_po_calculate_progress(sess, session_id, 12, "Loading raise ledger…")
-    hydrate_session_ledger_from_db(sess, body.get("planning_date"), lookback_days=lookback)
+    hydrate_session_ledger_from_db(sess, body.get("planning_date"), lookback_days=lookback, authoritative=True)
 
     ledger_auto_import = None
     if body.get("auto_import_yesterday_ledger", True) and session_id:
@@ -98,6 +98,14 @@ def execute_po_calculate(
                 sync_sidecars()
             except Exception:
                 logger.exception("sync_sidecars after ledger auto-import failed")
+
+    # Persist ledger to warm cache immediately so coverage polls do not race the async save.
+    try:
+        import backend.main as _main
+
+        _main.merge_po_optional_sheets_into_warm_cache(sess)
+    except Exception:
+        logger.exception("merge_po_optional_sheets_into_warm_cache after ledger load failed")
 
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 

@@ -59,6 +59,12 @@ def remove_raise_ledger_day(
     suppress_raise_date(day, note="removed via PO dashboard")
     archive_removed = delete_archives_for_date(day, session_id)
     invalidate_po_calculate_result(sess)
+    try:
+        import backend.main as _main
+
+        _main.merge_po_optional_sheets_into_warm_cache(sess)
+    except Exception:
+        pass
     parts = [
         f"Removed raise ledger for {day} ({max(removed_sess, removed_db):,} line(s) cleared)."
     ]

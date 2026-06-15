@@ -115,7 +115,30 @@ def test_hydrate_ledger_drops_deleted_day_from_stale_session(tmp_path, monkeypat
     po_raised_db.delete_raises_for_date("2026-05-16")
     po_raised_db.suppress_raise_date("2026-05-16")
 
-    hydrate_session_ledger_from_db(stale, "2026-05-18", lookback_days=30)
+    hydrate_session_ledger_from_db(stale, "2026-05-18", lookback_days=30, authoritative=True)
     assert stale.po_raise_ledger_df.empty or int(
         pd.to_numeric(stale.po_raise_ledger_df["Raised_Qty"], errors="coerce").fillna(0).sum()
     ) == 0
+
+
+def test_coverage_hydrate_keeps_session_ledger_when_db_empty(tmp_path, monkeypatch):
+    """Merge-mode hydrate must not wipe a session ledger that is not yet in SQLite."""
+    from backend.services.po_raise_import import hydrate_session_ledger_from_db
+
+    db_path = str(tmp_path / "ledger_merge.db")
+    monkeypatch.setattr("backend.db.po_raised_db.DB_PATH", db_path)
+    from backend.db import po_raised_db
+
+    po_raised_db.init_db()
+
+    sess = AppSession()
+    sess.po_raise_ledger_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"],
+            "Raised_Qty": [25],
+            "Raised_Date": pd.to_datetime(["2026-05-16"]),
+        }
+    )
+    hydrate_session_ledger_from_db(sess, "2026-06-15", lookback_days=30, authoritative=False)
+    assert len(sess.po_raise_ledger_df) == 1
+    assert int(sess.po_raise_ledger_df.iloc[0]["Raised_Qty"]) == 25

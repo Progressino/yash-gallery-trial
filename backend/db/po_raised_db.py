@@ -327,12 +327,14 @@ def is_raise_date_suppressed(raised_date: str) -> bool:
 
 
 def list_suppressed_raise_dates() -> list[str]:
+    """All calendar days blocked from archive auto-import."""
     conn = _connect()
     try:
-        cur = conn.execute(
-            "SELECT raised_date FROM po_raise_suppressed ORDER BY raised_date DESC"
-        )
-        return [str(r[0]) for r in cur.fetchall()]
+        _ensure_suppressed_table(conn)
+        rows = conn.execute(
+            "SELECT raised_date FROM po_raise_suppressed ORDER BY raised_date"
+        ).fetchall()
+        return [str(r["raised_date"]).strip()[:10] for r in rows if r["raised_date"]]
     finally:
         conn.close()
 

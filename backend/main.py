@@ -239,7 +239,15 @@ def restore_po_sidecars_from_warm(sess) -> bool:
             continue
         if cur is not None and hasattr(cur, "empty") and not cur.empty:
             continue
-        setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
+        val = wc.copy() if hasattr(wc, "copy") else wc
+        if key == "po_raise_ledger_df":
+            try:
+                from .services.po_raise_import import strip_suppressed_ledger_rows
+
+                val = strip_suppressed_ledger_rows(val)
+            except Exception:
+                pass
+        setattr(sess, key, val)
         changed = True
         # When the return overlay is newly restored, invalidate sales so it
         # gets rebuilt with the return deduction applied.
