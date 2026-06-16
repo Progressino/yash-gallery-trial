@@ -560,6 +560,14 @@ def _disk_cache_corruption_reason(disk_data: dict) -> str | None:
                 f"disk cache has {_total} total platform rows "
                 f"(hard min {_DISK_CACHE_HARD_MIN_ROWS}) — all platform frames empty"
             )
+    try:
+        from .services.github_cache import warm_cache_stale_vs_github
+
+        _stale = warm_cache_stale_vs_github(disk_data)
+        if _stale:
+            return _stale
+    except Exception:
+        pass
     return None
 
 
@@ -643,6 +651,36 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                 from .services.helpers import _coerce_df_for_parquet
 
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
+                new_rows = len(val)
+                if key in _WARM_PLATFORM_KEYS and os.path.exists(path):
+                    try:
+                        import pyarrow.parquet as pq
+
+                        old_rows = pq.read_metadata(path).num_rows
+                        if new_rows < old_rows * 0.9:
+                            log.warning(
+                                "Warm-cache disk save skipped for %s: %d rows < existing %d",
+                                key,
+                                new_rows,
+                                old_rows,
+                            )
+                            continue
+                    except Exception:
+                        pass
+                try:
+                    from .services.github_cache import cache_row_gap_vs_github
+
+                    gap = cache_row_gap_vs_github({key: val}, key)
+                    if gap and gap[0] < gap[1] * 0.9:
+                        log.warning(
+                            "Warm-cache disk save skipped for %s: %d rows vs GitHub %d",
+                            key,
+                            gap[0],
+                            gap[1],
+                        )
+                        continue
+                except Exception:
+                    pass
                 _coerce_df_for_parquet(val).to_parquet(path, index=False)
                 saved.append(key)
         # Merge with existing manifest instead of overwriting — prevents partial
@@ -929,10 +967,18 @@ def _do_load_warm_cache() -> bool:
                     # GitHub rebuild and serve "0/8" forever even with the mtr guard
                     # disabled (WARM_CACHE_MIN_MTR_ROWS=0).
                     _p0_total = _warm_total_platform_rows(disk_data)
+                    _stale_vs_gh = None
+                    try:
+                        from .services.github_cache import warm_cache_stale_vs_github
+
+                        _stale_vs_gh = warm_cache_stale_vs_github(disk_data)
+                    except Exception:
+                        pass
                     if (
                         _age_h < _FAST_SKIP_MAX_AGE_HOURS
                         and _p0_r >= _DISK_CACHE_MIN_MTR_ROWS
                         and _p0_total >= _DISK_CACHE_HARD_MIN_ROWS
+                        and not _stale_vs_gh
                     ):
                         log.warning(
                             "Warm-cache fast-path: disk is %.0fm old with %d mtr rows — "
@@ -949,12 +995,16 @@ def _do_load_warm_cache() -> bool:
                             seed_existing_po_warm_cache_from_disk()
                         except Exception:
                             log.exception("seed existing_po after fast-path disk load failed")
-                        # Light SQLite top-up without loading Phase 1 from scratch
                         try:
                             _merge_recent_sqlite_into_warm_cache(months=4)
                         except Exception:
                             log.exception("fast-path SQLite top-up failed")
                         return True
+                    elif _stale_vs_gh:
+                        log.warning(
+                            "Warm-cache fast-path skipped: %s — will run GitHub Phase 2.",
+                            _stale_vs_gh,
+                        )
             except Exception as _fp_err:
                 log.warning("fast-path check failed (non-fatal): %s", _fp_err)
         # ── Auto-detect corrupt disk cache ────────────────────────────────────
@@ -1069,49 +1119,54 @@ def _do_load_warm_cache() -> bool:
             log.warning("Warm-cache Phase 1 (SQLite) failed: %s — continuing to GitHub", e)
 
         if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
-            # Free Phase-1 scratch data (p1_raw / p1) — they are not needed
-            # here since _warm_cache already holds the full Phase-0 disk cache.
-            # Do NOT swap _warm_cache to p1: Phase-0 has full historical data
-            # (2+ years); Phase-1 only has the last 4 months.
+            _skip_p2_stale = None
             try:
-                del p1_raw, p1
+                from .services.github_cache import warm_cache_stale_vs_github
+
+                _skip_p2_stale = warm_cache_stale_vs_github(disk_data)
             except Exception:
                 pass
-            disk_data = None
-            _gc.collect()
-            # Release lock — Phase-1 RAM is freed; uploads may proceed safely
-            # against the ~3.5 GB Phase-0 warm cache.
-            _UPLOAD_MEMORY_LOCK.release()
-            _phase2_lock_held = False
-            log.info(
-                "Warm-cache: fresh disk cache — skipping GitHub Phase 2 "
-                "(set WARM_CACHE_SKIP_PHASE2_WHEN_DISK_FRESH=0 to force full reload)."
-            )
-            try:
-                _merge_recent_sqlite_into_warm_cache(months=_P1_MONTHS or 4)
-            except Exception:
-                log.exception("Warm-cache SQLite top-up after disk load failed")
-            # Guard: only re-save to disk if the warm cache still has meaningful
-            # data.  reload-fresh calls clear_warm_cache() which sets _warm_cache={}
-            # while this background thread is running.  If that race fires between
-            # the top-up and the disk save, _warm_cache["mtr_df"] would be empty or
-            # tiny, and we would overwrite the good 2-year disk file with 4 months.
-            try:
-                _cur_mtr = _warm_cache.get("mtr_df") if _warm_cache else None
-                _cur_rows = len(_cur_mtr) if _cur_mtr is not None and hasattr(_cur_mtr, "__len__") else 0
-                _min_ok = max(1000, _phase0_mtr_rows // 2)  # at least half of what Phase-0 had
-                if _cur_rows >= _min_ok:
-                    _save_warm_cache_to_disk(_warm_cache)
-                else:
-                    log.warning(
-                        "Warm-cache disk save skipped after skip-Phase-2 top-up: "
-                        "mtr_df has %d rows (need ≥%d). "
-                        "Likely cleared by concurrent reload-fresh; disk file preserved.",
-                        _cur_rows, _min_ok,
-                    )
-            except Exception:
-                pass
-            return True
+            if not _skip_p2_stale:
+                # Free Phase-1 scratch data (p1_raw / p1) — they are not needed
+                # here since _warm_cache already holds the full Phase-0 disk cache.
+                # Do NOT swap _warm_cache to p1: Phase-0 has full historical data
+                # (2+ years); Phase-1 only has the last 4 months.
+                try:
+                    del p1_raw, p1
+                except Exception:
+                    pass
+                disk_data = None
+                _gc.collect()
+                _UPLOAD_MEMORY_LOCK.release()
+                _phase2_lock_held = False
+                log.info(
+                    "Warm-cache: fresh disk cache — skipping GitHub Phase 2 "
+                    "(set WARM_CACHE_SKIP_PHASE2_WHEN_DISK_FRESH=0 to force full reload)."
+                )
+                try:
+                    _merge_recent_sqlite_into_warm_cache(months=_P1_MONTHS or 4)
+                except Exception:
+                    log.exception("Warm-cache SQLite top-up after disk load failed")
+                try:
+                    _cur_mtr = _warm_cache.get("mtr_df") if _warm_cache else None
+                    _cur_rows = len(_cur_mtr) if _cur_mtr is not None and hasattr(_cur_mtr, "__len__") else 0
+                    _min_ok = max(1000, _phase0_mtr_rows // 2)
+                    if _cur_rows >= _min_ok:
+                        _save_warm_cache_to_disk(_warm_cache)
+                    else:
+                        log.warning(
+                            "Warm-cache disk save skipped after skip-Phase-2 top-up: "
+                            "mtr_df has %d rows (need ≥%d).",
+                            _cur_rows, _min_ok,
+                        )
+                except Exception:
+                    pass
+                return True
+            else:
+                log.warning(
+                    "Warm-cache: disk stale vs GitHub (%s) — running Phase 2.",
+                    _skip_p2_stale,
+                )
 
         # ── Phase 2: GitHub historical cache (network, slow) ──────────────────
         # Provides data for dates not yet in the SQLite daily store.

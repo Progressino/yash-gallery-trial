@@ -62,7 +62,36 @@ RESTORE_SKIP_DOWNLOAD_KEYS = frozenset({
 
 _GITHUB_BLOB_CACHE_DIR = os.environ.get("GITHUB_BLOB_CACHE_DIR", "/data/github_cache")
 _GITHUB_DOWNLOAD_WORKERS = max(4, min(16, int(os.environ.get("GITHUB_DOWNLOAD_WORKERS", "12"))))
+# Disk/warm cache with fewer rows than this fraction of GitHub manifest → force Phase-2 rebuild.
+_GITHUB_GAP_RATIO = float(os.environ.get("WARM_CACHE_GITHUB_GAP_RATIO", "0.85"))
 
+
+def github_manifest_row_counts() -> dict[str, int]:
+    manifest = get_cache_manifest()
+    if not manifest:
+        return {}
+    return {k: int(v or 0) for k, v in (manifest.get("row_counts") or {}).items()}
+
+
+def cache_row_gap_vs_github(cache: dict, key: str = "mtr_df") -> tuple[int, int] | None:
+    """Return (have, want) when *cache* is materially smaller than the GitHub Release."""
+    counts = github_manifest_row_counts()
+    want = counts.get(key, 0)
+    if want < 50_000:
+        return None
+    df = cache.get(key)
+    have = len(df) if df is not None and hasattr(df, "__len__") else 0
+    if have < want * _GITHUB_GAP_RATIO:
+        return have, want
+    return None
+
+
+def warm_cache_stale_vs_github(cache: dict) -> str | None:
+    gap = cache_row_gap_vs_github(cache, "mtr_df")
+    if gap:
+        have, want = gap
+        return f"mtr_df has {have:,} rows but GitHub cache has {want:,}"
+    return None
 
 def _gh_headers() -> Optional[Dict[str, str]]:
     token = os.environ.get("GITHUB_TOKEN")

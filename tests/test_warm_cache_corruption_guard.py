@@ -108,3 +108,25 @@ def test_hard_floor_can_be_disabled(monkeypatch):
     monkeypatch.setattr(main, "_DISK_CACHE_HARD_MIN_ROWS", 0)
     # With both guards off, even an all-empty cache passes (operator opt-out).
     assert main._disk_cache_corruption_reason(_empty_disk_cache()) is None
+
+
+def test_partial_disk_cache_stale_vs_github_forces_rebuild(monkeypatch):
+    from backend.services import github_cache as gh
+
+    monkeypatch.setattr(main, "_DISK_CACHE_MIN_MTR_ROWS", 0)
+    monkeypatch.setattr(main, "_DISK_CACHE_HARD_MIN_ROWS", 1)
+    monkeypatch.setattr(
+        gh,
+        "github_manifest_row_counts",
+        lambda: {"mtr_df": 1_191_815},
+    )
+    partial = {
+        "mtr_df": pd.DataFrame({"OMS_SKU": ["A1"] * 190_555}),
+        "myntra_df": pd.DataFrame({"OMS_SKU": ["B"] * 80_000}),
+        "meesho_df": pd.DataFrame(),
+        "flipkart_df": pd.DataFrame(),
+        "snapdeal_df": pd.DataFrame(),
+    }
+    reason = main._disk_cache_corruption_reason(partial)
+    assert reason is not None
+    assert "GitHub" in reason
