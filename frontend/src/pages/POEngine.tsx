@@ -17,6 +17,13 @@ import { useAuth, mayResetSharedData } from '../store/auth'
 import { usePOStore, type Tab } from '../store/po'
 import { PODashboardPanel } from '../components/PODashboardPanel'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
+import {
+  POFormulaCellTrigger,
+  POFormulaHeaderButton,
+  POFormulaModal,
+  type POFormulaModalState,
+} from '../components/POFormulaModal'
+import type { POFormulaContext } from '../lib/poFormulaHelp'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
 import { archivePoExportOnServer } from '../lib/archivePoExport'
 import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
@@ -168,6 +175,23 @@ const COL_LABEL: Record<string, string> = {
 
 const PRIORITY_ORDER: Record<string, number> = {
   '🔴 URGENT': 0, '🟡 HIGH': 1, '🟢 MEDIUM': 2, '🔄 In Pipeline': 3, '⚪ OK': 4,
+}
+
+const PO_FORMULA_SKIP_CELL = new Set(['OMS_SKU', 'PO_Qty', 'Eff_Days', 'Eff_Days_Inventory'])
+
+function wrapPoCell(
+  col: string,
+  row: Record<string, unknown>,
+  finalPoQty: number | undefined,
+  onOpen: (col: string, row: Record<string, unknown>, finalPoQty?: number) => void,
+  node: ReactNode,
+): ReactNode {
+  if (PO_FORMULA_SKIP_CELL.has(col)) return node
+  return (
+    <POFormulaCellTrigger col={col} row={row} finalPoQty={finalPoQty} onOpen={onOpen}>
+      {node}
+    </POFormulaCellTrigger>
+  )
 }
 
 function poColHeaderLabel(col: string, raiseViewDate: string): ReactNode {
@@ -353,6 +377,15 @@ export default function POEngine() {
   }
   const closeEffInvDrawer = () => { setEffInvSku(null); setEffInvData(null) }
 
+  const [formulaModal, setFormulaModal] = useState<POFormulaModalState | null>(null)
+  const openFormulaCol = useCallback((col: string) => setFormulaModal({ key: col }), [])
+  const openFormulaCell = useCallback(
+    (col: string, row: Record<string, unknown>, finalPoQty?: number) =>
+      setFormulaModal({ key: col, row, finalPoQty }),
+    [],
+  )
+  const closeFormulaModal = useCallback(() => setFormulaModal(null), [])
+
   const {
     activeTab, setActiveTab,
     params, setParams,
@@ -512,6 +545,20 @@ export default function POEngine() {
   const [returnImportBusy, setReturnImportBusy] = useState(false)
   const [returnImportMsg, setReturnImportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [ledgerImportDate, setLedgerImportDate] = useState(() => yesterdayIST())
+
+  const formulaCtx = useMemo<POFormulaContext>(() => ({
+    periodDays: params.period_days,
+    leadTime: params.lead_time,
+    targetDays: params.target_days,
+    graceDays: params.grace_days,
+    demandBasis: params.demand_basis,
+    useSeasonality: params.use_seasonality,
+    seasonalWeight: params.seasonal_weight,
+    enforceLeadGate: !!params.enforce_lead_time_release_gate,
+    safetyPct: params.safety_pct,
+    raiseViewDate: ledgerImportDate,
+  }), [params, ledgerImportDate])
+
   const planningDate = calendarDateIST()
   const [debugInfo, setDebugInfo]   = useState<Record<string, unknown> | null>(null)
   const [shipment, setShipment] = useState<POResult | null>(null)
@@ -1311,16 +1358,17 @@ export default function POEngine() {
           <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
             <h3 className="font-semibold text-[#002B5B] mb-4">Parameters</h3>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <Param label="Period (days)" type="number"
+              <Param label="Period (days)" type="number" formulaKey="period_days" onFormulaOpen={openFormulaCol}
                 value={params.period_days} onChange={v => setParams({ ...params, period_days: +v })} />
-              <Param label="Lead Time (days)" type="number"
+              <Param label="Lead Time (days)" type="number" formulaKey="lead_time" onFormulaOpen={openFormulaCol}
                 value={params.lead_time} onChange={v => setParams({ ...params, lead_time: +v })} />
               <div>
                 <label
-                  className="text-xs font-semibold text-gray-500 uppercase block mb-1"
+                  className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-1 mb-1"
                   title="Target stock cover after PO release — editable; use 180+ for longer planning horizons"
                 >
                   Post-PO Running Days
+                  <button type="button" onClick={() => openFormulaCol('target_days')} className="text-gray-400 hover:text-sky-700 normal-case" title="Formula">ⓘ</button>
                 </label>
                 <input
                   type="number"
@@ -1351,7 +1399,10 @@ export default function POEngine() {
                 </div>
               </div>
               <div>
-                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">Demand Basis</label>
+                <label className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-1 mb-1">
+                  Demand Basis
+                  <button type="button" onClick={() => openFormulaCol('demand_basis')} className="text-gray-400 hover:text-sky-700 normal-case" title="Formula">ⓘ</button>
+                </label>
                 <select
                   value={params.demand_basis}
                   onChange={e => setParams({ ...params, demand_basis: e.target.value })}
@@ -1364,11 +1415,12 @@ export default function POEngine() {
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
-              <Param label="Grace Days (urgency buffer)" type="number"
+              <Param label="Grace Days (urgency buffer)" type="number" formulaKey="grace_days" onFormulaOpen={openFormulaCol}
                 value={params.grace_days} onChange={v => setParams({ ...params, grace_days: +v })} />
               <div>
-                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1" title="When any size of a parent has running days below this threshold, all sibling sizes are included in the PO output">
+                <label className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-1 mb-1" title="When any size of a parent has running days below this threshold, all sibling sizes are included in the PO output">
                   All sizes below (days)
+                  <button type="button" onClick={() => openFormulaCol('urgent_all_sizes_days')} className="text-gray-400 hover:text-sky-700 normal-case" title="Formula">ⓘ</button>
                 </label>
                 <input
                   type="number" min={0} step={5}
@@ -1380,8 +1432,9 @@ export default function POEngine() {
                 <p className="text-[10px] text-gray-400 mt-0.5">Show all sizes when any variant runs low</p>
               </div>
               <div>
-                <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">
+                <label className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-1 mb-1">
                   Safety Stock % ({params.safety_pct}%)
+                  <button type="button" onClick={() => openFormulaCol('safety_pct')} className="text-gray-400 hover:text-sky-700 normal-case" title="Formula">ⓘ</button>
                 </label>
                 <input
                   type="range" min={0} max={100} step={5}
@@ -1396,23 +1449,27 @@ export default function POEngine() {
             </div>
 
             <div className="flex items-center gap-6 mt-4 flex-wrap">
-              <Toggle label="YoY Seasonality" checked={params.use_seasonality}
+              <Toggle label="YoY Seasonality" checked={params.use_seasonality} formulaKey="use_seasonality" onFormulaOpen={openFormulaCol}
                 onChange={v => setParams({ ...params, use_seasonality: v })} />
               {params.use_seasonality && (
-                <Param label={`Seasonal Weight (${Math.round(params.seasonal_weight * 100)}%)`} type="range"
+                <Param label={`Seasonal Weight (${Math.round(params.seasonal_weight * 100)}%)`} type="range" formulaKey="seasonal_weight" onFormulaOpen={openFormulaCol}
                   value={params.seasonal_weight} min={0} max={1} step={0.05}
                   onChange={v => setParams({ ...params, seasonal_weight: +v })} />
               )}
-              <Toggle label="Group by Parent SKU" checked={params.group_by_parent}
+              <Toggle label="Group by Parent SKU" checked={params.group_by_parent} formulaKey="group_by_parent" onFormulaOpen={openFormulaCol}
                 onChange={v => setParams({ ...params, group_by_parent: v })} />
               <Toggle
                 label="Require ≥2 sizes to place PO"
                 checked={params.enforce_two_size_minimum}
+                formulaKey="enforce_two_size_minimum"
+                onFormulaOpen={openFormulaCol}
                 onChange={v => setParams({ ...params, enforce_two_size_minimum: v })}
               />
               <Toggle
                 label="Lead-time gate (hold PO while cover > lead time)"
                 checked={!!params.enforce_lead_time_release_gate}
+                formulaKey="enforce_lead_time_release_gate"
+                onFormulaOpen={openFormulaCol}
                 onChange={v => setParams({ ...params, enforce_lead_time_release_gate: v })}
               />
             </div>
@@ -1834,6 +1891,15 @@ export default function POEngine() {
               )}
 
               {/* Pipeline info banner */}
+              <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2">
+                <span>ⓘ</span>
+                <span>
+                  <strong className="text-slate-800">Formulas:</strong> click any column header{' '}
+                  <span className="opacity-60">ⓘ</span> or cell value to see how it is calculated for that SKU.
+                  Parameters above also have formula hints.
+                </span>
+              </div>
               <div className="flex items-center gap-2 text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg px-4 py-2">
                 <span>💡</span>
                 <span>
@@ -1843,6 +1909,7 @@ export default function POEngine() {
                   {' '}Plain <strong>Export CSV</strong> does not — use <strong>Import raises (CSV)</strong> for an older file.{' '}
                   <strong className="text-sky-800">Raise ledger:</strong> {raiseLedgerRows.toLocaleString()} SKU-day row(s) — confirmed qty feeds <strong>eff. pipeline</strong> and the PO Dashboard so SKUs are not double-released.
                 </span>
+              </div>
               </div>
 
               {/* ── Flat Table ── */}
@@ -1873,7 +1940,11 @@ export default function POEngine() {
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
                             ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}`}
                         >
-                          {poColHeaderLabel(c, ledgerImportDate)}
+                          <POFormulaHeaderButton
+                            col={c}
+                            label={poColHeaderLabel(c, ledgerImportDate)}
+                            onOpen={openFormulaCol}
+                          />
                         </th>
                       ))}
                       {/* Quarter history divider + columns */}
@@ -1884,11 +1955,11 @@ export default function POEngine() {
                           </th>
                           {quarterCols.map(c => (
                             <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">
-                              {c}
+                              <POFormulaHeaderButton col={c} label={c} onOpen={openFormulaCol} className="justify-end w-full" />
                             </th>
                           ))}
                           <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">
-                            Avg/Mo
+                            <POFormulaHeaderButton col="Avg_Monthly" label="Avg/Mo" onOpen={openFormulaCol} className="justify-end w-full" />
                           </th>
                           <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200">
                             Status
@@ -1938,7 +2009,8 @@ export default function POEngine() {
                               className={`px-4 py-2 whitespace-nowrap text-gray-700
                                 ${col === 'OMS_SKU' ? 'sticky left-9 z-10 font-medium text-gray-900 ' + (isSelected ? 'bg-blue-50' : 'bg-white') + ' shadow-sm' : ''}`}
                             >
-                              {col === 'Priority'
+                              {wrapPoCell(col, row, finalQty, openFormulaCell, (
+                              col === 'Priority'
                                 ? <PriorityBadge priority={priority} />
                                 : col === 'OMS_SKU'
                                   ? <span className="font-medium">{sku}</span>
@@ -1984,12 +2056,24 @@ export default function POEngine() {
                                             ? <DaysLeftBadge days={postPoCoverDays(row, finalQty)} />
                                           : renderRaiseLedgerCell(col, row) ?? (
                                           col === 'PO_Qty'
-                                            ? <QtyInput
-                                                value={finalQty}
-                                                computed={computedQty}
-                                                onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
-                                                onReset={() => { const n = {...editedQty}; delete n[sku]; setEditedQty(n) }}
-                                              />
+                                            ? (
+                                              <div className="flex items-center gap-1">
+                                                <QtyInput
+                                                  value={finalQty}
+                                                  computed={computedQty}
+                                                  onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
+                                                  onReset={() => { const n = {...editedQty}; delete n[sku]; setEditedQty(n) }}
+                                                />
+                                                <button
+                                                  type="button"
+                                                  onClick={() => openFormulaCell('PO_Qty', row, finalQty)}
+                                                  className="text-gray-400 hover:text-sky-700 text-xs"
+                                                  title="How is PO Qty calculated?"
+                                                >
+                                                  ⓘ
+                                                </button>
+                                              </div>
+                                            )
                                             : col === 'Days_Left'
                                               ? <DaysLeftBadge days={Number(row[col] ?? 999)} />
                                             : (col === 'Eff_Days_Inventory' || col === 'Eff_Days')
@@ -2016,7 +2100,8 @@ export default function POEngine() {
                                               : typeof row[col] === 'number'
                                                 ? Number(row[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
                                                 : row[col] ?? '—'
-                                          )}
+                                          )
+                              ))}
                             </td>
                           ))}
 
@@ -2073,7 +2158,11 @@ export default function POEngine() {
                             ${c === 'Pending_Cutting' ? 'text-purple-600' : ''}
                             ${c === 'Balance_to_Dispatch' ? 'text-teal-600' : ''}`}
                         >
-                          {poColHeaderLabel(c, ledgerImportDate)}
+                          <POFormulaHeaderButton
+                            col={c}
+                            label={poColHeaderLabel(c, ledgerImportDate)}
+                            onOpen={openFormulaCol}
+                          />
                         </th>
                       ))}
                       {quarterCols.length > 0 && (
@@ -2083,10 +2172,12 @@ export default function POEngine() {
                           </th>
                           {quarterCols.map(c => (
                             <th key={c} className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">
-                              {c}
+                              <POFormulaHeaderButton col={c} label={c} onOpen={openFormulaCol} className="justify-end w-full" />
                             </th>
                           ))}
-                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">Avg/Mo</th>
+                          <th className="text-right px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200 border-r border-indigo-100">
+                            <POFormulaHeaderButton col="Avg_Monthly" label="Avg/Mo" onOpen={openFormulaCol} className="justify-end w-full" />
+                          </th>
                           <th className="text-left px-3 py-3 font-semibold text-indigo-600 whitespace-nowrap text-xs sticky top-0 z-30 bg-indigo-50 border-b border-gray-200">Status</th>
                         </>
                       )}
@@ -2094,8 +2185,12 @@ export default function POEngine() {
                       <th className="px-2 py-3 sticky top-0 z-30 bg-amber-50 text-amber-400 text-xs font-bold whitespace-nowrap text-center border-b border-gray-200 border-l border-r border-amber-100">
                         ── CUTTING PLANNER ──
                       </th>
-                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">Cut Ratio</th>
-                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">PO Qty</th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">
+                        <POFormulaHeaderButton col="Cutting_Ratio" label="Cut Ratio" onOpen={openFormulaCol} className="justify-end w-full" />
+                      </th>
+                      <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">
+                        <POFormulaHeaderButton col="PO_Qty" label="PO Qty" onOpen={openFormulaCol} className="justify-end w-full" />
+                      </th>
                       <th className="text-center px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">🧵 Material Avail.</th>
                       <th className="text-right px-3 py-3 font-semibold text-amber-700 whitespace-nowrap text-xs sticky top-0 z-30 bg-amber-50 border-b border-gray-200 border-r border-amber-100">✂️ Sug. Cut</th>
                     </tr>
@@ -2287,7 +2382,8 @@ export default function POEngine() {
                                 className={`px-4 py-2 whitespace-nowrap text-gray-700
                                   ${col === 'OMS_SKU' ? 'sticky left-14 z-10 ' + (isSelected ? 'bg-blue-50' : 'bg-white') + ' shadow-sm' : ''}`}
                               >
-                                {col === 'Priority' ? <PriorityBadge priority={priority} />
+                                {wrapPoCell(col, variant, finalQty, openFormulaCell, (
+                                col === 'Priority' ? <PriorityBadge priority={priority} />
                                   : col === 'OMS_SKU'
                                     ? <span>
                                         <span className="inline-block w-12 text-xs font-bold text-gray-600 uppercase mr-1">{sizeLabel || sku}</span>
@@ -2317,14 +2413,27 @@ export default function POEngine() {
                                     ? <DaysLeftBadge days={postPoCoverDays(variant, finalQty)} />
                                   : renderRaiseLedgerCell(col, variant) ?? (
                                   col === 'PO_Qty'
-                                    ? <QtyInput value={finalQty} computed={computedQty}
-                                        onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
-                                        onReset={() => { const n = {...editedQty}; delete n[sku]; setEditedQty(n) }} />
+                                    ? (
+                                      <div className="flex items-center gap-1">
+                                        <QtyInput value={finalQty} computed={computedQty}
+                                          onChange={v => setEditedQty({ ...editedQty, [sku]: v })}
+                                          onReset={() => { const n = {...editedQty}; delete n[sku]; setEditedQty(n) }} />
+                                        <button
+                                          type="button"
+                                          onClick={() => openFormulaCell('PO_Qty', variant, finalQty)}
+                                          className="text-gray-400 hover:text-sky-700 text-xs"
+                                          title="How is PO Qty calculated?"
+                                        >
+                                          ⓘ
+                                        </button>
+                                      </div>
+                                    )
                                   : col === 'Days_Left' ? <DaysLeftBadge days={Number(variant[col] ?? 999)} />
                                   : typeof variant[col] === 'number'
                                     ? Number(variant[col]).toLocaleString(undefined, { maximumFractionDigits: 3 })
                                     : variant[col] ?? '—'
-                                  )}
+                                  )
+                                ))}
                               </td>
                             ))}
                             {quarterCols.length > 0 && (
@@ -2801,6 +2910,12 @@ export default function POEngine() {
         </div>
       )}
 
+      <POFormulaModal
+        state={formulaModal}
+        ctx={formulaCtx}
+        onClose={closeFormulaModal}
+      />
+
       {/* Eff-Days inventory-history drill-down */}
       {effInvSku && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={closeEffInvDrawer}>
@@ -2975,15 +3090,29 @@ const KpiCard = memo(function KpiCard({
 })
 
 function Param({
-  label, type, value, min, max, step, onChange,
+  label, type, value, min, max, step, onChange, formulaKey, onFormulaOpen,
 }: {
   label: string; type: string; value: number
   min?: number; max?: number; step?: number
   onChange: (v: string) => void
+  formulaKey?: string
+  onFormulaOpen?: (key: string) => void
 }) {
   return (
     <div>
-      <label className="text-xs font-semibold text-gray-500 uppercase block mb-1">{label}</label>
+      <label className="text-xs font-semibold text-gray-500 uppercase flex items-center gap-1 mb-1">
+        {label}
+        {formulaKey && onFormulaOpen && (
+          <button
+            type="button"
+            onClick={() => onFormulaOpen(formulaKey)}
+            className="text-gray-400 hover:text-sky-700 normal-case"
+            title="How is this used in the PO formula?"
+          >
+            ⓘ
+          </button>
+        )}
+      </label>
       <input
         type={type} value={value} min={min} max={max} step={step}
         onChange={e => onChange(e.target.value)}
@@ -2993,11 +3122,29 @@ function Param({
   )
 }
 
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+function Toggle({
+  label, checked, onChange, formulaKey, onFormulaOpen,
+}: {
+  label: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  formulaKey?: string
+  onFormulaOpen?: (key: string) => void
+}) {
   return (
     <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-700">
       <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="rounded" />
-      {label}
+      <span>{label}</span>
+      {formulaKey && onFormulaOpen && (
+        <button
+          type="button"
+          onClick={e => { e.preventDefault(); onFormulaOpen(formulaKey) }}
+          className="text-gray-400 hover:text-sky-700 text-xs"
+          title="How is this used in the PO formula?"
+        >
+          ⓘ
+        </button>
+      )}
     </label>
   )
 }
