@@ -13,6 +13,7 @@ import { canSkipHeavyServerRestore, operationalDataComplete, operationalDataLoad
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
+import POEngine from './pages/POEngine'
 
 const Dashboard   = lazy(() => import('./pages/Dashboard'))
 const Upload      = lazy(() => import('./pages/Upload'))
@@ -21,7 +22,6 @@ const Myntra      = lazy(() => import('./pages/Myntra'))
 const Meesho      = lazy(() => import('./pages/Meesho'))
 const Flipkart    = lazy(() => import('./pages/Flipkart'))
 const Inventory   = lazy(() => import('./pages/Inventory'))
-const POEngine    = lazy(() => import('./pages/POEngine'))
 const Forecast    = lazy(() => import('./pages/Forecast'))
 const Finance     = lazy(() => import('./pages/Finance'))
 const ItemMaster  = lazy(() => import('./pages/ItemMaster'))
