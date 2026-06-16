@@ -111,6 +111,33 @@ export default function Upload() {
   ])
 
   const handleRefreshAllData = async () => {
+    const { operationalDataComplete } = await import('../lib/localSessionHint')
+    if (operationalDataComplete(coverage)) {
+      const forceFull = window.confirm(
+        'All 8 datasets are already loaded in this session.\n\n' +
+          '• Quick refresh (~1 min): re-copy from server warm cache\n' +
+          '• Full restore (10–15 min): re-downloads from GitHub\n\n' +
+          'Click OK for quick refresh, or Cancel to run the slow full restore.',
+      )
+      if (forceFull) {
+        setL('refresh_all', true)
+        setRestoreProgress({ message: 'Quick refresh from warm cache…', progress: 0, step: 'warm' })
+        try {
+          const { cacheHydrateWarm } = await import('../api/client')
+          await cacheHydrateWarm()
+          const c = await getCoverage({ light: true, timeout: 45_000 })
+          setCoverage(c)
+          setRestoreProgress({ message: 'Quick refresh complete', progress: 100, step: 'done' })
+          invalidateDataQueries(qc)
+          showToast('success', 'Data refreshed from server warm cache.', 6000)
+        } catch (e) {
+          showToast('error', e instanceof Error ? e.message : 'Quick refresh failed', 8000)
+        } finally {
+          setL('refresh_all', false)
+        }
+        return
+      }
+    }
     setL('refresh_all', true)
     setRestoreProgress({ message: 'Starting restore…', progress: 0, step: 'queued' })
     try {

@@ -162,6 +162,23 @@ def _essential_missing_platforms(missing: list[str]) -> list[str]:
     return [p for p in missing if p in _ESSENTIAL_RESTORE_PLATFORMS]
 
 
+def _session_operational_data_complete(sess: AppSession) -> bool:
+    """True when SKU + all platforms + sales + inventory are loaded in session."""
+    if not getattr(sess, "sku_mapping", None):
+        return False
+    sales = getattr(sess, "sales_df", None)
+    if sales is None or not hasattr(sales, "empty") or sales.empty:
+        return False
+    for _plat, attr in _PLATFORM_ATTRS:
+        df = getattr(sess, attr, None)
+        if df is None or not hasattr(df, "empty") or df.empty:
+            return False
+    inv = getattr(sess, "inventory_df_variant", None)
+    if inv is None or not hasattr(inv, "empty") or inv.empty:
+        return False
+    return True
+
+
 def _missing_platform_names(sess: AppSession) -> list[str]:
     out: list[str] = []
     for plat, attr in _PLATFORM_ATTRS:
@@ -2199,6 +2216,35 @@ def full_restore_session(
         steps.append("warm")
     except Exception:
         pass
+
+    skip_github = (
+        _session_operational_data_complete(sess)
+        and not _main.session_needs_warm_cache_topup(sess)
+    )
+    if skip_github:
+        _set_restore_step(
+            sess,
+            "sales_queue",
+            "All 8 datasets already loaded — skipping GitHub download…",
+        )
+        steps.append("warm_only")
+        if defer_sales_rebuild:
+            _set_restore_step(sess, "sales_queue")
+        else:
+            _set_restore_step(sess, "sales")
+            _rebuild_session_sales(sess)
+        try:
+            _main.publish_warm_cache_from_session(sess)
+        except Exception:
+            pass
+        missing = _missing_platform_names(sess)
+        essential_missing = _essential_missing_platforms(missing)
+        if essential_missing:
+            labels = ", ".join(p.capitalize() for p in essential_missing)
+            msg = f"Fast refresh complete. Still missing: {labels}."
+        else:
+            msg = "Fast refresh complete — all 8 datasets already loaded (skipped GitHub download)."
+        return missing, steps, msg
 
     try:
         if _merge_github_bulk_into_session(sess):
