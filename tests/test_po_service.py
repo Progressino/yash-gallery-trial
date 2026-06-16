@@ -502,6 +502,125 @@ def test_po_output_dedupes_duplicate_oms_sku_rows():
     assert int(out.iloc[0]["PO_Pipeline_Total"]) == 115
 
 
+def test_po_output_dedupes_coalesces_pipeline_when_inventory_row_wins():
+    from backend.services.existing_po import dedupe_po_rows_by_sku
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["1488YKWHITE-3XL", "1488YKWHITE-3XL"],
+            "PO_Pipeline_Total": [0, 300],
+            "Total_Inventory": [84, 0],
+            "Sold_Units": [200, 0],
+            "ADS": [3.0, 0.0],
+            "PO_Qty": [470, 0],
+        }
+    )
+    out = dedupe_po_rows_by_sku(df)
+    assert len(out) == 1
+    row = out.iloc[0]
+    assert int(row["PO_Pipeline_Total"]) == 300
+    assert int(row["Total_Inventory"]) == 84
+    assert int(row["PO_Qty"]) == 470
+
+
+def test_existing_po_1488ykwhite_pipeline_on_per_size_not_bundled_ghost():
+    from pathlib import Path
+
+    from backend.services.existing_po import parse_existing_po
+
+    po_path = Path("/Users/samraisinghani/Downloads/Po 13-Jun-26.xlsx")
+    if not po_path.is_file():
+        pytest.skip("operator PO fixture not available locally")
+    existing = parse_existing_po(po_path.read_bytes(), po_path.name)
+    inv_map = {
+        "1488YKWHITE-3XL": 84,
+        "1488YKWHITE-4XL": 74,
+        "1488YKWHITE-3XL-4XL": 0,
+        "1488YKWHITE-5XL-6XL": 0,
+    }
+    days = pd.date_range("2026-05-01", periods=30, freq="D")
+    sales_rows = []
+    for sku in inv_map:
+        for d in days:
+            sales_rows.append(
+                {
+                    "Sku": sku,
+                    "TxnDate": d,
+                    "Transaction Type": "Shipment",
+                    "Quantity": 3,
+                    "Units_Effective": 3,
+                    "Source": "Amazon",
+                }
+            )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame(
+        {"OMS_SKU": list(inv_map.keys()), "Total_Inventory": list(inv_map.values())}
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        enforce_lead_time_release_gate=True,
+    )
+    row_3xl = po.loc[po["OMS_SKU"] == "1488YKWHITE-3XL"].iloc[0]
+    assert int(row_3xl["PO_Pipeline_Total"]) == 300
+    assert float(row_3xl["Projected_Running_Days"]) > 80.0
+    bundled = po.loc[po["OMS_SKU"] == "1488YKWHITE-3XL-4XL"]
+    if not bundled.empty:
+        assert int(bundled.iloc[0]["PO_Pipeline_Total"]) == 24
+
+
+def test_existing_po_pipeline_survives_sku_mapping_to_bundled_listing():
+    from backend.services.existing_po import parse_existing_po
+    from pathlib import Path
+
+    po_path = Path("/Users/samraisinghani/Downloads/Po 13-Jun-26.xlsx")
+    if not po_path.is_file():
+        pytest.skip("operator PO fixture not available locally")
+    existing = parse_existing_po(po_path.read_bytes(), po_path.name)
+    sku_map = {
+        "1488YKWHITE-3XL": "1488YKWHITE-3XL-4XL",
+        "1488YKWHITE-4XL": "1488YKWHITE-3XL-4XL",
+    }
+    days = pd.date_range("2026-05-01", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1488YKWHITE-3XL"] * 30 + ["1488YKWHITE-4XL"] * 30,
+            "TxnDate": list(days) + list(days),
+            "Transaction Type": ["Shipment"] * 60,
+            "Quantity": [3] * 60,
+            "Units_Effective": [3] * 60,
+            "Source": ["Amazon"] * 60,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1488YKWHITE-3XL", "1488YKWHITE-4XL", "1488YKWHITE-3XL-4XL"],
+            "Total_Inventory": [84, 74, 0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_mapping=sku_map,
+        enforce_lead_time_release_gate=True,
+    )
+    bundled = po.loc[po["OMS_SKU"] == "1488YKWHITE-3XL-4XL"].iloc[0]
+    assert int(bundled["PO_Pipeline_Total"]) >= 600
+    assert int(bundled["PO_Qty"]) == 0
+
+
 def test_po_4_jun_fixture_pending_cutting_flows_to_calculate():
     """Uploaded Po 4-Jun-26 values must appear on Calculate PO rows (not stale cache)."""
     from pathlib import Path
@@ -1118,6 +1237,7 @@ def test_po_release_uses_target_cover_balance_days_formula():
         demand_basis="Sold",
         safety_pct=0.0,
         sku_status_df=sheet,
+        enforce_lead_time_release_gate=False,
     )
     row = po.iloc[0]
     ads = float(row["ADS"])
@@ -1205,7 +1325,7 @@ def test_sheet_lead_window_blocks_po_when_projected_cover_gt_lead_days():
 
 
 def test_below_target_cover_gets_po_when_projected_within_lead_window():
-    """When projected cover equals lead days, lead-window gate allows top-up toward target."""
+    """With lead gate on, Excel Qty tops up only through lead-time days when cover is below lead."""
     days = pd.date_range("2025-11-01", periods=30, freq="D")
     sales = pd.DataFrame(
         {
@@ -1219,7 +1339,7 @@ def test_below_target_cover_gets_po_when_projected_within_lead_window():
     )
     inv = pd.DataFrame({"OMS_SKU": ["1052YKGREEN-5XL"], "Total_Inventory": [0]})
     existing = pd.DataFrame(
-        {"OMS_SKU": ["1052YKGREEN-5XL"], "PO_Pipeline_Total": [45]}
+        {"OMS_SKU": ["1052YKGREEN-5XL"], "PO_Pipeline_Total": [30]}
     )
     sheet = pd.DataFrame(
         {
@@ -1242,9 +1362,10 @@ def test_below_target_cover_gets_po_when_projected_within_lead_window():
         enforce_lead_time_release_gate=True,
     )
     row = po.iloc[0]
-    assert float(row["Projected_Running_Days"]) == 45.0
+    assert float(row["Projected_Running_Days"]) == 30.0
     assert int(row["Lead_Time_Days"]) == 45
-    assert int(row["PO_Qty"]) > 0
+    # Lead fill only: 45d − 30d pipeline = 15 raw → pack-10 rounds to 20.
+    assert int(row["PO_Qty"]) == 20
 
 
 def test_po_release_not_blocked_just_because_projected_cover_exceeds_lead_time():
@@ -1311,7 +1432,10 @@ def test_sheet_without_positive_lead_blocks_po_when_status_sheet_loaded():
         }
     )
     po_sheet = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=sheet)
-    po_none = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=None)
+    po_none = calculate_po_base(
+        sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=None,
+        enforce_lead_time_release_gate=False,
+    )
     assert int(po_sheet.iloc[0]["PO_Qty"]) == 0
     assert "lead" in str(po_sheet.iloc[0]["PO_Block_Reason"]).lower()
     assert int(po_none.iloc[0]["PO_Qty"]) > 0
@@ -1391,7 +1515,7 @@ def test_days_left_uses_total_inventory_when_column_present():
 
 
 def test_sheet_lead_increases_gross_vs_shorter_global_lead():
-    """With target-cover formula, lead sheet changes lead column but not gross requirement."""
+    """With lead gate on, a longer sheet lead increases PO when cover is below that lead."""
     sales = _minimal_sales()
     inv = _minimal_inventory()
     short = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=None)
@@ -1405,7 +1529,7 @@ def test_sheet_lead_increases_gross_vs_shorter_global_lead():
     )
     long_lead = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, sku_status_df=sheet)
     assert int(long_lead.iloc[0]["Lead_Time_Days"]) == 90
-    assert int(long_lead.iloc[0]["Gross_PO_Qty"]) == int(short.iloc[0]["Gross_PO_Qty"])
+    assert int(long_lead.iloc[0]["Gross_PO_Qty"]) > int(short.iloc[0]["Gross_PO_Qty"])
     assert float(long_lead.iloc[0]["ADS"]) == float(short.iloc[0]["ADS"])
 
 
@@ -1462,7 +1586,10 @@ def test_post_po_target_days_accepts_180_and_above():
     """PO engine must accept editable Post-PO running targets beyond the old 150d UI cap."""
     sales = _minimal_sales()
     inv = pd.DataFrame({"OMS_SKU": ["TEST-SKU-1"], "Total_Inventory": [5]})
-    po = calculate_po_base(sales, inv, period_days=30, lead_time=7, target_days=180, safety_pct=0.0)
+    po = calculate_po_base(
+        sales, inv, period_days=30, lead_time=7, target_days=180,
+        safety_pct=0.0, enforce_lead_time_release_gate=False,
+    )
     row = po.iloc[0]
     assert float(row["ADS"]) > 0
     assert int(row["PO_Qty"]) > 0
@@ -1785,6 +1912,7 @@ def test_po_qty_is_target_cover_balance_days_based():
         demand_basis="Sold",
         safety_pct=0.0,
         group_by_parent=False,
+        enforce_lead_time_release_gate=False,
     )
     row = po.iloc[0]
     assert float(row["ADS"]) > 0

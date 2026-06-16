@@ -955,6 +955,21 @@ def calculate_po_base(
         df = df[df["Sku"].str.len() > 0]
 
     inv_work = inv_df.copy()
+    from .existing_po import existing_po_merge_key, is_bundled_size_range_sku
+
+    _bundled_from_per_size_inv: set[str] = set()
+    if "OMS_SKU" in inv_work.columns:
+        for raw in inv_work["OMS_SKU"].astype(str):
+            raw_key = str(raw).strip().upper()
+            if not raw_key:
+                continue
+            mapped = canonical_oms_key(raw, sku_mapping)
+            if (
+                mapped
+                and mapped != existing_po_merge_key(raw)
+                and is_bundled_size_range_sku(mapped)
+            ):
+                _bundled_from_per_size_inv.add(mapped)
     _ep_prepared = pd.DataFrame()
     _unique_inv_skus = inv_work["OMS_SKU"].unique()
     _inv_canon_cache = {s: _canonical_oms_key(s) for s in _unique_inv_skus}
@@ -979,16 +994,19 @@ def calculate_po_base(
         )
         _ep_seed = _ep_prepared
         if not _ep_seed.empty and "PO_Pipeline_Total" in _ep_seed.columns:
-            _have_inv = set(inv_work["OMS_SKU"].astype(str))
+            _have_inv = set(inv_work["OMS_SKU"].astype(str).str.strip())
             _ep_active = pd.to_numeric(_ep_seed["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0
             for _ac in ("Pending_Cutting", "Balance_to_Dispatch", "PO_Qty_Ordered"):
                 if _ac in _ep_seed.columns:
                     _ep_active |= pd.to_numeric(_ep_seed[_ac], errors="coerce").fillna(0) > 0
-            _need = [
-                s
-                for s in _ep_seed.loc[_ep_active, "OMS_SKU"].astype(str).str.strip().unique()
-                if s and s not in _have_inv
-            ]
+            _need = []
+            for s in _ep_seed.loc[_ep_active, "OMS_SKU"].astype(str).str.strip().unique():
+                if not s or s in _have_inv:
+                    continue
+                mapped = canonical_oms_key(s, sku_mapping)
+                if mapped and mapped in _have_inv:
+                    continue
+                _need.append(s)
             if _need:
                 _pad = pd.DataFrame({"OMS_SKU": _need})
                 for _c in inv_work.columns:
@@ -1587,7 +1605,12 @@ def calculate_po_base(
     _breakdown_cols: list[str] = []
     if not _ep_prepared.empty and "PO_Pipeline_Total" in _ep_prepared.columns:
         from .existing_po import (
+            bundled_pipeline_children_in_po,
+            coalesce_pipeline_columns_on_po_df,
             existing_po_merge_key,
+            is_bundled_size_range_sku,
+            per_size_pipeline_covered_by_bundled_po_row,
+            rollup_pipeline_onto_bundled_rows,
             unbundle_inventory_rows_for_existing_po,
         )
 
@@ -1616,9 +1639,15 @@ def calculate_po_base(
             _ep_merge = _ep_prepared[_merge_cols].drop_duplicates(subset=["OMS_SKU"], keep="last")
             po_df = po_df.drop(columns=["PO_Pipeline_Total"] + _breakdown_cols + _finishing_cols, errors="ignore")
             po_df = pd.merge(po_df, _ep_merge, on="OMS_SKU", how="left")
+            po_df = rollup_pipeline_onto_bundled_rows(
+                po_df,
+                _ep_prepared,
+                bundled_from_per_size_inv=_bundled_from_per_size_inv,
+            )
             po_df = unbundle_inventory_rows_for_existing_po(
                 po_df, _ep_prepared, _breakdown_cols, canonical_fn=existing_po_merge_key
             )
+            po_df = coalesce_pipeline_columns_on_po_df(po_df, _ep_prepared)
             # Unbundled per-size rows keep pipeline qty only — not parent/bundled Eff_Days.
             # Do not wipe inventory-based active days (e.g. 1361YKBLUE-XL with 8/30 in-stock
             # days) — only clear inherited Eff_Days when there is no demand and no history.
@@ -1682,6 +1711,15 @@ def calculate_po_base(
             if _ac in _ep_ghost.columns:
                 _ep_active |= pd.to_numeric(_ep_ghost[_ac], errors="coerce").fillna(0) > 0
         missing_mask = ~_pipe_canon.isin(_po_keys) & _ep_active
+        if missing_mask.any():
+            for idx in _ep_ghost.index[missing_mask]:
+                sk = existing_po_merge_key(_ep_ghost.at[idx, "OMS_SKU"])
+                if is_bundled_size_range_sku(sk) and bundled_pipeline_children_in_po(
+                    sk, _ep_ghost, _po_keys
+                ):
+                    missing_mask.at[idx] = False
+                elif per_size_pipeline_covered_by_bundled_po_row(sk, po_df):
+                    missing_mask.at[idx] = False
         missing_po = _ep_ghost[missing_mask].copy()
         if not missing_po.empty:
             ghost = pd.DataFrame(
@@ -2061,11 +2099,12 @@ def calculate_po_base(
     #           = max(PO_Pipeline_Total, confirmed_raises)
     po_df["PO_Pipeline_Effective"] = np.maximum(_pipe_total_s.to_numpy(), _conf_raise_s.to_numpy()).astype(int)
 
-    # Sheet formula:
     # projected_days_now = (Total_Inventory + effective pipeline) / ADS
-    # balance_days       = target_cover_days - projected_days_now
-    # po_qty_raw         = ADS * balance_days
-    # po_qty_round       = ceil(max(po_qty_raw, 0) / pack) * pack
+    #
+    # PO quantity (two modes):
+    # • Lead gate ON  — operator Excel "Qty": only when cover is below factory lead,
+    #   top up through lead-time days (not the post-PO target horizon).
+    # • Lead gate OFF — balance-days toward target_cover_days (legacy / planning mode).
     target_cover_days = float(max(0, target_days + grace_days))
     if "Total_Inventory" in po_df.columns:
         inv_for_cover = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
@@ -2074,9 +2113,30 @@ def calculate_po_base(
     ads_num = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
     pipe_num = pd.to_numeric(po_df["PO_Pipeline_Effective"], errors="coerce").fillna(0.0)
     projected_days_now = np.where(ads_num > 0, (inv_for_cover + pipe_num) / ads_num, 999.0)
-    balance_days = target_cover_days - projected_days_now
-    raw_po = ads_num * balance_days
-    po_qty_round = np.vectorize(round_po_pack)(np.maximum(raw_po, 0.0))
+    _ads_arr = ads_num.to_numpy(dtype=float)
+    _inv_arr = inv_for_cover.to_numpy(dtype=float)
+    _pipe_arr = pipe_num.to_numpy(dtype=float)
+    _proj_arr = np.asarray(projected_days_now, dtype=float)
+
+    if enforce_lead_time_release_gate:
+        _lt_po = (
+            pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce")
+            .fillna(float(max(1, int(lead_time))))
+            .clip(lower=1.0, upper=730.0)
+            .to_numpy(dtype=float)
+        )
+        shortfall_units = np.maximum(_ads_arr * _lt_po - _inv_arr - _pipe_arr, 0.0)
+        need_po = (_ads_arr > 0) & (_proj_arr < _lt_po)
+        po_qty_round = np.where(
+            need_po,
+            np.vectorize(round_po_pack)(shortfall_units),
+            0.0,
+        ).astype(int)
+    else:
+        balance_days = target_cover_days - projected_days_now
+        raw_po = ads_num * balance_days
+        po_qty_round = np.vectorize(round_po_pack)(np.maximum(raw_po, 0.0)).astype(int)
+
     po_df["Gross_PO_Qty"] = po_qty_round.astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
 
@@ -2089,11 +2149,7 @@ def calculate_po_base(
         po_df["PO_Qty"] = np.vectorize(round_po_pack)(net_po).astype(int)
         po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
 
-    # Lead-time release gate: no fresh PO while projected cover (inv + eff. pipeline)
-    # is still *above* Lead_Time_Days — then top up toward ``target_days`` using the
-    # balance formula above.  Gate uses the per-SKU Lead_Time_Days which already holds
-    # the sheet-resolved value (or the global ``lead_time`` default for non-sheet SKUs),
-    # so every SKU is gated by its effective lead time when the checkbox is on.
+    # Surface why gated mode left PO at zero when cover already meets factory lead.
     _msg_lead_window = (
         "Projected cover exceeds factory lead time — no PO until cover is within lead days"
     )
@@ -2104,18 +2160,9 @@ def calculate_po_base(
             .clip(lower=1.0, upper=730.0)
             .to_numpy(dtype=float)
         )
-        _proj_gate = np.asarray(projected_days_now, dtype=float)
-        _ads_gate = ads_num.to_numpy(dtype=float)
-        _po_gate = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0).to_numpy(dtype=int)
-        _block_lead_win = (
-            (_po_gate > 0)
-            & (_ads_gate > 0)
-            & (_proj_gate > _lt_gate)
-        )
+        _block_lead_win = (_ads_arr > 0) & (_proj_arr >= _lt_gate)
         if bool(np.any(_block_lead_win)):
             _idx_bw = po_df.index[_block_lead_win]
-            po_df.loc[_idx_bw, "PO_Qty"] = 0
-            po_df.loc[_idx_bw, "Gross_PO_Qty"] = 0
             br_bw = po_df.loc[_idx_bw, "PO_Block_Reason"].astype(str).str.strip()
             po_df.loc[_idx_bw, "PO_Block_Reason"] = np.where(
                 br_bw.eq("") | br_bw.eq("nan"),
@@ -2318,12 +2365,10 @@ def calculate_po_base(
 
     # ── All-sizes expansion (two-part) ────────────────────────────────────────
     #
-    # Part A — Lead-time gate lift:
-    #   When ≥2 sizes of a parent already have PO_Qty > 0, siblings that are
-    #   blocked *only* by the lead-time release gate (Projected > Lead_Time but
-    #   still below target_days) should also receive a PO so that all sizes of the
-    #   style move together.  The balance formula is identical to the main engine
-    #   (target_days − projected) × ADS; the lead-time gate is simply overridden.
+    # Part A — Lead-time gate lift (target-only mode only):
+    #   When the lead gate is off, ≥2 sizes with PO can lift siblings blocked only
+    #   by projected > lead toward target_days.  Skipped when gate is on — Excel Qty
+    #   tops up through lead-time days only and does not override for siblings.
     #
     # Part B — Missing-size ghost rows:
     #   When any size of a parent has Projected_Running_Days < urgent_all_sizes_days,
@@ -2335,63 +2380,64 @@ def calculate_po_base(
 
     # ── Part A ────────────────────────────────────────────────────────────────
     try:
-        _po_qty_a = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0.0)
-        _par_a    = po_df["Parent_SKU"]
-        _ads_a    = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
-        _proj_a   = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
-        _n_active = (_po_qty_a > 0).astype(int).groupby(_par_a).transform("sum")
+        if not enforce_lead_time_release_gate:
+            _po_qty_a = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0.0)
+            _par_a    = po_df["Parent_SKU"]
+            _ads_a    = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
+            _proj_a   = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
+            _n_active = (_po_qty_a > 0).astype(int).groupby(_par_a).transform("sum")
 
-        # Siblings that qualify for the gate lift:
-        # • parent has ≥2 active PO sizes
-        # • this row currently has PO_Qty = 0
-        # • the *only* reason is the lead-time gate (i.e. block reason contains the gate msg)
-        # • the row has real ADS > 0 (it has sales history; not a phantom size)
-        # • projected cover is below target_days (otherwise there is nothing to order)
-        _target_eff = float(target_days) + float(grace_days)
-        _excl_status = po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status)
-        if not isinstance(_excl_status, pd.Series):
-            _excl_status = pd.Series(_excl_status, index=po_df.index)
-        _lift_mask = (
-            (_n_active >= 2)
-            & (_po_qty_a == 0)
-            & (_ads_a > 0)
-            & (_proj_a < _target_eff)
-            & po_df["PO_Block_Reason"].astype(str).str.contains(_LT_GATE_MSG, na=False)
-            & ~_excl_status.fillna(False)
-        )
-        if _lift_mask.any():
-            _lift_idx = po_df.index[_lift_mask]
-            _bal = (_target_eff - _proj_a.loc[_lift_idx]).clip(lower=0.0)
-            _gross = (_bal * _ads_a.loc[_lift_idx]).round(1)
-            _rounded = np.vectorize(round_po_pack)(_gross.to_numpy(dtype=float))
-
-            po_df.loc[_lift_idx, "Gross_PO_Qty"] = _rounded
-            po_df.loc[_lift_idx, "PO_Qty"] = _rounded
-
-            # Recompute Post-PO cover
-            _proj_lift = _proj_a.loc[_lift_idx].to_numpy(dtype=float)
-            _ads_lift = _ads_a.loc[_lift_idx].to_numpy(dtype=float)
-            _new_post = (_proj_lift + _rounded / np.maximum(_ads_lift, 1e-9)).round(1)
-            po_df.loc[_lift_idx, "Post_PO_Cover_Days_Capped"] = _new_post
-
-            # Strip the lead-time gate message from the block reason; keep any others
-            _old_br = po_df.loc[_lift_mask, "PO_Block_Reason"].astype(str)
-            _new_br = (
-                _old_br
-                .str.replace(_LT_GATE_MSG + "[^;]*", "", regex=True)
-                .str.strip("; ").str.strip()
+            # Siblings that qualify for the gate lift:
+            # • parent has ≥2 active PO sizes
+            # • this row currently has PO_Qty = 0
+            # • the *only* reason is the lead-time gate (i.e. block reason contains the gate msg)
+            # • the row has real ADS > 0 (it has sales history; not a phantom size)
+            # • projected cover is below target_days (otherwise there is nothing to order)
+            _target_eff = float(target_days) + float(grace_days)
+            _excl_status = po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status)
+            if not isinstance(_excl_status, pd.Series):
+                _excl_status = pd.Series(_excl_status, index=po_df.index)
+            _lift_mask = (
+                (_n_active >= 2)
+                & (_po_qty_a == 0)
+                & (_ads_a > 0)
+                & (_proj_a < _target_eff)
+                & po_df["PO_Block_Reason"].astype(str).str.contains(_LT_GATE_MSG, na=False)
+                & ~_excl_status.fillna(False)
             )
-            po_df.loc[_lift_idx, "PO_Block_Reason"] = _new_br
-            if bool((_rounded > 0).any()):
-                po_df.loc[_lift_idx[_rounded > 0], "Priority"] = "🟡 HIGH"
+            if _lift_mask.any():
+                _lift_idx = po_df.index[_lift_mask]
+                _bal = (_target_eff - _proj_a.loc[_lift_idx]).clip(lower=0.0)
+                _gross = (_bal * _ads_a.loc[_lift_idx]).round(1)
+                _rounded = np.vectorize(round_po_pack)(_gross.to_numpy(dtype=float))
 
-            _log_mod.getLogger(__name__).info(
-                "all-sizes gate-lift: %d sibling row(s) unblocked across %d parent(s)",
-                int(_lift_mask.sum()),
-                int((_n_active >= 2)[_lift_mask].groupby(_par_a[_lift_mask]).ngroups
-                    if hasattr(_par_a[_lift_mask].groupby(_par_a[_lift_mask]), "ngroups")
-                    else len(_par_a[_lift_mask].unique())),
-            )
+                po_df.loc[_lift_idx, "Gross_PO_Qty"] = _rounded
+                po_df.loc[_lift_idx, "PO_Qty"] = _rounded
+
+                # Recompute Post-PO cover
+                _proj_lift = _proj_a.loc[_lift_idx].to_numpy(dtype=float)
+                _ads_lift = _ads_a.loc[_lift_idx].to_numpy(dtype=float)
+                _new_post = (_proj_lift + _rounded / np.maximum(_ads_lift, 1e-9)).round(1)
+                po_df.loc[_lift_idx, "Post_PO_Cover_Days_Capped"] = _new_post
+
+                # Strip the lead-time gate message from the block reason; keep any others
+                _old_br = po_df.loc[_lift_mask, "PO_Block_Reason"].astype(str)
+                _new_br = (
+                    _old_br
+                    .str.replace(_LT_GATE_MSG + "[^;]*", "", regex=True)
+                    .str.strip("; ").str.strip()
+                )
+                po_df.loc[_lift_idx, "PO_Block_Reason"] = _new_br
+                if bool((_rounded > 0).any()):
+                    po_df.loc[_lift_idx[_rounded > 0], "Priority"] = "🟡 HIGH"
+
+                _log_mod.getLogger(__name__).info(
+                    "all-sizes gate-lift: %d sibling row(s) unblocked across %d parent(s)",
+                    int(_lift_mask.sum()),
+                    int((_n_active >= 2)[_lift_mask].groupby(_par_a[_lift_mask]).ngroups
+                        if hasattr(_par_a[_lift_mask].groupby(_par_a[_lift_mask]), "ngroups")
+                        else len(_par_a[_lift_mask].unique())),
+                )
     except Exception as _lift_err:
         _log_mod.getLogger(__name__).warning("all-sizes gate-lift failed (non-fatal): %s", _lift_err)
 

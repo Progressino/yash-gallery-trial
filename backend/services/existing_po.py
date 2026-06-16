@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import numpy as np
 
 _log = logging.getLogger(__name__)
 
@@ -988,6 +989,27 @@ def unbundle_inventory_rows_for_existing_po(
         if not sheet_children:
             continue
 
+        bundled_key = merge_key(sku)
+        bundled_pipe = 0.0
+        if "PO_Pipeline_Total" in po_df.columns:
+            bundled_pipe = float(
+                pd.to_numeric(po_df.at[idx, "PO_Pipeline_Total"], errors="coerce") or 0
+            )
+        child_ep_sum = 0.0
+        for child in sheet_children:
+            ck = merge_key(child)
+            if ck in ep_idx.index and "PO_Pipeline_Total" in ep_idx.columns:
+                child_ep_sum += float(
+                    pd.to_numeric(ep_idx.at[ck, "PO_Pipeline_Total"], errors="coerce") or 0
+                )
+        per_size_rows_exist = any((po_skus == merge_key(c)).any() for c in sheet_children)
+        if (
+            not per_size_rows_exist
+            and child_ep_sum > 0
+            and bundled_pipe >= child_ep_sum
+        ):
+            continue
+
         base = row.to_dict()
         for child in sheet_children:
             child_key = merge_key(child)
@@ -1004,7 +1026,10 @@ def unbundle_inventory_rows_for_existing_po(
             existing = po_skus == child_key
             if existing.any():
                 for col, val in pipe_vals.items():
-                    po_df.loc[existing, col] = val
+                    cur = pd.to_numeric(po_df.loc[existing, col], errors="coerce").fillna(0)
+                    new_val = pd.to_numeric(val, errors="coerce")
+                    new_val = 0 if pd.isna(new_val) else new_val
+                    po_df.loc[existing, col] = np.maximum(cur, float(new_val)).astype(int)
                 continue
 
             child_row = dict(base)
@@ -1047,10 +1072,15 @@ def unbundle_inventory_rows_for_existing_po(
 def rollup_pipeline_onto_bundled_rows(
     po_df: pd.DataFrame,
     ep: pd.DataFrame,
+    *,
+    bundled_from_per_size_inv: set[str] | None = None,
 ) -> pd.DataFrame:
     """
     Inventory often uses bundled SKUs (4XL-5XL) while Existing PO lists individual sizes.
     Sum child pipeline onto the bundled inventory row when direct merge missed.
+
+    When per-size children already exist as separate PO rows, keep the bundled sheet line
+    qty only (e.g. 4XL-5XL: 4 units) — do not add child totals on top.
     """
     if po_df is None or po_df.empty or ep is None or ep.empty or "OMS_SKU" not in po_df.columns:
         return po_df
@@ -1063,6 +1093,9 @@ def rollup_pipeline_onto_bundled_rows(
         return po_df
     ep_idx = ep.set_index("OMS_SKU")
     out = po_df.copy()
+    mapped_bundles = {str(s).strip().upper() for s in (bundled_from_per_size_inv or set())}
+    po_skus = set(out["OMS_SKU"].astype(str).str.strip())
+
     for col in breakdown:
         if col not in out.columns:
             out[col] = 0
@@ -1074,18 +1107,132 @@ def rollup_pipeline_onto_bundled_rows(
         children = _split_bundled_po_sku(sku)
         if len(children) < 2:
             continue
+        child_keys = [existing_po_merge_key(c) for c in children]
+        children_with_pipeline = []
+        for ck in child_keys:
+            if ck not in po_skus:
+                continue
+            rows = out[out["OMS_SKU"].astype(str).str.strip() == ck]
+            if rows.empty:
+                continue
+            pipe = float(pd.to_numeric(rows["PO_Pipeline_Total"], errors="coerce").fillna(0).max() or 0)
+            if pipe > 0:
+                children_with_pipeline.append(ck)
+        bundled_key = existing_po_merge_key(sku)
+        direct_total = 0.0
+        if bundled_key in ep_idx.index and "PO_Pipeline_Total" in ep_idx.columns:
+            direct_total = float(
+                pd.to_numeric(ep_idx.at[bundled_key, "PO_Pipeline_Total"], errors="coerce") or 0
+            )
+        if children_with_pipeline:
+            continue
+        if direct_total > 0 and bundled_key not in mapped_bundles:
+            continue
         for col in breakdown:
             total = 0.0
             found_child = False
             for child in children:
-                if child in ep_idx.index:
+                ck = existing_po_merge_key(child)
+                if ck in ep_idx.index:
                     found_child = True
-                    total += float(pd.to_numeric(ep_idx.at[child, col], errors="coerce") or 0)
-            # Always prefer child totals on bundled inventory rows — the sheet lists
-            # individual sizes, not the bundled inventory token.
+                    total += float(pd.to_numeric(ep_idx.at[ck, col], errors="coerce") or 0)
             if found_child and total > 0:
                 out.at[idx, col] = int(total) if col == "PO_Pipeline_Total" else total
     return out
+
+
+_PIPELINE_COALESCE_COLS = (
+    "PO_Pipeline_Total",
+    "PO_Qty_Ordered",
+    "Pending_Cutting",
+    "Balance_to_Dispatch",
+    "PO_Confirmed_Raise_Pipeline",
+    "PO_Pipeline_Effective",
+)
+
+
+def coalesce_pipeline_columns_on_po_df(po_df: pd.DataFrame, ep: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill missing per-size pipeline on PO rows from the Existing PO sheet.
+
+    Inventory may use bundled listing SKUs (via sku_mapping) while the uploaded PO
+    sheet lists individual sizes — the left merge on OMS_SKU alone can miss those rows.
+    """
+    if po_df is None or po_df.empty or ep is None or ep.empty or "OMS_SKU" not in po_df.columns:
+        return po_df
+    breakdown = [c for c in _PIPELINE_COALESCE_COLS if c in ep.columns]
+    if not breakdown:
+        return po_df
+    ep_idx = ep.set_index("OMS_SKU")
+    out = po_df.copy()
+    for col in breakdown:
+        if col not in out.columns:
+            out[col] = 0
+    keys = out["OMS_SKU"].astype(str).map(existing_po_merge_key)
+    for idx, key in zip(out.index, keys):
+        if not key or key not in ep_idx.index:
+            continue
+        for col in breakdown:
+            cur = float(pd.to_numeric(out.at[idx, col], errors="coerce") or 0)
+            ep_val = float(pd.to_numeric(ep_idx.at[key, col], errors="coerce") or 0)
+            if ep_val > cur:
+                if col in (
+                    "PO_Pipeline_Total",
+                    "PO_Qty_Ordered",
+                    "Pending_Cutting",
+                    "Balance_to_Dispatch",
+                    "PO_Confirmed_Raise_Pipeline",
+                    "PO_Pipeline_Effective",
+                ):
+                    out.at[idx, col] = int(ep_val)
+                else:
+                    out.at[idx, col] = ep_val
+    return out
+
+
+def per_size_pipeline_covered_by_bundled_po_row(child_sku: str, po_df: pd.DataFrame) -> bool:
+    """True when a bundled inventory row already carries this child's pipeline total."""
+    if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
+        return False
+    ck = existing_po_merge_key(child_sku)
+    if is_bundled_size_range_sku(ck):
+        return False
+    for _, br in po_df.iterrows():
+        bk = existing_po_merge_key(br.get("OMS_SKU"))
+        if not is_bundled_size_range_sku(bk):
+            continue
+        children = {existing_po_merge_key(c) for c in _split_bundled_po_sku(bk)}
+        if ck not in children:
+            continue
+        pipe = float(pd.to_numeric(br.get("PO_Pipeline_Total"), errors="coerce") or 0)
+        if pipe > 0:
+            return True
+    return False
+
+
+def bundled_pipeline_children_in_po(bundled_sku: str, ep: pd.DataFrame, po_keys: set[str]) -> bool:
+    """True when every per-size child with pipeline on the sheet already has a PO row."""
+    if not is_bundled_size_range_sku(bundled_sku) or ep is None or ep.empty:
+        return False
+    children = _split_bundled_po_sku(bundled_sku)
+    if len(children) < 2:
+        return False
+    ep_idx = ep.set_index("OMS_SKU")
+    saw_child_pipeline = False
+    for child in children:
+        ck = existing_po_merge_key(child)
+        if ck not in ep_idx.index:
+            continue
+        pipe = float(pd.to_numeric(ep_idx.at[ck, "PO_Pipeline_Total"], errors="coerce") or 0)
+        for bc in ("Pending_Cutting", "Balance_to_Dispatch", "PO_Qty_Ordered"):
+            if bc in ep_idx.columns:
+                pipe = max(pipe, float(pd.to_numeric(ep_idx.at[ck, bc], errors="coerce") or 0))
+        if pipe <= 0:
+            continue
+        saw_child_pipeline = True
+        if ck not in po_keys:
+            return False
+    return saw_child_pipeline
 
 
 def dedupe_po_rows_by_sku(po_df: pd.DataFrame) -> pd.DataFrame:
@@ -1107,9 +1254,16 @@ def dedupe_po_rows_by_sku(po_df: pd.DataFrame) -> pd.DataFrame:
         + _num("Sold_Units")
         + _num("ADS") * 10.0
     )
-    work = work.sort_values("_dedupe_rank", ascending=False)
-    work = work.drop_duplicates(subset=["OMS_SKU"], keep="first")
-    return work.drop(columns=["_dedupe_rank"], errors="ignore")
+    pipeline_cols = [c for c in _PIPELINE_COALESCE_COLS if c in work.columns]
+    rows: list[pd.Series] = []
+    for _sku, grp in work.groupby("OMS_SKU", sort=False):
+        best_idx = grp["_dedupe_rank"].idxmax()
+        row = grp.loc[best_idx].copy()
+        for col in pipeline_cols:
+            row[col] = _num(col).loc[grp.index].max()
+        rows.append(row)
+    out = pd.DataFrame(rows).reset_index(drop=True)
+    return out.drop(columns=["_dedupe_rank"], errors="ignore")
 
 
 def _build_po_dataframe(
