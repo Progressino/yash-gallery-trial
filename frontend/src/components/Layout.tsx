@@ -39,7 +39,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { to: '/grey', module: 'grey', label: 'Grey Fabric', short: '🧵' },
       { to: '/hrm', module: 'hrm', label: 'HRM', short: '👥' },
       { to: '/inventory', module: 'inventory', label: 'Inventory', short: '📦' },
-      { to: '/po', module: 'po', label: 'PO Engine', short: '🎯' },
+      { to: '/po2', module: 'po', label: 'PO Engine 2', short: '🎯' },
       { to: '/admin', module: 'admin', label: 'Admin', short: '🔐' },
       { to: '/marketplace-connections', module: 'marketplace', label: 'Marketplace API', short: '🔗' },
     ],

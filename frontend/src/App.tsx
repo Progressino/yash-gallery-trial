@@ -14,6 +14,7 @@ import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
 import POEngine from './pages/POEngine'
+import PO2 from './pages/PO2'
 
 const Dashboard   = lazy(() => import('./pages/Dashboard'))
 const Upload      = lazy(() => import('./pages/Upload'))
@@ -283,8 +284,10 @@ export default function App() {
               <Route path="meesho"    element={<Meesho />} />
               <Route path="flipkart"  element={<Flipkart />} />
               <Route path="inventory" element={<Inventory />} />
-              <Route path="po" element={<POEngine />} />
-              <Route path="po-dashboard" element={<Navigate to="/po?tab=dashboard" replace />} />
+              <Route path="po2" element={<PO2 />} />
+              <Route path="po" element={<Navigate to="/po2" replace />} />
+              <Route path="po-legacy" element={<POEngine />} />
+              <Route path="po-dashboard" element={<Navigate to="/po2" replace />} />
               <Route path="forecast"  element={<Forecast />} />
               <Route path="finance"   element={<Finance />} />
               <Route path="items"      element={<ItemMaster />} />

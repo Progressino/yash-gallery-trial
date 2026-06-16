@@ -53,6 +53,7 @@ if [[ "${DEPLOY_FAST:-}" == "1" ]]; then
   "$PYTHON_BIN" -m pytest tests/test_hrm_smoke.py -q
 else
   "$PYTHON_BIN" -m pytest tests/test_api_data_po_sales.py -q
+  "$PYTHON_BIN" -m pytest tests/test_po2_calculate_defaults.py -q
   "$PYTHON_BIN" -m pytest tests/test_po_service.py -q
   "$PYTHON_BIN" -m pytest tests/test_finance_sales_entries.py -q
   "$PYTHON_BIN" -m pytest tests/test_finance_accountant_dry_run.py -q

@@ -70,6 +70,8 @@ export const PATH_MODULE: Record<string, ModuleKey> = {
   '/grey': 'grey',
   '/hrm': 'hrm',
   '/inventory': 'inventory',
+  '/po2': 'po',
+  '/po-legacy': 'po',
   '/po': 'po',
   '/admin': 'admin',
   '/marketplace-connections': 'marketplace',
@@ -77,7 +79,10 @@ export const PATH_MODULE: Record<string, ModuleKey> = {
 
 export function moduleForPath(path: string): ModuleKey | null {
   if (path === '/') return 'intelligence'
-  const entry = Object.entries(PATH_MODULE).find(([p]) => p !== '/' && path.startsWith(p))
+  const entry = Object.entries(PATH_MODULE)
+    .filter(([p]) => p !== '/')
+    .sort((a, b) => b[0].length - a[0].length)
+    .find(([p]) => path === p || path.startsWith(`${p}/`))
   return entry ? entry[1] : null
 }
 
