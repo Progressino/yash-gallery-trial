@@ -263,6 +263,8 @@ const TAB_ORDER: Tab[] = ['po', 'dashboard', 'quarterly', 'shipment']
 
 const QUARTER_COL_RE = /^(Apr[-–]Jun|Jul[-–]Sep|Oct[-–]Dec|Jan[-–]Mar)\s+\d{4}$/i
 const EXPECTED_QUARTER_COLS = 8
+const ENABLE_PO_AUTO_RESUME = false
+const ENABLE_PO_SHARED_AUTO_LOAD = false
 
 function countQuarterColumns(columns: string[] | undefined): number {
   return (columns ?? []).filter(c => QUARTER_COL_RE.test(c.trim())).length
@@ -486,6 +488,7 @@ export default function POEngine() {
 
   /** Auto-resume if the server is still calculating (e.g. after gateway blip or page refresh). */
   useEffect(() => {
+    if (!ENABLE_PO_AUTO_RESUME) return
     let cancelled = false
     ;(async () => {
       try {
@@ -790,6 +793,7 @@ export default function POEngine() {
 
   /** After a PO-engine deploy, auto-load today's shared cache once data is ready. */
   useEffect(() => {
+    if (!ENABLE_PO_SHARED_AUTO_LOAD) return
     if (activeTab !== 'po' || !dataReady || mergeAutoRef.current) return
     let cancelled = false
     ;(async () => {
