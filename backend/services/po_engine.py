@@ -2089,18 +2089,15 @@ def calculate_po_base(
         po_df["PO_Qty"] = np.vectorize(round_po_pack)(net_po).astype(int)
         po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
 
-    # Lead-time release (sheet-resolved lead only): no fresh PO while projected cover
-    # (inv + eff. pipeline) is still *above* sheet ``Lead_Time_Days`` — then top up
-    # toward ``target_days`` using the balance formula above.
+    # Lead-time release gate: no fresh PO while projected cover (inv + eff. pipeline)
+    # is still *above* Lead_Time_Days — then top up toward ``target_days`` using the
+    # balance formula above.  Gate uses the per-SKU Lead_Time_Days which already holds
+    # the sheet-resolved value (or the global ``lead_time`` default for non-sheet SKUs),
+    # so every SKU is gated by its effective lead time when the checkbox is on.
     _msg_lead_window = (
         "Projected cover exceeds factory lead time — no PO until cover is within lead days"
     )
     if enforce_lead_time_release_gate:
-        _from_sheet = po_df.get("Lead_Time_From_Status_Sheet")
-        if _from_sheet is not None:
-            _from_sheet_ok = _from_sheet.fillna(False).astype(bool).to_numpy()
-        else:
-            _from_sheet_ok = np.zeros(len(po_df), dtype=bool)
         _lt_gate = (
             pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce")
             .fillna(float(max(1, int(lead_time))))
@@ -2111,8 +2108,7 @@ def calculate_po_base(
         _ads_gate = ads_num.to_numpy(dtype=float)
         _po_gate = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0).to_numpy(dtype=int)
         _block_lead_win = (
-            _from_sheet_ok
-            & (_po_gate > 0)
+            (_po_gate > 0)
             & (_ads_gate > 0)
             & (_proj_gate > _lt_gate)
         )

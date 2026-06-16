@@ -81,6 +81,7 @@ def po_result():
         target_days=TARGET_DAYS,
         demand_basis="Sold",
         safety_pct=0.0,
+        enforce_lead_time_release_gate=False,  # formula tests: bypass gate
     )
     assert not po.empty
     return po.set_index("OMS_SKU")
@@ -152,6 +153,43 @@ def test_summary_totals_match_sum_of_po_qty(po_result):
 )
 def test_round_po_pack_thresholds(raw, expected):
     assert round_po_pack(raw) == expected
+
+
+def test_lead_time_gate_applies_to_all_skus_not_just_sheet():
+    """The lead-time release gate must fire for non-sheet SKUs too.
+
+    A SKU with projected cover > lead_time should get PO_Qty = 0 when
+    enforce_lead_time_release_gate=True, regardless of whether it appears
+    in a status sheet.  Previously the gate only fired when
+    Lead_Time_From_Status_Sheet was True (sheet-resolved lead), leaving
+    non-sheet SKUs ungated and making the UI lead-time slider inert.
+    """
+    sales = _steady_sales("GATE-SKU", 2.0)   # ADS=2/day
+    # Inventory of 95 → projected = 95/2 = 47.5 days  (> LEAD_TIME=45, < TARGET=180)
+    inv = _inv({"GATE-SKU": 95})
+    # Gate ON → projected (47.5) > lead_time (45) → PO should be blocked to 0
+    gated = calculate_po_base(
+        sales_df=sales, inv_df=inv,
+        period_days=PERIOD_DAYS, lead_time=LEAD_TIME,
+        target_days=TARGET_DAYS, demand_basis="Sold",
+        safety_pct=0.0,
+        enforce_lead_time_release_gate=True,
+    ).set_index("OMS_SKU")
+    assert gated.loc["GATE-SKU", "PO_Qty"] == 0, (
+        "Non-sheet SKU with cover > lead_time must be gated to 0 when gate is on"
+    )
+
+    # Increasing lead_time beyond projected cover (48d > 47.5d projected) → unblocked
+    ungated = calculate_po_base(
+        sales_df=sales, inv_df=inv,
+        period_days=PERIOD_DAYS, lead_time=48,
+        target_days=TARGET_DAYS, demand_basis="Sold",
+        safety_pct=0.0,
+        enforce_lead_time_release_gate=True,
+    ).set_index("OMS_SKU")
+    assert ungated.loc["GATE-SKU", "PO_Qty"] > 0, (
+        "Raising lead_time above projected cover must unblock the SKU"
+    )
 
 
 def test_quarterly_history_zero_before_first_sale_is_not_a_bug():
