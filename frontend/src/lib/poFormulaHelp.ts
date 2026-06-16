@@ -74,8 +74,8 @@ export const PO_COLUMN_FORMULAS: Record<string, POFormulaDef> = {
   },
   Lead_Time_Days: {
     title: 'Lead time (days)',
-    summary: 'Factory lead time used for the lead-time gate and Excel-style PO Qty.',
-    formula: 'max(positive Lead_Time_From_Sheet, parent rollup, style-code match) or global default',
+    summary: 'Factory lead time used for urgency and planning context.',
+    formula: 'Per-SKU lead from status sheet, else global Lead Time parameter',
     steps: [
       'Resolved per SKU from the status / lead sheet when uploaded',
       'Parent-level lead rolls down to size variants',
@@ -317,12 +317,9 @@ export const PO_COLUMN_FORMULAS: Record<string, POFormulaDef> = {
   PO_Qty: {
     title: 'New PO qty',
     summary: 'Net units to raise today — editable before export.',
-    formula: 'See steps — depends on lead-time gate setting',
+    formula: 'Balance toward post-PO target cover',
     steps: [
-      'Lead gate ON (default): only when Projected_Running_Days < Lead_Time_Days',
-      '  PO = pack_round(ADS × Lead_Time − Total_Inventory − PO_Pipeline_Effective)',
-      'Lead gate OFF: balance toward Post-PO target',
-      '  PO = pack_round(ADS × (target_days + grace − Projected_Running_Days))',
+      'PO = pack_round(ADS × (target_days + grace − Projected_Running_Days))',
       'May be zeroed by status sheet, two-size rule, or block reasons',
       'Return overlay can reduce final PO_Qty',
     ],
@@ -361,12 +358,9 @@ export const PO_PARAM_FORMULAS: Record<string, POFormulaDef> = {
   },
   target_days: {
     title: 'Post-PO running days',
-    summary: 'Target stock cover after PO when the lead gate is OFF.',
+    summary: 'Target stock cover after PO.',
     formula: 'target_cover = target_days + grace_days',
-    steps: [
-      'With lead gate ON, PO Qty tops up through lead time only (Excel Qty mode)',
-      'With lead gate OFF, PO fills toward this post-PO horizon',
-    ],
+    steps: ['PO fills toward this post-PO horizon'],
   },
   demand_basis: {
     title: 'Demand basis',
@@ -416,13 +410,10 @@ export const PO_PARAM_FORMULAS: Record<string, POFormulaDef> = {
     steps: ['Surfaces recommendation to alter SKU sizing mix'],
   },
   enforce_lead_time_release_gate: {
-    title: 'Lead-time gate',
-    summary: 'Matches operator Excel Qty: order only when cover is below factory lead.',
-    formula: 'Gate ON → PO only fills through Lead_Time_Days',
-    steps: [
-      'No PO while Projected_Running_Days ≥ Lead_Time_Days',
-      'Gate OFF → full balance toward Post-PO target days',
-    ],
+    title: 'Lead-time gate (disabled)',
+    summary: 'Deprecated in app-only PO mode.',
+    formula: 'Not used in current release',
+    steps: ['PO calculations use target-cover formula from app data only.'],
   },
 }
 
@@ -561,19 +552,13 @@ export function buildPORowBreakdown(
       break
     case 'PO_Qty':
     case 'Gross_PO_Qty': {
-      const raw =
-        ctx.enforceLeadGate && ads > 0 && projected < lead
-          ? ads * lead - inv - pipe
-          : ads * (targetCover - projected)
+      const raw = ads * (targetCover - projected)
       lines.push(
-        { label: 'Lead gate', value: ctx.enforceLeadGate ? 'ON (Excel Qty)' : 'OFF (target cover)' },
         { label: 'Projected days', value: fmt(projected, 1) },
-        { label: 'Lead / target cover', value: ctx.enforceLeadGate ? `${fmt(lead, 0)} d` : `${fmt(targetCover, 0)} d` },
+        { label: 'Target cover', value: `${fmt(targetCover, 0)} d` },
         {
           label: 'Raw units',
-          expression: ctx.enforceLeadGate
-            ? `${fmt(ads)} × ${fmt(lead, 0)} − ${fmt(inv, 0)} − ${fmt(pipe, 0)}`
-            : `${fmt(ads)} × (${fmt(targetCover, 0)} − ${fmt(projected, 1)})`,
+          expression: `${fmt(ads)} × (${fmt(targetCover, 0)} − ${fmt(projected, 1)})`,
           value: fmt(Math.max(0, raw), 1),
         },
         {

@@ -151,13 +151,9 @@ def execute_po_calculate(
 
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 
-    _set_po_calculate_progress(sess, session_id, 18, "Loading existing PO sheet…")
-    try:
-        from .existing_po import ensure_existing_po_hydrated
-
-        ensure_existing_po_hydrated(sess)
-    except Exception:
-        logger.exception("ensure_existing_po_hydrated before calculate failed")
+    # Existing PO upload is no longer part of the default PO flow.
+    # Keep calculation app-data only (sales + inventory + in-app raise ledger).
+    _set_po_calculate_progress(sess, session_id, 18, "Preparing PO inputs…")
 
     # ── Inventory-history memory management ───────────────────────────────────
     # Two-stage trim so the heavy calculate_po_base call starts lean.
@@ -294,10 +290,11 @@ def execute_po_calculate(
             seasonal_weight=float(body.get("seasonal_weight", 0.5)),
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=group_by_parent,
-            existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
+            existing_po_df=None,
             sku_status_df=effective_sku_status_df_for_engine(sess),
             enforce_two_size_minimum=bool(body.get("enforce_two_size_minimum", False)),
-            enforce_lead_time_release_gate=bool(body.get("enforce_lead_time_release_gate", False)),
+            # Lead-time release gate is disabled for app-only PO mode.
+            enforce_lead_time_release_gate=False,
             inventory_history_df=_inv_history_for_calc,
             po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
             planning_date=body.get("planning_date"),

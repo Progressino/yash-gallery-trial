@@ -261,6 +261,11 @@ const STATUS_COLORS: Record<string, string> = {
 const TAB_ORDER: Tab[] = ['po', 'dashboard', 'quarterly', 'shipment']
 
 const QUARTER_COL_RE = /^(Apr[-–]Jun|Jul[-–]Sep|Oct[-–]Dec|Jan[-–]Mar)\s+\d{4}$/i
+const EXPECTED_QUARTER_COLS = 8
+
+function countQuarterColumns(columns: string[] | undefined): number {
+  return (columns ?? []).filter(c => QUARTER_COL_RE.test(c.trim())).length
+}
 type Marketplace = 'amazon' | 'flipkart' | 'myntra' | 'meesho'
 
 /** Scroll region + max height so thead ``sticky top-0`` has a real scrollport (Layout uses ``main`` scroll otherwise). */
@@ -301,13 +306,6 @@ export default function POEngine() {
   const dailyInvRows = useSession(s => s.daily_inventory_history_rows ?? 0)
   const dailyInvSkus = useSession(s => s.daily_inventory_history_skus ?? 0)
   const raiseLedgerRows = useSession(s => s.po_raise_ledger_rows ?? 0)
-  const existingPoLoaded = useSession(s => s.existing_po)
-  const existingPoFilename = useSession(s => s.existing_po_filename)
-  const existingPoUploadedAt = useSession(s => s.existing_po_uploaded_at)
-  const existingPoNeedsRecalc = useSession(s => s.existing_po_needs_recalc ?? false)
-  const existingPoRows = useSession(s => s.existing_po_rows ?? 0)
-  const existingPoPerSizeSkus = useSession(s => s.existing_po_per_size_skus ?? 0)
-  const existingPoLooksAggregated = useSession(s => s.existing_po_looks_aggregated ?? false)
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
 
   const PO_MERGE_VERSION_KEY = 'po-merge-version-seen'
@@ -554,7 +552,7 @@ export default function POEngine() {
     demandBasis: params.demand_basis,
     useSeasonality: params.use_seasonality,
     seasonalWeight: params.seasonal_weight,
-    enforceLeadGate: !!params.enforce_lead_time_release_gate,
+    enforceLeadGate: false,
     safetyPct: params.safety_pct,
     raiseViewDate: ledgerImportDate,
   }), [params, ledgerImportDate])
@@ -601,6 +599,22 @@ export default function POEngine() {
         if (data.status === 'error') {
           setQuarterly({ loaded: false, rows: [], columns: [], message: data.message })
           return
+        }
+        const qCount = countQuarterColumns(data.columns)
+        if (
+          data.loaded &&
+          qCount < EXPECTED_QUARTER_COLS &&
+          poll < maxPolls - 1
+        ) {
+          setQuarterlyProgress(
+            typeof data.progress === 'number' ? Math.min(99, data.progress) : 55,
+          )
+          setQuarterlyLoadMessage(
+            data.message ||
+              `Quarterly history incomplete (${qCount}/${EXPECTED_QUARTER_COLS}) — loading full history…`,
+          )
+          await new Promise(r => setTimeout(r, 3000))
+          continue
         }
         setQuarterly(data)
         setQuarterlyProgress(null)
@@ -683,20 +697,9 @@ export default function POEngine() {
   }, [result, setResult, setEditedQty, setSelected])
 
   useEffect(() => {
-    if (!existingPoNeedsRecalc && !existingPoLooksAggregated) return
-    setSkipSharedCacheOnce(true)
-    if (
-      existingPoLooksAggregated &&
-      result?.ok &&
-      (result.rows?.length ?? 0) > 0
-    ) {
-      setResult({
-        ok: false,
-        message:
-          'Existing PO looks bundled-only. Re-upload the full export on Upload, then Calculate PO.',
-      })
-    }
-  }, [existingPoNeedsRecalc, existingPoLooksAggregated, result, setResult, setSkipSharedCacheOnce])
+    // App-only PO mode: do not block runs based on existing-PO upload state.
+    if (skipSharedCacheOnce) setSkipSharedCacheOnce(false)
+  }, [skipSharedCacheOnce, setSkipSharedCacheOnce])
 
   const refreshRaiseLedger = useCallback(
     async (serverMessage?: string) => {
@@ -720,7 +723,7 @@ export default function POEngine() {
     let poRes: POResult | null = null
     let staleRetry = false
     try {
-      const useSharedCache = !skipSharedCacheOnce && !existingPoNeedsRecalc && !isRetry
+      const useSharedCache = !skipSharedCacheOnce && !isRetry
       if (skipSharedCacheOnce) setSkipSharedCacheOnce(false)
       poRes = (await startPoCalculate(
         {
@@ -776,7 +779,7 @@ export default function POEngine() {
 
   /** After a PO-engine deploy, auto-load today's shared cache (replaces stale session tables). */
   useEffect(() => {
-    if (activeTab !== 'po' || loading || existingPoNeedsRecalc) return
+    if (activeTab !== 'po' || loading) return
     let cancelled = false
     ;(async () => {
       try {
@@ -826,7 +829,7 @@ export default function POEngine() {
     })()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh once per po_merge_version bump
-  }, [activeTab, existingPoNeedsRecalc, loading])
+  }, [activeTab, loading])
 
   const confirmRaiseAndExport = async (rows: Array<PORow & { Final_PO_Qty: number }>) => {
     setRaiseConfirmErr(null)
@@ -1042,14 +1045,11 @@ export default function POEngine() {
     return map
   }, [quarterly, quarterCols])
 
-  // After PO results load, fetch quarterly history if cache is empty (auto-retry inside loader).
+  // After PO results load, fetch quarterly history if cache is empty or incomplete.
   useEffect(() => {
     if (!result?.ok || quarterlyLoading || loading) return
     const rows = quarterly?.rows ?? []
-    const hasValues =
-      rows.length > 0 &&
-      rows.some(r => quarterCols.some(c => Number((r as QuarterlyRow)[c] ?? 0) > 0))
-    if (hasValues) return
+    if (rows.length > 0 && quarterCols.length >= EXPECTED_QUARTER_COLS) return
     void loadQuarterlyForRun(poRunSeqRef.current)
   }, [result?.ok, loading, quarterly?.rows, quarterCols.length])
 
@@ -1465,13 +1465,6 @@ export default function POEngine() {
                 onFormulaOpen={openFormulaCol}
                 onChange={v => setParams({ ...params, enforce_two_size_minimum: v })}
               />
-              <Toggle
-                label="Lead-time gate (hold PO while cover > lead time)"
-                checked={!!params.enforce_lead_time_release_gate}
-                formulaKey="enforce_lead_time_release_gate"
-                onFormulaOpen={openFormulaCol}
-                onChange={v => setParams({ ...params, enforce_lead_time_release_gate: v })}
-              />
             </div>
 
             <div className="mt-5 p-4 rounded-lg border border-slate-200 bg-slate-50/90 text-xs text-slate-800 space-y-2">
@@ -1527,72 +1520,9 @@ export default function POEngine() {
                   </span>
                 ) : null}
               </div>
-              {existingPoLooksAggregated ? (
-                <p className="text-[11px] text-red-900 bg-red-50 border border-red-300 rounded px-2 py-1.5 font-medium">
-                  Existing PO in this session looks <strong>bundled-only</strong> ({existingPoPerSizeSkus.toLocaleString()} per-size SKUs vs{' '}
-                  {existingPoRows.toLocaleString()} total). Re-upload the full export on{' '}
-                  <Link to="/upload" className="underline font-semibold">Upload</Link>, then <strong>Calculate PO</strong> — otherwise only combined sizes (L-XL, S-M) appear with summed pipeline.
-                </p>
-              ) : null}
-              {existingPoNeedsRecalc ? (
-                <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 font-medium">
-                  Existing PO saved
-                  {existingPoFilename ? (
-                    <>
-                      {' '}
-                      (<strong>{existingPoFilename}</strong>
-                      {existingPoUploadedAt ? (
-                        <span className="font-normal text-amber-800">
-                          {' '}
-                          · {new Date(existingPoUploadedAt).toLocaleString()}
-                        </span>
-                      ) : null}
-                      )
-                    </>
-                  ) : null}
-                  {existingPoRows > 0 ? (
-                    <span className="font-normal text-amber-800">
-                      {' '}
-                      · {existingPoRows.toLocaleString()} SKUs
-                    </span>
-                  ) : null}
-                  . Click <strong>Calculate PO</strong> to refresh pipeline columns —{' '}
-                  <strong>no re-upload needed</strong> until you load a newer file on Upload.
-                </p>
-              ) : existingPoLoaded ? (
-                <p className="text-[11px] text-emerald-900 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5 font-medium">
-                  Existing PO saved
-                  {existingPoFilename ? (
-                    <>
-                      {' '}
-                      — <strong>{existingPoFilename}</strong>
-                    </>
-                  ) : null}
-                  {existingPoRows > 0 ? (
-                    <span className="font-normal text-emerald-800">
-                      {' '}
-                      · {existingPoRows.toLocaleString()} SKUs
-                    </span>
-                  ) : null}
-                  {existingPoUploadedAt ? (
-                    <span className="font-normal text-emerald-700">
-                      {' '}
-                      ({new Date(existingPoUploadedAt).toLocaleString()})
-                    </span>
-                  ) : null}
-                  . Stored on the server — no re-upload needed until you load a newer file on Upload.
-                  {existingPoRows > 0 && existingPoRows < 5000 ? (
-                    <span className="text-amber-900 font-medium">
-                      {' '}
-                      Sheet looks partial; upload the full export if counts look too low.
-                    </span>
-                  ) : null}
-                </p>
-              ) : (
-                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-                  No Existing PO sheet in this session — upload on <Link to="/upload" className="underline font-semibold">Upload → History &amp; setup</Link> first.
-                </p>
-              )}
+              <p className="text-[11px] text-slate-700 bg-slate-50 border border-slate-200 rounded px-2 py-1.5">
+                PO recommendations are now computed from app data only (sales, inventory, returns, and raise ledger).
+              </p>
               {loading && (
                 <div className="mt-2 space-y-1 max-w-md">
                   <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
@@ -1653,20 +1583,9 @@ export default function POEngine() {
                   label="New PO to raise"
                   value={totalPOUnits}
                   accent="border-l-[#002B5B]"
-                  title="Fresh units to raise today (PO Qty). Already-ordered / pipeline units from your Existing PO sheet are separate."
+                  title="Fresh units to raise today (PO Qty), based on app data."
                 />
               </div>
-              {result?.summary?.existing_po_applied ? (
-                <p className="text-[11px] text-slate-700 bg-slate-50 border border-slate-200 rounded px-2 py-1.5">
-                  <strong>{result.summary.existing_po_filename || existingPoFilename || 'Existing PO'}</strong>
-                  {' '}is applied in this run:{' '}
-                  <strong>{(result.summary.pipeline_sku_count ?? 0).toLocaleString()}</strong> SKUs with pipeline
-                  ({(result.summary.pipeline_qty_sum ?? 0).toLocaleString()} units on sheet),{' '}
-                  <strong>{(result.summary.sheet_po_ordered_sum ?? 0).toLocaleString()}</strong> units marked PO Ordered.
-                  {' '}Engine recommends <strong>{(result.summary.new_po_qty_sum ?? totalPOUnits).toLocaleString()}</strong> additional units
-                  ({(result.summary.new_po_sku_count ?? 0).toLocaleString()} SKUs) to reach your target cover.
-                </p>
-              ) : null}
 
               {/* Toolbar */}
               <div className="flex items-center gap-3 flex-wrap">

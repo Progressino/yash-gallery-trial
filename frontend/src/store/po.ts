@@ -89,7 +89,7 @@ export const usePOStore = create<POState>()(
     safety_pct: 0,
     enforce_two_size_minimum: true,
     urgent_all_sizes_days: 45,
-    enforce_lead_time_release_gate: true,
+    enforce_lead_time_release_gate: false,
   },
   result: null,
   quarterly: null,
@@ -117,7 +117,7 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
-      version: 4,
+      version: 5,
       migrate: (persisted, fromVersion) => {
         const p = persisted as Partial<POState> | undefined
         if (!p) return persisted as POState
@@ -126,11 +126,11 @@ export const usePOStore = create<POState>()(
         }
         const params = p.params as POParams | undefined
         if (params && params.enforce_lead_time_release_gate === undefined) {
-          params.enforce_lead_time_release_gate = true
+          params.enforce_lead_time_release_gate = false
         }
-        // Align with June export behaviour: hold PO while projected cover > sheet lead.
-        if (fromVersion < 4 && params) {
-          params.enforce_lead_time_release_gate = true
+        // App-only PO mode: keep lead-time gate off by default.
+        if (fromVersion < 5 && params) {
+          params.enforce_lead_time_release_gate = false
         }
         return p as POState
       },

@@ -81,9 +81,8 @@ class PORequest(BaseModel):
     grace_days:       int   = 0
     safety_pct:       float = 0.0
     enforce_two_size_minimum: bool = False
-    # When True: for sheet-resolved lead rows only, block PO while
-    # (Tot inv + eff. pipeline) / ADS > Lead_Time_Days.
-    # Default False so Post_PO_Cover_Days always reaches target_days.
+    # Deprecated toggle (kept for backward API compatibility).
+    # Current PO mode always uses app-data target-cover logic.
     enforce_lead_time_release_gate: bool = False
     # Calendar day for PO raise-ledger "yesterday / today" columns (YYYY-MM-DD).
     # Defaults to server date if omitted; browser should send local date for daily PO.
@@ -1026,15 +1025,6 @@ def po_dashboard(request: Request, body: PODashboardRequest):
     from ..services.po_dashboard import build_dashboard_payload
     from ..services.po_engine import calculate_po_base
 
-    # Ensure the full per-size Existing PO is loaded from disk before calculating.
-    # Without this, a freshly-restored session has an empty existing_po_df so bundled
-    # inventory rows (4XL-5XL) are never split into individual sizes (4XL, 5XL).
-    try:
-        from ..services.existing_po import ensure_existing_po_hydrated
-        ensure_existing_po_hydrated(sess)
-    except Exception:
-        logging.getLogger(__name__).exception("ensure_existing_po_hydrated in dashboard failed")
-
     inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 
@@ -1053,10 +1043,10 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             seasonal_weight=body.seasonal_weight,
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=body.group_by_parent,
-            existing_po_df=sess.existing_po_df if not sess.existing_po_df.empty else None,
+            existing_po_df=None,
             sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
             enforce_two_size_minimum=body.enforce_two_size_minimum,
-            enforce_lead_time_release_gate=body.enforce_lead_time_release_gate,
+            enforce_lead_time_release_gate=False,
             inventory_history_df=(
                 sess.daily_inventory_history_df
                 if not sess.daily_inventory_history_df.empty
@@ -1296,16 +1286,8 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     if not sid:
         return {"ok": False, "message": "No session id."}
 
-    from ..services.existing_po import (
-        ensure_existing_po_hydrated,
-        existing_po_needs_recalc,
-        session_has_fresh_existing_po,
-    )
-
-    ensure_existing_po_hydrated(sess)
-
     body_dict = body.model_dump()
-    if body.use_shared_cache and not existing_po_needs_recalc(sess):
+    if body.use_shared_cache:
         from ..services.po_shared_cache import apply_shared_cache_to_session
 
         cached = apply_shared_cache_to_session(sess, sid, body_dict)
@@ -1444,6 +1426,7 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     from ..services.po_quarterly_warmup import (
         quarterly_cache_key,
         try_build_quarterly_payload_sync,
+        normalize_quarterly_payload,
     )
 
     sid = getattr(request.state, "session_id", None) or ""
@@ -1451,11 +1434,13 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
 
     shared = get_shared_quarterly(cache_key)
     if shared and shared.get("loaded") and shared.get("rows"):
+        shared = normalize_quarterly_payload(shared, n_quarters=n_quarters)
         sess._quarterly_cache[cache_key] = shared
         return shared
 
     cached = sess._quarterly_cache.get(cache_key)
     if cached and cached.get("loaded") and cached.get("rows"):
+        cached = normalize_quarterly_payload(cached, n_quarters=n_quarters)
         return cached
 
     build_st = quarterly_build_status()
@@ -1476,6 +1461,7 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if job.get("status") == "ready":
         ready = job.get("result")
         if isinstance(ready, dict) and ready.get("loaded"):
+            ready = normalize_quarterly_payload(ready, n_quarters=n_quarters)
             sess._quarterly_cache[cache_key] = ready
             return ready
     if job.get("status") == "error":
@@ -1491,6 +1477,7 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
         n_quarters=n_quarters,
     )
     if result and result.get("loaded") and result.get("rows"):
+        result = normalize_quarterly_payload(result, n_quarters=n_quarters)
         sess._quarterly_cache[cache_key] = result
         return result
 
