@@ -1067,7 +1067,8 @@ export default function POEngine() {
     const rows = quarterly?.rows ?? []
     if (rows.length > 0 && quarterCols.length >= EXPECTED_QUARTER_COLS) return
     void loadQuarterlyForRun(poRunSeqRef.current)
-  }, [result?.ok, loading, quarterly?.rows, quarterCols.length])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- quarterly?.rows (array ref) replaced with length to avoid refiring on each new array identity
+  }, [result?.ok, loading, quarterly?.rows?.length, quarterCols.length])
 
   // ── PO tab rows ──
   const allRows = result?.rows ?? []
