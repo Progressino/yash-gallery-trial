@@ -2873,6 +2873,10 @@ def get_coverage(request: Request, light: bool = False):
             _main.restore_po_sidecars_from_warm(sess)
         except Exception:
             pass
+        try:
+            _ensure_return_overlay_hydrated(sess)
+        except Exception:
+            pass
         _maybe_queue_light_session_hydrate(sess, sid or None)
         _maybe_queue_full_restore_when_empty(sess, sid or None)
         return _build_coverage_response(sess)

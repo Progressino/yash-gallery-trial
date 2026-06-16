@@ -87,8 +87,10 @@ def test_load_history_for_restore_skips_network_when_disk_sufficient(monkeypatch
     assert "no GitHub download" in msg
 
 
-def test_union_history_dicts_keeps_largest_frame():
+def test_union_history_dicts_merges_both_frames():
     small = pd.DataFrame({"a": [1]})
     big = pd.DataFrame({"a": range(100)})
     out = gh._union_history_dicts({"mtr_df": small}, {"mtr_df": big})
-    assert len(out["mtr_df"]) == 100
+    # _union_history_dicts unions all frames (not just keeps the largest),
+    # so result has all distinct rows from both inputs.
+    assert len(out["mtr_df"]) == 101
