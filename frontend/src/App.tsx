@@ -9,7 +9,7 @@ import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
-import { canSkipHeavyServerRestore, operationalDataComplete, readLocalSessionHint } from './lib/localSessionHint'
+import { canSkipHeavyServerRestore, operationalDataComplete, operationalDataLoadedCount, readLocalSessionHint } from './lib/localSessionHint'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
@@ -163,7 +163,9 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
-  const dataStillLoading = useSession((s) => !operationalDataComplete(s))
+  const coverage = useSession(s => s)
+  const dataStillLoading = !operationalDataComplete(coverage)
+  const dataLoadCount = operationalDataLoadedCount(coverage)
 
   if (isLoading && !cachedUser) {
     return (
@@ -205,7 +207,7 @@ function ProtectedRoute() {
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
           </svg>
-          Loading all datasets from server (8/8)…
+          Loading all datasets from server ({dataLoadCount.loaded}/{dataLoadCount.total})…
         </div>
       )}
       <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>

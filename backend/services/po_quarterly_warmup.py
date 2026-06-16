@@ -11,11 +11,92 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 7
+QUARTERLY_CACHE_SCHEMA = 8
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
     return (QUARTERLY_CACHE_SCHEMA, bool(group_by_parent), int(n_quarters))
+
+
+_QUARTER_META_COLS = frozenset(
+    {"OMS_SKU", "Avg_Monthly", "Units_90d", "Units_30d", "Freq_30d", "ADS", "Status"}
+)
+
+
+def expected_quarter_columns(n_quarters: int = 8) -> list[str]:
+    """Oldest → newest quarter labels (matches calculate_quarterly_history pivot)."""
+    from .po_engine import get_indian_fy_quarter, quarter_col_name
+
+    today = pd.Timestamp.today()
+    cur_fy, cur_q = get_indian_fy_quarter(today)
+    quarter_seq: list[str] = []
+    fy_i, q_i = cur_fy, cur_q
+    for _ in range(int(n_quarters)):
+        quarter_seq.append(quarter_col_name(fy_i, q_i))
+        q_i -= 1
+        if q_i == 0:
+            q_i = 4
+            fy_i -= 1
+    quarter_seq.reverse()
+    return quarter_seq
+
+
+def _canonical_quarter_label(label: str) -> str:
+    """Normalize en/em dashes so ``Apr–Jun 2026`` maps to ``Apr-Jun 2026``."""
+    import re
+
+    s = str(label or "").strip()
+    s = re.sub(r"[-–—]", "-", s)
+    return s
+
+
+def normalize_quarterly_payload(
+    payload: dict[str, Any], *, n_quarters: int = 8
+) -> dict[str, Any]:
+    """Ensure every row has all ``n_quarters`` history columns (zeros if missing)."""
+    if not isinstance(payload, dict) or not payload.get("loaded"):
+        return payload
+    rows = payload.get("rows") or []
+    if not rows:
+        return payload
+
+    expected = expected_quarter_columns(n_quarters)
+    existing_cols = list(payload.get("columns") or [])
+    if not existing_cols and rows:
+        existing_cols = list(rows[0].keys())
+
+    # Map alternate dash spellings → canonical expected labels.
+    alias: dict[str, str] = {}
+    for col in existing_cols:
+        canon = _canonical_quarter_label(col)
+        for exp in expected:
+            if _canonical_quarter_label(exp) == canon:
+                alias[col] = exp
+                break
+
+    meta = [
+        c
+        for c in existing_cols
+        if c not in alias and c not in expected and c not in _QUARTER_META_COLS
+    ]
+    out_cols = ["OMS_SKU"] + expected + [
+        c for c in _QUARTER_META_COLS if c != "OMS_SKU" and c in existing_cols
+    ]
+    for m in meta:
+        if m not in out_cols:
+            out_cols.append(m)
+
+    norm_rows: list[dict[str, Any]] = []
+    for row in rows:
+        nr: dict[str, Any] = dict(row)
+        for src, dst in alias.items():
+            if src in nr and dst not in nr:
+                nr[dst] = nr[src]
+        for col in expected:
+            nr[col] = int(nr.get(col, 0) or 0)
+        norm_rows.append(nr)
+
+    return {**payload, "columns": out_cols, "rows": norm_rows}
 
 
 _PLATFORM_ATTRS = (
@@ -116,14 +197,15 @@ def _pivot_from_session_frames(
     )
 
 
-def _pivot_to_payload(pivot: pd.DataFrame) -> dict[str, Any]:
+def _pivot_to_payload(pivot: pd.DataFrame, *, n_quarters: int = 8) -> dict[str, Any]:
     if pivot is None or pivot.empty:
         return {"loaded": False, "rows": []}
-    return {
+    payload = {
         "loaded": True,
         "columns": list(pivot.columns),
         "rows": pivot.fillna(0).to_dict("records"),
     }
+    return normalize_quarterly_payload(payload, n_quarters=n_quarters)
 
 
 def _build_via_streaming(
@@ -147,7 +229,7 @@ def _build_via_streaming(
             n_quarters=n_quarters,
             progress_cb=progress_cb,
         )
-        return _pivot_to_payload(pivot)
+        return _pivot_to_payload(pivot, n_quarters=n_quarters)
 
     if not acquire_memory_lock:
         return _run()
@@ -177,6 +259,7 @@ def build_quarterly_payload(
     plat_span = platform_frames_span_days(sess)
     has_plat = _session_has_platform_rows(sess)
     sales_span = sales_df_span_days(getattr(sess, "sales_df", None))
+    span_ok = plat_span >= min_span - 60 or sales_span >= min_span - 60
 
     if has_plat and plat_span >= min_span - 60:
         if progress_cb:
@@ -187,17 +270,19 @@ def build_quarterly_payload(
             n_quarters=n_quarters,
             include_sales=False,
         )
-        out = _pivot_to_payload(pivot)
+        out = _pivot_to_payload(pivot, n_quarters=n_quarters)
         if out.get("loaded") and out.get("rows"):
             return out
 
-    if has_plat or sales_span > 0:
+    # Do not use a short session window — it yields empty older quarters and
+    # blocks the Tier-3 streaming path that has full FY history.
+    if span_ok and (has_plat or sales_span > 0):
         if progress_cb:
             progress_cb(25, "Using session sales history…")
         pivot = _pivot_from_session_frames(
             sess, group_by_parent=group_by_parent, n_quarters=n_quarters
         )
-        out = _pivot_to_payload(pivot)
+        out = _pivot_to_payload(pivot, n_quarters=n_quarters)
         if out.get("loaded") and out.get("rows"):
             return out
 

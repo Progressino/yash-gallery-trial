@@ -25,6 +25,7 @@ import {
 } from '../components/POFormulaModal'
 import type { POFormulaContext } from '../lib/poFormulaHelp'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
+import { operationalDataComplete, operationalDataLoadedCount } from '../lib/localSessionHint'
 import { archivePoExportOnServer } from '../lib/archivePoExport'
 import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
 
@@ -306,9 +307,12 @@ export default function POEngine() {
   const dailyInvRows = useSession(s => s.daily_inventory_history_rows ?? 0)
   const dailyInvSkus = useSession(s => s.daily_inventory_history_skus ?? 0)
   const raiseLedgerRows = useSession(s => s.po_raise_ledger_rows ?? 0)
+  const dataReady = useSession(s => operationalDataComplete(s))
+  const dataLoadCount = useSession(s => operationalDataLoadedCount(s))
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
 
   const PO_MERGE_VERSION_KEY = 'po-merge-version-seen'
+  const mergeAutoRef = useRef(false)
 
   useEffect(() => {
     api
@@ -715,6 +719,13 @@ export default function POEngine() {
   const run = async (isRetry = false) => {
     const seq = ++poRunSeqRef.current
     if (!isRetry) poStaleRetryRef.current = false
+    if (!dataReady) {
+      setResult({
+        ok: false,
+        message: `Server data is still loading (${dataLoadCount.loaded}/${dataLoadCount.total} datasets). Wait until the sidebar shows 8/8, then click Calculate PO again.`,
+      })
+      return
+    }
     setLoading(true)
     setPoProgress(isRetry ? 'PO calculation stalled — restarting automatically…' : 'Starting PO calculation…')
     setPoProgressPct(2)
@@ -777,9 +788,9 @@ export default function POEngine() {
     void loadQuarterlyForRun(seq)
   }
 
-  /** After a PO-engine deploy, auto-load today's shared cache (replaces stale session tables). */
+  /** After a PO-engine deploy, auto-load today's shared cache once data is ready. */
   useEffect(() => {
-    if (activeTab !== 'po' || loading) return
+    if (activeTab !== 'po' || !dataReady || mergeAutoRef.current) return
     let cancelled = false
     ;(async () => {
       try {
@@ -788,6 +799,7 @@ export default function POEngine() {
         if (!ver || cancelled) return
         const seen = Number(sessionStorage.getItem(PO_MERGE_VERSION_KEY) || 0)
         if (seen >= ver) return
+        mergeAutoRef.current = true
         const seq = ++poRunSeqRef.current
         const hasTable = Boolean(result?.ok && (result.rows?.length ?? 0) > 0)
         if (!hasTable) {
@@ -829,7 +841,7 @@ export default function POEngine() {
     })()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh once per po_merge_version bump
-  }, [activeTab, loading])
+  }, [activeTab, dataReady])
 
   const confirmRaiseAndExport = async (rows: Array<PORow & { Final_PO_Qty: number }>) => {
     setRaiseConfirmErr(null)
@@ -1506,7 +1518,7 @@ export default function POEngine() {
                 <button
                   type="button"
                   onClick={() => void run()}
-                  disabled={loading}
+                  disabled={loading || !dataReady}
                   className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-50"
                 >
                   {loading ? '⏳ Running PO…' : '🎯 Calculate PO'}
@@ -1523,6 +1535,11 @@ export default function POEngine() {
               <p className="text-[11px] text-slate-700 bg-slate-50 border border-slate-200 rounded px-2 py-1.5">
                 PO recommendations are now computed from app data only (sales, inventory, returns, and raise ledger).
               </p>
+              {!dataReady ? (
+                <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 font-medium">
+                  Server data is loading ({dataLoadCount.loaded}/{dataLoadCount.total} datasets). PO calculation unlocks when the sidebar shows <strong>8/8</strong>.
+                </p>
+              ) : null}
               {loading && (
                 <div className="mt-2 space-y-1 max-w-md">
                   <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">

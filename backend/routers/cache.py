@@ -441,7 +441,7 @@ def cache_hydrate_warm(request: Request):
             sess._warm_cache_only = True
             sess._quarterly_cache.clear()
             resume_auto_data_restore(sess)
-            n_sales = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
+            n_sales = _rebuild_sales_in_session(sess)
             n_mtr = len(sess.mtr_df) if hasattr(sess.mtr_df, "__len__") else 0
             try:
                 from ..services.github_cache import warm_cache_needs_full_rebuild

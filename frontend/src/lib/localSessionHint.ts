@@ -89,17 +89,26 @@ export function clearLocalSessionHint(): void {
   }
 }
 
+const OPERATIONAL_DATASET_KEYS = [
+  'sku_mapping',
+  'mtr',
+  'sales',
+  'inventory',
+  'myntra',
+  'meesho',
+  'flipkart',
+  'snapdeal',
+] as const
+
+export function operationalDataLoadedCount(c: CoverageResponse): { loaded: number; total: number } {
+  const total = OPERATIONAL_DATASET_KEYS.length
+  const loaded = OPERATIONAL_DATASET_KEYS.filter(k => Boolean(c[k])).length
+  return { loaded, total }
+}
+
 export function operationalDataComplete(c: CoverageResponse): boolean {
-  return !!(
-    c.sku_mapping &&
-    c.sales &&
-    c.inventory &&
-    c.mtr &&
-    c.myntra &&
-    c.meesho &&
-    c.flipkart &&
-    c.snapdeal
-  )
+  const { loaded, total } = operationalDataLoadedCount(c)
+  return loaded === total
 }
 
 /** True when we can skip GitHub hydrate + full cache download on login. */

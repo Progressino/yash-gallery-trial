@@ -47,7 +47,8 @@ def test_light_coverage_skips_heavy_restore(client, auth_token, monkeypatch):
     assert r.status_code == 200, r.text
     assert elapsed < 5.0
     assert called["restore"] is False
-    assert called["rebuild"] is False
+    # Sales rebuild on light coverage is in-memory only (not Tier-3 restore).
+    assert called["rebuild"] is True
     _hydrate_queued.clear()
 
 
@@ -86,5 +87,51 @@ def test_light_coverage_applies_warm_cache_when_session_empty(client, auth_token
     sess = store.get(sid)
     assert sess is not None
     assert not sess.mtr_df.empty
+    assert not sess.sales_df.empty
+    main_mod.clear_warm_cache()
+
+
+def test_light_coverage_rebuilds_sales_when_platforms_only(client, auth_token, monkeypatch):
+    """When warm cache copies platforms but sales_df is empty, light coverage rebuilds sales."""
+    import pandas as pd
+
+    import backend.main as main_mod
+    from backend.session import store
+
+    main_mod._warm_cache = {
+        "sku_mapping": {"SKU-A": "SKU-A"},
+        "mtr_df": pd.DataFrame({"SKU": ["SKU-A"], "Quantity": [3], "Date": pd.to_datetime(["2026-01-15"]), "Transaction_Type": ["Shipment"]}),
+        "myntra_df": pd.DataFrame(),
+        "meesho_df": pd.DataFrame(),
+        "flipkart_df": pd.DataFrame(),
+        "snapdeal_df": pd.DataFrame(),
+        "inventory_df_variant": pd.DataFrame({"OMS_SKU": ["SKU-A"], "Total_Inventory": [5]}),
+        "inventory_df_parent": pd.DataFrame(),
+    }
+    main_mod._warm_cache_generation = 4
+    main_mod._warm_cache_ready.set()
+    monkeypatch.setattr("backend.routers.data._maybe_queue_light_session_hydrate", lambda *_a, **_k: None)
+
+    def _fake_rebuild(sess):
+        sess.sales_df = pd.DataFrame(
+            {
+                "Sku": ["SKU-A"],
+                "Quantity": [3],
+                "TxnDate": pd.to_datetime(["2026-01-15"]),
+                "Transaction Type": ["Shipment"],
+            }
+        )
+
+    monkeypatch.setattr("backend.routers.data._ensure_sales_rebuilt", _fake_rebuild)
+
+    r = client.get("/api/data/coverage", params={"light": "1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("sales") is True
+    assert int(body.get("sales_rows") or 0) > 0
+
+    sid = client.cookies.get("session_id")
+    sess = store.get(sid)
+    assert sess is not None
     assert not sess.sales_df.empty
     main_mod.clear_warm_cache()

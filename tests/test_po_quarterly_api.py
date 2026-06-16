@@ -13,8 +13,8 @@ from backend.services.po_quarterly_warmup import (
 )
 
 
-def test_quarterly_cache_schema_v7():
-    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 7
+def test_quarterly_cache_schema_v8():
+    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 8
 
 
 def test_quarterly_report_window_covers_eight_quarters():

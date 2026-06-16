@@ -19,9 +19,14 @@ _DISK_CACHE_DIR = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
 
 
 def _disk_path(key: tuple) -> str:
-    group_by_parent, n_quarters = key[0], key[1]
+    """Key is ``(schema_version, group_by_parent, n_quarters)`` from quarterly_cache_key."""
+    if len(key) >= 3:
+        schema, group_by_parent, n_quarters = key[0], key[1], key[2]
+    else:
+        schema, group_by_parent, n_quarters = 0, key[0], key[1]
     return os.path.join(
-        _DISK_CACHE_DIR, f"quarterly_{int(bool(group_by_parent))}_{int(n_quarters)}.json"
+        _DISK_CACHE_DIR,
+        f"quarterly_v{int(schema)}_{int(bool(group_by_parent))}_{int(n_quarters)}.json",
     )
 
 
@@ -83,10 +88,21 @@ def invalidate_shared_quarterly() -> None:
 def get_shared_quarterly(key: tuple) -> Optional[dict[str, Any]]:
     with _lock:
         row = _payloads.get(key)
-        return dict(row) if row else None
+        if row:
+            return dict(row)
+    payload = load_shared_quarterly_from_disk(key)
+    if payload:
+        with _lock:
+            _payloads[key] = payload
+        return dict(payload)
+    return None
 
 
 def store_shared_quarterly(key: tuple, payload: dict[str, Any]) -> None:
+    from .po_quarterly_warmup import normalize_quarterly_payload
+
+    n_q = int(key[2]) if len(key) >= 3 else 8
+    payload = normalize_quarterly_payload(payload, n_quarters=n_q)
     with _lock:
         _payloads[key] = payload
     save_shared_quarterly_to_disk(key, payload)
