@@ -444,12 +444,30 @@ def cache_hydrate_warm(request: Request):
             n_sales = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
             n_mtr = len(sess.mtr_df) if hasattr(sess.mtr_df, "__len__") else 0
             try:
-                from ..services.github_cache import warm_cache_stale_vs_github, load_history_for_restore
+                from ..services.github_cache import warm_cache_needs_full_rebuild, load_history_for_restore
                 from ..services.daily_store import merge_platform_data
 
-                stale = warm_cache_stale_vs_github(_main._warm_cache or {})
+                stale = warm_cache_needs_full_rebuild(_main._warm_cache or {})
                 if stale:
-                    _log.warning("hydrate-warm: warm cache stale (%s) — merging GitHub bulk into session", stale)
+                    _log.warning("hydrate-warm: cache stale (%s) — loading full Tier-3 / GitHub into session", stale)
+                    try:
+                        from ..services.daily_store import load_platform_data
+
+                        for _plat, _attr in (
+                            ("amazon", "mtr_df"),
+                            ("myntra", "myntra_df"),
+                            ("meesho", "meesho_df"),
+                            ("flipkart", "flipkart_df"),
+                            ("snapdeal", "snapdeal_df"),
+                        ):
+                            t3 = load_platform_data(_plat, months=None, dedup=False)
+                            if t3 is None or not hasattr(t3, "empty") or t3.empty:
+                                continue
+                            cur = getattr(sess, _attr, None)
+                            if cur is None or not hasattr(cur, "__len__") or len(t3) > len(cur):
+                                setattr(sess, _attr, t3 if cur is None or not hasattr(cur, "__len__") or not len(cur) else merge_platform_data(cur, t3, _plat))
+                    except Exception:
+                        _log.exception("hydrate-warm Tier-3 platform top-up failed")
                     _ok, _msg, loaded, _used = load_history_for_restore()
                     if loaded:
                         for _plat, _attr in (

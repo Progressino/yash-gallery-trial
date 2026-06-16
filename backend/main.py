@@ -561,9 +561,9 @@ def _disk_cache_corruption_reason(disk_data: dict) -> str | None:
                 f"(hard min {_DISK_CACHE_HARD_MIN_ROWS}) — all platform frames empty"
             )
     try:
-        from .services.github_cache import warm_cache_stale_vs_github
+        from .services.github_cache import warm_cache_needs_full_rebuild
 
-        _stale = warm_cache_stale_vs_github(disk_data)
+        _stale = warm_cache_needs_full_rebuild(disk_data)
         if _stale:
             return _stale
     except Exception:
@@ -579,6 +579,88 @@ def _skip_phase2_when_disk_fresh() -> bool:
         "no",
         "off",
     )
+
+
+def _rebuild_warm_cache_from_tier3_full() -> bool:
+    """Rebuild ``_warm_cache`` platform frames from full Tier-3 SQLite history."""
+    global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
+    from .services.daily_store import load_platform_data
+    from .services.sales import build_sales_df
+    import pandas as pd
+
+    plat_keys = (
+        ("amazon", "mtr_df"),
+        ("myntra", "myntra_df"),
+        ("meesho", "meesho_df"),
+        ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
+    )
+    if not _warm_cache:
+        _warm_cache = {}
+    counts: dict[str, int] = {}
+    for plat, key in plat_keys:
+        df = load_platform_data(plat, months=None, dedup=False)
+        if df is not None and hasattr(df, "empty") and not df.empty:
+            _warm_cache[key] = df
+            counts[key] = len(df)
+    if counts.get("mtr_df", 0) < 100_000:
+        log.warning("Tier-3 full rebuild: amazon only has %s rows — aborting", counts.get("mtr_df", 0))
+        return False
+    # Preserve inventory / SKU / platform frames from disk when Tier-3 does not carry them
+    # or when disk still holds more rows (e.g. Snapdeal history not fully in Tier-3).
+    disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
+    if disk_ok and disk_data:
+        for key in (
+            "sku_mapping",
+            "inventory_df_variant",
+            "inventory_df_parent",
+            *tuple(k for _, k in plat_keys),
+        ):
+            val = disk_data.get(key)
+            if val is None:
+                continue
+            if key == "sku_mapping" and isinstance(val, dict) and val:
+                _warm_cache[key] = val
+            elif hasattr(val, "empty") and not val.empty:
+                cur = _warm_cache.get(key)
+                if cur is None or not hasattr(cur, "empty") or cur.empty or len(val) > len(cur):
+                    _warm_cache[key] = val
+    try:
+        from .services.sku_mapping import bundled_master_mapping
+
+        if not _warm_cache.get("sku_mapping"):
+            _warm_cache["sku_mapping"] = bundled_master_mapping()
+    except Exception:
+        pass
+    try:
+        _warm_cache["sales_df"] = build_sales_df(
+            mtr_df=_warm_cache.get("mtr_df", pd.DataFrame()),
+            myntra_df=_warm_cache.get("myntra_df", pd.DataFrame()),
+            meesho_df=_warm_cache.get("meesho_df", pd.DataFrame()),
+            flipkart_df=_warm_cache.get("flipkart_df", pd.DataFrame()),
+            snapdeal_df=_warm_cache.get("snapdeal_df", pd.DataFrame()),
+            sku_mapping=_warm_cache.get("sku_mapping") or {},
+        )
+    except Exception:
+        log.exception("Tier-3 full rebuild: sales_df build failed")
+        _warm_cache["sales_df"] = pd.DataFrame()
+    _warm_cache_loaded_at = datetime.now(IST)
+    _warm_cache_generation += 1
+    _warm_cache_ready.set()
+    log.warning(
+        "Warm-cache rebuilt from Tier-3 SQLite: mtr=%s myntra=%s meesho=%s flipkart=%s snapdeal=%s sales=%s",
+        counts.get("mtr_df", 0),
+        counts.get("myntra_df", 0),
+        counts.get("meesho_df", 0),
+        counts.get("flipkart_df", 0),
+        len(_warm_cache.get("snapdeal_df", pd.DataFrame())),
+        len(_warm_cache.get("sales_df", pd.DataFrame())),
+    )
+    try:
+        _save_warm_cache_to_disk(_warm_cache)
+    except Exception:
+        log.exception("Tier-3 full rebuild: disk save failed")
+    return True
 
 
 def _merge_recent_sqlite_into_warm_cache(months: int = 4) -> None:
@@ -962,9 +1044,9 @@ def _do_load_warm_cache() -> bool:
                     _p0_total = _warm_total_platform_rows(disk_data)
                     _stale_vs_gh = None
                     try:
-                        from .services.github_cache import warm_cache_stale_vs_github
+                        from .services.github_cache import warm_cache_needs_full_rebuild
 
-                        _stale_vs_gh = warm_cache_stale_vs_github(disk_data)
+                        _stale_vs_gh = warm_cache_needs_full_rebuild(disk_data)
                     except Exception:
                         pass
                     if (
@@ -1012,11 +1094,16 @@ def _do_load_warm_cache() -> bool:
         if _corrupt_reason:
             log.warning(
                 "Warm-cache Phase 0: %s. Treating disk cache as corrupt — "
-                "forcing Phase 2 rebuild from GitHub.",
+                "forcing Tier-3 / GitHub rebuild.",
                 _corrupt_reason,
             )
             disk_ok = False
             disk_data = {}
+            try:
+                if _rebuild_warm_cache_from_tier3_full():
+                    return True
+            except Exception:
+                log.exception("Tier-3 full warm-cache rebuild failed — falling back to GitHub Phase 2")
         if disk_ok and disk_data:
             _warm_cache = disk_data
             _warm_cache_loaded_at = datetime.now(IST)
@@ -1114,9 +1201,9 @@ def _do_load_warm_cache() -> bool:
         if disk_ok and disk_data and _skip_phase2_when_disk_fresh():
             _skip_p2_stale = None
             try:
-                from .services.github_cache import warm_cache_stale_vs_github
+                from .services.github_cache import warm_cache_needs_full_rebuild
 
-                _skip_p2_stale = warm_cache_stale_vs_github(disk_data)
+                _skip_p2_stale = warm_cache_needs_full_rebuild(disk_data)
             except Exception:
                 pass
             if not _skip_p2_stale:

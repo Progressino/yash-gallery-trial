@@ -130,3 +130,47 @@ def test_partial_disk_cache_stale_vs_github_forces_rebuild(monkeypatch):
     reason = main._disk_cache_corruption_reason(partial)
     assert reason is not None
     assert "GitHub" in reason
+
+
+def test_warm_cache_stale_vs_tier3_detects_gap(monkeypatch):
+    from backend.services import github_cache as gh
+
+    import backend.services.daily_store as ds
+
+    monkeypatch.setattr(
+        ds,
+        "get_summary",
+        lambda: {
+            "amazon": {"total_rows": 1_191_815},
+            "myntra": {"total_rows": 190_954},
+        },
+    )
+    partial = {
+        "mtr_df": pd.DataFrame({"OMS_SKU": ["A1"] * 190_555}),
+        "myntra_df": pd.DataFrame({"OMS_SKU": ["B"] * 80_000}),
+    }
+    reason = gh.warm_cache_stale_vs_tier3(partial)
+    assert reason is not None
+    assert "Tier-3" in reason
+    assert "mtr_df" in reason
+
+
+def test_warm_cache_stale_vs_tier3_flags_myntra_gap(monkeypatch):
+    from backend.services import github_cache as gh
+    import backend.services.daily_store as ds
+
+    monkeypatch.setattr(
+        ds,
+        "get_summary",
+        lambda: {
+            "amazon": {"total_rows": 1_200_000},
+            "myntra": {"total_rows": 190_954},
+        },
+    )
+    cache = {
+        "mtr_df": pd.DataFrame({"OMS_SKU": ["A1"] * 1_200_000}),
+        "myntra_df": pd.DataFrame({"OMS_SKU": ["B"] * 80_000}),
+    }
+    reason = gh.warm_cache_stale_vs_tier3(cache)
+    assert reason is not None
+    assert "myntra_df" in reason

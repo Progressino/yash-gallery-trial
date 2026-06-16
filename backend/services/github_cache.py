@@ -65,6 +65,15 @@ _GITHUB_DOWNLOAD_WORKERS = max(4, min(16, int(os.environ.get("GITHUB_DOWNLOAD_WO
 # Disk/warm cache with fewer rows than this fraction of GitHub manifest → force Phase-2 rebuild.
 _GITHUB_GAP_RATIO = float(os.environ.get("WARM_CACHE_GITHUB_GAP_RATIO", "0.85"))
 
+_WARM_PLATFORM_PAIRS: tuple[tuple[str, str], ...] = (
+    ("amazon", "mtr_df"),
+    ("myntra", "myntra_df"),
+    ("meesho", "meesho_df"),
+    ("flipkart", "flipkart_df"),
+    ("snapdeal", "snapdeal_df"),
+)
+_WARM_PLATFORM_KEYS: tuple[str, ...] = tuple(k for _, k in _WARM_PLATFORM_PAIRS)
+
 
 def github_manifest_row_counts() -> dict[str, int]:
     manifest = get_cache_manifest()
@@ -87,11 +96,38 @@ def cache_row_gap_vs_github(cache: dict, key: str = "mtr_df") -> tuple[int, int]
 
 
 def warm_cache_stale_vs_github(cache: dict) -> str | None:
-    gap = cache_row_gap_vs_github(cache, "mtr_df")
-    if gap:
-        have, want = gap
-        return f"mtr_df has {have:,} rows but GitHub cache has {want:,}"
+    for key in _WARM_PLATFORM_KEYS:
+        gap = cache_row_gap_vs_github(cache, key)
+        if gap:
+            have, want = gap
+            return f"{key} has {have:,} rows but GitHub cache has {want:,}"
     return None
+
+
+def warm_cache_stale_vs_tier3(cache: dict) -> str | None:
+    """Compare warm/disk cache to Tier-3 SQLite totals (source of truth when GitHub was overwritten)."""
+    try:
+        from .daily_store import get_summary
+
+        summary = get_summary()
+        if not summary:
+            return None
+        for plat, key in _WARM_PLATFORM_PAIRS:
+            want = int((summary.get(plat) or {}).get("total_rows") or 0)
+            if want < 1_000:
+                continue
+            df = cache.get(key)
+            have = len(df) if df is not None and hasattr(df, "__len__") else 0
+            if have < want * _GITHUB_GAP_RATIO:
+                return f"{key} has {have:,} rows but Tier-3 SQLite has {want:,}"
+    except Exception:
+        return None
+    return None
+
+
+def warm_cache_needs_full_rebuild(cache: dict) -> str | None:
+    """Return reason when cache is materially below GitHub and/or Tier-3 history."""
+    return warm_cache_stale_vs_tier3(cache) or warm_cache_stale_vs_github(cache)
 
 def _gh_headers() -> Optional[Dict[str, str]]:
     token = os.environ.get("GITHUB_TOKEN")
