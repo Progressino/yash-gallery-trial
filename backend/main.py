@@ -144,6 +144,28 @@ def bootstrap_warm_cache_from_disk_if_empty() -> bool:
     return True
 
 
+def try_fast_warm_cache_hydrate(sess) -> bool:
+    """Copy shared warm cache into an empty session — used on light coverage / hard refresh."""
+    if sess is None:
+        return False
+    if getattr(sess, "pause_auto_data_restore", False) and not session_needs_operational_data(sess):
+        return False
+    if not _warm_cache:
+        bootstrap_warm_cache_from_disk_if_empty()
+    if not _warm_cache:
+        _warm_cache_ready.wait(timeout=2.0)
+    if not _warm_cache:
+        bootstrap_warm_cache_from_disk_if_empty()
+    if not _warm_cache:
+        return False
+    try:
+        if not session_needs_warm_cache_topup(sess) and not session_needs_operational_data(sess):
+            return False
+    except Exception:
+        pass
+    return _apply_warm_cache_if_needed(sess, _warm_cache_generation)
+
+
 def publish_warm_cache_from_session(sess) -> None:
     """Merge session data into ``_warm_cache`` without dropping bulk platform history.
 
@@ -2021,6 +2043,10 @@ async def session_middleware(request: Request, call_next):
     if _session_coverage_light(path, request.method, request.url.query or ""):
         sid = request.cookies.get(SESSION_COOKIE)
         sid, session = await run_aux(store.get_or_empty, sid)
+        try:
+            await run_aux(try_fast_warm_cache_hydrate, session)
+        except Exception:
+            log.exception("fast warm-cache hydrate on light coverage failed")
         request.state.session_id = sid
         request.state.session = session
         setattr(session, "_persist_sid", sid)

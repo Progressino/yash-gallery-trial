@@ -822,8 +822,8 @@ export default function Upload() {
             </p>
           ) : (
             <p>
-              <strong>Data is loading…</strong> The server copies shared history into your session (may take up to a minute
-              after login). If rows stay empty, click <strong>Load Cache</strong> in the sidebar or refresh the page.
+              <strong>Data is loading…</strong> The server copies shared history into your session (usually a few seconds
+              after refresh). If rows stay empty after a minute, click <strong>Load Cache</strong> in the sidebar.
             </p>
           )}
         </div>

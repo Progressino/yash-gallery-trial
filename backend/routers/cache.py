@@ -444,79 +444,18 @@ def cache_hydrate_warm(request: Request):
             n_sales = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
             n_mtr = len(sess.mtr_df) if hasattr(sess.mtr_df, "__len__") else 0
             try:
-                from ..services.github_cache import warm_cache_needs_full_rebuild, load_history_for_restore
-                from ..services.daily_store import merge_platform_data
+                from ..services.github_cache import warm_cache_needs_full_rebuild
+                from ..routers.data import _maybe_queue_light_session_hydrate
 
                 stale = warm_cache_needs_full_rebuild(_main._warm_cache or {})
                 if stale:
-                    _log.warning("hydrate-warm: cache stale (%s) — loading full Tier-3 / GitHub into session", stale)
-                    try:
-                        from ..services.daily_store import load_platform_data
-
-                        for _plat, _attr in (
-                            ("amazon", "mtr_df"),
-                            ("myntra", "myntra_df"),
-                            ("meesho", "meesho_df"),
-                            ("flipkart", "flipkart_df"),
-                            ("snapdeal", "snapdeal_df"),
-                        ):
-                            t3 = load_platform_data(_plat, months=None, dedup=False)
-                            if t3 is None or not hasattr(t3, "empty") or t3.empty:
-                                continue
-                            cur = getattr(sess, _attr, None)
-                            if cur is None or not hasattr(cur, "__len__") or len(t3) > len(cur):
-                                setattr(sess, _attr, t3 if cur is None or not hasattr(cur, "__len__") or not len(cur) else merge_platform_data(cur, t3, _plat))
-                    except Exception:
-                        _log.exception("hydrate-warm Tier-3 platform top-up failed")
-                    _ok, _msg, loaded, _used = load_history_for_restore()
-                    if loaded:
-                        for _plat, _attr in (
-                            ("amazon", "mtr_df"),
-                            ("myntra", "myntra_df"),
-                            ("meesho", "meesho_df"),
-                            ("flipkart", "flipkart_df"),
-                            ("snapdeal", "snapdeal_df"),
-                        ):
-                            gh = loaded.get(_attr)
-                            if gh is not None and hasattr(gh, "empty") and not gh.empty:
-                                cur = getattr(sess, _attr, None)
-                                merged = merge_platform_data(
-                                    cur if cur is not None else __import__("pandas").DataFrame(),
-                                    gh,
-                                    _plat,
-                                )
-                                setattr(sess, _attr, merged)
-                        sm = loaded.get("sku_mapping")
-                        if isinstance(sm, dict) and sm:
-                            sess.sku_mapping = {**sm, **(sess.sku_mapping or {})}
-                        for _ik in ("inventory_df_variant", "inventory_df_parent"):
-                            iv = loaded.get(_ik)
-                            if iv is not None and hasattr(iv, "empty") and not iv.empty:
-                                cur_iv = getattr(sess, _ik, None)
-                                if cur_iv is None or not hasattr(cur_iv, "__len__") or len(iv) > len(cur_iv):
-                                    setattr(sess, _ik, iv)
-                        try:
-                            from ..services.sales import build_sales_df
-                            from ..services.po_return_import import aggregate_return_overlay_for_use
-
-                            ov = aggregate_return_overlay_for_use(
-                                getattr(sess, "po_return_overlay_df", None)
-                            )
-                            sess.sales_df = build_sales_df(
-                                mtr_df=sess.mtr_df,
-                                myntra_df=sess.myntra_df,
-                                meesho_df=sess.meesho_df,
-                                flipkart_df=sess.flipkart_df,
-                                snapdeal_df=sess.snapdeal_df,
-                                sku_mapping=sess.sku_mapping,
-                                return_overlay_df=ov,
-                            )
-                        except Exception:
-                            _log.exception("hydrate-warm sales rebuild after GitHub merge failed")
-                        n_sales = len(sess.sales_df)
-                        n_mtr = len(sess.mtr_df)
+                    _log.warning(
+                        "hydrate-warm: deferring stale gap-fill to background (%s)",
+                        stale,
+                    )
+                _maybe_queue_light_session_hydrate(sess, sid)
             except Exception:
-                _log.exception("hydrate-warm GitHub gap merge failed")
+                _log.exception("hydrate-warm background queue failed")
             _log.info(
                 "hydrate-warm copy done session=%s sales=%s mtr=%s inv=%s",
                 sid[:8],

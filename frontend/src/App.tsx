@@ -114,21 +114,24 @@ function ProtectedRoute() {
           if (!coverageNeedsSync(coverage)) invalidateDataQueries(qc)
           return true
         }
+        if (operationalDataComplete(coverage)) {
+          invalidateDataQueries(qc)
+          return true
+        }
         if (coverageJobsRunning(coverage)) {
           return true
         }
         const hasAnyPlatform =
           coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart || coverage.snapdeal
-        const needsWarmHydrate = !operationalDataComplete(coverage)
-        if ((coverageEmpty(coverage) && !hasAnyPlatform) || needsWarmHydrate) {
+        if (!operationalDataComplete(coverage)) {
           try {
-            await waitForWarmCacheReady({ maxWaitMs: 180_000 })
-            for (let attempt = 0; attempt < 5; attempt++) {
-              await withTimeout(cacheHydrateWarm(), 120_000)
-              coverage = await getCoverage({ light: true, timeout: 45_000 })
-              setCoverage(coverage)
-              if (operationalDataComplete(coverage)) break
-              await waitForWarmCacheReady({ maxWaitMs: 30_000, pollMs: 4_000 })
+            await waitForWarmCacheReady({ maxWaitMs: 45_000, pollMs: 2_000 })
+            await withTimeout(cacheHydrateWarm(), 30_000)
+            coverage = await getCoverage({ light: true, timeout: 45_000 })
+            setCoverage(coverage)
+            if (operationalDataComplete(coverage)) {
+              invalidateDataQueries(qc)
+              return true
             }
           } catch {
             /* warm cache may still be starting after deploy */
@@ -147,7 +150,7 @@ function ProtectedRoute() {
           invalidateDataQueries(qc)
         }
         return true
-        })(), 180_000)
+        })(), 90_000)
       } catch {
         /* server busy during upload — coverage polling will retry */
       }

@@ -23,7 +23,7 @@ export default function CoverageProvider({
       if (
         !operationalDataComplete(c) &&
         !coverageJobsRunning(c) &&
-        Date.now() - lastHydrateAt.current > 25_000
+        Date.now() - lastHydrateAt.current > 60_000
       ) {
         lastHydrateAt.current = Date.now()
         try {

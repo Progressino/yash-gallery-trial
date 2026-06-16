@@ -2871,6 +2871,7 @@ def get_coverage(request: Request, light: bool = False):
             import backend.main as _main
 
             _main.restore_po_sidecars_from_warm(sess)
+            _main.try_fast_warm_cache_hydrate(sess)
         except Exception:
             pass
         try:
