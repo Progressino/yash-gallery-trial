@@ -96,13 +96,23 @@ def _should_prefer_sidecar_backup(
 
 
 def load_po_sidecar_backups_from_disk() -> dict[str, pd.DataFrame]:
-    """Best sku_status / daily_inventory snapshots from warm_cache + github_cache dirs."""
+    """Best sku_status / daily_inventory snapshots from warm_cache + github_cache dirs.
+
+    Only checks the primary warm-cache dir and the single most-recent GitHub blob-cache
+    subdirectory — scanning ALL blob-cache subdirs was O(N × files) and slow when many
+    manifests had accumulated (e.g. 50+ subdirs × 3 parquet reads each).
+    """
     out: dict[str, tuple[int, pd.DataFrame]] = {}
     dirs: list[Path] = [_warm_cache_dir()]
     blob_root = Path(os.environ.get("GITHUB_BLOB_CACHE_DIR", "/data/github_cache"))
     if blob_root.is_dir():
-        dirs.append(blob_root)
-        dirs.extend(sorted(blob_root.glob("*/"), reverse=True))
+        # Only add the most recent blob cache subdirectory, not all of them.
+        try:
+            latest_blob = max(blob_root.glob("*/"), key=lambda p: p.stat().st_mtime, default=None)
+            if latest_blob:
+                dirs.append(latest_blob)
+        except Exception:
+            pass
     recovery = (os.environ.get("WARM_CACHE_RECOVERY_DIR") or "").strip()
     if recovery:
         dirs.append(Path(recovery))
@@ -141,7 +151,14 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
     """Restore real SKU status + daily inventory matrix when placeholders overwrote them."""
     import backend.main as _main
 
-    backups = load_po_sidecar_backups_from_disk()
+    wc = _main._warm_cache or {}
+    # Skip the expensive disk scan if the warm cache already has non-placeholder sidecar
+    # data for all keys — the common fast path after a normal startup.
+    need_backups = any(
+        _sidecar_looks_placeholder(key, wc.get(key)) or _df_row_count(wc.get(key)) == 0
+        for key in _PO_SIDECAR_KEYS
+    )
+    backups = load_po_sidecar_backups_from_disk() if need_backups else {}
     if not _main._warm_cache:
         _main._warm_cache = {}
 
@@ -209,14 +226,25 @@ def _should_replace_warm_frame(cur: Any, incoming: Any) -> bool:
 
 
 def load_po_calc_essentials_from_disk() -> dict[str, Any]:
-    """Read PO-calculate frames + metadata from WARM_CACHE_DIR (ignores manifest age)."""
+    """Read PO-calculate frames + metadata from WARM_CACHE_DIR (ignores manifest age).
+
+    Previously this called _warm_cache_loose_parquets_from_dir which re-read ALL
+    platform parquets (mtr_df, myntra_df …) from disk on every PO calculate run,
+    even though they were already in the in-memory warm cache.  That caused the
+    "stuck at 3%" symptom — 5-9 large parquet reads blocking the PO executor thread.
+    Now: prefer the warm-cache copy; fall back to disk only when missing.
+    """
     import backend.main as _main
 
     disk_dir = _warm_cache_dir()
-    loaded: dict[str, Any] = dict(_main._warm_cache_loose_parquets_from_dir(disk_dir))
+    loaded: dict[str, Any] = {}
 
+    wc = _main._warm_cache or {}
     for key in _PO_CALC_PARQUET_KEYS:
-        if key in loaded:
+        # Use in-memory value when already loaded — avoids the disk read entirely.
+        mem = wc.get(key)
+        if mem is not None and hasattr(mem, "empty") and not mem.empty:
+            loaded[key] = mem
             continue
         path = disk_dir / f"{key}.parquet"
         if path.is_file():

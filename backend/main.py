@@ -667,20 +667,13 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                             continue
                     except Exception:
                         pass
-                try:
-                    from .services.github_cache import cache_row_gap_vs_github
-
-                    gap = cache_row_gap_vs_github({key: val}, key)
-                    if gap and gap[0] < gap[1] * 0.9:
-                        log.warning(
-                            "Warm-cache disk save skipped for %s: %d rows vs GitHub %d",
-                            key,
-                            gap[0],
-                            gap[1],
-                        )
-                        continue
-                except Exception:
-                    pass
+                # Note: do NOT check against the GitHub manifest row count here.
+                # The manifest stores pre-dedup counts; the warm cache holds post-dedup
+                # rows. Comparing them causes a false-positive "gap" that blocks the disk
+                # save permanently (Phase 2 downloads → dedup → 192K saved to GitHub
+                # manifest eventually, but the disk save never happens in the interim).
+                # The old-disk comparison above (new_rows < old_rows * 0.9) is the
+                # correct protection against accidentally overwriting with partial data.
                 _coerce_df_for_parquet(val).to_parquet(path, index=False)
                 saved.append(key)
         # Merge with existing manifest instead of overwriting — prevents partial
@@ -1244,17 +1237,17 @@ def _do_load_warm_cache() -> bool:
         # the GitHub cache may still carry those stale rows.
         try:
             from .services.daily_store import get_blocked_dates as _get_blocked_dates
-            # Merge the last 6 months from SQLite on top of the GitHub release data.
-            # GitHub already carries the full 2-year historical cache; we only need recent
-            # uploads (daily files from the last ~6 months) to be layered on top.
-            # months=None was previously needed to rebuild after cache corruption but caused
-            # loading 1.18M+ rows alongside the GitHub 980K rows = 5-6 GiB memory peak and
-            # autoheal restarts.  months=6 covers all practical daily upload scenarios while
-            # keeping Phase-2 memory under 3 GiB.
+            # Merge the last 24 months from SQLite on top of the GitHub release data.
+            # 24 months covers Tier-1 bulk-uploaded MTR history (multi-year ZIPs stored
+            # in SQLite). months=6 missed data older than 6 months; months=None risks OOM
+            # when SQLite carries decades of history. months=24 is the practical maximum
+            # for how far back Amazon MTR/Myntra PPMP ZIPs typically go, and is now safe
+            # because GitHub data is deduped before the merge (~200-400K rows vs the old
+            # 980K+ pre-dedup rows that caused 5-6 GiB peaks).
             daily = {
                 _p: _df
                 for _p in ("amazon", "myntra", "meesho", "flipkart", "snapdeal")
-                if not (_df := _load_plat(_p, months=6)).empty
+                if not (_df := _load_plat(_p, months=24)).empty
             }
             merged_any = False
             for plat, key in [
