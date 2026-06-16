@@ -100,10 +100,15 @@ const OPERATIONAL_DATASET_KEYS = [
   'snapdeal',
 ] as const
 
+export const OPERATIONAL_DATA_TOTAL = OPERATIONAL_DATASET_KEYS.length
+
+export function operationalDataLoaded(c: CoverageResponse): number {
+  return OPERATIONAL_DATASET_KEYS.filter(k => Boolean(c[k])).length
+}
+
+/** @deprecated Returns a new object on every call — use operationalDataLoaded() + OPERATIONAL_DATA_TOTAL instead to avoid useSyncExternalStore looping. */
 export function operationalDataLoadedCount(c: CoverageResponse): { loaded: number; total: number } {
-  const total = OPERATIONAL_DATASET_KEYS.length
-  const loaded = OPERATIONAL_DATASET_KEYS.filter(k => Boolean(c[k])).length
-  return { loaded, total }
+  return { loaded: operationalDataLoaded(c), total: OPERATIONAL_DATA_TOTAL }
 }
 
 export function operationalDataComplete(c: CoverageResponse): boolean {

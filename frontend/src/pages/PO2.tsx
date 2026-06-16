@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api, { startPoCalculate, type POCalculateResult } from '../api/client'
 import { calendarDateIST } from '../lib/dates'
-import { operationalDataComplete, operationalDataLoadedCount } from '../lib/localSessionHint'
+import { operationalDataComplete, operationalDataLoaded, OPERATIONAL_DATA_TOTAL } from '../lib/localSessionHint'
 import { useSession } from '../store/session'
 import { PO2_DEFAULT_PARAMS, usePO2Store, type PO2Row } from '../store/po2'
 
@@ -69,7 +69,8 @@ function downloadCsv(rows: PO2Row[], columns: string[]) {
 export default function PO2() {
   const { params, setParams } = usePO2Store()
   const dataReady = useSession(s => operationalDataComplete(s))
-  const dataLoad = useSession(s => operationalDataLoadedCount(s))
+  const dataLoadLoaded = useSession(s => operationalDataLoaded(s))
+  const dataLoadTotal = OPERATIONAL_DATA_TOTAL
 
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState('')
@@ -120,7 +121,7 @@ export default function PO2() {
     if (!dataReady) {
       setResult({
         ok: false,
-        message: `Data still loading (${dataLoad.loaded}/${dataLoad.total}). Wait for sidebar 8/8, then try again.`,
+        message: `Data still loading (${dataLoadLoaded}/${dataLoadTotal}). Wait for sidebar 8/8, then try again.`,
       })
       return
     }
@@ -144,7 +145,7 @@ export default function PO2() {
       setProgress('')
       setProgressPct(null)
     }
-  }, [dataReady, dataLoad.loaded, dataLoad.total, params])
+  }, [dataReady, dataLoadLoaded, dataLoadTotal, params])
 
   return (
     <div className="p-4 md:p-6 max-w-[100vw] space-y-5">
@@ -164,12 +165,12 @@ export default function PO2() {
 
       {!dataReady ? (
         <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          Loading server data ({dataLoad.loaded}/{dataLoad.total}). PO calculation unlocks at{' '}
+          Loading server data ({dataLoadLoaded}/{dataLoadTotal}). PO calculation unlocks at{' '}
           <strong>8/8</strong>. Use sidebar <strong>Load cache</strong> if this stays below 8/8.
         </div>
       ) : (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-          Data ready ({dataLoad.loaded}/{dataLoad.total}). You can calculate PO.
+          Data ready ({dataLoadLoaded}/{dataLoadTotal}). You can calculate PO.
         </div>
       )}
 

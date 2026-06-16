@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, memo, useRef, useLayoutEffect, useEffect, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, memo, useRef, useEffect, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams, Link } from 'react-router-dom'
 import axios from 'axios'
@@ -25,7 +25,7 @@ import {
 } from '../components/POFormulaModal'
 import type { POFormulaContext } from '../lib/poFormulaHelp'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
-import { operationalDataComplete, operationalDataLoadedCount } from '../lib/localSessionHint'
+import { operationalDataComplete, operationalDataLoaded, OPERATIONAL_DATA_TOTAL } from '../lib/localSessionHint'
 import { archivePoExportOnServer } from '../lib/archivePoExport'
 import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
 
@@ -310,7 +310,8 @@ export default function POEngine() {
   const dailyInvSkus = useSession(s => s.daily_inventory_history_skus ?? 0)
   const raiseLedgerRows = useSession(s => s.po_raise_ledger_rows ?? 0)
   const dataReady = useSession(s => operationalDataComplete(s))
-  const dataLoadCount = useSession(s => operationalDataLoadedCount(s))
+  const dataLoadLoaded = useSession(s => operationalDataLoaded(s))
+  const dataLoadTotal = OPERATIONAL_DATA_TOTAL
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
 
   const PO_MERGE_VERSION_KEY = 'po-merge-version-seen'
@@ -414,7 +415,7 @@ export default function POEngine() {
     }
   }, [searchParams, setActiveTab])
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     syncTabFromUrl()
   }, [syncTabFromUrl])
 
@@ -725,7 +726,7 @@ export default function POEngine() {
     if (!dataReady) {
       setResult({
         ok: false,
-        message: `Server data is still loading (${dataLoadCount.loaded}/${dataLoadCount.total} datasets). Wait until the sidebar shows 8/8, then click Calculate PO again.`,
+        message: `Server data is still loading (${dataLoadLoaded}/${dataLoadTotal} datasets). Wait until the sidebar shows 8/8, then click Calculate PO again.`,
       })
       return
     }
@@ -1542,7 +1543,7 @@ export default function POEngine() {
               </p>
               {!dataReady ? (
                 <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 font-medium">
-                  Server data is loading ({dataLoadCount.loaded}/{dataLoadCount.total} datasets). PO calculation unlocks when the sidebar shows <strong>8/8</strong>.
+                  Server data is loading ({dataLoadLoaded}/{dataLoadTotal} datasets). PO calculation unlocks when the sidebar shows <strong>8/8</strong>.
                 </p>
               ) : null}
               {loading && (

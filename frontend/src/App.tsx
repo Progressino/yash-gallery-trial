@@ -9,14 +9,14 @@ import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
-import { canSkipHeavyServerRestore, operationalDataComplete, operationalDataLoadedCount, readLocalSessionHint } from './lib/localSessionHint'
+import { canSkipHeavyServerRestore, operationalDataComplete, operationalDataLoaded, OPERATIONAL_DATA_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
-import POEngine from './pages/POEngine'
-import PO2 from './pages/PO2'
-
 const Dashboard   = lazy(() => import('./pages/Dashboard'))
+const POFresh     = lazy(() => import('./pages/POFresh'))
+const PO2         = lazy(() => import('./pages/PO2'))
+const POEngine    = lazy(() => import('./pages/POEngine'))
 const Upload      = lazy(() => import('./pages/Upload'))
 const MTR         = lazy(() => import('./pages/MTR'))
 const Myntra      = lazy(() => import('./pages/Myntra'))
@@ -206,9 +206,9 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
-  const coverage = useSession(s => s)
-  const dataStillLoading = !operationalDataComplete(coverage)
-  const dataLoadCount = operationalDataLoadedCount(coverage)
+  const dataStillLoading = useSession(s => !operationalDataComplete(s))
+  const dataLoadLoaded = useSession(s => operationalDataLoaded(s))
+  const dataLoadTotal = OPERATIONAL_DATA_TOTAL
 
   if (isLoading && !cachedUser) {
     return (
@@ -250,7 +250,7 @@ function ProtectedRoute() {
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
           </svg>
-          Loading all datasets from server ({dataLoadCount.loaded}/{dataLoadCount.total})…
+          Loading all datasets from server ({dataLoadLoaded}/{dataLoadTotal})…
         </div>
       )}
       <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>
@@ -284,10 +284,11 @@ export default function App() {
               <Route path="meesho"    element={<Meesho />} />
               <Route path="flipkart"  element={<Flipkart />} />
               <Route path="inventory" element={<Inventory />} />
+              <Route path="po-fresh" element={<POFresh />} />
               <Route path="po2" element={<PO2 />} />
-              <Route path="po" element={<Navigate to="/po2" replace />} />
+              <Route path="po" element={<Navigate to="/po-fresh" replace />} />
               <Route path="po-legacy" element={<POEngine />} />
-              <Route path="po-dashboard" element={<Navigate to="/po2" replace />} />
+              <Route path="po-dashboard" element={<Navigate to="/po-fresh" replace />} />
               <Route path="forecast"  element={<Forecast />} />
               <Route path="finance"   element={<Finance />} />
               <Route path="items"      element={<ItemMaster />} />
