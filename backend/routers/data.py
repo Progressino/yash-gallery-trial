@@ -2621,25 +2621,29 @@ def _server_has_recoverable_history() -> bool:
 
 
 def _maybe_queue_full_restore_when_empty(sess: AppSession, session_id: str | None) -> None:
+    """Queue fast warm-cache hydrate when session is empty — never auto-start slow GitHub restore."""
     if not session_id:
         return
     if getattr(sess, "pause_auto_data_restore", False):
+        return
+    if getattr(sess, "_auto_restore_queued", False):
         return
     try:
         import backend.main as _main
 
         if not _main.session_needs_operational_data(sess):
             return
+        if not _server_has_recoverable_history():
+            return
+        _main.bootstrap_warm_cache_from_disk_if_empty()
+        if _main._warm_cache:
+            _maybe_queue_light_session_hydrate(sess, session_id)
+            sess._auto_restore_queued = True
+            return
     except Exception:
-        return
-    if not _server_has_recoverable_history():
-        return
-    queue_session_restore_if_needed(
-        sess,
-        session_id,
-        reason="Auto-restore — session empty but server history is available…",
-    )
-    sess._auto_restore_queued = True
+        pass
+    # No warm cache in memory/disk — last resort full restore (GitHub), operator-triggered only.
+    # Do not auto-queue here; empty sessions rely on frontend hydrate-warm + coverage worker.
 
 
 def _run_session_restore_worker(session_id: str) -> None:
@@ -2777,9 +2781,16 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
             from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
 
             _main.restore_po_sidecars_from_warm(sess)
-            ensure_po_return_overlay_from_server(sess)
             if _main.session_needs_warm_cache_topup(sess):
-                if _main.session_needs_operational_data(sess):
+                if not _main._warm_cache:
+                    _main.bootstrap_warm_cache_from_disk_if_empty()
+                if _main._warm_cache:
+                    _main._copy_warm_cache_to_session(sess)
+                    sess._warm_cache_gen = int(
+                        getattr(_main, "_warm_cache_generation", 0) or 0
+                    )
+                    sess._warm_cache_only = True
+                elif _main.session_needs_operational_data(sess):
                     _main.force_restore_session_from_server_cache(
                         sess, _main._warm_cache_generation,
                     )
@@ -2789,6 +2800,12 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
                     )
         except Exception:
             _log.exception("light hydrate warm copy failed session=%s", session_id[:8])
+        try:
+            from backend.routers.cache import _persist_pg_session_bg
+
+            _persist_pg_session_bg(session_id, sess)
+        except Exception:
+            pass
         if not sess._daily_restore_lock.acquire(blocking=False):
             return
         try:

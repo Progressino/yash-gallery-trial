@@ -62,7 +62,7 @@ export function readLocalSessionHint(): LocalSessionHint | null {
 }
 
 export function persistLocalSessionHint(c: CoverageResponse): void {
-  if (!sessionLooksLoaded(c)) return
+  if (!operationalDataComplete(c)) return
   try {
     const hint: LocalSessionHint = {
       savedAt: Date.now(),

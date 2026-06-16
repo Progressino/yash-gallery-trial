@@ -449,6 +449,12 @@ def cache_hydrate_warm(request: Request):
                 len(sess.mtr_df),
                 len(sess.inventory_df_variant),
             )
+            try:
+                from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+                DAILY_UPLOAD_EXECUTOR.submit(_persist_pg_session_bg, sid, sess)
+            except Exception:
+                pass
             return CacheStatusResponse(
                 ok=True,
                 message=f"Loaded from warm cache ({n_sales:,} sales rows). Daily uploads merge in background.",

@@ -1,6 +1,8 @@
+import { useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getCoverage } from '../api/client'
-import { coveragePollIntervalMs } from '../lib/coverageJobs'
+import { cacheHydrateWarm, getCoverage } from '../api/client'
+import { coverageJobsRunning, coveragePollIntervalMs } from '../lib/coverageJobs'
+import { operationalDataComplete } from '../lib/localSessionHint'
 import { useSession } from '../store/session'
 
 /** Single shared coverage poll — replaces per-page duplicate intervals. */
@@ -12,11 +14,25 @@ export default function CoverageProvider({
   children: React.ReactNode
 }) {
   const setCoverage = useSession(s => s.setCoverage)
+  const lastHydrateAt = useRef(0)
 
   useQuery({
     queryKey: ['coverage-poll'],
     queryFn: async () => {
-      const c = await getCoverage({ light: true, timeout: 45_000 })
+      let c = await getCoverage({ light: true, timeout: 45_000 })
+      if (
+        !operationalDataComplete(c) &&
+        !coverageJobsRunning(c) &&
+        Date.now() - lastHydrateAt.current > 25_000
+      ) {
+        lastHydrateAt.current = Date.now()
+        try {
+          await cacheHydrateWarm()
+          c = await getCoverage({ light: true, timeout: 45_000 })
+        } catch {
+          /* server may be busy — next poll retries */
+        }
+      }
       setCoverage(c)
       return c
     },

@@ -111,18 +111,6 @@ function ProtectedRoute() {
         setCoverage(coverage)
         const localHint = readLocalSessionHint()
         if (canSkipHeavyServerRestore(coverage, localHint)) {
-          if (localHint?.sales && !coverage.sales) {
-            setCoverage({
-              ...coverage,
-              sales: true,
-              sales_rows: Math.max(coverage.sales_rows ?? 0, localHint.sales_rows ?? 0),
-            })
-            coverage = {
-              ...coverage,
-              sales: true,
-              sales_rows: Math.max(coverage.sales_rows ?? 0, localHint.sales_rows ?? 0),
-            }
-          }
           if (!coverageNeedsSync(coverage)) invalidateDataQueries(qc)
           return true
         }
@@ -135,8 +123,8 @@ function ProtectedRoute() {
         if ((coverageEmpty(coverage) && !hasAnyPlatform) || needsWarmHydrate) {
           try {
             await waitForWarmCacheReady({ maxWaitMs: 180_000 })
-            for (let attempt = 0; attempt < 3; attempt++) {
-              await withTimeout(cacheHydrateWarm(), 90_000)
+            for (let attempt = 0; attempt < 5; attempt++) {
+              await withTimeout(cacheHydrateWarm(), 120_000)
               coverage = await getCoverage({ light: true, timeout: 45_000 })
               setCoverage(coverage)
               if (operationalDataComplete(coverage)) break
@@ -159,7 +147,7 @@ function ProtectedRoute() {
           invalidateDataQueries(qc)
         }
         return true
-        })(), 60_000)
+        })(), 180_000)
       } catch {
         /* server busy during upload — coverage polling will retry */
       }
@@ -172,9 +160,7 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
-  const dataStillLoading = useSession(
-    (s) => !sessionLooksLoaded(s) && (coverageNeedsSync(s) || coverageJobsRunning(s)),
-  )
+  const dataStillLoading = useSession((s) => !operationalDataComplete(s))
 
   if (isLoading && !cachedUser) {
     return (
@@ -216,7 +202,7 @@ function ProtectedRoute() {
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
           </svg>
-          Loading platform data from server…
+          Loading all datasets from server (8/8)…
         </div>
       )}
       <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-400 text-sm">Loading…</div>}>
