@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { Component, lazy, Suspense, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import axios from 'axios'
@@ -45,6 +45,48 @@ const qc = new QueryClient({
     },
   },
 })
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; message: string }> {
+  constructor(props: { children: ReactNode }) {
+    super(props)
+    this.state = { hasError: false, message: '' }
+  }
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : String(error ?? 'unknown-client-error'),
+    }
+  }
+
+  componentDidCatch(error: unknown, info: unknown) {
+    console.error('[AppErrorBoundary]', error, info)
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="max-w-xl w-full rounded-xl border border-red-200 bg-white shadow-sm p-5 space-y-3">
+          <h1 className="text-lg font-semibold text-red-700">Page failed to load</h1>
+          <p className="text-sm text-slate-700">
+            The app hit an unexpected UI error. Please reload once. If this repeats, share this error text.
+          </p>
+          <p className="text-xs font-mono rounded bg-slate-100 border border-slate-200 px-2 py-1 text-slate-700 break-all">
+            {this.state.message || 'unknown-client-error'}
+          </p>
+          <button
+            type="button"
+            className="px-4 py-2 rounded-lg bg-[#002B5B] text-white text-sm font-semibold hover:bg-blue-800"
+            onClick={() => window.location.reload()}
+          >
+            Reload app
+          </button>
+        </div>
+      </div>
+    )
+  }
+}
 
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let t: ReturnType<typeof setTimeout> | undefined
@@ -220,6 +262,7 @@ function ProtectedRoute() {
 export default function App() {
   return (
     <QueryClientProvider client={qc}>
+      <AppErrorBoundary>
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -262,6 +305,7 @@ export default function App() {
           </Route>
         </Routes>
       </BrowserRouter>
+      </AppErrorBoundary>
     </QueryClientProvider>
   )
 }
