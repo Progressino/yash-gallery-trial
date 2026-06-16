@@ -20,6 +20,48 @@ def _po_return_overlay_for_calc(sess) -> pd.DataFrame | None:
     return ov
 
 
+def _build_platform_sales_df(sess) -> pd.DataFrame:
+    """Combine all platform raw DataFrames into a unified sales_df for ADS calculation.
+
+    Matches the client PO sheet: FREQ (ADS) = Net Platform Sales / 30d where
+    platform sales = Amazon + Flipkart + Meesho + Myntra + Snapdeal - Returns.
+    Falls back to empty DataFrame when no platform data is loaded.
+    """
+    from .flipkart import flipkart_to_sales_rows
+    from .meesho import meesho_to_sales_rows
+    from .myntra import myntra_to_sales_rows
+    from .po_engine import _mtr_to_sales_df_local
+    from .snapdeal import snapdeal_to_sales_rows
+
+    sku_map = getattr(sess, "sku_mapping", None) or {}
+    parts: list[pd.DataFrame] = []
+
+    mtr = getattr(sess, "mtr_df", None)
+    if mtr is not None and not mtr.empty:
+        try:
+            parts.append(_mtr_to_sales_df_local(mtr, sku_map))
+        except Exception:
+            logger.exception("_build_platform_sales_df: mtr_df conversion failed")
+
+    for attr, converter in [
+        ("myntra_df",   lambda df: myntra_to_sales_rows(df)),
+        ("meesho_df",   lambda df: meesho_to_sales_rows(df, sku_map)),
+        ("flipkart_df", lambda df: flipkart_to_sales_rows(df)),
+        ("snapdeal_df", lambda df: snapdeal_to_sales_rows(df)),
+    ]:
+        raw = getattr(sess, attr, None)
+        if raw is not None and not raw.empty:
+            try:
+                parts.append(converter(raw))
+            except Exception:
+                logger.exception("_build_platform_sales_df: %s conversion failed", attr)
+
+    non_empty = [p for p in parts if p is not None and not p.empty]
+    if not non_empty:
+        return pd.DataFrame()
+    return pd.concat(non_empty, ignore_index=True)
+
+
 def _set_po_calculate_progress(
     sess,
     session_id: Optional[str],
@@ -225,9 +267,21 @@ def execute_po_calculate(
 
     _hb_thread = threading.Thread(target=_calc_heartbeat, daemon=True, name="po-calc-hb")
     _hb_thread.start()
+
+    # Use platform sales (Amazon + Flipkart + Meesho + Myntra + Snapdeal - Returns)
+    # for ADS, matching the client's FREQ = Net Platform Sales / 30d formula.
+    # Fall back to OMS sales_df only when no platform data is loaded.
+    _platform_sales = _build_platform_sales_df(sess)
+    _ads_source = _platform_sales if not _platform_sales.empty else sess.sales_df
+    logger.info(
+        "PO ADS source: %s (%d rows)",
+        "platform" if not _platform_sales.empty else "OMS",
+        len(_ads_source),
+    )
+
     try:
         po_df = calculate_po_base(
-            sales_df=sess.sales_df,
+            sales_df=_ads_source,
             inv_df=inv_df,
             period_days=_period,
             lead_time=int(body.get("lead_time", 30)),
@@ -284,7 +338,7 @@ def execute_po_calculate(
 
     sales_through = None
     try:
-        st = pd.to_datetime(sess.sales_df["TxnDate"], errors="coerce").max()
+        st = pd.to_datetime(_ads_source["TxnDate"], errors="coerce").max()
         if pd.notna(st):
             sales_through = str(pd.Timestamp(st).date())
     except Exception:
