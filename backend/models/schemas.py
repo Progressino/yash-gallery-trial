@@ -1,6 +1,6 @@
 """Pydantic response models shared across all routers."""
 from typing import Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class UploadResponse(BaseModel):
@@ -137,6 +137,23 @@ class CoverageResponse(BaseModel):
     session_restore_message: str = ""
     session_restore_step: str = ""
     session_restore_progress: int = 0
+    # PO readiness (decoupled from non-critical background jobs like sales_rebuild)
+    data_ready: bool = False
+    po_ready: bool = False
+    background_tasks: dict[str, bool] = Field(default_factory=dict)
+    critical_restore_running: bool = False
+
+
+class PoReadinessResponse(BaseModel):
+    po_ready: bool
+    data_ready: bool = False
+    sales_rows: int = 0
+    inventory_rows: int = 0
+    data_source: str = "warm_cache"
+    hydration: str = "unknown"
+    background_jobs: list[str] = Field(default_factory=list)
+    background_tasks: dict[str, bool] = Field(default_factory=dict)
+    critical_restore_running: bool = False
 
 
 class RestoreFullResponse(CoverageResponse):

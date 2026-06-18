@@ -1,0 +1,132 @@
+"""PO page readiness — separate from full-system background job status."""
+from __future__ import annotations
+
+from typing import Any
+
+from ..models.schemas import CoverageResponse
+
+PO_MIN_SALES_ROWS = 1_000_000
+PO_MIN_INVENTORY_ROWS = 5_000
+
+OPERATIONAL_DATASET_KEYS = (
+    "sku_mapping",
+    "mtr",
+    "sales",
+    "inventory",
+    "myntra",
+    "meesho",
+    "flipkart",
+    "snapdeal",
+)
+
+_BACKGROUND_JOB_ATTRS: tuple[tuple[str, str], ...] = (
+    ("sales_rebuild", "sales_rebuild_status"),
+    ("session_restore", "session_restore_status"),
+    ("daily_auto_ingest", "daily_auto_ingest_status"),
+    ("inventory_upload", "inventory_upload_status"),
+    ("daily_inventory_upload", "daily_inventory_upload_status"),
+    ("tier1_bulk", "tier1_bulk_status"),
+    ("returns_import", "returns_import_status"),
+)
+
+_CRITICAL_RESTORE_ATTRS = (
+    "session_restore_status",
+    "inventory_upload_status",
+)
+
+
+def operational_data_complete(cov: CoverageResponse) -> bool:
+    return all(bool(getattr(cov, key, False)) for key in OPERATIONAL_DATASET_KEYS)
+
+
+def data_row_floors_met(cov: CoverageResponse) -> bool:
+    return (
+        bool(cov.sales)
+        and bool(cov.inventory)
+        and int(cov.sales_rows or 0) >= PO_MIN_SALES_ROWS
+        and int(cov.inventory_rows or 0) >= PO_MIN_INVENTORY_ROWS
+    )
+
+
+def critical_restore_running(sess) -> bool:
+    if sess is None:
+        return False
+    return any(
+        str(getattr(sess, attr, "idle") or "idle") == "running"
+        for attr in _CRITICAL_RESTORE_ATTRS
+    )
+
+
+def background_tasks_running(sess) -> dict[str, bool]:
+    if sess is None:
+        return {}
+    out: dict[str, bool] = {}
+    for name, attr in _BACKGROUND_JOB_ATTRS:
+        if str(getattr(sess, attr, "idle") or "idle") == "running":
+            out[name] = True
+    return out
+
+
+def background_job_names(sess) -> list[str]:
+    return list(background_tasks_running(sess).keys())
+
+
+def compute_data_ready(cov: CoverageResponse) -> bool:
+    """Session holds PO essentials (8/8 flags + row floors) — ignores background jobs."""
+    return operational_data_complete(cov) and data_row_floors_met(cov)
+
+
+def compute_po_ready(sess, cov: CoverageResponse) -> bool:
+    """PO Engine may mount — data ready and no critical restore replacing inventory/session."""
+    if critical_restore_running(sess):
+        return False
+    return compute_data_ready(cov)
+
+
+def _resolve_data_source(sess) -> str:
+    try:
+        from .coverage_debug import _resolve_sales_source
+
+        return _resolve_sales_source(sess)
+    except Exception:
+        return "warm_cache"
+
+
+def _hydration_label(sess, session_id: str = "") -> str:
+    try:
+        from .session_hydrate import session_hydrate_inflight, session_warm_hydration_complete
+
+        sid = session_id or getattr(sess, "_session_id", "") or ""
+        if session_hydrate_inflight(sid):
+            return "inflight"
+        if session_warm_hydration_complete(sess):
+            return "complete"
+        return "partial"
+    except Exception:
+        return "unknown"
+
+
+def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:
+    from .shared_frames import frame_row_count
+
+    return {
+        "po_ready": compute_po_ready(sess, cov),
+        "data_ready": compute_data_ready(cov),
+        "sales_rows": int(cov.sales_rows or frame_row_count("sales_df", sess)),
+        "inventory_rows": int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess)),
+        "data_source": _resolve_data_source(sess),
+        "hydration": _hydration_label(sess, session_id=session_id),
+        "background_jobs": background_job_names(sess),
+        "background_tasks": background_tasks_running(sess),
+        "critical_restore_running": critical_restore_running(sess),
+    }
+
+
+def augment_coverage(sess, cov: CoverageResponse) -> CoverageResponse:
+    """Attach data_ready / po_ready / background_tasks to coverage payload."""
+    data = cov.model_dump()
+    data["data_ready"] = compute_data_ready(cov)
+    data["po_ready"] = compute_po_ready(sess, cov)
+    data["background_tasks"] = background_tasks_running(sess)
+    data["critical_restore_running"] = critical_restore_running(sess)
+    return CoverageResponse(**data)

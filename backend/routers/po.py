@@ -20,6 +20,21 @@ router = APIRouter()
 _IST = ZoneInfo("Asia/Kolkata")
 
 
+@router.get("/readiness")
+def po_readiness(request: Request):
+    """Lightweight PO page gate — data ready for calculate, not all background jobs finished."""
+    from ..models.schemas import PoReadinessResponse
+    from ..routers.data import _build_coverage_response
+    from ..services.po_readiness import build_po_readiness
+
+    sess = request.state.session
+    if sess is None:
+        return PoReadinessResponse(po_ready=False, hydration="none")
+    sid = getattr(request.state, "session_id", None) or ""
+    cov = _build_coverage_response(sess)
+    return PoReadinessResponse(**build_po_readiness(sess, cov, session_id=sid))
+
+
 def _return_overlay_for_po_calc(sess):
     from ..services.po_return_import import aggregate_return_overlay_for_use
 

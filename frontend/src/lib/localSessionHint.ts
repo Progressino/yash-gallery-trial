@@ -143,16 +143,12 @@ export const PO_MIN_SALES_ROWS = 1_000_000
 /** Minimum inventory SKUs before PO page mounts (prod ~6.7k). */
 export const PO_MIN_INVENTORY_ROWS = 5_000
 
-/** True when PO routes may mount — 8/8 flags, no background jobs, row floors met. */
+/** True when PO routes may mount — uses po_ready semantics (see GET /api/po/readiness). */
 export function poPageHydrationReady(c: CoverageResponse): boolean {
-  if (
-    c.inventory_upload_status === 'running' ||
-    c.daily_inventory_upload_status === 'running' ||
-    c.daily_auto_ingest_status === 'running' ||
-    c.tier1_bulk_status === 'running' ||
-    c.sales_rebuild === 'running' ||
-    c.session_restore_status === 'running'
-  ) {
+  if (typeof c.po_ready === 'boolean') {
+    return c.po_ready
+  }
+  if (c.critical_restore_running) {
     return false
   }
   if (!operationalDataComplete(c)) return false

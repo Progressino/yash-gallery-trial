@@ -1,58 +1,34 @@
 /**
- * Blocks PO routes until session hydration reaches 8/8 coverage with full row counts.
- * POFresh / POEngine must not mount while warm-cache copy or sales rebuild is in flight.
+ * Blocks PO routes until GET /api/po/readiness reports po_ready.
+ * Non-critical jobs (e.g. sales_rebuild) do not block the PO engine.
  */
 import { useEffect, useRef } from 'react'
 import { Outlet } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { cacheHydrateWarm, getCoverage, type CoverageResponse } from '../api/client'
-import {
-  OPERATIONAL_DATA_TOTAL,
-  operationalDataLoaded,
-  poPageHydrationReady,
-  PO_MIN_INVENTORY_ROWS,
-  PO_MIN_SALES_ROWS,
-} from '../lib/localSessionHint'
-import { coverageJobsRunning } from '../lib/coverageJobs'
-import { useSession } from '../store/session'
+import { cacheHydrateWarm, getPoReadiness, type PoReadinessResponse } from '../api/client'
 import { PageLoadingStripe } from './LoadingProgressBar'
 
-function hydrationLabel(c: CoverageResponse | undefined): string {
-  if (!c) return 'Connecting to server…'
-  if (c.session_restore_status === 'running') {
-    return c.session_restore_message || 'Restoring session from server…'
+function hydrationLabel(r: PoReadinessResponse | undefined): string {
+  if (!r) return 'Connecting to server…'
+  if (r.critical_restore_running) {
+    return 'Restoring session or inventory…'
   }
-  if (c.sales_rebuild === 'running') {
-    return c.sales_rebuild_message || 'Rebuilding unified sales…'
-  }
-  if (coverageJobsRunning(c)) {
+  if (r.hydration === 'inflight') {
     return 'Syncing datasets into your session…'
   }
-  const loaded = operationalDataLoaded(c)
-  const sales = (c.sales_rows ?? 0).toLocaleString()
-  const inv = (c.inventory_rows ?? 0).toLocaleString()
-  if (loaded < OPERATIONAL_DATA_TOTAL) {
-    return `Loading datasets (${loaded}/${OPERATIONAL_DATA_TOTAL}) — ${sales} sales · ${inv} inventory SKUs`
+  const sales = (r.sales_rows ?? 0).toLocaleString()
+  const inv = (r.inventory_rows ?? 0).toLocaleString()
+  if (!r.data_ready) {
+    return `Loading PO data — ${sales} sales · ${inv} inventory SKUs…`
   }
-  if ((c.sales_rows ?? 0) < PO_MIN_SALES_ROWS) {
-    return `Waiting for full sales history (${sales} / ${PO_MIN_SALES_ROWS.toLocaleString()}+ rows)…`
+  if (r.background_jobs?.length) {
+    return `PO data ready (${r.background_jobs.join(', ')} running in background)…`
   }
-  if ((c.inventory_rows ?? 0) < PO_MIN_INVENTORY_ROWS) {
-    return `Waiting for inventory (${inv} / ${PO_MIN_INVENTORY_ROWS.toLocaleString()}+ SKUs)…`
-  }
-  return 'Finalizing session data…'
+  return 'Opening PO engine…'
 }
 
-function LoadingDataScreen({ coverage }: { coverage: CoverageResponse | undefined }) {
-  const loaded = coverage ? operationalDataLoaded(coverage) : 0
-  const pct =
-    coverage && OPERATIONAL_DATA_TOTAL > 0
-      ? Math.min(95, Math.round((loaded / OPERATIONAL_DATA_TOTAL) * 70))
-      : null
-  const restorePct =
-    coverage?.session_restore_status === 'running'
-      ? Math.max(pct ?? 0, coverage.session_restore_progress ?? 0)
-      : pct
+function LoadingDataScreen({ readiness }: { readiness: PoReadinessResponse | undefined }) {
+  const pct = readiness?.data_ready ? 85 : readiness ? 40 : null
 
   return (
     <div className="min-h-[60vh] flex flex-col items-center justify-center px-4 py-12">
@@ -60,26 +36,34 @@ function LoadingDataScreen({ coverage }: { coverage: CoverageResponse | undefine
         <div className="text-center space-y-1">
           <h1 className="text-lg font-semibold text-[#002B5B]">Loading PO data</h1>
           <p className="text-sm text-slate-600">
-            Hydrating sales, inventory, and platform history before the PO engine opens.
+            Waiting for sales and inventory required by the PO engine.
           </p>
         </div>
-        <PageLoadingStripe active label={hydrationLabel(coverage)} percent={restorePct} />
-        {coverage ? (
+        <PageLoadingStripe active label={hydrationLabel(readiness)} percent={pct} />
+        {readiness ? (
           <dl className="grid grid-cols-2 gap-2 text-xs text-slate-600">
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-              <dt className="text-slate-400">Coverage</dt>
-              <dd className="font-semibold tabular-nums">
-                {loaded}/{OPERATIONAL_DATA_TOTAL} datasets
-              </dd>
+              <dt className="text-slate-400">PO ready</dt>
+              <dd className="font-semibold">{readiness.po_ready ? 'Yes' : 'No'}</dd>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+              <dt className="text-slate-400">Data source</dt>
+              <dd className="font-semibold">{readiness.data_source}</dd>
             </div>
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
               <dt className="text-slate-400">Sales rows</dt>
-              <dd className="font-semibold tabular-nums">{(coverage.sales_rows ?? 0).toLocaleString()}</dd>
+              <dd className="font-semibold tabular-nums">{readiness.sales_rows.toLocaleString()}</dd>
             </div>
-            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 col-span-2">
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
               <dt className="text-slate-400">Inventory SKUs</dt>
-              <dd className="font-semibold tabular-nums">{(coverage.inventory_rows ?? 0).toLocaleString()}</dd>
+              <dd className="font-semibold tabular-nums">{readiness.inventory_rows.toLocaleString()}</dd>
             </div>
+            {readiness.background_jobs?.length ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 col-span-2">
+                <dt className="text-amber-700">Background (non-blocking)</dt>
+                <dd className="font-medium text-amber-900">{readiness.background_jobs.join(', ')}</dd>
+              </div>
+            ) : null}
           </dl>
         ) : null}
       </div>
@@ -88,41 +72,28 @@ function LoadingDataScreen({ coverage }: { coverage: CoverageResponse | undefine
 }
 
 export default function PoHydrationGate() {
-  const setCoverage = useSession(s => s.setCoverage)
-  const sessionCoverage = useSession()
   const hydrateRequested = useRef(false)
 
-  const { data: polled } = useQuery({
-    queryKey: ['po-hydration-gate'],
-    queryFn: async () => {
-      const c = await getCoverage({ light: true, timeout: 45_000 })
-      setCoverage(c)
-      return c
-    },
-    refetchInterval: q => {
-      const c = q.state.data ?? sessionCoverage
-      return poPageHydrationReady(c) ? false : 2_000
-    },
+  const { data: readiness } = useQuery({
+    queryKey: ['po-readiness-gate'],
+    queryFn: () => getPoReadiness({ timeout: 45_000 }),
+    refetchInterval: q => (q.state.data?.po_ready ? false : 2_000),
     staleTime: 0,
   })
 
-  const coverage = polled ?? sessionCoverage
-  const ready = poPageHydrationReady(coverage)
+  const ready = readiness?.po_ready === true
 
   useEffect(() => {
     if (ready || hydrateRequested.current) return
-    if (coverageJobsRunning(coverage)) return
+    if (readiness?.critical_restore_running) return
     hydrateRequested.current = true
-    void cacheHydrateWarm()
-      .then(() => getCoverage({ light: true, timeout: 45_000 }))
-      .then(c => setCoverage(c))
-      .catch(() => {
-        hydrateRequested.current = false
-      })
-  }, [ready, coverage, setCoverage])
+    void cacheHydrateWarm().catch(() => {
+      hydrateRequested.current = false
+    })
+  }, [ready, readiness])
 
   if (!ready) {
-    return <LoadingDataScreen coverage={coverage} />
+    return <LoadingDataScreen readiness={readiness} />
   }
 
   return <Outlet />

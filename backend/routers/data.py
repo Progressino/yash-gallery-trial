@@ -2594,7 +2594,7 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         _po_only = False
     _plat_ok = _po_only or None  # when True, all marketplace flags count as loaded
     _inv = session_inventory_variant(sess)
-    return CoverageResponse(
+    cov = CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=_plat_ok or frame_row_count("mtr_df", sess) > 0,
         sales=_coverage_sales_ready(sess),
@@ -2780,6 +2780,9 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         session_restore_step=getattr(sess, "session_restore_step", "") or "",
         session_restore_progress=int(getattr(sess, "session_restore_progress", 0) or 0),
     )
+    from ..services.po_readiness import augment_coverage
+
+    return augment_coverage(sess, cov)
 
 
 def _acquire_upload_lock_with_progress(sess: AppSession, *, timeout_sec: float = 3600.0) -> bool:

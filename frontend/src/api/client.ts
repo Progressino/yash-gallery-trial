@@ -157,6 +157,25 @@ export interface CoverageResponse {
   existing_po_looks_aggregated?: boolean
   daily_inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   daily_inventory_upload_message?: string
+  /** Session holds PO essentials (8/8 + row floors) — ignores background jobs. */
+  data_ready?: boolean
+  /** PO page may mount — data_ready and no critical session/inventory restore. */
+  po_ready?: boolean
+  /** Non-critical and critical background jobs currently running. */
+  background_tasks?: Record<string, boolean>
+  critical_restore_running?: boolean
+}
+
+export interface PoReadinessResponse {
+  po_ready: boolean
+  data_ready?: boolean
+  sales_rows: number
+  inventory_rows: number
+  data_source: string
+  hydration: string
+  background_jobs: string[]
+  background_tasks?: Record<string, boolean>
+  critical_restore_running?: boolean
 }
 
 export type DailyAutoIngestSummary = {
@@ -1462,6 +1481,13 @@ export async function waitForWarmCacheReady(opts?: {
     await new Promise(r => setTimeout(r, pollMs))
   }
   return false
+}
+
+export async function getPoReadiness(opts?: { timeout?: number }): Promise<PoReadinessResponse> {
+  const { data } = await api.get<PoReadinessResponse>('/po/readiness', {
+    timeout: opts?.timeout ?? 45_000,
+  })
+  return data
 }
 
 export async function getCoverage(opts?: {
