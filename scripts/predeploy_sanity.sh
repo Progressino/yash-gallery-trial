@@ -49,7 +49,7 @@ echo "==> Backend sanity tests"
 
 if [[ "${DEPLOY_FAST:-}" == "1" ]]; then
   echo "==> DEPLOY_FAST=1 — VPS deploy gate (critical regressions only; full suite runs in dev/CI)"
-  "$PYTHON_BIN" -m pytest tests/test_daily_sales_auto_refresh.py tests/test_po_sales_lag_and_cache.py tests/test_tier3_prod_window.py tests/test_coverage_light_fast.py tests/test_inventory_clear_and_myntra.py tests/test_forecast_ops_pg.py tests/test_forecast_ops_tables.py tests/test_tier3_pg_reads.py tests/test_tier3_session_merge.py tests/test_timing_middleware.py tests/test_query_logging.py -q
+  "$PYTHON_BIN" -m pytest tests/test_daily_sales_auto_refresh.py tests/test_po_sales_lag_and_cache.py tests/test_tier3_prod_window.py tests/test_coverage_light_fast.py tests/test_inventory_clear_and_myntra.py tests/test_forecast_ops_pg.py tests/test_forecast_ops_tables.py tests/test_tier3_pg_reads.py tests/test_tier3_session_merge.py tests/test_timing_middleware.py tests/test_query_logging.py tests/test_po_stage_timer.py -q
   "$PYTHON_BIN" -m pytest tests/test_po_service.py -k "4032 or sparse or bursty or intermittent or inv_window" -q
   "$PYTHON_BIN" -m pytest tests/test_hrm_smoke.py -q
 else

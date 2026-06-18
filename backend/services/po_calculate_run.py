@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -143,6 +144,9 @@ def execute_po_calculate(
         effective_sku_status_df_for_engine,
         hydrate_po_session_for_calculate,
     )
+    from .po_stage_timer import PoStageTimer
+
+    stage_timer = PoStageTimer()
 
     if not skip_hydrate:
         hydrate_po_session_for_calculate(sess)
@@ -158,6 +162,36 @@ def execute_po_calculate(
     group_by_parent = bool(body.get("group_by_parent", False))
     inv_df = sess.inventory_df_parent if group_by_parent else sess.inventory_df_variant
 
+    _period = int(body.get("period_days", 30))
+
+    # ── Stage 1: sales load (Tier-3 overlay + ADS window trim) ────────────────
+    from .tier3_session_merge import build_po_ads_platform_sales
+
+    _set_po_calculate_progress(sess, session_id, 12, "Loading Tier-3 daily sales for ADS window…")
+    _platform_sales = build_po_ads_platform_sales(
+        sess,
+        planning_date=body.get("planning_date"),
+        period_days=_period,
+        use_seasonality=bool(body.get("use_seasonality", False)),
+        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+    )
+    if _platform_sales.empty:
+        _platform_sales = _build_platform_sales_df(sess)
+    _ads_source = _platform_sales if not _platform_sales.empty else sess.sales_df
+    _ads_source = _trim_sales_for_po_memory(
+        _ads_source,
+        period_days=_period,
+        use_seasonality=bool(body.get("use_seasonality", False)),
+        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+    )
+    logger.info(
+        "PO ADS source: %s (%d rows)",
+        "platform" if not _platform_sales.empty else "OMS",
+        len(_ads_source),
+    )
+    stage_timer.mark("sales load")
+
+    # ── Stage 2: inventory sidecars (ledger, existing PO sheet, daily history) ─
     from ..services.po_raise_import import hydrate_session_ledger_from_db
 
     lookback = max(int(body.get("raise_ledger_lookback_days") or 14), 14)
@@ -221,7 +255,6 @@ def execute_po_calculate(
     # than the server retains (default 30 days).
     import gc as _gc
 
-    _period = int(body.get("period_days", 90))
     _raw_ih = getattr(sess, "daily_inventory_history_df", None)
     _inv_history_for_calc: pd.DataFrame | None = None
 
@@ -294,6 +327,8 @@ def execute_po_calculate(
             _set_po_calculate_progress(sess, session_id, 27, "Releasing trimmed inventory memory…")
             _gc.collect()
 
+    stage_timer.mark("inventory")
+
     _set_po_calculate_progress(
         sess,
         session_id,
@@ -315,33 +350,6 @@ def execute_po_calculate(
 
     _hb_thread = threading.Thread(target=_calc_heartbeat, daemon=True, name="po-calc-hb")
     _hb_thread.start()
-
-    # Tier-3 overlay for ADS (in-memory only — never blocks on full session merge / sales rebuild).
-    from .tier3_session_merge import build_po_ads_platform_sales
-
-    _period = int(body.get("period_days", 30))
-    _set_po_calculate_progress(sess, session_id, 28, "Loading Tier-3 daily sales for ADS window…")
-    _platform_sales = build_po_ads_platform_sales(
-        sess,
-        planning_date=body.get("planning_date"),
-        period_days=_period,
-        use_seasonality=bool(body.get("use_seasonality", False)),
-        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-    )
-    if _platform_sales.empty:
-        _platform_sales = _build_platform_sales_df(sess)
-    _ads_source = _platform_sales if not _platform_sales.empty else sess.sales_df
-    _ads_source = _trim_sales_for_po_memory(
-        _ads_source,
-        period_days=_period,
-        use_seasonality=bool(body.get("use_seasonality", False)),
-        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-    )
-    logger.info(
-        "PO ADS source: %s (%d rows)",
-        "platform" if not _platform_sales.empty else "OMS",
-        len(_ads_source),
-    )
 
     try:
         _lt_raw = body.get("lead_time")
@@ -375,6 +383,7 @@ def execute_po_calculate(
             po_return_overlay_df=_po_return_overlay_for_calc(sess),
             urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
             use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+            stage_timer=stage_timer,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
@@ -402,6 +411,9 @@ def execute_po_calculate(
         if c in po_df.columns:
             s = pd.to_numeric(po_df[c], errors="coerce")
             po_df[c] = s.where(np.isfinite(s), 999.0).fillna(999.0).round(1)
+
+    stage_timer.mark("result format")
+    stage_timings = stage_timer.log_summary()
 
     sess.po_calculate_result_df = po_df
     sess.po_calculate_existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0)
@@ -471,6 +483,7 @@ def execute_po_calculate(
         "planning_date": planning_out,
         "raise_ledger_rows": ledger_n,
         "ledger_auto_import": auto_msg,
+        "stage_timings": stage_timings,
         "summary": {
             "new_po_qty_sum": int(_po_qty.sum()),
             "new_po_sku_count": int((_po_qty > 0).sum()),
@@ -544,10 +557,11 @@ def background_po_calculate(session_id: str, body: dict) -> None:
             n = int(result.get("total_rows") or 0)
             msg = f"PO calculation complete ({n:,} rows)."
             cols: list[str] = []
+            po_df = getattr(sess, "po_calculate_result_df", None)
+            _persist_start = time.perf_counter()
             try:
                 from .po_result_spill import spill_df
 
-                po_df = getattr(sess, "po_calculate_result_df", None)
                 if po_df is not None and not getattr(po_df, "empty", True):
                     cols = list(po_df.columns)
                     spill_df(session_id, po_df)
@@ -590,6 +604,14 @@ def background_po_calculate(session_id: str, body: dict) -> None:
                 save_shared_cache(sess, body, po_df, result)
             except Exception:
                 logger.exception("save_shared_cache after PO calculate failed")
+
+            _persist_sec = time.perf_counter() - _persist_start
+            from .po_stage_timer import po_stage_timing_enabled
+
+            if po_stage_timing_enabled() and _persist_sec >= 0.05:
+                logging.getLogger("perf.po").info(
+                    "PO stages: persist cache/spill  %6.3fs", _persist_sec
+                )
 
             threading.Thread(
                 target=_warm_quarterly_bg,

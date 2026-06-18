@@ -814,7 +814,11 @@ def calculate_po_base(
     po_return_overlay_df: Optional[pd.DataFrame] = None,
     urgent_all_sizes_days: int = 45,
     use_ly_fallback: bool = True,
+    stage_timer: Any = None,
 ) -> pd.DataFrame:
+    import time as _time
+
+    _engine_start = _time.perf_counter() if stage_timer is not None else None
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
 
@@ -1646,6 +1650,9 @@ def calculate_po_base(
     prim_ads = np.where(_cap_mask, np.minimum(prim_ads, _ceil), prim_ads)
     po_df["ADS"] = np.maximum.reduce([prim_ads, seasonal_ads, flat_ads]).round(3)
     po_df.drop(columns=["_sparse_intermittent"], inplace=True, errors="ignore")
+
+    if stage_timer is not None and _engine_start is not None:
+        stage_timer.mark("forecast", since=_engine_start)
 
     # PO formula uses OMS_Inventory (physical warehouse only) when available.
     # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
@@ -2724,5 +2731,8 @@ def calculate_po_base(
             ((_inv_fin2 + po_df["PO_Pipeline_Effective"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
             999.0,
         )
+
+    if stage_timer is not None:
+        stage_timer.mark("po logic")
 
     return dedupe_po_rows_by_sku(po_df)
