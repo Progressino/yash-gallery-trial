@@ -881,6 +881,18 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
         log.warning("Warm-cache disk save failed: %s", _e)
 
 
+def _persist_shared_snapshot_if_ready() -> None:
+    """Save in-memory warm cache to PostgreSQL so all users survive the next deploy."""
+    if not _warm_cache or _warm_cache_generation < 1:
+        return
+    try:
+        from .db.forecast_ops_pg import persist_shared_snapshot
+
+        persist_shared_snapshot(_warm_cache)
+    except Exception:
+        log.exception("PostgreSQL shared snapshot persist failed")
+
+
 def _try_bootstrap_warm_cache_from_pg() -> bool:
     """Load shared operational snapshot from PostgreSQL when disk/GitHub are empty."""
     global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
@@ -1688,6 +1700,7 @@ def _do_load_warm_cache() -> bool:
         # Always signal so waiting code is never blocked forever
         # (no-op if Phase 1 already called set())
         _warm_cache_ready.set()
+        _persist_shared_snapshot_if_ready()
         try:
             from backend.services.po_quarterly_warmup import schedule_shared_quarterly_prewarm
 
