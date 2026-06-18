@@ -81,9 +81,7 @@ class PORequest(BaseModel):
     grace_days:       int   = 0
     safety_pct:       float = 0.0
     enforce_two_size_minimum: bool = False
-    # Deprecated toggle (kept for backward API compatibility).
-    # Current PO mode always uses app-data target-cover logic.
-    enforce_lead_time_release_gate: bool = False
+    enforce_lead_time_release_gate: bool = True
     # Calendar day for PO raise-ledger "yesterday / today" columns (YYYY-MM-DD).
     # Defaults to server date if omitted; browser should send local date for daily PO.
     planning_date: Optional[str] = None
@@ -98,6 +96,9 @@ class PORequest(BaseModel):
     # automatically include ALL sibling sizes in the PO output so the operator
     # can review and raise for every size.  Set to 0 to disable.
     urgent_all_sizes_days: int = 45
+    # When False, ADS uses only the current-period sales (no Last Year fallback).
+    # Set True to blend LY data for seasonal planning, False for current-demand-only PO.
+    use_ly_fallback: bool = True
     # When True (default), reuse another session's PO result on this server if planning
     # date, settings, and data snapshot match (see ``po_shared_cache``).
     use_shared_cache: bool = True
@@ -146,6 +147,14 @@ async def po_upload_sku_status_lead(
         return {"ok": False, "message": "No valid SKU rows found (need SKU and Lead time columns; Status is optional)."}
     sess.sku_status_lead_df = df
     sess._quarterly_cache.clear()
+    try:
+        from ..services.po_raise_remove import invalidate_po_calculate_result
+        from ..services.po_shared_cache import invalidate_all_shared_caches
+
+        invalidate_po_calculate_result(sess)
+        invalidate_all_shared_caches()
+    except Exception:
+        pass
     _sync_po_sidecars_to_durable_storage(request, sess, background_tasks)
     return {"ok": True, "rows": int(len(df)), "message": f"Loaded {len(df)} SKU rows (status + lead time) for PO."}
 
@@ -1025,12 +1034,21 @@ def po_dashboard(request: Request, body: PODashboardRequest):
     from ..services.po_dashboard import build_dashboard_payload
     from ..services.po_engine import calculate_po_base
 
+    from ..services.po_calculate_run import _build_platform_sales_df
+    from ..services.existing_po import ensure_existing_po_hydrated
+
+    ensure_existing_po_hydrated(sess)
     inv_df = sess.inventory_df_parent if body.group_by_parent else sess.inventory_df_variant
     _ledger = getattr(sess, "po_raise_ledger_df", None)
+    _platform_sales = _build_platform_sales_df(sess)
+    _ads_source = _platform_sales if not _platform_sales.empty else sess.sales_df
+    _existing_po = (
+        sess.existing_po_df if getattr(sess, "existing_po_df", None) is not None and not sess.existing_po_df.empty else None
+    )
 
     try:
         po_df = calculate_po_base(
-            sales_df=sess.sales_df,
+            sales_df=_ads_source,
             inv_df=inv_df,
             period_days=body.period_days,
             lead_time=body.lead_time,
@@ -1043,7 +1061,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             seasonal_weight=body.seasonal_weight,
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=body.group_by_parent,
-            existing_po_df=None,
+            existing_po_df=_existing_po,
             sku_status_df=sess.sku_status_lead_df if not sess.sku_status_lead_df.empty else None,
             enforce_two_size_minimum=body.enforce_two_size_minimum,
             enforce_lead_time_release_gate=False,
@@ -1058,6 +1076,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             raise_view_date=body.raise_view_date,
             po_return_overlay_df=_return_overlay_for_po_calc(sess),
             urgent_all_sizes_days=body.urgent_all_sizes_days,
+            use_ly_fallback=body.use_ly_fallback,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
@@ -1201,6 +1220,7 @@ def po_calculate_result(
     if st != "done":
         return {"ok": False, "status": st, "message": "No PO result yet — run Calculate PO first."}
     from ..services.existing_po import existing_po_needs_recalc
+    from ..services.po_shared_cache import PO_MERGE_LOGIC_VERSION, po_merge_result_is_stale
 
     if existing_po_needs_recalc(sess):
         return {
@@ -1209,6 +1229,16 @@ def po_calculate_result(
             "message": "Existing PO sheet was updated. Click Calculate PO to refresh per-size pipeline rows.",
         }
     meta = getattr(sess, "po_calculate_result", None) or {}
+    if po_merge_result_is_stale(meta):
+        return {
+            "ok": False,
+            "status": "stale",
+            "message": (
+                f"PO engine updated to v{PO_MERGE_LOGIC_VERSION}. "
+                "Click Calculate PO to refresh recommendations."
+            ),
+            "po_merge_version": PO_MERGE_LOGIC_VERSION,
+        }
     if not meta:
         return {"ok": False, "message": "PO result missing."}
     sid = getattr(request.state, "session_id", None)
@@ -1226,34 +1256,45 @@ def po_calculate_result(
 
 
 @router.get("/calculate/shared-cache")
-def po_shared_cache_info(
-    request: Request,
-    planning_date: Optional[str] = None,
-    period_days: int = 90,
-    lead_time: int = 30,
-    target_days: int = 135,
-    demand_basis: str = "Sold",
-    group_by_parent: bool = False,
-    raise_ledger_lookback_days: int = 14,
-):
+def po_shared_cache_info(request: Request):
     """Whether a shared PO run exists for this planning date and settings (no copy yet)."""
     sess = request.state.session
     if sess is None:
         return {"available": False}
-    from ..services.po_shared_cache import shared_cache_availability
+    from ..services.po_shared_cache import _CALC_PARAM_KEYS, shared_cache_availability
 
-    return shared_cache_availability(
-        sess,
-        {
-            "planning_date": planning_date,
-            "period_days": period_days,
-            "lead_time": lead_time,
-            "target_days": target_days,
-            "demand_basis": demand_basis,
-            "group_by_parent": group_by_parent,
-            "raise_ledger_lookback_days": raise_ledger_lookback_days,
-        },
-    )
+    qp = request.query_params
+    body: dict = {}
+    for k in _CALC_PARAM_KEYS:
+        if k not in qp:
+            continue
+        raw = qp.get(k)
+        if raw is None:
+            continue
+        if k in (
+            "use_seasonality",
+            "group_by_parent",
+            "enforce_two_size_minimum",
+            "enforce_lead_time_release_gate",
+            "auto_import_yesterday_ledger",
+            "use_ly_fallback",
+        ):
+            body[k] = str(raw).strip().lower() in ("1", "true", "yes", "on")
+        elif k in ("period_days", "lead_time", "target_days", "min_denominator", "grace_days", "urgent_all_sizes_days", "raise_ledger_lookback_days"):
+            try:
+                body[k] = int(raw)
+            except (TypeError, ValueError):
+                pass
+        elif k in ("seasonal_weight", "safety_pct"):
+            try:
+                body[k] = float(raw)
+            except (TypeError, ValueError):
+                pass
+        else:
+            body[k] = raw
+    if "planning_date" in qp:
+        body["planning_date"] = qp.get("planning_date")
+    return shared_cache_availability(sess, body)
 
 
 @router.post("/calculate")

@@ -48,6 +48,8 @@ for i in $(seq 1 12); do
   if curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health; then
     echo ""
     echo "OK: deploy healthy (attempt $i) — build ${_sha}"
+    echo "==> PO shared-cache warmup"
+    bash scripts/run-po-warmup-production.sh || true
     exit 0
   fi
   echo "… waiting for /api/health ($i/12)"

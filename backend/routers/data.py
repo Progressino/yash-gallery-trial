@@ -57,6 +57,8 @@ from ..services.inventory import (
 router = APIRouter()
 
 # Process-wide Intelligence bundle cache (PG-restore shells share the same Tier-3 window).
+# Bump when bundle shape/semantics change (invalidates persisted intel_bundle_*.json keys).
+_INTELLIGENCE_BUNDLE_CACHE_GEN = "v3"
 _GLOBAL_INTELLIGENCE_BUNDLE_CACHE: dict = {}
 
 # How long a cached bundle is served without recomputation. Real data changes
@@ -880,6 +882,49 @@ def _platform_max_reporting_day_in_window(
     return str(t.max().normalize())[:10]
 
 
+def _warm_disk_platform_frame(
+    attr: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> "pd.DataFrame":
+    """Read one platform parquet from warm-cache disk (PO-session-only skips RAM load)."""
+    import os
+    from pathlib import Path
+
+    import pandas as pd
+
+    try:
+        import backend.main as _main
+
+        mem = (_main._warm_cache or {}).get(attr)
+        if mem is not None and hasattr(mem, "empty") and not mem.empty:
+            return mem
+    except Exception:
+        pass
+
+    disk_dir = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+    path = disk_dir / f"{attr}.parquet"
+    if not path.is_file():
+        return pd.DataFrame()
+    try:
+        s = str(start_date or "")[:10]
+        e = str(end_date or "")[:10]
+        if len(s) == 10 and len(e) == 10:
+            try:
+                return pd.read_parquet(
+                    path,
+                    filters=[
+                        ("Date", ">=", pd.Timestamp(s)),
+                        ("Date", "<=", pd.Timestamp(e) + pd.Timedelta(days=1)),
+                    ],
+                )
+            except Exception:
+                pass
+        return pd.read_parquet(path)
+    except Exception:
+        return pd.DataFrame()
+
+
 def _platform_df_for_intelligence_bundle(
     sess: AppSession,
     platform_key: str,
@@ -905,6 +950,16 @@ def _platform_df_for_intelligence_bundle(
     e = str(end_date)[:10]
     if len(s) != 10 or len(e) != 10:
         return raw
+
+    in_w = _filter_platform_df_by_window(raw, s, e)
+    if in_w.empty:
+        disk = _warm_disk_platform_frame(attr, s, e)
+        if not disk.empty:
+            in_disk = _filter_platform_df_by_window(disk, s, e)
+            if not in_disk.empty:
+                raw = disk
+                in_w = in_disk
+
     if platform_key not in platforms_with_uploads_in_range(s, e):
         return raw
 
@@ -980,13 +1035,30 @@ def _session_has_operational_frames(sess: AppSession) -> bool:
     return _session_has_platform_data(sess)
 
 
+def _repair_platform_loaded_flags(payload: dict) -> dict:
+    """Legacy bundles: unified sales had per-platform units but ``loaded`` stayed false."""
+    platforms = payload.get("platform_summary")
+    if not isinstance(platforms, list):
+        return payload
+    for p in platforms:
+        if not isinstance(p, dict) or p.get("loaded"):
+            continue
+        units = int(p.get("total_units") or 0)
+        if units > 0 or (p.get("daily") or []) or (p.get("monthly") or []):
+            p["loaded"] = True
+    return payload
+
+
 def _bundle_payload_has_display_data(payload: dict) -> bool:
-    if int((payload.get("sales_summary") or {}).get("total_units") or 0) > 0:
-        return True
-    return any(
+    _repair_platform_loaded_flags(payload)
+    platforms = payload.get("platform_summary") or []
+    has_loaded_units = any(
         p.get("loaded") and int(p.get("total_units") or 0) > 0
-        for p in (payload.get("platform_summary") or [])
+        for p in platforms
     )
+    if int((payload.get("sales_summary") or {}).get("total_units") or 0) > 0:
+        return has_loaded_units or not platforms
+    return has_loaded_units
 
 
 def _platform_summary_has_units(platform_summary: list) -> bool:
@@ -1372,6 +1444,31 @@ def _intelligence_payload_from_tier3_direct(
     )
 
 
+def _bundle_payload_chart_sparse(
+    payload: dict,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> bool:
+    """True when a short-range chart has headline units but almost no daily points."""
+    from ..services.sales import intelligence_daily_chart_enabled
+
+    if not intelligence_daily_chart_enabled(start_date, end_date):
+        return False
+    span = _report_span_days(start_date, end_date) or 0
+    if span < 7:
+        return False
+    min_days = max(7, span // 3)
+    for p in payload.get("platform_summary") or []:
+        if not p.get("loaded"):
+            continue
+        units = int(p.get("total_units") or 0)
+        if units < 200:
+            continue
+        if len(p.get("daily") or []) < min_days:
+            return True
+    return False
+
+
 def _cached_bundle_stale_vs_tier3_uploads(
     payload: dict,
     start_date: Optional[str],
@@ -1418,7 +1515,7 @@ def _bundle_cache_global_key(
 ) -> tuple:
     from ..services.daily_store import get_tier3_sync_token
 
-    return (*cache_key, tuple(sorted((get_tier3_sync_token() or {}).items())))
+    return (*cache_key, _INTELLIGENCE_BUNDLE_CACHE_GEN, tuple(sorted((get_tier3_sync_token() or {}).items())))
 
 
 def _bundle_cache_lookup(
@@ -1445,7 +1542,9 @@ def _bundle_cache_lookup(
             continue
         if _cached_bundle_stale_vs_tier3_uploads(payload, start_date, end_date):
             continue
-        return payload
+        if _bundle_payload_chart_sparse(payload, start_date, end_date):
+            continue
+        return _repair_platform_loaded_flags(payload)
     return None
 
 
@@ -1456,6 +1555,7 @@ def _bundle_cache_store(
     *,
     ts: float | None = None,
 ) -> None:
+    payload = _repair_platform_loaded_flags(payload)
     entry = {"_ts": ts if ts is not None else time.time(), "payload": payload}
     sess_cache[cache_key] = entry
     global_key = _bundle_cache_global_key(cache_key)
@@ -2354,14 +2454,21 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
             _ret_agg = _ret_ov
     _ingest = getattr(sess, "daily_auto_ingest_result", None) or {}
     _has_ingest = bool(_ingest)
+    try:
+        import backend.main as _main
+
+        _po_only = _main.warm_cache_po_session_only() and not sess.sales_df.empty
+    except Exception:
+        _po_only = False
+    _plat_ok = _po_only or None  # when True, all marketplace flags count as loaded
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
-        mtr=not sess.mtr_df.empty,
+        mtr=_plat_ok or not sess.mtr_df.empty,
         sales=not sess.sales_df.empty,
-        myntra=not sess.myntra_df.empty,
-        meesho=not sess.meesho_df.empty,
-        flipkart=not sess.flipkart_df.empty,
-        snapdeal=not sess.snapdeal_df.empty,
+        myntra=_plat_ok or not sess.myntra_df.empty,
+        meesho=_plat_ok or not sess.meesho_df.empty,
+        flipkart=_plat_ok or not sess.flipkart_df.empty,
+        snapdeal=_plat_ok or not sess.snapdeal_df.empty,
         inventory=not sess.inventory_df_variant.empty,
         daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
         existing_po=not sess.existing_po_df.empty,
@@ -2871,8 +2978,11 @@ def get_coverage(request: Request, light: bool = False):
             import backend.main as _main
 
             _main.restore_po_sidecars_from_warm(sess)
-            _main.try_fast_warm_cache_hydrate(sess)
-            _ensure_sales_rebuilt(sess)
+            if not _main._warm_cache:
+                _main.bootstrap_warm_cache_from_disk_if_empty()
+            if _main._warm_cache:
+                if _main.session_needs_warm_cache_topup(sess) or _main.session_needs_operational_data(sess):
+                    _main._apply_warm_cache_if_needed(sess, _main._warm_cache_generation)
         except Exception:
             pass
         try:

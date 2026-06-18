@@ -25,6 +25,64 @@ _log = logging.getLogger(__name__)
 _warm_hydrate_queued: set[str] = set()
 
 
+def _hydrate_warm_worker(session_id: str) -> None:
+    """Background: copy warm cache into session (can take 30–90s on large catalogs)."""
+    from ..session import store
+
+    try:
+        sess = store.get(session_id)
+        if sess is None:
+            return
+        import backend.main as _main
+
+        _main._copy_warm_cache_to_session(sess)
+        try:
+            from ..routers.data import _merge_disk_warm_into_session
+
+            disk_note = _merge_disk_warm_into_session(sess)
+            if disk_note:
+                _log.info("hydrate-warm disk merge: %s", disk_note)
+        except Exception:
+            _log.exception("hydrate-warm disk top-up failed")
+        sess._warm_cache_gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
+        sess._warm_cache_only = True
+        sess._quarterly_cache.clear()
+        resume_auto_data_restore(sess)
+        n_mtr = len(sess.mtr_df) if hasattr(sess.mtr_df, "__len__") else 0
+        n_inv = len(sess.inventory_df_variant)
+        n_sales = len(sess.sales_df)
+        try:
+            from ..services.github_cache import warm_cache_needs_full_rebuild
+            from ..routers.data import _maybe_queue_light_session_hydrate
+
+            stale = warm_cache_needs_full_rebuild(_main._warm_cache or {})
+            if stale:
+                _log.warning(
+                    "hydrate-warm: deferring stale gap-fill to background (%s)",
+                    stale,
+                )
+            _maybe_queue_light_session_hydrate(sess, session_id)
+        except Exception:
+            _log.exception("hydrate-warm background queue failed")
+        _log.info(
+            "hydrate-warm copy done session=%s sales=%s mtr=%s inv=%s",
+            session_id[:8],
+            n_sales,
+            n_mtr,
+            n_inv,
+        )
+        try:
+            from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+            DAILY_UPLOAD_EXECUTOR.submit(_persist_pg_session_bg, session_id, sess)
+        except Exception:
+            pass
+    except Exception:
+        _log.exception("hydrate-warm worker failed session=%s", session_id[:8])
+    finally:
+        _warm_hydrate_queued.discard(session_id)
+
+
 def _apply_loaded_into_session(sess, loaded: dict) -> None:
     """Copy cache payload into session without clobbering a newer Existing PO upload."""
     from ..services.existing_po import session_has_fresh_existing_po
@@ -435,46 +493,13 @@ def cache_hydrate_warm(request: Request):
         if sid in _warm_hydrate_queued:
             return CacheStatusResponse(ok=True, message="Warm cache hydrate already running…")
         _warm_hydrate_queued.add(sid)
-        try:
-            _main._copy_warm_cache_to_session(sess)
-            sess._warm_cache_gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
-            sess._warm_cache_only = True
-            sess._quarterly_cache.clear()
-            resume_auto_data_restore(sess)
-            n_sales = _rebuild_sales_in_session(sess)
-            n_mtr = len(sess.mtr_df) if hasattr(sess.mtr_df, "__len__") else 0
-            try:
-                from ..services.github_cache import warm_cache_needs_full_rebuild
-                from ..routers.data import _maybe_queue_light_session_hydrate
+        from ..concurrency import DAILY_UPLOAD_EXECUTOR
 
-                stale = warm_cache_needs_full_rebuild(_main._warm_cache or {})
-                if stale:
-                    _log.warning(
-                        "hydrate-warm: deferring stale gap-fill to background (%s)",
-                        stale,
-                    )
-                _maybe_queue_light_session_hydrate(sess, sid)
-            except Exception:
-                _log.exception("hydrate-warm background queue failed")
-            _log.info(
-                "hydrate-warm copy done session=%s sales=%s mtr=%s inv=%s",
-                sid[:8],
-                n_sales,
-                n_mtr,
-                len(sess.inventory_df_variant),
-            )
-            try:
-                from ..concurrency import DAILY_UPLOAD_EXECUTOR
-
-                DAILY_UPLOAD_EXECUTOR.submit(_persist_pg_session_bg, sid, sess)
-            except Exception:
-                pass
-            return CacheStatusResponse(
-                ok=True,
-                message=f"Loaded from warm cache ({n_sales:,} sales rows). Daily uploads merge in background.",
-            )
-        finally:
-            _warm_hydrate_queued.discard(sid)
+        DAILY_UPLOAD_EXECUTOR.submit(_hydrate_warm_worker, sid)
+        return CacheStatusResponse(
+            ok=True,
+            message="Warm cache hydrate started — datasets will appear as coverage reaches 8/8.",
+        )
     except Exception:
         _log.exception("hydrate-warm failed session=%s", sid[:8] if sid else "?")
         _warm_hydrate_queued.discard(sid)

@@ -21,6 +21,7 @@ from ..services.upload_policy import upload_policy_for_role
 from ..services.rbac import build_hrm_scope, resolve_module_access, ROLE_SUPER_ADMIN
 from ..services.login_otp import (
     otp_required_globally,
+    sms_otp_available,
     super_admin_otp_bypass_enabled,
     is_super_admin_user,
     normalize_india_phone,
@@ -158,6 +159,9 @@ def _resolve_phone(user: dict | None, username: str) -> str | None:
 def _needs_otp(request: Request, user: dict, phone: str | None) -> bool:
     if not otp_required_globally():
         return False
+    # Safety valve: Super Admin login must not hard-fail if SMS is unavailable.
+    if is_super_admin_user(user, user.get("username") or "") and not sms_otp_available():
+        return False
     if super_admin_otp_bypass_enabled() and is_super_admin_user(
         user, user.get("username") or ""
     ):
@@ -226,6 +230,8 @@ def _login_after_password(
                 phone=phone,
             )
         except RuntimeError as e:
+            if is_super_admin_user(user, user.get("username") or ""):
+                return _complete_login(request, response, user)
             raise HTTPException(status_code=503, detail=str(e)) from e
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e

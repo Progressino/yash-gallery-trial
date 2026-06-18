@@ -775,7 +775,7 @@ def restore_existing_po_from_disk(sess) -> bool:
     """Hydrate session from disk when warm cache left a partial or stale Existing PO."""
     meta = read_existing_po_disk_meta()
     df = _load_existing_po_df_from_disk()
-    if meta is None or df is None:
+    if df is None:
         return False
 
     disk_gen = int(meta.get("existing_po_generation") or 0)
@@ -815,7 +815,8 @@ def ensure_existing_po_hydrated(sess) -> bool:
     else:
         changed = restore_existing_po_from_disk(sess) or changed
         ep = getattr(sess, "existing_po_df", None)
-        if existing_po_looks_aggregated_bundled_only(ep):
+        ep_empty = ep is None or getattr(ep, "empty", True)
+        if existing_po_looks_aggregated_bundled_only(ep) or ep_empty:
             changed = restore_existing_po_from_warm_cache(sess) or changed
     if changed:
         try:

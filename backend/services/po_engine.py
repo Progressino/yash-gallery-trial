@@ -36,6 +36,33 @@ def round_po_pack(qty: float) -> int:
     return int(np.floor(np.ceil(q / pack) * pack))
 
 
+def _lead_time_gate_uses_entered(lead_time: int) -> bool:
+    return int(lead_time or 0) > 0
+
+
+def _lead_time_column_fallback(lead_time: int) -> int:
+    """Default ``Lead_Time_Days`` when sheet merge has no value (45d when gate uses sheet)."""
+    entered = int(lead_time or 0)
+    return entered if entered > 0 else 45
+
+
+def _lead_time_release_gate_days(po_df: pd.DataFrame, lead_time: int) -> np.ndarray:
+    """Per-row lead days for PO release gate: entered param when >0, else sheet ``Lead_Time_Days``."""
+    if _lead_time_gate_uses_entered(lead_time):
+        return np.full(len(po_df), float(int(lead_time)))
+    sheet_lt = pd.to_numeric(
+        po_df.get("Lead_Time_Days", pd.Series(_lead_time_column_fallback(lead_time), index=po_df.index)),
+        errors="coerce",
+    ).fillna(_lead_time_column_fallback(lead_time)).clip(lower=1, upper=730)
+    return sheet_lt.to_numpy(dtype=float)
+
+
+def _lead_time_gate_block_message(uses_entered: bool) -> str:
+    if uses_entered:
+        return "Projected cover exceeds entered lead time — no PO until cover is within lead days"
+    return "Projected cover exceeds sheet lead time — no PO until cover is within lead days"
+
+
 def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
     """Module-level twin of the nested ``_canonical_oms_key`` used in ``calculate_po_base``.
 
@@ -404,17 +431,15 @@ def _seasonal_adjacent_months_ads(
     demand_basis: str,
     years_lookback: int = 2,
     min_denominator: int = 7,
+    months_forward: int = 2,
 ) -> pd.DataFrame:
     """
-    Daily ADS from the same calendar month + following month in prior years.
+    Daily ADS from the current calendar month plus the next *months_forward* months
+    in prior years (default: 3-month window — e.g. June run uses Jun+Jul+Aug history).
 
-    Example: max_date in late March 2026 → use Mar+Apr of 2025 and 2024 per SKU.
-    If the last 30–90 days look weak but March/April historically move 4–5+ units
-    per day in aggregate, this lifts ADS so PO is appropriate before the season.
-
-    Per prior year we compute (units in that two-month window) / (days in window),
-    then take the mean across years (only years with any sales in the window
-    contribute — avoids diluting a clear seasonal peak with empty years).
+    Example: max_date in June 2026 → use Jun+Jul+Aug of 2025 and 2024 per SKU.
+    Lifts ADS before a seasonal peak when recent weeks look weak but last year's
+    peak months (e.g. July–August) sold strongly.
     """
     if sales_df.empty or "TxnDate" not in sales_df.columns or "Sku" not in sales_df.columns:
         return pd.DataFrame(columns=["OMS_SKU", "Seasonal_Month_ADS"])
@@ -437,16 +462,18 @@ def _seasonal_adjacent_months_ads(
         work["Sku"] = work["Sku"].map(_par_sea_cache)
 
     m0 = int(max_date.month)
+    span = max(1, int(months_forward) + 1)
     rate_lists: Dict[str, list] = defaultdict(list)
 
     for yo in range(1, years_lookback + 1):
         y = max_date.year - yo
-        if m0 == 12:
-            start = pd.Timestamp(year=y, month=12, day=1)
-            end = pd.Timestamp(year=y + 1, month=1, day=31)
-        else:
-            start = pd.Timestamp(year=y, month=m0, day=1)
-            end = pd.Timestamp(year=y, month=m0 + 1, day=1) + MonthEnd(0)
+        start = pd.Timestamp(year=y, month=m0, day=1)
+        end_month = m0 + span - 1
+        end_year = y
+        while end_month > 12:
+            end_month -= 12
+            end_year += 1
+        end = pd.Timestamp(year=end_year, month=end_month, day=1) + MonthEnd(0)
         days_span = max((end.normalize() - start.normalize()).days + 1, min_denominator)
 
         chunk = work[(work["TxnDate"] >= start) & (work["TxnDate"] <= end)]
@@ -786,6 +813,7 @@ def calculate_po_base(
     raise_view_date: Optional[str] = None,
     po_return_overlay_df: Optional[pd.DataFrame] = None,
     urgent_all_sizes_days: int = 45,
+    use_ly_fallback: bool = True,
 ) -> pd.DataFrame:
     if sales_df.empty or inv_df.empty:
         return pd.DataFrame()
@@ -1076,6 +1104,26 @@ def calculate_po_base(
         if ov is None or ov.empty:
             ov = po_return_overlay_df.copy()
         if "OMS_SKU" in ov.columns and "Return_Units" in ov.columns:
+            # Date-window the overlay: only count returns that fall within the ADS
+            # period window (same cutoff used for sales). Returns from prior months
+            # must not cancel out current-period sales and inflate ADS.
+            if "Return_Date" in ov.columns:
+                try:
+                    ov_dates = pd.to_datetime(ov["Return_Date"], errors="coerce")
+                    _cutoff_ts = pd.Timestamp(cutoff).normalize()
+                    _max_ts = pd.Timestamp(max_date).normalize()
+                    _in_window = (
+                        ov_dates.notna()
+                        & (ov_dates >= _cutoff_ts)
+                        & (ov_dates <= _max_ts)
+                    )
+                    # Rows with no parseable date (legacy undated bundles) are kept
+                    # so PO overlay still works for files that don't have per-row dates.
+                    _no_date = ov_dates.isna()
+                    ov = ov[_in_window | _no_date].copy()
+                except Exception:
+                    pass  # date filtering failed — keep all rows (safe fallback)
+
             ov["OMS_SKU"] = ov["OMS_SKU"].astype(str).map(lambda x: canonical_oms_key(x, sku_mapping))
             ov = ov[ov["OMS_SKU"].str.len() > 0]
             if group_by_parent:
@@ -1118,7 +1166,7 @@ def calculate_po_base(
 
     # Defaults until SKU Status / Lead merge — applied later after pipeline ghost rows are appended,
     # so pipeline-only SKUs still inherit per-sheet lead times.
-    po_df["Lead_Time_Days"] = int(max(1, int(lead_time)))
+    po_df["Lead_Time_Days"] = _lead_time_column_fallback(lead_time)
     po_df["PO_Block_Reason"] = ""
     po_df["SKU_Sheet_Status"] = ""
     po_df["SKU_Sheet_Closed"] = False
@@ -1453,9 +1501,20 @@ def calculate_po_base(
             )
             span_vals = pd.to_numeric(po_df["_ship_span_days"], errors="coerce")
             po_df.loc[_need_ship_span & span_vals.notna() & (span_vals > 0), "Eff_Days"] = (
-                span_vals.clip(lower=1.0, upper=150.0)
+                span_vals.clip(lower=1.0, upper=float(ADS_WINDOW))
             )
             po_df.drop(columns=["_ship_span_days"], inplace=True, errors="ignore")
+
+    # Eff_Days must never exceed the ADS window (period_days). The 150d shipment-span
+    # fallback is only for SKUs missing from inventory history — not calendar days beyond
+    # the demand window (e.g. 54d span shown as "54 of 30" in the UI).
+    po_df["Eff_Days"] = (
+        pd.to_numeric(po_df["Eff_Days"], errors="coerce").fillna(0).clip(lower=0, upper=float(ADS_WINDOW))
+    )
+    _window_demand = (
+        po_df["Net_Units"].fillna(0) if demand_basis == "Net" else po_df["Sold_Units"].fillna(0)
+    )
+    po_df.loc[pd.to_numeric(_window_demand, errors="coerce").fillna(0) <= 0, "Eff_Days"] = 0
 
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = np.where(
@@ -1555,10 +1614,13 @@ def calculate_po_base(
             po_df["Recent_ADS"],
         )
     else:
-        blended = np.maximum(po_df["Recent_ADS"], po_df["LY_ADS"])
+        if use_ly_fallback:
+            blended = np.maximum(po_df["Recent_ADS"], po_df["LY_ADS"])
+        else:
+            blended = po_df["Recent_ADS"]
 
-    # Final ADS for PO should not collapse to zero only because recent window is quiet.
-    # Use recent as primary signal, then floor with LY/seasonal/flat diagnostics.
+    # Final ADS for PO: recent signal (sold ÷ Eff_Days), optionally lifted by LY,
+    # capped for non-sparse bursty SKUs, then floored by seasonal + Flat30 (sheet FREQ).
     recent_ads = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0)
     ly_ads = pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0)
     seasonal_ads = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
@@ -1566,22 +1628,22 @@ def calculate_po_base(
     if use_seasonality:
         prim_ads = pd.to_numeric(pd.Series(blended, index=po_df.index), errors="coerce").fillna(0.0)
     else:
-        prim_ads = np.maximum(recent_ads, ly_ads)
-    # Non-sparse sellers: matrix/short-span Recent_ADS cannot exceed the period
-    # average (sold/30). Prevents 6 sold / Eff_Days=2 → ADS=3 style inflation while
-    # keeping sparse/intermittent (4032) lifts uncapped.
-    if "_sparse_intermittent" in po_df.columns:
-        _ns_cap = ~po_df["_sparse_intermittent"].fillna(False).astype(bool)
-        _sold_cap = (
-            pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
-            if demand_basis == "Net"
-            else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
-        )
-        _period_rate = (_sold_cap / float(ADS_WINDOW)).clip(lower=0.0)
-        _ceil = np.maximum(flat_ads, _period_rate)
-        prim_ads = pd.Series(prim_ads, index=po_df.index, dtype=float)
-        _cap_mask = _ns_cap & (_sold_cap >= 6) & (_sold_cap < 10)
-        prim_ads = np.where(_cap_mask, np.minimum(prim_ads, _ceil), prim_ads)
+        if use_ly_fallback:
+            prim_ads = np.maximum(recent_ads, ly_ads)
+        else:
+            prim_ads = recent_ads
+    # Short-span Recent_ADS cannot exceed the period average (sold ÷ period_days).
+    # Applies to all sellers — e.g. 6 sold in 30d → max 0.2/day even when Eff_Days=6.
+    _sold_cap = (
+        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+        if demand_basis == "Net"
+        else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
+    )
+    _period_rate = (_sold_cap / float(ADS_WINDOW)).clip(lower=0.0)
+    _ceil = np.maximum(flat_ads, _period_rate)
+    prim_ads = pd.Series(prim_ads, index=po_df.index, dtype=float)
+    _cap_mask = (_sold_cap >= 6) & (prim_ads > _ceil)
+    prim_ads = np.where(_cap_mask, np.minimum(prim_ads, _ceil), prim_ads)
     po_df["ADS"] = np.maximum.reduce([prim_ads, seasonal_ads, flat_ads]).round(3)
     po_df.drop(columns=["_sparse_intermittent"], inplace=True, errors="ignore")
 
@@ -1736,7 +1798,7 @@ def calculate_po_base(
             ghost["Flat30_ADS"]      = 0.0
             ghost["Days_Left"]       = 999.0
             ghost["Gross_PO_Qty"]    = 0
-            ghost["Lead_Time_Days"] = int(max(1, int(lead_time)))
+            ghost["Lead_Time_Days"] = _lead_time_column_fallback(lead_time)
             ghost["SKU_Sheet_Status"] = ""
             ghost["SKU_Sheet_Closed"] = False
             ghost["PO_Block_Reason"] = ""
@@ -1760,6 +1822,7 @@ def calculate_po_base(
     # ── SKU Status / Lead sheet (optional, after pipeline ghost rows) ────────────
     # Upload overrides lead days per SKU / parent style. Without this pass, every row
     # keeps the global ``lead_time`` default — operators often mistake that for “missing”.
+    _status_catalog_keys: set[str] = set()
     if sku_status_df is not None and not sku_status_df.empty:
         po_df.drop(columns=["SKU_Sheet_Status", "SKU_Sheet_Closed"], inplace=True, errors="ignore")
         m = sku_status_df.copy()
@@ -1767,6 +1830,7 @@ def calculate_po_base(
         _ss_canon = {s: _canonical_oms_key(s) for s in _uniq_ss}
         m["OMS_SKU"] = m["OMS_SKU"].map(_ss_canon).fillna("")
         m = m[m["OMS_SKU"].str.len() > 0]
+        _status_catalog_keys = set(m["OMS_SKU"].astype(str).str.strip())
 
         def _max_positive_lead(series: pd.Series) -> float:
             v = pd.to_numeric(series, errors="coerce")
@@ -1990,7 +2054,12 @@ def calculate_po_base(
         else:
             po_df["Lead_Time_From_Status_Sheet"] = False
 
-    po_df["Lead_Time_Days"] = pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce").fillna(int(max(1, int(lead_time)))).clip(lower=1, upper=730).astype(int)
+    po_df["Lead_Time_Days"] = (
+        pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce")
+        .fillna(_lead_time_column_fallback(lead_time))
+        .clip(lower=1, upper=730)
+        .astype(int)
+    )
 
     # ── In-app confirmed PO raises (Export & Confirm) ───────────────────────────
     # Merged into effective pipeline so tomorrow's run does not re-recommend the
@@ -2101,11 +2170,14 @@ def calculate_po_base(
 
     # projected_days_now = (Total_Inventory + effective pipeline) / ADS
     #
-    # PO quantity (two modes):
-    # • Lead gate ON  — operator Excel "Qty": only when cover is below factory lead,
-    #   top up through lead-time days (not the post-PO target horizon).
-    # • Lead gate OFF — balance-days toward target_cover_days (legacy / planning mode).
+    # PO quantity (hybrid lead gate):
+    # • Lead gate ON  — release when projected cover (inv + pipeline) is below lead days:
+    #   operator-entered lead_time when >0, else per-SKU sheet ``Lead_Time_Days``.
+    #   Qty tops up toward post-PO target using full projected days.
+    # • Lead gate OFF — balance-days toward target_cover_days (same qty rule; no lead gate).
     target_cover_days = float(max(0, target_days + grace_days))
+    _lt_gate_arr = _lead_time_release_gate_days(po_df, lead_time)
+    _lt_gate_uses_entered = _lead_time_gate_uses_entered(lead_time)
     if "Total_Inventory" in po_df.columns:
         inv_for_cover = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
     else:
@@ -2119,14 +2191,9 @@ def calculate_po_base(
     _proj_arr = np.asarray(projected_days_now, dtype=float)
 
     if enforce_lead_time_release_gate:
-        _lt_po = (
-            pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce")
-            .fillna(float(max(1, int(lead_time))))
-            .clip(lower=1.0, upper=730.0)
-            .to_numpy(dtype=float)
-        )
-        shortfall_units = np.maximum(_ads_arr * _lt_po - _inv_arr - _pipe_arr, 0.0)
-        need_po = (_ads_arr > 0) & (_proj_arr < _lt_po)
+        need_po = (_ads_arr > 0) & (_proj_arr < _lt_gate_arr)
+        balance_days = np.maximum(target_cover_days - _proj_arr, 0.0)
+        shortfall_units = _ads_arr * balance_days
         po_qty_round = np.where(
             need_po,
             np.vectorize(round_po_pack)(shortfall_units),
@@ -2136,6 +2203,19 @@ def calculate_po_base(
         balance_days = target_cover_days - projected_days_now
         raw_po = ads_num * balance_days
         po_qty_round = np.vectorize(round_po_pack)(np.maximum(raw_po, 0.0)).astype(int)
+
+    # Closed / doubt / sales-after-closed SKUs must never receive a PO recommendation.
+    try:
+        from .sku_status_lead import is_excluded_po_status as _is_excl_st
+    except Exception:  # pragma: no cover
+        def _is_excl_st(_x: object) -> bool:
+            return False
+
+    _st_excl = po_df.get("SKU_Sheet_Status", pd.Series("", index=po_df.index)).astype(str).map(_is_excl_st)
+    _cl_excl = po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
+    _excl_mask = (_st_excl | _cl_excl).fillna(False).to_numpy(dtype=bool)
+    if _excl_mask.any():
+        po_qty_round = np.where(_excl_mask, 0, po_qty_round)
 
     po_df["Gross_PO_Qty"] = po_qty_round.astype(int)
     po_df["PO_Qty"] = po_df["Gross_PO_Qty"].astype(int)
@@ -2149,18 +2229,10 @@ def calculate_po_base(
         po_df["PO_Qty"] = np.vectorize(round_po_pack)(net_po).astype(int)
         po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
 
-    # Surface why gated mode left PO at zero when cover already meets factory lead.
-    _msg_lead_window = (
-        "Projected cover exceeds factory lead time — no PO until cover is within lead days"
-    )
+    # Surface why gated mode left PO at zero when projected cover already meets lead gate.
+    _msg_lead_window = _lead_time_gate_block_message(_lt_gate_uses_entered)
     if enforce_lead_time_release_gate:
-        _lt_gate = (
-            pd.to_numeric(po_df["Lead_Time_Days"], errors="coerce")
-            .fillna(float(max(1, int(lead_time))))
-            .clip(lower=1.0, upper=730.0)
-            .to_numpy(dtype=float)
-        )
-        _block_lead_win = (_ads_arr > 0) & (_proj_arr >= _lt_gate)
+        _block_lead_win = (_ads_arr > 0) & (_proj_arr >= _lt_gate_arr)
         if bool(np.any(_block_lead_win)):
             _idx_bw = po_df.index[_block_lead_win]
             br_bw = po_df.loc[_idx_bw, "PO_Block_Reason"].astype(str).str.strip()
@@ -2215,6 +2287,25 @@ def calculate_po_base(
     #   keys (which can borrow an unrelated style).
     from .sku_status_lead import is_excluded_po_status, po_block_reason_for_excluded_status
 
+    # Safety guard: zero out any SKU whose CURRENT coverage already meets or exceeds the
+    # target horizon.  The balance-days formula already handles this arithmetically, but
+    # pack-size rounding or sibling-lift logic can occasionally leave a non-zero PO_Qty
+    # on an already-covered SKU.  This explicit check is the belt-and-suspenders guarantee.
+    _proj_cover_now = np.where(
+        ads_num > 0, (inv_for_cover + pipe_num) / ads_num, 999.0
+    )
+    _already_at_target = (_proj_cover_now >= target_cover_days) & (
+        pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
+    )
+    if _already_at_target.any():
+        po_df.loc[_already_at_target, "PO_Qty"] = 0
+        po_df.loc[_already_at_target, "Gross_PO_Qty"] = 0
+        _msg_covered = f"Current cover ≥ {int(target_cover_days)}d target — no PO needed"
+        br = po_df.loc[_already_at_target, "PO_Block_Reason"].astype(str).str.strip()
+        po_df.loc[_already_at_target, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"), _msg_covered, br + "; " + _msg_covered
+        )
+
     _closed = po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
     _status_excl = po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status)
     _excluded = (_closed | _status_excl).fillna(False).astype(bool)
@@ -2236,6 +2327,14 @@ def calculate_po_base(
         _sheet_ok = po_df["Lead_Time_From_Status_Sheet"].fillna(False).astype(bool)
         _hot2 = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
         block_lt = (~_sheet_ok) & _hot2
+        # When the loaded status sheet only covers part of the catalog, do not zero PO
+        # for SKUs whose parent style never appeared on that sheet — they keep the global
+        # lead_time default.  Full-sheet uploads still require a sheet-resolved lead per row.
+        if _status_catalog_keys and len(po_df) > 100:
+            _sku_k = po_df["OMS_SKU"].astype(str).str.strip()
+            _par_k = _sku_k.map(get_parent_sku).astype(str).str.strip()
+            _governed = _sku_k.isin(_status_catalog_keys) | _par_k.isin(_status_catalog_keys)
+            block_lt = block_lt & _governed
         if block_lt.any():
             po_df.loc[block_lt, "PO_Qty"] = 0
             po_df.loc[block_lt, "Gross_PO_Qty"] = 0
@@ -2367,8 +2466,8 @@ def calculate_po_base(
     #
     # Part A — Lead-time gate lift (target-only mode only):
     #   When the lead gate is off, ≥2 sizes with PO can lift siblings blocked only
-    #   by projected > lead toward target_days.  Skipped when gate is on — Excel Qty
-    #   tops up through lead-time days only and does not override for siblings.
+    #   by projected > lead toward target_days.  Skipped when gate is on — qty is
+    #   already sized toward post-PO target for eligible rows.
     #
     # Part B — Missing-size ghost rows:
     #   When any size of a parent has Projected_Running_Days < urgent_all_sizes_days,
@@ -2499,6 +2598,28 @@ def calculate_po_base(
 
     # Final pack rounding (overlay / gate-lift can leave non-pack quantities) + refresh cover.
     _po_final = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0.0)
+
+    # Re-apply excluded-SKU block after sibling-lift / ghost-row expansion.
+    try:
+        from .sku_status_lead import is_excluded_po_status as _is_excl_final
+    except Exception:  # pragma: no cover
+        def _is_excl_final(_x: object) -> bool:
+            return False
+
+    _st_final = po_df.get("SKU_Sheet_Status", pd.Series("", index=po_df.index)).astype(str).map(_is_excl_final)
+    _cl_final = po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False).astype(bool)
+    _excl_final = (_st_final | _cl_final).fillna(False)
+    if _excl_final.any():
+        _po_final = _po_final.where(~_excl_final, 0.0)
+        _msg_excl = "SKU excluded from PO recommendation"
+        br = po_df.loc[_excl_final, "PO_Block_Reason"].astype(str).str.strip()
+        reasons = po_df.loc[_excl_final, "SKU_Sheet_Status"].map(
+            lambda s: po_block_reason_for_excluded_status(s) if str(s).strip() else "SKU marked closed on status sheet"
+        )
+        po_df.loc[_excl_final, "PO_Block_Reason"] = np.where(
+            br.eq("") | br.eq("nan"), reasons, br + "; " + reasons.astype(str)
+        )
+
     po_df["PO_Qty"] = np.vectorize(round_po_pack)(_po_final.to_numpy(dtype=float)).astype(int)
     po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
     if "Total_Inventory" in po_df.columns:
@@ -2555,5 +2676,53 @@ def calculate_po_base(
         )
     else:
         po_df["Bundle_Size"] = ""
+
+    # Final lead-time gate (belt-and-suspenders after pack-round / ghost rows).
+    if enforce_lead_time_release_gate and "Projected_Running_Days" in po_df.columns:
+        _proj_fin = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
+        _lt_fin_arr = _lead_time_release_gate_days(po_df, lead_time)
+        _lt_fin_s = pd.Series(_lt_fin_arr, index=po_df.index)
+        _po_fin = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0)
+        _msg_lead_fin = _lead_time_gate_block_message(_lead_time_gate_uses_entered(lead_time))
+
+        _over_lead = (_proj_fin >= _lt_fin_s) & (_po_fin > 0)
+        if _over_lead.any():
+            po_df.loc[_over_lead, "PO_Qty"] = 0
+            po_df.loc[_over_lead, "Gross_PO_Qty"] = 0
+            br = po_df.loc[_over_lead, "PO_Block_Reason"].astype(str).str.strip()
+            po_df.loc[_over_lead, "PO_Block_Reason"] = np.where(
+                br.eq("") | br.eq("nan"),
+                _msg_lead_fin,
+                br + "; " + _msg_lead_fin,
+            )
+
+        if enforce_two_size_minimum:
+            _par_fin = po_df["Parent_SKU"]
+            _below_lead = (_proj_fin < _lt_fin_s).astype(int)
+            _n_below_lead = _below_lead.groupby(_par_fin).transform("sum")
+            _po_fin2 = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0)
+            _single_parent = (_n_below_lead < 2) & (_po_fin2 > 0)
+            if _single_parent.any():
+                po_df.loc[_single_parent, "PO_Qty"] = 0
+                po_df.loc[_single_parent, "Gross_PO_Qty"] = 0
+                _msg_two = (
+                    "Fewer than 2 sizes below factory lead — no PO until multiple sizes need cover"
+                )
+                br = po_df.loc[_single_parent, "PO_Block_Reason"].astype(str).str.strip()
+                po_df.loc[_single_parent, "PO_Block_Reason"] = np.where(
+                    br.eq("") | br.eq("nan"),
+                    _msg_two,
+                    br + "; " + _msg_two,
+                )
+
+        if "Total_Inventory" in po_df.columns:
+            _inv_fin2 = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
+        else:
+            _inv_fin2 = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0.0)
+        po_df["Post_PO_Cover_Days_Capped"] = np.where(
+            po_df["ADS"] > 0,
+            ((_inv_fin2 + po_df["PO_Pipeline_Effective"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
+            999.0,
+        )
 
     return dedupe_po_rows_by_sku(po_df)

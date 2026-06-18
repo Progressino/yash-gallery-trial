@@ -1325,7 +1325,7 @@ def test_sheet_lead_window_blocks_po_when_projected_cover_gt_lead_days():
 
 
 def test_below_target_cover_gets_po_when_projected_within_lead_window():
-    """With lead gate on, Excel Qty tops up only through lead-time days when cover is below lead."""
+    """Lead gate: release only below factory lead; qty tops up toward post-PO target cover."""
     days = pd.date_range("2025-11-01", periods=30, freq="D")
     sales = pd.DataFrame(
         {
@@ -1364,8 +1364,281 @@ def test_below_target_cover_gets_po_when_projected_within_lead_window():
     row = po.iloc[0]
     assert float(row["Projected_Running_Days"]) == 30.0
     assert int(row["Lead_Time_Days"]) == 45
-    # Lead fill only: 45d − 30d pipeline = 15 raw → pack-10 rounds to 20.
-    assert int(row["PO_Qty"]) == 20
+    assert int(row["PO_Qty"]) == 60
+    assert float(row["Post_PO_Cover_Days_Capped"]) == pytest.approx(90.0, abs=1.0)
+
+
+def test_po_released_when_projected_below_entered_lead_not_sheet_lead():
+    """4032DRSGREEN-S: entered lead 70d; projected ~67d → PO toward 180d target."""
+    sku = "4032DRSGREEN-S"
+    days = pd.date_range("2026-05-18", periods=30, freq="D")
+    sales_rows = []
+    for d in days[:8]:
+        sales_rows.append(
+            {
+                "Sku": sku,
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [4]})
+    existing = pd.DataFrame({"OMS_SKU": [sku], "PO_Pipeline_Total": [14]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": [sku],
+            "SKU_Sheet_Status": ["Medium Selling"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [45.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=70,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=False,
+    )
+    row = po.iloc[0]
+    assert float(row["Projected_Running_Days"]) < 70
+    assert int(row["Lead_Time_Days"]) == 45
+    assert int(row["PO_Qty"]) > 0
+
+
+def test_no_po_when_projected_cover_exceeds_sheet_lead_with_zero_entered_lead():
+    """lead_time=0 → gate uses sheet lead (45d); projected 68d > 45d → no PO."""
+    sku = "1003YKMUSTARD-XXL"
+    days = pd.date_range("2026-05-18", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": [sku] * 23,
+            "TxnDate": days[:23],
+            "Transaction Type": ["Shipment"] * 23,
+            "Quantity": [1] * 23,
+            "Units_Effective": [1] * 23,
+            "Source": ["Amazon"] * 23,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [33]})
+    existing = pd.DataFrame({"OMS_SKU": [sku], "PO_Pipeline_Total": [20]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": [sku],
+            "SKU_Sheet_Status": ["High selling"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [45.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=0,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=False,
+    )
+    row = po.iloc[0]
+    assert float(row["Projected_Running_Days"]) > 45
+    assert int(row["Lead_Time_Days"]) == 45
+    assert int(row["PO_Qty"]) == 0
+    assert "sheet lead" in str(row["PO_Block_Reason"]).lower()
+
+
+def test_po_released_when_projected_below_sheet_lead_with_zero_entered_lead():
+    """lead_time=0 → sheet lead 70d; projected ~67d → PO toward 180d target."""
+    sku = "4032DRSGREEN-S"
+    days = pd.date_range("2026-05-18", periods=30, freq="D")
+    sales_rows = []
+    for d in days[:8]:
+        sales_rows.append(
+            {
+                "Sku": sku,
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [4]})
+    existing = pd.DataFrame({"OMS_SKU": [sku], "PO_Pipeline_Total": [14]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": [sku],
+            "SKU_Sheet_Status": ["Medium Selling"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [70.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=0,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=False,
+    )
+    row = po.iloc[0]
+    assert float(row["Projected_Running_Days"]) < 70
+    assert int(row["Lead_Time_Days"]) == 70
+    assert int(row["PO_Qty"]) > 0
+
+
+def test_no_po_when_projected_cover_exceeds_entered_lead_time():
+    """1003YKMUSTARD-XXL: projected 68d > entered lead 60d → no PO (sheet lead 45 ignored for gate)."""
+    sku = "1003YKMUSTARD-XXL"
+    days = pd.date_range("2026-05-18", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": [sku] * 23,
+            "TxnDate": days[:23],
+            "Transaction Type": ["Shipment"] * 23,
+            "Quantity": [1] * 23,
+            "Units_Effective": [1] * 23,
+            "Source": ["Amazon"] * 23,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [33]})
+    existing = pd.DataFrame({"OMS_SKU": [sku], "PO_Pipeline_Total": [20]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": [sku],
+            "SKU_Sheet_Status": ["High selling"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [45.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=False,
+    )
+    row = po.iloc[0]
+    assert float(row["Projected_Running_Days"]) > 60
+    assert int(row["PO_Qty"]) == 0
+    assert "lead time" in str(row["PO_Block_Reason"]).lower()
+
+
+def test_pipeline_skus_all_get_po_when_projected_below_entered_lead():
+    """Every size with low shelf stock gets PO — not a single-SKU exception."""
+    skus = ["4032DRSGREEN-S", "4032DRSGREEN-M", "4032DRSGREEN-XXL"]
+    inv_vals = [4, 0, 8]
+    pipe_vals = [14, 10, 10]
+    days = pd.date_range("2026-05-18", periods=30, freq="D")
+    sales_rows = []
+    for sku in skus:
+        for d in days[:6]:
+            sales_rows.append(
+                {
+                    "Sku": sku,
+                    "TxnDate": d,
+                    "Transaction Type": "Shipment",
+                    "Quantity": 1,
+                    "Units_Effective": 1,
+                    "Source": "Amazon",
+                }
+            )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame({"OMS_SKU": skus, "Total_Inventory": inv_vals})
+    existing = pd.DataFrame({"OMS_SKU": skus, "PO_Pipeline_Total": pipe_vals})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": skus,
+            "SKU_Sheet_Status": ["Medium Selling"] * 3,
+            "SKU_Sheet_Closed": [False] * 3,
+            "Lead_Time_From_Sheet": [45.0] * 3,
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=95,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=False,
+    )
+    rows = po.set_index("OMS_SKU").loc[skus]
+    for sku in skus:
+        r = rows.loc[sku]
+        assert float(r["Projected_Running_Days"]) < 95, sku
+        assert float(r["Projected_Running_Days"]) < 180, sku
+        assert int(r["PO_Qty"]) > 0, sku
+
+
+def test_lead_gate_qty_targets_post_po_cover_not_lead_only():
+    """Proj ~18d, lead 60d → PO sized toward 180d post-PO cover (not ~65d lead-only top-up)."""
+    sku = "LOWCOV-M"
+    days = pd.date_range("2026-05-18", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": [sku] * 30,
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * 30,
+            "Quantity": [1] * 30,
+            "Units_Effective": [1] * 30,
+            "Source": ["Amazon"] * 30,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [0]})
+    existing = pd.DataFrame({"OMS_SKU": [sku], "PO_Pipeline_Total": [18]})
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": [sku],
+            "SKU_Sheet_Status": ["Open"],
+            "SKU_Sheet_Closed": [False],
+            "Lead_Time_From_Sheet": [60.0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=False,
+    )
+    row = po.iloc[0]
+    assert float(row["Projected_Running_Days"]) == pytest.approx(18.0, abs=1.0)
+    assert int(row["PO_Qty"]) > 50
+    assert float(row["Post_PO_Cover_Days_Capped"]) >= 170.0
 
 
 def test_po_release_not_blocked_just_because_projected_cover_exceeds_lead_time():
@@ -1620,9 +1893,9 @@ def test_projected_running_days_uses_inventory_plus_pipeline_over_ads():
 
 
 def test_ads_equals_sales_over_effective_days():
-    """ADS uses Sales / Eff_Days (no seasonal/flat overrides)."""
+    """Steady daily seller across full period: final ADS tracks sold ÷ Eff_Days."""
     rows = []
-    for d in pd.date_range("2025-11-01", periods=10, freq="D"):
+    for d in pd.date_range("2025-11-01", periods=30, freq="D"):
         rows.append(
             {
                 "Sku": "ADS-SKU-1",
@@ -1637,8 +1910,8 @@ def test_ads_equals_sales_over_effective_days():
     inv = pd.DataFrame({"OMS_SKU": ["ADS-SKU-1"], "Total_Inventory": [20]})
     po = calculate_po_base(sales, inv, 30, 7, 60, safety_pct=0.0, demand_basis="Sold")
     r = po.iloc[0]
-    assert int(r["Eff_Days"]) == 10
-    assert float(r["Sold_Units"]) == pytest.approx(30.0, abs=0.01)
+    assert int(r["Eff_Days"]) == 30
+    assert float(r["Sold_Units"]) == pytest.approx(90.0, abs=0.01)
     assert float(r["ADS"]) == pytest.approx(3.0, abs=0.02)
     assert float(r["Days_Left"]) == pytest.approx(round(20 / 3.0, 1), abs=0.05)
 
@@ -1790,6 +2063,39 @@ def test_ship_units_150d_shows_broader_context_than_period_sold_units():
     row = po.iloc[0]
     assert int(row["Sold_Units"]) == 10
     assert int(row["Ship_Units_150d"]) == 30
+
+
+def test_ads_caps_sparse_six_units_in_thirty_day_window():
+    """6 sold in 30d with short Eff_Days must not exceed sold÷30 (0.2), not 6÷6=1.0."""
+    rows = []
+    # One unit on each of 6 days spread across ~4 weeks (sparse intermittent pattern).
+    for d in pd.to_datetime(["2026-05-01", "2026-05-05", "2026-05-10", "2026-05-18", "2026-05-22", "2026-05-28"]):
+        rows.append(
+            {
+                "Sku": "1050YKBLUE-L",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        )
+    sales = pd.DataFrame(rows)
+    inv = pd.DataFrame({"OMS_SKU": ["1050YKBLUE-L"], "Total_Inventory": [11]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        safety_pct=0.0,
+        use_ly_fallback=False,
+        demand_basis="Sold",
+    )
+    row = po.iloc[0]
+    assert int(row["Sold_Units"]) == 6
+    assert float(row["Recent_ADS"]) == pytest.approx(1.0, abs=0.05)  # raw sold÷eff before cap
+    assert float(row["ADS"]) == pytest.approx(0.2, abs=0.02)  # capped to 6÷30
 
 
 def test_ads_falls_back_to_ly_when_recent_is_zero():
@@ -2625,6 +2931,138 @@ def test_urgent_all_sizes_ghost_rows_use_canonical_skus_not_mapping_keys():
     assert int(xxl["Net_Units"]) > 0
 
 
+def test_seasonal_window_includes_two_forward_months_for_june_run():
+    """June PO run uses Jun+Jul+Aug prior-year history (captures July–August peak)."""
+    from backend.services.po_engine import _seasonal_adjacent_months_ads
+
+    sku = "PEAK-M"
+    rows = []
+    for d in pd.date_range("2025-08-01", periods=31, freq="D"):
+        rows.append(
+            {
+                "Sku": sku,
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 3,
+                "Units_Effective": 3,
+            }
+        )
+    sales = pd.DataFrame(rows)
+    out = _seasonal_adjacent_months_ads(
+        sales, pd.Timestamp("2026-06-15"), False, "Sold", months_forward=2
+    )
+    assert not out.empty
+    assert float(out.loc[out["OMS_SKU"] == sku, "Seasonal_Month_ADS"].iloc[0]) > 0.5
+
+
+def test_ly_and_seasonal_lift_ads_when_recent_window_is_weak():
+    """Weak current month but strong same season last year → ADS uses seasonal/LY uplift."""
+    sku = "UPLIFT-M"
+    frames = []
+    for d in pd.date_range("2026-05-18", periods=30, freq="D"):
+        if d.day % 6 == 0:
+            frames.append(
+                {
+                    "Sku": sku,
+                    "TxnDate": d,
+                    "Transaction Type": "Shipment",
+                    "Quantity": 1,
+                    "Units_Effective": 1,
+                }
+            )
+    for d in pd.date_range("2025-07-01", periods=62, freq="D"):
+        frames.append(
+            {
+                "Sku": sku,
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 2,
+                "Units_Effective": 2,
+            }
+        )
+    sales = pd.concat([pd.DataFrame(frames)], ignore_index=True)
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [10]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        use_seasonality=True,
+        use_ly_fallback=True,
+    )
+    row = po.iloc[0]
+    recent = float(row["Recent_ADS"])
+    seasonal = float(row["Seasonal_Month_ADS"])
+    ads = float(row["ADS"])
+    assert recent < 0.3
+    assert seasonal > recent
+    assert ads >= seasonal
+
+
+def test_high_cover_style_no_po_when_projected_exceeds_lead_gate():
+    """Excel rule: no PO when projected cover already exceeds factory lead (e.g. 1023YKPBLUE)."""
+    parent = "1023YKPBLUE"
+    sizes = ["6XL", "M", "XS", "L", "XL"]
+    skus = [f"{parent}-{sz}" for sz in sizes]
+    days = pd.date_range("2026-05-01", periods=30, freq="D")
+    sales_frames = []
+    for sku in skus:
+        sales_frames.append(
+            pd.DataFrame(
+                {
+                    "Sku": [sku] * len(days),
+                    "TxnDate": days,
+                    "Transaction Type": ["Shipment"] * len(days),
+                    "Quantity": [1] * len(days),
+                    "Units_Effective": [1] * len(days),
+                    "Source": ["Amazon"] * len(days),
+                }
+            )
+        )
+    sales = pd.concat(sales_frames, ignore_index=True)
+    # ADS ≈ 1/day; inv + pipeline ⇒ projected 150–175d (above 60d lead).
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": skus,
+            "Total_Inventory": [120, 110, 100, 150, 140],
+        }
+    )
+    existing = pd.DataFrame(
+        {
+            "OMS_SKU": skus,
+            "PO_Pipeline_Total": [50, 65, 75, 80, 70],
+        }
+    )
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": skus,
+            "SKU_Sheet_Status": ["High selling"] * len(skus),
+            "SKU_Sheet_Closed": [False] * len(skus),
+            "Lead_Time_From_Sheet": [60.0] * len(skus),
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=True,
+    )
+    style = po[po["OMS_SKU"].astype(str).str.startswith(parent)]
+    assert len(style) == len(sizes)
+    assert all(float(r["Projected_Running_Days"]) > 60 for _, r in style.iterrows())
+    assert int(style["PO_Qty"].sum()) == 0
+
+
 def test_unbundled_per_size_rows_get_proportional_sales_not_bundled_eff_days():
     """Individual sizes get proportional sales from bundled listing fan-out, not inherited Eff_Days.
 
@@ -2777,7 +3215,64 @@ def test_in_stock_sku_shows_inventory_eff_days_without_ads_window_sales():
     assert int(row["Sold_Units"]) == 0
     assert int(row["Ship_Units_150d"]) == 12
     assert int(row["Eff_Days_Inventory"]) == 25
-    assert int(row["Eff_Days"]) > 0
+    assert int(row["Eff_Days"]) == 0
+    assert float(row["Recent_ADS"]) == 0.0
+
+
+def test_eff_days_zero_when_no_sales_in_ads_window_despite_ship150_span():
+    """1037DPT19WHITE-style: 0 sold in 30d must not show 150d span as Eff_Days."""
+    end = pd.Timestamp("2026-06-17")
+    old_dates = pd.date_range(end - pd.Timedelta(days=120), periods=7, freq="7D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1037DPT19WHITE-4XL",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+            for d in old_dates
+        ]
+        + [
+            {
+                "Sku": "OTHER",
+                "TxnDate": end,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        ]
+    )
+    inv = pd.DataFrame(
+        {"OMS_SKU": ["1037DPT19WHITE-4XL", "OTHER"], "Total_Inventory": [4, 1]}
+    )
+    hist_dates = pd.date_range(end - pd.Timedelta(days=13), periods=14, freq="D")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["1037DPT19WHITE-4XL"] * 14,
+            "Date": hist_dates,
+            "Qty": [1] * 14,
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        planning_date=str(end.date()),
+        inventory_history_df=inv_hist,
+    )
+    row = po.loc[po["OMS_SKU"] == "1037DPT19WHITE-4XL"].iloc[0]
+    assert int(row["Sold_Units"]) == 0
+    assert int(row["Ship_Units_150d"]) == 7
+    assert int(row["Eff_Days"]) == 0
+    assert int(row["Eff_Days_Inventory"]) == 14
     assert float(row["Recent_ADS"]) == 0.0
 
 
@@ -2830,7 +3325,7 @@ def test_in_stock_ship150_keeps_eff_days_after_existing_po_unbundle():
     assert int(row["Sold_Units"]) == 0
     assert int(row["Ship_Units_150d"]) == 96
     assert int(row["Total_Inventory"]) == 4
-    assert float(row["Eff_Days"]) > 0
+    assert int(row["Eff_Days"]) == 0
 
 
 def test_bundled_inventory_pipeline_stays_on_band_sales_fan_out_to_per_size():
@@ -3060,7 +3555,7 @@ def test_ship150_span_fallback_when_no_inventory_history():
     row = po.loc[po["OMS_SKU"] == "NO-HIST"].iloc[0]
     assert int(row["Sold_Units"]) == 0
     assert int(row["Ship_Units_150d"]) == 20
-    assert int(row["Eff_Days"]) == 10
+    assert int(row["Eff_Days"]) == 0
     """Real-world bug: daily-inventory sheet had only 24 of 30 snapshot dates.
 
     Every SKU in-stock for all 24 snapshot days was getting Eff_Days = 24 (the

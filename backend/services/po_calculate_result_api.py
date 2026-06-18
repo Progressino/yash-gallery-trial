@@ -80,6 +80,8 @@ def build_result_page(
                 "planning_date": meta.get("planning_date"),
                 "raise_ledger_rows": meta.get("raise_ledger_rows"),
                 "ledger_auto_import": meta.get("ledger_auto_import"),
+                "po_merge_version": meta.get("po_merge_version"),
+                "summary": meta.get("summary"),
             }
             if compact:
                 payload["rows_matrix"] = spilled.get("rows_matrix") or []
@@ -118,6 +120,8 @@ def build_result_page(
         "planning_date": meta.get("planning_date"),
         "raise_ledger_rows": meta.get("raise_ledger_rows"),
         "ledger_auto_import": meta.get("ledger_auto_import"),
+        "po_merge_version": meta.get("po_merge_version"),
+        "summary": meta.get("summary"),
     }
     if compact:
         payload["rows_matrix"] = _matrix_from_df(chunk, columns)

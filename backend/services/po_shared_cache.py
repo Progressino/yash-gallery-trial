@@ -24,7 +24,21 @@ _log = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Bump when PO engine merge/ADS semantics change (invalidates shared cache).
-PO_MERGE_LOGIC_VERSION = 20
+PO_MERGE_LOGIC_VERSION = 36
+
+
+def po_merge_result_is_stale(meta: dict[str, Any] | None) -> bool:
+    """True when a stored PO result was computed with an older engine merge version."""
+    if not meta:
+        return False
+    stored = meta.get("po_merge_version")
+    if stored is None:
+        return True
+    try:
+        return int(stored) < PO_MERGE_LOGIC_VERSION
+    except (TypeError, ValueError):
+        return True
+
 
 _CALC_PARAM_KEYS = (
     "period_days",
@@ -42,8 +56,36 @@ _CALC_PARAM_KEYS = (
     "raise_ledger_lookback_days",
     "auto_import_yesterday_ledger",
     "urgent_all_sizes_days",
-    "raise_view_date",
+    "use_ly_fallback",
 )
+
+# Mirror ``PORequest`` defaults so partial query bodies match POST fingerprints.
+_CALC_PARAM_DEFAULTS: dict[str, Any] = {
+    "period_days": 90,
+    "lead_time": 30,
+    "target_days": 135,
+    "demand_basis": "Sold",
+    "use_seasonality": False,
+    "seasonal_weight": 0.5,
+    "group_by_parent": False,
+    "min_denominator": 7,
+    "grace_days": 0,
+    "safety_pct": 0.0,
+    "enforce_two_size_minimum": False,
+    "enforce_lead_time_release_gate": True,
+    "raise_ledger_lookback_days": 14,
+    "auto_import_yesterday_ledger": True,
+    "urgent_all_sizes_days": 45,
+    "use_ly_fallback": True,
+}
+
+
+def _calc_params_for_fingerprint(body: dict) -> dict[str, Any]:
+    params = dict(_CALC_PARAM_DEFAULTS)
+    for k in _CALC_PARAM_KEYS:
+        if k in body and body[k] is not None and body[k] != "":
+            params[k] = body[k]
+    return params
 
 
 def shared_cache_enabled() -> bool:
@@ -119,6 +161,30 @@ def _existing_po_fingerprint(sess) -> str:
     return f"ep:{gen}:{n}:{sku_n}:{uploaded}:{fn}:{sums}"
 
 
+def _sku_status_fingerprint(sess) -> str:
+    """Changes when SKU status / lead sheet is uploaded or closed counts shift."""
+    df = getattr(sess, "sku_status_lead_df", None)
+    if df is None or getattr(df, "empty", True):
+        return "ss:0"
+    n = int(len(df))
+    closed = 0
+    if "SKU_Sheet_Closed" in df.columns:
+        closed = int(pd.to_numeric(df["SKU_Sheet_Closed"], errors="coerce").fillna(0).sum())
+    elif "SKU_Sheet_Status" in df.columns:
+        from .sku_status_lead import is_closed_sku_status
+
+        closed = int(df["SKU_Sheet_Status"].map(is_closed_sku_status).sum())
+    return f"ss:{n}:{closed}"
+
+
+def _sku_mapping_fingerprint(sess) -> str:
+    """Changes when SKU mapping master is merged or replaced."""
+    m = getattr(sess, "sku_mapping", None) or {}
+    if not m:
+        return "map:0"
+    return f"map:{len(m)}"
+
+
 def _raise_ledger_fingerprint(planning_date: str, lookback_days: int) -> str:
     """Stable signature for confirmed raises in the planning window (shared DB)."""
     try:
@@ -138,6 +204,33 @@ def _raise_ledger_fingerprint(planning_date: str, lookback_days: int) -> str:
         return f"raises:{n}:{qty}"
     except Exception:
         return "raises:?"
+
+
+def _return_overlay_fingerprint(sess) -> str:
+    """Changes when return overlay import/rebuild alters PO net demand."""
+    df = getattr(sess, "po_return_overlay_df", None)
+    if df is None or getattr(df, "empty", True):
+        return "rov:0"
+    n = int(len(df))
+    units = 0
+    if "Return_Overlay_Units" in df.columns:
+        units = int(pd.to_numeric(df["Return_Overlay_Units"], errors="coerce").fillna(0).sum())
+    as_of = str(getattr(sess, "return_overlay_as_of", "") or "")[:10]
+    return f"rov:{n}:{units}:{as_of}"
+
+
+def invalidate_po_after_sales_or_returns_change(sess) -> None:
+    """Drop session PO results and shared cache after sales/returns data changes."""
+    try:
+        from .po_raise_remove import invalidate_po_calculate_result
+
+        invalidate_po_calculate_result(sess)
+    except Exception:
+        _log.exception("invalidate_po_calculate_result after data change failed")
+    try:
+        invalidate_all_shared_caches()
+    except Exception:
+        _log.exception("invalidate_all_shared_caches after data change failed")
 
 
 def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
@@ -163,12 +256,7 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
     except Exception:
         pass
 
-    params = {k: body.get(k) for k in _CALC_PARAM_KEYS}
-    params.setdefault("period_days", 90)
-    params.setdefault("lead_time", 30)
-    params.setdefault("target_days", 135)
-    params.setdefault("demand_basis", "Sold")
-    params.setdefault("group_by_parent", False)
+    params = _calc_params_for_fingerprint(body)
 
     git_sha = ""
     try:
@@ -194,6 +282,9 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
             planning, int(body.get("raise_ledger_lookback_days") or 14)
         ),
         "existing_po": _existing_po_fingerprint(sess),
+        "sku_status": _sku_status_fingerprint(sess),
+        "sku_mapping": _sku_mapping_fingerprint(sess),
+        "return_overlay": _return_overlay_fingerprint(sess),
     }
 
 
@@ -278,6 +369,7 @@ def save_shared_cache(
             "sales_through": result.get("sales_through"),
             "planning_date_out": result.get("planning_date"),
             "raise_ledger_rows": result.get("raise_ledger_rows"),
+            "po_merge_version": fp.get("po_merge_version"),
         }
         _meta_path(key).write_text(json.dumps(meta, default=str), encoding="utf-8")
         _log.info(
@@ -311,6 +403,8 @@ def apply_shared_cache_to_session(sess, session_id: str, body: dict) -> Optional
 
         n = int(meta.get("total_rows") or 0)
         cols = list(meta.get("columns") or [])
+        _fp = meta.get("fingerprint") if isinstance(meta.get("fingerprint"), dict) else {}
+        _merge_ver = meta.get("po_merge_version") or _fp.get("po_merge_version")
         msg = (
             f"Loaded shared PO run from {meta.get('created_at_ist', 'earlier today')} "
             f"({n:,} rows) — same planning date and settings."
@@ -326,6 +420,7 @@ def apply_shared_cache_to_session(sess, session_id: str, body: dict) -> Optional
             "sales_through": meta.get("sales_through"),
             "planning_date": meta.get("planning_date_out") or meta.get("planning_date"),
             "raise_ledger_rows": meta.get("raise_ledger_rows"),
+            "po_merge_version": _merge_ver,
         }
         sess.po_calculate_status = "done"
         sess.po_calculate_progress = 100
@@ -354,12 +449,14 @@ def shared_cache_availability(sess, body: dict) -> dict[str, Any]:
     meta = lookup_shared_cache(sess, body)
     if not meta:
         return {"available": False}
+    _fp = meta.get("fingerprint") if isinstance(meta.get("fingerprint"), dict) else {}
     return {
         "available": True,
         "planning_date": meta.get("planning_date"),
         "row_count": int(meta.get("total_rows") or 0),
         "computed_at": meta.get("created_at_ist"),
         "sales_through": meta.get("sales_through"),
+        "po_merge_version": meta.get("po_merge_version") or _fp.get("po_merge_version"),
     }
 
 

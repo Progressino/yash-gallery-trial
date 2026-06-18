@@ -24,6 +24,13 @@ def otp_required_globally() -> bool:
     return os.environ.get("OTP_REQUIRED", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+def sms_otp_available() -> bool:
+    """True when OTP delivery is configured (provider or dev mode)."""
+    if os.environ.get("SMS_OTP_DEV", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    return bool(os.environ.get("MSG91_AUTH_KEY", "").strip())
+
+
 def super_admin_otp_bypass_enabled() -> bool:
     """When set, Super Admin accounts skip OTP on all devices (password only)."""
     return os.environ.get("SUPER_ADMIN_OTP_BYPASS", "").strip().lower() in (

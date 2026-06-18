@@ -313,6 +313,7 @@ export default function POEngine() {
   const dataLoadLoaded = useSession(s => operationalDataLoaded(s))
   const dataLoadTotal = OPERATIONAL_DATA_TOTAL
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
+  const [poEngineVersion, setPoEngineVersion] = useState<number | null>(null)
 
   const PO_MERGE_VERSION_KEY = 'po-merge-version-seen'
   const mergeAutoRef = useRef(false)
@@ -321,6 +322,7 @@ export default function POEngine() {
     api
       .get<{ git_sha?: string; label?: string; built_at?: string; po_merge_version?: number }>('/health')
       .then(r => {
+        if (r.data.po_merge_version != null) setPoEngineVersion(r.data.po_merge_version)
         const sha = r.data.git_sha || r.data.label
         if (!sha) return
         const built = r.data.built_at ? ` · ${r.data.built_at.slice(0, 10)}` : ''
@@ -726,7 +728,7 @@ export default function POEngine() {
     if (!dataReady) {
       setResult({
         ok: false,
-        message: `Server data is still loading (${dataLoadLoaded}/${dataLoadTotal} datasets). Wait until the sidebar shows 8/8, then click Calculate PO again.`,
+        message: `Server data is still loading (${dataLoadLoaded}/${dataLoadTotal} datasets). Wait until the sidebar shows ${dataLoadTotal}/${dataLoadTotal}, then click Calculate PO again.`,
       })
       return
     }
@@ -1344,6 +1346,29 @@ export default function POEngine() {
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">🎯 PO Engine</h2>
         <p className="text-gray-400 text-sm mt-1">Calculate purchase orders with quarterly history inline.</p>
+        {(poEngineVersion != null || appBuildLabel) && (
+          <p className="text-[11px] text-gray-500 mt-1.5 flex flex-wrap items-center gap-2">
+            {poEngineVersion != null && (
+              <span className="font-semibold text-[#002B5B] bg-sky-50 border border-sky-200 rounded px-2 py-0.5">
+                PO logic v{poEngineVersion}
+                {_storeResult?.ok && _storeResult.po_merge_version != null && (
+                  <>
+                    {' '}
+                    · result v{_storeResult.po_merge_version}
+                    {_storeResult.po_merge_version < poEngineVersion && (
+                      <span className="text-amber-700"> (recalculate)</span>
+                    )}
+                  </>
+                )}
+              </span>
+            )}
+            {appBuildLabel ? (
+              <span className="font-mono text-slate-600" title={`Server build ${appBuildLabel}`}>
+                Build {appBuildLabel.length > 28 ? `${appBuildLabel.slice(0, 7)}…` : appBuildLabel}
+              </span>
+            ) : null}
+          </p>
+        )}
       </div>
 
       {/* Tabs */}
@@ -1543,7 +1568,7 @@ export default function POEngine() {
               </p>
               {!dataReady ? (
                 <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 font-medium">
-                  Server data is loading ({dataLoadLoaded}/{dataLoadTotal} datasets). PO calculation unlocks when the sidebar shows <strong>8/8</strong>.
+                  Server data is loading ({dataLoadLoaded}/{dataLoadTotal} datasets). PO calculation unlocks when the sidebar shows <strong>{dataLoadTotal}/{dataLoadTotal}</strong>.
                 </p>
               ) : null}
               {loading && (

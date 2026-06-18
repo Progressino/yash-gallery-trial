@@ -64,6 +64,43 @@ def test_hydrate_po_session_from_disk_parquets(tmp_path, monkeypatch):
     assert int(getattr(sess, "existing_po_generation", 0) or 0) == 3
 
 
+def test_po_session_hydrate_loads_platform_parquets_when_po_session_only(tmp_path, monkeypatch):
+    import backend.main as main_mod
+    from backend.session import AppSession
+    from backend.services.po_session_hydrate import hydrate_po_session_for_calculate
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("WARM_CACHE_PO_SESSION_ONLY", "1")
+    main_mod.clear_warm_cache()
+
+    mtr = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-06-01"]),
+            "SKU": ["A1"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [500],
+        }
+    )
+    mtr.to_parquet(tmp_path / "mtr_df.parquet", index=False)
+    sales = pd.DataFrame(
+        {
+            "Sku": ["A1"],
+            "TxnDate": [pd.Timestamp("2026-06-01")],
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Units_Effective": [1],
+            "Source": ["Amazon"],
+        }
+    )
+    sales.to_parquet(tmp_path / "sales_df.parquet", index=False)
+
+    sess = AppSession()
+    main_mod._warm_cache = {"sales_df": sales}
+    sess.sales_df = sales.copy()
+    hydrate_po_session_for_calculate(sess)
+    assert len(sess.mtr_df) == 1
+
+
 def test_placeholder_sidecars_restored_from_backup(tmp_path, monkeypatch):
     import backend.main as main_mod
     from backend.session import AppSession
@@ -157,5 +194,24 @@ def test_effective_sku_status_ignores_placeholder(tmp_path, monkeypatch):
             "SKU_Sheet_Closed": [False],
             "Lead_Time_From_Sheet": [10.0],
         }
+    )
+    assert effective_sku_status_df_for_engine(sess) is None
+
+
+def test_effective_sku_status_ignores_sparse_fragment_on_large_catalog():
+    from backend.session import AppSession
+    from backend.services.po_session_hydrate import effective_sku_status_df_for_engine
+
+    sess = AppSession()
+    sess.sku_status_lead_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["FOO-BAR", "BAZ-QUX"],
+            "SKU_Sheet_Status": ["Open", "Open"],
+            "SKU_Sheet_Closed": [False, False],
+            "Lead_Time_From_Sheet": [45.0, 45.0],
+        }
+    )
+    sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": [f"SKU-{i}" for i in range(200)], "Total_Inventory": [1] * 200}
     )
     assert effective_sku_status_df_for_engine(sess) is None

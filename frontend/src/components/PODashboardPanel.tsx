@@ -93,16 +93,20 @@ export interface PODashboardPanelProps {
   embedded?: boolean
   canDeleteRaiseSkus?: boolean
   onRaiseLedgerChanged?: (message?: string) => void | Promise<void>
+  /** When set (e.g. PO Fresh), overrides Zustand PO store params for dashboard API. */
+  poParams?: Record<string, unknown>
 }
 
 export function PODashboardPanel({
   embedded = false,
   canDeleteRaiseSkus: canDeleteRaiseSkusProp,
   onRaiseLedgerChanged,
+  poParams,
 }: PODashboardPanelProps) {
   const authUser = useAuth(s => s.user)
   const canDeleteRaiseSkus = canDeleteRaiseSkusProp ?? mayResetSharedData(authUser)
-  const params = usePOStore(s => s.params)
+  const storeParams = usePOStore(s => s.params)
+  const params = poParams ?? storeParams
   const [tuning, setTuning] = useState({
     recent_days: 7,
     prev_days: 7,
@@ -149,6 +153,7 @@ export function PODashboardPanel({
 
   const mut = useMutation({
     mutationFn: async () => {
+      const p = params as Record<string, unknown>
       const { data } = await api.post<DashboardPayload>(
         '/po/dashboard',
         {
@@ -156,7 +161,10 @@ export function PODashboardPanel({
           min_denominator: 7,
           ...tuning,
           planning_date: calendarDateIST(),
-          raise_ledger_lookback_days: 14,
+          raise_ledger_lookback_days: Number(p.raise_ledger_lookback_days ?? 14),
+          raise_view_date: (p.raise_view_date as string | undefined) || undefined,
+          auto_import_yesterday_ledger: true,
+          use_shared_cache: false,
         },
         { timeout: PO_DASHBOARD_TIMEOUT_MS },
       )

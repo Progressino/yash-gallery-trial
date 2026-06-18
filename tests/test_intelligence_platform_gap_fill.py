@@ -130,3 +130,26 @@ def test_unified_sales_lag_uses_newer_tier3_daily():
     assert daily.get("2026-06-01") == 400
     assert daily.get("2026-06-02") == 500
     assert amazon["total_units"] == 1100
+
+
+def test_unified_sales_only_marks_platforms_loaded_without_raw_frames():
+    """PO-session-only warm cache: sales_df has all channels; platform parquets skipped."""
+    sales = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-06-01", "2026-06-02"]),
+            "Source": ["Amazon", "Myntra"],
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Quantity": [10, 5],
+            "Sku": ["A1", "M1"],
+        }
+    )
+    empty = pd.DataFrame()
+    out = _platform_summaries_from_unified_bulk(
+        sales, empty, empty, empty, empty, empty, "2026-05-18", "2026-06-17"
+    )
+    by_name = {p["platform"]: p for p in out}
+    assert by_name["Amazon"]["loaded"] is True
+    assert by_name["Amazon"]["total_units"] == 10
+    assert by_name["Myntra"]["loaded"] is True
+    assert by_name["Myntra"]["total_units"] == 5
+    assert by_name["Flipkart"]["loaded"] is False

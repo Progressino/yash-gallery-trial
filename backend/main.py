@@ -153,8 +153,7 @@ def try_fast_warm_cache_hydrate(sess) -> bool:
     if not _warm_cache:
         bootstrap_warm_cache_from_disk_if_empty()
     if not _warm_cache:
-        _warm_cache_ready.wait(timeout=2.0)
-    if not _warm_cache:
+        _warm_cache_ready.wait(timeout=15.0)
         bootstrap_warm_cache_from_disk_if_empty()
     if not _warm_cache:
         return False
@@ -554,6 +553,33 @@ _DISK_CACHE_HARD_MIN_ROWS = int(_os_main.environ.get("WARM_CACHE_HARD_MIN_ROWS",
 _WARM_PLATFORM_KEYS = ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
 
 
+def warm_cache_po_session_only() -> bool:
+    """Local Mac dev: load unified sales + PO inputs only (skip ~1M-row platform frames)."""
+    raw = _os_main.environ.get("WARM_CACHE_PO_SESSION_ONLY", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _disk_manifest_keys(keys: list[str]) -> list[str]:
+    """Keys to read from disk — may omit platform history when unified sales exists."""
+    if not warm_cache_po_session_only() or "sales_df" not in keys:
+        return list(keys)
+    skip = set(_WARM_PLATFORM_KEYS)
+    skipped = [k for k in keys if k in skip]
+    if skipped:
+        log.info("PO-session-only warm cache: skip platform keys %s", skipped)
+    return [k for k in keys if k not in skip]
+
+
+def warm_cache_sales_rows(cache: dict) -> int:
+    df = cache.get("sales_df") if cache else None
+    if df is None or not hasattr(df, "__len__"):
+        return 0
+    try:
+        return int(len(df))
+    except Exception:
+        return 0
+
+
 def _warm_total_platform_rows(cache: dict) -> int:
     """Total rows across all platform frames in a (warm/disk) cache dict."""
     if not cache:
@@ -583,6 +609,11 @@ def _disk_cache_corruption_reason(disk_data: dict) -> str | None:
         reloaded on every restart, serving "0/8 Data loaded" forever.
     """
     if not disk_data:
+        return None
+    if warm_cache_po_session_only():
+        sales_n = warm_cache_sales_rows(disk_data)
+        if sales_n < 100_000:
+            return f"disk sales_df has only {sales_n} rows (min 100000 for PO-session-only)"
         return None
     if _DISK_CACHE_MIN_MTR_ROWS > 0:
         _mtr = disk_data.get("mtr_df")
@@ -669,6 +700,25 @@ def _rebuild_warm_cache_from_tier3_full() -> bool:
     except Exception:
         pass
     try:
+        # Include return overlay when building the warm-cache sales_df so that
+        # net-sales figures in Intelligence and per-SKU views are accurate from
+        # the first request after a Tier-3 rebuild.  The overlay is already in
+        # _warm_cache (loaded from disk parquet by the startup sequence).
+        _t3_rov_kw: dict = {}
+        try:
+            from .services.po_return_import import aggregate_return_overlay_for_use as _agg_t3
+            _t3_rov = _warm_cache.get("po_return_overlay_df")
+            if _t3_rov is not None and not getattr(_t3_rov, "empty", True):
+                _t3_rov_agg = _agg_t3(_t3_rov)
+                if _t3_rov_agg is not None and not getattr(_t3_rov_agg, "empty", True):
+                    _t3_rov_kw["return_overlay_df"] = _t3_rov_agg
+                    _t3_meta = _warm_cache.get(_RETURN_OVERLAY_META_WARM_KEY) or {}
+                    if isinstance(_t3_meta, dict):
+                        _t3_as_of = str(_t3_meta.get("return_overlay_as_of", "") or "")[:10]
+                        if _t3_as_of:
+                            _t3_rov_kw["return_overlay_as_of"] = _t3_as_of
+        except Exception:
+            log.exception("Tier-3 rebuild: return overlay prep for sales_df failed (continuing without)")
         _warm_cache["sales_df"] = build_sales_df(
             mtr_df=_warm_cache.get("mtr_df", pd.DataFrame()),
             myntra_df=_warm_cache.get("myntra_df", pd.DataFrame()),
@@ -676,6 +726,7 @@ def _rebuild_warm_cache_from_tier3_full() -> bool:
             flipkart_df=_warm_cache.get("flipkart_df", pd.DataFrame()),
             snapdeal_df=_warm_cache.get("snapdeal_df", pd.DataFrame()),
             sku_mapping=_warm_cache.get("sku_mapping") or {},
+            **_t3_rov_kw,
         )
     except Exception:
         log.exception("Tier-3 full rebuild: sales_df build failed")
@@ -851,7 +902,7 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
             )
 
         import pandas as pd
-        keys = manifest.get("keys", [])
+        keys = _disk_manifest_keys(list(manifest.get("keys", [])))
         loaded: dict = {}
         for key in keys:
             if key == "sku_mapping":
@@ -1045,6 +1096,26 @@ def _do_load_warm_cache() -> bool:
                   | df["OMS_SKU"].astype(str).str.match(r'^\d+$'))
             ].reset_index(drop=True)
 
+        # Lifespan bootstraps disk cache before this runs — reloading duplicates
+        # ~1M+ rows in memory and can OOM-kill the process on local dev.
+        if _warm_cache:
+            if warm_cache_po_session_only():
+                _wc_n = warm_cache_sales_rows(_warm_cache)
+                _wc_min = 100_000
+            else:
+                _wc_mtr = _warm_cache.get("mtr_df")
+                _wc_n = len(_wc_mtr) if _wc_mtr is not None and hasattr(_wc_mtr, "__len__") else 0
+                _wc_min = _DISK_CACHE_MIN_MTR_ROWS
+            if _wc_n >= _wc_min:
+                if _warm_cache_generation < 1:
+                    _warm_cache_generation = 1
+                log.info(
+                    "Warm cache already in memory from startup (%d mtr rows) — skipping disk reload",
+                    _wc_n,
+                )
+                _warm_cache_ready.set()
+                return True
+
         # ── Phase 0: local disk cache (fastest, ~2-3 s) ──────────────────────
         # Parquet files written to /data/warm_cache/ after each successful Phase 2.
         # /data is a Docker volume that persists across container restarts.
@@ -1071,13 +1142,16 @@ def _do_load_warm_cache() -> bool:
                     if _saved.tzinfo is None:
                         _saved = _saved.replace(tzinfo=IST)
                     _age_h = (datetime.now(IST) - _saved).total_seconds() / 3600
-                    _p0_m = disk_data.get("mtr_df")
-                    _p0_r = len(_p0_m) if _p0_m is not None else 0
-                    del _p0_m
-                    # Never fast-path an all-empty disk cache: that would skip the
-                    # GitHub rebuild and serve "0/8" forever even with the mtr guard
-                    # disabled (WARM_CACHE_MIN_MTR_ROWS=0).
-                    _p0_total = _warm_total_platform_rows(disk_data)
+                    if warm_cache_po_session_only():
+                        _p0_r = warm_cache_sales_rows(disk_data)
+                        _p0_total = _p0_r
+                        _p0_min = 100_000
+                    else:
+                        _p0_m = disk_data.get("mtr_df")
+                        _p0_r = len(_p0_m) if _p0_m is not None else 0
+                        del _p0_m
+                        _p0_total = _warm_total_platform_rows(disk_data)
+                        _p0_min = _DISK_CACHE_MIN_MTR_ROWS
                     _stale_vs_gh = None
                     try:
                         from .services.github_cache import warm_cache_needs_full_rebuild
@@ -1087,14 +1161,16 @@ def _do_load_warm_cache() -> bool:
                         pass
                     if (
                         _age_h < _FAST_SKIP_MAX_AGE_HOURS
-                        and _p0_r >= _DISK_CACHE_MIN_MTR_ROWS
+                        and _p0_r >= _p0_min
                         and _p0_total >= _DISK_CACHE_HARD_MIN_ROWS
                         and not _stale_vs_gh
                     ):
                         log.warning(
-                            "Warm-cache fast-path: disk is %.0fm old with %d mtr rows — "
+                            "Warm-cache fast-path: disk is %.0fm old with %d %s rows — "
                             "serving immediately, skipping Phase 1+2 entirely.",
-                            _age_h * 60, _p0_r,
+                            _age_h * 60,
+                            _p0_r,
+                            "sales" if warm_cache_po_session_only() else "mtr",
                         )
                         _warm_cache = disk_data
                         _warm_cache_loaded_at = datetime.now(IST)
@@ -1210,10 +1286,26 @@ def _do_load_warm_cache() -> bool:
                 # Skipping it keeps Phase 1 memory under 500 MB and prevents the
                 # health-check timeouts that trigger autoheal container restarts.
                 if has_sales and not disk_ok:
+                    # Phase 1 only runs when there's no disk cache (first-time server start).
+                    # Include return overlay from disk parquet if it exists.
+                    _p1_rov_kw: dict = {}
+                    try:
+                        from .services.po_return_import import aggregate_return_overlay_for_use as _agg_p1
+                        from .services.po_session_hydrate import _warm_cache_dir as _p1_wcdir
+                        import pathlib as _pl
+                        _p1_rov_path = _pl.Path(_p1_wcdir()) / "po_return_overlay_df.parquet"
+                        if _p1_rov_path.is_file():
+                            _p1_rov = pd.read_parquet(_p1_rov_path)
+                            _p1_rov_agg = _agg_p1(_p1_rov)
+                            if _p1_rov_agg is not None and not getattr(_p1_rov_agg, "empty", True):
+                                _p1_rov_kw["return_overlay_df"] = _p1_rov_agg
+                    except Exception:
+                        pass
                     p1["sales_df"] = build_sales_df(
                         mtr_df=p1["mtr_df"],       myntra_df=p1["myntra_df"],
                         meesho_df=p1["meesho_df"], flipkart_df=p1["flipkart_df"],
                         sku_mapping={},            snapdeal_df=p1["snapdeal_df"],
+                        **_p1_rov_kw,
                     )
                 # Only publish Phase-1 data to _warm_cache when Phase 0 disk cache
                 # is absent — Phase 0 data is full historical and must not be
@@ -1444,8 +1536,22 @@ def _do_load_warm_cache() -> bool:
             loaded["sales_df"] = _old_sales_df
             log.info("Phase 2: using disk sales_df (%d rows) — skipping build_sales_df to prevent OOM.", len(_old_sales_df))
         else:
-            # No disk sales_df available — build it (first-time Phase 2 only)
+            # No disk sales_df available — build it (first-time Phase 2 only).
+            # Include return overlay from disk so net-sales is accurate.
             try:
+                _p2_rov_kw: dict = {}
+                try:
+                    from .services.po_return_import import aggregate_return_overlay_for_use as _agg_p2
+                    from .services.po_session_hydrate import _warm_cache_dir as _p2_wcdir
+                    import pathlib as _pl2
+                    _p2_rov_path = _pl2.Path(_p2_wcdir()) / "po_return_overlay_df.parquet"
+                    if _p2_rov_path.is_file():
+                        _p2_rov = pd.read_parquet(_p2_rov_path)
+                        _p2_rov_agg = _agg_p2(_p2_rov)
+                        if _p2_rov_agg is not None and not getattr(_p2_rov_agg, "empty", True):
+                            _p2_rov_kw["return_overlay_df"] = _p2_rov_agg
+                except Exception:
+                    pass
                 loaded["sales_df"] = build_sales_df(
                     mtr_df=loaded.get("mtr_df", pd.DataFrame()),
                     myntra_df=loaded.get("myntra_df", pd.DataFrame()),
@@ -1453,6 +1559,7 @@ def _do_load_warm_cache() -> bool:
                     flipkart_df=loaded.get("flipkart_df", pd.DataFrame()),
                     sku_mapping=loaded.get("sku_mapping") or {},
                     snapdeal_df=loaded.get("snapdeal_df"),
+                    **_p2_rov_kw,
                 )
                 log.info("Phase 2 sales_df: %d rows (first-time build)", len(loaded["sales_df"]))
             except Exception as e:
@@ -1840,9 +1947,7 @@ async def _session_eviction_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: load cache in background so server is ready immediately
-    # Never use the default thread pool (Starlette run_in_threadpool / sync routes).
-    # Warm-cache load can run many minutes and would starve /api/auth/login → 504.
+    # Load warm cache in background — sync disk load at startup OOMs on large local catalogs.
     asyncio.create_task(run_heavy(_bootstrap_stitching_on_startup))
     asyncio.create_task(run_heavy(_do_load_warm_cache))
     try:

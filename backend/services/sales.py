@@ -1434,8 +1434,10 @@ def _unified_platform_summary_one(
     """
     One platform card from rows already filtered to that ``Source`` and reporting dates.
     ``raw_df`` gates ``loaded`` and supplies by_state when unified rows omit State.
+    When only unified ``sales_df`` is in memory (local PO-session mode), treat a
+    non-empty per-source slice as loaded even if raw platform frames were skipped.
     """
-    loaded = not raw_df.empty
+    loaded = not raw_df.empty or not s.empty
     if s.empty:
         if loaded and (start_date or end_date):
             # Unified sales_df can lag Tier-3 session frames (warm cache + daily_restored).

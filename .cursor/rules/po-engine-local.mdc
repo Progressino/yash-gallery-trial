@@ -1,0 +1,35 @@
+---
+description: After PO engine changes — bump version and restart local backend
+globs:
+  - backend/services/po_engine.py
+  - backend/services/po_shared_cache.py
+  - backend/services/po_calculate_run.py
+  - backend/services/po_session_hydrate.py
+  - backend/services/po_calculate_result_api.py
+  - frontend/src/pages/POFresh.tsx
+alwaysApply: false
+---
+
+# PO engine local sync
+
+When you change PO calculation logic or PO Fresh calculate flow:
+
+1. **Bump version** (invalidates shared cache):
+   ```bash
+   bash scripts/bump-po-engine-version.sh
+   ```
+   Or set `PO_MERGE_LOGIC_VERSION` in `backend/services/po_shared_cache.py` and update `tests/test_po_fresh_api.py` if it asserts the version.
+
+2. **Restart local backend** so `/api/health` reports the new `po_merge_version`:
+   ```bash
+   bash scripts/ensure-po-engine-local.sh
+   ```
+   This restarts the backend when the running version or PO source hash differs from the repo.
+
+3. **Verify**:
+   ```bash
+   bash local-dev/status.sh
+   ```
+   User UI reads version from `/api/health` — stale backend shows an old v32/v33 chip.
+
+Do not end a PO engine task without running `ensure-po-engine-local.sh` when the local stack is used for testing.

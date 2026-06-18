@@ -91,6 +91,36 @@ def test_light_coverage_applies_warm_cache_when_session_empty(client, auth_token
     main_mod.clear_warm_cache()
 
 
+def test_po_session_only_disk_load_skips_platform_frames(monkeypatch, tmp_path):
+    """Local Mac mode: load sales + PO inputs without 1M+ row platform history."""
+    import json
+
+    import pandas as pd
+
+    import backend.main as main_mod
+
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
+    monkeypatch.setenv("WARM_CACHE_PO_SESSION_ONLY", "1")
+
+    pd.DataFrame({"Sku": ["A"], "Quantity": [1]}).to_parquet(warm / "sales_df.parquet", index=False)
+    pd.DataFrame({"Sku": ["A"] * 100}).to_parquet(warm / "mtr_df.parquet", index=False)
+    with open(warm / "sku_mapping.json", "w") as f:
+        json.dump({"A": "A"}, f)
+    manifest = {
+        "saved_at": "2026-06-17T12:00:00+05:30",
+        "keys": ["sales_df", "mtr_df", "sku_mapping"],
+    }
+    with open(warm / "_manifest.json", "w") as f:
+        json.dump(manifest, f)
+
+    ok, data = main_mod._load_warm_cache_from_disk(ignore_age=True)
+    assert ok
+    assert "sales_df" in data
+    assert "mtr_df" not in data
+
+
 def test_light_coverage_rebuilds_sales_when_platforms_only(client, auth_token, monkeypatch):
     """When warm cache copies platforms but sales_df is empty, light coverage rebuilds sales."""
     import pandas as pd

@@ -174,7 +174,7 @@ export const PO_COLUMN_FORMULAS: Record<string, POFormulaDef> = {
     title: 'Season ADS (month+1)',
     summary: 'Historical ADS for this calendar month and the next month (prior years).',
     formula: 'AVG(monthly rate) from same month pair in lookback years',
-    steps: ['Floors final ADS when seasonality is enabled'],
+    steps: ['Floors final ADS when seasonality signals apply'],
   },
   Flat30_ADS: {
     title: 'Sheet FREQ (÷30)',
@@ -185,10 +185,10 @@ export const PO_COLUMN_FORMULAS: Record<string, POFormulaDef> = {
   ADS: {
     title: 'ADS (used)',
     summary: 'Final average daily sales used for all cover and PO math.',
-    formula: 'ADS = max(blended_recent, Seasonal_Month_ADS, Flat30_ADS)',
+    formula: 'ADS = max(capped_primary, Seasonal_Month_ADS, Flat30_ADS)',
     steps: [
-      'Blended recent = Recent_ADS, or weighted with LY_ADS when YoY seasonality is on',
-      'Without seasonality: max(Recent_ADS, LY_ADS) before seasonal / flat floors',
+      'Primary = max(Recent_ADS, LY_ADS) when LY fallback is on',
+      'Recent_ADS = demand_units ÷ Eff_Days',
       'Non-sparse sellers cap inflated short-span Recent_ADS at sold÷Period',
     ],
   },
@@ -388,9 +388,18 @@ export const PO_PARAM_FORMULAS: Record<string, POFormulaDef> = {
   },
   use_seasonality: {
     title: 'YoY seasonality',
-    summary: 'Blend Recent ADS with last-year same-window ADS.',
-    formula: 'blend = Recent × (1 − weight) + LY × weight',
-    steps: ['Still floored by Seasonal_Month_ADS and Flat30_ADS'],
+    summary: 'Blend recent ADS with last year; floor with current month + next 2 months from prior years.',
+    formula: 'blend = Recent × (1 − weight) + LY × weight; ADS = max(blend, Seasonal, Flat30)',
+    steps: [
+      'Seasonal window example: June run uses Jun+Jul+Aug history (captures July–August peak)',
+      'Still floored by Flat30_ADS (sheet FREQ)',
+    ],
+  },
+  use_ly_fallback: {
+    title: 'Last-year ADS floor',
+    summary: 'When seasonality is off, ADS uses max(Recent, same 30-day window last year).',
+    formula: 'Primary = max(Recent_ADS, LY_ADS)',
+    steps: ['On by default — helps when this year started slow vs last year same period'],
   },
   seasonal_weight: {
     title: 'Seasonal weight',
@@ -410,10 +419,16 @@ export const PO_PARAM_FORMULAS: Record<string, POFormulaDef> = {
     steps: ['Surfaces recommendation to alter SKU sizing mix'],
   },
   enforce_lead_time_release_gate: {
-    title: 'Lead-time gate (disabled)',
-    summary: 'Deprecated in app-only PO mode.',
-    formula: 'Not used in current release',
-    steps: ['PO calculations use target-cover formula from app data only.'],
+    title: 'Lead-time release gate',
+    summary:
+      'PO only when projected cover (inv + pipeline) is below lead time — entered value when set, otherwise per-SKU sheet lead.',
+    formula: 'PO when Projected days < Lead time; Qty = ADS × (target − Projected days)',
+    steps: [
+      'Lead time > 0 in Demand Parameters → same entered days for every SKU',
+      'Lead time 0 or blank → per-SKU Lead_Time_Days from the status sheet',
+      'Projected days = (inventory + pipeline) ÷ ADS',
+      'Requires ≥2 sizes with PO when two-size minimum is on',
+    ],
   },
 }
 
@@ -495,7 +510,7 @@ export function buildPORowBreakdown(
         { label: 'Flat30 ADS', value: fmt(flat) },
         {
           label: 'ADS (used)',
-          expression: 'max(blend, seasonal, flat30)',
+          expression: 'max(capped primary, seasonal, flat30)',
           value: fmt(ads),
           highlight: true,
         },

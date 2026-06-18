@@ -203,6 +203,17 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
     return stats
 
 
+_MIN_STATUS_ROWS_FOR_LARGE_CATALOG = 100
+
+
+def _status_too_sparse_for_catalog(df: pd.DataFrame, sess) -> bool:
+    """A tiny status fragment must not gate PO for the whole inventory catalog."""
+    if len(df) >= _MIN_STATUS_ROWS_FOR_LARGE_CATALOG:
+        return False
+    inv_n = _df_row_count(getattr(sess, "inventory_df_variant", None))
+    return inv_n > _MIN_STATUS_ROWS_FOR_LARGE_CATALOG
+
+
 def effective_sku_status_df_for_engine(sess) -> pd.DataFrame | None:
     """Return status sheet for PO math, or None when only a placeholder row is loaded."""
     df = getattr(sess, "sku_status_lead_df", None)
@@ -214,7 +225,54 @@ def effective_sku_status_df_for_engine(sess) -> pd.DataFrame | None:
             len(df),
         )
         return None
-    return df
+    if _status_too_sparse_for_catalog(df, sess):
+        _log.warning(
+            "Ignoring sparse sku_status_lead_df (%s rows vs %s inventory SKUs) — using global lead_time",
+            len(df),
+            _df_row_count(getattr(sess, "inventory_df_variant", None)),
+        )
+        return None
+    # Re-canonicalize with the current SKU mapping so status rows align with inventory/sales
+    # even when the mapping master was updated after the status sheet was uploaded.
+    try:
+        from .po_engine import canonical_oms_key
+
+        sku_map = getattr(sess, "sku_mapping", None) or {}
+        out = df.copy()
+        out["OMS_SKU"] = out["OMS_SKU"].astype(str).map(lambda s: canonical_oms_key(s, sku_map))
+        out = out[out["OMS_SKU"].astype(str).str.len() > 0]
+        return out if not out.empty else None
+    except Exception:
+        _log.exception("re-canonicalize sku_status_lead_df failed")
+        return df
+
+
+_LARGE_WARM_FRAMES = frozenset({"sales_df", "daily_inventory_history_df"})
+
+
+def _share_warm_frame_in_po_session_only(key: str) -> bool:
+    try:
+        import backend.main as _main
+
+        return _main.warm_cache_po_session_only() and key in _LARGE_WARM_FRAMES
+    except Exception:
+        return False
+
+
+def _assign_frame(target: dict | object, key: str, val: Any, *, is_dict: bool) -> None:
+    """Assign a dataframe without copying multi-million-row frames in local PO mode."""
+    if val is None or not hasattr(val, "empty") or val.empty:
+        return
+    if _share_warm_frame_in_po_session_only(key):
+        frame = val
+    elif hasattr(val, "copy"):
+        frame = val.copy()
+    else:
+        frame = val
+    if is_dict:
+        target[key] = frame
+    else:
+        setattr(target, key, frame)
 
 
 def _should_replace_warm_frame(cur: Any, incoming: Any) -> bool:
@@ -304,7 +362,7 @@ def ensure_po_calc_server_data_in_warm_cache() -> bool:
             continue
         cur = _main._warm_cache.get(key)
         if _should_replace_warm_frame(cur, val):
-            _main._warm_cache[key] = val.copy() if hasattr(val, "copy") else val
+            _assign_frame(_main._warm_cache, key, val, is_dict=True)
             changed = True
 
     try:
@@ -383,6 +441,40 @@ def ensure_po_return_overlay_from_server(sess) -> bool:
     return True
 
 
+_PO_PLATFORM_ATTRS = (
+    "mtr_df",
+    "myntra_df",
+    "meesho_df",
+    "flipkart_df",
+    "snapdeal_df",
+)
+
+
+def _hydrate_platform_frames_from_disk_for_po(sess) -> None:
+    """PO-session-only warm cache skips platform RAM; read parquets for ADS when empty."""
+    import backend.main as _main
+
+    if not _main.warm_cache_po_session_only():
+        return
+    if any(
+        _df_row_count(getattr(sess, attr, None)) > 0 for attr in _PO_PLATFORM_ATTRS
+    ):
+        return
+    disk = _warm_cache_dir()
+    for attr in _PO_PLATFORM_ATTRS:
+        path = disk / f"{attr}.parquet"
+        if not path.is_file():
+            continue
+        try:
+            df = pd.read_parquet(path)
+        except Exception:
+            _log.exception("PO hydrate: failed reading %s", path)
+            continue
+        if df is not None and not df.empty:
+            setattr(sess, attr, df)
+            _log.info("PO hydrate: loaded %s from disk (%s rows)", attr, len(df))
+
+
 def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
     """Ensure session has sales, inventory, existing PO, and PO sidecars before calculate."""
     import backend.main as _main
@@ -397,7 +489,7 @@ def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
     if sales_before == 0:
         wc_sales = _main._warm_cache.get("sales_df")
         if wc_sales is not None and not wc_sales.empty:
-            sess.sales_df = wc_sales.copy()
+            _assign_frame(sess, "sales_df", wc_sales, is_dict=False)
 
     try:
         from .inventory import sync_inventory_snapshot_from_warm
@@ -434,6 +526,8 @@ def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
         ensure_existing_po_hydrated(sess)
     except Exception:
         _log.exception("ensure_existing_po_hydrated during PO hydrate failed")
+
+    _hydrate_platform_frames_from_disk_for_po(sess)
 
     stats = {
         "sales_rows": _df_row_count(getattr(sess, "sales_df", None)),

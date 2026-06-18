@@ -245,6 +245,12 @@ jobs:
           echo "ERROR: health check failed after retries"
           exit 1
 
+      - name: Warm shared PO cache (PO Fresh defaults)
+        continue-on-error: true
+        run: |
+          set -eu
+          bash scripts/run-po-warmup-production.sh
+
       - name: Backend logs (on failure)
         if: failure()
         run: |

@@ -457,6 +457,12 @@ def _rebuild_sales_sync(
         )
         sess._quarterly_cache.clear()
         _session_data_changed(sess)
+        try:
+            from ..services.po_shared_cache import invalidate_po_after_sales_or_returns_change
+
+            invalidate_po_after_sales_or_returns_change(sess)
+        except Exception:
+            _log.exception("PO cache invalidation after sales rebuild failed")
         rows = len(sess.sales_df)
         return True, f"Sales rebuilt ({rows:,} rows)."
     except Exception as e:
@@ -1583,6 +1589,14 @@ async def upload_sku_mapping(
                 )
 
             _session_data_changed(sess)
+            try:
+                from ..services.po_raise_remove import invalidate_po_calculate_result
+                from ..services.po_shared_cache import invalidate_all_shared_caches
+
+                invalidate_po_calculate_result(sess)
+                invalidate_all_shared_caches()
+            except Exception:
+                pass
             return UploadResponse(
                 ok=True,
                 message=msg,
@@ -2070,7 +2084,8 @@ def _inventory_apply_parse_result(
     try:
         from ..services.manual_intransit_sheet import apply_manual_intransit_overlay_to_inventory
 
-        if not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty:
+        _mit_df = getattr(sess, "manual_intransit_overlay_df", None)
+        if _mit_df is not None and not _mit_df.empty:
             apply_manual_intransit_overlay_to_inventory(sess)
     except Exception:
         _log.exception("re-apply manual in-transit overlay after inventory snapshot failed")

@@ -758,6 +758,11 @@ export interface POCalculateResult {
   ledger_auto_import?: string | null
   from_shared_cache?: boolean
   shared_cache_at?: string
+  po_merge_version?: number
+  summary?: {
+    new_po_qty_sum?: number
+    new_po_sku_count?: number
+  }
 }
 
 export type DailyInventoryUploadResult = {
@@ -987,11 +992,140 @@ export type PoCalculateStatus = {
   progress?: number
   ok?: boolean
   row_count?: number
+  columns?: string[]
 }
 
 /** Lightweight status probe (used to auto-resume after refresh). */
 export async function getPoCalculateStatus(): Promise<PoCalculateStatus> {
   const { data } = await api.get<PoCalculateStatus>('/po/calculate/status', {
+    timeout: PO_STATUS_POLL_TIMEOUT_MS,
+  })
+  return data
+}
+
+/** Fetch all paginated PO result rows (session must already be ``done``). */
+export async function fetchAllPoResultPages(
+  onTick?: (message: string, progress?: number) => void,
+  hint?: { columns?: string[]; row_count?: number },
+): Promise<POCalculateResult> {
+  const pageSize = PO_RESULT_PAGE_SIZE
+  let offset = 0
+  let columns: string[] | undefined = hint?.columns?.length ? [...hint.columns] : undefined
+  const allRows: Record<string, unknown>[] = []
+  let meta: POCalculateResult = { ok: true, columns }
+  let resultGatewayRetries = 0
+  const expectedTotal = hint?.row_count ?? 0
+  while (true) {
+    let page: POCalculateResult & {
+      offset?: number
+      total?: number
+      has_more?: boolean
+      rows_matrix?: unknown[][]
+    }
+    try {
+      ;({ data: page } = await api.get<
+        POCalculateResult & {
+          offset?: number
+          total?: number
+          has_more?: boolean
+          rows_matrix?: unknown[][]
+        }
+      >('/po/calculate/result', {
+        params: { offset, limit: pageSize, compact: 1 },
+        timeout: PO_RESULT_TIMEOUT_MS,
+      }))
+      resultGatewayRetries = 0
+    } catch (e: unknown) {
+      if (_isGateway502(e) && resultGatewayRetries < 60) {
+        resultGatewayRetries += 1
+        const total = expectedTotal || allRows.length + pageSize
+        const loadPct =
+          total > 0
+            ? 92 + Math.round((Math.min(allRows.length, total) / total) * 8)
+            : 95
+        onTick?.(
+          `Loading PO results… ${Math.min(allRows.length, total).toLocaleString()} / ${total.toLocaleString()} rows`,
+          loadPct,
+        )
+        await _sleep(_poPollRetryDelayMs(resultGatewayRetries))
+        continue
+      }
+      throw e
+    }
+    if (!page.ok) {
+      throw new Error(page.message || 'Failed to load PO results')
+    }
+    const batch = _rowsFromPoResultPage(page, columns)
+    if (batch.columns?.length) columns = batch.columns
+    if (batch.rows.length) allRows.push(...batch.rows)
+    meta = {
+      ok: true,
+      columns: columns ?? page.columns,
+      sales_through: page.sales_through ?? meta.sales_through,
+      planning_date: page.planning_date ?? meta.planning_date,
+      raise_ledger_rows: page.raise_ledger_rows ?? meta.raise_ledger_rows,
+      ledger_auto_import: page.ledger_auto_import ?? meta.ledger_auto_import,
+      po_merge_version: page.po_merge_version ?? meta.po_merge_version,
+      summary: page.summary ?? meta.summary,
+      from_shared_cache: page.from_shared_cache ?? meta.from_shared_cache,
+      shared_cache_at: page.shared_cache_at ?? meta.shared_cache_at,
+    }
+    const total = (page.total ?? expectedTotal) || allRows.length
+    const loaded = Math.min(allRows.length, total)
+    const loadPct = total > 0 ? 92 + Math.round((loaded / total) * 8) : 95
+    onTick?.(
+      `Loading PO results… ${loaded.toLocaleString()} / ${total.toLocaleString()}`,
+      loadPct,
+    )
+    if (!page.has_more) break
+    offset += pageSize
+  }
+  return { ...meta, rows: allRows }
+}
+
+/** Load PO table from the current session when a prior run finished (tab switch / refresh). */
+export async function loadPoCalculateResultFromSession(
+  onTick?: (message: string, progress?: number) => void,
+): Promise<POCalculateResult | null> {
+  try {
+    const st = await getPoCalculateStatus()
+    if (st.status === 'running') return null
+    if (st.status === 'error') return null
+    if (st.status !== 'done') {
+      const { data: probe } = await api.get<
+        POCalculateResult & { status?: string; total?: number; rows_matrix?: unknown[][] }
+      >(
+        '/po/calculate/result',
+        { params: { offset: 0, limit: 1, compact: 1 }, timeout: PO_STATUS_POLL_TIMEOUT_MS },
+      )
+      if (!probe.ok || probe.status === 'stale') return null
+      if ((probe.total ?? 0) <= 0 && !(probe.rows?.length || probe.rows_matrix?.length)) return null
+    }
+    onTick?.('Restoring PO results from server…', 90)
+    return await fetchAllPoResultPages(onTick, {
+      columns: st.columns,
+      row_count: st.row_count,
+    })
+  } catch {
+    return null
+  }
+}
+
+export type PoSharedCacheAvailability = {
+  available: boolean
+  planning_date?: string
+  row_count?: number
+  computed_at?: string
+  sales_through?: string
+  po_merge_version?: number
+}
+
+/** Check if another user already computed PO today with the same settings. */
+export async function getPoSharedCacheAvailability(
+  body: Record<string, unknown>,
+): Promise<PoSharedCacheAvailability> {
+  const { data } = await api.get<PoSharedCacheAvailability>('/po/calculate/shared-cache', {
+    params: body,
     timeout: PO_STATUS_POLL_TIMEOUT_MS,
   })
   return data
@@ -1018,6 +1152,7 @@ export async function waitForPoCalculate(
 ): Promise<POCalculateResult> {
   const start = Date.now()
   let statusGatewayRetries = 0
+  let idlePolls = 0
   let lastServerMessage = 'Calculating PO recommendations…'
   let lastServerProgress: number | undefined
   let sawRunning = false
@@ -1041,6 +1176,7 @@ export async function waitForPoCalculate(
     let st = data.status ?? 'idle'
     if (st === 'running') {
       sawRunning = true
+      idlePolls = 0
       const prog =
         typeof data.progress === 'number' && Number.isFinite(data.progress)
           ? Math.max(0, Math.min(100, Math.round(data.progress)))
@@ -1085,80 +1221,37 @@ export async function waitForPoCalculate(
       }
     }
     if (st === 'idle') {
+      idlePolls += 1
+      onTick?.(
+        sawRunning
+          ? 'Waiting for server to finish…'
+          : lastServerMessage || 'Waiting for PO calculation to start…',
+        lastServerProgress ?? Math.min(12 + idlePolls, 40),
+      )
+      if (!sawRunning && idlePolls >= 24) {
+        throw new Error(
+          'PO calculation did not start on the server. Hard-refresh the page and click Calculate PO again. If it persists, restart the local PO stack.',
+        )
+      }
+      if (sawRunning && idlePolls >= 40) {
+        throw new Error(
+          'PO calculation lost server progress. Hard-refresh and click Calculate PO again.',
+        )
+      }
       await new Promise(r => setTimeout(r, 1500))
       continue
     }
     if (st === 'done') {
-      const pageSize = PO_RESULT_PAGE_SIZE
-      let offset = 0
-      let columns: string[] | undefined = data.columns?.length ? [...data.columns] : undefined
-      const allRows: Record<string, unknown>[] = []
-      let meta: POCalculateResult = { ok: true, columns }
-      let resultGatewayRetries = 0
-      const expectedTotal = data.row_count ?? 0
-      while (true) {
-        let page: POCalculateResult & {
-          offset?: number
-          total?: number
-          has_more?: boolean
-          rows_matrix?: unknown[][]
-        }
-        try {
-          ;({ data: page } = await api.get<
-            POCalculateResult & {
-              offset?: number
-              total?: number
-              has_more?: boolean
-              rows_matrix?: unknown[][]
-            }
-          >('/po/calculate/result', {
-            params: { offset, limit: pageSize, compact: 1 },
-            timeout: PO_RESULT_TIMEOUT_MS,
-          }))
-          resultGatewayRetries = 0
-        } catch (e: unknown) {
-          if (_isGateway502(e) && resultGatewayRetries < 60) {
-            resultGatewayRetries += 1
-            const total = expectedTotal || allRows.length + pageSize
-            const loadPct =
-              total > 0
-                ? 92 + Math.round((Math.min(allRows.length, total) / total) * 8)
-                : 95
-            onTick?.(
-              `Loading PO results… ${Math.min(allRows.length, total).toLocaleString()} / ${total.toLocaleString()} rows`,
-              loadPct,
-            )
-            await _sleep(_poPollRetryDelayMs(resultGatewayRetries))
-            continue
-          }
-          throw e
-        }
-        if (!page.ok) {
-          throw new Error(page.message || 'Failed to load PO results')
-        }
-        const batch = _rowsFromPoResultPage(page, columns)
-        if (batch.columns?.length) columns = batch.columns
-        if (batch.rows.length) allRows.push(...batch.rows)
-        meta = {
-          ok: true,
-          columns: columns ?? page.columns,
-          sales_through: page.sales_through ?? meta.sales_through,
-          planning_date: page.planning_date ?? meta.planning_date,
-          raise_ledger_rows: page.raise_ledger_rows ?? meta.raise_ledger_rows,
-          ledger_auto_import: page.ledger_auto_import ?? meta.ledger_auto_import,
-        }
-        const total = (page.total ?? expectedTotal) || allRows.length
-        const loaded = Math.min(allRows.length, total)
-        const loadPct =
-          total > 0 ? 92 + Math.round((loaded / total) * 8) : 95
-        onTick?.(
-          `Loading PO results… ${loaded.toLocaleString()} / ${total.toLocaleString()}`,
-          loadPct,
-        )
-        if (!page.has_more) break
-        offset += pageSize
+      const loaded = await fetchAllPoResultPages(onTick, {
+        columns: data.columns,
+        row_count: data.row_count,
+      })
+      return {
+        ...loaded,
+        from_shared_cache: data.from_shared_cache ?? loaded.from_shared_cache,
+        shared_cache_at: data.shared_cache_at ?? loaded.shared_cache_at,
+        message: data.message ?? loaded.message,
       }
-      return { ...meta, rows: allRows }
     }
   }
   throw new Error(
@@ -1206,10 +1299,21 @@ export async function startPoCalculate(
         100,
       )
     }
-    if (data.status === 'running' || (!data.rows && data.status !== 'done')) {
-      return waitForPoCalculate(onTick)
+    if (data.status === 'done' && !data.rows?.length) {
+      onTick?.('Loading PO results…', 92)
+      const loaded = await fetchAllPoResultPages(onTick, {
+        columns: data.columns,
+        row_count: (data as { total_rows?: number }).total_rows ?? data.row_count,
+      })
+      return {
+        ...loaded,
+        from_shared_cache: data.from_shared_cache ?? loaded.from_shared_cache,
+        shared_cache_at: data.shared_cache_at ?? loaded.shared_cache_at,
+        message: data.message ?? loaded.message,
+        po_merge_version: data.po_merge_version ?? loaded.po_merge_version,
+      }
     }
-    if (data.status === 'done' && !data.rows) {
+    if (data.status === 'running' || (!data.rows && data.status !== 'done')) {
       return waitForPoCalculate(onTick)
     }
     return data

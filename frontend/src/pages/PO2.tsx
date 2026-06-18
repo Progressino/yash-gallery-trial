@@ -121,7 +121,7 @@ export default function PO2() {
     if (!dataReady) {
       setResult({
         ok: false,
-        message: `Data still loading (${dataLoadLoaded}/${dataLoadTotal}). Wait for sidebar 8/8, then try again.`,
+        message: `Data still loading (${dataLoadLoaded}/${dataLoadTotal}). Wait for sidebar ${dataLoadTotal}/${dataLoadTotal}, then try again.`,
       })
       return
     }
@@ -166,7 +166,7 @@ export default function PO2() {
       {!dataReady ? (
         <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           Loading server data ({dataLoadLoaded}/{dataLoadTotal}). PO calculation unlocks at{' '}
-          <strong>8/8</strong>. Use sidebar <strong>Load cache</strong> if this stays below 8/8.
+          <strong>{dataLoadTotal}/{dataLoadTotal}</strong>. Use sidebar <strong>Load cache</strong> if this stays below {dataLoadTotal}/{dataLoadTotal}.
         </div>
       ) : (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">

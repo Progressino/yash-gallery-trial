@@ -31,8 +31,10 @@ data_cache/
 # Local smoke-test extracts (e.g. APR sales RAR)
 tmp-sales-apr-extract/
 
-# Local PO raise archive dev scratch
-po_raise_archive_dev/
+# Local dev runtime (logs, pids)
+local-dev/logs/
+local-dev/pids/
+
 
 # Local SQLite / dev databases (never commit)
 *.db

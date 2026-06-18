@@ -96,6 +96,13 @@ def cache_row_gap_vs_github(cache: dict, key: str = "mtr_df") -> tuple[int, int]
 
 
 def warm_cache_stale_vs_github(cache: dict) -> str | None:
+    try:
+        from backend.main import warm_cache_po_session_only, warm_cache_sales_rows
+
+        if warm_cache_po_session_only() and warm_cache_sales_rows(cache) >= 100_000:
+            return None
+    except Exception:
+        pass
     for key in _WARM_PLATFORM_KEYS:
         gap = cache_row_gap_vs_github(cache, key)
         if gap:
@@ -107,6 +114,10 @@ def warm_cache_stale_vs_github(cache: dict) -> str | None:
 def warm_cache_stale_vs_tier3(cache: dict) -> str | None:
     """Compare warm/disk cache to Tier-3 SQLite totals (source of truth when GitHub was overwritten)."""
     try:
+        from backend.main import warm_cache_po_session_only, warm_cache_sales_rows
+
+        if warm_cache_po_session_only() and warm_cache_sales_rows(cache) >= 100_000:
+            return None
         from .daily_store import get_summary
 
         summary = get_summary()

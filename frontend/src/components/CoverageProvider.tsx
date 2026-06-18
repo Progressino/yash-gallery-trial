@@ -20,9 +20,12 @@ export default function CoverageProvider({
     queryKey: ['coverage-poll'],
     queryFn: async () => {
       let c = await getCoverage({ light: true, timeout: 45_000 })
+      const totallyEmpty =
+        !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.inventory
       if (
         !operationalDataComplete(c) &&
         !coverageJobsRunning(c) &&
+        totallyEmpty &&
         Date.now() - lastHydrateAt.current > 60_000
       ) {
         lastHydrateAt.current = Date.now()

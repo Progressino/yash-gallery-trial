@@ -77,7 +77,8 @@ export type CachedIntelligenceBundle = IntelligenceBundle & {
   basis: 'gross' | 'net'
 }
 
-const STORAGE_PREFIX = 'erp_intelligence_bundle_v1'
+// v3: reject sparse daily charts (legacy partial tier3 bundle cache).
+const STORAGE_PREFIX = 'erp_intelligence_bundle_v3'
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
 function ttlMs(): number {
@@ -159,9 +160,43 @@ export function clearIntelligenceCache(): void {
   }
 }
 
+function hasLoadedPlatformUnits(bundle: IntelligenceBundle): boolean {
+  return (bundle.platform_summary ?? []).some(p => p.loaded && (p.total_units ?? 0) > 0)
+}
+
 export function bundleHasDisplayData(bundle: IntelligenceBundle | null | undefined): boolean {
   if (!bundle) return false
   if (bundle.status === 'warming') return false
-  if ((bundle.sales_summary?.total_units ?? 0) > 0) return true
-  return (bundle.platform_summary ?? []).some(p => p.loaded && (p.total_units ?? 0) > 0)
+  const platforms = bundle.platform_summary ?? []
+  if (platforms.length > 0) {
+    if (hasLoadedPlatformUnits(bundle)) {
+      const loaded = platforms.filter(p => p.loaded && (p.total_units ?? 0) >= 200)
+      if (loaded.length > 0) {
+        const minDaily = 7
+        const sparse = loaded.some(p => (p.daily?.length ?? 0) > 0 && (p.daily?.length ?? 0) < minDaily)
+        if (sparse) return false
+      }
+      return true
+    }
+    if ((bundle.sales_summary?.total_units ?? 0) > 0) return false
+    return false
+  }
+  return (bundle.sales_summary?.total_units ?? 0) > 0
 }
+
+/** Drop v1 keys written before the loaded-flag fix. */
+function purgeLegacyIntelligenceCache(): void {
+  try {
+    const prefixes = ['erp_intelligence_bundle_v1', 'erp_intelligence_bundle_v2']
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && prefixes.some(p => k.startsWith(p))) keys.push(k)
+    }
+    keys.forEach(k => localStorage.removeItem(k))
+  } catch {
+    /* ignore */
+  }
+}
+
+purgeLegacyIntelligenceCache()

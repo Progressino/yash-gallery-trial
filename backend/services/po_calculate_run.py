@@ -11,6 +11,47 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _trim_sales_for_po_memory(
+    sales_df: pd.DataFrame,
+    *,
+    period_days: int,
+    use_seasonality: bool,
+    use_ly_fallback: bool,
+) -> pd.DataFrame:
+    """Local Mac: pass a recent sales window into the engine to avoid OOM on full history."""
+    if sales_df is None or getattr(sales_df, "empty", True):
+        return sales_df
+    try:
+        from backend.main import warm_cache_po_session_only
+
+        if not warm_cache_po_session_only():
+            return sales_df
+    except Exception:
+        return sales_df
+    if "TxnDate" not in sales_df.columns:
+        return sales_df
+    horizon = max(int(period_days), 90)
+    if use_seasonality or use_ly_fallback:
+        horizon = max(horizon, 400)
+    dates = pd.to_datetime(sales_df["TxnDate"], errors="coerce")
+    end = dates.max()
+    if pd.isna(end):
+        return sales_df
+    start = pd.Timestamp(end).normalize() - pd.Timedelta(days=horizon)
+    mask = dates >= start
+    if not bool(mask.any()):
+        return sales_df
+    trimmed = sales_df.loc[mask]
+    if len(trimmed) < len(sales_df):
+        logger.info(
+            "PO local memory trim: %s → %s sales rows (horizon=%dd)",
+            f"{len(sales_df):,}",
+            f"{len(trimmed):,}",
+            horizon,
+        )
+    return trimmed.reset_index(drop=True)
+
+
 def _po_return_overlay_for_calc(sess) -> pd.DataFrame | None:
     from .po_return_import import aggregate_return_overlay_for_use
 
@@ -151,9 +192,17 @@ def execute_po_calculate(
 
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 
-    # Existing PO upload is no longer part of the default PO flow.
-    # Keep calculation app-data only (sales + inventory + in-app raise ledger).
-    _set_po_calculate_progress(sess, session_id, 18, "Preparing PO inputs…")
+    _set_po_calculate_progress(sess, session_id, 18, "Loading existing PO sheet…")
+    try:
+        from .existing_po import ensure_existing_po_hydrated
+
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        logger.exception("ensure_existing_po_hydrated before calculate failed")
+
+    _existing_po = (
+        sess.existing_po_df if getattr(sess, "existing_po_df", None) is not None and not sess.existing_po_df.empty else None
+    )
 
     # ── Inventory-history memory management ───────────────────────────────────
     # Two-stage trim so the heavy calculate_po_base call starts lean.
@@ -269,6 +318,12 @@ def execute_po_calculate(
     # Fall back to OMS sales_df only when no platform data is loaded.
     _platform_sales = _build_platform_sales_df(sess)
     _ads_source = _platform_sales if not _platform_sales.empty else sess.sales_df
+    _ads_source = _trim_sales_for_po_memory(
+        _ads_source,
+        period_days=_period,
+        use_seasonality=bool(body.get("use_seasonality", False)),
+        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+    )
     logger.info(
         "PO ADS source: %s (%d rows)",
         "platform" if not _platform_sales.empty else "OMS",
@@ -276,11 +331,13 @@ def execute_po_calculate(
     )
 
     try:
+        _lt_raw = body.get("lead_time")
+        _lead_time = 0 if _lt_raw in (None, "") else int(_lt_raw or 0)
         po_df = calculate_po_base(
             sales_df=_ads_source,
             inv_df=inv_df,
             period_days=_period,
-            lead_time=int(body.get("lead_time", 30)),
+            lead_time=_lead_time,
             target_days=int(body.get("target_days", 135)),
             demand_basis=str(body.get("demand_basis", "Sold")),
             min_denominator=int(body.get("min_denominator", 7)),
@@ -290,11 +347,13 @@ def execute_po_calculate(
             seasonal_weight=float(body.get("seasonal_weight", 0.5)),
             sku_mapping=sess.sku_mapping or None,
             group_by_parent=group_by_parent,
-            existing_po_df=None,
+            existing_po_df=_existing_po,
             sku_status_df=effective_sku_status_df_for_engine(sess),
             enforce_two_size_minimum=bool(body.get("enforce_two_size_minimum", False)),
-            # Lead-time release gate is disabled for app-only PO mode.
-            enforce_lead_time_release_gate=False,
+            # App PO mode always uses Excel Qty rule (lead-time gate). Do not honour
+            # ``False`` from legacy API defaults — ``body.get(..., True)`` would still
+            # return False when the key is present.
+            enforce_lead_time_release_gate=True,
             inventory_history_df=_inv_history_for_calc,
             po_raise_ledger_df=(_ledger if _ledger is not None and not _ledger.empty else None),
             planning_date=body.get("planning_date"),
@@ -302,6 +361,7 @@ def execute_po_calculate(
             raise_view_date=body.get("raise_view_date"),
             po_return_overlay_df=_po_return_overlay_for_calc(sess),
             urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
+            use_ly_fallback=bool(body.get("use_ly_fallback", True)),
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
@@ -370,10 +430,13 @@ def execute_po_calculate(
     _pipe = _num_col("PO_Pipeline_Total")
     _ordered = _num_col("PO_Qty_Ordered")
     _ep_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+    from .po_shared_cache import PO_MERGE_LOGIC_VERSION
+
     return {
         "ok": True,
         "columns": cols,
         "total_rows": int(len(po_df)),
+        "po_merge_version": PO_MERGE_LOGIC_VERSION,
         "sales_through": sales_through,
         "planning_date": planning_out,
         "raise_ledger_rows": ledger_n,

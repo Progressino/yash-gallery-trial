@@ -51,6 +51,31 @@ def _minimal_session():
     return sess
 
 
+def test_po_fresh_warmup_profile_matches_ui_defaults():
+    from backend.scripts.run_po_calculate_production import _PROFILES
+
+    fresh = next(p for p in _PROFILES if p["label"] == "po_fresh_default")
+    assert fresh["period_days"] == 30
+    assert fresh["lead_time"] == 60
+    assert fresh["target_days"] == 180
+    assert fresh["use_seasonality"] is True
+    assert fresh["use_ly_fallback"] is True
+    assert fresh["enforce_lead_time_release_gate"] is True
+    assert fresh["raise_ledger_lookback_days"] == 45
+
+
+def test_cache_key_changes_when_return_overlay_changes():
+    sess = _minimal_session()
+    body = {"planning_date": _PLAN_DATE, "period_days": 30}
+    k1, _ = psc.build_cache_key(sess, body)
+    sess.po_return_overlay_df = pd.DataFrame(
+        {"OMS_SKU": ["SKU-A"], "Return_Overlay_Units": [3]}
+    )
+    sess.return_overlay_as_of = "2026-06-01"
+    k2, _ = psc.build_cache_key(sess, body)
+    assert k1 != k2
+
+
 def test_cache_key_changes_when_params_differ():
     sess = _minimal_session()
     body = {"planning_date": _PLAN_DATE, "period_days": 30, "lead_time": 7}
@@ -90,6 +115,7 @@ def test_save_lookup_and_apply_to_session():
     assert out is not None
     assert out.get("from_shared_cache") is True
     assert out.get("status") == "done"
+    assert out.get("po_merge_version") == psc.PO_MERGE_LOGIC_VERSION
     assert has_spill("session-b")
     assert spill_row_count("session-b") == 2
 
@@ -100,6 +126,14 @@ def test_cache_key_changes_when_merge_version_changes():
     k1, fp1 = psc.build_cache_key(sess, body)
     assert fp1.get("po_merge_version") == psc.PO_MERGE_LOGIC_VERSION
     assert "git_sha" in fp1
+
+
+def test_po_merge_result_is_stale():
+    assert psc.po_merge_result_is_stale(None) is False
+    assert psc.po_merge_result_is_stale({}) is False
+    assert psc.po_merge_result_is_stale({"po_merge_version": None}) is True
+    assert psc.po_merge_result_is_stale({"po_merge_version": 1}) is True
+    assert psc.po_merge_result_is_stale({"po_merge_version": psc.PO_MERGE_LOGIC_VERSION}) is False
 
 
 def test_apply_miss_when_merge_version_in_meta_differs():
@@ -166,6 +200,15 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
 
     from backend.routers.po import PORequest
 
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate.ensure_po_return_overlay_from_server",
+        lambda _sess: False,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate.hydrate_po_session_for_calculate",
+        lambda _sess: {},
+    )
+
     _, sess = session_for_client
     days = pd.date_range("2025-12-01", periods=10, freq="D")
     sess.sales_df = pd.DataFrame(
@@ -186,9 +229,6 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
         planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60
     ).model_dump()
     po_df = pd.DataFrame({"OMS_SKU": ["CACHE-SKU"], "PO_Qty": [7]})
-    from backend.services.po_session_hydrate import hydrate_po_session_for_calculate
-
-    hydrate_po_session_for_calculate(sess)
     psc.save_shared_cache(
         sess,
         body,
@@ -217,7 +257,13 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
         sess, "daily_inventory_history_df", pd.DataFrame()
     ).copy()
     sess2.sku_status_lead_df = getattr(sess, "sku_status_lead_df", pd.DataFrame()).copy()
-    sess2.inventory_snapshot_date = getattr(sess, "inventory_snapshot_date", "") or ""
+    sess2.sku_mapping = dict(getattr(sess, "sku_mapping", None) or {})
+    sess2.po_return_overlay_df = getattr(sess, "po_return_overlay_df", pd.DataFrame()).copy()
+    sess2.return_overlay_as_of = getattr(sess, "return_overlay_as_of", "") or ""
+    sess2.existing_po_df = getattr(sess, "existing_po_df", pd.DataFrame()).copy()
+    sess2.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0)
+    sess2.existing_po_uploaded_at = getattr(sess, "existing_po_uploaded_at", "") or ""
+    sess2.existing_po_filename = getattr(sess, "existing_po_filename", "") or ""
     sess2.inventory_snapshot_uploaded_at = (
         getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
     )
