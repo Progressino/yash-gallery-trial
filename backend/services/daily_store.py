@@ -1261,10 +1261,19 @@ def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
 
 def get_tier3_sync_token() -> Dict[str, str]:
     """
-    Cheap fingerprint of Tier-3 SQLite per platform (file count, rows, last upload time).
+    Cheap fingerprint of Tier-3 per platform (file count, rows, last upload time).
     Used to detect backfills (e.g. June 1 saved while session already has June 4) that
     do not change ``max_date`` but must still trigger a dashboard merge.
     """
+    try:
+        from ..db.forecast_ops_pg import daily_uploads_pg_read, pg_get_tier3_sync_token
+
+        if daily_uploads_pg_read():
+            tok = pg_get_tier3_sync_token()
+            if tok:
+                return tok
+    except Exception:
+        pass
     conn = _get_conn()
     rows = conn.execute(
         """
@@ -1309,6 +1318,15 @@ def platforms_with_uploads_in_range(start_date: str, end_date: str) -> List[str]
         return []
     if s1 < s0:
         s0, s1 = s1, s0
+    try:
+        from ..db.forecast_ops_pg import daily_uploads_pg_read, pg_platforms_with_uploads_in_range
+
+        if daily_uploads_pg_read():
+            pg_plats = pg_platforms_with_uploads_in_range(s0, s1)
+            if pg_plats:
+                return pg_plats
+    except Exception:
+        pass
     conn = _get_conn()
     clause = _tier3_window_sql_clause()
     rows = conn.execute(
@@ -1386,19 +1404,29 @@ def load_platform_data_for_report_range(
     if cached is not None:
         return cached
 
-    conn = _get_conn()
-    clause = _tier3_window_sql_clause()
-    rows = conn.execute(
-        f"""
-        SELECT filename, data_parquet
-        FROM daily_uploads
-        WHERE platform = ?
-          AND ({clause})
-        ORDER BY file_date ASC
-        """,
-        (platform, s1, s0),
-    ).fetchall()
-    conn.close()
+    rows: list = []
+    try:
+        from ..db.forecast_ops_pg import daily_uploads_pg_read, pg_load_platform_rows_for_range
+
+        if daily_uploads_pg_read():
+            rows = pg_load_platform_rows_for_range(platform, s0, s1)
+    except Exception:
+        pass
+
+    if not rows:
+        conn = _get_conn()
+        clause = _tier3_window_sql_clause()
+        rows = conn.execute(
+            f"""
+            SELECT filename, data_parquet
+            FROM daily_uploads
+            WHERE platform = ?
+              AND ({clause})
+            ORDER BY file_date ASC
+            """,
+            (platform, s1, s0),
+        ).fetchall()
+        conn.close()
 
     dfs: list[pd.DataFrame] = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)

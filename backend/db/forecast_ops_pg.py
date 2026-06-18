@@ -472,8 +472,8 @@ def pg_get_summary() -> dict:
                 SELECT platform,
                        COUNT(*) AS file_count,
                        COALESCE(SUM(rows), 0) AS total_rows,
-                       MAX(file_date) AS max_date,
-                       MIN(file_date) AS min_date
+                       MAX(COALESCE(date_to, file_date)) AS max_date,
+                       MIN(COALESCE(date_from, file_date)) AS min_date
                 FROM forecast_daily_uploads
                 GROUP BY platform
                 """
@@ -489,6 +489,117 @@ def pg_get_summary() -> dict:
         }
     except Exception:
         _log.exception("pg_get_summary failed")
+        return {}
+
+
+def _pg_tier3_window_clause() -> str:
+    """Upload row-date range overlaps dashboard window ``[start, end]`` (ISO date strings)."""
+    return """
+        LEFT(
+            TRIM(COALESCE(NULLIF(TRIM(COALESCE(date_from::text, '')), ''), file_date::text)),
+            10
+        ) <= %s
+        AND LEFT(
+            TRIM(
+                COALESCE(
+                    NULLIF(TRIM(COALESCE(date_to::text, '')), ''),
+                    NULLIF(TRIM(COALESCE(date_from::text, '')), ''),
+                    file_date::text
+                )
+            ),
+            10
+        ) >= %s
+    """
+
+
+def pg_platforms_with_uploads_in_range(start_date: str, end_date: str) -> list[str]:
+    if not ops_pg_enabled():
+        return []
+    conn = _require_conn()
+    if conn is None:
+        return []
+    s0 = str(start_date or "").strip()[:10]
+    s1 = str(end_date or "").strip()[:10]
+    if len(s0) != 10 or len(s1) != 10:
+        return []
+    if s1 < s0:
+        s0, s1 = s1, s0
+    try:
+        with conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT platform
+                FROM forecast_daily_uploads
+                WHERE platform IS NOT NULL
+                  AND ({_pg_tier3_window_clause()})
+                """,
+                (s1, s0),
+            ).fetchall()
+        return [str(r[0]).strip().lower() for r in rows if r and r[0]]
+    except Exception:
+        _log.exception("pg_platforms_with_uploads_in_range failed")
+        return []
+
+
+def pg_load_platform_rows_for_range(
+    platform: str,
+    start_date: str,
+    end_date: str,
+) -> list[tuple[str, bytes]]:
+    if not ops_pg_enabled():
+        return []
+    conn = _require_conn()
+    if conn is None:
+        return []
+    s0 = str(start_date or "").strip()[:10]
+    s1 = str(end_date or "").strip()[:10]
+    if len(s0) != 10 or len(s1) != 10:
+        return []
+    if s1 < s0:
+        s0, s1 = s1, s0
+    try:
+        with conn:
+            rows = conn.execute(
+                f"""
+                SELECT filename, data_parquet
+                FROM forecast_daily_uploads
+                WHERE platform = %s
+                  AND ({_pg_tier3_window_clause()})
+                ORDER BY file_date ASC
+                """,
+                (platform, s1, s0),
+            ).fetchall()
+        return [(str(r[0]), bytes(r[1])) for r in rows if r[1]]
+    except Exception:
+        _log.exception("pg_load_platform_rows_for_range failed platform=%s", platform)
+        return []
+
+
+def pg_get_tier3_sync_token() -> dict[str, str]:
+    if not ops_pg_enabled():
+        return {}
+    conn = _require_conn()
+    if conn is None:
+        return {}
+    try:
+        with conn:
+            rows = conn.execute(
+                """
+                SELECT platform, COUNT(*), COALESCE(SUM(rows), 0), MAX(uploaded_at)
+                FROM forecast_daily_uploads
+                WHERE platform IS NOT NULL
+                GROUP BY platform
+                """
+            ).fetchall()
+        out: dict[str, str] = {}
+        for plat, n_files, n_rows, last_up in rows:
+            p = str(plat).strip().lower()
+            if not p:
+                continue
+            out[p] = f"{int(n_files)}:{int(n_rows)}:{str(last_up or '')}"
+        return out
+    except Exception:
+        _log.exception("pg_get_tier3_sync_token failed")
         return {}
 
 

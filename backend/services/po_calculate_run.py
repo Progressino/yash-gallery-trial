@@ -406,6 +406,16 @@ def execute_po_calculate(
     sess.po_calculate_result_df = po_df
     sess.po_calculate_existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0)
 
+    try:
+        from .daily_store import get_summary
+        from .tier3_session_merge import mark_tier3_sync_applied
+
+        summary = get_summary() or {}
+        if any(int((summary.get(p) or {}).get("file_count") or 0) > 0 for p in summary):
+            mark_tier3_sync_applied(sess)
+    except Exception:
+        logger.exception("mark_tier3_sync_applied after PO calc failed")
+
     sales_through = None
     try:
         from .tier3_session_merge import effective_sales_through
