@@ -115,7 +115,9 @@ def init_db() -> None:
         _table_ready = False
         return
     try:
-        with psycopg.connect(url, autocommit=True) as conn:
+        from .query_logging import connect_psycopg
+
+        with connect_psycopg(url, autocommit=True) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS forecast_app_sessions (
                     session_id TEXT PRIMARY KEY,
@@ -136,12 +138,12 @@ def init_db() -> None:
 
 
 def _require_conn():
-    import psycopg
+    from .query_logging import connect_psycopg
 
     url = _connection_url()
     if not url or not _table_ready:
         return None
-    return psycopg.connect(url, autocommit=True)
+    return connect_psycopg(url, autocommit=True)
 
 
 def session_bundle_bytes(sess) -> bytes:

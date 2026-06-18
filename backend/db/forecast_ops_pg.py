@@ -83,7 +83,9 @@ def init_db() -> None:
         _table_ready = False
         return
     try:
-        with psycopg.connect(url, autocommit=True) as conn:
+        from .query_logging import connect_psycopg
+
+        with connect_psycopg(url, autocommit=True) as conn:
             try:
                 conn.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
             except Exception:
@@ -132,12 +134,12 @@ def init_db() -> None:
 
 
 def _require_conn():
-    import psycopg
+    from .query_logging import connect_psycopg
 
     url = _connection_url()
     if not url or not _table_ready:
         return None
-    return psycopg.connect(url, autocommit=True)
+    return connect_psycopg(url, autocommit=True)
 
 
 def warm_cache_dict_to_bundle(cache_dict: dict) -> tuple[bytes, dict]:

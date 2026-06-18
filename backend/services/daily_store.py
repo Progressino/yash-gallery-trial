@@ -83,7 +83,9 @@ def _max_files_per_platform() -> int:
 # ── Schema ────────────────────────────────────────────────────────────────────
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(_DB_PATH))
+    from ..db.query_logging import connect_sqlite
+
+    conn = connect_sqlite(str(_DB_PATH), backend="sqlite-tier3")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS daily_uploads (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
