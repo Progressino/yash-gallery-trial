@@ -29,7 +29,7 @@ def _statement_preview(statement: Any) -> str:
     return text[:300]
 
 
-def log_slow_query(*, backend: str, statement: Any, duration: float) -> None:
+def log_slow_query(*, backend: str, statement: Any, duration: float, conn: Any = None, params: Any = None) -> None:
     if not query_logging_enabled():
         return
     if duration < slow_query_threshold_sec():
@@ -40,6 +40,13 @@ def log_slow_query(*, backend: str, statement: Any, duration: float) -> None:
         backend,
         _statement_preview(statement),
     )
+    if conn is not None and backend.startswith("postgresql"):
+        try:
+            from .explain_analyze import maybe_explain_slow_query
+
+            maybe_explain_slow_query(conn, statement, duration, params)
+        except Exception:
+            logger.exception("maybe_explain_slow_query failed")
 
 
 class _TimedPsycopgConnection:
@@ -60,6 +67,8 @@ class _TimedPsycopgConnection:
                 backend=self._backend,
                 statement=query,
                 duration=time.perf_counter() - start,
+                conn=self._conn,
+                params=params,
             )
 
     def cursor(self, *args: Any, **kwargs: Any) -> Any:
@@ -96,6 +105,8 @@ class _TimedPsycopgCursor:
                 backend=self._backend,
                 statement=query,
                 duration=time.perf_counter() - start,
+                conn=self._conn,
+                params=params,
             )
 
     def copy(self, statement: Any) -> Any:

@@ -115,6 +115,11 @@ def ensure_tables(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_forecast_inv_lines_total "
         "ON forecast_inventory_lines (snapshot_id, total_inventory DESC)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forecast_inv_snapshots_current "
+        "ON forecast_inventory_snapshots (uploaded_at DESC) "
+        "WHERE is_current = TRUE"
+    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS forecast_sales_transactions (
             id                BIGSERIAL PRIMARY KEY,
@@ -134,6 +139,10 @@ def ensure_tables(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fst_platform_txn_date "
         "ON forecast_sales_transactions (platform, txn_date DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fst_platform_txn_date_asc "
+        "ON forecast_sales_transactions (platform, txn_date)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fst_sku_txn_date "
