@@ -78,6 +78,11 @@ async def session_mw(request: Request, call_next):
     return await call_next(request)
 
 
+from .middleware.timing import register_timing_middleware
+
+register_timing_middleware(app)
+
+
 # Routes
 from .routers.auth import router as auth_router
 from .routers.stitching import router as stitching_router

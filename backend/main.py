@@ -2338,6 +2338,12 @@ async def session_middleware(request: Request, call_next):
     return response
 
 
+# ── Endpoint timing (outermost — full request wall time) ───────
+from .middleware.timing import register_timing_middleware
+
+register_timing_middleware(app)
+
+
 # ── Routers ───────────────────────────────────────────────────
 app.include_router(auth_router.router, prefix="/api/auth",       tags=["auth"])
 app.include_router(upload.router,      prefix="/api/upload",     tags=["upload"])
