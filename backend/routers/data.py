@@ -1656,6 +1656,12 @@ def _bundle_cache_lookup(
             continue
         if not allow_sparse and _bundle_payload_chart_sparse(payload, start_date, end_date):
             continue
+        try:
+            from ..services.perf_metrics import record_cache
+
+            record_cache(hit=True, source="intelligence_bundle", name="bundle_lookup")
+        except Exception:
+            pass
         return _repair_platform_loaded_flags(payload)
     return None
 
@@ -2210,8 +2216,10 @@ def _restore_inventory_from_warm(sess: AppSession) -> None:
 
 
 def _session_has_platform_data(sess: AppSession) -> bool:
+    from ..services.shared_frames import frame_row_count
+
     return any(
-        not getattr(sess, attr).empty
+        frame_row_count(attr, sess) > 0
         for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
     )
 
@@ -2221,7 +2229,9 @@ def _coverage_sales_ready(sess: AppSession) -> bool:
     Unified sales_df exists, or bulk platform history is loaded (derived sales rebuilds in background).
     Prevents the app staying at 7/8 after warm-cache hydrate copies platform frames only.
     """
-    sales = getattr(sess, "sales_df", None)
+    from ..services.shared_frames import session_sales_df
+
+    sales = session_sales_df(sess)
     if sales is not None and hasattr(sales, "empty") and not sales.empty:
         return True
     return bool(sess.sku_mapping) and _session_has_platform_data(sess)
@@ -2426,7 +2436,7 @@ def full_restore_session(
 
     _set_restore_step(sess, "warm")
     try:
-        _main.bootstrap_warm_cache_from_disk_if_empty()
+        _main.bootstrap_warm_cache_if_empty()
         _main.restore_po_sidecars_from_warm(sess)
         _main.force_restore_session_from_server_cache(sess, _main._warm_cache_generation)
         steps.append("warm")
@@ -2528,6 +2538,12 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     """Build coverage flags from current session state (no restore side effects)."""
     import pandas as pd
 
+    from ..services.shared_frames import (
+        frame_row_count,
+        session_inventory_variant,
+        session_sales_df,
+    )
+
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.daily_store import get_summary
     from ..services.existing_po import (
@@ -2573,19 +2589,20 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     try:
         import backend.main as _main
 
-        _po_only = _main.warm_cache_po_session_only() and not sess.sales_df.empty
+        _po_only = _main.warm_cache_po_session_only() and not session_sales_df(sess).empty
     except Exception:
         _po_only = False
     _plat_ok = _po_only or None  # when True, all marketplace flags count as loaded
+    _inv = session_inventory_variant(sess)
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
-        mtr=_plat_ok or not sess.mtr_df.empty,
+        mtr=_plat_ok or frame_row_count("mtr_df", sess) > 0,
         sales=_coverage_sales_ready(sess),
-        myntra=_plat_ok or not sess.myntra_df.empty,
-        meesho=_plat_ok or not sess.meesho_df.empty,
-        flipkart=_plat_ok or not sess.flipkart_df.empty,
-        snapdeal=_plat_ok or not sess.snapdeal_df.empty,
-        inventory=not sess.inventory_df_variant.empty,
+        myntra=_plat_ok or frame_row_count("myntra_df", sess) > 0,
+        meesho=_plat_ok or frame_row_count("meesho_df", sess) > 0,
+        flipkart=_plat_ok or frame_row_count("flipkart_df", sess) > 0,
+        snapdeal=_plat_ok or frame_row_count("snapdeal_df", sess) > 0,
+        inventory=not _inv.empty,
         daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
         existing_po=not sess.existing_po_df.empty,
         sku_status_lead=not sess.sku_status_lead_df.empty,
@@ -2593,12 +2610,13 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         manual_intransit_sheet=not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty,
         po_raise_ledger=bool(_po_ledger_ok),
         return_sheet=bool(_ret_ok),
-        mtr_rows=len(sess.mtr_df),
-        sales_rows=len(sess.sales_df),
-        myntra_rows=len(sess.myntra_df),
-        meesho_rows=len(sess.meesho_df),
-        flipkart_rows=len(sess.flipkart_df),
-        snapdeal_rows=len(sess.snapdeal_df),
+        mtr_rows=frame_row_count("mtr_df", sess),
+        sales_rows=frame_row_count("sales_df", sess),
+        myntra_rows=frame_row_count("myntra_df", sess),
+        meesho_rows=frame_row_count("meesho_df", sess),
+        flipkart_rows=frame_row_count("flipkart_df", sess),
+        snapdeal_rows=frame_row_count("snapdeal_df", sess),
+        inventory_rows=int(len(_inv)),
         sku_status_lead_rows=int(len(sess.sku_status_lead_df)),
         daily_inventory_history_rows=int(len(sess.daily_inventory_history_df)),
         daily_inventory_history_skus=(
@@ -2828,7 +2846,7 @@ def _server_has_recoverable_history() -> bool:
         import backend.main as _main
         from ..services.github_cache import get_cache_manifest
 
-        _main.bootstrap_warm_cache_from_disk_if_empty()
+        _main.bootstrap_warm_cache_if_empty()
         if _main._warm_cache:
             for key in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df"):
                 df = _main._warm_cache.get(key)
@@ -2859,7 +2877,7 @@ def _maybe_queue_full_restore_when_empty(sess: AppSession, session_id: str | Non
             return
         if not _server_has_recoverable_history():
             return
-        _main.bootstrap_warm_cache_from_disk_if_empty()
+        _main.bootstrap_warm_cache_if_empty()
         if _main._warm_cache:
             _maybe_queue_light_session_hydrate(sess, session_id)
             sess._auto_restore_queued = True
@@ -2911,6 +2929,14 @@ def _run_session_restore_worker(session_id: str) -> None:
             _rebuild_session_sales(sess)
             _set_restore_step(sess, "done", msg)
             sess.session_restore_status = "done"
+            try:
+                from ..services.perf_metrics import record_session_restore
+
+                started = float(getattr(sess, "session_restore_started", 0) or 0)
+                if started:
+                    record_session_restore("full_restore", time.monotonic() - started, ok=True)
+            except Exception:
+                pass
     except Exception as e:
         _log.exception("background session restore failed")
         sess.session_restore_status = "error"
@@ -2935,6 +2961,16 @@ def _run_session_restore_sales_worker(session_id: str) -> None:
         _set_restore_step(sess, "done", msg)
         sess.session_restore_status = "done"
         try:
+            import time
+
+            from ..services.perf_metrics import record_session_restore
+
+            started = float(getattr(sess, "session_restore_started", 0) or 0)
+            if started:
+                record_session_restore("full_restore+sales", time.monotonic() - started, ok=True)
+        except Exception:
+            pass
+        try:
             import backend.main as _main
 
             _main.publish_warm_cache_from_session(sess)
@@ -2948,7 +2984,7 @@ def _run_session_restore_sales_worker(session_id: str) -> None:
 
 # ── Coverage / job status ─────────────────────────────────────
 
-_hydrate_queued: set[str] = set()
+_hydrate_queued: set[str] = set()  # legacy — prefer session_hydrate.schedule_session_hydrate
 
 
 def _session_needs_background_hydrate(sess: AppSession) -> bool:
@@ -3007,7 +3043,7 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
             _main.restore_po_sidecars_from_warm(sess)
             if _main.session_needs_warm_cache_topup(sess):
                 if not _main._warm_cache:
-                    _main.bootstrap_warm_cache_from_disk_if_empty()
+                    _main.bootstrap_warm_cache_if_empty()
                 if _main._warm_cache:
                     _main._copy_warm_cache_to_session(sess)
                     sess._warm_cache_gen = int(
@@ -3046,12 +3082,18 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
 def _maybe_queue_light_session_hydrate(sess: AppSession, session_id: str | None) -> None:
     if not session_id or not _session_needs_background_hydrate(sess):
         return
-    if session_id in _hydrate_queued:
-        return
-    _hydrate_queued.add(session_id)
     from ..concurrency import SESSION_RESTORE_EXECUTOR
+    from ..services.session_hydrate import HydrateSchedule, schedule_session_hydrate, session_hydrate_inflight
 
-    SESSION_RESTORE_EXECUTOR.submit(_run_light_session_hydrate_worker, session_id)
+    if session_hydrate_inflight(session_id):
+        return
+    status = schedule_session_hydrate(
+        session_id,
+        _run_light_session_hydrate_worker,
+        executor=SESSION_RESTORE_EXECUTOR,
+    )
+    if status in (HydrateSchedule.SCHEDULED, HydrateSchedule.INFLIGHT):
+        _hydrate_queued.add(session_id)
 
 
 _tier3_sync_queued: set[str] = set()
@@ -3163,10 +3205,20 @@ def get_coverage(request: Request, light: bool = False):
     if light:
         try:
             import backend.main as _main
+            from ..local_dev import hydrate_session_from_warm_local, local_dev_mode
 
-            _main.restore_po_sidecars_from_warm(sess)
             if not _main._warm_cache:
-                _main.bootstrap_warm_cache_from_disk_if_empty()
+                _main.bootstrap_warm_cache_if_empty()
+            if local_dev_mode() and _main.session_needs_operational_data(sess):
+                hydrate_session_from_warm_local(
+                    sess, _main._warm_cache, int(getattr(_main, "_warm_cache_generation", 0) or 0),
+                )
+            else:
+                _main.restore_po_sidecars_from_warm(sess)
+                if _main.session_needs_operational_data(sess):
+                    _main.try_fast_warm_cache_hydrate(sess) or _main.force_restore_session_from_server_cache(
+                        sess, _main._warm_cache_generation,
+                    )
             # Heavy warm-cache copy runs in _maybe_queue_light_session_hydrate — never block light polls.
             if not getattr(sess, "sku_mapping", None):
                 try:
@@ -4774,6 +4826,14 @@ def delete_daily_upload(upload_id: int, request: Request):
 
 
 # ── Data Debug / Coverage ────────────────────────────────────
+
+@router.get("/coverage/debug")
+def coverage_debug_endpoint(request: Request):
+    """Structured source/session/warm-cache diagnostics (no SSH)."""
+    from ..services.coverage_debug import build_coverage_debug
+
+    return build_coverage_debug(_sess(request))
+
 
 @router.get("/debug-coverage")
 def debug_coverage(request: Request):

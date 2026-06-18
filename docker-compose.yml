@@ -17,6 +17,15 @@ services:
       - pg_stat_statements.track=all
       - -c
       - pg_stat_statements.save=on
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+    mem_limit: 2g
     volumes:
       - forecast_pg_data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro

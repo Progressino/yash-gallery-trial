@@ -34,7 +34,7 @@ def main() -> int:
 
     cache = load_shared_snapshot()
     if not cache:
-        main_mod.bootstrap_warm_cache_from_disk_if_empty()
+        main_mod.bootstrap_warm_cache_if_empty()
         cache = dict(main_mod._warm_cache or {})
     if not cache:
         disk_ok, disk_data = main_mod._load_warm_cache_from_disk(ignore_age=True)

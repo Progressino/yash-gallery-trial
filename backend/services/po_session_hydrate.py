@@ -252,11 +252,16 @@ _LARGE_WARM_FRAMES = frozenset({"sales_df", "daily_inventory_history_df"})
 
 def _share_warm_frame_in_po_session_only(key: str) -> bool:
     try:
-        import backend.main as _main
+        from .shared_frames import should_skip_session_copy
 
-        return _main.warm_cache_po_session_only() and key in _LARGE_WARM_FRAMES
+        return should_skip_session_copy(key)
     except Exception:
-        return False
+        try:
+            import backend.main as _main
+
+            return _main.warm_cache_po_session_only() and key in _LARGE_WARM_FRAMES
+        except Exception:
+            return False
 
 
 def _assign_frame(target: dict | object, key: str, val: Any, *, is_dict: bool) -> None:
@@ -502,7 +507,7 @@ def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
         for key in _main._INVENTORY_WARM_KEYS:
             wc = _main._warm_cache.get(key)
             if wc is not None and not wc.empty:
-                setattr(sess, key, wc.copy())
+                _assign_frame(sess, key, wc, is_dict=False)
         meta = _main._warm_cache.get(_main._INVENTORY_META_WARM_KEY)
         if isinstance(meta, dict) and meta:
             try:

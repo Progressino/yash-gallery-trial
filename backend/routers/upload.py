@@ -568,6 +568,13 @@ def _run_sales_rebuild_worker(
                 persist_session_bundle_thread_safe(session_id, sess)
             except Exception:
                 _log.exception("PostgreSQL persist after sales rebuild")
+            try:
+                from ..db.forecast_sales_materializations import refresh_from_sales_df
+
+                if not sess.sales_df.empty:
+                    refresh_from_sales_df(sess.sales_df)
+            except Exception:
+                _log.exception("SKU sales materialization refresh after sales rebuild")
         else:
             sess.sales_rebuild_status = "error"
             sess.sales_rebuild_message = msg

@@ -144,54 +144,39 @@ def execute_po_calculate(
         effective_sku_status_df_for_engine,
         hydrate_po_session_for_calculate,
     )
+    from .po_inputs import load_po_inputs, po_inputs_from_pg_enabled
     from .po_stage_timer import PoStageTimer
+    from .shared_frames import session_inventory_variant, session_sales_df
 
     stage_timer = PoStageTimer()
 
     if not skip_hydrate:
         hydrate_po_session_for_calculate(sess)
+
+    inputs = load_po_inputs(sess, body)
     _set_po_calculate_progress(sess, session_id, 5, "Validating sales and inventory…")
 
-    if sess.sales_df.empty:
+    sales_df = inputs.sales_df if not inputs.sales_df.empty else session_sales_df(sess)
+    inv_variant = (
+        inputs.inventory_df_variant
+        if not inputs.inventory_df_variant.empty
+        else session_inventory_variant(sess)
+    )
+
+    if sales_df.empty:
         return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
-    if sess.inventory_df_variant.empty:
+    if inv_variant.empty:
         return {"ok": False, "message": "Upload Inventory first."}
 
     from ..services.po_engine import calculate_po_base
 
     group_by_parent = bool(body.get("group_by_parent", False))
-    inv_df = sess.inventory_df_parent if group_by_parent else sess.inventory_df_variant
-
-    _period = int(body.get("period_days", 30))
-
-    # ── Stage 1: sales load (Tier-3 overlay + ADS window trim) ────────────────
-    from .tier3_session_merge import build_po_ads_platform_sales
-
-    _set_po_calculate_progress(sess, session_id, 12, "Loading Tier-3 daily sales for ADS window…")
-    _platform_sales = build_po_ads_platform_sales(
-        sess,
-        planning_date=body.get("planning_date"),
-        period_days=_period,
-        use_seasonality=bool(body.get("use_seasonality", False)),
-        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+    inv_parent = inputs.inventory_df_parent if not inputs.inventory_df_parent.empty else getattr(
+        sess, "inventory_df_parent", None
     )
-    if _platform_sales.empty:
-        _platform_sales = _build_platform_sales_df(sess)
-    _ads_source = _platform_sales if not _platform_sales.empty else sess.sales_df
-    _ads_source = _trim_sales_for_po_memory(
-        _ads_source,
-        period_days=_period,
-        use_seasonality=bool(body.get("use_seasonality", False)),
-        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-    )
-    logger.info(
-        "PO ADS source: %s (%d rows)",
-        "platform" if not _platform_sales.empty else "OMS",
-        len(_ads_source),
-    )
-    stage_timer.mark("sales load")
+    inv_df = inv_parent if group_by_parent and inv_parent is not None and not inv_parent.empty else inv_variant
+    sku_mapping = inputs.sku_mapping or getattr(sess, "sku_mapping", None) or None
 
-    # ── Stage 2: inventory sidecars (ledger, existing PO sheet, daily history) ─
     from ..services.po_raise_import import hydrate_session_ledger_from_db
 
     lookback = max(int(body.get("raise_ledger_lookback_days") or 14), 14)
@@ -242,19 +227,9 @@ def execute_po_calculate(
     )
 
     # ── Inventory-history memory management ───────────────────────────────────
-    # Two-stage trim so the heavy calculate_po_base call starts lean.
-    #
-    # Stage 1 — session migration: sessions restored from a warm-cache or PG
-    # snapshot saved BEFORE the upload-time trim was added may carry multi-year
-    # baselines (30M+ rows).  Trim those in-place once so every future request
-    # for this session is fast.  The trimmed version is saved back to PG/warm-
-    # cache by the post-calculate _sync() thread.
-    #
-    # Stage 2 — calc-time pre-trim: keep only rows needed for this run. Cap depth at
-    # min(period_days + 14, DAILY_INV_MAX_DAYS) so we never scan more inventory history
-    # than the server retains (default 30 days).
     import gc as _gc
 
+    _period = int(body.get("period_days", 30))
     _raw_ih = getattr(sess, "daily_inventory_history_df", None)
     _inv_history_for_calc: pd.DataFrame | None = None
 
@@ -329,6 +304,59 @@ def execute_po_calculate(
 
     stage_timer.mark("inventory")
 
+    # Tier-3 overlay for ADS (in-memory only — never blocks on full session merge / sales rebuild).
+    from .tier3_session_merge import build_po_ads_platform_sales
+
+    _set_po_calculate_progress(sess, session_id, 28, "Loading Tier-3 daily sales for ADS window…")
+    _platform_sales = build_po_ads_platform_sales(
+        sess,
+        planning_date=body.get("planning_date"),
+        period_days=_period,
+        use_seasonality=bool(body.get("use_seasonality", False)),
+        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+    )
+    _mat_sales = None
+    if po_inputs_from_pg_enabled() and not sales_df.empty and inputs.sales_source.startswith("postgres"):
+        _mat_sales = sales_df
+    else:
+        try:
+            from ..db.forecast_sales_materializations import load_po_sales_df
+
+            _mat_sales = load_po_sales_df(
+                sess,
+                period_days=_period,
+                planning_date=body.get("planning_date"),
+                use_seasonality=bool(body.get("use_seasonality", False)),
+                use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+            )
+        except Exception:
+            logger.exception("load_po_sales_df failed — falling back to raw sales")
+    if _mat_sales is not None and not _mat_sales.empty:
+        _ads_source = _mat_sales
+        _ads_label = inputs.ads_source_label if inputs.sales_source.startswith("postgres") else "materialized-daily"
+    elif not _platform_sales.empty:
+        _ads_source = _platform_sales
+        _ads_label = "platform"
+    else:
+        _ads_source = _build_platform_sales_df(sess)
+        _ads_label = "platform-built"
+        if _ads_source.empty:
+            _ads_source = sales_df
+            _ads_label = "OMS"
+    if _ads_label != "materialized-daily":
+        _ads_source = _trim_sales_for_po_memory(
+            _ads_source,
+            period_days=_period,
+            use_seasonality=bool(body.get("use_seasonality", False)),
+            use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+        )
+    logger.info(
+        "PO ADS source: %s (%d rows)",
+        _ads_label,
+        len(_ads_source),
+    )
+    stage_timer.mark("sales load")
+
     _set_po_calculate_progress(
         sess,
         session_id,
@@ -366,7 +394,7 @@ def execute_po_calculate(
             safety_pct=float(body.get("safety_pct", 0.0)),
             use_seasonality=bool(body.get("use_seasonality", False)),
             seasonal_weight=float(body.get("seasonal_weight", 0.5)),
-            sku_mapping=sess.sku_mapping or None,
+            sku_mapping=sku_mapping,
             group_by_parent=group_by_parent,
             existing_po_df=_existing_po,
             sku_status_df=effective_sku_status_df_for_engine(sess),
@@ -484,6 +512,7 @@ def execute_po_calculate(
         "raise_ledger_rows": ledger_n,
         "ledger_auto_import": auto_msg,
         "stage_timings": stage_timings,
+        "ads_source": _ads_label,
         "summary": {
             "new_po_qty_sum": int(_po_qty.sum()),
             "new_po_sku_count": int((_po_qty > 0).sum()),
@@ -518,6 +547,7 @@ def background_po_calculate(session_id: str, body: dict) -> None:
     sess.po_calculate_status = "running"
     sess.po_calculate_progress = 2
     sess.po_calculate_message = "Calculating PO recommendations…"
+    _po_wall_start = time.perf_counter()
 
     try:
         from .po_result_spill import clear_spill
@@ -623,12 +653,34 @@ def background_po_calculate(session_id: str, body: dict) -> None:
                 daemon=True,
                 name=f"po-save-{session_id[:8]}",
             ).start()
+            try:
+                from .perf_metrics import record_po_calculate
+
+                record_po_calculate(
+                    time.perf_counter() - _po_wall_start,
+                    ok=True,
+                    total_rows=n,
+                    stage_timings=result.get("stage_timings"),
+                    ads_source=str(result.get("ads_source") or ""),
+                )
+            except Exception:
+                pass
         else:
             msg = result.get("message") or "PO calculation failed."
             sess.po_calculate_status = "error"
             sess.po_calculate_progress = 0
             sess.po_calculate_message = msg
             set_po_job(session_id, status="error", ok=False, progress=0, message=msg)
+            try:
+                from .perf_metrics import record_po_calculate
+
+                record_po_calculate(
+                    time.perf_counter() - _po_wall_start,
+                    ok=False,
+                    stage_timings=result.get("stage_timings"),
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.exception("background_po_calculate failed")
         msg = str(e)
@@ -637,3 +689,9 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         sess.po_calculate_message = msg
         sess.po_calculate_result = {"ok": False, "message": msg}
         set_po_job(session_id, status="error", ok=False, progress=0, message=msg)
+        try:
+            from .perf_metrics import record_po_calculate
+
+            record_po_calculate(time.perf_counter() - _po_wall_start, ok=False)
+        except Exception:
+            pass

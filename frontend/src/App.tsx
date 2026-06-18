@@ -9,6 +9,7 @@ import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
+import PoHydrationGate from './components/PoHydrationGate'
 import { canSkipHeavyServerRestore, poOperationalReady, poOperationalLoaded, PO_OPERATIONAL_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
@@ -35,6 +36,7 @@ const StitchingCosting = lazy(() => import('./pages/StitchingCosting'))
 const GreyFabric  = lazy(() => import('./pages/GreyFabric'))
 const HRM         = lazy(() => import('./pages/HRM'))
 const Admin                  = lazy(() => import('./pages/Admin'))
+const AdminPerformance       = lazy(() => import('./pages/AdminPerformance'))
 const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
 const SKUDeepDive            = lazy(() => import('./pages/SKUDeepDive'))
 
@@ -284,11 +286,13 @@ export default function App() {
               <Route path="meesho"    element={<Meesho />} />
               <Route path="flipkart"  element={<Flipkart />} />
               <Route path="inventory" element={<Inventory />} />
-              <Route path="po-fresh" element={<POFresh />} />
-              <Route path="po2" element={<PO2 />} />
-              <Route path="po" element={<Navigate to="/po-fresh" replace />} />
-              <Route path="po-legacy" element={<POEngine />} />
-              <Route path="po-dashboard" element={<Navigate to="/po-fresh" replace />} />
+              <Route element={<PoHydrationGate />}>
+                <Route path="po-fresh" element={<POFresh />} />
+                <Route path="po2" element={<PO2 />} />
+                <Route path="po" element={<Navigate to="/po-fresh" replace />} />
+                <Route path="po-legacy" element={<POEngine />} />
+                <Route path="po-dashboard" element={<Navigate to="/po-fresh" replace />} />
+              </Route>
               <Route path="forecast"  element={<Forecast />} />
               <Route path="finance"   element={<Finance />} />
               <Route path="items"      element={<ItemMaster />} />
@@ -301,6 +305,7 @@ export default function App() {
               <Route path="grey"      element={<GreyFabric />} />
               <Route path="hrm"       element={<HRM />} />
               <Route path="admin"       element={<Admin />} />
+              <Route path="admin/performance" element={<AdminPerformance />} />
               <Route path="marketplace-connections" element={<MarketplaceConnections />} />
               <Route path="sku-deepdive" element={<SKUDeepDive />} />
               </Route>

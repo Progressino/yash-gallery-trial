@@ -31,6 +31,7 @@ const empty: CoverageResponse = {
   meesho_rows: 0,
   flipkart_rows: 0,
   snapdeal_rows: 0,
+  inventory_rows: 0,
   sku_status_lead_rows: 0,
   daily_inventory_history_rows: 0,
   daily_inventory_history_skus: 0,

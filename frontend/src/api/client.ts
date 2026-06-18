@@ -63,6 +63,7 @@ export interface CoverageResponse {
   meesho_rows: number
   flipkart_rows: number
   snapdeal_rows: number
+  inventory_rows?: number
   sku_status_lead_rows?: number
   daily_inventory_history_rows?: number
   daily_inventory_history_skus?: number

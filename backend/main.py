@@ -6,6 +6,10 @@ Session state is stored server-side keyed by a UUID cookie.
 from dotenv import load_dotenv
 load_dotenv()   # loads .env from cwd (run from repo root or backend/)
 
+from .local_dev import apply_local_dev_defaults
+
+apply_local_dev_defaults()
+
 import asyncio
 import logging
 import threading
@@ -19,6 +23,7 @@ from .concurrency import run_aux, run_heavy, _UPLOAD_MEMORY_LOCK
 
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
+from .routers.admin_performance import router as admin_performance_router
 from .routers.auth import verify_token, decode_token
 from .services.permissions import karigar_may_access_api, may_access_erp_admin, KARIGAR_ROLE
 from .routers.finance import router as finance_router
@@ -61,6 +66,12 @@ init_users_db()
 init_po_raised_db()
 init_forecast_session_pg()
 init_forecast_ops_pg()
+try:
+    from .services.perf_metrics import init_db as init_perf_metrics_db
+
+    init_perf_metrics_db()
+except Exception:
+    log.exception("perf metrics init failed")
 
 log = logging.getLogger("erp.cache_warmer")
 
@@ -131,21 +142,25 @@ def clear_warm_cache() -> None:
     _warm_cache_ready.clear()  # Reset so next load is awaited correctly
 
 
-def bootstrap_warm_cache_from_disk_if_empty() -> bool:
-    """When in-memory warm cache was cleared (e.g. mid Phase-2), reload from disk snapshot."""
+def bootstrap_warm_cache_if_empty() -> bool:
+    """Reload in-memory warm cache when empty: PostgreSQL first, disk acceleration second."""
     global _warm_cache, _warm_cache_loaded_at
     if _warm_cache:
         return True
+    if _try_bootstrap_warm_cache_from_pg():
+        return True
     disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
     if not disk_ok or not disk_data:
-        if _try_bootstrap_warm_cache_from_pg():
-            return True
         return False
     _warm_cache = disk_data
     _warm_cache_loaded_at = datetime.now(IST)
     _warm_cache_ready.set()
     log.info("Warm cache bootstrapped from disk (%d keys)", len(_warm_cache))
     return True
+
+
+# Backward-compatible alias — prefer bootstrap_warm_cache_if_empty().
+bootstrap_warm_cache_from_disk_if_empty = bootstrap_warm_cache_if_empty
 
 
 def try_fast_warm_cache_hydrate(sess) -> bool:
@@ -155,10 +170,10 @@ def try_fast_warm_cache_hydrate(sess) -> bool:
     if getattr(sess, "pause_auto_data_restore", False) and not session_needs_operational_data(sess):
         return False
     if not _warm_cache:
-        bootstrap_warm_cache_from_disk_if_empty()
+        bootstrap_warm_cache_if_empty()
     if not _warm_cache:
         _warm_cache_ready.wait(timeout=15.0)
-        bootstrap_warm_cache_from_disk_if_empty()
+        bootstrap_warm_cache_if_empty()
     if not _warm_cache:
         return False
     try:
@@ -322,7 +337,7 @@ def force_restore_session_from_server_cache(sess, warm_cache_generation: int) ->
     sess.daily_restored = False
     changed = False
     try:
-        bootstrap_warm_cache_from_disk_if_empty()
+        bootstrap_warm_cache_if_empty()
         restore_po_sidecars_from_warm(sess)
         if _warm_cache and _copy_warm_cache_to_session(sess):
             sess._warm_cache_gen = warm_cache_generation
@@ -894,7 +909,7 @@ def _persist_shared_snapshot_if_ready() -> None:
 
 
 def _try_bootstrap_warm_cache_from_pg() -> bool:
-    """Load shared operational snapshot from PostgreSQL when disk/GitHub are empty."""
+    """Build in-memory warm cache from PostgreSQL (normalized tables, then snapshot blob)."""
     global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
     try:
         from .db.forecast_ops_pg import load_shared_snapshot
@@ -906,18 +921,18 @@ def _try_bootstrap_warm_cache_from_pg() -> bool:
         _warm_cache_loaded_at = datetime.now(IST)
         _warm_cache_generation = max(_warm_cache_generation, 1) + 1
         _warm_cache_ready.set()
-        log.warning(
-            "Warm cache bootstrapped from PostgreSQL shared snapshot (%d keys, gen=%d)",
+        log.info(
+            "Warm cache built from PostgreSQL (%d keys, gen=%d)",
             len(data),
             _warm_cache_generation,
         )
         try:
             _save_warm_cache_to_disk(_warm_cache)
         except Exception:
-            log.exception("disk save after PG snapshot bootstrap failed")
+            log.exception("disk cache write after PG warm-cache build failed")
         return True
     except Exception:
-        log.exception("PostgreSQL shared snapshot bootstrap failed")
+        log.exception("PostgreSQL warm-cache build failed")
         return False
 
 
@@ -1171,7 +1186,25 @@ def _do_load_warm_cache() -> bool:
                 _warm_cache_ready.set()
                 return True
 
-        # ── Phase 0: local disk cache (fastest, ~2-3 s) ──────────────────────
+        # ── Phase PG: PostgreSQL normalized tables (production source of truth) ──
+        if not _warm_cache and _try_bootstrap_warm_cache_from_pg():
+            if warm_cache_po_session_only():
+                _pg_n = warm_cache_sales_rows(_warm_cache)
+                _pg_min = 100_000
+            else:
+                _pg_mtr = _warm_cache.get("mtr_df")
+                _pg_n = len(_pg_mtr) if _pg_mtr is not None and hasattr(_pg_mtr, "__len__") else 0
+                _pg_min = _DISK_CACHE_MIN_MTR_ROWS
+            if _pg_n >= _pg_min:
+                log.info(
+                    "Warm-cache Phase PG: serving from PostgreSQL (%d %s rows, gen=%d)",
+                    _pg_n,
+                    "sales" if warm_cache_po_session_only() else "mtr",
+                    _warm_cache_generation,
+                )
+                return True
+
+        # ── Phase 0: local disk cache (acceleration, ~2-3 s) ──────────────────────
         # Parquet files written to /data/warm_cache/ after each successful Phase 2.
         # /data is a Docker volume that persists across container restarts.
         # If the cache is fresh (< WARM_CACHE_MAX_AGE_HOURS old) we serve it
@@ -1716,10 +1749,15 @@ def _do_load_warm_cache() -> bool:
 
 
 def _copy_warm_cache_to_session(sess) -> bool:
-    """Copy _warm_cache into an AppSession. Returns True if data was available."""
+    """Attach or copy _warm_cache into an AppSession. Returns True if data was available."""
     global _warm_cache
     if not _warm_cache:
         return False
+    try:
+        from .services.shared_frames import shared_frames_enabled, should_skip_session_copy
+    except Exception:
+        shared_frames_enabled = lambda: False  # type: ignore
+        should_skip_session_copy = lambda _k: False  # type: ignore
     try:
         from .services.inventory import inventory_snapshot_upload_epoch
     except Exception:
@@ -1767,6 +1805,9 @@ def _copy_warm_cache_to_session(sess) -> bool:
             except Exception:
                 pass  # fall through to plain copy on any import / trim error
         if key in _warm_plat_keys and val is not None and hasattr(val, "empty") and not val.empty:
+            if shared_frames_enabled():
+                setattr(sess, key, val)
+                continue
             cur = getattr(sess, key, None)
             if cur is not None and hasattr(cur, "empty") and not cur.empty:
                 try:
@@ -1808,6 +1849,11 @@ def _copy_warm_cache_to_session(sess) -> bool:
             except Exception:
                 pass
             continue
+        if should_skip_session_copy(key):
+            wc_val = _warm_cache.get(key)
+            if wc_val is not None:
+                setattr(sess, key, wc_val)
+            continue
         setattr(sess, key, val)
     for _pk, _pv in _warm_plat_updates.items():
         _warm_cache[_pk] = _pv
@@ -1834,6 +1880,13 @@ def _copy_warm_cache_to_session(sess) -> bool:
         ensure_existing_po_hydrated(sess)
     except Exception:
         pass
+    if shared_frames_enabled():
+        try:
+            from .services.shared_frames import attach_shared_frames
+
+            attach_shared_frames(sess, warm_cache_generation=int(_warm_cache_generation or 0))
+        except Exception:
+            pass
     return True
 
 
@@ -1968,6 +2021,21 @@ def _do_marketplace_sync_all() -> None:
         log.info("Scheduled %s sync complete: %s", platform, msg)
 
 
+async def _sku_sales_rollup_scheduler():
+    """Refresh materialized SKU sales rollups hourly (PO fast path)."""
+    interval = int(_os_main.environ.get("FORECAST_SKU_ROLLUP_INTERVAL_SEC", "3600"))
+    while True:
+        await asyncio.sleep(max(300, interval))
+        try:
+            from .db.forecast_sales_materializations import refresh_hourly_from_server
+
+            stats = await run_aux(refresh_hourly_from_server)
+            if stats:
+                log.info("Hourly SKU sales materialization refresh: %s", stats)
+        except Exception:
+            log.exception("hourly SKU sales materialization refresh failed")
+
+
 async def _warm_cache_scheduler():
     """Background task: refresh cache + run Amazon sync at 06:00 IST every day."""
     while True:
@@ -2012,7 +2080,7 @@ async def _session_eviction_loop() -> None:
 
 
 def _bootstrap_ops_pg_from_sqlite() -> None:
-    """Seed PostgreSQL Tier-3 + shared snapshot from SQLite/disk when PG is empty."""
+    """Seed PostgreSQL Tier-3 + shared snapshot when PG is empty (PG remains source of truth)."""
     try:
         from .db.forecast_ops_pg import (
             load_shared_snapshot,
@@ -2028,6 +2096,7 @@ def _bootstrap_ops_pg_from_sqlite() -> None:
             migrate_sqlite_daily_uploads_to_pg()
         if load_shared_snapshot():
             return
+        # Disk only seeds an empty PG — never overrides normalized tables on startup.
         disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
         if disk_ok and disk_data and not _disk_cache_corruption_reason(disk_data):
             persist_shared_snapshot(disk_data)
@@ -2049,10 +2118,18 @@ async def lifespan(app: FastAPI):
         log.exception("Failed to restore persisted Intelligence bundle cache")
     # Schedule daily 6AM IST refresh
     task = asyncio.create_task(_warm_cache_scheduler())
+    rollup_task = asyncio.create_task(_sku_sales_rollup_scheduler())
     evict_task = asyncio.create_task(_session_eviction_loop())
     yield
     task.cancel()
+    rollup_task.cancel()
     evict_task.cancel()
+    try:
+        from .db.pg_pool import close_all_pools
+
+        close_all_pools()
+    except Exception:
+        log.exception("PostgreSQL pool shutdown failed")
 
 
 app = FastAPI(
@@ -2173,6 +2250,10 @@ async def auth_middleware(request: Request, call_next):
         return JSONResponse(status_code=403, content={"detail": "Access denied for karigar role"})
 
     if path.startswith("/api/erp-admin") and not may_access_erp_admin(role):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+
+    if path.startswith("/api/admin/") and not may_access_erp_admin(role):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"detail": "Admin access required"})
 
@@ -2361,6 +2442,7 @@ app.include_router(grey_router,        prefix="/api/grey",       tags=["grey"])
 app.include_router(stitching_router,   prefix="/api/stitching",  tags=["stitching"])
 app.include_router(hrm_router,         prefix="/api/hrm",        tags=["hrm"])
 app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])
+app.include_router(admin_performance_router, prefix="/api/admin", tags=["admin-performance"])
 app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketplace"])
 
 

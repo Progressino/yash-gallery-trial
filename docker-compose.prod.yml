@@ -26,7 +26,15 @@ services:
       - pg_stat_statements.track=all
       - -c
       - pg_stat_statements.save=on
-    mem_limit: 768m
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+    mem_limit: 2g
     volumes:
       - ${APP_DATA_DIR:-/root/app-data}/postgres:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
@@ -86,7 +94,7 @@ services:
       postgres:
         condition: service_healthy
     mem_limit: 7.5g
-    memswap_limit: 9g   # raised from 7g/8g: kernel OOM-killed uvicorn at ~7.3 GB RSS during warm-cache phase 2 + first session copy (2026-05-13). Host has 7.8 GiB RAM + 2 GiB swap; postgres ~0.5 GiB so this leaves ~0.3 GiB physical + 1.5 GiB swap headroom.
+    memswap_limit: 9g   # raised from 7g/8g: kernel OOM-killed uvicorn at ~7.3 GB RSS during warm-cache phase 2 + first session copy (2026-05-13). Host has 7.8 GiB RAM + 2 GiB swap; postgres capped at 2 GiB leaves headroom for backend + OS.
     restart: unless-stopped
     labels:
       - autoheal=true

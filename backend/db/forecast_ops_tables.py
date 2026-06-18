@@ -153,6 +153,17 @@ def ensure_tables(conn) -> None:
         "ON forecast_sales_transactions (platform, line_key) "
         "WHERE line_key IS NOT NULL AND line_key <> ''"
     )
+    # Composite btree indexes for ERP hot paths (see backend/db/sales_index_audit.py).
+    # Do not duplicate under idx_sales_* names — run scripts/pg_explain_analyze.py first:
+    #   idx_sales_platform_date     → idx_fst_platform_txn_date_asc / idx_fst_platform_txn_date
+    #   idx_sales_sku_date          → idx_fst_sku_txn_date
+    #   idx_sales_sku_platform_date → created only when EXPLAIN shows sku filter on platform scan
+    from .sales_index_audit import ensure_sales_indexes_from_audit
+
+    ensure_sales_indexes_from_audit(conn)
+    from .forecast_sales_materializations import ensure_materialization_tables
+
+    ensure_materialization_tables(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS forecast_sku_mapping (
             seller_key TEXT PRIMARY KEY,
@@ -586,6 +597,14 @@ def persist_warm_cache_tables(cache_dict: dict) -> dict[str, int]:
         df = cache_dict.get(key)
         if df is not None and hasattr(df, "empty") and not df.empty:
             stats[f"sales_{plat}"] = persist_platform_sales_dataframe(plat, df)
+    sales = cache_dict.get("sales_df")
+    if sales is not None and hasattr(sales, "empty") and not sales.empty:
+        try:
+            from .forecast_sales_materializations import refresh_from_sales_df
+
+            stats.update(refresh_from_sales_df(sales))
+        except Exception:
+            _log.exception("SKU sales materialization refresh after warm-cache persist failed")
     return stats
 
 

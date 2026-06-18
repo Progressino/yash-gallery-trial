@@ -137,6 +137,31 @@ export function operationalDataComplete(c: CoverageResponse): boolean {
   return loaded === total
 }
 
+/** Minimum unified sales rows before PO page mounts (prod catalog ~1.56M). */
+export const PO_MIN_SALES_ROWS = 1_000_000
+
+/** Minimum inventory SKUs before PO page mounts (prod ~6.7k). */
+export const PO_MIN_INVENTORY_ROWS = 5_000
+
+/** True when PO routes may mount — 8/8 flags, no background jobs, row floors met. */
+export function poPageHydrationReady(c: CoverageResponse): boolean {
+  if (
+    c.inventory_upload_status === 'running' ||
+    c.daily_inventory_upload_status === 'running' ||
+    c.daily_auto_ingest_status === 'running' ||
+    c.tier1_bulk_status === 'running' ||
+    c.sales_rebuild === 'running' ||
+    c.session_restore_status === 'running'
+  ) {
+    return false
+  }
+  if (!operationalDataComplete(c)) return false
+  if (!c.inventory || !c.sales) return false
+  if ((c.sales_rows ?? 0) < PO_MIN_SALES_ROWS) return false
+  if ((c.inventory_rows ?? 0) < PO_MIN_INVENTORY_ROWS) return false
+  return true
+}
+
 /** True when we can skip GitHub hydrate + full cache download on login. */
 export function canSkipHeavyServerRestore(
   coverage: CoverageResponse,

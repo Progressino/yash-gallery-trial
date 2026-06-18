@@ -62,6 +62,7 @@ class CoverageResponse(BaseModel):
     meesho_rows: int = 0
     flipkart_rows: int = 0
     snapdeal_rows: int = 0
+    inventory_rows: int = 0
     sku_status_lead_rows: int = 0
     daily_inventory_history_rows: int = 0
     daily_inventory_history_skus: int = 0

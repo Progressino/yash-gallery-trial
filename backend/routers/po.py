@@ -1308,15 +1308,30 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
         return {"ok": False, "message": "No session"}
 
     from ..services.po_session_hydrate import hydrate_po_session_for_calculate
+    from ..services.shared_frames import session_inventory_variant, session_sales_df
 
     hydrate_stats = hydrate_po_session_for_calculate(sess)
 
-    if sess.sales_df.empty:
+    sales_df = session_sales_df(sess)
+    inv_df = session_inventory_variant(sess)
+    if sales_df.empty:
+        try:
+            from ..services.po_inputs import load_po_inputs
+
+            pg_inputs = load_po_inputs(sess, body.model_dump())
+            if not pg_inputs.sales_df.empty:
+                sales_df = pg_inputs.sales_df
+            if not pg_inputs.inventory_df_variant.empty:
+                inv_df = pg_inputs.inventory_df_variant
+        except Exception:
+            pass
+
+    if sales_df.empty:
         return {
             "ok": False,
             "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales).",
         }
-    if sess.inventory_df_variant.empty:
+    if inv_df.empty:
         return {
             "ok": False,
             "message": (

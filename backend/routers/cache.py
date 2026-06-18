@@ -22,7 +22,6 @@ from ..session import wipe_app_session, resume_auto_data_restore
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
-_warm_hydrate_queued: set[str] = set()
 
 
 def _hydrate_warm_worker(session_id: str) -> None:
@@ -79,8 +78,6 @@ def _hydrate_warm_worker(session_id: str) -> None:
             pass
     except Exception:
         _log.exception("hydrate-warm worker failed session=%s", session_id[:8])
-    finally:
-        _warm_hydrate_queued.discard(session_id)
 
 
 def _apply_loaded_into_session(sess, loaded: dict) -> None:
@@ -386,7 +383,7 @@ def _run_warm_hydrate_worker(session_id: str) -> None:
         if not _main._warm_cache:
             _main._warm_cache_ready.wait(timeout=60.0)
         if not _main._warm_cache:
-            _main.bootstrap_warm_cache_from_disk_if_empty()
+            _main.bootstrap_warm_cache_if_empty()
         if not _main._warm_cache:
             _log.warning("warm hydrate worker: warm cache unavailable session=%s", session_id[:8])
             return
@@ -444,7 +441,7 @@ def _hydrate_session_from_warm(
         if not _main._warm_cache:
             _main._warm_cache_ready.wait(timeout=15.0)
         if not _main._warm_cache:
-            _main.bootstrap_warm_cache_from_disk_if_empty()
+            _main.bootstrap_warm_cache_if_empty()
         if not _main._warm_cache:
             return None
         _main._copy_warm_cache_to_session(sess)
@@ -501,29 +498,95 @@ def cache_hydrate_warm(request: Request):
         return CacheStatusResponse(ok=False, message="No session id")
     try:
         import backend.main as _main
+        from ..local_dev import hydrate_session_from_warm_local, local_dev_mode
+        from ..services.session_hydrate import (
+            HydrateSchedule,
+            run_session_hydrate_blocking,
+            schedule_session_hydrate,
+            session_warm_hydration_complete,
+        )
 
         if not _main._warm_cache:
             _main._warm_cache_ready.wait(timeout=15.0)
-        if not _main._warm_cache:
-            _main.bootstrap_warm_cache_from_disk_if_empty()
+        _main.bootstrap_warm_cache_if_empty()
         if not _main._warm_cache:
             return CacheStatusResponse(
                 ok=False,
                 message="Warm cache is still loading on the server — wait a moment and retry.",
             )
-        if sid in _warm_hydrate_queued:
-            return CacheStatusResponse(ok=True, message="Warm cache hydrate already running…")
-        _warm_hydrate_queued.add(sid)
+
+        if local_dev_mode():
+
+            def _sync_local() -> None:
+                hydrate_session_from_warm_local(
+                    sess,
+                    _main._warm_cache,
+                    int(getattr(_main, "_warm_cache_generation", 0) or 0),
+                )
+                if len(getattr(sess, "sales_df", [])) == 0:
+                    _merge_daily_store_into_session(sess)
+                    _rebuild_sales_in_session(sess)
+
+            ran = run_session_hydrate_blocking(
+                sid,
+                _sync_local,
+                check_ready=session_warm_hydration_complete,
+            )
+            if not ran and not session_warm_hydration_complete(sess):
+                return CacheStatusResponse(ok=False, message="Session hydrate failed.")
+            n_sales = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
+            n_mtr = len(sess.mtr_df) if hasattr(sess.mtr_df, "__len__") else 0
+            n_inv = len(sess.inventory_df_variant)
+            _log.info(
+                "local sync hydrate-warm session=%s sales=%s mtr=%s inv=%s",
+                sid[:8],
+                n_sales,
+                n_mtr,
+                n_inv,
+            )
+            try:
+                from ..services.perf_metrics import record_cache
+
+                record_cache(hit=True, source="warm_cache", name="hydrate_warm")
+            except Exception:
+                pass
+            return CacheStatusResponse(
+                ok=True,
+                message=(
+                    f"Loaded from local warm cache ({n_sales:,} sales, {n_mtr:,} MTR, "
+                    f"{n_inv:,} inventory rows)."
+                ),
+            )
+
         from ..concurrency import DAILY_UPLOAD_EXECUTOR
 
-        DAILY_UPLOAD_EXECUTOR.submit(_hydrate_warm_worker, sid)
+        status = schedule_session_hydrate(
+            sid,
+            _hydrate_warm_worker,
+            executor=DAILY_UPLOAD_EXECUTOR,
+        )
+        if status == HydrateSchedule.READY:
+            try:
+                from ..services.perf_metrics import record_cache
+
+                record_cache(hit=True, source="warm_cache", name="hydrate_warm")
+            except Exception:
+                pass
+            return CacheStatusResponse(ok=True, message="Session already hydrated from warm cache.")
+        if status == HydrateSchedule.INFLIGHT:
+            return CacheStatusResponse(ok=True, message="Warm cache hydrate already running…")
+        try:
+            from ..services.perf_metrics import record_cache
+
+            record_cache(hit=False, source="warm_cache", name="hydrate_warm_async")
+        except Exception:
+            pass
         return CacheStatusResponse(
             ok=True,
             message="Warm cache hydrate started — datasets will appear as coverage reaches 8/8.",
         )
     except Exception:
         _log.exception("hydrate-warm failed session=%s", sid[:8] if sid else "?")
-        _warm_hydrate_queued.discard(sid)
         return CacheStatusResponse(ok=False, message="Warm cache hydrate failed.")
 
 

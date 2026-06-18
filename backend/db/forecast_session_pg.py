@@ -241,6 +241,9 @@ def load_session_from_pg(session_id: str):
     conn = _require_conn()
     if conn is None:
         return None
+    import time
+
+    t0 = time.perf_counter()
     try:
         with conn:
             row = conn.execute(
@@ -248,8 +251,25 @@ def load_session_from_pg(session_id: str):
                 (session_id,),
             ).fetchone()
         if row is None or row[0] is None:
+            try:
+                from ..services.perf_metrics import record_cache
+
+                record_cache(hit=False, source="pg_session", name="snapshot_restore")
+            except Exception:
+                pass
             return None
-        return _hydrate_session_from_bundle(bytes(row[0]))
+        out = _hydrate_session_from_bundle(bytes(row[0]))
+        if out is not None:
+            try:
+                from ..services.perf_metrics import record_session_restore
+
+                record_session_restore("pg_snapshot", time.perf_counter() - t0, ok=True)
+                from ..services.perf_metrics import record_cache
+
+                record_cache(hit=True, source="pg_session", name="snapshot_restore")
+            except Exception:
+                pass
+        return out
     except Exception:
         _log.exception(
             "load_session_from_pg failed for session_id=%s",

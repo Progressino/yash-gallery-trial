@@ -40,6 +40,12 @@ def log_slow_query(*, backend: str, statement: Any, duration: float, conn: Any =
         backend,
         _statement_preview(statement),
     )
+    try:
+        from ..services.perf_metrics import record_db_query
+
+        record_db_query(backend, statement, duration)
+    except Exception:
+        pass
     if conn is not None and backend.startswith("postgresql"):
         try:
             from .explain_analyze import maybe_explain_slow_query
@@ -194,15 +200,22 @@ class _TimedSqliteConnection:
 
 
 def connect_psycopg(url: str, **kwargs: Any) -> Any:
-    import psycopg
-
-    conn = psycopg.connect(url, **kwargs)
-    if not query_logging_enabled():
-        return conn
+    """Return a connection lease — use ``with connect_psycopg(...) as conn:``."""
     backend = "postgresql"
     if "forecast_session" in url or "session" in (kwargs.get("name") or ""):
         backend = "postgresql-session"
-    return _TimedPsycopgConnection(conn, backend=backend)
+
+    def _wrap(raw: Any, *, backend: str) -> Any:
+        if not query_logging_enabled():
+            return raw
+        return _TimedPsycopgConnection(raw, backend=backend)
+
+    from .pg_pool import DirectConnectionLease, PooledConnectionLease, get_pool
+
+    pool = get_pool(url, **kwargs)
+    if pool is not None:
+        return PooledConnectionLease(pool, backend=backend, timed_factory=_wrap)
+    return DirectConnectionLease(url, backend=backend, timed_factory=_wrap, **kwargs)
 
 
 def connect_sqlite(path: str, *, backend: str = "sqlite", **kwargs: Any) -> Any:

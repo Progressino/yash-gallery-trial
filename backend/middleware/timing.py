@@ -59,4 +59,10 @@ def register_timing_middleware(app: FastAPI) -> None:
             response.status_code,
             elapsed,
         )
+        try:
+            from ..services.perf_metrics import record_http
+
+            record_http(request.method, path, response.status_code, elapsed)
+        except Exception:
+            pass
         return response
