@@ -210,65 +210,61 @@ def ensure_tier3_merged_for_po(
     use_ly_fallback: bool = True,
 ) -> dict[str, Any]:
     """
-    Merge Tier-3 daily uploads into session platform frames before PO ADS build.
-    Keeps PO requirements aligned with Intelligence dashboard (same daily sales).
+    Legacy session merge — prefer ``build_po_ads_platform_sales`` for PO calculate
+    (in-memory Tier-3 overlay; does not mutate session or rebuild unified sales).
     """
-    from .daily_store import get_summary, platforms_with_uploads_in_range
+    _ = (sess, planning_date, period_days, use_seasonality, use_ly_fallback)
+    return {"merged": False, "reason": "use_build_po_ads_platform_sales", "platforms": []}
+
+
+def build_po_ads_platform_sales(
+    sess,
+    *,
+    planning_date: str | None = None,
+    period_days: int = 30,
+    use_seasonality: bool = False,
+    use_ly_fallback: bool = True,
+) -> pd.DataFrame:
+    """
+    Build platform sales for PO ADS from session bulk + Tier-3 window overlay.
+    Does not mutate session frames or rebuild unified sales_df (fast path).
+    """
+    from .daily_store import get_summary, load_platform_data_for_report_range, merge_platform_data, platforms_with_uploads_in_range
+
+    summary = get_summary() or {}
+    tier3_any = any(int((summary.get(p) or {}).get("file_count") or 0) > 0 for p in summary)
+    if not tier3_any:
+        return pd.DataFrame()
 
     plan = _normalize_planning_date(planning_date)
     horizon = _po_ads_horizon_days(period_days, use_seasonality, use_ly_fallback)
     end = plan
     start = str((pd.Timestamp(plan) - pd.Timedelta(days=horizon)).date())
 
-    summary = get_summary() or {}
-    tier3_any = any(int((summary.get(p) or {}).get("file_count") or 0) > 0 for p in summary)
-    if not tier3_any:
-        return {"merged": False, "reason": "no_tier3", "platforms": []}
-
-    merged_platforms: list[str] = []
-    changed = False
-
     window_plats = platforms_with_uploads_in_range(start, end)
-    if window_plats:
-        if merge_tier3_for_report_range(sess, window_plats, start, end):
-            changed = True
-            merged_platforms.extend(window_plats)
+    if not window_plats:
+        return pd.DataFrame()
 
-    if tier3_token_mismatch(sess) or session_platform_shorter_than_tier3(sess):
-        need = platforms_with_tier3_token_mismatch(sess)
-        if not need and session_platform_shorter_than_tier3(sess):
-            need = [p for p, s in summary.items() if int(s.get("file_count") or 0) > 0]
-        if merge_tier3_light(sess, only_platforms=need or None):
-            changed = True
-            for p in need or []:
-                if p not in merged_platforms:
-                    merged_platforms.append(p)
+    frame_overrides: dict[str, pd.DataFrame] = {}
+    used_tier3 = False
+    for platform, attr in _PLATFORM_ATTRS:
+        cur = getattr(sess, attr, pd.DataFrame())
+        if platform not in window_plats:
+            if cur is not None and not getattr(cur, "empty", True):
+                frame_overrides[attr] = cur
+            continue
+        tier = load_platform_data_for_report_range(platform, start, end, dedup=False)
+        if tier.empty:
+            if cur is not None and not getattr(cur, "empty", True):
+                frame_overrides[attr] = cur
+            continue
+        base = cur if cur is not None and not getattr(cur, "empty", True) else pd.DataFrame()
+        frame_overrides[attr] = merge_platform_data(base, tier, platform)
+        used_tier3 = True
 
-    if changed:
-        try:
-            from .sales import build_sales_df
-            from .po_return_import import aggregate_return_overlay_for_use
+    if not used_tier3:
+        return pd.DataFrame()
 
-            if sess.sku_mapping:
-                ov = aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None))
-                if ov is not None and getattr(ov, "empty", True):
-                    ov = None
-                sess.sales_df = build_sales_df(
-                    mtr_df=sess.mtr_df,
-                    myntra_df=sess.myntra_df,
-                    meesho_df=sess.meesho_df,
-                    flipkart_df=sess.flipkart_df,
-                    snapdeal_df=sess.snapdeal_df,
-                    sku_mapping=sess.sku_mapping,
-                    return_overlay_df=ov,
-                )
-                mark_tier3_sync_applied(sess)
-        except Exception:
-            _log.exception("rebuild session sales after tier3 PO merge failed")
+    from .po_calculate_run import _build_platform_sales_df
 
-    return {
-        "merged": changed,
-        "platforms": merged_platforms,
-        "ads_window": {"start": start, "end": end},
-        "sales_through": session_sales_through(sess),
-    }
+    return _build_platform_sales_df(sess, frame_overrides=frame_overrides)

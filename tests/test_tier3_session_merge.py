@@ -41,7 +41,7 @@ def test_build_parity_report_warns_when_tier3_empty_but_session_has_sales(monkey
     assert report["ok"] is False
 
 
-def test_ensure_tier3_merged_for_po_merges_and_rebuilds_sales(monkeypatch):
+def test_build_po_ads_platform_sales_overlays_tier3(monkeypatch):
     sess = AppSession()
     sess.sku_mapping = {"SKU1": "SKU1"}
     sess.mtr_df = pd.DataFrame()
@@ -70,29 +70,26 @@ def test_ensure_tier3_merged_for_po_merges_and_rebuilds_sales(monkeypatch):
         "backend.services.daily_store.merge_platform_data",
         lambda cur, df, plat: pd.concat([cur, df], ignore_index=True) if not df.empty else cur,
     )
-    monkeypatch.setattr(t3, "tier3_token_mismatch", lambda _s: True)
-    monkeypatch.setattr(t3, "session_platform_shorter_than_tier3", lambda _s: False)
-    monkeypatch.setattr(t3, "platforms_with_tier3_token_mismatch", lambda _s: ["amazon"])
 
-    built = pd.DataFrame({"TxnDate": ["2026-06-10"], "Quantity": [5]})
+    built = pd.DataFrame({"TxnDate": ["2026-06-10"], "Quantity": [5], "OMS_SKU": ["SKU1"]})
 
-    def _fake_build_sales_df(**_kw):
+    def _fake_build_platform_sales_df(_sess, *, frame_overrides=None):
+        assert frame_overrides is not None
+        assert "mtr_df" in frame_overrides
         return built
 
-    monkeypatch.setattr("backend.services.sales.build_sales_df", _fake_build_sales_df)
     monkeypatch.setattr(
-        "backend.services.po_return_import.aggregate_return_overlay_for_use",
-        lambda _ov: None,
+        "backend.services.po_calculate_run._build_platform_sales_df",
+        _fake_build_platform_sales_df,
     )
 
-    out = t3.ensure_tier3_merged_for_po(
+    out = t3.build_po_ads_platform_sales(
         sess,
         planning_date="2026-06-18",
         period_days=30,
     )
-    assert out["merged"] is True
-    assert "amazon" in out["platforms"]
-    assert len(sess.sales_df) == 1
+    assert len(out) == 1
+    assert int(out["Quantity"].iloc[0]) == 5
 
 
 def test_po_fingerprint_includes_tier3_token(monkeypatch):

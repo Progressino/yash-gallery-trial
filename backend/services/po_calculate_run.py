@@ -61,36 +61,32 @@ def _po_return_overlay_for_calc(sess) -> pd.DataFrame | None:
     return ov
 
 
-def _build_platform_sales_df(sess) -> pd.DataFrame:
-    """Combine all platform raw DataFrames into a unified sales_df for ADS calculation.
-
-    Matches the client PO sheet: FREQ (ADS) = Net Platform Sales / 30d where
-    platform sales = Amazon + Flipkart + Meesho + Myntra + Snapdeal - Returns.
-    Falls back to empty DataFrame when no platform data is loaded.
-    """
+def _build_platform_sales_df(sess, *, frame_overrides: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
+    """Combine platform raw DataFrames into unified sales rows for ADS calculation."""
     from .flipkart import flipkart_to_sales_rows
     from .meesho import meesho_to_sales_rows
     from .myntra import myntra_to_sales_rows
     from .po_engine import _mtr_to_sales_df_local
     from .snapdeal import snapdeal_to_sales_rows
 
+    overrides = frame_overrides or {}
     sku_map = getattr(sess, "sku_mapping", None) or {}
     parts: list[pd.DataFrame] = []
 
-    mtr = getattr(sess, "mtr_df", None)
+    mtr = overrides.get("mtr_df", getattr(sess, "mtr_df", None))
     if mtr is not None and not mtr.empty:
         try:
             parts.append(_mtr_to_sales_df_local(mtr, sku_map))
         except Exception:
             logger.exception("_build_platform_sales_df: mtr_df conversion failed")
 
-    for attr, converter in [
-        ("myntra_df",   lambda df: myntra_to_sales_rows(df)),
-        ("meesho_df",   lambda df: meesho_to_sales_rows(df, sku_map)),
-        ("flipkart_df", lambda df: flipkart_to_sales_rows(df)),
-        ("snapdeal_df", lambda df: snapdeal_to_sales_rows(df)),
+    for key, attr, converter in [
+        ("myntra_df", "myntra_df", lambda df: myntra_to_sales_rows(df)),
+        ("meesho_df", "meesho_df", lambda df: meesho_to_sales_rows(df, sku_map)),
+        ("flipkart_df", "flipkart_df", lambda df: flipkart_to_sales_rows(df)),
+        ("snapdeal_df", "snapdeal_df", lambda df: snapdeal_to_sales_rows(df)),
     ]:
-        raw = getattr(sess, attr, None)
+        raw = overrides.get(key, getattr(sess, attr, None))
         if raw is not None and not raw.empty:
             try:
                 parts.append(converter(raw))
@@ -149,19 +145,6 @@ def execute_po_calculate(
 
     hydrate_po_session_for_calculate(sess)
     _set_po_calculate_progress(sess, session_id, 5, "Validating sales and inventory…")
-
-    from .tier3_session_merge import ensure_tier3_merged_for_po
-
-    _period = int(body.get("period_days", 30))
-    _tier3_note = ensure_tier3_merged_for_po(
-        sess,
-        planning_date=body.get("planning_date"),
-        period_days=_period,
-        use_seasonality=bool(body.get("use_seasonality", False)),
-        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-    )
-    if _tier3_note.get("merged"):
-        logger.info("PO tier3 merge before calculate: %s", _tier3_note)
 
     if sess.sales_df.empty:
         return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
@@ -327,10 +310,20 @@ def execute_po_calculate(
     _hb_thread = threading.Thread(target=_calc_heartbeat, daemon=True, name="po-calc-hb")
     _hb_thread.start()
 
-    # Use platform sales (Amazon + Flipkart + Meesho + Myntra + Snapdeal - Returns)
-    # for ADS, matching the client's FREQ = Net Platform Sales / 30d formula.
-    # Fall back to OMS sales_df only when no platform data is loaded.
-    _platform_sales = _build_platform_sales_df(sess)
+    # Tier-3 overlay for ADS (in-memory only — never blocks on full session merge / sales rebuild).
+    from .tier3_session_merge import build_po_ads_platform_sales
+
+    _period = int(body.get("period_days", 30))
+    _set_po_calculate_progress(sess, session_id, 28, "Loading Tier-3 daily sales for ADS window…")
+    _platform_sales = build_po_ads_platform_sales(
+        sess,
+        planning_date=body.get("planning_date"),
+        period_days=_period,
+        use_seasonality=bool(body.get("use_seasonality", False)),
+        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+    )
+    if _platform_sales.empty:
+        _platform_sales = _build_platform_sales_df(sess)
     _ads_source = _platform_sales if not _platform_sales.empty else sess.sales_df
     _ads_source = _trim_sales_for_po_memory(
         _ads_source,
