@@ -32,8 +32,8 @@ if ! curl -sf --max-time 5 http://127.0.0.1:8000/api/health >/dev/null 2>&1; the
 fi
 
 echo "==> Running run_po_calculate_production (timeout ${TIMEOUT_SEC}s)…"
-if timeout "${TIMEOUT_SEC}s" _dc -f "$COMPOSE_FILE" exec -T backend \
-  python -m backend.scripts.run_po_calculate_production; then
+WARMUP_CMD=(_dc -f "$COMPOSE_FILE" exec -T backend python -m backend.scripts.run_po_calculate_production)
+if timeout "${TIMEOUT_SEC}s" "${WARMUP_CMD[@]}"; then
   echo "OK: PO shared-cache warmup finished"
 else
   rc=$?
