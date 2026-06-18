@@ -1377,8 +1377,10 @@ export type DailyUploadVerifyResponse = {
   message: string
   tier3_platforms: string[]
   tier3_upload_count: number
+  tier3_summary?: DailySummary
   recent_uploads: Array<Record<string, unknown>>
   session_sales_rows: number
+  session_sales_range?: { min: string | null; max: string | null }
   sales_ready: boolean
   dashboard_ready: boolean
   daily_auto_ingest_status?: string
@@ -1434,6 +1436,22 @@ export async function getCoverage(opts?: {
   } catch (e: unknown) {
     throw new Error(_errMessage(e, 'Coverage refresh failed'))
   }
+}
+
+export type DataParityReport = {
+  ok: boolean
+  planning_date: string
+  sales_through: string
+  tier3_file_count: number
+  tier3_sync_mismatch: boolean
+  tier3_platforms_mismatch: string[]
+  warnings: string[]
+}
+
+export async function getDataParity(planningDate?: string): Promise<DataParityReport> {
+  const params = planningDate ? { planning_date: planningDate } : undefined
+  const { data } = await api.get<DataParityReport>('/data/parity', { params, timeout: 30_000 })
+  return data
 }
 
 /** Full restore: warm + disk + Tier-3 + GitHub for missing platforms (Upload page). */

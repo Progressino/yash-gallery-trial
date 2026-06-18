@@ -1517,6 +1517,12 @@ export default function Upload() {
               Snapdeal paths containing <code className="text-gray-600">snapdeal</code>, RAR bundles. Sales dataset rebuilds automatically.
             </p>
           </div>
+
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-3">
+            <p className="text-xs font-semibold text-[#002B5B] mb-2">Saved daily uploads (server)</p>
+            <DailyHistory allowDelete={mayDeleteDailyFiles} />
+          </div>
+
           <DailyDropzone
             uploading={loading['daily'] || loading['daily_reset']}
             chunkProgress={chunkProgress}
@@ -1593,6 +1599,22 @@ export default function Upload() {
                 )}
                 {verifyResult.session_sales_rows > 0 && (
                   <p className="mt-0.5">Session sales rows: {verifyResult.session_sales_rows.toLocaleString()}</p>
+                )}
+                {verifyResult.session_sales_range?.min && verifyResult.session_sales_range?.max && (
+                  <p className="mt-0.5 text-gray-700">
+                    Session sales dates: {verifyResult.session_sales_range.min}
+                    {verifyResult.session_sales_range.min !== verifyResult.session_sales_range.max
+                      ? ` → ${verifyResult.session_sales_range.max}`
+                      : ''}
+                  </p>
+                )}
+                {verifyResult.tier3_summary && Object.keys(verifyResult.tier3_summary).length > 0 && (
+                  <p className="mt-1 text-gray-700">
+                    Tier-3 saved:{' '}
+                    {Object.entries(verifyResult.tier3_summary)
+                      .map(([p, s]) => `${p} ${s.min_date}→${s.max_date}`)
+                      .join(' · ')}
+                  </p>
                 )}
               </div>
             )}
@@ -1847,9 +1869,6 @@ export default function Upload() {
           />
         </UploadCard>
 
-        <div className="col-span-2">
-          <DailyHistory allowDelete={mayDeleteDailyFiles} />
-        </div>
       </Section>
       )}
 

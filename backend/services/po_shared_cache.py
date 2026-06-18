@@ -231,6 +231,14 @@ def invalidate_po_after_sales_or_returns_change(sess) -> None:
         invalidate_all_shared_caches()
     except Exception:
         _log.exception("invalidate_all_shared_caches after data change failed")
+    try:
+        from backend.routers.data import _invalidate_intelligence_bundle_cache
+
+        if hasattr(sess, "_intelligence_bundle_cache"):
+            sess._intelligence_bundle_cache.clear()
+        _invalidate_intelligence_bundle_cache()
+    except Exception:
+        _log.exception("intelligence bundle cache invalidation after data change failed")
 
 
 def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
@@ -257,6 +265,14 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         pass
 
     params = _calc_params_for_fingerprint(body)
+
+    tier3_token: dict[str, str] = {}
+    try:
+        from .daily_store import get_tier3_sync_token
+
+        tier3_token = get_tier3_sync_token() or {}
+    except Exception:
+        pass
 
     git_sha = ""
     try:
@@ -285,6 +301,7 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         "sku_status": _sku_status_fingerprint(sess),
         "sku_mapping": _sku_mapping_fingerprint(sess),
         "return_overlay": _return_overlay_fingerprint(sess),
+        "tier3_sync_token": tier3_token,
     }
 
 

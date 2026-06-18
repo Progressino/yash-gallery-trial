@@ -149,6 +149,20 @@ def execute_po_calculate(
 
     hydrate_po_session_for_calculate(sess)
     _set_po_calculate_progress(sess, session_id, 5, "Validating sales and inventory…")
+
+    from .tier3_session_merge import ensure_tier3_merged_for_po
+
+    _period = int(body.get("period_days", 30))
+    _tier3_note = ensure_tier3_merged_for_po(
+        sess,
+        planning_date=body.get("planning_date"),
+        period_days=_period,
+        use_seasonality=bool(body.get("use_seasonality", False)),
+        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+    )
+    if _tier3_note.get("merged"):
+        logger.info("PO tier3 merge before calculate: %s", _tier3_note)
+
     if sess.sales_df.empty:
         return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
     if sess.inventory_df_variant.empty:

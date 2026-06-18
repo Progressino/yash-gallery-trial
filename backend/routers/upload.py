@@ -683,7 +683,7 @@ def verify_daily_upload(request: Request, date: str = ""):
     Confirm Tier-3 persistence and session sales for a calendar day (YYYY-MM-DD).
     Use after upload to verify data before opening Intelligence.
     """
-    from ..services.daily_store import get_upload_report_day_coverage, list_uploads
+    from ..services.daily_store import get_upload_report_day_coverage, get_summary, list_uploads
 
     day = str(date or "").strip()[:10]
     if not day or len(day) < 10:
@@ -691,6 +691,7 @@ def verify_daily_upload(request: Request, date: str = ""):
 
     coverage = get_upload_report_day_coverage()
     tier3_platforms = sorted(p for p, days in coverage.items() if day in days)
+    tier3_summary = get_summary()
     recent = [
         u
         for u in list_uploads()
@@ -706,19 +707,43 @@ def verify_daily_upload(request: Request, date: str = ""):
     sales_df = getattr(sess, "sales_df", None)
     sales_rows = len(sales_df) if sales_df is not None and not sales_df.empty else 0
     sales_ready = sales_rows > 0
+    session_sales_range: dict[str, str | None] = {"min": None, "max": None}
+    if sales_ready and sales_df is not None and "TxnDate" in sales_df.columns:
+        try:
+            import pandas as pd
+            from ..services.sales import txn_reporting_naive_ist
+
+            t = txn_reporting_naive_ist(sales_df["TxnDate"]).dropna()
+            if not t.empty:
+                session_sales_range = {
+                    "min": str(t.min().normalize())[:10],
+                    "max": str(t.max().normalize())[:10],
+                }
+        except Exception:
+            pass
     dashboard_ready = sales_ready and any(
         not getattr(sess, attr).empty
         for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
         if getattr(sess, attr, None) is not None and hasattr(getattr(sess, attr), "empty")
     )
     ok = bool(tier3_platforms)
+    hint = ""
+    if not ok and sales_ready:
+        hint = (
+            " Session has unified sales (warm cache or prior import) but no Tier-3 daily file "
+            f"covers {day}. Check Saved Daily Uploads below or upload today's files."
+        )
+    elif ok and not sales_ready:
+        hint = " Tier-3 saved — wait for sales rebuild or tap ↻ Rebuild on this page."
     return {
         "ok": ok,
         "date": day,
         "tier3_platforms": tier3_platforms,
         "tier3_upload_count": len(recent),
+        "tier3_summary": tier3_summary,
         "recent_uploads": recent[:12],
         "session_sales_rows": sales_rows,
+        "session_sales_range": session_sales_range,
         "sales_ready": sales_ready,
         "dashboard_ready": dashboard_ready,
         "daily_auto_ingest_status": getattr(sess, "daily_auto_ingest_status", "idle"),
@@ -727,6 +752,7 @@ def verify_daily_upload(request: Request, date: str = ""):
         "message": (
             f"Tier-3 has {len(tier3_platforms)} platform(s) for {day}: {', '.join(tier3_platforms) or 'none'}."
             + (f" Session sales: {sales_rows:,} rows." if sales_ready else " Sales not rebuilt yet — wait or tap ↻ Rebuild.")
+            + hint
         ),
     }
 

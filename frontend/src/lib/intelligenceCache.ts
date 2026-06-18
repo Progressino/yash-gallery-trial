@@ -63,6 +63,8 @@ export type IntelligenceBundle = {
   status?: 'warming' | 'ready'
   message?: string
   busy?: boolean
+  empty_window?: boolean
+  session_data_range?: { min: string; max: string }
   sales_summary: SalesSummary
   platform_summary: PlatformSummaryItem[]
   top_skus: TopSku[]
@@ -77,8 +79,8 @@ export type CachedIntelligenceBundle = IntelligenceBundle & {
   basis: 'gross' | 'net'
 }
 
-// v3: reject sparse daily charts (legacy partial tier3 bundle cache).
-const STORAGE_PREFIX = 'erp_intelligence_bundle_v3'
+// v4: bust stale pre-tier3 bundles (e.g. 56,145 gross from warm-cache-only sessions).
+const STORAGE_PREFIX = 'erp_intelligence_bundle_v4'
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
 function ttlMs(): number {
@@ -167,17 +169,11 @@ function hasLoadedPlatformUnits(bundle: IntelligenceBundle): boolean {
 export function bundleHasDisplayData(bundle: IntelligenceBundle | null | undefined): boolean {
   if (!bundle) return false
   if (bundle.status === 'warming') return false
+  // Server finished — stop the loading stripe even for empty windows or sparse charts.
+  if (bundle.status === 'ready') return true
   const platforms = bundle.platform_summary ?? []
   if (platforms.length > 0) {
-    if (hasLoadedPlatformUnits(bundle)) {
-      const loaded = platforms.filter(p => p.loaded && (p.total_units ?? 0) >= 200)
-      if (loaded.length > 0) {
-        const minDaily = 7
-        const sparse = loaded.some(p => (p.daily?.length ?? 0) > 0 && (p.daily?.length ?? 0) < minDaily)
-        if (sparse) return false
-      }
-      return true
-    }
+    if (hasLoadedPlatformUnits(bundle)) return true
     if ((bundle.sales_summary?.total_units ?? 0) > 0) return false
     return false
   }
@@ -187,7 +183,11 @@ export function bundleHasDisplayData(bundle: IntelligenceBundle | null | undefin
 /** Drop v1 keys written before the loaded-flag fix. */
 function purgeLegacyIntelligenceCache(): void {
   try {
-    const prefixes = ['erp_intelligence_bundle_v1', 'erp_intelligence_bundle_v2']
+    const prefixes = [
+      'erp_intelligence_bundle_v1',
+      'erp_intelligence_bundle_v2',
+      'erp_intelligence_bundle_v3',
+    ]
     const keys: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i)

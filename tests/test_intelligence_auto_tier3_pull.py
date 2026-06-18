@@ -198,14 +198,23 @@ def test_long_window_uses_session_without_tier3_parquet_load(client, monkeypatch
         return pd.DataFrame()
 
     monkeypatch.setattr(daily_store, "load_platform_data_for_report_range", _load)
-    monkeypatch.setattr(daily_store, "platforms_with_uploads_in_range", lambda s, e: ["amazon"])
+    monkeypatch.setattr(daily_store, "platforms_with_uploads_in_range", lambda s, e: [])
     monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _sid: None)
     monkeypatch.setattr(data_router, "_schedule_persist_tier3_window", lambda *a, **k: None)
+    monkeypatch.setattr(data_router, "_maybe_queue_light_session_hydrate", lambda *a, **k: None)
     monkeypatch.setattr(daily_store, "get_tier3_sync_token", lambda: {})
+    monkeypatch.setattr(data_router, "_tier3_token_mismatch", lambda _s: False)
+    monkeypatch.setattr(
+        data_router,
+        "_platform_df_for_intelligence_bundle",
+        lambda sess, pk, attr, start_date, end_date: pd.DataFrame(),
+    )
 
+    data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
     bootstrap_test_session(client)
     sess = store.get(client.cookies.get("session_id"))
     assert sess is not None
+    sess._intelligence_bundle_cache.clear()
     sess.sales_df = pd.DataFrame(
         {
             "Sku": ["SKU-A", "SKU-A"],
@@ -234,6 +243,141 @@ def test_long_window_uses_session_without_tier3_parquet_load(client, monkeypatch
     assert r.status_code == 200, r.text
     body = r.json()
     assert body.get("session_fast_path") is True
-    assert body["sales_summary"]["total_units"] == 40
-    # Gap-fill may load Tier-3 for trailing days (session sales end Jun 2, window ends Jun 4).
-    assert tier3_loads["n"] <= 5
+    assert body.get("tier3_auto_pull") is not True
+    assert tier3_loads["n"] == 0
+    # Session sales in fixture: 40 gross Amazon units in the June slice.
+    assert body["sales_summary"]["total_units"] >= 40
+
+
+def test_stale_session_cache_defers_to_tier3_when_uploads_in_window(client, monkeypatch):
+    """Cached session bundle must not beat Tier-3 when daily uploads exist for the window."""
+    import time as _time
+
+    from backend.services import daily_store
+    from backend.services.daily_store import merge_platform_data
+    from backend.session import store
+
+    amazon = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-06-01", "2026-06-02"]),
+            "SKU": ["SKU-A", "SKU-A"],
+            "Transaction_Type": ["Shipment", "Shipment"],
+            "Quantity": [100, 50],
+            "Order_Id": ["O1", "O2"],
+        }
+    )
+
+    monkeypatch.setattr(
+        daily_store,
+        "platforms_with_uploads_in_range",
+        lambda s, e: ["amazon"],
+    )
+    monkeypatch.setattr(
+        daily_store,
+        "load_platform_data_for_report_range",
+        lambda plat, s, e, dedup=True, **kwargs: amazon.copy() if plat == "amazon" else pd.DataFrame(),
+    )
+    monkeypatch.setattr(daily_store, "merge_platform_data", merge_platform_data)
+    monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _sid: None)
+    monkeypatch.setattr(data_router, "_schedule_persist_tier3_window", lambda *a, **k: None)
+    monkeypatch.setattr(
+        daily_store,
+        "get_tier3_sync_token",
+        lambda: {"amazon": "2:150:2026-06-02"},
+    )
+
+    data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
+    bootstrap_test_session(client)
+    sess = store.get(client.cookies.get("session_id"))
+    assert sess is not None
+    sess.sku_mapping = {"SKU-A": "SKU-A"}
+    sess._tier3_sync_token_applied = {}
+
+    stale_payload = {
+        "status": "ready",
+        "session_fast_path": True,
+        "sales_summary": {"total_units": 40, "total_returns": 0, "net_units": 40, "return_rate": 0.0},
+        "platform_summary": [
+            {
+                "platform": "Amazon",
+                "loaded": True,
+                "total_units": 40,
+                "total_returns": 0,
+                "net_units": 40,
+                "return_rate": 0.0,
+                "top_sku": "SKU-A",
+                "trend_direction": "flat",
+                "monthly": [],
+                "daily": [{"date": "2026-06-01", "shipments": 40, "refunds": 0, "net": 40}],
+            }
+        ],
+        "top_skus": [],
+        "anomalies": [],
+        "dsr_brand_monthly": {"rows": []},
+    }
+    cache_key = ("2026-06-01", "2026-06-04", "gross", 10, False)
+    sess._intelligence_bundle_cache = {
+        cache_key: {"_ts": _time.time(), "payload": stale_payload}
+    }
+
+    r = client.get(
+        "/api/data/intelligence-bundle",
+        params={"start_date": "2026-06-01", "end_date": "2026-06-04", "include_extras": "0"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["sales_summary"]["total_units"] == 150
+    assert body.get("tier3_auto_pull") is True
+
+
+def test_tier3_intelligence_bundle_applies_return_overlay(monkeypatch):
+    """Tier-3 fast path must still merge PO return overlay (net units / return rate)."""
+    import pandas as pd
+
+    from backend.routers import data as data_router
+    from backend.services import daily_store
+    from backend.session import AppSession
+
+    amazon = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-06-01"]),
+            "SKU": ["SKU-A"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [100],
+            "Order_Id": ["O1"],
+        }
+    )
+
+    monkeypatch.setattr(
+        daily_store,
+        "platforms_with_uploads_in_range",
+        lambda s, e: ["amazon"],
+    )
+    monkeypatch.setattr(
+        daily_store,
+        "load_platform_data_for_report_range",
+        lambda plat, s, e, dedup=True, **kwargs: amazon.copy() if plat == "amazon" else pd.DataFrame(),
+    )
+    monkeypatch.setattr(daily_store, "get_tier3_sync_token", lambda: {"amazon": "1:1:x"})
+
+    sess = AppSession()
+    sess.sku_mapping = {"SKU-A": "SKU-A"}
+    sess.po_return_overlay_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"],
+            "Return_Platform": ["amazon"],
+            "Return_Date": ["2026-06-01"],
+            "Return_Units": [25],
+        }
+    )
+    sess.return_overlay_as_of = "2026-06-01"
+
+    payload = data_router._build_intelligence_bundle_payload_from_tier3(
+        sess, "2026-06-01", "2026-06-04", 10, "gross", False
+    )
+    assert payload is not None
+    assert payload.get("tier3_auto_pull") is True
+    assert payload["sales_summary"]["total_units"] == 100
+    assert payload["sales_summary"]["total_returns"] == 25
+    assert payload["sales_summary"]["net_units"] == 75
+    assert payload["sales_summary"]["return_rate"] == 25.0

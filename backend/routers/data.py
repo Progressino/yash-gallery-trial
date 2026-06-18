@@ -1105,6 +1105,12 @@ def _resolve_bundle_platform_frames(
 def _ensure_return_overlay_hydrated(sess: AppSession) -> None:
     """Load saved PO return overlay from warm cache / disk for dashboard + marketplace tabs."""
     try:
+        cur = getattr(sess, "po_return_overlay_df", None)
+        if cur is not None and hasattr(cur, "empty") and not cur.empty:
+            from ..services.po_return_import import ensure_return_overlay_meta_hydrated
+
+            ensure_return_overlay_meta_hydrated(sess)
+            return
         from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
 
         ensure_po_return_overlay_from_server(sess)
@@ -1112,30 +1118,126 @@ def _ensure_return_overlay_hydrated(sess: AppSession) -> None:
         pass
 
 
+def _apply_return_overlay_to_intelligence_bundle(
+    sess: AppSession,
+    platform_summary: list,
+    sales_for_returns,
+    start_date: str,
+    end_date: str,
+) -> tuple[list, dict]:
+    """Merge PO return-sheet overlay into platform cards and headline totals."""
+    import pandas as pd
+
+    from ..services.po_return_import import aggregate_return_overlay_for_use
+    from ..services.sales import (
+        RETURN_SHEET_SOURCE,
+        merge_return_data_into_platform_summaries,
+    )
+
+    _ensure_return_overlay_hydrated(sess)
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    sales_slice = (
+        sales_for_returns
+        if sales_for_returns is not None
+        and hasattr(sales_for_returns, "empty")
+        and not sales_for_returns.empty
+        else None
+    )
+    platform_summary = merge_return_data_into_platform_summaries(
+        platform_summary,
+        aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None)),
+        sales_slice,
+        s,
+        e,
+        fallback_as_of=str(getattr(sess, "return_overlay_as_of", "") or "")[:10] or None,
+    )
+    shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
+    returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
+    net = sum(int(p.get("net_units") or 0) for p in platform_summary)
+    rate = round(returned / shipped * 100, 1) if shipped > 0 else 0.0
+    sales_summary = {
+        "total_units": shipped,
+        "total_returns": returned,
+        "net_units": net,
+        "return_rate": rate,
+    }
+    if sales_slice is not None and "Source" in sales_slice.columns:
+        txn = sales_slice["Transaction Type"].astype(str).str.strip() == "Refund"
+        src = sales_slice["Source"].astype(str).str.strip()
+        overlay_refunds = int(
+            pd.to_numeric(sales_slice.loc[txn & src.eq(RETURN_SHEET_SOURCE), "Quantity"], errors="coerce")
+            .fillna(0)
+            .sum()
+        )
+        if overlay_refunds > 0:
+            sales_summary["return_sheet_units"] = overlay_refunds
+            sales_summary["marketplace_return_units"] = max(0, returned - overlay_refunds)
+    return platform_summary, sales_summary
+
+
 def _hydrate_session_for_intelligence(sess: AppSession) -> bool:
     """
-    Synchronously copy warm-cache platform/sales frames into the session before
-    Intelligence builds metrics. Never rebuild unified sales here — that blocks
-    the request thread for minutes on large uploads.
+  Lightweight prep for Intelligence metrics — never copy the full warm cache here.
+  ``GET /coverage?light=1`` and the background hydrate worker fill platform frames;
+  blocking on a 1M+ row copy made the dashboard feel stuck at 5%.
     """
     try:
         import backend.main as _main
 
         _main.restore_po_sidecars_from_warm(sess)
         _ensure_return_overlay_hydrated(sess)
-        if _main.session_needs_warm_cache_topup(sess):
-            if _main.session_needs_operational_data(sess):
-                _main.force_restore_session_from_server_cache(
-                    sess, _main._warm_cache_generation
-                )
-            else:
-                _main._apply_warm_cache_if_needed(
-                    sess, _main._warm_cache_generation
-                )
     except Exception:
         pass
     _ensure_sku_mapping_for_dashboard(sess)
     return _session_has_operational_frames(sess)
+
+
+def _session_sales_reporting_range(sess: AppSession) -> tuple[str, str] | None:
+    """IST calendar min/max from unified ``sales_df`` (cheap; for empty-window hints)."""
+    import pandas as pd
+
+    from ..services.sales import txn_reporting_naive_ist
+
+    sales = getattr(sess, "sales_df", None)
+    if sales is None or not hasattr(sales, "empty") or sales.empty:
+        return None
+    if "TxnDate" not in sales.columns:
+        return None
+    t = txn_reporting_naive_ist(sales["TxnDate"]).dropna()
+    if t.empty:
+        return None
+    return str(t.min().normalize())[:10], str(t.max().normalize())[:10]
+
+
+def _intelligence_empty_window_payload(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+) -> dict:
+    """Session has sales but none in the requested window — return ready (not warming)."""
+    bounds = _session_sales_reporting_range(sess)
+    msg = f"No marketplace units for {start_date} → {end_date}."
+    if bounds:
+        msg += f" Loaded sales span {bounds[0]} → {bounds[1]} — adjust the date range above."
+    payload = {
+        "status": "ready",
+        "message": msg,
+        "empty_window": True,
+        "sales_summary": {
+            "total_units": 0,
+            "total_returns": 0,
+            "net_units": 0,
+            "return_rate": 0.0,
+        },
+        "platform_summary": [],
+        "top_skus": [],
+        "anomalies": [],
+        "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
+    }
+    if bounds:
+        payload["session_data_range"] = {"min": bounds[0], "max": bounds[1]}
+    return payload
 
 
 def _session_has_units_in_window(sess: AppSession, start_date: str, end_date: str) -> bool:
@@ -1473,17 +1575,22 @@ def _cached_bundle_stale_vs_tier3_uploads(
     payload: dict,
     start_date: Optional[str],
     end_date: Optional[str],
+    *,
+    sess: AppSession | None = None,
 ) -> bool:
-    """True when cache shows zero but Upload tab has blobs for this window."""
+    """True when a cached bundle should not be served — Tier-3 daily uploads are newer."""
     from ..services.daily_store import platforms_with_uploads_in_range
 
-    if int((payload.get("sales_summary") or {}).get("total_units") or 0) > 0:
-        return False
     s = str(start_date or end_date or "")[:10]
     e = str(end_date or start_date or "")[:10]
     if len(s) != 10 or len(e) != 10:
         return False
-    return bool(platforms_with_uploads_in_range(s, e))
+    if not platforms_with_uploads_in_range(s, e):
+        return False
+    if payload.get("tier3_auto_pull"):
+        return bool(sess and _tier3_token_mismatch(sess))
+    # Session/warm-cache bundle while Upload tab has Tier-3 rows for this window.
+    return True
 
 
 def _tier3_direct_has_units(
@@ -1524,6 +1631,8 @@ def _bundle_cache_lookup(
     *,
     start_date: Optional[str],
     end_date: Optional[str],
+    allow_sparse: bool = False,
+    sess: AppSession | None = None,
 ) -> dict | None:
     """Return a fresh cached payload if we have display data for this window."""
     now = time.time()
@@ -1540,9 +1649,11 @@ def _bundle_cache_lookup(
         payload = hit.get("payload") or {}
         if age >= _INTELLIGENCE_BUNDLE_TTL_SEC or not _bundle_payload_has_display_data(payload):
             continue
-        if _cached_bundle_stale_vs_tier3_uploads(payload, start_date, end_date):
+        if _cached_bundle_stale_vs_tier3_uploads(
+            payload, start_date, end_date, sess=sess
+        ):
             continue
-        if _bundle_payload_chart_sparse(payload, start_date, end_date):
+        if not allow_sparse and _bundle_payload_chart_sparse(payload, start_date, end_date):
             continue
         return _repair_platform_loaded_flags(payload)
     return None
@@ -1659,26 +1770,13 @@ def _build_intelligence_bundle_payload_from_session(
         if win_gated is not None and not win_gated.empty
         else sales_slice
     )
-    from ..services.po_return_import import aggregate_return_overlay_for_use
-
-    platform_summary = merge_return_data_into_platform_summaries(
+    platform_summary, sales_summary = _apply_return_overlay_to_intelligence_bundle(
+        sess,
         platform_summary,
-        aggregate_return_overlay_for_use(getattr(sess, "po_return_overlay_df", None)),
-        sales_for_returns if sales_for_returns is not None and not sales_for_returns.empty else None,
+        sales_for_returns,
         s,
         e,
-        fallback_as_of=str(getattr(sess, "return_overlay_as_of", "") or "")[:10] or None,
     )
-    shipped = sum(int(p.get("total_units") or 0) for p in platform_summary)
-    returned = sum(int(p.get("total_returns") or 0) for p in platform_summary)
-    net = sum(int(p.get("net_units") or 0) for p in platform_summary)
-    rate = round(returned / shipped * 100, 1) if shipped > 0 else 0.0
-    sales_summary = {
-        "total_units": shipped,
-        "total_returns": returned,
-        "net_units": net,
-        "return_rate": rate,
-    }
     top_skus = (
         get_top_skus(
             sales_slice,
@@ -1758,6 +1856,13 @@ def _build_intelligence_bundle_payload_from_tier3(
         _snapdeal,
         pulled_platforms,
     ) = t3
+    platform_summary, sales_summary = _apply_return_overlay_to_intelligence_bundle(
+        sess,
+        list(platform_summary),
+        None,
+        start_date,
+        end_date,
+    )
     _empty_plat = pd.DataFrame()
     payload: dict = {
         "sales_summary": sales_summary,
@@ -3034,6 +3139,18 @@ def get_coverage(request: Request, light: bool = False):
     return _build_coverage_response(sess)
 
 
+@router.get("/parity")
+def data_parity(request: Request, planning_date: Optional[str] = None):
+    """
+    Lightweight live vs local / dashboard vs PO parity diagnostics.
+    Does not modify session data.
+    """
+    from ..services.tier3_session_merge import build_parity_report
+
+    sess = _sess(request)
+    return build_parity_report(sess, planning_date=planning_date)
+
+
 @router.post("/restore-full", response_model=RestoreFullResponse)
 def restore_full(request: Request, sync: bool = False):
     """
@@ -3229,32 +3346,6 @@ def intelligence_bundle(
     s_win = str(start_date or end_date or "")[:10] if has_dates else ""
     e_win = str(end_date or start_date or "")[:10] if has_dates else ""
 
-    # Tier-3 direct first — fast path that does not wait on warm-cache copy.
-    if has_dates and len(s_win) == 10 and len(e_win) == 10:
-        tier3_immediate = _build_intelligence_bundle_payload_from_tier3(
-            sess, s_win, e_win, limit, basis, include_extras
-        )
-        if tier3_immediate and _bundle_payload_has_display_data(tier3_immediate):
-            cache_key_early = (
-                str(start_date or ""),
-                str(end_date or ""),
-                str(basis or "gross"),
-                int(limit),
-                bool(include_extras),
-            )
-            bundle_cache_early = getattr(sess, "_intelligence_bundle_cache", None)
-            if bundle_cache_early is None:
-                bundle_cache_early = {}
-                sess._intelligence_bundle_cache = bundle_cache_early
-            _bundle_cache_store(
-                cache_key_early, bundle_cache_early, tier3_immediate, ts=time.time()
-            )
-            return tier3_immediate
-
-    _hydrate_session_for_intelligence(sess)
-    if sess.sales_df.empty and not _session_has_platform_data(sess):
-        _maybe_queue_light_session_hydrate(sess, sid or None)
-
     cache_key = (
         str(start_date or ""),
         str(end_date or ""),
@@ -3262,13 +3353,61 @@ def intelligence_bundle(
         int(limit),
         bool(include_extras),
     )
-    now = time.time()
     bundle_cache = getattr(sess, "_intelligence_bundle_cache", None)
     if bundle_cache is None:
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
+
+    tier3_window = False
+    if has_dates and len(s_win) == 10 and len(e_win) == 10:
+        from ..services.daily_store import platforms_with_uploads_in_range
+
+        tier3_window = bool(platforms_with_uploads_in_range(s_win, e_win))
+    prefer_tier3 = tier3_window or _tier3_token_mismatch(sess)
+
+    # Tier-3 daily uploads are source of truth for the window — before stale session cache.
+    if prefer_tier3 and has_dates and len(s_win) == 10 and len(e_win) == 10:
+        tier3_immediate = _build_intelligence_bundle_payload_from_tier3(
+            sess, s_win, e_win, limit, basis, include_extras
+        )
+        if tier3_immediate and _bundle_payload_has_display_data(tier3_immediate):
+            _bundle_cache_store(
+                cache_key, bundle_cache, tier3_immediate, ts=time.time()
+            )
+            _mark_tier3_sync_applied(sess)
+            return tier3_immediate
+
+    # PO-style instant path: persisted bundle cache (memory/disk) when Tier-3 is not fresher.
+    cached_instant = _bundle_cache_lookup(
+        cache_key,
+        bundle_cache,
+        start_date=start_date,
+        end_date=end_date,
+        allow_sparse=True,
+        sess=sess,
+    )
+    if cached_instant is not None:
+        _maybe_queue_light_session_hydrate(sess, sid or None)
+        return cached_instant
+
+    # Tier-3 direct when no cache hit and Upload tab has blobs for this window.
+    if tier3_window and has_dates and len(s_win) == 10 and len(e_win) == 10:
+        tier3_immediate = _build_intelligence_bundle_payload_from_tier3(
+            sess, s_win, e_win, limit, basis, include_extras
+        )
+        if tier3_immediate and _bundle_payload_has_display_data(tier3_immediate):
+            _bundle_cache_store(
+                cache_key, bundle_cache, tier3_immediate, ts=time.time()
+            )
+            _mark_tier3_sync_applied(sess)
+            return tier3_immediate
+
+    _hydrate_session_for_intelligence(sess)
+    _maybe_queue_light_session_hydrate(sess, sid or None)
+
+    now = time.time()
     cached_payload = _bundle_cache_lookup(
-        cache_key, bundle_cache, start_date=start_date, end_date=end_date
+        cache_key, bundle_cache, start_date=start_date, end_date=end_date, sess=sess
     )
     if cached_payload is not None:
         if _tier3_token_mismatch(sess):
@@ -3363,6 +3502,9 @@ def intelligence_bundle(
             "dsr_brand_monthly": {"rows": []},
             "busy": busy,
         }
+
+    if has_dates and len(s_win) == 10 and len(e_win) == 10 and _session_sales_reporting_range(sess):
+        return _intelligence_empty_window_payload(sess, s_win, e_win)
 
     return _intelligence_warming_payload(
         "Marketplace data is still loading — retrying shortly."

@@ -45,7 +45,29 @@ def _resolve_db_path() -> Path:
         return Path(env)
     if Path("/data").exists():
         return Path("/data/daily_sales.db")
-    return Path("daily_sales.db")
+    # Local dev: uvicorn often runs with cwd=backend/, which used to create a second
+    # empty daily_sales.db. Prefer the repo-root store (same file production syncs to).
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        repo_root / "daily_sales.db",
+        Path.cwd() / "daily_sales.db",
+        repo_root / "backend" / "daily_sales.db",
+        Path.cwd() / "backend" / "daily_sales.db",
+    ]
+    seen: set[Path] = set()
+    existing: list[Path] = []
+    for p in candidates:
+        try:
+            rp = p.resolve()
+        except OSError:
+            continue
+        if rp in seen or not rp.is_file():
+            continue
+        seen.add(rp)
+        existing.append(rp)
+    if existing:
+        return max(existing, key=lambda p: p.stat().st_size)
+    return repo_root / "daily_sales.db"
 
 
 _DB_PATH = _resolve_db_path()
@@ -909,6 +931,7 @@ def save_daily_file(
     conn.commit()
     conn.close()
     invalidate_upload_coverage_cache()
+    _invalidate_intelligence_bundle_after_daily_save()
     return file_date, len(df), None
 
 
@@ -1132,6 +1155,16 @@ _COVERAGE_CACHE_TTL_SEC = 30.0
 def invalidate_upload_coverage_cache() -> None:
     global _COVERAGE_CACHE
     _COVERAGE_CACHE = None
+
+
+def _invalidate_intelligence_bundle_after_daily_save() -> None:
+    """Drop persisted Intelligence bundles when Tier-3 SQLite gains new daily files."""
+    try:
+        from backend.routers.data import _invalidate_intelligence_bundle_cache
+
+        _invalidate_intelligence_bundle_cache()
+    except Exception:
+        pass
 
 
 def get_upload_report_day_coverage() -> Dict[str, Set[str]]:
@@ -1384,6 +1417,7 @@ def delete_upload(upload_id: int) -> bool:
     conn.close()
     if changed:
         invalidate_upload_coverage_cache()
+        _invalidate_intelligence_bundle_after_daily_save()
     return changed
 
 

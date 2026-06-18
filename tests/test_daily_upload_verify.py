@@ -44,12 +44,9 @@ def test_fast_ingest_proceeds_without_memory_lock(monkeypatch):
 def test_daily_auto_queues_pipeline(client, auth_token, monkeypatch):
     pipeline_called: list[tuple[str, list]] = []
 
-    def _fake_pipeline(session_id: str, file_parts: list[tuple[str, bytes]]):
-        pipeline_called.append((session_id, file_parts))
-
     monkeypatch.setattr(
-        "backend.routers.upload._run_daily_auto_ingest_pipeline",
-        _fake_pipeline,
+        "backend.routers.upload._queue_daily_auto_ingest",
+        lambda session_id, file_parts: pipeline_called.append((session_id, file_parts)),
     )
 
     r = client.post(

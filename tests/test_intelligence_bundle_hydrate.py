@@ -58,10 +58,20 @@ def test_bundle_session_builder_uses_auto_dashboard_when_sales_empty(monkeypatch
 
 def test_intelligence_bundle_warming_when_no_data_anywhere(client, monkeypatch):
     from backend.services import daily_store
+    from backend.session import store
+    from tests.conftest import bootstrap_test_session
 
     # Clear the module-level global cache so previous tests' cached "ready" payloads
     # don't leak into this test and cause a false "ready" response.
     data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
+
+    bootstrap_test_session(client)
+    sid = client.cookies.get("session_id")
+    sess = store.get(sid)
+    assert sess is not None
+    sess.sales_df = pd.DataFrame()
+    for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df"):
+        setattr(sess, attr, pd.DataFrame())
 
     monkeypatch.setattr(
         daily_store, "platforms_with_uploads_in_range", lambda s, e: []
@@ -74,6 +84,9 @@ def test_intelligence_bundle_warming_when_no_data_anywhere(client, monkeypatch):
     monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", lambda _: None)
     monkeypatch.setattr(data_router, "_schedule_persist_tier3_window", lambda *a, **k: None)
     monkeypatch.setattr(data_router, "_hydrate_session_for_intelligence", lambda _s: False)
+    monkeypatch.setattr(data_router, "_session_has_operational_frames", lambda _s: False)
+    monkeypatch.setattr(data_router, "_build_intelligence_bundle_payload_from_session", lambda *a, **k: None)
+    monkeypatch.setattr(data_router, "_build_intelligence_bundle_payload_from_tier3", lambda *a, **k: None)
     # Skip the global cache lookup so no previous test's result is reused.
     monkeypatch.setattr(data_router, "_bundle_cache_lookup", lambda *a, **k: None)
 

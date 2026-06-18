@@ -6,11 +6,13 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState, type Reac
 import { createPortal } from 'react-dom'
 import api, {
   getCoverage,
+  getDataParity,
   getPoSharedCacheAvailability,
   loadPoCalculateResultFromSession,
   resumePoCalculateIfRunning,
   startPoCalculate,
   type CoverageResponse,
+  type DataParityReport,
   type PoSharedCacheAvailability,
 } from '../api/client'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
@@ -167,6 +169,7 @@ function POFreshInner() {
   const [actionMsg, setActionMsg] = useState<string | null>(null)
   const [serverEngineVersion, setServerEngineVersion] = useState<number | null>(null)
   const [sharedCacheHint, setSharedCacheHint] = useState<PoSharedCacheAvailability | null>(null)
+  const [parityReport, setParityReport] = useState<DataParityReport | null>(null)
 
   const quarterCols = useMemo(
     () => quarterColumnsFromApi(quarterly?.columns),
@@ -189,6 +192,12 @@ function POFreshInner() {
       const c = await getCoverage({ light: true, timeout: 45_000 })
       setCoverageDetail(c)
       setDataStatus(countLoaded(c))
+      try {
+        const parity = await getDataParity(calendarDateIST())
+        setParityReport(parity)
+      } catch {
+        setParityReport(null)
+      }
     } catch (e: unknown) {
       setResult({
         ok: false,
@@ -797,6 +806,14 @@ function POFreshInner() {
         </div>
 
         {quarterlyMsg && <p className="text-xs text-[var(--po-outline)] -mt-4">{quarterlyMsg}</p>}
+
+        {parityReport && !parityReport.ok && parityReport.warnings.length > 0 ? (
+          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 space-y-1">
+            {parityReport.warnings.map((w, i) => (
+              <p key={i}>{w}</p>
+            ))}
+          </div>
+        ) : null}
 
         {/* Sales window banner — shows after every successful calculate */}
         {result?.ok && (

@@ -402,7 +402,28 @@ def _run_warm_hydrate_worker(session_id: str) -> None:
             len(sess.mtr_df),
             len(sess.inventory_df_variant),
         )
-        # Tier-3 merge + sales rebuild run via GET /coverage background hydrate — not here.
+        try:
+            from backend.routers.cache import (
+                _merge_daily_store_into_session,
+                _rebuild_sales_in_session,
+            )
+            from backend.routers.data import _mark_tier3_sync_applied
+
+            daily_note = _merge_daily_store_into_session(sess)
+            if daily_note.strip():
+                n_sales = _rebuild_sales_in_session(sess)
+                _main.publish_warm_cache_from_session(sess)
+                sess._intelligence_bundle_cache.clear()
+                _mark_tier3_sync_applied(sess)
+                _log.info(
+                    "warm hydrate tier-3 merge session=%s sales=%s%s",
+                    session_id[:8],
+                    n_sales,
+                    daily_note,
+                )
+        except Exception:
+            _log.exception("warm hydrate tier-3 merge failed session=%s", session_id[:8])
+        # Further Tier-3 gap-fill runs via GET /coverage background hydrate.
     except Exception:
         _log.exception("warm hydrate worker failed session=%s", session_id[:8])
     finally:

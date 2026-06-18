@@ -10,11 +10,13 @@ import api, {
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
   getCoverage,
+  getDataParity,
   invalidateDataQueries,
 } from '../api/client'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
 import {
   bundleHasDisplayData,
+  clearIntelligenceCache,
   clearIntelligenceCacheForRange,
   readIntelligenceCache,
   writeIntelligenceCache,
@@ -790,6 +792,7 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const prevSalesRebuild = useRef<string>('idle')
+  const prevReturnsImport = useRef<string>('idle')
   const bundleLoadStartedAt = useRef<number | null>(null)
   const bundleKickedRef = useRef(false)
   const [bundleLoadTick, setBundleLoadTick] = useState(0)
@@ -802,8 +805,10 @@ export default function Dashboard() {
     s.daily_inventory_upload_status === 'running' ||
     s.daily_auto_ingest_status === 'running' ||
     s.tier1_bulk_status === 'running' ||
-    s.sales_rebuild === 'running',
+    s.sales_rebuild === 'running' ||
+    s.returns_import_status === 'running',
   )
+  const returnsImport = useSession(s => s.returns_import_status ?? 'idle')
 
   /* ── state ── */
   const [dateStart,      setDateStart]      = useState(() => daysAgoIsoIST(30))
@@ -847,11 +852,34 @@ export default function Dashboard() {
     prevSalesRebuild.current = salesRebuild
   }, [salesRebuild, qc])
 
+  useEffect(() => {
+    if (prevReturnsImport.current === 'running' && returnsImport !== 'running') {
+      invalidateDataQueries(qc)
+      clearIntelligenceCache()
+    }
+    prevReturnsImport.current = returnsImport
+  }, [returnsImport, qc])
+
+  const { data: parityReport } = useQuery({
+    queryKey: ['data-parity', dateEnd],
+    queryFn: () => getDataParity(dateEnd || undefined),
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
+  })
+
+  useEffect(() => {
+    if (parityReport && !parityReport.ok) {
+      clearIntelligenceCache()
+    }
+  }, [parityReport?.ok, parityReport?.tier3_file_count, parityReport?.tier3_sync_mismatch])
+
   const cachedBundleHint = useMemo(() => {
     const c = readIntelligenceCache(dateStart, dateEnd, salesBasis)
     if (c && !bundleHasDisplayData(c)) return null
+    // Never show stale localStorage totals when server reports a data parity gap.
+    if (parityReport && !parityReport.ok) return null
     return c
-  }, [dateStart, dateEnd, salesBasis])
+  }, [dateStart, dateEnd, salesBasis, parityReport?.ok])
 
   useEffect(() => {
     const c = readIntelligenceCache(dateStart, dateEnd, salesBasis)
@@ -1258,6 +1286,18 @@ export default function Dashboard() {
           pollNote={bundlePollNote}
           className="mx-0"
         />
+      ) : null}
+      {parityReport && !parityReport.ok && parityReport.warnings.length > 0 ? (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 space-y-1">
+          {parityReport.warnings.map((w, i) => (
+            <p key={i}>{w}</p>
+          ))}
+        </div>
+      ) : null}
+      {intelligenceBundle?.empty_window && intelligenceBundle.message ? (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          {intelligenceBundle.message}
+        </div>
       ) : null}
       {/* ══════════ HERO ══════════ */}
       <section className="hero">
