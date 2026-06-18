@@ -2998,7 +2998,6 @@ def _session_needs_background_hydrate(sess: AppSession) -> bool:
         getattr(sess, attr, "idle") == "running"
         for attr in (
             "daily_auto_ingest_status",
-            "sales_rebuild_status",
             "session_restore_status",
             "inventory_upload_status",
             "daily_inventory_upload_status",
@@ -3287,12 +3286,21 @@ def get_coverage(request: Request, light: bool = False):
 
 @router.get("/intelligence/readiness", response_model=IntelligenceReadinessResponse)
 def intelligence_readiness(request: Request):
-    """Dashboard gate — 8/8 + platform history + hydration settled (ignores sales_rebuild)."""
+    """Dashboard gate — 8/8 + platform history (ignores sales_rebuild)."""
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
+    try:
+        from ..routers.upload import clear_stale_background_jobs
+
+        clear_stale_background_jobs(sess)
+    except Exception:
+        pass
+    _maybe_queue_light_session_hydrate(sess, sid or None)
     cov = _build_coverage_response(sess)
     from ..services.intelligence_readiness import build_intelligence_readiness
+    from ..services.po_readiness import augment_coverage
 
+    cov = augment_coverage(sess, cov)
     return IntelligenceReadinessResponse(**build_intelligence_readiness(sess, cov, session_id=sid))
 
 

@@ -137,7 +137,7 @@ export function operationalDataComplete(c: CoverageResponse): boolean {
   return loaded === total
 }
 
-/** Dashboard may mount charts — 8/8 + platform history + hydration settled. */
+/** Dashboard may mount charts — 8/8 + platform history (PG/Tier-3 or session). */
 export function dashboardGateReady(c: CoverageResponse): boolean {
   if (typeof c.dashboard_ready === 'boolean') {
     return c.dashboard_ready
@@ -145,7 +145,6 @@ export function dashboardGateReady(c: CoverageResponse): boolean {
   if (!operationalDataComplete(c)) return false
   if (c.critical_restore_running) return false
   if (c.platforms_loaded === false) return false
-  if (c.hydration_complete === false) return false
   return true
 }
 

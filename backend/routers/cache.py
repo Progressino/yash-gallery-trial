@@ -530,7 +530,7 @@ def cache_hydrate_warm(request: Request):
             ran = run_session_hydrate_blocking(
                 sid,
                 _sync_local,
-                check_ready=session_warm_hydration_complete,
+                check_ready=lambda: session_warm_hydration_complete(sess),
             )
             if not ran and not session_warm_hydration_complete(sess):
                 return CacheStatusResponse(ok=False, message="Session hydrate failed.")

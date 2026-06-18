@@ -152,14 +152,17 @@ def intelligence_ready(sess, cov: CoverageResponse, *, session_id: str = "") -> 
 
 
 def dashboard_gate_ready(sess, cov: CoverageResponse, *, session_id: str = "") -> bool:
-    """Dashboard may fetch aggregates — 8/8 + platform history + hydration settled."""
+    """Dashboard may fetch aggregates — 8/8 + platform history (PG/Tier-3 or session)."""
     from .po_readiness import operational_data_complete
 
+    if hydration_inflight(session_id, sess):
+        return False
     if not operational_data_complete(cov):
         return False
-    if not hydration_complete(sess, session_id):
+    if not platform_frames_available(sess, cov) or not sales_available(sess, cov):
         return False
-    return platform_frames_available(sess, cov) and sales_available(sess, cov)
+    # Charts use Tier-3 / PG aggregates — do not block on full session warm copy.
+    return True
 
 
 def build_intelligence_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:
