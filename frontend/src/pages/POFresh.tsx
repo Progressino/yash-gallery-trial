@@ -444,7 +444,11 @@ function POFreshInner() {
     return allRows.slice(start, start + PAGE_SIZE)
   }, [allRows, page])
 
-  const totalPO = useMemo(() => allRows.reduce((s, r) => s + num(r.PO_Qty), 0), [allRows])
+  const totalPO = useMemo(() => {
+    const server = result?.summary?.new_po_qty_sum
+    if (typeof server === 'number' && Number.isFinite(server)) return server
+    return allRows.reduce((s, r) => s + num(r.PO_Qty), 0)
+  }, [allRows, result?.summary?.new_po_qty_sum])
 
   const kpis = useMemo(
     () => ({

@@ -44,7 +44,12 @@ def test_build_parity_report_warns_when_tier3_empty_but_session_has_sales(monkey
 def test_build_po_ads_platform_sales_overlays_tier3(monkeypatch):
     sess = AppSession()
     sess.sku_mapping = {"SKU1": "SKU1"}
-    sess.mtr_df = pd.DataFrame()
+    sess.mtr_df = pd.DataFrame({
+        "Date": ["2025-01-01"],
+        "SKU": ["SKU1"],
+        "Transaction_Type": ["Shipment"],
+        "Quantity": [99],
+    })
     daily = pd.DataFrame(
         {
             "Date": ["2026-06-10"],
@@ -64,12 +69,15 @@ def test_build_po_ads_platform_sales_overlays_tier3(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.services.daily_store.load_platform_data_for_report_range",
-        lambda plat, _s, _e, dedup=False: daily.copy() if plat == "amazon" else pd.DataFrame(),
+        lambda plat, _s, _e, dedup=True: daily.copy() if plat == "amazon" else pd.DataFrame(),
     )
-    monkeypatch.setattr(
-        "backend.services.daily_store.merge_platform_data",
-        lambda cur, df, plat: pd.concat([cur, df], ignore_index=True) if not df.empty else cur,
-    )
+    merge_calls: list[tuple] = []
+
+    def _merge(cur, df, plat):
+        merge_calls.append((len(cur), len(df), plat))
+        return pd.concat([cur, df], ignore_index=True) if not df.empty else cur
+
+    monkeypatch.setattr("backend.services.daily_store.merge_platform_data", _merge)
 
     built = pd.DataFrame({"TxnDate": ["2026-06-10"], "Quantity": [5], "OMS_SKU": ["SKU1"]})
 
@@ -89,7 +97,8 @@ def test_build_po_ads_platform_sales_overlays_tier3(monkeypatch):
         period_days=30,
     )
     assert len(out) == 1
-    assert int(out["Quantity"].iloc[0]) == 5
+    # Tier-3 authoritative: merge only pre-tier3 bulk (1 old row), not full session on top of tier3.
+    assert merge_calls and merge_calls[0][0] == 1
 
 
 def test_po_fingerprint_includes_tier3_token(monkeypatch):

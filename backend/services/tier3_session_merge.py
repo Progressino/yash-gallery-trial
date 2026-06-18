@@ -10,6 +10,7 @@ import pandas as pd
 
 from .platform_session_window import (
     _PLATFORM_ATTRS,
+    platform_date_column,
     platform_df_date_bounds,
     session_platform_shorter_than_tier3,
 )
@@ -171,6 +172,13 @@ def build_parity_report(sess, *, planning_date: str | None = None) -> dict[str, 
             "Tier-3 daily uploads exist but are not fully merged into this session — "
             "Intelligence and PO may disagree until data reloads."
         )
+    ep_fn = str(getattr(sess, "existing_po_filename", "") or "")
+    ep_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+    if ep_fn and "17-Jun" not in ep_fn and "Jun-26" not in ep_fn and ep_gen <= 1:
+        warnings.append(
+            f"Existing PO sheet looks stale ({ep_fn or 'unknown'}) — production uses "
+            "Po 17-Jun-26.xlsx; reload warm cache or re-upload for matching PO totals."
+        )
     if session_platform_shorter_than_tier3(sess):
         warnings.append(
             "Session platform history is shorter than Tier-3 SQLite — use Reload from server "
@@ -249,18 +257,36 @@ def build_po_ads_platform_sales(
     used_tier3 = False
     for platform, attr in _PLATFORM_ATTRS:
         cur = getattr(sess, attr, pd.DataFrame())
-        if platform not in window_plats:
-            if cur is not None and not getattr(cur, "empty", True):
-                frame_overrides[attr] = cur
-            continue
-        tier = load_platform_data_for_report_range(platform, start, end, dedup=False)
-        if tier.empty:
-            if cur is not None and not getattr(cur, "empty", True):
-                frame_overrides[attr] = cur
-            continue
-        base = cur if cur is not None and not getattr(cur, "empty", True) else pd.DataFrame()
-        frame_overrides[attr] = merge_platform_data(base, tier, platform)
-        used_tier3 = True
+        tier = pd.DataFrame()
+        if platform in window_plats:
+            tier = load_platform_data_for_report_range(platform, start, end, dedup=True)
+        if not tier.empty:
+            # Tier-3 is authoritative for the ADS window — avoid merging full bulk history
+            # on top (overlap double-count risk). Keep session rows only BEFORE Tier-3 min date
+            # so LY / seasonality still has history when bulk goes further back.
+            lo, _hi = platform_df_date_bounds(tier)
+            if (
+                cur is not None
+                and not getattr(cur, "empty", True)
+                and lo is not None
+                and pd.notna(lo)
+            ):
+                col = platform_date_column(cur)
+                if col:
+                    cur_dates = pd.to_datetime(cur[col], errors="coerce")
+                    older = cur.loc[cur_dates < lo].copy()
+                    frame_overrides[attr] = (
+                        merge_platform_data(older, tier, platform)
+                        if not older.empty
+                        else tier
+                    )
+                else:
+                    frame_overrides[attr] = tier
+            else:
+                frame_overrides[attr] = tier
+            used_tier3 = True
+        elif cur is not None and not getattr(cur, "empty", True):
+            frame_overrides[attr] = cur
 
     if not used_tier3:
         return pd.DataFrame()
