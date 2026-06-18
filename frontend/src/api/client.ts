@@ -759,6 +759,8 @@ export interface POCalculateResult {
   from_shared_cache?: boolean
   shared_cache_at?: string
   po_merge_version?: number
+  total_rows?: number
+  row_count?: number
   summary?: {
     new_po_qty_sum?: number
     new_po_sku_count?: number
@@ -1303,7 +1305,7 @@ export async function startPoCalculate(
       onTick?.('Loading PO results…', 92)
       const loaded = await fetchAllPoResultPages(onTick, {
         columns: data.columns,
-        row_count: (data as { total_rows?: number }).total_rows ?? data.row_count,
+        row_count: data.total_rows ?? data.row_count,
       })
       return {
         ...loaded,

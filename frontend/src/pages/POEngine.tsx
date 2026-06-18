@@ -94,6 +94,7 @@ interface POResult {
   planning_date?: string
   raise_ledger_rows?: number
   ledger_auto_import?: string | null
+  po_merge_version?: number
   summary?: POSummary
 }
 interface PORiskRow extends PORow {
@@ -1351,11 +1352,11 @@ export default function POEngine() {
             {poEngineVersion != null && (
               <span className="font-semibold text-[#002B5B] bg-sky-50 border border-sky-200 rounded px-2 py-0.5">
                 PO logic v{poEngineVersion}
-                {_storeResult?.ok && _storeResult.po_merge_version != null && (
+                {result?.ok && result.po_merge_version != null && (
                   <>
                     {' '}
-                    · result v{_storeResult.po_merge_version}
-                    {_storeResult.po_merge_version < poEngineVersion && (
+                    · result v{result.po_merge_version}
+                    {result.po_merge_version < poEngineVersion && (
                       <span className="text-amber-700"> (recalculate)</span>
                     )}
                   </>

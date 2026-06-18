@@ -280,20 +280,16 @@ function POFreshInner() {
 
   /** After a backend deploy, prompt recalculate — do not auto-run (OOM on large local catalogs). */
   useEffect(() => {
-    if (!dataStatus?.ready || !serverEngineVersion) return
-    const resultVer = result?.po_merge_version ?? 0
+    if (!dataStatus?.ready || !serverEngineVersion || !result?.ok) return
+    const resultVer = result.po_merge_version ?? 0
     if (resultVer >= serverEngineVersion) return
-    setResult(prev =>
-      prev?.ok
-        ? {
-            ...prev,
-            message:
-              (prev.message ? `${prev.message} ` : '') +
-              `PO engine updated to v${serverEngineVersion} — click Calculate PO to refresh.`,
-          }
-        : prev,
-    )
-  }, [dataStatus?.ready, result?.ok, result?.po_merge_version, serverEngineVersion, setResult])
+    const tag = `PO engine updated to v${serverEngineVersion}`
+    if (result.message?.includes(tag)) return
+    setResult({
+      ...result,
+      message: (result.message ? `${result.message} ` : '') + `${tag} — click Calculate PO to refresh.`,
+    })
+  }, [dataStatus?.ready, result, serverEngineVersion, setResult])
 
   const loadQuarterly = useCallback(async () => {
     setQuarterlyLoading(true)
@@ -994,6 +990,7 @@ function POFreshInner() {
                     rows={(quarterly.rows ?? []).slice(0, 500)}
                     quarterCols={quarterCols}
                     quarterMap={{}}
+                    periodDays={params.period_days}
                   />
                 </>
               )}
