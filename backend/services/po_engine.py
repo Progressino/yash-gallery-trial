@@ -4,7 +4,7 @@ calculate_quarterly_history + calculate_po_base.
 """
 from collections import defaultdict
 from datetime import timedelta
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
