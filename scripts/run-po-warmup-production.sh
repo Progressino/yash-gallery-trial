@@ -18,11 +18,6 @@ TIMEOUT_SEC="${PO_WARMUP_TIMEOUT_SEC:-2400}"
 
 echo "==> PO shared-cache warmup (compose: ${COMPOSE_FILE})"
 
-if ! _dc -f "$COMPOSE_FILE" ps --status running 2>/dev/null | grep -q backend; then
-  echo "WARN: backend container not running — skipping PO warmup"
-  exit 0
-fi
-
 echo "==> Waiting for backend health (warm disk cache may still be loading)…"
 for i in $(seq 1 60); do
   if curl -sf --max-time 5 http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
