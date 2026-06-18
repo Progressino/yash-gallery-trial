@@ -214,10 +214,34 @@ def persist_shared_snapshot(cache_dict: dict) -> bool:
     conn = _require_conn()
     if conn is None:
         return False
+    max_mb = int(os.environ.get("SHARED_SNAPSHOT_MAX_MB", "2048"))
+    max_bytes = max_mb * 1024 * 1024
+    candidates = [cache_dict]
+    essential = {
+        k: cache_dict[k]
+        for k in (
+            "sku_mapping",
+            "mtr_df",
+            "myntra_df",
+            "meesho_df",
+            "flipkart_df",
+            "snapdeal_df",
+            "inventory_df_variant",
+            "inventory_df_parent",
+            "sales_df",
+        )
+        if k in cache_dict
+    }
+    if essential and essential != cache_dict:
+        candidates.append(essential)
     try:
-        blob, manifest = warm_cache_dict_to_bundle(cache_dict)
-        max_mb = int(os.environ.get("SHARED_SNAPSHOT_MAX_MB", "512"))
-        if len(blob) > max_mb * 1024 * 1024:
+        blob = b""
+        manifest: dict = {}
+        for cand in candidates:
+            blob, manifest = warm_cache_dict_to_bundle(cand)
+            if len(blob) <= max_bytes:
+                break
+        if len(blob) > max_bytes:
             _log.warning(
                 "skip shared snapshot persist: bundle %d MB exceeds SHARED_SNAPSHOT_MAX_MB=%d",
                 len(blob) // (1024 * 1024),
