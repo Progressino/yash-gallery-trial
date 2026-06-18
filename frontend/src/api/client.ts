@@ -1190,7 +1190,6 @@ export async function waitForPoCalculate(
 ): Promise<POCalculateResult> {
   const start = Date.now()
   const statusPath = _poStatusPath(jobId)
-  const resultPath = _poResultPath(jobId)
   let statusGatewayRetries = 0
   let idlePolls = 0
   let lastServerMessage = 'Calculating PO recommendations…'
