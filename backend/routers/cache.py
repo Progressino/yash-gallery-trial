@@ -704,6 +704,13 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
     sess.sku_mapping = {}
     sess._quarterly_cache.clear()
 
+    if _main._try_bootstrap_warm_cache_from_pg():
+        _main._copy_warm_cache_to_session(sess)
+        n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
+        resume_auto_data_restore(sess)
+        msg = "Reloaded from PostgreSQL shared operational snapshot."
+        return CacheReloadResponse(ok=True, message=msg, sales_rows=n_sales)
+
     ok, msg, loaded = load_cache_from_drive()
     if ok:
         _sanitize_snapdeal_in_loaded(loaded)

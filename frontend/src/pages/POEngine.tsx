@@ -25,7 +25,7 @@ import {
 } from '../components/POFormulaModal'
 import type { POFormulaContext } from '../lib/poFormulaHelp'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
-import { operationalDataComplete, operationalDataLoaded, OPERATIONAL_DATA_TOTAL } from '../lib/localSessionHint'
+import { poOperationalReady, poOperationalLoaded, PO_OPERATIONAL_TOTAL } from '../lib/localSessionHint'
 import { archivePoExportOnServer } from '../lib/archivePoExport'
 import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
 
@@ -310,9 +310,9 @@ export default function POEngine() {
   const dailyInvRows = useSession(s => s.daily_inventory_history_rows ?? 0)
   const dailyInvSkus = useSession(s => s.daily_inventory_history_skus ?? 0)
   const raiseLedgerRows = useSession(s => s.po_raise_ledger_rows ?? 0)
-  const dataReady = useSession(s => operationalDataComplete(s))
-  const dataLoadLoaded = useSession(s => operationalDataLoaded(s))
-  const dataLoadTotal = OPERATIONAL_DATA_TOTAL
+  const dataReady = useSession(s => poOperationalReady(s))
+  const dataLoadLoaded = useSession(s => poOperationalLoaded(s))
+  const dataLoadTotal = PO_OPERATIONAL_TOTAL
   const [appBuildLabel, setAppBuildLabel] = useState<string | null>(null)
   const [poEngineVersion, setPoEngineVersion] = useState<number | null>(null)
 

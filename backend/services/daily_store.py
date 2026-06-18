@@ -932,6 +932,24 @@ def save_daily_file(
     conn.close()
     invalidate_upload_coverage_cache()
     _invalidate_intelligence_bundle_after_daily_save()
+    try:
+        from ..db.forecast_ops_pg import pg_save_daily_file, ops_pg_enabled
+
+        if ops_pg_enabled():
+            pg_save_daily_file(
+                platform,
+                filename,
+                file_date,
+                date_from,
+                date_to,
+                parquet_bytes,
+                len(df),
+                max_files_per_platform=_max_files_per_platform(),
+            )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("PostgreSQL dual-write for save_daily_file failed")
     return file_date, len(df), None
 
 
@@ -957,21 +975,33 @@ def load_platform_data(
         except Exception:
             _limit = None
 
-    if months is None:
-        rows = conn.execute(
-            "SELECT filename, data_parquet FROM daily_uploads "
-            "WHERE platform=? ORDER BY file_date ASC",
-            (platform,),
-        ).fetchall()
-    else:
-        cutoff = (datetime.date.today() - datetime.timedelta(days=months * 30)).isoformat()
-        rows = conn.execute(
-            "SELECT filename, data_parquet FROM daily_uploads "
-            "WHERE platform=? AND file_date >= ? ORDER BY file_date ASC",
-            (platform, cutoff),
-        ).fetchall()
-    if _limit is not None and len(rows) > _limit:
-        rows = rows[-_limit:]
+    rows: list = []
+    try:
+        from ..db.forecast_ops_pg import daily_uploads_pg_read, pg_load_platform_rows
+
+        if daily_uploads_pg_read():
+            pg_rows = pg_load_platform_rows(platform, months=months, max_files=_limit)
+            if pg_rows:
+                rows = pg_rows
+    except Exception:
+        pass
+
+    if not rows:
+        if months is None:
+            rows = conn.execute(
+                "SELECT filename, data_parquet FROM daily_uploads "
+                "WHERE platform=? ORDER BY file_date ASC",
+                (platform,),
+            ).fetchall()
+        else:
+            cutoff = (datetime.date.today() - datetime.timedelta(days=months * 30)).isoformat()
+            rows = conn.execute(
+                "SELECT filename, data_parquet FROM daily_uploads "
+                "WHERE platform=? AND file_date >= ? ORDER BY file_date ASC",
+                (platform, cutoff),
+            ).fetchall()
+        if _limit is not None and len(rows) > _limit:
+            rows = rows[-_limit:]
     conn.close()
 
     dfs = []
@@ -1417,6 +1447,15 @@ def get_summary() -> dict:
     min/max prefer **actual** row date ranges (``date_from`` / ``date_to`` per upload)
     so Flipkart "1–14 Apr" files do not all look like a single ``file_date`` day.
     """
+    try:
+        from ..db.forecast_ops_pg import daily_uploads_pg_read, pg_get_summary
+
+        if daily_uploads_pg_read():
+            pg_sum = pg_get_summary()
+            if pg_sum:
+                return pg_sum
+    except Exception:
+        pass
     conn = _get_conn()
     rows = conn.execute(
         """

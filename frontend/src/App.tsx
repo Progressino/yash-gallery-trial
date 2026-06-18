@@ -9,7 +9,7 @@ import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
-import { canSkipHeavyServerRestore, operationalDataComplete, operationalDataLoaded, OPERATIONAL_DATA_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
+import { canSkipHeavyServerRestore, poOperationalReady, poOperationalLoaded, PO_OPERATIONAL_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
@@ -157,7 +157,7 @@ function ProtectedRoute() {
           if (!coverageNeedsSync(coverage)) invalidateDataQueries(qc)
           return true
         }
-        if (operationalDataComplete(coverage)) {
+        if (poOperationalReady(coverage)) {
           invalidateDataQueries(qc)
           return true
         }
@@ -166,13 +166,13 @@ function ProtectedRoute() {
         }
         const hasAnyPlatform =
           coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart || coverage.snapdeal
-        if (!operationalDataComplete(coverage)) {
+        if (!poOperationalReady(coverage)) {
           try {
             await waitForWarmCacheReady({ maxWaitMs: 45_000, pollMs: 2_000 })
             await withTimeout(cacheHydrateWarm(), 30_000)
             coverage = await getCoverage({ light: true, timeout: 45_000 })
             setCoverage(coverage)
-            if (operationalDataComplete(coverage)) {
+            if (poOperationalReady(coverage)) {
               invalidateDataQueries(qc)
               return true
             }
@@ -206,9 +206,9 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
-  const dataStillLoading = useSession(s => !operationalDataComplete(s))
-  const dataLoadLoaded = useSession(s => operationalDataLoaded(s))
-  const dataLoadTotal = OPERATIONAL_DATA_TOTAL
+  const dataStillLoading = useSession(s => !poOperationalReady(s))
+  const dataLoadLoaded = useSession(s => poOperationalLoaded(s))
+  const dataLoadTotal = PO_OPERATIONAL_TOTAL
 
   if (isLoading && !cachedUser) {
     return (

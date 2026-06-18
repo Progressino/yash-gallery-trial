@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api, { startPoCalculate, type POCalculateResult } from '../api/client'
 import { calendarDateIST } from '../lib/dates'
-import { operationalDataComplete, operationalDataLoaded, OPERATIONAL_DATA_TOTAL } from '../lib/localSessionHint'
+import { poOperationalReady, poOperationalLoaded, PO_OPERATIONAL_TOTAL } from '../lib/localSessionHint'
 import { useSession } from '../store/session'
 import { PO2_DEFAULT_PARAMS, usePO2Store, type PO2Row } from '../store/po2'
 
@@ -68,9 +68,9 @@ function downloadCsv(rows: PO2Row[], columns: string[]) {
 
 export default function PO2() {
   const { params, setParams } = usePO2Store()
-  const dataReady = useSession(s => operationalDataComplete(s))
-  const dataLoadLoaded = useSession(s => operationalDataLoaded(s))
-  const dataLoadTotal = OPERATIONAL_DATA_TOTAL
+  const dataReady = useSession(s => poOperationalReady(s))
+  const dataLoadLoaded = useSession(s => poOperationalLoaded(s))
+  const dataLoadTotal = PO_OPERATIONAL_TOTAL
 
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState('')

@@ -100,10 +100,31 @@ const OPERATIONAL_DATASET_KEYS = [
   'snapdeal',
 ] as const
 
+/** PO / dashboard essentials — Snapdeal optional (often unused). */
+export const PO_OPERATIONAL_KEYS = [
+  'sku_mapping',
+  'mtr',
+  'sales',
+  'inventory',
+  'myntra',
+  'meesho',
+  'flipkart',
+] as const
+
 export const OPERATIONAL_DATA_TOTAL = OPERATIONAL_DATASET_KEYS.length
+export const PO_OPERATIONAL_TOTAL = PO_OPERATIONAL_KEYS.length
 
 export function operationalDataLoaded(c: CoverageResponse): number {
   return OPERATIONAL_DATASET_KEYS.filter(k => Boolean(c[k])).length
+}
+
+export function poOperationalLoaded(c: CoverageResponse): number {
+  return PO_OPERATIONAL_KEYS.filter(k => Boolean(c[k])).length
+}
+
+/** True when PO Engine can run (does not require Snapdeal). */
+export function poOperationalReady(c: CoverageResponse): boolean {
+  return poOperationalLoaded(c) === PO_OPERATIONAL_TOTAL
 }
 
 /** @deprecated Returns a new object on every call — use operationalDataLoaded() + OPERATIONAL_DATA_TOTAL instead to avoid useSyncExternalStore looping. */

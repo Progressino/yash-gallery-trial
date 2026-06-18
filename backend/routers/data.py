@@ -3049,9 +3049,9 @@ def _maybe_queue_light_session_hydrate(sess: AppSession, session_id: str | None)
     if session_id in _hydrate_queued:
         return
     _hydrate_queued.add(session_id)
-    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+    from ..concurrency import SESSION_RESTORE_EXECUTOR
 
-    DAILY_UPLOAD_EXECUTOR.submit(_run_light_session_hydrate_worker, session_id)
+    SESSION_RESTORE_EXECUTOR.submit(_run_light_session_hydrate_worker, session_id)
 
 
 _tier3_sync_queued: set[str] = set()

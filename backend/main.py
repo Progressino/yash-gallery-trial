@@ -45,6 +45,7 @@ from .db.hrm_db import init_db as init_hrm_db
 from .db.users_db import init_db as init_users_db
 from .db.po_raised_db import init_db as init_po_raised_db
 from .db.forecast_session_pg import init_db as init_forecast_session_pg
+from .db.forecast_ops_pg import init_db as init_forecast_ops_pg
 
 init_db()
 init_item_db()
@@ -59,6 +60,7 @@ init_hrm_db()
 init_users_db()
 init_po_raised_db()
 init_forecast_session_pg()
+init_forecast_ops_pg()
 
 log = logging.getLogger("erp.cache_warmer")
 
@@ -136,6 +138,8 @@ def bootstrap_warm_cache_from_disk_if_empty() -> bool:
         return True
     disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
     if not disk_ok or not disk_data:
+        if _try_bootstrap_warm_cache_from_pg():
+            return True
         return False
     _warm_cache = disk_data
     _warm_cache_loaded_at = datetime.now(IST)
@@ -238,6 +242,12 @@ def publish_warm_cache_from_session(sess) -> None:
         _warm_cache[key] = val
 
     _warm_cache_loaded_at = datetime.now(IST)
+    try:
+        from .db.forecast_ops_pg import persist_shared_snapshot
+
+        persist_shared_snapshot(_warm_cache)
+    except Exception:
+        log.exception("PostgreSQL shared snapshot persist after publish failed")
 
 
 _PO_SIDECAR_KEYS = (
@@ -861,8 +871,42 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
         with open(manifest_path, "w") as f:
             json.dump(manifest, f)
         log.info("Warm-cache saved to disk (%d new keys, %d total) → %s", len(saved), len(merged_keys), _DISK_CACHE_DIR)
+        try:
+            from .db.forecast_ops_pg import persist_shared_snapshot
+
+            persist_shared_snapshot(cache_dict)
+        except Exception:
+            log.exception("PostgreSQL shared snapshot persist after disk save failed")
     except Exception as _e:
         log.warning("Warm-cache disk save failed: %s", _e)
+
+
+def _try_bootstrap_warm_cache_from_pg() -> bool:
+    """Load shared operational snapshot from PostgreSQL when disk/GitHub are empty."""
+    global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
+    try:
+        from .db.forecast_ops_pg import load_shared_snapshot
+
+        data = load_shared_snapshot()
+        if not data:
+            return False
+        _warm_cache = data
+        _warm_cache_loaded_at = datetime.now(IST)
+        _warm_cache_generation = max(_warm_cache_generation, 1) + 1
+        _warm_cache_ready.set()
+        log.warning(
+            "Warm cache bootstrapped from PostgreSQL shared snapshot (%d keys, gen=%d)",
+            len(data),
+            _warm_cache_generation,
+        )
+        try:
+            _save_warm_cache_to_disk(_warm_cache)
+        except Exception:
+            log.exception("disk save after PG snapshot bootstrap failed")
+        return True
+    except Exception:
+        log.exception("PostgreSQL shared snapshot bootstrap failed")
+        return False
 
 
 def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
@@ -1205,11 +1249,13 @@ def _do_load_warm_cache() -> bool:
         if _corrupt_reason:
             log.warning(
                 "Warm-cache Phase 0: %s. Treating disk cache as corrupt — "
-                "forcing Tier-3 / GitHub rebuild.",
+                "trying PostgreSQL shared snapshot, then Tier-3 / GitHub rebuild.",
                 _corrupt_reason,
             )
             disk_ok = False
             disk_data = {}
+            if _try_bootstrap_warm_cache_from_pg():
+                return True
             try:
                 if _rebuild_warm_cache_from_tier3_full():
                     return True
@@ -1952,11 +1998,36 @@ async def _session_eviction_loop() -> None:
             log.exception("session eviction failed")
 
 
+def _bootstrap_ops_pg_from_sqlite() -> None:
+    """Seed PostgreSQL Tier-3 + shared snapshot from SQLite/disk when PG is empty."""
+    try:
+        from .db.forecast_ops_pg import (
+            load_shared_snapshot,
+            migrate_sqlite_daily_uploads_to_pg,
+            ops_pg_enabled,
+            pg_get_summary,
+            persist_shared_snapshot,
+        )
+
+        if not ops_pg_enabled():
+            return
+        if not pg_get_summary():
+            migrate_sqlite_daily_uploads_to_pg()
+        if load_shared_snapshot():
+            return
+        disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
+        if disk_ok and disk_data and not _disk_cache_corruption_reason(disk_data):
+            persist_shared_snapshot(disk_data)
+    except Exception:
+        log.exception("ops PG bootstrap from SQLite/disk failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load warm cache in background — sync disk load at startup OOMs on large local catalogs.
     asyncio.create_task(run_heavy(_bootstrap_stitching_on_startup))
     asyncio.create_task(run_heavy(_do_load_warm_cache))
+    asyncio.create_task(run_aux(_bootstrap_ops_pg_from_sqlite))
     try:
         from .routers.data import _load_intelligence_bundle_cache_from_disk
 
@@ -2297,4 +2368,14 @@ def health():
         # generation: 0=loading, 1=Phase1 SQLite ready, 2=Phase2 GitHub+SQLite ready
         "warm_cache_generation": _warm_cache_generation,
         "upload_memory_lock_held": upload_memory_lock_held(),
+        "ops_pg": _ops_pg_health(),
     }
+
+
+def _ops_pg_health() -> dict:
+    try:
+        from .db.forecast_ops_pg import shared_snapshot_status
+
+        return shared_snapshot_status()
+    except Exception:
+        return {"enabled": False}
