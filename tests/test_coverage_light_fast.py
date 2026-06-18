@@ -110,6 +110,7 @@ def test_po_session_only_disk_load_skips_platform_frames(monkeypatch, tmp_path):
     warm.mkdir()
     monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
     monkeypatch.setenv("WARM_CACHE_PO_SESSION_ONLY", "1")
+    monkeypatch.setattr(main_mod, "_DISK_CACHE_DIR", str(warm))
 
     pd.DataFrame({"Sku": ["A"], "Quantity": [1]}).to_parquet(warm / "sales_df.parquet", index=False)
     pd.DataFrame({"Sku": ["A"] * 100}).to_parquet(warm / "mtr_df.parquet", index=False)
