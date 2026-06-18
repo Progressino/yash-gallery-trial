@@ -1307,6 +1307,30 @@ _PLATFORM_METRICS_COLUMNS: dict[str, list[str]] = {
     "snapdeal": ["Date", "OMS_SKU", "TxnType", "Quantity", "State", "OrderId"],
 }
 
+_TIER3_RANGE_CACHE_TTL_SEC = 180.0
+_TIER3_RANGE_CACHE_MAX = 24
+_tier3_range_cache: dict[tuple, tuple[float, pd.DataFrame]] = {}
+
+
+def _tier3_range_cache_get(key: tuple) -> pd.DataFrame | None:
+    hit = _tier3_range_cache.get(key)
+    if not hit:
+        return None
+    ts, df = hit
+    if (time.time() - ts) > _TIER3_RANGE_CACHE_TTL_SEC:
+        _tier3_range_cache.pop(key, None)
+        return None
+    return df.copy()
+
+
+def _tier3_range_cache_put(key: tuple, df: pd.DataFrame) -> None:
+    if df is None or getattr(df, "empty", True):
+        return
+    if len(_tier3_range_cache) >= _TIER3_RANGE_CACHE_MAX:
+        oldest = min(_tier3_range_cache.items(), key=lambda kv: kv[1][0])[0]
+        _tier3_range_cache.pop(oldest, None)
+    _tier3_range_cache[key] = (time.time(), df.copy())
+
 
 def load_platform_data_for_report_range(
     platform: str,
@@ -1326,6 +1350,11 @@ def load_platform_data_for_report_range(
         return pd.DataFrame()
     if s1 < s0:
         s0, s1 = s1, s0
+
+    cache_key = (platform, s0, s1, bool(dedup), bool(columns_only))
+    cached = _tier3_range_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     conn = _get_conn()
     clause = _tier3_window_sql_clause()
@@ -1375,8 +1404,11 @@ def load_platform_data_for_report_range(
         return pd.DataFrame()
     combined = pd.concat(dfs, ignore_index=True)
     if not dedup:
-        return combined.reset_index(drop=True)
-    return _dedup_platform_df(combined, platform)
+        out = combined.reset_index(drop=True)
+    else:
+        out = _dedup_platform_df(combined, platform)
+    _tier3_range_cache_put(cache_key, out)
+    return out
 
 
 def get_summary() -> dict:

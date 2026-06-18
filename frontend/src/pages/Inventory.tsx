@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, getCoverage } from '../api/client'
+import { api, getCoverage, resetStuckInventoryUpload } from '../api/client'
 import { useSession } from '../store/session'
 import * as XLSX from 'xlsx'
 
@@ -60,6 +60,19 @@ export default function Inventory() {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [clearingStuck, setClearingStuck] = useState(false)
+
+  const handleClearStuckInventory = async () => {
+    setClearingStuck(true)
+    try {
+      await resetStuckInventoryUpload()
+      const cov = await getCoverage({ light: true })
+      setCoverage(cov)
+      void qc.invalidateQueries({ queryKey: ['inventory'] })
+    } finally {
+      setClearingStuck(false)
+    }
+  }
 
   const invUploadRunning =
     coverage.inventory_upload_status === 'running'
@@ -195,6 +208,14 @@ export default function Inventory() {
         <p className="text-xs text-gray-500">
           Large RAR bundles can take 1–3 minutes. This page refreshes automatically when parsing finishes.
         </p>
+        <button
+          type="button"
+          disabled={clearingStuck}
+          onClick={() => void handleClearStuckInventory()}
+          className="mt-2 px-4 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-800 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {clearingStuck ? 'Clearing…' : 'Clear stuck upload'}
+        </button>
       </div>
     )
   }

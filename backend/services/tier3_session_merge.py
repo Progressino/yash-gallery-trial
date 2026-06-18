@@ -118,6 +118,103 @@ def _po_ads_horizon_days(period_days: int, use_seasonality: bool, use_ly_fallbac
     return horizon
 
 
+def _trim_sales_to_ads_window(
+    sales_df: pd.DataFrame,
+    planning_date: str,
+    period_days: int,
+    use_seasonality: bool,
+    use_ly_fallback: bool,
+) -> pd.DataFrame:
+    """Keep only rows needed for PO ADS / seasonality on the unified sales frame."""
+    if sales_df is None or getattr(sales_df, "empty", True):
+        return pd.DataFrame()
+    if "TxnDate" not in sales_df.columns:
+        return pd.DataFrame()
+    horizon = _po_ads_horizon_days(period_days, use_seasonality, use_ly_fallback)
+    plan = pd.Timestamp(_normalize_planning_date(planning_date)).normalize()
+    txn = pd.to_datetime(sales_df["TxnDate"], errors="coerce")
+    end = txn.max()
+    if pd.notna(end):
+        end = min(pd.Timestamp(end).normalize(), plan)
+    else:
+        end = plan
+    start = end - pd.Timedelta(days=horizon)
+    mask = (txn >= start) & (txn <= plan)
+    if not bool(mask.any()):
+        return pd.DataFrame()
+    out = sales_df.loc[mask].reset_index(drop=True)
+    if "TxnDate" in out.columns:
+        out = out.copy()
+        out["TxnDate"] = pd.to_datetime(out["TxnDate"], errors="coerce")
+    return out
+
+
+def _sales_has_ads_history(
+    sales_df: pd.DataFrame,
+    planning_date: str,
+    period_days: int,
+    use_seasonality: bool,
+    use_ly_fallback: bool,
+) -> bool:
+    if sales_df is None or getattr(sales_df, "empty", True) or "TxnDate" not in sales_df.columns:
+        return False
+    txn = pd.to_datetime(sales_df["TxnDate"], errors="coerce")
+    mn = txn.min()
+    if pd.isna(mn):
+        return False
+    plan = pd.Timestamp(_normalize_planning_date(planning_date)).normalize()
+    horizon = _po_ads_horizon_days(period_days, use_seasonality, use_ly_fallback)
+    need = plan - pd.Timedelta(days=horizon)
+    return pd.Timestamp(mn).normalize() <= need
+
+
+def _merge_sales_tail(
+    base: pd.DataFrame,
+    tail: pd.DataFrame,
+    planning_date: str,
+    period_days: int,
+    use_seasonality: bool,
+    use_ly_fallback: bool,
+) -> pd.DataFrame:
+    """Append recent Tier-3 rows and drop overlapping base dates."""
+    if tail is None or getattr(tail, "empty", True):
+        return _trim_sales_to_ads_window(base, planning_date, period_days, use_seasonality, use_ly_fallback)
+    if base is None or getattr(base, "empty", True):
+        return _trim_sales_to_ads_window(tail, planning_date, period_days, use_seasonality, use_ly_fallback)
+    tail_dates = pd.to_datetime(tail["TxnDate"], errors="coerce")
+    gap_min = tail_dates.min()
+    if pd.notna(gap_min):
+        base_dates = pd.to_datetime(base["TxnDate"], errors="coerce")
+        base = base.loc[base_dates < gap_min]
+    combined = pd.concat([base, tail], ignore_index=True)
+    return _trim_sales_to_ads_window(
+        combined, planning_date, period_days, use_seasonality, use_ly_fallback
+    )
+
+
+def _build_tier3_gap_sales(sess, gap_start: str, gap_end: str) -> pd.DataFrame:
+    """Load only the missing tail window from Tier-3 (seconds, not minutes)."""
+    from .daily_store import load_platform_data_for_report_range, platforms_with_uploads_in_range
+
+    plats = platforms_with_uploads_in_range(gap_start, gap_end)
+    if not plats:
+        return pd.DataFrame()
+    overrides: dict[str, pd.DataFrame] = {}
+    for platform, attr in _PLATFORM_ATTRS:
+        if platform not in plats:
+            continue
+        tier = load_platform_data_for_report_range(
+            platform, gap_start, gap_end, dedup=True, columns_only=True
+        )
+        if not tier.empty:
+            overrides[attr] = tier
+    if not overrides:
+        return pd.DataFrame()
+    from .po_calculate_run import _build_platform_sales_df
+
+    return _build_platform_sales_df(sess, frame_overrides=overrides)
+
+
 def _normalize_planning_date(planning_date: str | None) -> str:
     if planning_date:
         try:
@@ -131,6 +228,34 @@ def _normalize_planning_date(planning_date: str | None) -> str:
         return str(pd.Timestamp.now(tz=IST).normalize().date())
     except Exception:
         return str(date.today())
+
+
+def sales_data_lag_days(planning_date: str | None, sales_through: str | None) -> int | None:
+    """Calendar days between sales_through and planning_date (positive = sales end before plan)."""
+    if not planning_date or not sales_through:
+        return None
+    try:
+        plan = pd.Timestamp(pd.to_datetime(str(planning_date).strip()[:10]).normalize()).date()
+        thru = pd.Timestamp(pd.to_datetime(str(sales_through).strip()[:10]).normalize()).date()
+        return int((plan - thru).days)
+    except Exception:
+        return None
+
+
+def sales_data_gap_needs_warning(
+    planning_date: str | None,
+    sales_through: str | None,
+    *,
+    max_expected_lag_days: int = 1,
+) -> bool:
+    """
+    True when sales end materially before planning day.
+    Daily uploads are always T-1, so a 1-day gap is normal and should not warn.
+    """
+    lag = sales_data_lag_days(planning_date, sales_through)
+    if lag is None:
+        return False
+    return lag > max(0, int(max_expected_lag_days))
 
 
 def session_sales_through(sess) -> str:
@@ -184,10 +309,11 @@ def build_parity_report(sess, *, planning_date: str | None = None) -> dict[str, 
             "Session platform history is shorter than Tier-3 SQLite — use Reload from server "
             "or run PO calculate to merge recent dailies."
         )
-    if sales_through and plan and sales_through < plan:
+    if sales_data_gap_needs_warning(plan, sales_through):
+        lag = sales_data_lag_days(plan, sales_through)
         warnings.append(
-            f"Platform data ends {sales_through} but planning date is {plan} — "
-            "reload data for a complete sales window."
+            f"Platform data ends {sales_through} but planning date is {plan} "
+            f"({lag}d gap) — reload data for a complete sales window."
         )
     if tier3_files == 0 and not getattr(sess, "sales_df", pd.DataFrame()).empty:
         warnings.append(
@@ -235,16 +361,67 @@ def build_po_ads_platform_sales(
 ) -> pd.DataFrame:
     """
     Build platform sales for PO ADS from session bulk + Tier-3 window overlay.
-    Does not mutate session frames or rebuild unified sales_df (fast path).
+    Does not mutate session frames or rebuild unified sales_df.
+
+    Fast path: reuse unified ``sales_df`` when fresh (T-1) and deep enough.
+    Incremental path: append only the missing tail from Tier-3 (few days of blobs).
+    Slow path: full Tier-3 authoritative overlay when session has no sales history.
     """
-    from .daily_store import get_summary, load_platform_data_for_report_range, merge_platform_data, platforms_with_uploads_in_range
+    from .daily_store import (
+        get_summary,
+        load_platform_data_for_report_range,
+        merge_platform_data,
+        platforms_with_uploads_in_range,
+    )
+
+    plan = _normalize_planning_date(planning_date)
+    sdf = getattr(sess, "sales_df", None)
+    thru = session_sales_through(sess)
+    lag = sales_data_lag_days(plan, thru)
+
+    if sdf is not None and not getattr(sdf, "empty", True):
+        if _sales_has_ads_history(sdf, plan, period_days, use_seasonality, use_ly_fallback):
+            if lag is not None and lag <= 1:
+                out = _trim_sales_to_ads_window(
+                    sdf, plan, period_days, use_seasonality, use_ly_fallback
+                )
+                _log.info(
+                    "PO ADS fast path: session sales_df %s rows (lag=%sd)",
+                    len(out),
+                    lag,
+                )
+                return out
+
+            if lag is not None and 1 < lag <= 21 and thru:
+                gap_start = str((pd.Timestamp(thru) + pd.Timedelta(days=1)).date())
+                if gap_start <= plan:
+                    gap_sales = _build_tier3_gap_sales(sess, gap_start, plan)
+                    if not gap_sales.empty:
+                        trimmed = _trim_sales_to_ads_window(
+                            sdf, plan, period_days, use_seasonality, use_ly_fallback
+                        )
+                        out = _merge_sales_tail(
+                            trimmed,
+                            gap_sales,
+                            plan,
+                            period_days,
+                            use_seasonality,
+                            use_ly_fallback,
+                        )
+                        _log.info(
+                            "PO ADS incremental tier3 %s..%s → %s rows (was %sd behind)",
+                            gap_start,
+                            plan,
+                            len(out),
+                            lag,
+                        )
+                        return out
 
     summary = get_summary() or {}
     tier3_any = any(int((summary.get(p) or {}).get("file_count") or 0) > 0 for p in summary)
     if not tier3_any:
         return pd.DataFrame()
 
-    plan = _normalize_planning_date(planning_date)
     horizon = _po_ads_horizon_days(period_days, use_seasonality, use_ly_fallback)
     end = plan
     start = str((pd.Timestamp(plan) - pd.Timedelta(days=horizon)).date())
@@ -259,11 +436,10 @@ def build_po_ads_platform_sales(
         cur = getattr(sess, attr, pd.DataFrame())
         tier = pd.DataFrame()
         if platform in window_plats:
-            tier = load_platform_data_for_report_range(platform, start, end, dedup=True)
+            tier = load_platform_data_for_report_range(
+                platform, start, end, dedup=True, columns_only=True
+            )
         if not tier.empty:
-            # Tier-3 is authoritative for the ADS window — avoid merging full bulk history
-            # on top (overlap double-count risk). Keep session rows only BEFORE Tier-3 min date
-            # so LY / seasonality still has history when bulk goes further back.
             lo, _hi = platform_df_date_bounds(tier)
             if (
                 cur is not None
@@ -293,4 +469,5 @@ def build_po_ads_platform_sales(
 
     from .po_calculate_run import _build_platform_sales_df
 
+    _log.info("PO ADS slow path: full tier3 overlay %s..%s", start, end)
     return _build_platform_sales_df(sess, frame_overrides=frame_overrides)

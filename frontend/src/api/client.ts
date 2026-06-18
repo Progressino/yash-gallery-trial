@@ -103,6 +103,7 @@ export interface CoverageResponse {
   /** Tier-3 daily-auto background sales rebuild */
   sales_rebuild?: 'idle' | 'running' | 'done' | 'error'
   sales_rebuild_message?: string
+  sales_data_revision?: number
   /** Background full restore (Upload → Restore all from server) */
   session_restore_status?: 'idle' | 'running' | 'done' | 'error'
   session_restore_message?: string
@@ -367,7 +368,7 @@ export async function uploadInventoryAuto(
     }
     return data
   } catch (e: unknown) {
-    if (isUploadGateway502(e)) {
+    if (isUploadRequestInterrupted(e)) {
       return { ...dailyUploadPendingAfter502(files.length), ingest_async: true }
     }
     throw new Error(_errMessage(e, 'Inventory upload failed'))
@@ -446,6 +447,19 @@ export function isUploadGateway502(e: unknown): boolean {
   )
 }
 
+/** Upload may have reached the server before the client/proxy gave up (502/504/timeout). */
+export function isUploadRequestInterrupted(e: unknown): boolean {
+  if (isUploadGateway502(e)) return true
+  if (axios.isAxiosError(e)) {
+    if (e.code === 'ECONNABORTED') return true
+    const st = e.response?.status
+    if (st === 504 || st === 503) return true
+    if (!e.response) return true
+  }
+  if (e instanceof Error && /timed out|timeout/i.test(e.message)) return true
+  return false
+}
+
 async function getCoverageResilient(opts?: {
   timeout?: number
   light?: boolean
@@ -480,7 +494,7 @@ function dailyUploadPendingAfter502(fileCount: number): {
   return {
     ok: true,
     message:
-      'Upload may have been accepted (gateway timed out). Checking server status — stay on this page.',
+      'Upload may have been accepted (connection timed out). Checking server status — stay on this page.',
     ingest_async: true,
     sales_rebuild: 'pending',
     processed_files: fileCount,
@@ -513,7 +527,7 @@ export async function uploadDailyAutoChunked(
   try {
     return await uploadFilesChunked('daily-auto', files, onProgress)
   } catch (e: unknown) {
-    if (isUploadGateway502(e)) {
+    if (isUploadRequestInterrupted(e)) {
       return { ...dailyUploadPendingAfter502(files.length), chunked: true }
     }
     throw e
@@ -564,7 +578,7 @@ export async function uploadDailyAuto(
     }
     return data
   } catch (e: unknown) {
-    if (isUploadGateway502(e)) {
+    if (isUploadRequestInterrupted(e)) {
       return dailyUploadPendingAfter502(files.length)
     }
     throw new Error(_errMessage(e, 'Daily upload failed'))
@@ -641,12 +655,18 @@ export async function resetStuckInventoryUpload(): Promise<{
 export async function waitForInventoryUpload(
   onTick?: (message: string, progressPct?: number) => void,
   maxMs = UPLOAD_TIMEOUT_MS,
+  shouldAbort?: () => boolean,
 ): Promise<CoverageResponse> {
   const start = Date.now()
+  let sawRunning = false
   while (Date.now() - start < maxMs) {
+    if (shouldAbort?.()) {
+      throw new Error('Inventory upload cancelled — you can upload again.')
+    }
     const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
     const st = cov.inventory_upload_status ?? 'idle'
     if (st === 'running') {
+      sawRunning = true
       const pct = cov.inventory_upload_progress ?? 0
       onTick?.(cov.inventory_upload_message || 'Parsing inventory…', pct)
       await new Promise(r => setTimeout(r, 1500))
@@ -659,9 +679,12 @@ export async function waitForInventoryUpload(
       onTick?.(cov.inventory_upload_message || 'Inventory snapshot updated.')
       return cov
     }
+    if (sawRunning && st === 'idle') {
+      return cov
+    }
     await new Promise(r => setTimeout(r, 1500))
   }
-  throw new Error('Inventory upload timed out — refresh the page in a minute.')
+  throw new Error('Inventory upload timed out — use “Clear stuck”, then upload again.')
 }
 
 /** Poll until Tier-1 bulk history parse finishes (MTR / Myntra / Meesho / Flipkart / Snapdeal). */

@@ -69,7 +69,9 @@ def test_build_po_ads_platform_sales_overlays_tier3(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.services.daily_store.load_platform_data_for_report_range",
-        lambda plat, _s, _e, dedup=True: daily.copy() if plat == "amazon" else pd.DataFrame(),
+        lambda plat, _s, _e, dedup=True, columns_only=False: daily.copy()
+        if plat == "amazon"
+        else pd.DataFrame(),
     )
     merge_calls: list[tuple] = []
 
@@ -99,6 +101,91 @@ def test_build_po_ads_platform_sales_overlays_tier3(monkeypatch):
     assert len(out) == 1
     # Tier-3 authoritative: merge only pre-tier3 bulk (1 old row), not full session on top of tier3.
     assert merge_calls and merge_calls[0][0] == 1
+
+
+def test_build_po_ads_platform_sales_fast_path_uses_session_sales(monkeypatch):
+    """When sales_df is T-1 fresh, skip Tier-3 rebuild entirely."""
+    sess = AppSession()
+    days = pd.date_range("2025-02-01", "2026-06-17", freq="D")
+    sess.sales_df = pd.DataFrame(
+        {
+            "TxnDate": days,
+            "Quantity": [1] * len(days),
+            "Transaction Type": ["Shipment"] * len(days),
+            "Sku": ["SKU1"] * len(days),
+            "Source": ["Amazon"] * len(days),
+            "Units_Effective": [1] * len(days),
+        }
+    )
+
+    def _should_not_load(*_a, **_kw):
+        raise AssertionError("Tier-3 load should not run on fast path")
+
+    monkeypatch.setattr(
+        "backend.services.daily_store.load_platform_data_for_report_range",
+        _should_not_load,
+    )
+    out = t3.build_po_ads_platform_sales(
+        sess,
+        planning_date="2026-06-18",
+        period_days=30,
+        use_seasonality=True,
+        use_ly_fallback=True,
+    )
+    assert not out.empty
+    assert out["TxnDate"].max() <= pd.Timestamp("2026-06-18")
+
+
+def test_build_po_ads_platform_sales_incremental_gap(monkeypatch):
+    sess = AppSession()
+    sess.sku_mapping = {"SKU1": "SKU1"}
+    days = pd.date_range("2025-02-01", "2026-06-14", freq="D")
+    sess.sales_df = pd.DataFrame(
+        {
+            "TxnDate": days,
+            "Quantity": [1] * len(days),
+            "Transaction Type": ["Shipment"] * len(days),
+            "Sku": ["SKU1"] * len(days),
+            "Source": ["Amazon"] * len(days),
+            "Units_Effective": [1] * len(days),
+        }
+    )
+    gap_sales = pd.DataFrame(
+        {
+            "TxnDate": ["2026-06-15", "2026-06-16", "2026-06-17"],
+            "Quantity": [2, 2, 2],
+            "Transaction Type": ["Shipment"] * 3,
+            "Sku": ["SKU1"] * 3,
+            "Source": ["Amazon"] * 3,
+            "Units_Effective": [2] * 3,
+        }
+    )
+    monkeypatch.setattr(
+        "backend.services.daily_store.platforms_with_uploads_in_range",
+        lambda _s, _e: ["amazon"],
+    )
+    monkeypatch.setattr(
+        "backend.services.daily_store.load_platform_data_for_report_range",
+        lambda plat, _s, _e, dedup=True, columns_only=False: pd.DataFrame(
+            {"Date": ["2026-06-15"], "SKU": ["SKU1"], "Transaction_Type": ["Shipment"], "Quantity": [2]}
+        )
+        if plat == "amazon"
+        else pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "backend.services.po_calculate_run._build_platform_sales_df",
+        lambda _s, *, frame_overrides=None: gap_sales,
+    )
+
+    out = t3.build_po_ads_platform_sales(
+        sess,
+        planning_date="2026-06-18",
+        period_days=30,
+        use_seasonality=True,
+        use_ly_fallback=True,
+    )
+    assert pd.Timestamp(out["TxnDate"].max()).date() == pd.Timestamp("2026-06-17").date()
+    assert int(out.loc[out["TxnDate"] >= "2026-06-15", "Quantity"].sum()) >= 6
 
 
 def test_po_fingerprint_includes_tier3_token(monkeypatch):

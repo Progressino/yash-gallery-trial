@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useDropzone, type FileRejection } from 'react-dropzone'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import FileUpload from '../components/FileUpload'
@@ -69,6 +69,7 @@ export default function Upload() {
   const [buildingMsg, setBuildingMsg] = useState('')
   const [chunkProgress, setChunkProgress] = useState<{ pct: number; sent: number; total: number; msg: string } | null>(null)
   const [invProgress, setInvProgress] = useState<{ pct: number; msg: string; phase: 'upload' | 'parse' } | null>(null)
+  const invWaitAbortRef = useRef(false)
   const [existingPoProgress, setExistingPoProgress] = useState<{
     pct: number
     msg: string
@@ -633,8 +634,8 @@ export default function Upload() {
         }
       })
     } catch (e: unknown) {
-      const { isUploadGateway502, waitForDailyAutoIngest, waitForSalesRebuild } = await import('../api/client')
-      if (isUploadGateway502(e)) {
+      const { isUploadRequestInterrupted, waitForDailyAutoIngest, waitForSalesRebuild } = await import('../api/client')
+      if (isUploadRequestInterrupted(e)) {
         showToast('success', 'Upload may still be processing on the server…', 6000)
         try {
           let cov = await waitForDailyAutoIngest(msg => setBuildingMsg(msg))
@@ -686,6 +687,8 @@ export default function Upload() {
   }
 
   const handleClearStuckInventory = async () => {
+    invWaitAbortRef.current = true
+    setL('inv', false)
     setL('inv_reset', true)
     try {
       const res = await resetStuckInventoryUpload()
@@ -1737,6 +1740,7 @@ export default function Upload() {
             disabled={!coverage.sku_mapping || coverage.inventory_upload_status === 'running'}
             uploading={loading['inv']}
             onUpload={async (files) => {
+              invWaitAbortRef.current = false
               setL('inv', true)
               setBuildingMsg('Uploading inventory files…')
               setInvProgress({ pct: 0, msg: 'Uploading inventory files…', phase: 'upload' })
@@ -1755,15 +1759,19 @@ export default function Upload() {
                   if (res.ok) {
                     if (res.ingest_async) {
                       showToast('success', `${res.message}`, 6000)
-                      setInvProgress({ pct: 42, msg: 'Upload complete — parsing on server…', phase: 'parse' })
-                      const cov = await waitForInventoryUpload((msg, pct) => {
-                        setBuildingMsg(msg)
-                        setInvProgress({
-                          pct: Math.max(42, pct ?? 42),
-                          msg,
-                          phase: 'parse',
-                        })
-                      })
+                      setInvProgress({ pct: 5, msg: 'Upload complete — parsing on server…', phase: 'parse' })
+                      const cov = await waitForInventoryUpload(
+                        (msg, pct) => {
+                          setBuildingMsg(msg)
+                          setInvProgress({
+                            pct: Math.max(5, pct ?? 5),
+                            msg,
+                            phase: 'parse',
+                          })
+                        },
+                        undefined,
+                        () => invWaitAbortRef.current,
+                      )
                       setBuildingMsg('')
                       setInvProgress(null)
                       setCoverage(cov)
@@ -1802,15 +1810,19 @@ export default function Upload() {
                   } else showToast('error', res.message)
                 })
               } catch (e: unknown) {
-                const { isUploadGateway502, waitForInventoryUpload } = await import('../api/client')
-                if (isUploadGateway502(e)) {
+                const { isUploadRequestInterrupted, waitForInventoryUpload } = await import('../api/client')
+                if (isUploadRequestInterrupted(e)) {
                   showToast('success', 'Upload may still be processing on the server…', 6000)
-                  setInvProgress({ pct: 45, msg: 'Checking server status…', phase: 'parse' })
+                  setInvProgress({ pct: 5, msg: 'Checking server status…', phase: 'parse' })
                   try {
-                    const cov = await waitForInventoryUpload((msg, pct) => {
-                      setBuildingMsg(msg)
-                      setInvProgress({ pct: pct ?? 50, msg, phase: 'parse' })
-                    })
+                    const cov = await waitForInventoryUpload(
+                      (msg, pct) => {
+                        setBuildingMsg(msg)
+                        setInvProgress({ pct: pct ?? 5, msg, phase: 'parse' })
+                      },
+                      undefined,
+                      () => invWaitAbortRef.current,
+                    )
                     setBuildingMsg('')
                     setInvProgress(null)
                     setCoverage(cov)

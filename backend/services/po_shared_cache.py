@@ -335,6 +335,23 @@ def _meta_is_fresh(meta: dict[str, Any]) -> bool:
     return True
 
 
+def _shared_cache_stale_vs_disk(meta: dict[str, Any]) -> bool:
+    """Reject cache saved before a newer Existing PO sheet landed on disk."""
+    try:
+        from .existing_po import read_existing_po_disk_meta
+
+        disk = read_existing_po_disk_meta() or {}
+    except Exception:
+        return False
+    disk_gen = int(disk.get("existing_po_generation") or 0)
+    cache_gen = int(meta.get("existing_po_generation") or 0)
+    if disk_gen > cache_gen:
+        return True
+    disk_fn = str(disk.get("existing_po_filename") or "").strip()
+    cache_fn = str(meta.get("existing_po_filename") or "").strip()
+    return bool(disk_fn and cache_fn and disk_fn != cache_fn)
+
+
 def lookup_shared_cache(sess, body: dict) -> Optional[dict[str, Any]]:
     """Return meta dict if a matching shared PO result exists."""
     if not shared_cache_enabled():
@@ -351,6 +368,8 @@ def lookup_shared_cache(sess, body: dict) -> Optional[dict[str, Any]]:
     if not _meta_is_fresh(meta):
         return None
     if meta.get("fingerprint") != fp:
+        return None
+    if _shared_cache_stale_vs_disk(meta):
         return None
     meta["cache_key"] = key
     return meta
@@ -375,6 +394,7 @@ def save_shared_cache(
 
         _coerce_df_for_parquet(po_df).to_parquet(tmp, index=False)
         tmp.replace(final)
+        summ = result.get("summary") if isinstance(result.get("summary"), dict) else {}
         meta = {
             "cache_key": key,
             "fingerprint": fp,
@@ -387,6 +407,9 @@ def save_shared_cache(
             "planning_date_out": result.get("planning_date"),
             "raise_ledger_rows": result.get("raise_ledger_rows"),
             "po_merge_version": fp.get("po_merge_version"),
+            "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
+            "existing_po_filename": str(getattr(sess, "existing_po_filename", "") or ""),
+            "new_po_qty_sum": int(summ.get("new_po_qty_sum") or 0),
         }
         _meta_path(key).write_text(json.dumps(meta, default=str), encoding="utf-8")
         _log.info(
@@ -439,6 +462,12 @@ def apply_shared_cache_to_session(sess, session_id: str, body: dict) -> Optional
             "raise_ledger_rows": meta.get("raise_ledger_rows"),
             "po_merge_version": _merge_ver,
         }
+        if int(meta.get("new_po_qty_sum") or 0) > 0:
+            result["summary"] = {
+                "new_po_qty_sum": int(meta.get("new_po_qty_sum") or 0),
+                "existing_po_filename": meta.get("existing_po_filename"),
+                "existing_po_generation": meta.get("existing_po_generation"),
+            }
         sess.po_calculate_status = "done"
         sess.po_calculate_progress = 100
         sess.po_calculate_message = msg

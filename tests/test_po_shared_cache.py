@@ -208,6 +208,14 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
         "backend.services.po_session_hydrate.hydrate_po_session_for_calculate",
         lambda _sess: {},
     )
+    monkeypatch.setattr(
+        "backend.services.existing_po.read_existing_po_disk_meta",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_shared_cache._shared_cache_stale_vs_disk",
+        lambda _meta: False,
+    )
 
     _, sess = session_for_client
     days = pd.date_range("2025-12-01", periods=10, freq="D")
@@ -267,6 +275,7 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
     sess2.inventory_snapshot_uploaded_at = (
         getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
     )
+    sess2.inventory_snapshot_date = getattr(sess, "inventory_snapshot_date", "") or ""
     store._sessions[sid2] = sess2
 
     c2 = client.__class__(client.app)

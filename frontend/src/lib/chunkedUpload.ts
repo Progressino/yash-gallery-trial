@@ -8,7 +8,7 @@ const chunkApi = axios.create({
   baseURL: '/api',
   withCredentials: true,
   // Keep chunk transport resilient on slow networks / busy server.
-  timeout: 120_000,
+  timeout: 180_000,
 })
 
 export type ChunkUploadTarget = 'daily-auto' | 'inventory-auto'
@@ -28,8 +28,8 @@ export type ChunkUploadProgress = {
 export const CHUNK_UPLOAD_FILE_THRESHOLD = 1.5 * 1024 * 1024
 export const CHUNK_UPLOAD_BATCH_THRESHOLD = 4 * 1024 * 1024
 
-const CHUNK_REQUEST_TIMEOUT_MS = 120_000
-const COMPLETE_TIMEOUT_MS = 90_000
+const CHUNK_REQUEST_TIMEOUT_MS = 180_000
+const COMPLETE_TIMEOUT_MS = 180_000
 const CHUNK_CONCURRENCY = 3
 const CHUNK_RETRY_MAX = 4
 

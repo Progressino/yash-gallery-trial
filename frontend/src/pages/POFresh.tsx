@@ -17,6 +17,7 @@ import api, {
 } from '../api/client'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
 import { calendarDateIST } from '../lib/dates'
+import { salesDataGapNeedsWarning } from '../lib/reportingDates'
 import {
   OPERATIONAL_DATA_TOTAL,
   operationalDataLoaded,
@@ -783,7 +784,7 @@ function POFreshInner() {
               </button>
               {loading && (
                 <p className="text-xs text-white/80 text-center">
-                  Large catalogs can take several minutes — keep this tab open.
+                  Usually completes in under a minute — keep this tab open.
                 </p>
               )}
               <button
@@ -1351,7 +1352,8 @@ function SalesWindowBanner({
     }
   }
 
-  const stale = through && planDate && through < planDate
+  const stale =
+    through && planDate && salesDataGapNeedsWarning(planDate, through)
   return (
     <div
       className={`flex flex-wrap items-center gap-4 rounded-xl px-4 py-3 text-xs font-semibold ${
@@ -1370,7 +1372,7 @@ function SalesWindowBanner({
       {stale && (
         <span className="font-bold">
           ⚠ Platform data ends {through} but planning date is {planDate} — reload data for a
-          complete 30-day window.
+          complete sales window.
         </span>
       )}
       {!through && (

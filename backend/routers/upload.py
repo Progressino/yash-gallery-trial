@@ -88,6 +88,24 @@ def _session_data_changed(sess) -> None:
     resume_auto_data_restore(sess)
 
 
+def _finalize_sales_data_refresh(sess: AppSession) -> None:
+    """After sales_df / platform frames change — bust PO + Intelligence caches and signal the UI."""
+    sess.sales_data_revision = int(getattr(sess, "sales_data_revision", 0) or 0) + 1
+    sess.daily_restored = True
+    try:
+        from ..services.po_shared_cache import invalidate_po_after_sales_or_returns_change
+
+        invalidate_po_after_sales_or_returns_change(sess)
+    except Exception:
+        _log.exception("PO/intelligence cache invalidation after sales refresh failed")
+    try:
+        from ..services.tier3_session_merge import mark_tier3_sync_applied
+
+        mark_tier3_sync_applied(sess)
+    except Exception:
+        _log.exception("tier3 sync token apply after sales refresh failed")
+
+
 def _upload_quality_from_merge(
     *,
     parsed_rows: int,
@@ -373,7 +391,7 @@ def _incremental_sales_rebuild_from_buffers(
 
     sess._quarterly_cache.clear()
     _session_data_changed(sess)
-    sess.daily_restored = False
+    _finalize_sales_data_refresh(sess)
     sess._daily_auto_parsed_buffers = {}
     rows = len(sess.sales_df)
     return True, f"Sales updated ({rows:,} rows) from upload."
@@ -457,12 +475,7 @@ def _rebuild_sales_sync(
         )
         sess._quarterly_cache.clear()
         _session_data_changed(sess)
-        try:
-            from ..services.po_shared_cache import invalidate_po_after_sales_or_returns_change
-
-            invalidate_po_after_sales_or_returns_change(sess)
-        except Exception:
-            _log.exception("PO cache invalidation after sales rebuild failed")
+        _finalize_sales_data_refresh(sess)
         rows = len(sess.sales_df)
         return True, f"Sales rebuilt ({rows:,} rows)."
     except Exception as e:
@@ -536,6 +549,18 @@ def _run_sales_rebuild_worker(
             sess.sales_rebuild_status = "done"
             sess.sales_rebuild_message = msg
             _schedule_sales_cache_save(sess)
+            try:
+                import backend.main as _main
+
+                _main.publish_warm_cache_from_session(sess)
+            except Exception:
+                _log.exception("warm cache publish after sales rebuild")
+            try:
+                from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+
+                persist_session_bundle_thread_safe(session_id, sess)
+            except Exception:
+                _log.exception("PostgreSQL persist after sales rebuild")
         else:
             sess.sales_rebuild_status = "error"
             sess.sales_rebuild_message = msg
@@ -619,10 +644,18 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
     """Background task: rebuild sales after Tier-3 ingest (bounded SQLite, no full re-merge)."""
     sess = _resolve_upload_session(session_id)
     touched = getattr(sess, "_daily_auto_platforms_touched", None) if sess else None
+    refresh_sqlite = False
+    if sess is not None:
+        try:
+            import backend.main as _main
+
+            refresh_sqlite = _main.session_needs_operational_data(sess)
+        except Exception:
+            refresh_sqlite = False
     _run_sales_rebuild_worker(
         session_id,
-        refresh_sqlite=False,
-        platforms_touched=touched if touched else None,
+        refresh_sqlite=refresh_sqlite,
+        platforms_touched=None if refresh_sqlite else (touched if touched else None),
     )
 
 
@@ -962,6 +995,24 @@ def _resolve_upload_session(session_id: str) -> AppSession | None:
         return None
     sess = store._sessions.get(session_id)
     if sess is not None:
+        try:
+            import backend.main as _main
+
+            if _main.session_needs_operational_data(sess):
+                from ..db.forecast_session_pg import load_session_from_pg, pg_session_persist_enabled
+
+                if pg_session_persist_enabled():
+                    loaded = load_session_from_pg(session_id)
+                    if loaded is not None and not _main.session_needs_operational_data(loaded):
+                        loaded.last_accessed = time.time()
+                        store._sessions[session_id] = loaded
+                        _log.info(
+                            "Upload session %s… replaced shell with PostgreSQL restore",
+                            session_id[:8],
+                        )
+                        return loaded
+        except Exception:
+            _log.exception("hydrate upload shell session %s", session_id[:8])
         sess.last_accessed = time.time()
         return sess
     try:
@@ -1865,23 +1916,49 @@ def _set_inventory_upload_progress(sess: AppSession, pct: int, message: str) -> 
 
 def _clear_stuck_inventory_upload(sess: AppSession, *, force: bool = False) -> bool:
     """Reset a session stuck in inventory_upload_status=running."""
-    if getattr(sess, "inventory_upload_status", "idle") != "running":
+    st = getattr(sess, "inventory_upload_status", "idle")
+    if st not in ("running", "error"):
         return False
-    started = float(getattr(sess, "inventory_upload_started", 0) or 0)
-    age = time.time() - started if started > 0 else 999999
-    stuck_sec = int(os.environ.get("INVENTORY_UPLOAD_STUCK_SEC", "900"))
-    if not force and age < stuck_sec:
-        return False
-    msg = (
-        "Previous inventory upload did not finish (timed out or server was busy). "
-        "Try uploading again, or use Clear stuck if the job is frozen."
-    )
-    sess.inventory_upload_status = "error"
+    if st == "running":
+        started = float(getattr(sess, "inventory_upload_started", 0) or 0)
+        age = time.time() - started if started > 0 else 999999
+        stuck_sec = int(os.environ.get("INVENTORY_UPLOAD_STUCK_SEC", "300"))
+        if not force and age < stuck_sec:
+            return False
+    if force:
+        msg = "Upload cleared — you can upload again."
+    else:
+        msg = (
+            "Previous inventory upload did not finish (timed out or server was busy). "
+            "Try uploading again."
+        )
+    sess.inventory_upload_status = "idle"
     sess.inventory_upload_progress = 0
     sess.inventory_upload_started = 0.0
-    sess.inventory_upload_message = msg
-    sess.inventory_upload_result = {"ok": False, "message": msg, "warnings": [msg]}
+    sess.inventory_upload_message = msg if not force else ""
+    if not force:
+        sess.inventory_upload_result = {"ok": False, "message": msg, "warnings": [msg]}
     return True
+
+
+def _acquire_inventory_memory_lock(sess: AppSession, session_id: str) -> bool:
+    """Wait briefly for the global upload lock, then parse anyway (avoid infinite queue)."""
+    wait_sec = int(os.environ.get("INVENTORY_MEMORY_LOCK_WAIT_SEC", "120"))
+    if _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
+        return True
+    _set_inventory_upload_progress(
+        sess, 8, f"Queued — waiting for server ({wait_sec}s max)…",
+    )
+    _log.info("inventory-auto queued behind another heavy job (session=%s)", session_id[:8])
+    if _UPLOAD_MEMORY_LOCK.acquire(timeout=wait_sec):
+        return True
+    _log.warning(
+        "inventory-auto proceeding without memory lock (session=%s)", session_id[:8],
+    )
+    _set_inventory_upload_progress(
+        sess, 12, "Parsing inventory (server finishing cache load in background)…",
+    )
+    return False
 
 
 def _persist_inventory_after_upload(sess: AppSession, session_id: str | None = None) -> bool:
@@ -2178,10 +2255,7 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
     sku_mapping = dict(sess.sku_mapping or {})
 
     def parse_work() -> tuple[Any, Any, dict]:
-        if not _UPLOAD_MEMORY_LOCK.acquire(timeout=0):
-            _set_inventory_upload_progress(sess, 8, "Queued — waiting for server memory…")
-            _log.info("inventory-auto queued behind another heavy job (session=%s)", session_id[:8])
-            _UPLOAD_MEMORY_LOCK.acquire()
+        lock_held = _acquire_inventory_memory_lock(sess, session_id)
         try:
             return _inventory_parse_heavy(
                 sess,
@@ -2193,7 +2267,8 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
                 warnings=warnings,
             )
         finally:
-            _UPLOAD_MEMORY_LOCK.release()
+            if lock_held:
+                _UPLOAD_MEMORY_LOCK.release()
 
     try:
         df_variant, df_parent, debug = await asyncio.to_thread(parse_work)
@@ -2240,7 +2315,7 @@ async def reset_stuck_inventory_upload(request: Request):
         "message": (
             "Cleared stuck inventory upload — you can upload again."
             if cleared
-            else "No stuck inventory upload to clear (or still within the grace period)."
+            else "No stuck inventory upload to clear."
         ),
         "inventory_upload_status": getattr(sess, "inventory_upload_status", "idle"),
     }
@@ -2264,11 +2339,20 @@ async def upload_inventory_auto(
         return JSONResponse(content={"ok": False, "message": "No files provided."})
 
     if getattr(sess, "inventory_upload_status", "idle") == "running":
-        return JSONResponse(
-            content={
-                "ok": False,
-                "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
-            }
+        if not _clear_stuck_inventory_upload(sess, force=False):
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "stuck": True,
+                    "message": (
+                        "An inventory upload is still processing. Wait a few minutes, "
+                        "or use “Clear stuck”, then try again."
+                    ),
+                }
+            )
+        _log.info(
+            "Auto-cleared stale inventory upload before new upload (session=%s)",
+            getattr(sess, "_persist_sid", "")[:8],
         )
 
     if len(files) > _INVENTORY_AUTO_DIRECT_MAX_FILES:
@@ -3450,9 +3534,6 @@ def _process_daily_auto_sync(
                 sales_rebuild = "pending"
                 _session_data_changed(sess)
 
-            if fast_ingest and getattr(sess, "_daily_auto_platforms_touched", None):
-                sess.daily_restored = False
-
             msg_parts = [f"Loaded {len(detected)} file(s): {', '.join(d.split('(')[0].strip() for d in detected)}."]
             if rebuild_sales and not sess.sales_df.empty:
                 msg_parts.append(f"Sales rebuilt ({len(sess.sales_df):,} rows).")
@@ -3499,7 +3580,7 @@ async def upload_daily_auto(
     ``build_sales_df`` still runs after ingest (same as the historical async sales rebuild).
     """
     sess = _get_session(request)
-    sid = getattr(request.state, "session_id", None)
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
     n_files = len(files)
 
     if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
@@ -3556,10 +3637,18 @@ async def upload_daily_auto(
         )
 
     if not sid:
-        payload = await run_heavy(
-            _process_daily_auto_sync, sess, file_parts, rebuild_sales=True,
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": "Session required — refresh the page and sign in again.",
+                "detected_platforms": [],
+                "warnings": [],
+                "processed_files": n_files,
+                "detected_files": 0,
+                "unknown_files": n_files,
+            },
+            status_code=400,
         )
-        return JSONResponse(content=payload)
 
     msg = (
         "Upload accepted — parsing daily files on the server. "

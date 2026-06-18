@@ -785,13 +785,23 @@ def restore_existing_po_from_disk(sess) -> bool:
     sess_rows = int(len(ep)) if ep is not None and not getattr(ep, "empty", True) else 0
     disk_per = count_per_size_pipeline_skus(df)
     sess_per = count_per_size_pipeline_skus(ep) if ep is not None else 0
+    disk_fn = str(meta.get("existing_po_filename") or "").strip()
+    sess_fn = str(getattr(sess, "existing_po_filename", "") or "").strip()
 
     newer_gen = disk_gen > sess_gen
     partial_session = sess_rows > 0 and disk_rows > sess_rows + 50
     same_gen_partial = disk_gen == sess_gen and sess_rows > 0 and disk_rows > sess_rows + 50
     empty_session = sess_rows == 0 and disk_rows > 0
     aggregated_session = sess_rows > 0 and disk_per > sess_per + 200
-    if not (newer_gen or partial_session or same_gen_partial or empty_session or aggregated_session):
+    filename_changed = bool(disk_fn and sess_fn and disk_fn != sess_fn)
+    if not (
+        newer_gen
+        or partial_session
+        or same_gen_partial
+        or empty_session
+        or aggregated_session
+        or filename_changed
+    ):
         return False
 
     _apply_existing_po_df_to_session(sess, df, meta)

@@ -1582,7 +1582,7 @@ export default function POEngine() {
                   </div>
                   <p className="text-xs text-gray-500 flex justify-between gap-2">
                     <span>
-                      {poProgress || 'Computing recommendations from sales and inventory (large catalogs may take 5–15 minutes).'}
+                      {poProgress || 'Computing recommendations from sales and inventory…'}
                     </span>
                     {poProgressPct != null ? (
                       <span className="tabular-nums text-slate-600 shrink-0">{poProgressPct}%</span>

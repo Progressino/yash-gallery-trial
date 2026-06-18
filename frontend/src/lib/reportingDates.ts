@@ -23,3 +23,22 @@ export function reportingSpanDays(startIso: string, endIso: string): number | nu
   const span = Math.round((d1.getTime() - d0.getTime()) / 86_400_000) + 1
   return span >= 1 ? span : null
 }
+
+/** Days sales_through is before planning_date (1 = yesterday's upload — normal). */
+export function salesDataLagDays(planningIso: string, salesThroughIso: string): number | null {
+  if (!planningIso || !salesThroughIso) return null
+  const plan = new Date(`${planningIso.slice(0, 10)}T12:00:00`)
+  const thru = new Date(`${salesThroughIso.slice(0, 10)}T12:00:00`)
+  if (Number.isNaN(plan.getTime()) || Number.isNaN(thru.getTime())) return null
+  return Math.round((plan.getTime() - thru.getTime()) / 86_400_000)
+}
+
+export function salesDataGapNeedsWarning(
+  planningIso: string,
+  salesThroughIso: string,
+  maxExpectedLagDays = 1,
+): boolean {
+  const lag = salesDataLagDays(planningIso, salesThroughIso)
+  if (lag == null) return false
+  return lag > maxExpectedLagDays
+}

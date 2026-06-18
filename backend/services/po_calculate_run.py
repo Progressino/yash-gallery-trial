@@ -136,6 +136,7 @@ def execute_po_calculate(
     *,
     session_id: Optional[str] = None,
     sync_sidecars: Optional[Callable[[], None]] = None,
+    skip_hydrate: bool = False,
 ) -> dict[str, Any]:
     """Run full PO engine math and return the same payload as the legacy sync endpoint."""
     from .po_session_hydrate import (
@@ -143,7 +144,8 @@ def execute_po_calculate(
         hydrate_po_session_for_calculate,
     )
 
-    hydrate_po_session_for_calculate(sess)
+    if not skip_hydrate:
+        hydrate_po_session_for_calculate(sess)
     _set_po_calculate_progress(sess, session_id, 5, "Validating sales and inventory…")
 
     if sess.sales_df.empty:
@@ -179,11 +181,15 @@ def execute_po_calculate(
             except Exception:
                 logger.exception("sync_sidecars after ledger auto-import failed")
 
-    # Persist ledger to warm cache immediately so coverage polls do not race the async save.
+    # Persist ledger to warm cache without blocking the PO engine thread.
     try:
         import backend.main as _main
 
-        _main.merge_po_optional_sheets_into_warm_cache(sess)
+        threading.Thread(
+            target=lambda: _main.merge_po_optional_sheets_into_warm_cache(sess),
+            daemon=True,
+            name="po-ledger-warm",
+        ).start()
     except Exception:
         logger.exception("merge_po_optional_sheets_into_warm_cache after ledger load failed")
 
@@ -292,14 +298,14 @@ def execute_po_calculate(
         sess,
         session_id,
         30,
-        "Running PO calculation engine (typically 1–5 minutes)…",
+        "Running PO calculation engine…",
     )
     _hb_stop = threading.Event()
 
     def _calc_heartbeat() -> None:
         pct = 32
-        while not _hb_stop.wait(45):
-            pct = min(pct + 4, 78)
+        while not _hb_stop.wait(20):
+            pct = min(pct + 3, 78)
             _set_po_calculate_progress(
                 sess,
                 session_id,
@@ -490,14 +496,6 @@ def background_po_calculate(session_id: str, body: dict) -> None:
     except Exception:
         pass
 
-    try:
-        from .po_session_hydrate import hydrate_po_session_for_calculate
-
-        _set_po_calculate_progress(sess, session_id, 3, "Loading sales, inventory, and PO sheets…")
-        hydrate_po_session_for_calculate(sess)
-    except Exception:
-        logger.exception("hydrate_po_session_for_calculate in background worker failed")
-
     def _sync() -> None:
         try:
             import backend.main as _main
@@ -517,7 +515,13 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         if _inv_n > 500_000:
             msg = f"Calculating PO (trimmed inventory window, {_inv_n:,} baseline rows)…"
             _set_po_calculate_progress(sess, session_id, 8, msg)
-        result = execute_po_calculate(sess, body, session_id=session_id, sync_sidecars=None)
+        result = execute_po_calculate(
+            sess,
+            body,
+            session_id=session_id,
+            sync_sidecars=None,
+            skip_hydrate=True,
+        )
         sess.po_calculate_result = result
         if result.get("ok"):
             n = int(result.get("total_rows") or 0)

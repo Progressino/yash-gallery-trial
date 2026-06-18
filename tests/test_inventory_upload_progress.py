@@ -10,7 +10,7 @@ def test_clear_stuck_inventory_upload_force():
     sess.inventory_upload_started = 0.0
     sess.inventory_upload_progress = 55
     assert upload_router._clear_stuck_inventory_upload(sess, force=True) is True
-    assert sess.inventory_upload_status == "error"
+    assert sess.inventory_upload_status == "idle"
     assert sess.inventory_upload_progress == 0
 
 

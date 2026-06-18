@@ -2658,6 +2658,7 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
         returns_import_warnings=list(getattr(sess, "returns_import_warnings", None) or []) or None,
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
+        sales_data_revision=int(getattr(sess, "sales_data_revision", 0) or 0),
         daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
         daily_auto_ingest_message=getattr(sess, "daily_auto_ingest_message", "") or "",
         daily_auto_ingest_detected_platforms=(
@@ -3042,6 +3043,43 @@ def _maybe_queue_light_session_hydrate(sess: AppSession, session_id: str | None)
     DAILY_UPLOAD_EXECUTOR.submit(_run_light_session_hydrate_worker, session_id)
 
 
+_tier3_sync_queued: set[str] = set()
+
+
+def _run_tier3_sales_sync_worker(session_id: str, platforms: list[str] | None) -> None:
+    """Merge Tier-3 SQLite into session when uploads saved but sales rebuild never finished."""
+    from .upload import _run_sales_rebuild_worker
+
+    try:
+        plats = set(platforms) if platforms else None
+        _run_sales_rebuild_worker(
+            session_id,
+            refresh_sqlite=not plats,
+            platforms_touched=plats,
+        )
+    finally:
+        _tier3_sync_queued.discard(session_id)
+
+
+def _maybe_queue_tier3_sales_sync(sess: AppSession, session_id: str | None) -> None:
+    """Background sales rebuild when Tier-3 SQLite is ahead of session (upload saved, no rebuild)."""
+    if not session_id:
+        return
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
+        return
+    if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+        return
+    if not _tier3_token_mismatch(sess):
+        return
+    if session_id in _tier3_sync_queued:
+        return
+    _tier3_sync_queued.add(session_id)
+    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+
+    plats = _platforms_with_tier3_token_mismatch(sess)
+    DAILY_UPLOAD_EXECUTOR.submit(_run_tier3_sales_sync_worker, session_id, plats or None)
+
+
 @router.get("/job-status", response_model=JobStatusResponse)
 def get_job_status(request: Request):
     """Fast job snapshot for UI polling — no restore, Tier-3 merge, or sales rebuild."""
@@ -3095,6 +3133,7 @@ def get_coverage(request: Request, light: bool = False):
         except Exception:
             pass
         _maybe_queue_light_session_hydrate(sess, sid or None)
+        _maybe_queue_tier3_sales_sync(sess, sid or None)
         _maybe_queue_full_restore_when_empty(sess, sid or None)
         return _build_coverage_response(sess)
 
@@ -3374,7 +3413,7 @@ def intelligence_bundle(
             _bundle_cache_store(
                 cache_key, bundle_cache, tier3_immediate, ts=time.time()
             )
-            _mark_tier3_sync_applied(sess)
+            _maybe_queue_tier3_sales_sync(sess, sid or None)
             return tier3_immediate
 
     # PO-style instant path: persisted bundle cache (memory/disk) when Tier-3 is not fresher.
@@ -3399,7 +3438,7 @@ def intelligence_bundle(
             _bundle_cache_store(
                 cache_key, bundle_cache, tier3_immediate, ts=time.time()
             )
-            _mark_tier3_sync_applied(sess)
+            _maybe_queue_tier3_sales_sync(sess, sid or None)
             return tier3_immediate
 
     _hydrate_session_for_intelligence(sess)

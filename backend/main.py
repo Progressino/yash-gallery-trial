@@ -272,6 +272,13 @@ def session_needs_operational_data(sess) -> bool:
 
 def session_needs_warm_cache_topup(sess) -> bool:
     """True when session is empty, missing unified sales, or warm cache has more platforms."""
+    try:
+        from .routers.data import _tier3_token_mismatch
+
+        if _tier3_token_mismatch(sess):
+            return False
+    except Exception:
+        pass
     if session_needs_operational_data(sess):
         return True
     sales = getattr(sess, "sales_df", None)
@@ -1784,6 +1791,14 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
     restore_po_sidecars_from_warm(sess)
     if getattr(sess, "pause_auto_data_restore", False) and not session_needs_operational_data(sess):
         return False
+    # Tier-3 uploads are newer than warm cache — never overwrite a post-upload session.
+    try:
+        from .routers.data import _tier3_token_mismatch
+
+        if _tier3_token_mismatch(sess):
+            return False
+    except Exception:
+        pass
     _session_gen = getattr(sess, "_warm_cache_gen", 0)
     _wc_only = getattr(sess, "_warm_cache_only", False)
     _phase2_ready = warm_cache_generation >= 2 and _session_gen < warm_cache_generation
@@ -2000,6 +2015,8 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 def _session_skip_heavy_warm(path: str) -> bool:
     """Poll/start endpoints must stay fast while a heavy PO job runs in the background."""
     if path.startswith("/api/po/calculate"):
+        return True
+    if path.startswith("/api/upload/"):
         return True
     if path in (
         "/api/data/coverage",

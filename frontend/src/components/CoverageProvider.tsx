@@ -1,8 +1,9 @@
 import { useRef } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { cacheHydrateWarm, getCoverage } from '../api/client'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { cacheHydrateWarm, getCoverage, invalidateDataQueries } from '../api/client'
 import { coverageJobsRunning, coveragePollIntervalMs } from '../lib/coverageJobs'
 import { operationalDataComplete } from '../lib/localSessionHint'
+import { usePOFreshStore } from '../store/poFresh'
 import { useSession } from '../store/session'
 
 /** Single shared coverage poll — replaces per-page duplicate intervals. */
@@ -15,6 +16,10 @@ export default function CoverageProvider({
 }) {
   const setCoverage = useSession(s => s.setCoverage)
   const lastHydrateAt = useRef(0)
+  const prevSalesRevision = useRef<number | null>(null)
+  const prevDailyIngest = useRef('idle')
+  const prevSalesRebuild = useRef('idle')
+  const qc = useQueryClient()
 
   useQuery({
     queryKey: ['coverage-poll'],
@@ -37,6 +42,35 @@ export default function CoverageProvider({
         }
       }
       setCoverage(c)
+
+      const rev = c.sales_data_revision ?? 0
+      const ingest = c.daily_auto_ingest_status ?? 'idle'
+      const rebuild = c.sales_rebuild ?? 'idle'
+      const ingestDone =
+        prevDailyIngest.current === 'running' && ingest !== 'running' && ingest !== 'error'
+      const rebuildDone =
+        prevSalesRebuild.current === 'running' && rebuild !== 'running' && rebuild !== 'error'
+      const revisionBumped =
+        prevSalesRevision.current != null && rev > prevSalesRevision.current
+
+      if (revisionBumped || ingestDone || rebuildDone) {
+        invalidateDataQueries(qc)
+        if (revisionBumped) {
+          const po = usePOFreshStore.getState()
+          if (po.result?.ok) {
+            const note = 'Daily sales updated — recalculate PO for latest ADS.'
+            const msg = po.result.message?.includes(note)
+              ? po.result.message
+              : (po.result.message ? `${po.result.message} ` : '') + note
+            po.setResult({ ...po.result, message: msg })
+            po.setFromSharedCache(false)
+          }
+        }
+      }
+
+      prevSalesRevision.current = rev
+      prevDailyIngest.current = ingest
+      prevSalesRebuild.current = rebuild
       return c
     },
     enabled,
