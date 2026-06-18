@@ -3154,6 +3154,7 @@ def get_coverage(request: Request, light: bool = False):
     except Exception:
         pass
     _restore_inventory_from_warm(sess)
+    _maybe_queue_tier3_sales_sync(sess, sid or None)
     if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
         light = True
     if getattr(sess, "sales_rebuild_status", "idle") == "running":
@@ -3182,12 +3183,16 @@ def get_coverage(request: Request, light: bool = False):
 def data_parity(request: Request, planning_date: Optional[str] = None):
     """
     Lightweight live vs local / dashboard vs PO parity diagnostics.
-    Does not modify session data.
+    When Tier-3 SQLite is ahead of the session, queue a background sales sync.
     """
     from ..services.tier3_session_merge import build_parity_report
 
     sess = _sess(request)
-    return build_parity_report(sess, planning_date=planning_date)
+    sid = getattr(request.state, "session_id", None) or ""
+    report = build_parity_report(sess, planning_date=planning_date)
+    if report.get("tier3_sync_mismatch") or report.get("tier3_platforms_mismatch"):
+        _maybe_queue_tier3_sales_sync(sess, sid or None)
+    return report
 
 
 @router.post("/restore-full", response_model=RestoreFullResponse)
