@@ -128,3 +128,55 @@ def test_warm_cache_skipped_when_tier3_mismatch(monkeypatch):
     assert main_mod._apply_warm_cache_if_needed(sess, 2) is False
     assert len(sess.mtr_df) == 1
     assert len(sess.sales_df) == 1
+
+
+def test_daily_dsr_tier3_fallback_when_session_missing_day(monkeypatch):
+    """Daily DSR must read Tier-3 when unified sales_df lacks that calendar day."""
+    import pandas as pd
+
+    from backend.routers import data as data_router
+    from backend.session import AppSession
+
+    sess = AppSession()
+    sess.sku_mapping = {"SKU-A": "SKU-A"}
+    sess.sales_df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2026-06-16"]),
+            "Sku": ["SKU-A"],
+            "Transaction Type": ["Shipment"],
+            "Quantity": [3],
+            "Source": ["Myntra"],
+        }
+    )
+
+    tier3_frames = {
+        "myntra": pd.DataFrame(
+            {
+                "Date": pd.to_datetime(["2026-06-17"]),
+                "OMS_SKU": ["SKU-A"],
+                "TxnType": ["Shipment"],
+                "Quantity": [7],
+                "State": ["MH"],
+                "OrderId": ["O1"],
+                "LineKey": ["L1"],
+            }
+        ),
+    }
+
+    monkeypatch.setattr(
+        data_router,
+        "_load_tier3_frames_for_platforms",
+        lambda plats, s, e, **kw: tier3_frames,
+    )
+    monkeypatch.setattr(
+        "backend.services.daily_store.platforms_with_uploads_in_range",
+        lambda s, e: ["myntra"],
+    )
+
+    df, iso = data_router._resolve_daily_dsr_date(sess, "2026-06-17")
+    assert iso == "2026-06-17"
+    assert not df.empty
+    from backend.services.sales import get_daily_dsr_report
+
+    report = get_daily_dsr_report(df, iso)
+    assert report["subtotal"]["sales"] == 7

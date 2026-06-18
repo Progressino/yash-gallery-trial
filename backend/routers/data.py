@@ -8,6 +8,7 @@ import csv
 import datetime
 import io
 import json
+import logging
 import os
 import re
 import time
@@ -2179,7 +2180,6 @@ def _ensure_intelligence_session_fresh(sess: AppSession) -> None:
             _rebuild_session_sales(sess)
         else:
             _ensure_sales_rebuilt(sess)
-        _mark_tier3_sync_applied(sess)
     finally:
         sess._intelligence_refresh_ts = time.time()
         sess._intelligence_refresh_running = False
@@ -3074,10 +3074,10 @@ def _maybe_queue_tier3_sales_sync(sess: AppSession, session_id: str | None) -> N
     if session_id in _tier3_sync_queued:
         return
     _tier3_sync_queued.add(session_id)
-    from ..concurrency import DAILY_UPLOAD_EXECUTOR
+    from ..concurrency import AUX_EXECUTOR
 
     plats = _platforms_with_tier3_token_mismatch(sess)
-    DAILY_UPLOAD_EXECUTOR.submit(_run_tier3_sales_sync_worker, session_id, plats or None)
+    AUX_EXECUTOR.submit(_run_tier3_sales_sync_worker, session_id, plats or None)
 
 
 @router.get("/job-status", response_model=JobStatusResponse)
@@ -4007,11 +4007,44 @@ def _resolve_daily_dsr_date(sess: AppSession, date: Optional[str]) -> tuple:
     """Return (sales_df, iso_date_str) for DSR helpers."""
     import pandas as pd
 
-    df = apply_upload_report_day_gate(sess.sales_df.copy())
-    if df.empty:
-        return df, (date or "").strip()
+    from ..services.sales import apply_upload_report_day_gate, txn_reporting_naive_ist
 
-    if not date or not str(date).strip():
+    iso = (date or "").strip()
+    df = apply_upload_report_day_gate(sess.sales_df.copy())
+
+    if iso and len(iso) >= 10:
+        iso = iso[:10]
+        needs_tier3 = False
+        if df.empty:
+            needs_tier3 = True
+        elif "TxnDate" in df.columns:
+            d = df.copy()
+            d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
+            d = d.dropna(subset=["TxnDate"])
+            try:
+                day = pd.Timestamp(iso).normalize()
+                if d.empty or not (d["TxnDate"].dt.normalize() == day).any():
+                    needs_tier3 = True
+            except Exception:
+                pass
+        if needs_tier3:
+            try:
+                from ..services.daily_store import platforms_with_uploads_in_range
+
+                plats = platforms_with_uploads_in_range(iso, iso)
+                if plats:
+                    frames = _load_tier3_frames_for_platforms(plats, iso, iso, dedup=False)
+                    if frames:
+                        tier3_sales = _build_sales_from_tier3_frames(sess, frames)
+                        if tier3_sales is not None and not tier3_sales.empty:
+                            df = apply_upload_report_day_gate(tier3_sales)
+            except Exception:
+                logging.getLogger(__name__).exception("daily-dsr tier3 fallback for %s", iso)
+
+    if df.empty:
+        return df, iso
+
+    if not iso:
         d = df.copy()
         d["TxnDate"] = txn_reporting_naive_ist(d["TxnDate"])
         d = d.dropna(subset=["TxnDate"])
@@ -4020,9 +4053,9 @@ def _resolve_daily_dsr_date(sess: AppSession, date: Optional[str]) -> tuple:
         latest = d["TxnDate"].max()
         if pd.isna(latest):
             return df, ""
-        date = str(latest.normalize().date())
+        iso = str(latest.normalize().date())[:10]
 
-    return df, str(date).strip()
+    return df, iso
 
 
 @router.get("/daily-dsr")

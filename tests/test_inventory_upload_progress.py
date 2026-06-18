@@ -41,3 +41,9 @@ def test_set_inventory_upload_progress_clamps():
     assert sess.inventory_upload_progress == 100
     upload_router._set_inventory_upload_progress(sess, -5, "Start")
     assert sess.inventory_upload_progress == 0
+
+
+def test_inventory_uses_dedicated_executor():
+    from backend import concurrency
+
+    assert concurrency.INVENTORY_EXECUTOR is not concurrency.DAILY_UPLOAD_EXECUTOR

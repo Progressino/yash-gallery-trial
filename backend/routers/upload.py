@@ -20,7 +20,14 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from ..concurrency import HEAVY_EXECUTOR, DAILY_UPLOAD_EXECUTOR, _UPLOAD_MEMORY_LOCK, run_heavy
+from ..concurrency import (
+    AUX_EXECUTOR,
+    HEAVY_EXECUTOR,
+    DAILY_UPLOAD_EXECUTOR,
+    INVENTORY_EXECUTOR,
+    _UPLOAD_MEMORY_LOCK,
+    run_heavy,
+)
 
 from ..session import store, resume_auto_data_restore, AppSession
 from ..models.schemas import UploadResponse
@@ -899,7 +906,7 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
             persist_session_bundle_thread_safe(session_id, sess)
         except Exception:
             _log.exception("PostgreSQL persist after Tier-3 background ingest")
-        _run_daily_auto_sales_rebuild(session_id)
+        AUX_EXECUTOR.submit(_run_daily_auto_sales_rebuild, session_id)
     else:
         sess.sales_rebuild_status = "idle"
         sess.sales_rebuild_message = ""
@@ -2216,8 +2223,8 @@ def _inventory_apply_parse_result(
     return payload
 
 
-async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
-    """Parse assembled inventory file bytes on a worker thread."""
+def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
+    """Parse assembled inventory file bytes on the inventory worker thread."""
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
@@ -2271,7 +2278,7 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
                 _UPLOAD_MEMORY_LOCK.release()
 
     try:
-        df_variant, df_parent, debug = await asyncio.to_thread(parse_work)
+        df_variant, df_parent, debug = parse_work()
 
         def apply_work() -> dict:
             return _inventory_apply_parse_result(
@@ -2284,9 +2291,9 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
                 warnings=warnings,
             )
 
-        await asyncio.to_thread(_session_lock_apply_sync, sess, apply_work)
+        _session_lock_apply_sync(sess, apply_work)
         if sess.inventory_upload_status == "done":
-            await asyncio.to_thread(_finish_inventory_server_save, sess, session_id)
+            _finish_inventory_server_save(sess, session_id)
     except Exception as e:
         _log.exception("inventory-auto parse")
         sess.inventory_upload_status = "error"
@@ -2297,8 +2304,8 @@ async def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple
 
 
 def _run_inventory_auto_worker(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
-    """Sync entry for DAILY_UPLOAD_EXECUTOR (chunk finalize + direct upload)."""
-    asyncio.run(_run_inventory_auto_from_parts(session_id, file_parts))
+    """Sync entry for INVENTORY_EXECUTOR (chunk finalize + direct upload)."""
+    _run_inventory_auto_from_parts(session_id, file_parts)
 
 
 _INVENTORY_AUTO_DIRECT_MAX_FILES = int(os.environ.get("INVENTORY_AUTO_DIRECT_MAX_FILES", "3"))
@@ -2379,7 +2386,7 @@ async def upload_inventory_auto(
     if sid:
 
         _mark_inventory_upload_running(sess, "Upload received — starting parse…")
-        DAILY_UPLOAD_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
+        INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
         return JSONResponse(
             content={
                 "ok": True,
@@ -3969,7 +3976,7 @@ async def _accept_inventory_auto_file_parts(
         }
 
     _mark_inventory_upload_running(sess, "Chunks assembled — starting parse…")
-    DAILY_UPLOAD_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
+    INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
     return {
         "ok": True,
         "ingest_async": True,
@@ -4099,7 +4106,7 @@ def _finalize_chunk_upload_worker(session_id: str, upload_id: str) -> None:
         _run_daily_auto_ingest_pipeline(session_id, file_parts)
     else:
         sess.inventory_upload_message = "Parsing inventory files and merging snapshot…"
-        _run_inventory_auto_worker(session_id, file_parts)
+        INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, session_id, file_parts)
 
 
 def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:

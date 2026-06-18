@@ -29,6 +29,13 @@ DAILY_UPLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="erp-upload",
 )
 
+# Snapshot inventory parse — separate from daily sales ingest/rebuild so RAR uploads
+# are not stuck at 5% behind a multi-minute sales rebuild on DAILY_UPLOAD_EXECUTOR.
+INVENTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="erp-inventory",
+)
+
 # Session full-restore worker — its own queue so a backlog of per-session
 # hydrate-warm / daily-upload jobs on DAILY_UPLOAD_EXECUTOR (e.g. many tabs
 # reconnecting after a deploy) cannot leave a user's restore stuck at
