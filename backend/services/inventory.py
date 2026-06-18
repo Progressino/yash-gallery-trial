@@ -391,6 +391,26 @@ def restore_inventory_upload_backup(sess: Any) -> bool:
     return True
 
 
+def clear_inventory_snapshot(sess: Any) -> None:
+    """Remove snapshot inventory from session so admins can re-upload a clean file."""
+    sess.inventory_df_variant = pd.DataFrame()
+    sess.inventory_df_parent = pd.DataFrame()
+    sess.inventory_debug = {}
+    sess.inventory_snapshot_date = ""
+    sess.inventory_snapshot_date_label = ""
+    sess.inventory_snapshot_date_sources = []
+    sess.inventory_snapshot_uploaded_at = ""
+    sess.inventory_upload_status = "idle"
+    sess.inventory_upload_progress = 0
+    sess.inventory_upload_message = ""
+    sess.inventory_upload_result = {}
+    sess.inventory_upload_started = 0.0
+    sess._inventory_pre_upload_backup = None
+    if hasattr(sess, "inventory_api_totals"):
+        sess.inventory_api_totals = {}
+    refresh_inventory_api_cache(sess)
+
+
 def inventory_session_meta_bundle(sess: Any) -> dict[str, Any]:
     """Serializable inventory snapshot metadata for warm cache / disk."""
     return {
@@ -1098,6 +1118,20 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
                     return result
         return ""
 
+    wh_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "warehouse name"),
+        None,
+    )
+    if wh_col is not None:
+        wh = df[wh_col].astype(str).str.lower()
+        other_mask = wh.str.contains("other", na=False)
+        if other_mask.any():
+            df = df[other_mask]
+        else:
+            myntra_mask = wh.str.contains("myntra", na=False)
+            if myntra_mask.any():
+                df = df[myntra_mask]
+
     df["OMS_SKU"] = df.apply(_resolve, axis=1)
     df = df[df["OMS_SKU"].str.strip() != ""]
     return (
@@ -1375,7 +1409,8 @@ def load_inventory_consolidated(
     # ── Single Myntra Other layer (standalone + RAR) ───────────────────────────
     if myntra_other_parts:
         m_all = pd.concat(myntra_other_parts, ignore_index=True)
-        part = m_all.groupby("OMS_SKU")["Myntra_Other_Inventory"].sum().reset_index()
+        # Full PPMP snapshots overlap — max per SKU, not sum (avoids 2× totals from duplicate exports).
+        part = m_all.groupby("OMS_SKU")["Myntra_Other_Inventory"].max().reset_index()
         inv_dfs.append(part)
         debug["myntra"] = f"{len(part)} SKUs ({len(myntra_other_parts)} file payload(s) merged)"
     else:

@@ -1672,6 +1672,8 @@ export default function Upload() {
           title="📦 Snapshot inventory"
           subtitle="Drop the daily RAR plus any separate files. Include OMS CSV, Amazon, Flipkart & Myntra PPMP inventory CSVs inside the bundle for full marketplace stock."
           loaded={coverage.inventory}
+          onClear={mayClearPlatform ? handleClear('inventory') : undefined}
+          clearing={loading['clear_inventory']}
           alert={showImportCompleteness ? uploadAlertsBySource['inv'] : undefined}
           onClearAlert={() => clearUploadAlert('inv')}
         >

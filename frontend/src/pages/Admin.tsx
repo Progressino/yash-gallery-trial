@@ -2,9 +2,9 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
-import { resetErpModuleData } from '../api/client'
+import { resetErpModuleData, clearPlatform } from '../api/client'
 import { ALL_MODULE_KEYS, MODULE_LABELS } from '../lib/modules'
-import { mayAccessErpAdmin, useAuth } from '../store/auth'
+import { mayAccessErpAdmin, mayClearPlatformData, useAuth } from '../store/auth'
 
 type Tab = 'dashboard' | 'users' | 'roles' | 'activity' | 'data-reset'
 
@@ -67,6 +67,9 @@ export default function Admin() {
   const [editUser, setEditUser] = useState<ERPUser | null>(null)
   const [editData, setEditData] = useState<Record<string, string | number | null>>({})
   const [resetBusyModule, setResetBusyModule] = useState<string | null>(null)
+  const [clearInventoryBusy, setClearInventoryBusy] = useState(false)
+  const [clearInventoryMsg, setClearInventoryMsg] = useState<string | null>(null)
+  const mayClearPlatform = mayClearPlatformData(authUser)
 
   const payloadFromUserForm = (form: typeof EMPTY_USER_FORM, modules: string[]) => {
     const body: Record<string, unknown> = {
@@ -172,6 +175,27 @@ export default function Admin() {
     resetModuleMut.mutate(module, {
       onSettled: () => setResetBusyModule(null),
     })
+  }
+
+  const runClearInventorySnapshot = async () => {
+    const ok = window.confirm(
+      'Remove the current snapshot inventory from the server?\n\n'
+        + 'Use this when the wrong RAR/CSV was uploaded (e.g. inflated totals). '
+        + 'Re-upload the correct file under Upload Data → Daily uploads → Snapshot inventory.',
+    )
+    if (!ok) return
+    setClearInventoryBusy(true)
+    setClearInventoryMsg(null)
+    try {
+      const res = await clearPlatform('inventory')
+      setClearInventoryMsg(res.message)
+      qc.invalidateQueries({ queryKey: ['coverage'] })
+      qc.invalidateQueries({ queryKey: ['inventory'] })
+    } catch (e: unknown) {
+      setClearInventoryMsg(formatUserCreateError(e))
+    } finally {
+      setClearInventoryBusy(false)
+    }
   }
 
   if (!mayAccessErpAdmin(authUser)) {
@@ -550,6 +574,26 @@ export default function Admin() {
               Use only to remove testing data in production. Each action permanently deletes one module&apos;s records.
             </p>
           </div>
+          {mayClearPlatform && (
+            <div className="bg-white rounded-xl border border-red-200 p-4">
+              <p className="text-sm font-semibold text-gray-800">Snapshot inventory (Upload Data)</p>
+              <p className="text-xs text-gray-500 mt-1">
+                Clears the daily OMS + marketplace inventory snapshot (wrong RAR/CSV). Does not delete sales history,
+                SKU map, or PO data. After clearing, upload the correct file on Upload Data → Daily uploads.
+              </p>
+              <button
+                type="button"
+                onClick={() => void runClearInventorySnapshot()}
+                disabled={clearInventoryBusy}
+                className="mt-3 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50"
+              >
+                {clearInventoryBusy ? 'Clearing…' : 'Clear snapshot inventory'}
+              </button>
+              {clearInventoryMsg && (
+                <p className="text-xs mt-2 text-gray-600">{clearInventoryMsg}</p>
+              )}
+            </div>
+          )}
           <div className="grid md:grid-cols-2 gap-3">
             {RESET_MODULES.map(m => (
               <div key={m.key} className="bg-white rounded-xl border p-4">

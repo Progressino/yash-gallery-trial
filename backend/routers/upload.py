@@ -3864,6 +3864,12 @@ async def build_sales(request: Request, background_tasks: BackgroundTasks):
 
 # ── Clear platform data ────────────────────────────────────────
 
+def _clear_inventory_platform(sess, _pd) -> None:
+    from ..services.inventory import clear_inventory_snapshot
+
+    clear_inventory_snapshot(sess)
+
+
 _PLATFORM_CLEAR = {
     "mtr":      lambda sess, pd: setattr(sess, "mtr_df",      pd.DataFrame()),
     "myntra":   lambda sess, pd: setattr(sess, "myntra_df",   pd.DataFrame()),
@@ -3871,6 +3877,7 @@ _PLATFORM_CLEAR = {
     "flipkart": lambda sess, pd: setattr(sess, "flipkart_df", pd.DataFrame()),
     "snapdeal": lambda sess, pd: setattr(sess, "snapdeal_df", pd.DataFrame()),
     "sales":    lambda sess, pd: setattr(sess, "sales_df",    pd.DataFrame()),
+    "inventory": _clear_inventory_platform,
 }
 
 @router.delete("/clear/{platform}")
@@ -3892,6 +3899,21 @@ async def clear_platform(platform: str, request: Request):
 
     def work():
         cleaner(sess, pd)
+        if platform == "inventory":
+            try:
+                import backend.main as _main
+
+                _main.merge_inventory_into_warm_cache(sess)
+            except Exception:
+                _log.exception("merge_inventory_into_warm_cache after inventory clear failed")
+            _session_data_changed(sess)
+            return {
+                "ok": True,
+                "message": (
+                    "Snapshot inventory cleared from this session and server cache. "
+                    "Upload a new file under Upload Data → Daily uploads → Snapshot inventory."
+                ),
+            }
         if platform != "sales":
             sess.sales_df = pd.DataFrame()   # invalidate combined sales
             sess._quarterly_cache.clear()
