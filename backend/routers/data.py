@@ -2216,6 +2216,17 @@ def _session_has_platform_data(sess: AppSession) -> bool:
     )
 
 
+def _coverage_sales_ready(sess: AppSession) -> bool:
+    """
+    Unified sales_df exists, or bulk platform history is loaded (derived sales rebuilds in background).
+    Prevents the app staying at 7/8 after warm-cache hydrate copies platform frames only.
+    """
+    sales = getattr(sess, "sales_df", None)
+    if sales is not None and hasattr(sales, "empty") and not sales.empty:
+        return True
+    return bool(sess.sku_mapping) and _session_has_platform_data(sess)
+
+
 def _ensure_sales_rebuilt(sess: AppSession) -> None:
     """Rebuild unified sales when platform history is loaded but sales_df is still empty."""
     if getattr(sess, "inventory_upload_status", "idle") == "running":
@@ -2569,7 +2580,7 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     return CoverageResponse(
         sku_mapping=bool(sess.sku_mapping),
         mtr=_plat_ok or not sess.mtr_df.empty,
-        sales=not sess.sales_df.empty,
+        sales=_coverage_sales_ready(sess),
         myntra=_plat_ok or not sess.myntra_df.empty,
         meesho=_plat_ok or not sess.meesho_df.empty,
         flipkart=_plat_ok or not sess.flipkart_df.empty,
@@ -3080,6 +3091,39 @@ def _maybe_queue_tier3_sales_sync(sess: AppSession, session_id: str | None) -> N
     AUX_EXECUTOR.submit(_run_tier3_sales_sync_worker, session_id, plats or None)
 
 
+_unified_sales_build_queued: set[str] = set()
+
+
+def _maybe_queue_unified_sales_build(sess: AppSession, session_id: str | None) -> None:
+    """Build unified sales_df when platform history is in session but sales_df is still empty."""
+    if not session_id:
+        return
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
+        return
+    if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
+        return
+    if not sess.sku_mapping:
+        return
+    sales = getattr(sess, "sales_df", None)
+    if sales is not None and hasattr(sales, "empty") and not sales.empty:
+        return
+    if not _session_has_platform_data(sess):
+        return
+    if session_id in _unified_sales_build_queued or session_id in _tier3_sync_queued:
+        return
+    _unified_sales_build_queued.add(session_id)
+    from ..concurrency import AUX_EXECUTOR
+    from .upload import _run_sales_rebuild_worker
+
+    def _worker(sid: str) -> None:
+        try:
+            _run_sales_rebuild_worker(sid, refresh_sqlite=False)
+        finally:
+            _unified_sales_build_queued.discard(sid)
+
+    AUX_EXECUTOR.submit(_worker, session_id)
+
+
 @router.get("/job-status", response_model=JobStatusResponse)
 def get_job_status(request: Request):
     """Fast job snapshot for UI polling — no restore, Tier-3 merge, or sales rebuild."""
@@ -3134,6 +3178,7 @@ def get_coverage(request: Request, light: bool = False):
             pass
         _maybe_queue_light_session_hydrate(sess, sid or None)
         _maybe_queue_tier3_sales_sync(sess, sid or None)
+        _maybe_queue_unified_sales_build(sess, sid or None)
         _maybe_queue_full_restore_when_empty(sess, sid or None)
         return _build_coverage_response(sess)
 
@@ -3155,6 +3200,7 @@ def get_coverage(request: Request, light: bool = False):
         pass
     _restore_inventory_from_warm(sess)
     _maybe_queue_tier3_sales_sync(sess, sid or None)
+    _maybe_queue_unified_sales_build(sess, sid or None)
     if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
         light = True
     if getattr(sess, "sales_rebuild_status", "idle") == "running":
