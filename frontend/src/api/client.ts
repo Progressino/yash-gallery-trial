@@ -1013,17 +1013,27 @@ function _rowsFromPoResultPage(
 }
 
 export type PoCalculateStatus = {
+  job_id?: string
   status?: string
   message?: string
   progress?: number
   ok?: boolean
   row_count?: number
   columns?: string[]
+  from_shared_cache?: boolean
+}
+
+function _poStatusPath(jobId?: string): string {
+  return jobId ? `/po/calculate/status/${jobId}` : '/po/calculate/status'
+}
+
+function _poResultPath(jobId?: string): string {
+  return jobId ? `/po/calculate/result/${jobId}` : '/po/calculate/result'
 }
 
 /** Lightweight status probe (used to auto-resume after refresh). */
-export async function getPoCalculateStatus(): Promise<PoCalculateStatus> {
-  const { data } = await api.get<PoCalculateStatus>('/po/calculate/status', {
+export async function getPoCalculateStatus(jobId?: string): Promise<PoCalculateStatus> {
+  const { data } = await api.get<PoCalculateStatus>(_poStatusPath(jobId), {
     timeout: PO_STATUS_POLL_TIMEOUT_MS,
   })
   return data
@@ -1033,6 +1043,7 @@ export async function getPoCalculateStatus(): Promise<PoCalculateStatus> {
 export async function fetchAllPoResultPages(
   onTick?: (message: string, progress?: number) => void,
   hint?: { columns?: string[]; row_count?: number },
+  jobId?: string,
 ): Promise<POCalculateResult> {
   const pageSize = PO_RESULT_PAGE_SIZE
   let offset = 0
@@ -1056,7 +1067,7 @@ export async function fetchAllPoResultPages(
           has_more?: boolean
           rows_matrix?: unknown[][]
         }
-      >('/po/calculate/result', {
+      >(_poResultPath(jobId), {
         params: { offset, limit: pageSize, compact: 1 },
         timeout: PO_RESULT_TIMEOUT_MS,
       }))
@@ -1175,8 +1186,11 @@ export async function resumePoCalculateIfRunning(
 export async function waitForPoCalculate(
   onTick?: (message: string, progress?: number) => void,
   maxMs = 900_000,
+  jobId?: string,
 ): Promise<POCalculateResult> {
   const start = Date.now()
+  const statusPath = _poStatusPath(jobId)
+  const resultPath = _poResultPath(jobId)
   let statusGatewayRetries = 0
   let idlePolls = 0
   let lastServerMessage = 'Calculating PO recommendations…'
@@ -1187,7 +1201,7 @@ export async function waitForPoCalculate(
     try {
       ;({ data } = await api.get<
         POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
-      >('/po/calculate/status', { timeout: PO_STATUS_POLL_TIMEOUT_MS }))
+      >(statusPath, { timeout: PO_STATUS_POLL_TIMEOUT_MS }))
       statusGatewayRetries = 0
     } catch (e: unknown) {
       if (_isRetryablePoPollError(e) && statusGatewayRetries < 180) {
@@ -1220,7 +1234,7 @@ export async function waitForPoCalculate(
       try {
         const { data: probe } = await api.get<
           POCalculateResult & { status?: string; total?: number }
-        >('/po/calculate/result', {
+        >(_poResultPath(jobId), {
           params: { offset: 0, limit: 1, compact: 1 },
           timeout: PO_STATUS_POLL_TIMEOUT_MS,
         })
@@ -1268,10 +1282,14 @@ export async function waitForPoCalculate(
       continue
     }
     if (st === 'done') {
-      const loaded = await fetchAllPoResultPages(onTick, {
-        columns: data.columns,
-        row_count: data.row_count,
-      })
+      const loaded = await fetchAllPoResultPages(
+        onTick,
+        {
+          columns: data.columns,
+          row_count: data.row_count,
+        },
+        jobId,
+      )
       return {
         ...loaded,
         from_shared_cache: data.from_shared_cache ?? loaded.from_shared_cache,
@@ -1310,7 +1328,7 @@ export async function startPoCalculate(
 ): Promise<POCalculateResult> {
   try {
     const { data } = await api.post<
-      POCalculateResult & { status?: string; from_shared_cache?: boolean }
+      POCalculateResult & { status?: string; from_shared_cache?: boolean; job_id?: string }
     >(
       '/po/calculate',
       body,
@@ -1318,6 +1336,10 @@ export async function startPoCalculate(
     )
     if (!data.ok) {
       return data
+    }
+    const jobId = data.job_id
+    if (jobId) {
+      return waitForPoCalculate(onTick, 900_000, jobId)
     }
     if (data.from_shared_cache) {
       onTick?.(
@@ -1348,8 +1370,6 @@ export async function startPoCalculate(
       onTick?.('Still calculating on server…')
       return waitForPoCalculate(onTick)
     }
-    // 502 on the initial POST: the server may have received the request and started
-    // the calculation before the gateway timed out. Poll the status endpoint to find out.
     if (axios.isAxiosError(e) && e.response?.status === 502) {
       onTick?.('Still calculating on server — checking progress…', 8)
       await _sleep(2000)

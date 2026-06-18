@@ -417,7 +417,13 @@ def save_shared_cache(
         return None
 
 
-def apply_shared_cache_to_session(sess, session_id: str, body: dict) -> Optional[dict[str, Any]]:
+def apply_shared_cache_to_session(
+    sess,
+    session_id: str,
+    body: dict,
+    *,
+    job_id: str | None = None,
+) -> Optional[dict[str, Any]]:
     """
     Copy shared parquet into this session's spill and mark job done.
     Returns API-shaped dict for POST /po/calculate, or None if no hit.
@@ -474,17 +480,24 @@ def apply_shared_cache_to_session(sess, session_id: str, body: dict) -> Optional
         sess.po_calculate_message = msg
         sess.po_calculate_result = {k: v for k, v in result.items() if k != "status"}
         sess.po_calculate_result_df = pd.DataFrame()
-        set_po_job(
-            session_id,
-            status="done",
-            ok=True,
-            progress=100,
-            message=msg,
-            total_rows=n,
-            columns=cols,
-            sales_through=result.get("sales_through"),
-            planning_date=result.get("planning_date"),
-        )
+        target_job = job_id
+        if not target_job:
+            from .po_calculate_jobs import get_latest_job_id
+
+            target_job = get_latest_job_id(session_id)
+        if target_job:
+            set_po_job(
+                target_job,
+                status="done",
+                ok=True,
+                progress=100,
+                message=msg,
+                total_rows=n,
+                columns=cols,
+                sales_through=result.get("sales_through"),
+                planning_date=result.get("planning_date"),
+                from_shared_cache=True,
+            )
         return result
     except Exception:
         _log.exception("apply_shared_cache_to_session failed")

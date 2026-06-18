@@ -1,6 +1,8 @@
-"""POST /api/po/calculate must return immediately while work runs in background."""
+"""POST /api/po/calculate must return immediately with job_id while work runs in background."""
 
 import time
+
+from tests.conftest import wait_po_job_done
 
 
 def test_po_calculate_post_returns_before_job_finishes(client, monkeypatch, session_for_client):
@@ -49,12 +51,8 @@ def test_po_calculate_post_returns_before_job_finishes(client, monkeypatch, sess
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("status") == "running"
+    job_id = body.get("job_id")
+    assert job_id
 
-    for _ in range(40):
-        st = client.get("/api/po/calculate/status")
-        assert st.status_code == 200
-        if st.json().get("status") == "done":
-            break
-        time.sleep(0.25)
-    assert st.json().get("status") == "done"
+    st = wait_po_job_done(client, job_id, max_sec=30)
+    assert st.get("status") == "done"

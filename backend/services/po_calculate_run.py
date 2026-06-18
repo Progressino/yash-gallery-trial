@@ -102,17 +102,17 @@ def _build_platform_sales_df(sess, *, frame_overrides: dict[str, pd.DataFrame] |
 
 def _set_po_calculate_progress(
     sess,
-    session_id: Optional[str],
+    job_id: Optional[str],
     pct: int,
     message: str,
 ) -> None:
     p = max(0, min(100, int(pct)))
     sess.po_calculate_progress = p
     sess.po_calculate_message = message
-    if session_id:
+    if job_id:
         from .po_calculate_jobs import set_po_job
 
-        set_po_job(session_id, status="running", ok=True, progress=p, message=message)
+        set_po_job(job_id, status="running", ok=True, progress=p, message=message)
 
 
 def _dedupe_column_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -136,6 +136,7 @@ def execute_po_calculate(
     body: dict,
     *,
     session_id: Optional[str] = None,
+    job_id: Optional[str] = None,
     sync_sidecars: Optional[Callable[[], None]] = None,
     skip_hydrate: bool = False,
 ) -> dict[str, Any]:
@@ -150,11 +151,13 @@ def execute_po_calculate(
 
     stage_timer = PoStageTimer()
 
+    progress_id = job_id or session_id
+
     if not skip_hydrate:
         hydrate_po_session_for_calculate(sess)
 
     inputs = load_po_inputs(sess, body)
-    _set_po_calculate_progress(sess, session_id, 5, "Validating sales and inventory…")
+    _set_po_calculate_progress(sess, progress_id, 5, "Validating sales and inventory…")
 
     sales_df = inputs.sales_df if not inputs.sales_df.empty else session_sales_df(sess)
     inv_variant = (
@@ -180,7 +183,7 @@ def execute_po_calculate(
     from ..services.po_raise_import import hydrate_session_ledger_from_db
 
     lookback = max(int(body.get("raise_ledger_lookback_days") or 14), 14)
-    _set_po_calculate_progress(sess, session_id, 12, "Loading raise ledger…")
+    _set_po_calculate_progress(sess, progress_id, 12, "Loading raise ledger…")
     hydrate_session_ledger_from_db(sess, body.get("planning_date"), lookback_days=lookback, authoritative=True)
 
     ledger_auto_import = None
@@ -214,7 +217,7 @@ def execute_po_calculate(
 
     _ledger = getattr(sess, "po_raise_ledger_df", None)
 
-    _set_po_calculate_progress(sess, session_id, 18, "Loading existing PO sheet…")
+    _set_po_calculate_progress(sess, progress_id, 18, "Loading existing PO sheet…")
     try:
         from .existing_po import ensure_existing_po_hydrated
 
@@ -244,7 +247,7 @@ def execute_po_calculate(
         _ih_rows = len(_raw_ih)
         _set_po_calculate_progress(
             sess,
-            session_id,
+            progress_id,
             22,
             f"Preparing daily inventory history ({_ih_rows:,} rows)…",
         )
@@ -252,7 +255,7 @@ def execute_po_calculate(
         if _ih_rows > (_MAX_HISTORY_DAYS + 10) * 500:
             _set_po_calculate_progress(
                 sess,
-                session_id,
+                progress_id,
                 24,
                 f"Trimming oversized inventory history ({_ih_rows:,} rows)…",
             )
@@ -299,7 +302,7 @@ def execute_po_calculate(
             _inv_history_for_calc = _raw_ih
         del _inv_dates
         if _rows_dropped >= 100_000:
-            _set_po_calculate_progress(sess, session_id, 27, "Releasing trimmed inventory memory…")
+            _set_po_calculate_progress(sess, progress_id, 27, "Releasing trimmed inventory memory…")
             _gc.collect()
 
     stage_timer.mark("inventory")
@@ -307,7 +310,7 @@ def execute_po_calculate(
     # Tier-3 overlay for ADS (in-memory only — never blocks on full session merge / sales rebuild).
     from .tier3_session_merge import build_po_ads_platform_sales
 
-    _set_po_calculate_progress(sess, session_id, 28, "Loading Tier-3 daily sales for ADS window…")
+    _set_po_calculate_progress(sess, progress_id, 28, "Loading Tier-3 daily sales for ADS window…")
     _platform_sales = build_po_ads_platform_sales(
         sess,
         planning_date=body.get("planning_date"),
@@ -359,7 +362,7 @@ def execute_po_calculate(
 
     _set_po_calculate_progress(
         sess,
-        session_id,
+        progress_id,
         30,
         "Running PO calculation engine…",
     )
@@ -371,7 +374,7 @@ def execute_po_calculate(
             pct = min(pct + 3, 78)
             _set_po_calculate_progress(
                 sess,
-                session_id,
+                progress_id,
                 pct,
                 f"Running PO engine… ({pct}%)",
             )
@@ -421,7 +424,7 @@ def execute_po_calculate(
     if po_df is None or po_df.empty:
         return {"ok": False, "message": "PO result is empty."}
 
-    _set_po_calculate_progress(sess, session_id, 85, "Formatting PO results…")
+    _set_po_calculate_progress(sess, progress_id, 85, "Formatting PO results…")
     po_df = po_df.copy()
     po_df = _dedupe_column_names(po_df)
     for c in ["Suggest_Close_SKU", "PO_Block_Reason", "SKU_Sheet_Status"]:
@@ -526,27 +529,29 @@ def execute_po_calculate(
     }
 
 
-def background_po_calculate(session_id: str, body: dict) -> None:
+def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
     import threading
 
     from ..session import store
     from .po_calculate_jobs import set_po_job
+    from .po_session_hydrate import hydrate_po_session_for_calculate
+    from .shared_frames import session_inventory_variant, session_sales_df
 
     sess = store.get(session_id)
     if sess is None:
-        set_po_job(session_id, status="error", ok=False, message="Session not found.")
+        set_po_job(job_id, status="error", ok=False, message="Session not found.")
         return
 
     set_po_job(
-        session_id,
+        job_id,
         status="running",
         ok=True,
         progress=2,
-        message="Calculating PO recommendations…",
+        message="Preparing PO calculation…",
     )
     sess.po_calculate_status = "running"
     sess.po_calculate_progress = 2
-    sess.po_calculate_message = "Calculating PO recommendations…"
+    sess.po_calculate_message = "Preparing PO calculation…"
     _po_wall_start = time.perf_counter()
 
     try:
@@ -571,14 +576,72 @@ def background_po_calculate(session_id: str, body: dict) -> None:
             logger.exception("PostgreSQL persist after PO calculate failed")
 
     try:
+        _set_po_calculate_progress(sess, job_id, 4, "Hydrating sales and inventory…")
+        sales_before = session_sales_df(sess)
+        inv_before = session_inventory_variant(sess)
+        if sales_before.empty or inv_before.empty:
+            hydrate_po_session_for_calculate(sess)
+        else:
+            from .po_session_hydrate import ensure_po_sidecars_hydrated
+
+            ensure_po_sidecars_hydrated(sess)
+            try:
+                import backend.main as _main
+
+                _main.restore_po_sidecars_from_warm(sess)
+            except Exception:
+                logger.exception("restore_po_sidecars_from_warm during PO job failed")
+
+        if body.get("use_shared_cache"):
+            from .po_shared_cache import apply_shared_cache_to_session
+
+            cached = apply_shared_cache_to_session(sess, session_id, body, job_id=job_id)
+            if cached:
+                sess.po_calculate_existing_po_generation = int(
+                    getattr(sess, "existing_po_generation", 0) or 0
+                )
+                return
+
+        sales_df = session_sales_df(sess)
+        inv_df = session_inventory_variant(sess)
+        if sales_df.empty:
+            try:
+                from .po_inputs import load_po_inputs
+
+                pg_inputs = load_po_inputs(sess, body)
+                if not pg_inputs.sales_df.empty:
+                    sales_df = pg_inputs.sales_df
+                if not pg_inputs.inventory_df_variant.empty:
+                    inv_df = pg_inputs.inventory_df_variant
+            except Exception:
+                pass
+
+        if sales_df.empty:
+            msg = "Build Sales first (upload platforms, then POST /api/upload/build-sales)."
+            sess.po_calculate_status = "error"
+            sess.po_calculate_progress = 0
+            sess.po_calculate_message = msg
+            sess.po_calculate_result = {"ok": False, "message": msg}
+            set_po_job(job_id, status="error", ok=False, progress=0, message=msg)
+            return
+        if inv_df.empty:
+            msg = "Upload Inventory first."
+            sess.po_calculate_status = "error"
+            sess.po_calculate_progress = 0
+            sess.po_calculate_message = msg
+            sess.po_calculate_result = {"ok": False, "message": msg}
+            set_po_job(job_id, status="error", ok=False, progress=0, message=msg)
+            return
+
         _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
         if _inv_n > 500_000:
             msg = f"Calculating PO (trimmed inventory window, {_inv_n:,} baseline rows)…"
-            _set_po_calculate_progress(sess, session_id, 8, msg)
+            _set_po_calculate_progress(sess, job_id, 8, msg)
         result = execute_po_calculate(
             sess,
             body,
             session_id=session_id,
+            job_id=job_id,
             sync_sidecars=None,
             skip_hydrate=True,
         )
@@ -601,9 +664,9 @@ def background_po_calculate(session_id: str, body: dict) -> None:
                 logger.exception("spill_po_result_df after calculate")
 
             sess.po_calculate_status = "done"
-            _set_po_calculate_progress(sess, session_id, 100, msg)
+            _set_po_calculate_progress(sess, job_id, 100, msg)
             set_po_job(
-                session_id,
+                job_id,
                 status="done",
                 ok=True,
                 progress=100,
@@ -646,12 +709,12 @@ def background_po_calculate(session_id: str, body: dict) -> None:
             threading.Thread(
                 target=_warm_quarterly_bg,
                 daemon=True,
-                name=f"po-qtr-{session_id[:8]}",
+                name=f"po-qtr-{job_id[:8]}",
             ).start()
             threading.Thread(
                 target=_sync,
                 daemon=True,
-                name=f"po-save-{session_id[:8]}",
+                name=f"po-save-{job_id[:8]}",
             ).start()
             try:
                 from .perf_metrics import record_po_calculate
@@ -670,7 +733,7 @@ def background_po_calculate(session_id: str, body: dict) -> None:
             sess.po_calculate_status = "error"
             sess.po_calculate_progress = 0
             sess.po_calculate_message = msg
-            set_po_job(session_id, status="error", ok=False, progress=0, message=msg)
+            set_po_job(job_id, status="error", ok=False, progress=0, message=msg)
             try:
                 from .perf_metrics import record_po_calculate
 
@@ -688,7 +751,7 @@ def background_po_calculate(session_id: str, body: dict) -> None:
         sess.po_calculate_progress = 0
         sess.po_calculate_message = msg
         sess.po_calculate_result = {"ok": False, "message": msg}
-        set_po_job(session_id, status="error", ok=False, progress=0, message=msg)
+        set_po_job(job_id, status="error", ok=False, progress=0, message=msg)
         try:
             from .perf_metrics import record_po_calculate
 

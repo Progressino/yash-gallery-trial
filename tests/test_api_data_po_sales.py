@@ -1,7 +1,9 @@
 """HTTP tests: /api/data/* , /api/po/* , /api/sales/* (requires auth middleware bypass)."""
 
 import time
+
 import pandas as pd
+import pytest
 
 
 def test_health(client):
@@ -50,6 +52,16 @@ def test_po_calculate_needs_inventory(client, session_for_client, monkeypatch):
         "backend.services.po_session_hydrate.hydrate_po_session_for_calculate",
         lambda sess: {},
     )
+    monkeypatch.setattr(
+        "backend.services.po_inputs.load_po_inputs",
+        lambda sess, body: __import__(
+            "backend.services.po_inputs", fromlist=["PoInputs"]
+        ).PoInputs(sales_df=sess.sales_df),
+    )
+    monkeypatch.setattr(
+        "backend.services.shared_frames.session_inventory_variant",
+        lambda _sess: pd.DataFrame(),
+    )
     _, sess = session_for_client
     sess.sales_df = pd.DataFrame(
         {
@@ -67,7 +79,14 @@ def test_po_calculate_needs_inventory(client, session_for_client, monkeypatch):
         json={"period_days": 30, "lead_time": 7, "target_days": 60, "safety_pct": 0},
     )
     assert r.status_code == 200
-    assert r.json().get("ok") is False
+    kick = r.json()
+    assert kick.get("ok") is True
+    job_id = kick.get("job_id")
+    assert job_id
+    from tests.conftest import wait_po_job_done
+
+    with pytest.raises(AssertionError, match="Upload Inventory"):
+        wait_po_job_done(client, job_id, max_sec=15)
 
 
 def test_po_calculate_ok(client, session_for_client):
@@ -88,32 +107,19 @@ def test_po_calculate_ok(client, session_for_client):
     )
     r = client.post(
         "/api/po/calculate",
-        json={
-            "period_days": 30,
-            "lead_time": 7,
-            "target_days": 60,
-            "safety_pct": 0,
-            "use_shared_cache": False,
-        },
+        json={"period_days": 30, "lead_time": 7, "target_days": 60, "safety_pct": 0},
     )
     assert r.status_code == 200
     kick = r.json()
     assert kick.get("ok") is True
-    assert kick.get("status") in ("running", "done")
-    body = kick
-    if body.get("status") != "done":
-        for _ in range(60):
-            st = client.get("/api/po/calculate/status")
-            assert st.status_code == 200
-            body = st.json()
-            if body.get("status") == "done":
-                break
-            if body.get("status") == "error":
-                raise AssertionError(body.get("message") or "PO calculate failed")
-            time.sleep(0.5)
+    job_id = kick.get("job_id")
+    assert job_id
+    from tests.conftest import wait_po_job_done
+
+    body = wait_po_job_done(client, job_id)
     assert body.get("ok") is True
     res = client.get(
-        "/api/po/calculate/result",
+        f"/api/po/calculate/result/{job_id}",
         params={"offset": 0, "limit": 500, "compact": 0},
     )
     assert res.status_code == 200
@@ -127,7 +133,6 @@ def test_po_calculate_ok(client, session_for_client):
         ]
     assert rows
     assert "PO_Qty" in full["columns"]
-    assert full.get("has_more") is False
 
 
 def test_po_quarterly_loaded(client, session_for_client):

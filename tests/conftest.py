@@ -56,6 +56,25 @@ def bootstrap_test_session(client) -> str:
     return sid
 
 
+def wait_po_job_done(client, job_id: str, *, max_sec: float = 45.0) -> dict:
+    """Poll job status until done or error."""
+    import time
+
+    deadline = time.monotonic() + max_sec
+    last = {}
+    while time.monotonic() < deadline:
+        r = client.get(f"/api/po/calculate/status/{job_id}")
+        assert r.status_code == 200
+        last = r.json()
+        st = last.get("status")
+        if st == "done":
+            return last
+        if st == "error":
+            raise AssertionError(last.get("message") or "PO calculate failed")
+        time.sleep(0.25)
+    raise AssertionError(f"PO job timed out: {last}")
+
+
 @pytest.fixture
 def session_for_client(client):
     """Return (session_id, AppSession) after one request activates the session."""

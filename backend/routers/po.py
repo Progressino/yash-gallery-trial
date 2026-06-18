@@ -1121,6 +1121,10 @@ def _po_calculate_status_payload(job: dict, *, sid: str = "") -> dict:
     msg = str(job.get("message") or "")
     progress = max(0, min(100, int(job.get("progress") or 0)))
     out: dict = {"status": st, "message": msg, "progress": progress}
+    if job.get("job_id"):
+        out["job_id"] = str(job["job_id"])
+    if job.get("from_shared_cache"):
+        out["from_shared_cache"] = True
     if st == "error":
         out["ok"] = bool(job.get("ok", False))
     elif st == "done":
@@ -1133,21 +1137,38 @@ def _po_calculate_status_payload(job: dict, *, sid: str = "") -> dict:
         out["ok"] = True
     if sid and st in ("running", "done", "error"):
         try:
-            from ..services.po_calculate_jobs import set_po_job
+            from ..services.po_calculate_jobs import get_latest_job_id, set_po_job
 
-            set_po_job(sid, **{k: v for k, v in job.items() if k != "updated_at"})
+            job_id = str(job.get("job_id") or get_latest_job_id(sid) or "")
+            if job_id:
+                set_po_job(job_id, **{k: v for k, v in job.items() if k != "updated_at"})
         except Exception:
             pass
     return out
+
+
+def _require_po_job(request: Request, job_id: str) -> dict:
+    from fastapi import HTTPException
+
+    from ..services.po_calculate_jobs import get_po_job_by_id
+
+    sid = getattr(request.state, "session_id", None) or ""
+    job = get_po_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="PO job not found.")
+    if str(job.get("session_id") or "") != sid:
+        raise HTTPException(status_code=403, detail="PO job not accessible.")
+    return job
 
 
 def _fail_stale_po_job_if_needed(sess, sid: str) -> dict | None:
     """Mark long-idle running jobs as failed so the UI can retry."""
     if not sid:
         return None
-    from ..services.po_calculate_jobs import get_po_job, po_job_is_stale, set_po_job
+    from ..services.po_calculate_jobs import get_latest_job_id, get_po_job_by_id, po_job_is_stale, set_po_job
 
-    if not po_job_is_stale(sid):
+    job_id = get_latest_job_id(sid)
+    if not job_id or not po_job_is_stale(job_id):
         return None
     msg = (
         "PO calculation stopped responding (server may have restarted or run out of memory). "
@@ -1158,8 +1179,23 @@ def _fail_stale_po_job_if_needed(sess, sid: str) -> dict | None:
         sess.po_calculate_progress = 0
         sess.po_calculate_message = msg
         sess.po_calculate_result = {"ok": False, "message": msg}
-    set_po_job(sid, status="error", ok=False, progress=0, message=msg)
-    return {"status": "error", "message": msg, "progress": 0, "ok": False}
+    set_po_job(job_id, status="error", ok=False, progress=0, message=msg)
+    return _po_calculate_status_payload(get_po_job_by_id(job_id), sid=sid)
+
+
+@router.get("/calculate/status/{job_id}")
+def po_calculate_status_by_job(request: Request, job_id: str):
+    """Poll a specific PO calculate job."""
+    from ..services.po_calculate_jobs import get_po_job_by_id
+
+    sess = getattr(request.state, "session", None)
+    sid = getattr(request.state, "session_id", None) or ""
+    _require_po_job(request, job_id)
+    stale = _fail_stale_po_job_if_needed(sess, sid)
+    if stale and stale.get("job_id") == job_id:
+        return stale
+    job = get_po_job_by_id(job_id)
+    return _po_calculate_status_payload(job, sid=sid)
 
 
 @router.get("/calculate/status")
@@ -1174,7 +1210,7 @@ def po_calculate_status(request: Request):
         return stale
     job = get_po_job(sid)
     if job:
-        return _po_calculate_status_payload(job)
+        return _po_calculate_status_payload(job, sid=sid)
 
     if sess is not None:
         st = getattr(sess, "po_calculate_status", "idle") or "idle"
@@ -1198,14 +1234,13 @@ def po_calculate_status(request: Request):
     return {"status": "idle", "message": "", "progress": 0, "ok": True}
 
 
-@router.get("/calculate/result")
-def po_calculate_result(
+def _po_calculate_result_response(
     request: Request,
-    offset: int = 0,
-    limit: int = 0,
-    compact: int = 1,
+    *,
+    offset: int,
+    limit: int,
+    compact: int,
 ):
-    """PO table page after ``status`` is ``done`` (paginated; compact matrix JSON by default)."""
     from ..services.po_calculate_result_api import build_result_page, default_page_size
 
     sess = request.state.session
@@ -1258,6 +1293,42 @@ def po_calculate_result(
     )
 
 
+@router.get("/calculate/result/{job_id}")
+def po_calculate_result_by_job(
+    request: Request,
+    job_id: str,
+    offset: int = 0,
+    limit: int = 0,
+    compact: int = 1,
+):
+    """PO table page for a finished job (paginated)."""
+    job = _require_po_job(request, job_id)
+    st = str(job.get("status") or "idle")
+    if st == "running":
+        return {"ok": False, "status": "running", "message": "PO calculation still running.", "job_id": job_id}
+    if st == "error":
+        return {
+            "ok": False,
+            "status": "error",
+            "message": job.get("message") or "PO calculation failed.",
+            "job_id": job_id,
+        }
+    if st != "done":
+        return {"ok": False, "status": st, "message": "No PO result yet.", "job_id": job_id}
+    return _po_calculate_result_response(request, offset=offset, limit=limit, compact=compact)
+
+
+@router.get("/calculate/result")
+def po_calculate_result(
+    request: Request,
+    offset: int = 0,
+    limit: int = 0,
+    compact: int = 1,
+):
+    """PO table page after ``status`` is ``done`` (paginated; compact matrix JSON by default)."""
+    return _po_calculate_result_response(request, offset=offset, limit=limit, compact=compact)
+
+
 @router.get("/calculate/shared-cache")
 def po_shared_cache_info(request: Request):
     """Whether a shared PO run exists for this planning date and settings (no copy yet)."""
@@ -1302,115 +1373,53 @@ def po_shared_cache_info(request: Request):
 
 @router.post("/calculate")
 async def po_calculate(request: Request, body: PORequest, background_tasks: BackgroundTasks):
-    """Start PO calculation in the background (avoids 502 on large catalogs)."""
+    """Enqueue PO calculation — returns immediately with a job_id (no gateway timeout)."""
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-
-    from ..services.po_session_hydrate import hydrate_po_session_for_calculate
-    from ..services.shared_frames import session_inventory_variant, session_sales_df
-
-    hydrate_stats = hydrate_po_session_for_calculate(sess)
-
-    sales_df = session_sales_df(sess)
-    inv_df = session_inventory_variant(sess)
-    if sales_df.empty:
-        try:
-            from ..services.po_inputs import load_po_inputs
-
-            pg_inputs = load_po_inputs(sess, body.model_dump())
-            if not pg_inputs.sales_df.empty:
-                sales_df = pg_inputs.sales_df
-            if not pg_inputs.inventory_df_variant.empty:
-                inv_df = pg_inputs.inventory_df_variant
-        except Exception:
-            pass
-
-    if sales_df.empty:
-        return {
-            "ok": False,
-            "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales).",
-        }
-    if inv_df.empty:
-        return {
-            "ok": False,
-            "message": (
-                "Upload Inventory first."
-                if hydrate_stats.get("inventory_rows", 0) == 0
-                else "Inventory could not be loaded into this session — refresh and retry."
-            ),
-        }
 
     sid = getattr(request.state, "session_id", None)
     if not sid:
         return {"ok": False, "message": "No session id."}
 
+    stale = _fail_stale_po_job_if_needed(sess, sid)
+    if not stale:
+        from ..services.po_calculate_jobs import get_latest_job_id, get_po_job_by_id
+
+        latest_id = get_latest_job_id(sid)
+        if latest_id:
+            latest = get_po_job_by_id(latest_id)
+            if str(latest.get("status") or "") == "running":
+                return {"ok": True, "job_id": latest_id}
+
     body_dict = body.model_dump()
-    if body.use_shared_cache:
-        from ..services.po_shared_cache import apply_shared_cache_to_session
-
-        cached = apply_shared_cache_to_session(sess, sid, body_dict)
-        if cached:
-            sess.po_calculate_existing_po_generation = int(
-                getattr(sess, "existing_po_generation", 0) or 0
-            )
-            return cached
-
-    sid_running = getattr(request.state, "session_id", None) or ""
-    stale = _fail_stale_po_job_if_needed(sess, sid_running)
-    if stale:
-        pass  # allow a fresh Calculate PO below
-    elif getattr(sess, "po_calculate_status", "idle") == "running":
-        return {
-            "ok": True,
-            "status": "running",
-            "message": getattr(sess, "po_calculate_message", "") or "PO calculation already in progress…",
-        }
-
     sess.po_calculate_status = "running"
-    sess.po_calculate_progress = 2
-    try:
-        from ..services.po_result_spill import clear_spill
-
-        clear_spill(sid)
-    except Exception:
-        pass
-    _inv_n = int(len(getattr(sess, "daily_inventory_history_df", pd.DataFrame())))
-    if _inv_n > 500_000:
-        sess.po_calculate_message = (
-            f"Calculating PO (using last {int(body.period_days)} days of "
-            f"{_inv_n:,}-row inventory history)…"
-        )
-    else:
-        sess.po_calculate_message = "Calculating PO recommendations…"
+    sess.po_calculate_progress = 0
+    sess.po_calculate_message = "Queued…"
     sess.po_calculate_result = {}
     sess.po_calculate_result_df = pd.DataFrame()
 
     import asyncio
 
     from ..concurrency import PO_CALC_EXECUTOR
-    from ..services.po_calculate_jobs import set_po_job
+    from ..services.po_calculate_jobs import create_po_job
     from ..services.po_calculate_run import background_po_calculate
 
-    set_po_job(
+    job_id = create_po_job(
         sid,
-        status="running",
+        status="queued",
         ok=True,
-        progress=2,
-        message=sess.po_calculate_message,
+        progress=0,
+        message="Queued…",
     )
-    # Fire-and-forget — must not await (large catalogs run several minutes).
     asyncio.get_running_loop().run_in_executor(
         PO_CALC_EXECUTOR,
         background_po_calculate,
+        job_id,
         sid,
-        body.model_dump(),
+        body_dict,
     )
-    return {
-        "ok": True,
-        "status": "running",
-        "message": "PO calculation started. This may take 1–3 minutes on large catalogs.",
-    }
+    return {"ok": True, "job_id": job_id}
 
 
 @router.get("/quarterly-debug")

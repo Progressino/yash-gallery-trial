@@ -93,6 +93,11 @@ def _rows_from_result(full: dict) -> list[dict]:
 
 
 def _wait_done(client, kick):
+    job_id = kick.get("job_id")
+    if job_id:
+        from tests.conftest import wait_po_job_done
+
+        return wait_po_job_done(client, job_id)
     body = kick
     if body.get("status") == "done":
         return body
@@ -120,9 +125,11 @@ def test_po_fresh_calculate_ok(client, session_for_client, monkeypatch):
     assert r.status_code == 200
     kick = r.json()
     assert kick.get("ok") is True
-    _wait_done(client, kick)
+    body = _wait_done(client, kick)
+    job_id = kick.get("job_id") or body.get("job_id")
+    result_path = f"/api/po/calculate/result/{job_id}" if job_id else "/api/po/calculate/result"
     res = client.get(
-        "/api/po/calculate/result",
+        result_path,
         params={"offset": 0, "limit": 500, "compact": 0},
     )
     full = res.json()
@@ -133,7 +140,7 @@ def test_po_fresh_calculate_ok(client, session_for_client, monkeypatch):
     cols = full.get("columns") or []
     assert "PO_Pipeline_Total" in cols
     assert "Gross_PO_Qty" in cols
-    assert full.get("po_merge_version") == 36
+    assert full.get("po_merge_version") == 37
 
 
 def test_po_fresh_lead_gate_blocks_high_cover_even_if_api_sends_false(

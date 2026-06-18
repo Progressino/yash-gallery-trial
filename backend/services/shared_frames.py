@@ -75,14 +75,18 @@ def attach_shared_frames(sess, *, warm_cache_generation: int) -> None:
 
 def warm_frame(key: str, sess=None) -> pd.DataFrame:
     """Unified sales / platform / inventory accessor."""
-    if sess is not None and not session_uses_shared_frames(sess):
-        df = getattr(sess, key, None)
-        if df is not None and hasattr(df, "empty"):
-            return df
     wc = _warm_cache()
-    df = wc.get(key)
-    if df is not None and hasattr(df, "empty"):
-        return df
+    wc_df = wc.get(key)
+    if sess is not None:
+        df = getattr(sess, key, None)
+        if df is not None and hasattr(df, "empty") and not df.empty:
+            if not session_uses_shared_frames(sess):
+                return df
+            # Session holds a distinct copy (upload / test seed) — prefer it over warm cache.
+            if wc_df is None or df is not wc_df:
+                return df
+    if wc_df is not None and hasattr(wc_df, "empty"):
+        return wc_df
     if sess is not None:
         df = getattr(sess, key, None)
         if df is not None and hasattr(df, "empty"):

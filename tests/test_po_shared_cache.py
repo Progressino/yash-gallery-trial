@@ -234,7 +234,7 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
     )
     # Use model_dump() so the fingerprint has the same Pydantic defaults as the API.
     body = PORequest(
-        planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60
+        planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60, use_shared_cache=True
     ).model_dump()
     po_df = pd.DataFrame({"OMS_SKU": ["CACHE-SKU"], "PO_Qty": [7]})
     psc.save_shared_cache(
@@ -288,14 +288,19 @@ def test_po_calculate_post_uses_shared_cache(client, monkeypatch, session_for_cl
 
     assert r.status_code == 200
     data = r.json()
-    assert data.get("from_shared_cache") is True
-    assert data.get("status") == "done"
+    assert data.get("ok") is True
+    job_id = data.get("job_id")
+    assert job_id
     assert elapsed < 2.0
+    from tests.conftest import wait_po_job_done
+
+    st = wait_po_job_done(c2, job_id, max_sec=15)
+    assert st.get("status") == "done"
     assert ran["n"] == 0
 
-    st = c2.get("/api/po/calculate/result", params={"offset": 0, "limit": 50, "compact": 1})
-    assert st.status_code == 200
-    page = st.json()
+    res = c2.get(f"/api/po/calculate/result/{job_id}", params={"offset": 0, "limit": 50, "compact": 1})
+    assert res.status_code == 200
+    page = res.json()
     assert page.get("total") == 1
 
 
@@ -333,7 +338,7 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
 
     # Use model_dump() so the fingerprint has the same Pydantic defaults as the API.
     body = PORequest(
-        planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60
+        planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60, use_shared_cache=True
     ).model_dump()
     from backend.services.po_session_hydrate import hydrate_po_session_for_calculate
 
@@ -359,7 +364,11 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
     r = client.post("/api/po/calculate", json=body)
     assert r.status_code == 200
     data = r.json()
-    assert data.get("from_shared_cache") is True
+    assert data.get("job_id")
+    from tests.conftest import wait_po_job_done
+
+    st = wait_po_job_done(client, data["job_id"], max_sec=15)
+    assert st.get("from_shared_cache") is True
     assert ran["n"] == 0
 
 

@@ -830,12 +830,13 @@ def ensure_existing_po_hydrated(sess) -> bool:
             changed = restore_existing_po_from_warm_cache(sess) or changed
     if changed:
         try:
-            from ..services.po_raise_remove import invalidate_po_calculate_result
+            if getattr(sess, "po_calculate_status", "idle") != "running":
+                from ..services.po_raise_remove import invalidate_po_calculate_result
 
-            invalidate_po_calculate_result(sess)
-            from ..services.po_shared_cache import invalidate_all_shared_caches
+                invalidate_po_calculate_result(sess)
+                from ..services.po_shared_cache import invalidate_all_shared_caches
 
-            invalidate_all_shared_caches()
+                invalidate_all_shared_caches()
         except Exception:
             pass
     return changed

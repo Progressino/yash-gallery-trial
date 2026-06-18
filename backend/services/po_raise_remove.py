@@ -14,6 +14,8 @@ def invalidate_po_calculate_result(sess) -> None:
     """Drop cached PO table — pipeline columns are stale after ledger edits."""
     import pandas as pd
 
+    if getattr(sess, "po_calculate_status", "idle") == "running":
+        return
     sess.po_calculate_status = "idle"
     sess.po_calculate_message = ""
     sess.po_calculate_progress = 0
