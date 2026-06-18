@@ -15,7 +15,7 @@ import time
 from typing import Dict, List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
-from ..models.schemas import CoverageResponse, JobStatusResponse, RestoreFullResponse
+from ..models.schemas import CoverageResponse, JobStatusResponse, RestoreFullResponse, IntelligenceReadinessResponse, DashboardSummaryResponse
 from ..services.helpers import (
     clean_sku,
     get_parent_sku,
@@ -3283,6 +3283,32 @@ def get_coverage(request: Request, light: bool = False):
     _restore_daily_if_needed(sess)
     _ensure_sales_rebuilt(sess)
     return _build_coverage_response(sess)
+
+
+@router.get("/intelligence/readiness", response_model=IntelligenceReadinessResponse)
+def intelligence_readiness(request: Request):
+    """Dashboard gate — 8/8 + platform history + hydration settled (ignores sales_rebuild)."""
+    sess = _sess(request)
+    sid = getattr(request.state, "session_id", None) or ""
+    cov = _build_coverage_response(sess)
+    from ..services.intelligence_readiness import build_intelligence_readiness
+
+    return IntelligenceReadinessResponse(**build_intelligence_readiness(sess, cov, session_id=sid))
+
+
+@router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
+def dashboard_summary(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10,
+):
+    """Compact dashboard aggregates from Tier-3 / PostgreSQL (no session platform copies)."""
+    from ..services.dashboard_summary import build_dashboard_summary
+
+    sess = _sess(request)
+    payload = build_dashboard_summary(sess, start_date=start_date, end_date=end_date, limit=limit)
+    return DashboardSummaryResponse(**payload)
 
 
 @router.get("/parity")

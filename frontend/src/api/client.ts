@@ -164,6 +164,39 @@ export interface CoverageResponse {
   /** Non-critical and critical background jobs currently running. */
   background_tasks?: Record<string, boolean>
   critical_restore_running?: boolean
+  /** Intelligence dashboard — platform history available (PG/Tier-3 or session frames). */
+  platforms_loaded?: boolean
+  /** Session warm hydrate finished (not inflight). */
+  hydration_complete?: boolean
+  /** Full intelligence gate — sales + inventory + platforms + hydration settled. */
+  intelligence_ready?: boolean
+  /** Dashboard may fetch aggregates — 8/8 + platforms_loaded + hydration_complete. */
+  dashboard_ready?: boolean
+}
+
+export interface IntelligenceReadinessResponse {
+  intelligence_ready: boolean
+  dashboard_ready: boolean
+  data_ready?: boolean
+  platforms_loaded: boolean
+  hydration_complete: boolean
+  hydration_inflight: boolean
+  sales_available: boolean
+  inventory_available: boolean
+  sales_rows: number
+  inventory_rows: number
+  platform_rows: Record<string, number>
+  data_source: string
+  background_jobs: string[]
+  background_tasks?: Record<string, boolean>
+}
+
+export interface DashboardSummaryResponse {
+  source: string
+  platforms: Record<string, { sales?: number; returns?: number; net?: number; loaded?: boolean }>
+  top_skus: Array<{ sku: string; units?: number }>
+  sales_summary: Record<string, number>
+  message?: string
 }
 
 export interface PoReadinessResponse {
@@ -1486,6 +1519,32 @@ export async function waitForWarmCacheReady(opts?: {
 export async function getPoReadiness(opts?: { timeout?: number }): Promise<PoReadinessResponse> {
   const { data } = await api.get<PoReadinessResponse>('/po/readiness', {
     timeout: opts?.timeout ?? 45_000,
+  })
+  return data
+}
+
+export async function getIntelligenceReadiness(opts?: {
+  timeout?: number
+}): Promise<IntelligenceReadinessResponse> {
+  const { data } = await api.get<IntelligenceReadinessResponse>('/data/intelligence/readiness', {
+    timeout: opts?.timeout ?? 45_000,
+  })
+  return data
+}
+
+export async function getDashboardSummary(opts?: {
+  startDate?: string
+  endDate?: string
+  limit?: number
+  timeout?: number
+}): Promise<DashboardSummaryResponse> {
+  const params: Record<string, string | number> = {}
+  if (opts?.startDate) params.start_date = opts.startDate
+  if (opts?.endDate) params.end_date = opts.endDate
+  if (opts?.limit != null) params.limit = opts.limit
+  const { data } = await api.get<DashboardSummaryResponse>('/data/dashboard/summary', {
+    params,
+    timeout: opts?.timeout ?? 60_000,
   })
   return data
 }

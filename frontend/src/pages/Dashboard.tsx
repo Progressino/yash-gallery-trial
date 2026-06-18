@@ -6,14 +6,17 @@ import {
   CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts'
 import api, {
+  cacheHydrateWarm,
   downloadDailyDsrCsv,
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
   getCoverage,
   getDataParity,
+  getIntelligenceReadiness,
   invalidateDataQueries,
 } from '../api/client'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
+import { dashboardGateReady } from '../lib/localSessionHint'
 import {
   bundleHasDisplayData,
   clearIntelligenceCache,
@@ -795,19 +798,13 @@ export default function Dashboard() {
   const prevReturnsImport = useRef<string>('idle')
   const bundleLoadStartedAt = useRef<number | null>(null)
   const bundleKickedRef = useRef(false)
+  const hydrateRequested = useRef(false)
   const [bundleLoadTick, setBundleLoadTick] = useState(0)
   const salesRebuild = useSession(s => s.sales_rebuild ?? 'idle')
   const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
   const coverageReturnLoaded = useSession(s => s.return_sheet)
   const sessionSales = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
-  const jobRunning = useSession(s =>
-    s.inventory_upload_status === 'running' ||
-    s.daily_inventory_upload_status === 'running' ||
-    s.daily_auto_ingest_status === 'running' ||
-    s.tier1_bulk_status === 'running' ||
-    s.sales_rebuild === 'running' ||
-    s.returns_import_status === 'running',
-  )
+  const coverageSnapshot = useSession(s => s)
   const returnsImport = useSession(s => s.returns_import_status ?? 'idle')
 
   /* ── state ── */
@@ -866,6 +863,30 @@ export default function Dashboard() {
     staleTime: 60_000,
     refetchOnWindowFocus: true,
   })
+
+  const { data: intelligenceReadiness } = useQuery({
+    queryKey: ['intelligence-readiness'],
+    queryFn: () => getIntelligenceReadiness({ timeout: 45_000 }),
+    refetchInterval: q => (q.state.data?.dashboard_ready ? false : 2_000),
+    staleTime: 0,
+  })
+
+  const dashboardReady =
+    intelligenceReadiness?.dashboard_ready === true ||
+    dashboardGateReady(coverageSnapshot)
+
+  useEffect(() => {
+    if (dashboardReady || hydrateRequested.current) return
+    if (intelligenceReadiness?.hydration_inflight) return
+    hydrateRequested.current = true
+    void cacheHydrateWarm().catch(() => {
+      hydrateRequested.current = false
+    })
+  }, [dashboardReady, intelligenceReadiness?.hydration_inflight])
+
+  useEffect(() => {
+    if (dashboardReady) hydrateRequested.current = false
+  }, [dashboardReady])
 
   useEffect(() => {
     if (parityReport && !parityReport.ok) {
@@ -943,6 +964,7 @@ export default function Dashboard() {
     staleTime: 120_000,
     retry: 2,
     retryDelay: attempt => Math.min(8_000, 2_000 * (attempt + 1)),
+    enabled: dashboardReady,
     placeholderData: previousData => {
       const prev = previousData as IntelligenceBundle | undefined
       if (prev && bundleHasDisplayData(prev)) return prev
@@ -950,8 +972,8 @@ export default function Dashboard() {
       return undefined
     },
     refetchInterval: q => {
+      if (!dashboardReady) return false
       const d = q.state.data
-      if (jobRunning) return 4_000
       if (d?.status === 'warming') return 4_000
       if (q.state.fetchStatus === 'fetching') return false
       if (!bundleHasDisplayData(d)) return 4_000
@@ -988,7 +1010,9 @@ export default function Dashboard() {
   const hasDisplayData = bundleHasDisplayData(intelligenceBundle)
   const hasCachedDisplay = Boolean(cachedBundleHint && bundleHasDisplayData(cachedBundleHint))
 
+  const awaitingDashboardReady = !dashboardReady
   const awaitingFirstBundle =
+    !awaitingDashboardReady &&
     !hasDisplayData &&
     !hasCachedDisplay &&
     (bundleWarming ||
@@ -1225,6 +1249,7 @@ export default function Dashboard() {
   const hiddenByName = new Set([...hiddenPlatforms].map(id => id))
 
   const intelligenceLoading =
+    awaitingDashboardReady ||
     awaitingFirstBundle ||
     bundleWarming ||
     (!hasDisplayData && loadingBundle && !hasCachedDisplay) ||
@@ -1235,6 +1260,18 @@ export default function Dashboard() {
     exportingDsrMonthly
 
   const intelligenceLoadLabel = useMemo(() => {
+    if (awaitingDashboardReady) {
+      if (intelligenceReadiness?.hydration_inflight) {
+        return 'Syncing marketplace history into your session…'
+      }
+      if (!intelligenceReadiness?.platforms_loaded) {
+        return 'Loading marketplace platform data…'
+      }
+      if (intelligenceReadiness?.background_jobs?.length) {
+        return `Preparing dashboard (${intelligenceReadiness.background_jobs.join(', ')} in background)…`
+      }
+      return 'Preparing Intelligence dashboard…'
+    }
     if (awaitingFirstBundle && bundleLoadPercent != null) {
       const sec = Math.floor(bundleLoadElapsedMs / 1000)
       return `Loading marketplace data… (${bundleLoadPercent}% · ${sec}s)`
@@ -1249,6 +1286,10 @@ export default function Dashboard() {
     if (showDsr && loadingDsr) return 'Loading daily DSR…'
     return undefined
   }, [
+    awaitingDashboardReady,
+    intelligenceReadiness?.hydration_inflight,
+    intelligenceReadiness?.platforms_loaded,
+    intelligenceReadiness?.background_jobs,
     exportingSales,
     exportingDsr,
     exportingDsrMonthly,
@@ -1319,7 +1360,9 @@ export default function Dashboard() {
             </h1>
             <p className="hero-sub">
               {dateStart || 'All time'} → {dateEnd || 'today'} ·{' '}
-              {awaitingFirstBundle
+              {awaitingDashboardReady
+                ? 'Syncing marketplace data — please wait…'
+                : awaitingFirstBundle
                 ? 'Loading marketplace data — please wait…'
                 : salesLoaded || hasCachedDisplay
                   ? `${loadedPlatforms.length || (cachedBundleHint?.platform_summary?.filter(p => p.loaded).length ?? 0)} of ${platforms.length || 5} marketplaces loaded`

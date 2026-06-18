@@ -67,6 +67,8 @@ def test_augment_coverage_adds_po_ready():
     assert cov.data_ready is True
     assert cov.po_ready is True
     assert cov.background_tasks.get("sales_rebuild") is True
+    assert hasattr(cov, "platforms_loaded")
+    assert hasattr(cov, "dashboard_ready")
 
 
 def test_po_readiness_endpoint(client, session_for_client, monkeypatch):

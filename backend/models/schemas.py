@@ -142,6 +142,36 @@ class CoverageResponse(BaseModel):
     po_ready: bool = False
     background_tasks: dict[str, bool] = Field(default_factory=dict)
     critical_restore_running: bool = False
+    # Intelligence dashboard (stronger than 8/8 alone)
+    platforms_loaded: bool = False
+    hydration_complete: bool = False
+    intelligence_ready: bool = False
+    dashboard_ready: bool = False
+
+
+class IntelligenceReadinessResponse(BaseModel):
+    intelligence_ready: bool
+    dashboard_ready: bool = False
+    data_ready: bool = False
+    platforms_loaded: bool = False
+    hydration_complete: bool = False
+    hydration_inflight: bool = False
+    sales_available: bool = False
+    inventory_available: bool = False
+    sales_rows: int = 0
+    inventory_rows: int = 0
+    platform_rows: dict[str, int] = Field(default_factory=dict)
+    data_source: str = "warm_cache"
+    background_jobs: list[str] = Field(default_factory=list)
+    background_tasks: dict[str, bool] = Field(default_factory=dict)
+
+
+class DashboardSummaryResponse(BaseModel):
+    source: str = "none"
+    platforms: dict[str, dict] = Field(default_factory=dict)
+    top_skus: list[dict] = Field(default_factory=list)
+    sales_summary: dict = Field(default_factory=dict)
+    message: str = ""
 
 
 class PoReadinessResponse(BaseModel):

@@ -124,9 +124,22 @@ def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> 
 
 def augment_coverage(sess, cov: CoverageResponse) -> CoverageResponse:
     """Attach data_ready / po_ready / background_tasks to coverage payload."""
+    from .intelligence_readiness import (
+        build_intelligence_readiness,
+        dashboard_gate_ready,
+        hydration_complete,
+        platform_frames_available,
+    )
+
     data = cov.model_dump()
     data["data_ready"] = compute_data_ready(cov)
     data["po_ready"] = compute_po_ready(sess, cov)
     data["background_tasks"] = background_tasks_running(sess)
     data["critical_restore_running"] = critical_restore_running(sess)
+    sid = getattr(sess, "_session_id", "") or ""
+    data["platforms_loaded"] = platform_frames_available(sess, cov)
+    data["hydration_complete"] = hydration_complete(sess, sid)
+    intel = build_intelligence_readiness(sess, cov, session_id=sid)
+    data["intelligence_ready"] = bool(intel.get("intelligence_ready"))
+    data["dashboard_ready"] = dashboard_gate_ready(sess, cov, session_id=sid)
     return CoverageResponse(**data)

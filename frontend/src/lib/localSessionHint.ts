@@ -137,6 +137,26 @@ export function operationalDataComplete(c: CoverageResponse): boolean {
   return loaded === total
 }
 
+/** Dashboard may mount charts — 8/8 + platform history + hydration settled. */
+export function dashboardGateReady(c: CoverageResponse): boolean {
+  if (typeof c.dashboard_ready === 'boolean') {
+    return c.dashboard_ready
+  }
+  if (!operationalDataComplete(c)) return false
+  if (c.critical_restore_running) return false
+  if (c.platforms_loaded === false) return false
+  if (c.hydration_complete === false) return false
+  return true
+}
+
+/** Full intelligence gate (includes sales/inventory availability checks). */
+export function intelligenceReady(c: CoverageResponse): boolean {
+  if (typeof c.intelligence_ready === 'boolean') {
+    return c.intelligence_ready
+  }
+  return dashboardGateReady(c)
+}
+
 /** Minimum unified sales rows before PO page mounts (prod catalog ~1.56M). */
 export const PO_MIN_SALES_ROWS = 1_000_000
 
