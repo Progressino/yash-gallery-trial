@@ -179,6 +179,12 @@ jobs:
           fi
           docker image prune -f || true
 
+      - name: Enable PostgreSQL query analytics (pg_stat_statements)
+        run: |
+          set -eu
+          chmod +x scripts/pg_enable_stat_statements.sh scripts/pg_slow_queries.sh
+          bash scripts/pg_enable_stat_statements.sh
+
       - name: Renew TLS certificate (app.progressino.com)
         continue-on-error: true
         run: |

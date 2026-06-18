@@ -7,8 +7,19 @@ services:
       POSTGRES_USER: forecast
       POSTGRES_PASSWORD: forecast
       POSTGRES_DB: forecast
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.save=on
     volumes:
       - forecast_pg_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "5433:5432"
     restart: unless-stopped

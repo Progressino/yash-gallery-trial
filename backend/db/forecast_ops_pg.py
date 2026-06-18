@@ -84,6 +84,10 @@ def init_db() -> None:
         return
     try:
         with psycopg.connect(url, autocommit=True) as conn:
+            try:
+                conn.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+            except Exception:
+                _log.debug("pg_stat_statements extension not available (preload + restart required)")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS forecast_shared_snapshot (
                     snapshot_id TEXT PRIMARY KEY,
