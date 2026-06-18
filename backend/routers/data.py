@@ -3167,9 +3167,14 @@ def get_coverage(request: Request, light: bool = False):
             _main.restore_po_sidecars_from_warm(sess)
             if not _main._warm_cache:
                 _main.bootstrap_warm_cache_from_disk_if_empty()
-            if _main._warm_cache:
-                if _main.session_needs_warm_cache_topup(sess) or _main.session_needs_operational_data(sess):
-                    _main._apply_warm_cache_if_needed(sess, _main._warm_cache_generation)
+            # Heavy warm-cache copy runs in _maybe_queue_light_session_hydrate — never block light polls.
+            if not getattr(sess, "sku_mapping", None):
+                try:
+                    from ..services.sku_mapping import restore_sku_mapping_to_session
+
+                    restore_sku_mapping_to_session(sess)
+                except Exception:
+                    pass
         except Exception:
             pass
         try:

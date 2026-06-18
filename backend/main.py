@@ -163,14 +163,6 @@ def try_fast_warm_cache_hydrate(sess) -> bool:
     except Exception:
         pass
     applied = _apply_warm_cache_if_needed(sess, _warm_cache_generation)
-    # Platform frames copy without unified sales_df leaves coverage at 0/8 until
-    # a background worker runs — rebuild synchronously when mapping + history exist.
-    try:
-        from .routers.data import _ensure_sales_rebuilt
-
-        _ensure_sales_rebuilt(sess)
-    except Exception:
-        log.exception("sales rebuild after fast warm-cache hydrate failed")
     if applied:
         return True
     try:

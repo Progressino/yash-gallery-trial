@@ -60,11 +60,12 @@ def test_light_coverage_skips_heavy_restore(client, auth_token, monkeypatch):
 
 
 def test_light_coverage_applies_warm_cache_when_session_empty(client, auth_token, monkeypatch):
-    """Hard refresh: first light coverage should copy warm cache into session without Tier-3."""
+    """Hard refresh: light coverage queues warm-cache hydrate; worker copies without Tier-3."""
     import pandas as pd
 
     import backend.main as main_mod
     from backend.session import store
+    from backend.routers.data import _run_light_session_hydrate_worker
 
     main_mod._warm_cache = {
         "sku_mapping": {"SKU-A": "SKU-A"},
@@ -80,11 +81,11 @@ def test_light_coverage_applies_warm_cache_when_session_empty(client, auth_token
     main_mod._warm_cache_generation = 3
     main_mod._warm_cache_ready.set()
 
-    monkeypatch.setattr("backend.routers.data._maybe_queue_light_session_hydrate", lambda *_a, **_k: None)
-
     r = client.get("/api/data/coverage", params={"light": "1"})
     assert r.status_code == 200, r.text
-    body = r.json()
+    sid = client.cookies.get("session_id")
+    _run_light_session_hydrate_worker(sid)
+    body = client.get("/api/data/coverage", params={"light": "1"}).json()
     assert body.get("sku_mapping") is True
     assert body.get("mtr") is True
     assert body.get("sales") is True
@@ -141,42 +142,29 @@ def test_coverage_sales_ready_when_platforms_loaded_without_sales_df():
 
 
 def test_light_coverage_marks_sales_ready_and_queues_build(client, auth_token, monkeypatch):
-    """Platforms-only session: coverage reports sales=True and queues background unified build."""
-    import backend.main as main_mod
+    """Platforms in session without sales_df: coverage is 8/8-ready and queues unified build."""
     from backend.session import store
-
-    main_mod._warm_cache = {
-        "sku_mapping": {"SKU-A": "SKU-A"},
-        "mtr_df": pd.DataFrame({"SKU": ["SKU-A"], "Quantity": [3], "Date": pd.to_datetime(["2026-01-15"]), "Transaction_Type": ["Shipment"]}),
-        "myntra_df": pd.DataFrame(),
-        "meesho_df": pd.DataFrame(),
-        "flipkart_df": pd.DataFrame(),
-        "snapdeal_df": pd.DataFrame(),
-        "inventory_df_variant": pd.DataFrame({"OMS_SKU": ["SKU-A"], "Total_Inventory": [5]}),
-        "inventory_df_parent": pd.DataFrame(),
-    }
-    main_mod._warm_cache_generation = 5
-    main_mod._warm_cache_ready.set()
-    monkeypatch.setattr("backend.routers.data._maybe_queue_light_session_hydrate", lambda *_a, **_k: None)
 
     queued = {"n": 0}
 
     def _track_queue(sess, sid):
         queued["n"] += 1
 
+    monkeypatch.setattr("backend.routers.data._maybe_queue_light_session_hydrate", lambda *_a, **_k: None)
     monkeypatch.setattr("backend.routers.data._maybe_queue_unified_sales_build", _track_queue)
 
-    r = client.get("/api/data/coverage", params={"light": "1"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body.get("sales") is True
-
+    client.get("/api/data/coverage", params={"light": "1"})
     sid = client.cookies.get("session_id")
     sess = store.get(sid)
-    assert sess is not None
-    assert not sess.mtr_df.empty
+    sess.sku_mapping = {"SKU-A": "SKU-A"}
+    sess.mtr_df = pd.DataFrame({"Sku": ["SKU-A"], "Quantity": [3]})
+    sess.sales_df = pd.DataFrame()
+    sess.inventory_df_variant = pd.DataFrame({"OMS_SKU": ["SKU-A"], "Total_Inventory": [5]})
+
+    queued["n"] = 0
+    body = client.get("/api/data/coverage", params={"light": "1"}).json()
+    assert body.get("sales") is True
     assert queued["n"] == 1
-    main_mod.clear_warm_cache()
     _unified_sales_build_queued.clear()
 
 
