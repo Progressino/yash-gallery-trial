@@ -408,11 +408,18 @@ def execute_po_calculate(
 
     sales_through = None
     try:
-        st = pd.to_datetime(_ads_source["TxnDate"], errors="coerce").max()
-        if pd.notna(st):
-            sales_through = str(pd.Timestamp(st).date())
+        from .tier3_session_merge import effective_sales_through
+
+        sales_through = effective_sales_through(sess, _ads_source) or None
     except Exception:
         pass
+    if not sales_through:
+        try:
+            st = pd.to_datetime(_ads_source["TxnDate"], errors="coerce").max()
+            if pd.notna(st):
+                sales_through = str(pd.Timestamp(st).date())
+        except Exception:
+            pass
 
     planning_out = None
     pd_raw = body.get("planning_date")

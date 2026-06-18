@@ -271,6 +271,62 @@ def session_sales_through(sess) -> str:
     return ""
 
 
+def tier3_sales_through() -> str:
+    """Latest calendar day across Tier-3 SQLite upload metadata (Upload tab source of truth)."""
+    try:
+        from .daily_store import get_summary
+
+        summary = get_summary() or {}
+    except Exception:
+        return ""
+    bests: list[str] = []
+    for info in summary.values():
+        if not isinstance(info, dict):
+            continue
+        if int(info.get("file_count") or 0) <= 0:
+            continue
+        md = str(info.get("max_date") or "")[:10]
+        if len(md) == 10:
+            bests.append(md)
+    return max(bests) if bests else ""
+
+
+def effective_sales_through(sess, ads_df: pd.DataFrame | None = None) -> str:
+    """
+    Latest sales day for PO gap warnings — session, Tier-3 metadata, and ADS overlay.
+    Avoids false “4d gap” warnings when dailies are saved but session sales is stale.
+    """
+    candidates: list[str] = []
+    st = session_sales_through(sess)
+    if st:
+        candidates.append(st[:10])
+    t3 = tier3_sales_through()
+    if t3:
+        candidates.append(t3[:10])
+    if ads_df is not None and not getattr(ads_df, "empty", True):
+        try:
+            if "TxnDate" in ads_df.columns:
+                t = pd.to_datetime(ads_df["TxnDate"], errors="coerce").max()
+                if pd.notna(t):
+                    candidates.append(str(pd.Timestamp(t).date()))
+        except Exception:
+            pass
+    candidates = [c for c in candidates if len(c) >= 10]
+    return max(candidates) if candidates else ""
+
+
+def refresh_po_sales_through_meta(sess, meta: dict | None) -> dict:
+    """Bump stale PO result metadata when Tier-3 dailies are newer than session sales."""
+    out = dict(meta or {})
+    fresh = effective_sales_through(sess)
+    if not fresh:
+        return out
+    old = str(out.get("sales_through") or "")[:10]
+    if not old or fresh >= old:
+        out["sales_through"] = fresh
+    return out
+
+
 def platform_session_bounds(sess) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for plat, attr in _PLATFORM_ATTRS:
@@ -290,7 +346,7 @@ def build_parity_report(sess, *, planning_date: str | None = None) -> dict[str, 
     plan = _normalize_planning_date(planning_date)
     tier3 = get_summary() or {}
     tier3_files = sum(int((tier3.get(p) or {}).get("file_count") or 0) for p in tier3)
-    sales_through = session_sales_through(sess)
+    sales_through = effective_sales_through(sess)
     warnings: list[str] = []
     if tier3_files > 0 and tier3_token_mismatch(sess):
         warnings.append(

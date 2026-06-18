@@ -1241,6 +1241,9 @@ def po_calculate_result(
         }
     if not meta:
         return {"ok": False, "message": "PO result missing."}
+    from ..services.tier3_session_merge import refresh_po_sales_through_meta
+
+    meta = refresh_po_sales_through_meta(sess, meta)
     sid = getattr(request.state, "session_id", None)
     po_df = getattr(sess, "po_calculate_result_df", None)
     lim = int(limit) if int(limit or 0) > 0 else default_page_size()

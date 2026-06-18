@@ -130,16 +130,9 @@ def normalize_planning_date(body: dict) -> str:
 
 
 def _sales_through(sess) -> str:
-    try:
-        sdf = getattr(sess, "sales_df", None)
-        if sdf is None or sdf.empty or "TxnDate" not in sdf.columns:
-            return ""
-        t = pd.to_datetime(sdf["TxnDate"], errors="coerce").max()
-        if pd.notna(t):
-            return str(pd.Timestamp(t).date())
-    except Exception:
-        pass
-    return ""
+    from .tier3_session_merge import effective_sales_through
+
+    return effective_sales_through(sess)
 
 
 def _existing_po_fingerprint(sess) -> str:
@@ -462,6 +455,14 @@ def apply_shared_cache_to_session(sess, session_id: str, body: dict) -> Optional
             "raise_ledger_rows": meta.get("raise_ledger_rows"),
             "po_merge_version": _merge_ver,
         }
+        try:
+            from .tier3_session_merge import effective_sales_through
+
+            fresh_through = effective_sales_through(sess)
+            if fresh_through:
+                result["sales_through"] = fresh_through
+        except Exception:
+            pass
         if int(meta.get("new_po_qty_sum") or 0) > 0:
             result["summary"] = {
                 "new_po_qty_sum": int(meta.get("new_po_qty_sum") or 0),
@@ -492,6 +493,8 @@ def apply_shared_cache_to_session(sess, session_id: str, body: dict) -> Optional
 
 def shared_cache_availability(sess, body: dict) -> dict[str, Any]:
     """Lightweight check for UI — does not copy into session."""
+    from .tier3_session_merge import effective_sales_through
+
     meta = lookup_shared_cache(sess, body)
     if not meta:
         return {"available": False}
@@ -501,7 +504,7 @@ def shared_cache_availability(sess, body: dict) -> dict[str, Any]:
         "planning_date": meta.get("planning_date"),
         "row_count": int(meta.get("total_rows") or 0),
         "computed_at": meta.get("created_at_ist"),
-        "sales_through": meta.get("sales_through"),
+        "sales_through": effective_sales_through(sess) or meta.get("sales_through"),
         "po_merge_version": meta.get("po_merge_version") or _fp.get("po_merge_version"),
     }
 
