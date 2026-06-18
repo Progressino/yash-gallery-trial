@@ -2201,6 +2201,17 @@ def _inventory_apply_parse_result(
         _log.exception("re-apply manual in-transit overlay after inventory snapshot failed")
     apply_inventory_snapshot_metadata(sess, file_parts, debug)
     refresh_inventory_api_cache(sess)
+    try:
+        from ..db.forecast_ops_tables import persist_inventory_dataframe
+
+        persist_inventory_dataframe(
+            sess.inventory_df_variant,
+            snapshot_date=getattr(sess, "inventory_snapshot_date", "") or None,
+            snapshot_label=getattr(sess, "inventory_snapshot_date_label", "") or None,
+            debug=dict(getattr(sess, "inventory_debug", None) or {}),
+        )
+    except Exception:
+        _log.exception("PostgreSQL inventory table persist failed")
     sess._inventory_pre_upload_backup = None
     _session_data_changed(sess)
     payload = _build_inventory_upload_payload(

@@ -117,6 +117,9 @@ def init_db() -> None:
                     PRIMARY KEY (platform, blocked_date)
                 )
             """)
+            from .forecast_ops_tables import ensure_tables
+
+            ensure_tables(conn)
         _table_ready = True
         _log.info("forecast ops PostgreSQL tables ready (shared snapshot + daily_uploads)")
     except Exception:
@@ -265,6 +268,12 @@ def persist_shared_snapshot(cache_dict: dict) -> bool:
             len(manifest.get("keys") or []),
             len(blob) // (1024 * 1024),
         )
+        try:
+            from .forecast_ops_tables import persist_warm_cache_tables
+
+            persist_warm_cache_tables(cache_dict)
+        except Exception:
+            _log.exception("normalized table persist after shared snapshot failed")
         return True
     except Exception:
         _log.exception("persist_shared_snapshot failed")
@@ -272,9 +281,18 @@ def persist_shared_snapshot(cache_dict: dict) -> bool:
 
 
 def load_shared_snapshot() -> dict | None:
-    """Load shared warm-cache dict from PostgreSQL."""
+    """Load shared warm-cache dict from PostgreSQL (indexed tables first, then blob)."""
     if not ops_pg_enabled():
         return None
+    try:
+        from .forecast_ops_tables import load_warm_cache_tables, normalized_tables_enabled
+
+        if normalized_tables_enabled():
+            tab = load_warm_cache_tables()
+            if tab and _snapshot_has_operational_data(tab):
+                return tab
+    except Exception:
+        _log.exception("load from normalized PG tables failed — falling back to blob")
     conn = _require_conn()
     if conn is None:
         return None
@@ -309,14 +327,37 @@ def shared_snapshot_status() -> dict[str, Any]:
             ).fetchone()
             upload_count = conn.execute("SELECT COUNT(*) FROM forecast_daily_uploads").fetchone()
         if row is None:
-            return {"enabled": True, "present": False, "daily_uploads": int(upload_count[0] or 0)}
+            try:
+                from .forecast_ops_tables import tables_status
+
+                tbl = tables_status()
+            except Exception:
+                tbl = {}
+            has_tables = bool(
+                tbl.get("inventory_lines")
+                or tbl.get("sku_mapping")
+                or tbl.get("sales_by_platform")
+            )
+            return {
+                "enabled": True,
+                "present": has_tables,
+                "daily_uploads": int(upload_count[0] or 0),
+                "tables": tbl,
+            }
         manifest = row[0] if isinstance(row[0], dict) else {}
+        try:
+            from .forecast_ops_tables import tables_status
+
+            tbl = tables_status()
+        except Exception:
+            tbl = {}
         return {
             "enabled": True,
             "present": True,
             "updated_at": row[1].isoformat() if row[1] else None,
             "keys": manifest.get("keys") or [],
             "daily_uploads": int(upload_count[0] or 0),
+            "tables": tbl,
         }
     except Exception:
         _log.exception("shared_snapshot_status failed")
