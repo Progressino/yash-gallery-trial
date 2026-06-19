@@ -2588,12 +2588,16 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
 
 
 def _shared_frames_operational(sess: AppSession) -> bool:
-    """Warm cache attached with PO-scale sales + inventory — skip session rebuild workers."""
+    """Warm cache attached — skip session rebuild workers (partial attach OK for Intelligence)."""
     try:
         from ..services.shared_frames import frame_row_count, session_uses_shared_frames
 
+        import backend.main as _main
+
         if not session_uses_shared_frames(sess):
             return False
+        if not _main.session_needs_operational_data(sess):
+            return True
         return (
             frame_row_count("sales_df", sess) >= 100_000
             and frame_row_count("inventory_df_variant", sess) >= 1_000
@@ -3101,7 +3105,12 @@ def _session_needs_background_hydrate(sess: AppSession) -> bool:
     try:
         from ..services.shared_frames import frame_row_count, session_uses_shared_frames
 
+        import backend.main as _main
+
         if session_uses_shared_frames(sess):
+            # Shared warm-cache pointers are enough for Intelligence / coverage polls.
+            if not _main.session_needs_operational_data(sess):
+                return False
             if (
                 frame_row_count("sales_df", sess) >= 100_000
                 and frame_row_count("inventory_df_variant", sess) >= 1_000
@@ -3149,9 +3158,11 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
 
             if shared_frames_enabled():
                 _main.try_attach_shared_frames_fast(sess)
+                if not _main.session_needs_operational_data(sess):
+                    return
                 if (
-                    not _main.session_needs_operational_data(sess)
-                    and frame_row_count("sales_df", sess) >= 100_000
+                    frame_row_count("sales_df", sess) >= 100_000
+                    and frame_row_count("inventory_df_variant", sess) >= 1_000
                 ):
                     return
         except Exception:
@@ -3311,8 +3322,14 @@ def get_job_status(request: Request):
 
 
 @router.get("/coverage", response_model=CoverageResponse)
-def get_coverage(request: Request, light: bool = False):
+async def get_coverage(request: Request, light: bool = False):
     """Session coverage flags. ``light=1`` is read-only + queues background hydrate when needed."""
+    from ..concurrency import run_aux
+
+    return await run_aux(_get_coverage_sync, request, light)
+
+
+def _get_coverage_sync(request: Request, light: bool = False) -> CoverageResponse:
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
     try:
