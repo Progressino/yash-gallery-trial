@@ -134,12 +134,9 @@ def _invalidate_intelligence_bundle_cache() -> None:
 
 def _sku_deepdive_aliases(raw: str) -> Set[str]:
     """Return SKU tokens that should match the same row after PL/YK normalisation."""
-    u = raw.strip().upper()
-    out = {u, canonical_sales_sku(u)}
-    m = re.match(r"^(\d+)(YK[A-Z0-9\-]+)$", u)
-    if m and "PL" not in m.group(0):
-        out.add(f"{m.group(1)}PL{m.group(2)}")
-    return {x for x in out if x and x != "NAN"}
+    from ..services.sku_deepdive_data import deepdive_sku_alias_tokens
+
+    return deepdive_sku_alias_tokens(raw)
 
 
 def _sess(request: Request):
@@ -3917,29 +3914,32 @@ def sku_deepdive(
     import pandas as pd
 
     from ..services.shared_frames import session_sales_df
+    from ..services.sku_deepdive_data import build_deepdive_sales_frame
 
     sess = _sess(request)
-    sales = session_sales_df(sess)
-    if sales is None or sales.empty:
+    unified = session_sales_df(sess)
+    if unified is None or unified.empty:
         return {"loaded": False, "message": "No sales data loaded"}
 
-    df0 = apply_upload_report_day_gate(sales)
+    sales = build_deepdive_sales_frame(sess, sku, all_sizes=all_sizes)
+    df0 = apply_upload_report_day_gate(sales) if sales is not None and not sales.empty else pd.DataFrame()
 
     # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format)
     meesho_note: str | None = None
     if not sess.meesho_df.empty:
+        unified_gated = apply_upload_report_day_gate(unified)
         meesho_skus_in_sales = (
-            df0[df0["Source"].astype(str) == "Meesho"]["Sku"]
+            unified_gated[unified_gated["Source"].astype(str) == "Meesho"]["Sku"]
             .dropna().unique().tolist()
-            if not df0.empty and "Source" in df0.columns else []
+            if not unified_gated.empty and "Source" in unified_gated.columns else []
         )
         if meesho_skus_in_sales == ["MEESHO_TOTAL"] or set(meesho_skus_in_sales) == {"MEESHO_TOTAL"}:
             meesho_total_units = int(
-                df0[
-                    (df0["Source"].astype(str) == "Meesho") &
-                    (df0["Transaction Type"].astype(str) == "Shipment")
+                unified_gated[
+                    (unified_gated["Source"].astype(str) == "Meesho") &
+                    (unified_gated["Transaction Type"].astype(str) == "Shipment")
                 ]["Quantity"].sum()
-            ) if not df0.empty else 0
+            ) if not unified_gated.empty else 0
             meesho_note = (
                 f"Meesho data loaded ({meesho_total_units:,} total units) but your uploaded "
                 f"Meesho TCS ZIP reports don't include per-SKU data. "
@@ -3948,7 +3948,22 @@ def sku_deepdive(
             )
 
     if df0.empty:
-        return {"loaded": False, "message": "No sales data loaded"}
+        return {
+            "loaded":       True,
+            "sku":          sku,
+            "all_sizes":    all_sizes,
+            "matched_skus": [],
+            "summary":      {"shipped": 0, "returns": 0, "net_units": 0, "return_rate": 0.0, "ads": 0.0},
+            "monthly":      [],
+            "by_platform":  [],
+            "by_size":      [],
+            "daily":        [],
+            "first_sale":   None,
+            "last_sale":    None,
+            "meesho_note":  meesho_note,
+            "source_filter": None,
+            "filter_note":  None,
+        }
 
     # Parse dates once; avoid copying the full sales table (was the main latency on large sessions).
     txn_dates = txn_reporting_naive_ist(df0["TxnDate"])
@@ -3997,25 +4012,8 @@ def sku_deepdive(
     date_mask = (txn_dates >= start_ts) & (txn_dates <= end_inclusive)
     pre_mask = base_mask & date_mask
 
-    sku_variants = _sku_deepdive_aliases(sku)
-    if all_sizes:
-        parent_targets = {
-            canonical_sales_sku(str(get_parent_sku(s)).strip()) for s in sku_variants
-        }
-        sub_skus = df0.loc[pre_mask, "Sku"].astype(str)
-        uniq = sub_skus.unique()
-        parent_map = {u: canonical_sales_sku(str(get_parent_sku(u)).strip()) for u in uniq}
-        sub_parents = sub_skus.map(parent_map)
-        sku_match_sub = sub_parents.isin(parent_targets)
-        sku_mask = pd.Series(False, index=df0.index)
-        sku_mask.loc[pre_mask] = sku_match_sub.values
-    else:
-        targets = {canonical_sales_sku(s) for s in sku_variants}
-        sku_mask = canonical_sales_sku_series(df0["Sku"]).isin(targets)
-
-    final_mask = pre_mask & sku_mask
-    sku_df = df0.loc[final_mask].copy()
-    sku_df["TxnDate"] = txn_dates.loc[final_mask]
+    sku_df = df0.loc[pre_mask].copy()
+    sku_df["TxnDate"] = txn_dates.loc[pre_mask]
 
     if sku_df.empty:
         return {
