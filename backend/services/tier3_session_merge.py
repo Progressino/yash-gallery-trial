@@ -448,7 +448,15 @@ def build_po_ads_platform_sales(
                 )
                 return out
 
-            if lag is not None and 1 < lag <= 21 and thru:
+            _try_incremental_tier3 = lag is not None and 1 < lag <= 21 and thru
+            try:
+                from ..local_dev import local_dev_mode
+
+                if local_dev_mode():
+                    _try_incremental_tier3 = False
+            except Exception:
+                pass
+            if _try_incremental_tier3:
                 gap_start = str((pd.Timestamp(thru) + pd.Timedelta(days=1)).date())
                 if gap_start <= plan:
                     gap_sales = _build_tier3_gap_sales(sess, gap_start, plan)
@@ -472,6 +480,16 @@ def build_po_ads_platform_sales(
                             lag,
                         )
                         return out
+
+            out = _trim_sales_to_ads_window(
+                sdf, plan, period_days, use_seasonality, use_ly_fallback
+            )
+            _log.info(
+                "PO ADS bulk path: session sales_df → %s rows (lag=%s, tier3 overlay skipped)",
+                len(out),
+                lag,
+            )
+            return out
 
     summary = get_summary() or {}
     tier3_any = any(int((summary.get(p) or {}).get("file_count") or 0) > 0 for p in summary)

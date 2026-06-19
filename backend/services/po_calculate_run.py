@@ -577,6 +577,12 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
 
     try:
         _set_po_calculate_progress(sess, job_id, 4, "Hydrating sales and inventory…")
+        try:
+            import backend.main as _main
+
+            _main.try_attach_shared_frames_fast(sess)
+        except Exception:
+            pass
         sales_before = session_sales_df(sess)
         inv_before = session_inventory_variant(sess)
         if sales_before.empty or inv_before.empty:

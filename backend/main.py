@@ -2225,6 +2225,7 @@ def _session_coverage_light(path: str, method: str, query: str) -> bool:
         "/api/data/dashboard/summary",
         "/api/data/intelligence-bundle",
         "/api/data/parity",
+        "/api/data/sku-deepdive",
     ):
         return True
     if path != "/api/data/coverage":
@@ -2356,11 +2357,21 @@ async def session_middleware(request: Request, call_next):
 
     if _session_po_calculate_light(path, request.method):
         sid = request.cookies.get(SESSION_COOKIE)
-        sess = store.get(sid) if sid else None
-        if sess is None and request.method == "POST" and path == "/api/po/calculate":
-            sid, sess = await run_aux(store.get_or_create, sid)
+        if request.method == "POST" and path == "/api/po/calculate":
+            sid, sess = await run_aux(store.get_or_empty, sid)
+            if getattr(sess, "sales_df", None) is None or (
+                hasattr(sess.sales_df, "empty") and sess.sales_df.empty
+            ):
+                sid, sess = await run_aux(store.get_or_create, sid)
+        else:
+            sid, sess = await run_aux(store.get_or_empty, sid)
+        try:
+            await run_aux(try_attach_shared_frames_fast, sess)
+        except Exception:
+            log.exception("shared-frame attach on PO light path failed")
         request.state.session_id = sid
         request.state.session = sess
+        setattr(sess, "_persist_sid", sid)
         response: Response = await call_next(request)
         if sid:
             response.set_cookie(

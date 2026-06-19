@@ -3916,24 +3916,30 @@ def sku_deepdive(
     """
     import pandas as pd
 
+    from ..services.shared_frames import session_sales_df
+
     sess = _sess(request)
-    df0 = apply_upload_report_day_gate(sess.sales_df.copy())
+    sales = session_sales_df(sess)
+    if sales is None or sales.empty:
+        return {"loaded": False, "message": "No sales data loaded"}
+
+    df0 = apply_upload_report_day_gate(sales)
 
     # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format)
     meesho_note: str | None = None
     if not sess.meesho_df.empty:
         meesho_skus_in_sales = (
-            sess.sales_df[sess.sales_df["Source"].astype(str) == "Meesho"]["Sku"]
+            df0[df0["Source"].astype(str) == "Meesho"]["Sku"]
             .dropna().unique().tolist()
-            if not sess.sales_df.empty and "Source" in sess.sales_df.columns else []
+            if not df0.empty and "Source" in df0.columns else []
         )
         if meesho_skus_in_sales == ["MEESHO_TOTAL"] or set(meesho_skus_in_sales) == {"MEESHO_TOTAL"}:
             meesho_total_units = int(
-                sess.sales_df[
-                    (sess.sales_df["Source"].astype(str) == "Meesho") &
-                    (sess.sales_df["Transaction Type"].astype(str) == "Shipment")
+                df0[
+                    (df0["Source"].astype(str) == "Meesho") &
+                    (df0["Transaction Type"].astype(str) == "Shipment")
                 ]["Quantity"].sum()
-            ) if not sess.sales_df.empty else 0
+            ) if not df0.empty else 0
             meesho_note = (
                 f"Meesho data loaded ({meesho_total_units:,} total units) but your uploaded "
                 f"Meesho TCS ZIP reports don't include per-SKU data. "

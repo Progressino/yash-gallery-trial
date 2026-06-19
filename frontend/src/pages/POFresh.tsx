@@ -21,6 +21,7 @@ import { salesDataGapNeedsWarning } from '../lib/reportingDates'
 import {
   PO_OPERATIONAL_TOTAL,
   poOperationalLoaded,
+  poPageHydrationReady,
 } from '../lib/localSessionHint'
 import {
   countQuarterColumns,
@@ -63,7 +64,11 @@ const PAGE_SIZE = 100
 
 function countLoaded(c: CoverageResponse) {
   const loaded = poOperationalLoaded(c)
-  return { loaded, total: PO_OPERATIONAL_TOTAL, ready: loaded === PO_OPERATIONAL_TOTAL }
+  return {
+    loaded,
+    total: PO_OPERATIONAL_TOTAL,
+    ready: poPageHydrationReady(c) || loaded === PO_OPERATIONAL_TOTAL,
+  }
 }
 
 function num(v: unknown): number {
@@ -165,6 +170,7 @@ function POFreshInner() {
   const [progress, setProgress] = useState<{ msg: string; pct: number | null } | null>(null)
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [quarterlyMsg, setQuarterlyMsg] = useState<string>()
+  const [quarterlyPage, setQuarterlyPage] = useState(0)
   const progressThrottle = useRef(0)
   const calcRunSeq = useRef(0)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
@@ -331,6 +337,7 @@ function POFreshInner() {
         }
         setQuarterly(data)
         setQuarterlyMsg(undefined)
+        setQuarterlyPage(0)
         return
       }
       setQuarterly({ loaded: false, message: 'Quarterly load timed out' })
@@ -349,7 +356,16 @@ function POFreshInner() {
     } finally {
       setQuarterlyLoading(false)
     }
-  }, [params.group_by_parent])
+  }, [params.group_by_parent, setQuarterly])
+
+  /** Load quarterly history after PO calculate or session restore (inline quarter columns). */
+  useEffect(() => {
+    if (!result?.ok || quarterlyLoading) return
+    if (quarterly?.loaded && (quarterly.rows?.length ?? 0) > 0 && quarterCols.length >= EXPECTED_QUARTER_COLS) {
+      return
+    }
+    void loadQuarterly()
+  }, [result?.ok, result?.row_count, result?.rows?.length, quarterlyLoading, quarterly?.loaded, quarterly?.rows?.length, quarterCols.length, loadQuarterly])
 
   const runCalculate = useCallback(async (opts?: { force?: boolean }) => {
     const force = Boolean(opts?.force)
@@ -465,6 +481,14 @@ function POFreshInner() {
   )
 
   const dashboardParams = useMemo(() => buildBody(params), [params])
+
+  const quarterRowCount = quarterly?.rows?.length ?? 0
+  const quarterPageCount = Math.max(1, Math.ceil(quarterRowCount / PAGE_SIZE))
+  const quarterPageRows = useMemo(() => {
+    const rows = quarterly?.rows ?? []
+    const start = quarterlyPage * PAGE_SIZE
+    return rows.slice(start, start + PAGE_SIZE)
+  }, [quarterly?.rows, quarterlyPage])
 
   const tableCols = useMemo(
     () => visiblePoColumns(result?.columns, quarterCols),
@@ -1003,16 +1027,25 @@ function POFreshInner() {
               ) : (
                 <>
                   <p className="text-xs text-[var(--po-outline)]">
-                    {quarterly.rows.length.toLocaleString()} SKUs · {quarterCols.length} quarter columns
+                    {quarterRowCount.toLocaleString()} SKUs · {quarterCols.length} quarter columns
                   </p>
                   <PoTable
                     cols={['OMS_SKU', 'Status', 'Avg_Monthly', ...quarterCols].filter(c =>
                       (quarterly.columns ?? []).includes(c) || c === 'OMS_SKU',
                     )}
-                    rows={(quarterly.rows ?? []).slice(0, 500)}
+                    rows={quarterPageRows}
                     quarterCols={quarterCols}
                     quarterMap={{}}
                     periodDays={params.period_days}
+                  />
+                  <TableFooter
+                    page={quarterlyPage}
+                    pageCount={quarterPageCount}
+                    pageRows={quarterPageRows.length}
+                    totalRows={quarterRowCount}
+                    onPrev={() => setQuarterlyPage(p => Math.max(0, p - 1))}
+                    onNext={() => setQuarterlyPage(p => p + 1)}
+                    quarterCount={quarterCols.length}
                   />
                 </>
               )}
@@ -1511,9 +1544,9 @@ function TableFooter({
   totalRows: number
   onPrev: () => void
   onNext: () => void
-  onExport: () => void
-  onClientReport: () => void
-  quarterCount: number
+  onExport?: () => void
+  onClientReport?: () => void
+  quarterCount?: number
 }) {
   return (
     <div className="px-6 py-4 flex flex-wrap items-center justify-between gap-3 bg-[var(--po-surface-low)]/50">
@@ -1521,6 +1554,7 @@ function TableFooter({
         Showing {pageRows} of {totalRows.toLocaleString()} · Page {page + 1}/{pageCount}
       </span>
       <div className="flex items-center gap-2">
+        {onClientReport ? (
         <button
           type="button"
           onClick={onClientReport}
@@ -1528,13 +1562,16 @@ function TableFooter({
         >
           Client Report
         </button>
+        ) : null}
+        {onExport ? (
         <button
           type="button"
           onClick={onExport}
           className="text-xs font-semibold text-[var(--po-secondary)] hover:underline"
         >
-          Export CSV{quarterCount > 0 ? ` (+${quarterCount} Q)` : ''}
+          Export CSV{quarterCount && quarterCount > 0 ? ` (+${quarterCount} Q)` : ''}
         </button>
+        ) : null}
         <button
           type="button"
           disabled={page <= 0}

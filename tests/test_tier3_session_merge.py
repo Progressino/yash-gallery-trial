@@ -188,6 +188,40 @@ def test_build_po_ads_platform_sales_incremental_gap(monkeypatch):
     assert int(out.loc[out["TxnDate"] >= "2026-06-15", "Quantity"].sum()) >= 6
 
 
+def test_build_po_ads_platform_sales_bulk_path_when_lag_large(monkeypatch):
+    """Stale bulk sales_df (lag > 21d) must not trigger slow Tier-3 overlay."""
+    sess = AppSession()
+    days = pd.date_range("2024-01-01", "2026-03-01", freq="D")
+    sess.sales_df = pd.DataFrame(
+        {
+            "TxnDate": days,
+            "Quantity": [1] * len(days),
+            "Transaction Type": ["Shipment"] * len(days),
+            "Sku": ["SKU1"] * len(days),
+            "Source": ["Amazon"] * len(days),
+            "Units_Effective": [1] * len(days),
+        }
+    )
+
+    def _should_not_load(*_a, **_kw):
+        raise AssertionError("slow Tier-3 overlay should not run when bulk sales covers ADS window")
+
+    monkeypatch.setattr("backend.services.daily_store.get_summary", lambda: {"amazon": {"file_count": 5}})
+    monkeypatch.setattr(
+        "backend.services.daily_store.load_platform_data_for_report_range",
+        _should_not_load,
+    )
+    out = t3.build_po_ads_platform_sales(
+        sess,
+        planning_date="2026-06-18",
+        period_days=30,
+        use_seasonality=True,
+        use_ly_fallback=True,
+    )
+    assert not out.empty
+    assert out["TxnDate"].max() <= pd.Timestamp("2026-03-01")
+
+
 def test_po_fingerprint_includes_tier3_token(monkeypatch):
     from backend.services.po_shared_cache import build_data_fingerprint
 

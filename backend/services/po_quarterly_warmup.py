@@ -154,10 +154,16 @@ def _ensure_session_operational_frames(sess) -> None:
     try:
         import backend.main as _main
 
-        if _main.session_needs_operational_data(sess):
-            _main.force_restore_session_from_server_cache(
-                sess, _main._warm_cache_generation
-            )
+        _main.try_attach_shared_frames_fast(sess)
+        if not _main.session_needs_operational_data(sess):
+            pass
+        elif _main._warm_cache:
+            _main.try_attach_shared_frames_fast(sess)
+        if not _main.session_needs_operational_data(sess):
+            return
+        _main.force_restore_session_from_server_cache(
+            sess, _main._warm_cache_generation
+        )
     except Exception:
         pass
     try:
