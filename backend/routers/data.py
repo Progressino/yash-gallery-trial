@@ -1085,7 +1085,7 @@ def _try_serve_tier3_intelligence_bundle(
     tier3_units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
     session_units = _session_window_gross_units(sess, s_win, e_win)
     # Tier-3 dailies alone can under-count vs bulk history on disk / unified sales_df.
-    if session_units > tier3_units and session_units > tier3_units * 1.05:
+    if session_units > tier3_units and session_units > int(tier3_units * 1.05):
         return None
     tier3["status"] = "ready"
     _bundle_cache_store(cache_key, bundle_cache, tier3, ts=ts if ts is not None else time.time())
@@ -1696,6 +1696,14 @@ def _bundle_cache_lookup(
             payload, start_date, end_date, sess=sess
         ):
             continue
+        if sess is not None and payload.get("tier3_auto_pull"):
+            s = str(start_date or end_date or "")[:10]
+            e = str(end_date or start_date or "")[:10]
+            if len(s) == 10 and len(e) == 10:
+                session_units = _session_window_gross_units(sess, s, e)
+                tier3_units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
+                if session_units > tier3_units and session_units > int(tier3_units * 1.05):
+                    continue
         if not allow_sparse and _bundle_payload_chart_sparse(payload, start_date, end_date):
             continue
         try:
@@ -2262,13 +2270,15 @@ def _session_window_gross_units(sess: AppSession, start_date: str, end_date: str
     import pandas as pd
 
     from ..services.sales import apply_upload_report_day_gate, get_sales_summary
-    from ..services.shared_frames import session_sales_df
+    from ..services.shared_frames import session_sales_df, warm_frame
 
     s = str(start_date)[:10]
     e = str(end_date)[:10]
     if len(s) != 10 or len(e) != 10:
         return 0
     sales = session_sales_df(sess)
+    if sales is None or sales.empty:
+        sales = warm_frame("sales_df", sess)
     if sales is None or sales.empty:
         return 0
     gated = apply_upload_report_day_gate(sales)
@@ -2333,15 +2343,9 @@ def _coverage_platform_row_count(sess: AppSession, frame_key: str, platform: str
     from ..services.shared_frames import frame_row_count
 
     rows = int(frame_row_count(frame_key, sess))
-    if rows > 0:
-        return rows
     disk_rows = _disk_parquet_row_count(frame_key)
-    if disk_rows > 0:
-        return disk_rows
     tier3_rows = _tier3_platform_row_count(platform)
-    if tier3_rows > 0:
-        return tier3_rows
-    return 0
+    return max(rows, disk_rows, tier3_rows)
 
 
 def _session_has_platform_data(sess: AppSession) -> bool:
@@ -3723,6 +3727,16 @@ def intelligence_bundle(
 
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_if_empty()
+        else:
+            _main._top_up_warm_cache_from_disk()
+        _main.try_attach_shared_frames_fast(sess)
+    except Exception:
+        pass
     has_dates = bool(start_date or end_date)
     s_win = str(start_date or end_date or "")[:10] if has_dates else ""
     e_win = str(end_date or start_date or "")[:10] if has_dates else ""
