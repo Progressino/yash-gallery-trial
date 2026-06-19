@@ -31,7 +31,7 @@ def po_readiness(request: Request):
     if sess is None:
         return PoReadinessResponse(po_ready=False, hydration="none")
     sid = getattr(request.state, "session_id", None) or ""
-    cov = _build_coverage_response(sess)
+    cov = _build_coverage_response(sess, light=True)
     return PoReadinessResponse(**build_po_readiness(sess, cov, session_id=sid))
 
 

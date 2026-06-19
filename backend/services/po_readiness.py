@@ -71,16 +71,42 @@ def background_job_names(sess) -> list[str]:
     return list(background_tasks_running(sess).keys())
 
 
+def _pg_row_floors() -> tuple[int, int]:
+    """Sales + inventory row counts from normalized PostgreSQL tables."""
+    try:
+        from ..db.forecast_ops_tables import normalized_tables_enabled, tables_status
+
+        if not normalized_tables_enabled():
+            return 0, 0
+        st = tables_status()
+        sbp = st.get("sales_by_platform") or {}
+        sales = int(sbp.get("unified", 0) or 0)
+        if sales <= 0:
+            sales = sum(int(v or 0) for k, v in sbp.items() if k != "unified")
+        inv = int(st.get("inventory_lines", 0) or 0)
+        return sales, inv
+    except Exception:
+        return 0, 0
+
+
 def compute_data_ready(cov: CoverageResponse) -> bool:
     """Session holds PO essentials (8/8 flags + row floors) — ignores background jobs."""
-    return operational_data_complete(cov) and data_row_floors_met(cov)
+    if operational_data_complete(cov) and data_row_floors_met(cov):
+        return True
+    pg_sales, pg_inv = _pg_row_floors()
+    if pg_sales >= PO_MIN_SALES_ROWS and pg_inv >= PO_MIN_INVENTORY_ROWS:
+        return operational_data_complete(cov)
+    return False
 
 
 def compute_po_ready(sess, cov: CoverageResponse) -> bool:
     """PO Engine may mount — data ready and no critical restore replacing inventory/session."""
     if critical_restore_running(sess):
         return False
-    return compute_data_ready(cov)
+    if compute_data_ready(cov):
+        return True
+    pg_sales, pg_inv = _pg_row_floors()
+    return pg_sales >= PO_MIN_SALES_ROWS and pg_inv >= PO_MIN_INVENTORY_ROWS
 
 
 def _resolve_data_source(sess) -> str:
@@ -109,12 +135,22 @@ def _hydration_label(sess, session_id: str = "") -> str:
 def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:
     from .shared_frames import frame_row_count
 
+    pg_sales, pg_inv = _pg_row_floors()
+    sales_rows = int(cov.sales_rows or frame_row_count("sales_df", sess))
+    inventory_rows = int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess))
+    if sales_rows < PO_MIN_SALES_ROWS and pg_sales > sales_rows:
+        sales_rows = pg_sales
+    if inventory_rows < PO_MIN_INVENTORY_ROWS and pg_inv > inventory_rows:
+        inventory_rows = pg_inv
+    data_source = _resolve_data_source(sess)
+    if pg_sales >= PO_MIN_SALES_ROWS and data_source == "warm_cache":
+        data_source = "postgres_normalized"
     return {
         "po_ready": compute_po_ready(sess, cov),
         "data_ready": compute_data_ready(cov),
-        "sales_rows": int(cov.sales_rows or frame_row_count("sales_df", sess)),
-        "inventory_rows": int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess)),
-        "data_source": _resolve_data_source(sess),
+        "sales_rows": sales_rows,
+        "inventory_rows": inventory_rows,
+        "data_source": data_source,
         "hydration": _hydration_label(sess, session_id=session_id),
         "background_jobs": background_job_names(sess),
         "background_tasks": background_tasks_running(sess),

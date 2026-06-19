@@ -2534,7 +2534,7 @@ def full_restore_session(
     return missing, steps, msg
 
 
-def _build_coverage_response(sess: AppSession) -> CoverageResponse:
+def _build_coverage_response(sess: AppSession, *, light: bool = False) -> CoverageResponse:
     """Build coverage flags from current session state (no restore side effects)."""
     import pandas as pd
 
@@ -2548,15 +2548,17 @@ def _build_coverage_response(sess: AppSession) -> CoverageResponse:
     from ..services.daily_store import get_summary
     from ..services.existing_po import (
         count_per_size_pipeline_skus,
-        ensure_existing_po_hydrated,
         existing_po_looks_aggregated_bundled_only,
         existing_po_needs_recalc as _existing_po_needs_recalc,
     )
 
-    try:
-        ensure_existing_po_hydrated(sess)
-    except Exception:
-        pass
+    if not light:
+        from ..services.existing_po import ensure_existing_po_hydrated
+
+        try:
+            ensure_existing_po_hydrated(sess)
+        except Exception:
+            pass
 
     tier3_any = bool(get_summary())
     _po_ledger = getattr(sess, "po_raise_ledger_df", None)
@@ -3296,7 +3298,7 @@ def intelligence_readiness(request: Request):
     except Exception:
         pass
     _maybe_queue_light_session_hydrate(sess, sid or None)
-    cov = _build_coverage_response(sess)
+    cov = _build_coverage_response(sess, light=True)
     from ..services.intelligence_readiness import build_intelligence_readiness
     from ..services.po_readiness import augment_coverage
 

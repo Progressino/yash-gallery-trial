@@ -2186,8 +2186,16 @@ def _session_skip_heavy_warm(path: str) -> bool:
 
 
 def _session_coverage_light(path: str, method: str, query: str) -> bool:
-    """GET /coverage?light=1 must never block on PostgreSQL session blobs."""
-    if method != "GET" or path != "/api/data/coverage":
+    """Fast poll routes — never block on PostgreSQL session blob restore."""
+    if method != "GET":
+        return False
+    if path in (
+        "/api/po/readiness",
+        "/api/data/intelligence/readiness",
+        "/api/data/dashboard/summary",
+    ):
+        return True
+    if path != "/api/data/coverage":
         return False
     q = query or ""
     return "light=1" in q or "light=true" in q
