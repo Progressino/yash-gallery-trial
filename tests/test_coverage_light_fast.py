@@ -250,8 +250,8 @@ def test_tier3_bundle_skipped_when_session_window_has_more_units(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "backend.routers.data._session_window_gross_units",
-        lambda *_a, **_k: 63000,
+        "backend.routers.data._tier3_only_undercounts_bulk",
+        lambda tier3_units, _s, _e: tier3_units == 22000,
     )
     out = _try_serve_tier3_intelligence_bundle(
         sess, ("s", "e", "gross", 10, False), {}, "2026-05-21", "2026-06-20", 10, "gross", False
