@@ -142,9 +142,8 @@ export function dashboardGateReady(c: CoverageResponse): boolean {
   if (typeof c.dashboard_ready === 'boolean') {
     return c.dashboard_ready
   }
+  if (c.sales && c.sales_rows > 0) return true
   if (!operationalDataComplete(c)) return false
-  if (c.critical_restore_running) return false
-  if (c.platforms_loaded === false) return false
   return true
 }
 

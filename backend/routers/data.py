@@ -3517,6 +3517,8 @@ def intelligence_bundle(
 
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
+    if not sess or (hasattr(sess, 'sales_df') and sess.sales_df.empty):
+        return {"ok": False, "computing": True, "message": "Session data still loading"}
     has_dates = bool(start_date or end_date)
     try:
         from ..routers.upload import clear_stale_background_jobs

@@ -19,8 +19,8 @@ import { PageLoadingStripe } from '../components/LoadingProgressBar'
 import { calendarDateIST } from '../lib/dates'
 import { salesDataGapNeedsWarning } from '../lib/reportingDates'
 import {
-  OPERATIONAL_DATA_TOTAL,
-  operationalDataLoaded,
+  PO_OPERATIONAL_TOTAL,
+  poOperationalLoaded,
 } from '../lib/localSessionHint'
 import {
   countQuarterColumns,
@@ -62,8 +62,8 @@ type Params = POFreshParams
 const PAGE_SIZE = 100
 
 function countLoaded(c: CoverageResponse) {
-  const loaded = operationalDataLoaded(c)
-  return { loaded, total: OPERATIONAL_DATA_TOTAL, ready: loaded === OPERATIONAL_DATA_TOTAL }
+  const loaded = poOperationalLoaded(c)
+  return { loaded, total: PO_OPERATIONAL_TOTAL, ready: loaded === PO_OPERATIONAL_TOTAL }
 }
 
 function num(v: unknown): number {
