@@ -44,7 +44,7 @@ docker rm -f app-backend-1 app-stitching-backend-1 app-frontend-1 app-autoheal-1
 _dc -f docker-compose.prod.yml up -d --remove-orphans
 
 echo "==> Health check"
-for i in $(seq 1 12); do
+for i in $(seq 1 24); do
   if curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health; then
     echo ""
     echo "OK: deploy healthy (attempt $i) — build ${_sha}"
@@ -52,7 +52,7 @@ for i in $(seq 1 12); do
     bash scripts/run-po-warmup-production.sh || true
     exit 0
   fi
-  echo "… waiting for /api/health ($i/12)"
+  echo "… waiting for /api/health ($i/24)"
   sleep 5
 done
 echo "ERROR: health check failed" >&2
