@@ -41,7 +41,12 @@ def _db_path() -> str:
 
 
 def _conn():
-    return sqlite3.connect(_db_path(), check_same_thread=False)
+    conn = sqlite3.connect(_db_path(), check_same_thread=False)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+    return conn
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────

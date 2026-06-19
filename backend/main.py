@@ -1823,6 +1823,12 @@ def _do_load_warm_cache() -> bool:
             schedule_shared_quarterly_prewarm()
         except Exception:
             pass
+        try:
+            from backend.routers.data import schedule_intelligence_bundle_precompute
+
+            schedule_intelligence_bundle_precompute()
+        except Exception:
+            pass
         # Release Phase-2 memory lock if it was acquired
         try:
             if _phase2_lock_held:

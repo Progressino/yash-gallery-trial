@@ -220,6 +220,10 @@ def connect_psycopg(url: str, **kwargs: Any) -> Any:
 
 def connect_sqlite(path: str, *, backend: str = "sqlite", **kwargs: Any) -> Any:
     conn = sqlite3.connect(path, **kwargs)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
     if not query_logging_enabled():
         return conn
     return _TimedSqliteConnection(conn, backend=backend)

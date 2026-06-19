@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Dict, List, Optional, Set
 from fastapi import APIRouter, Request, HTTPException
@@ -130,6 +131,123 @@ def _invalidate_intelligence_bundle_cache() -> None:
                         pass
     except Exception:
         pass
+    schedule_intelligence_bundle_precompute()
+
+
+_intel_precompute_lock = threading.Lock()
+_intel_precompute_running = False
+
+
+def schedule_intelligence_bundle_precompute() -> None:
+    """Queue background precompute of default Intelligence bundles (one at a time)."""
+    if os.environ.get("INTELLIGENCE_PRECOMPUTE", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return
+    global _intel_precompute_running
+    with _intel_precompute_lock:
+        if _intel_precompute_running:
+            return
+        _intel_precompute_running = True
+    try:
+        from ..concurrency import HEAVY_EXECUTOR
+
+        HEAVY_EXECUTOR.submit(_precompute_intelligence_bundles_worker)
+    except Exception:
+        with _intel_precompute_lock:
+            _intel_precompute_running = False
+
+
+def _precompute_intelligence_bundles_worker() -> None:
+    global _intel_precompute_running
+    _log = logging.getLogger(__name__)
+    try:
+        precompute_default_intelligence_bundles()
+    except Exception:
+        _log.exception("intelligence bundle precompute failed")
+    finally:
+        with _intel_precompute_lock:
+            _intel_precompute_running = False
+
+
+def precompute_default_intelligence_bundles() -> None:
+    """Pre-build default Dashboard Intelligence window into global/disk cache."""
+    import backend.main as _main
+
+    _log = logging.getLogger(__name__)
+    if not _main._warm_cache_ready.wait(timeout=600.0):
+        _log.warning("intelligence precompute: warm cache not ready after 600s")
+        return
+    if not _main._warm_cache:
+        _log.warning("intelligence precompute: warm cache empty")
+        return
+
+    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    today = datetime.datetime.now(ist).date()
+    end_date = today.isoformat()
+    start_date = (today - datetime.timedelta(days=30)).isoformat()
+
+    sess = AppSession()
+    try:
+        _main.try_attach_shared_frames_fast(sess)
+    except Exception:
+        _log.exception("intelligence precompute: attach shared frames failed")
+        return
+
+    bundle_cache: dict = {}
+    now = time.time()
+    cache_key = (start_date, end_date, "gross", 10, False)
+
+    if _bundle_cache_lookup(
+        cache_key,
+        bundle_cache,
+        start_date=start_date,
+        end_date=end_date,
+        allow_sparse=True,
+        sess=sess,
+    ):
+        _log.info("intelligence precompute: cache hit for %s..%s", start_date, end_date)
+        return
+
+    session_build_unsafe = _intelligence_session_build_unsafe(sess)
+    if not session_build_unsafe or _disk_bulk_history_available():
+        payload = _build_intelligence_bundle_payload_from_session(
+            sess, start_date, end_date, 10, "gross", False
+        )
+        if payload and _bundle_payload_has_display_data(payload):
+            payload["status"] = "ready"
+            _bundle_cache_store(cache_key, bundle_cache, payload, ts=now)
+            units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
+            _log.warning(
+                "intelligence precompute: stored session bundle %s..%s (%d units)",
+                start_date,
+                end_date,
+                units,
+            )
+            return
+
+    tier3_payload = _try_serve_tier3_intelligence_bundle(
+        sess,
+        cache_key,
+        bundle_cache,
+        start_date,
+        end_date,
+        10,
+        "gross",
+        False,
+        ts=now,
+    )
+    if tier3_payload is not None:
+        units = int((tier3_payload.get("sales_summary") or {}).get("total_units") or 0)
+        _log.warning(
+            "intelligence precompute: stored tier3 bundle %s..%s (%d units)",
+            start_date,
+            end_date,
+            units,
+        )
 
 
 def _sku_deepdive_aliases(raw: str) -> Set[str]:
