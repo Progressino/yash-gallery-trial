@@ -58,6 +58,37 @@ def test_po_not_ready_during_session_restore():
     assert compute_po_ready(sess, cov) is False
 
 
+def test_augment_coverage_light_dashboard_ready_partial_rows(monkeypatch):
+    """Light coverage marks dashboard ready when flags + Tier-3 exist (no 1M sales rows)."""
+    from backend.services.po_readiness import augment_coverage
+
+    sess = _Sess()
+    cov = _cov(
+        sales_rows=87_981,
+        inventory_rows=6_000,
+        mtr_rows=1000,
+        myntra_rows=1000,
+        meesho_rows=1000,
+        flipkart_rows=1000,
+    )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness._tier3_all_platforms_have_uploads",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness.hydration_inflight",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness.hydration_complete",
+        lambda _s, _sid="": True,
+    )
+    out = augment_coverage(sess, cov, light=True)
+    assert out.dashboard_ready is True
+    assert out.intelligence_ready is True
+    assert out.po_ready is False
+
+
 def test_augment_coverage_adds_po_ready():
     from backend.session import AppSession
 

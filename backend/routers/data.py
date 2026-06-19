@@ -2876,7 +2876,7 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     )
     from ..services.po_readiness import augment_coverage
 
-    return augment_coverage(sess, cov)
+    return augment_coverage(sess, cov, light=light)
 
 
 def _acquire_upload_lock_with_progress(sess: AppSession, *, timeout_sec: float = 3600.0) -> bool:

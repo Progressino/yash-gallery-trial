@@ -133,8 +133,13 @@ def platform_frames_available(sess, cov: CoverageResponse) -> bool:
     from .shared_frames import frame_row_count
 
     sales_rows = int(cov.sales_rows or frame_row_count("sales_df", sess))
+    # Tier-3 + coverage flags — enough for Intelligence without scanning unified sales_df.
+    if _platform_flags_ready(cov) and _tier3_all_platforms_have_uploads():
+        return True
     # Unified sales_df mode: coverage flags set without per-platform session frames.
     if _platform_flags_ready(cov) and sales_rows >= 100_000:
+        return True
+    if _platform_flags_ready(cov) and sales_rows > 0:
         return True
 
     if all(frame_row_count(attr, sess) > 0 for _, attr, _, _ in PLATFORM_SPECS):

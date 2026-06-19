@@ -180,8 +180,62 @@ def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> 
     }
 
 
-def augment_coverage(sess, cov: CoverageResponse) -> CoverageResponse:
+def _effective_row_floors_light(cov: CoverageResponse, sess) -> tuple[int, int]:
+    """Row floors for light coverage polls — skip slow PostgreSQL GROUP BY."""
+    from .shared_frames import frame_row_count
+
+    sales = int(cov.sales_rows or frame_row_count("sales_df", sess))
+    inv = int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess))
+    warm_sales, warm_inv = _warm_row_floors()
+    return max(sales, warm_sales), max(inv, warm_inv)
+
+
+def _augment_coverage_light(sess, cov: CoverageResponse) -> CoverageResponse:
+    """Fast readiness for GET /coverage?light=1 — no PG scans or unified sales Source walk."""
+    from .intelligence_readiness import (
+        _platform_flags_ready,
+        _tier3_all_platforms_have_uploads,
+        hydration_complete,
+        hydration_inflight,
+    )
+
+    data = cov.model_dump()
+    sid = getattr(sess, "_session_id", "") or ""
+    tier3 = _tier3_all_platforms_have_uploads()
+    flags_ok = _platform_flags_ready(cov)
+    sales_rows, inv_rows = _effective_row_floors_light(cov, sess)
+    sales_ok = bool(cov.sales) and (sales_rows > 0 or tier3)
+    inv_ok = bool(cov.inventory) and inv_rows > 0
+    platforms = flags_ok and (sales_rows > 0 or tier3)
+    hydrate_inflight = hydration_inflight(sid, sess)
+
+    data["background_tasks"] = background_tasks_running(sess)
+    data["critical_restore_running"] = critical_restore_running(sess)
+    data["platforms_loaded"] = platforms
+    data["hydration_complete"] = hydration_complete(sess, sid)
+    data["dashboard_ready"] = platforms and sales_ok
+    data["intelligence_ready"] = (
+        not hydrate_inflight and sales_ok and inv_ok and platforms
+    )
+    data["data_ready"] = (
+        sales_rows >= PO_MIN_SALES_ROWS and inv_rows >= PO_MIN_INVENTORY_ROWS
+    ) or (operational_data_complete(cov) and data_row_floors_met(cov))
+    if critical_restore_running(sess):
+        data["po_ready"] = False
+    elif data["data_ready"]:
+        data["po_ready"] = True
+    else:
+        data["po_ready"] = (
+            sales_rows >= PO_MIN_SALES_ROWS and inv_rows >= PO_MIN_INVENTORY_ROWS
+        )
+    return CoverageResponse(**data)
+
+
+def augment_coverage(sess, cov: CoverageResponse, *, light: bool = False) -> CoverageResponse:
     """Attach data_ready / po_ready / background_tasks to coverage payload."""
+    if light:
+        return _augment_coverage_light(sess, cov)
+
     from .intelligence_readiness import (
         build_intelligence_readiness,
         dashboard_gate_ready,

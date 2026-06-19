@@ -208,9 +208,14 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
-  const dataStillLoading = useSession(
-    s => !poPageHydrationReady(s) && (s.sales_rows ?? 0) < 100_000,
-  )
+  const dataStillLoading = useSession(s => {
+    const loaded = poOperationalLoaded(s)
+    // Avoid flashing 0/7 before the first coverage poll returns.
+    if (loaded === 0) return false
+    if (s.dashboard_ready || s.intelligence_ready) return false
+    if (loaded >= PO_OPERATIONAL_TOTAL) return false
+    return !poPageHydrationReady(s) && (s.sales_rows ?? 0) < 100_000
+  })
   const dataLoadLoaded = useSession(s => poOperationalLoaded(s))
   const dataLoadTotal = PO_OPERATIONAL_TOTAL
 
