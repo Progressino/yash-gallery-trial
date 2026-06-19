@@ -2544,8 +2544,25 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
         if not _main._warm_cache:
             return
         _main.try_attach_shared_frames_fast(sess)
+        if _shared_frames_operational(sess):
+            _mark_tier3_sync_applied(sess)
     except Exception:
         pass
+
+
+def _shared_frames_operational(sess: AppSession) -> bool:
+    """Warm cache attached with PO-scale sales + inventory — skip session rebuild workers."""
+    try:
+        from ..services.shared_frames import frame_row_count, session_uses_shared_frames
+
+        if not session_uses_shared_frames(sess):
+            return False
+        return (
+            frame_row_count("sales_df", sess) >= 100_000
+            and frame_row_count("inventory_df_variant", sess) >= 1_000
+        )
+    except Exception:
+        return False
 
 
 def _build_coverage_response(sess: AppSession, *, light: bool = False) -> CoverageResponse:
@@ -3270,9 +3287,10 @@ def get_coverage(request: Request, light: bool = False):
 
     if light:
         _apply_light_coverage_hydrate(sess)
-        _maybe_queue_light_session_hydrate(sess, sid or None)
-        _maybe_queue_tier3_sales_sync(sess, sid or None)
-        _maybe_queue_unified_sales_build(sess, sid or None)
+        if not _shared_frames_operational(sess):
+            _maybe_queue_light_session_hydrate(sess, sid or None)
+            _maybe_queue_tier3_sales_sync(sess, sid or None)
+            _maybe_queue_unified_sales_build(sess, sid or None)
         return _build_coverage_response(sess, light=True)
 
     try:
@@ -3329,12 +3347,11 @@ def intelligence_readiness(request: Request):
         clear_stale_background_jobs(sess)
     except Exception:
         pass
-    _maybe_queue_light_session_hydrate(sess, sid or None)
+    if not _shared_frames_operational(sess):
+        _maybe_queue_light_session_hydrate(sess, sid or None)
     cov = _build_coverage_response(sess, light=True)
     from ..services.intelligence_readiness import build_intelligence_readiness
-    from ..services.po_readiness import augment_coverage
 
-    cov = augment_coverage(sess, cov)
     return IntelligenceReadinessResponse(**build_intelligence_readiness(sess, cov, session_id=sid))
 
 
