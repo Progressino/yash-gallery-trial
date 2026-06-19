@@ -950,13 +950,14 @@ def _platform_df_for_intelligence_bundle(
         return raw
 
     in_w = _filter_platform_df_by_window(raw, s, e)
-    if in_w.empty:
-        disk = _warm_disk_platform_frame(attr, s, e)
-        if not disk.empty:
-            in_disk = _filter_platform_df_by_window(disk, s, e)
-            if not in_disk.empty:
-                raw = disk
-                in_w = in_disk
+    disk = _warm_disk_platform_frame(attr, s, e)
+    in_disk = _filter_platform_df_by_window(disk, s, e) if not disk.empty else pd.DataFrame()
+    if not in_disk.empty and (in_w.empty or len(in_w) < max(len(in_disk) // 2, 1000)):
+        raw = disk
+        in_w = in_disk
+    elif in_w.empty and not in_disk.empty:
+        raw = disk
+        in_w = in_disk
 
     if platform_key not in platforms_with_uploads_in_range(s, e):
         return raw
@@ -1777,9 +1778,12 @@ def _build_intelligence_bundle_payload_from_session(
     )
     gated_sales = (
         apply_upload_report_day_gate(sess.sales_df)
-        if getattr(sess, "sales_df", None) is not None
-        and hasattr(sess.sales_df, "empty")
-        and not sess.sales_df.empty
+        if (
+            not _intelligence_session_build_unsafe(sess)
+            and getattr(sess, "sales_df", None) is not None
+            and hasattr(sess.sales_df, "empty")
+            and not sess.sales_df.empty
+        )
         else pd.DataFrame()
     )
     win_gated = _slice_sales_for_bundle(gated_sales, s, e)
@@ -3922,7 +3926,7 @@ def intelligence_bundle(
             if tier3_first is not None:
                 return tier3_first
 
-        if not session_build_unsafe:
+        if not session_build_unsafe or _disk_bulk_history_available():
             session_payload = _build_intelligence_bundle_payload_from_session(
                 sess, s_win, e_win, limit, basis, include_extras
             )
@@ -3930,7 +3934,7 @@ def intelligence_bundle(
                 _bundle_cache_store(cache_key, bundle_cache, session_payload, ts=now)
                 return session_payload
 
-        if fast_window or session_build_unsafe:
+        if fast_window or (session_build_unsafe and not _disk_bulk_history_available()):
             tier3_payload = _try_serve_tier3_intelligence_bundle(
                 sess,
                 cache_key,
@@ -3956,7 +3960,9 @@ def intelligence_bundle(
         if need_persist:
             _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
 
-    elif _session_has_operational_frames(sess) and not session_build_unsafe:
+    elif _session_has_operational_frames(sess) and (
+        not session_build_unsafe or _disk_bulk_history_available()
+    ):
         session_payload = _build_intelligence_bundle_payload_from_session(
             sess,
             s_win or str(start_date or "")[:10],
