@@ -1083,9 +1083,9 @@ def _try_serve_tier3_intelligence_bundle(
         if units <= 0:
             return None
     tier3_units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
-    session_units = _session_window_gross_units(sess, s_win, e_win)
+    richer_units = _best_non_tier3_window_units(sess, s_win, e_win)
     # Tier-3 dailies alone can under-count vs bulk history on disk / unified sales_df.
-    if session_units > tier3_units and session_units > int(tier3_units * 1.05):
+    if richer_units > tier3_units and richer_units > int(tier3_units * 1.05):
         return None
     tier3["status"] = "ready"
     _bundle_cache_store(cache_key, bundle_cache, tier3, ts=ts if ts is not None else time.time())
@@ -1700,9 +1700,9 @@ def _bundle_cache_lookup(
             s = str(start_date or end_date or "")[:10]
             e = str(end_date or start_date or "")[:10]
             if len(s) == 10 and len(e) == 10:
-                session_units = _session_window_gross_units(sess, s, e)
+                richer_units = _best_non_tier3_window_units(sess, s, e)
                 tier3_units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
-                if session_units > tier3_units and session_units > int(tier3_units * 1.05):
+                if richer_units > tier3_units and richer_units > int(tier3_units * 1.05):
                     continue
         if not allow_sparse and _bundle_payload_chart_sparse(payload, start_date, end_date):
             continue
@@ -2346,6 +2346,44 @@ def _coverage_platform_row_count(sess: AppSession, frame_key: str, platform: str
     disk_rows = _disk_parquet_row_count(frame_key)
     tier3_rows = _tier3_platform_row_count(platform)
     return max(rows, disk_rows, tier3_rows)
+
+
+def _gapfill_window_gross_units(sess: AppSession, start_date: str, end_date: str) -> int:
+    """Gross shipments from gap-filled platform frames (bulk disk + Tier-3 dailies)."""
+    from ..services.sales import _compute_platform_metrics, _unified_platform_stub
+
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    if len(s) != 10 or len(e) != 10:
+        return 0
+    specs = (
+        ("amazon", "mtr_df", "Amazon", "SKU", "Transaction_Type"),
+        ("myntra", "myntra_df", "Myntra", "OMS_SKU", "TxnType"),
+        ("meesho", "meesho_df", "Meesho", "OMS_SKU", "TxnType"),
+        ("flipkart", "flipkart_df", "Flipkart", "OMS_SKU", "TxnType"),
+        ("snapdeal", "snapdeal_df", "Snapdeal", "OMS_SKU", "TxnType"),
+    )
+    total = 0
+    for pk, attr, name, sku_col, txn_col in specs:
+        try:
+            df = _platform_df_for_intelligence_bundle(sess, pk, attr, s, e)
+            win = _filter_platform_df_by_window(df, s, e)
+            if win.empty:
+                continue
+            metrics = _compute_platform_metrics(
+                win, name, sku_col, txn_col, start_date=s, end_date=e
+            )
+            total += int(metrics.get("total_units") or 0)
+        except Exception:
+            continue
+    return total
+
+
+def _best_non_tier3_window_units(sess: AppSession, start_date: str, end_date: str) -> int:
+    return max(
+        _session_window_gross_units(sess, start_date, end_date),
+        _gapfill_window_gross_units(sess, start_date, end_date),
+    )
 
 
 def _session_has_platform_data(sess: AppSession) -> bool:
