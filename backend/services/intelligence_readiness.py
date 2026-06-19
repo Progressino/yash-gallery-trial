@@ -99,12 +99,23 @@ def _tier3_all_platforms_have_uploads() -> bool:
         return False
 
 
+_unified_covers_cache: tuple[int, int, bool] | None = None
+
+
+def _platform_flags_ready(cov: CoverageResponse) -> bool:
+    return all(bool(getattr(cov, flag, False)) for _, _, flag, _ in PLATFORM_SPECS)
+
+
 def _unified_sales_covers_platforms(sess) -> bool:
     from .shared_frames import session_sales_df
 
     sales = session_sales_df(sess)
     if sales is None or sales.empty or "Source" not in sales.columns:
         return False
+    global _unified_covers_cache
+    cache_key = (id(sales), len(sales))
+    if _unified_covers_cache is not None and _unified_covers_cache[:2] == cache_key:
+        return _unified_covers_cache[2]
     sources = {
         str(v).strip().lower()
         for v in sales["Source"].dropna().astype(str).unique()
@@ -113,20 +124,27 @@ def _unified_sales_covers_platforms(sess) -> bool:
     for aliases in _SOURCE_ALIASES.values():
         if sources & aliases:
             found += 1
-    return found >= 5
+    result = found >= 5
+    _unified_covers_cache = (cache_key[0], cache_key[1], result)
+    return result
 
 
 def platform_frames_available(sess, cov: CoverageResponse) -> bool:
     from .shared_frames import frame_row_count
 
+    sales_rows = int(cov.sales_rows or frame_row_count("sales_df", sess))
+    # Unified sales_df mode: coverage flags set without per-platform session frames.
+    if _platform_flags_ready(cov) and sales_rows >= 100_000:
+        return True
+
     if all(frame_row_count(attr, sess) > 0 for _, attr, _, _ in PLATFORM_SPECS):
+        return True
+
+    if _tier3_all_platforms_have_uploads():
         return True
 
     pg = _pg_platform_sales_counts()
     if pg and all(int(pg.get(plat, 0) or 0) > 0 for plat in _PLATFORM_PG_KEYS):
-        return True
-
-    if int(pg.get("unified", 0) or 0) >= 100_000 and _unified_sales_covers_platforms(sess):
         return True
 
     if all(
@@ -135,10 +153,13 @@ def platform_frames_available(sess, cov: CoverageResponse) -> bool:
     ):
         return True
 
-    if _tier3_all_platforms_have_uploads():
+    if sales_rows >= 100_000 and _unified_sales_covers_platforms(sess):
         return True
 
-    return _unified_sales_covers_platforms(sess)
+    if int(pg.get("unified", 0) or 0) >= 100_000 and _unified_sales_covers_platforms(sess):
+        return True
+
+    return False
 
 
 def intelligence_ready(sess, cov: CoverageResponse, *, session_id: str = "") -> bool:
@@ -162,15 +183,21 @@ def build_intelligence_readiness(sess, cov: CoverageResponse, *, session_id: str
     from .shared_frames import frame_row_count
 
     bg = background_tasks_running(sess)
+    platforms_loaded = platform_frames_available(sess, cov)
+    sales_ok = sales_available(sess, cov)
+    inv_ok = inventory_available(sess, cov)
+    hydrate_inflight = hydration_inflight(session_id, sess)
     return {
-        "intelligence_ready": intelligence_ready(sess, cov, session_id=session_id),
-        "dashboard_ready": dashboard_gate_ready(sess, cov, session_id=session_id),
+        "intelligence_ready": (
+            not hydrate_inflight and sales_ok and inv_ok and platforms_loaded
+        ),
+        "dashboard_ready": platforms_loaded and sales_ok,
         "data_ready": bool(getattr(cov, "data_ready", False)),
-        "platforms_loaded": platform_frames_available(sess, cov),
+        "platforms_loaded": platforms_loaded,
         "hydration_complete": hydration_complete(sess, session_id),
-        "hydration_inflight": hydration_inflight(session_id, sess),
-        "sales_available": sales_available(sess, cov),
-        "inventory_available": inventory_available(sess, cov),
+        "hydration_inflight": hydrate_inflight,
+        "sales_available": sales_ok,
+        "inventory_available": inv_ok,
         "sales_rows": int(cov.sales_rows or frame_row_count("sales_df", sess)),
         "inventory_rows": int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess)),
         "platform_rows": {

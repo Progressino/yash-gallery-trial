@@ -3045,6 +3045,17 @@ def _session_needs_background_hydrate(sess: AppSession) -> bool:
     ):
         return False
     try:
+        from ..services.shared_frames import frame_row_count, session_uses_shared_frames
+
+        if session_uses_shared_frames(sess):
+            if (
+                frame_row_count("sales_df", sess) >= 100_000
+                and frame_row_count("inventory_df_variant", sess) >= 1_000
+            ):
+                return False
+    except Exception:
+        pass
+    try:
         import backend.main as _main
 
         if _main.session_needs_warm_cache_topup(sess):
@@ -3078,6 +3089,19 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
             return
         if getattr(sess, "pause_auto_data_restore", False):
             return
+        try:
+            import backend.main as _main
+            from ..services.shared_frames import frame_row_count, shared_frames_enabled
+
+            if shared_frames_enabled():
+                _main.try_attach_shared_frames_fast(sess)
+                if (
+                    not _main.session_needs_operational_data(sess)
+                    and frame_row_count("sales_df", sess) >= 100_000
+                ):
+                    return
+        except Exception:
+            pass
         try:
             import backend.main as _main
             from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
