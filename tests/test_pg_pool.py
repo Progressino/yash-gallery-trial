@@ -46,3 +46,38 @@ def test_pool_kwargs_open_on_create(monkeypatch):
         types.SimpleNamespace(ConnectionPool=type("CP", (), {"check_connection": None})),
     )
     assert pg_pool._pool_kwargs({})["open"] is True
+
+
+def test_pooled_lease_execute_delegates_without_rebinding(monkeypatch):
+    """``with lease: lease.execute()`` — lease variable is not rebound by ``with``."""
+    calls: list[str] = []
+
+    class FakeConn:
+        def execute(self, query, params=None):
+            calls.append(str(query))
+            return self
+
+        def fetchone(self):
+            return (1,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeCM:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, *a):
+            return False
+
+    class FakePool:
+        def connection(self):
+            return FakeCM()
+
+    lease = pg_pool.PooledConnectionLease(FakePool(), backend="postgresql", timed_factory=lambda c, **k: c)
+    with lease:
+        lease.execute("SELECT 1").fetchone()
+    assert calls == ["SELECT 1"]

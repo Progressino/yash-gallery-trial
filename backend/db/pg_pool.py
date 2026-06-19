@@ -95,7 +95,7 @@ def close_all_pools() -> None:
 
 
 class PooledConnectionLease:
-    """Deferred checkout — supports ``conn = lease(); with conn: ...``."""
+    """Deferred checkout — supports ``conn = lease(); with conn: ...`` and ``lease.execute()``."""
 
     __slots__ = ("_pool", "_backend", "_cm", "_timed_factory")
 
@@ -114,6 +114,16 @@ class PooledConnectionLease:
         if self._cm is not None:
             return self._cm.__exit__(*exc)
         return False
+
+    def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        with self as conn:
+            if params is None:
+                return conn.execute(query, **kwargs)
+            return conn.execute(query, params, **kwargs)
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        with self as conn:
+            return conn.cursor(*args, **kwargs)
 
 
 class DirectConnectionLease:
@@ -140,3 +150,13 @@ class DirectConnectionLease:
         if self._conn is not None:
             return self._conn.__exit__(*exc)
         return False
+
+    def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        with self as conn:
+            if params is None:
+                return conn.execute(query, **kwargs)
+            return conn.execute(query, params, **kwargs)
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        with self as conn:
+            return conn.cursor(*args, **kwargs)
