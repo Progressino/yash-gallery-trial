@@ -1747,10 +1747,13 @@ def _cached_bundle_stale_vs_tier3_uploads(
         return False
     if not platforms_with_uploads_in_range(s, e):
         return False
+    applied = getattr(sess, "_tier3_sync_token_applied", None) if sess else None
+    if not applied:
+        # Global / precomputed disk cache — key already embeds get_tier3_sync_token().
+        return False
     if payload.get("tier3_auto_pull"):
         return bool(sess and _tier3_token_mismatch(sess))
-    # Session/warm-cache bundle while Upload tab has Tier-3 rows for this window.
-    return True
+    return bool(sess and _tier3_token_mismatch(sess))
 
 
 def _tier3_direct_has_units(
@@ -3964,23 +3967,7 @@ def intelligence_bundle(
         tier3_window = bool(platforms_with_uploads_in_range(s_win, e_win))
     prefer_tier3 = tier3_window or _tier3_token_mismatch(sess)
 
-    # Tier-3 daily uploads are source of truth for the window — before stale session cache.
-    if prefer_tier3 and has_dates and len(s_win) == 10 and len(e_win) == 10:
-        tier3_immediate = _try_serve_tier3_intelligence_bundle(
-            sess,
-            cache_key,
-            bundle_cache,
-            s_win,
-            e_win,
-            limit,
-            basis,
-            include_extras,
-        )
-        if tier3_immediate is not None:
-            _maybe_queue_tier3_sales_sync(sess, sid or None)
-            return tier3_immediate
-
-    # PO-style instant path: persisted bundle cache (memory/disk) when Tier-3 is not fresher.
+    # Precomputed global/disk bundle — instant path before any Tier-3 rebuild.
     cached_instant = _bundle_cache_lookup(
         cache_key,
         bundle_cache,
@@ -3993,8 +3980,8 @@ def intelligence_bundle(
         _maybe_queue_light_session_hydrate(sess, sid or None)
         return cached_instant
 
-    # Tier-3 direct when no cache hit and Upload tab has blobs for this window.
-    if tier3_window and has_dates and len(s_win) == 10 and len(e_win) == 10:
+    # Tier-3 daily uploads when cache miss and window has fresh Tier-3 blobs.
+    if prefer_tier3 and has_dates and len(s_win) == 10 and len(e_win) == 10:
         tier3_immediate = _try_serve_tier3_intelligence_bundle(
             sess,
             cache_key,

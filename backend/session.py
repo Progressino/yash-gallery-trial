@@ -312,6 +312,42 @@ class SessionStore:
         self._sessions: dict[str, AppSession] = {}
         self._pg_restore_lock = threading.Lock()
 
+    @staticmethod
+    def _max_active_sessions() -> int:
+        raw = os.environ.get("SESSION_MAX_ACTIVE", "4").strip()
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 4
+
+    def _enforce_active_cap(self, protect_sid: Optional[str] = None) -> int:
+        """Evict least-recently-used sessions when over SESSION_MAX_ACTIVE (OOM guard)."""
+        cap = self._max_active_sessions()
+        if len(self._sessions) <= cap:
+            return 0
+        ranked = sorted(
+            (
+                (sid, sess.last_accessed)
+                for sid, sess in self._sessions.items()
+                if sid != protect_sid
+            ),
+            key=lambda item: item[1],
+        )
+        evicted = 0
+        for sid, _ in ranked:
+            if len(self._sessions) <= cap:
+                break
+            if sid in self._sessions:
+                del self._sessions[sid]
+                evicted += 1
+        if evicted:
+            _log.warning(
+                "Evicted %d session(s) — active count exceeded cap of %d",
+                evicted,
+                cap,
+            )
+        return evicted
+
     def get_or_create(self, sid: Optional[str]) -> tuple[str, AppSession]:
         if sid and sid in self._sessions:
             sess = self._sessions[sid]
@@ -329,6 +365,7 @@ class SessionStore:
                     if loaded is not None:
                         self._sessions[sid] = loaded
                         loaded.last_accessed = time.time()
+                        self._enforce_active_cap(sid)
                         return sid, loaded
                     _schedule_pg_session_restore(sid)
             except Exception:
@@ -338,11 +375,13 @@ class SessionStore:
             empty = AppSession()
             empty.last_accessed = time.time()
             self._sessions[sid] = empty
+            self._enforce_active_cap(sid)
             return sid, empty
 
         new_id = str(uuid.uuid4())
         self._sessions[new_id] = AppSession()
         self._sessions[new_id].last_accessed = time.time()
+        self._enforce_active_cap(new_id)
         return new_id, self._sessions[new_id]
 
     def get(self, sid: str) -> Optional[AppSession]:
@@ -361,10 +400,12 @@ class SessionStore:
             empty = AppSession()
             empty.last_accessed = time.time()
             self._sessions[sid] = empty
+            self._enforce_active_cap(sid)
             return sid, empty
         new_id = str(uuid.uuid4())
         self._sessions[new_id] = AppSession()
         self._sessions[new_id].last_accessed = time.time()
+        self._enforce_active_cap(new_id)
         return new_id, self._sessions[new_id]
 
     def delete(self, sid: str) -> None:
@@ -375,7 +416,8 @@ class SessionStore:
         stale = [k for k, v in self._sessions.items() if v.last_accessed < cutoff]
         for k in stale:
             del self._sessions[k]
-        return len(stale)
+        cap_evicted = self._enforce_active_cap()
+        return len(stale) + cap_evicted
 
     @property
     def count(self) -> int:

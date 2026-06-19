@@ -1,7 +1,6 @@
 """PostgreSQL connection pool (psycopg_pool — equivalent to SQLAlchemy pool settings).
 
-Defaults mirror SQLAlchemy ``pool_size=20``, ``max_overflow=40``, ``pool_recycle=1800``,
-``pool_pre_ping=True`` without adding SQLAlchemy as a dependency.
+Defaults: ``pool_size=2``, ``max_overflow=3`` (5 connections total on the VPS).
 """
 from __future__ import annotations
 
@@ -30,11 +29,11 @@ def _int_env(name: str, default: int) -> int:
 
 
 def pool_size() -> int:
-    return max(1, _int_env("DB_POOL_SIZE", 20))
+    return max(1, _int_env("DB_POOL_SIZE", 2))
 
 
 def pool_max_overflow() -> int:
-    return max(0, _int_env("DB_POOL_MAX_OVERFLOW", 40))
+    return max(0, _int_env("DB_POOL_MAX_OVERFLOW", 3))
 
 
 def pool_max_size() -> int:
@@ -54,7 +53,7 @@ def _pool_kwargs(connect_kwargs: dict[str, Any]) -> dict[str, Any]:
     from psycopg_pool import ConnectionPool
 
     kw: dict[str, Any] = {
-        "min_size": min(5, pool_size()),
+        "min_size": pool_size(),
         "max_size": pool_max_size(),
         "max_lifetime": float(pool_recycle_sec()),
         "kwargs": dict(connect_kwargs),

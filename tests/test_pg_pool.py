@@ -5,9 +5,9 @@ from backend.db import pg_pool
 
 
 def test_pool_defaults_match_sqlalchemy_equivalent():
-    assert pg_pool.pool_size() == 20
-    assert pg_pool.pool_max_overflow() == 40
-    assert pg_pool.pool_max_size() == 60
+    assert pg_pool.pool_size() == 2
+    assert pg_pool.pool_max_overflow() == 3
+    assert pg_pool.pool_max_size() == 5
     assert pg_pool.pool_recycle_sec() == 1800
     assert pg_pool.pool_pre_ping() is True
     assert pg_pool.pg_pool_enabled() is True
