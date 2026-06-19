@@ -213,3 +213,47 @@ def test_full_coverage_rebuilds_sales_when_platforms_only(client, auth_token, mo
     assert sess is not None
     assert not sess.sales_df.empty
     main_mod.clear_warm_cache()
+
+
+def test_coverage_platform_row_count_uses_tier3_when_frame_empty(monkeypatch):
+    """Upload History tab shows row counts when flags set but shared frames omit platform RAM copies."""
+    from backend.routers.data import _coverage_platform_row_count
+    from backend.session import AppSession
+
+    sess = AppSession()
+    monkeypatch.setattr(
+        "backend.routers.data._tier3_platform_row_count",
+        lambda plat: {"amazon": 82353, "myntra": 185477}.get(plat, 0),
+    )
+    monkeypatch.setattr(
+        "backend.services.shared_frames.frame_row_count",
+        lambda _k, _s: 0,
+    )
+    assert _coverage_platform_row_count(sess, "mtr_df", "amazon") == 82353
+    assert _coverage_platform_row_count(sess, "myntra_df", "myntra") == 185477
+
+
+def test_tier3_bundle_skipped_when_session_window_has_more_units(monkeypatch):
+    """Prefer gap-filled session/unified sales when Tier-3 dailies under-count bulk history."""
+    from backend.routers.data import _try_serve_tier3_intelligence_bundle
+    from backend.session import AppSession
+
+    sess = AppSession()
+    monkeypatch.setattr(
+        "backend.routers.data._build_intelligence_bundle_payload_from_tier3",
+        lambda *_a, **_k: {
+            "sales_summary": {"total_units": 22000},
+            "platform_summary": [{"platform": "Amazon", "loaded": True, "total_units": 22000}],
+            "top_skus": [],
+            "status": "ready",
+            "tier3_auto_pull": True,
+        },
+    )
+    monkeypatch.setattr(
+        "backend.routers.data._session_window_gross_units",
+        lambda *_a, **_k: 63000,
+    )
+    out = _try_serve_tier3_intelligence_bundle(
+        sess, ("s", "e", "gross", 10, False), {}, "2026-05-21", "2026-06-20", 10, "gross", False
+    )
+    assert out is None
