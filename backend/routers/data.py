@@ -1083,9 +1083,7 @@ def _try_serve_tier3_intelligence_bundle(
         if units <= 0:
             return None
     tier3_units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
-    richer_units = _best_non_tier3_window_units(sess, s_win, e_win)
-    # Tier-3 dailies alone can under-count vs bulk history on disk / unified sales_df.
-    if richer_units > tier3_units and richer_units > int(tier3_units * 1.05):
+    if _tier3_only_undercounts_bulk(tier3_units, s_win, e_win):
         return None
     tier3["status"] = "ready"
     _bundle_cache_store(cache_key, bundle_cache, tier3, ts=ts if ts is not None else time.time())
@@ -1700,9 +1698,8 @@ def _bundle_cache_lookup(
             s = str(start_date or end_date or "")[:10]
             e = str(end_date or start_date or "")[:10]
             if len(s) == 10 and len(e) == 10:
-                richer_units = _best_non_tier3_window_units(sess, s, e)
                 tier3_units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
-                if richer_units > tier3_units and richer_units > int(tier3_units * 1.05):
+                if _tier3_only_undercounts_bulk(tier3_units, s, e):
                     continue
         if not allow_sparse and _bundle_payload_chart_sparse(payload, start_date, end_date):
             continue
@@ -2346,6 +2343,30 @@ def _coverage_platform_row_count(sess: AppSession, frame_key: str, platform: str
     disk_rows = _disk_parquet_row_count(frame_key)
     tier3_rows = _tier3_platform_row_count(platform)
     return max(rows, disk_rows, tier3_rows)
+
+
+def _disk_bulk_history_available() -> bool:
+    """True when on-disk warm-cache parquets hold bulk Tier-1 platform history."""
+    return any(
+        _disk_parquet_row_count(k) >= 50_000
+        for k in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df")
+    )
+
+
+def _tier3_only_undercounts_bulk(
+    tier3_units: int,
+    start_date: str,
+    end_date: str,
+) -> bool:
+    """Fast check: Tier-3 dailies alone vs bulk parquets on disk for multi-week windows."""
+    if tier3_units <= 0:
+        return False
+    span = _report_span_days(start_date, end_date) or 0
+    if span < 7 or not _disk_bulk_history_available():
+        return False
+    # When bulk parquets exist, 30D Tier-3-only totals below ~35K are almost always incomplete.
+    floor = min(35_000, max(7_000, span * 900))
+    return tier3_units < floor
 
 
 def _gapfill_window_gross_units(sess: AppSession, start_date: str, end_date: str) -> int:
