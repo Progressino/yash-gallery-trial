@@ -139,12 +139,10 @@ export function operationalDataComplete(c: CoverageResponse): boolean {
 
 /** Dashboard may mount charts — 8/8 + platform history (PG/Tier-3 or session). */
 export function dashboardGateReady(c: CoverageResponse): boolean {
-  if (typeof c.dashboard_ready === 'boolean') {
-    return c.dashboard_ready
-  }
-  if (c.sales && c.sales_rows > 0) return true
-  if (!operationalDataComplete(c)) return false
-  return true
+  if (typeof c.dashboard_ready === 'boolean') return c.dashboard_ready
+  if (c.sales && (c.sales_rows ?? 0) > 0) return true
+  if (c.mtr || c.myntra || c.meesho || c.flipkart) return true
+  return operationalDataComplete(c)
 }
 
 /** Full intelligence gate (includes sales/inventory availability checks). */

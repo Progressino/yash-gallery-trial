@@ -1260,24 +1260,15 @@ export default function Dashboard() {
 
   const intelligenceLoadLabel = useMemo(() => {
     if (awaitingDashboardReady) {
-      if (intelligenceReadiness?.hydration_inflight) {
-        return 'Syncing marketplace history into your session…'
-      }
-      if (!intelligenceReadiness?.platforms_loaded) {
-        return 'Loading marketplace platform data…'
-      }
-      if (intelligenceReadiness?.background_jobs?.length) {
-        return `Preparing dashboard (${intelligenceReadiness.background_jobs.join(', ')} in background)…`
-      }
-      return 'Preparing Intelligence dashboard…'
+      return 'Analytics warming up — numbers will appear shortly…'
     }
     if (awaitingFirstBundle && bundleLoadPercent != null) {
       const sec = Math.floor(bundleLoadElapsedMs / 1000)
-      return `Loading marketplace data… (${bundleLoadPercent}% · ${sec}s)`
+      return `Analytics warming up… (${bundleLoadPercent}% · ${sec}s)`
     }
     if (bundleWarming && intelligenceBundle?.message) return intelligenceBundle.message
-    if (bundleWarming) return 'Warming sales data on server…'
-    if (!hasDisplayData && loadingBundle) return 'Loading marketplace data…'
+    if (bundleWarming) return 'Analytics warming up…'
+    if (!hasDisplayData && loadingBundle) return 'Analytics warming up…'
     if (fetchingBundle && hasDisplayData) return 'Refreshing dashboard…'
     if (exportingSales) return 'Preparing sales export…'
     if (exportingDsr) return 'Exporting DSR…'
