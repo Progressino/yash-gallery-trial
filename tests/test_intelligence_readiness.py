@@ -57,7 +57,10 @@ class _Sess:
 
 def test_dashboard_not_ready_when_platform_rows_zero(monkeypatch):
     sess = _Sess()
-    cov = _cov(mtr_rows=0, myntra_rows=0, meesho_rows=0, flipkart_rows=0, snapdeal_rows=0)
+    cov = _cov(
+        mtr=False, myntra=False, meesho=False, flipkart=False, snapdeal=False,
+        mtr_rows=0, myntra_rows=0, meesho_rows=0, flipkart_rows=0, snapdeal_rows=0,
+    )
     monkeypatch.setattr(
         "backend.services.intelligence_readiness._pg_platform_sales_counts",
         lambda: {},

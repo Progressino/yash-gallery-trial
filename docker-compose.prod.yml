@@ -66,6 +66,7 @@ services:
       - SESSION_PG_MAX_BUNDLE_MB=${SESSION_PG_MAX_BUNDLE_MB:-200}
       # Disable MTR row-count guard so accounts with <500K rows use fast-path from disk cache.
       - WARM_CACHE_MIN_MTR_ROWS=0
+      - SESSION_SHARED_FRAMES=1
       - FINANCE_DB_PATH=/data/finance.db
       - ITEM_DB_PATH=/data/items.db
       - SALES_DB_PATH=/data/sales.db

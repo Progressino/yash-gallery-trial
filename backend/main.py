@@ -164,7 +164,7 @@ bootstrap_warm_cache_from_disk_if_empty = bootstrap_warm_cache_if_empty
 
 
 def try_fast_warm_cache_hydrate(sess) -> bool:
-    """Copy shared warm cache into an empty session — used on light coverage / hard refresh."""
+    """Copy shared warm cache into an empty session — used on login / explicit hydrate only."""
     if sess is None:
         return False
     if getattr(sess, "pause_auto_data_restore", False) and not session_needs_operational_data(sess):
@@ -177,6 +177,14 @@ def try_fast_warm_cache_hydrate(sess) -> bool:
     if not _warm_cache:
         return False
     try:
+        from .services.shared_frames import attach_shared_frames, shared_frames_enabled
+
+        if shared_frames_enabled():
+            attach_shared_frames(sess, warm_cache_generation=int(_warm_cache_generation or 0))
+            return True
+    except Exception:
+        pass
+    try:
         if not session_needs_warm_cache_topup(sess) and not session_needs_operational_data(sess):
             return False
     except Exception:
@@ -188,6 +196,28 @@ def try_fast_warm_cache_hydrate(sess) -> bool:
         return not session_needs_operational_data(sess)
     except Exception:
         return applied
+
+
+def try_attach_shared_frames_fast(sess) -> bool:
+    """Instant warm-cache attach for coverage/readiness polls — never copies DataFrames."""
+    if sess is None:
+        return False
+    if not _warm_cache:
+        bootstrap_warm_cache_if_empty()
+    if not _warm_cache:
+        return False
+    try:
+        from .services.shared_frames import attach_shared_frames, shared_frames_enabled
+
+        if shared_frames_enabled():
+            attach_shared_frames(sess, warm_cache_generation=int(_warm_cache_generation or 0))
+            return True
+        sm = (_warm_cache or {}).get("sku_mapping")
+        if isinstance(sm, dict) and sm and not getattr(sess, "sku_mapping", None):
+            sess.sku_mapping = sm
+        return bool((_warm_cache or {}).get("sales_df") is not None)
+    except Exception:
+        return False
 
 
 def publish_warm_cache_from_session(sess) -> None:
@@ -2347,9 +2377,9 @@ async def session_middleware(request: Request, call_next):
         sid = request.cookies.get(SESSION_COOKIE)
         sid, session = await run_aux(store.get_or_empty, sid)
         try:
-            await run_aux(try_fast_warm_cache_hydrate, session)
+            await run_aux(try_attach_shared_frames_fast, session)
         except Exception:
-            log.exception("fast warm-cache hydrate on light coverage failed")
+            log.exception("shared-frame attach on light poll failed")
         request.state.session_id = sid
         request.state.session = session
         setattr(session, "_persist_sid", sid)

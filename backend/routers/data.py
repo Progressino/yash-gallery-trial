@@ -2535,29 +2535,15 @@ def full_restore_session(
 
 
 def _apply_light_coverage_hydrate(sess: AppSession) -> None:
-    """Attach warm-cache / shared frames for fast coverage & readiness polls."""
+    """Attach shared frames / sku map for fast coverage — never block on full DataFrame copy."""
     try:
         import backend.main as _main
-        from ..services.shared_frames import attach_shared_frames, shared_frames_enabled
 
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_if_empty()
         if not _main._warm_cache:
             return
-        gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
-        if shared_frames_enabled():
-            attach_shared_frames(sess, warm_cache_generation=gen)
-        else:
-            from ..local_dev import hydrate_session_from_warm_local, local_dev_mode
-
-            if local_dev_mode():
-                hydrate_session_from_warm_local(sess, _main._warm_cache, gen)
-            else:
-                _main.try_fast_warm_cache_hydrate(sess)
-        if not getattr(sess, "sku_mapping", None):
-            sm = (_main._warm_cache or {}).get("sku_mapping")
-            if isinstance(sm, dict) and sm:
-                sess.sku_mapping = sm
+        _main.try_attach_shared_frames_fast(sess)
     except Exception:
         pass
 
@@ -3259,41 +3245,11 @@ def get_coverage(request: Request, light: bool = False):
         pass
 
     if light:
-        try:
-            import backend.main as _main
-            from ..local_dev import hydrate_session_from_warm_local, local_dev_mode
-
-            if not _main._warm_cache:
-                _main.bootstrap_warm_cache_if_empty()
-            if local_dev_mode() and _main.session_needs_operational_data(sess):
-                hydrate_session_from_warm_local(
-                    sess, _main._warm_cache, int(getattr(_main, "_warm_cache_generation", 0) or 0),
-                )
-            else:
-                _main.restore_po_sidecars_from_warm(sess)
-                if _main.session_needs_operational_data(sess):
-                    _main.try_fast_warm_cache_hydrate(sess) or _main.force_restore_session_from_server_cache(
-                        sess, _main._warm_cache_generation,
-                    )
-            # Heavy warm-cache copy runs in _maybe_queue_light_session_hydrate — never block light polls.
-            if not getattr(sess, "sku_mapping", None):
-                try:
-                    from ..services.sku_mapping import restore_sku_mapping_to_session
-
-                    restore_sku_mapping_to_session(sess)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            _ensure_return_overlay_hydrated(sess)
-        except Exception:
-            pass
+        _apply_light_coverage_hydrate(sess)
         _maybe_queue_light_session_hydrate(sess, sid or None)
         _maybe_queue_tier3_sales_sync(sess, sid or None)
         _maybe_queue_unified_sales_build(sess, sid or None)
-        _maybe_queue_full_restore_when_empty(sess, sid or None)
-        return _build_coverage_response(sess)
+        return _build_coverage_response(sess, light=True)
 
     try:
         from ..services.sku_mapping import restore_sku_mapping_to_session
