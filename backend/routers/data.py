@@ -1082,6 +1082,11 @@ def _try_serve_tier3_intelligence_bundle(
         units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
         if units <= 0:
             return None
+    tier3_units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
+    session_units = _session_window_gross_units(sess, s_win, e_win)
+    # Tier-3 dailies alone can under-count vs bulk history on disk / unified sales_df.
+    if session_units > tier3_units and session_units > tier3_units * 1.05:
+        return None
     tier3["status"] = "ready"
     _bundle_cache_store(cache_key, bundle_cache, tier3, ts=ts if ts is not None else time.time())
     return tier3
@@ -2252,9 +2257,101 @@ def _restore_inventory_from_warm(sess: AppSession) -> None:
         pass
 
 
+def _session_window_gross_units(sess: AppSession, start_date: str, end_date: str) -> int:
+    """Fast gross shipment units from unified session/warm sales for a reporting window."""
+    import pandas as pd
+
+    from ..services.sales import apply_upload_report_day_gate, get_sales_summary
+    from ..services.shared_frames import session_sales_df
+
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    if len(s) != 10 or len(e) != 10:
+        return 0
+    sales = session_sales_df(sess)
+    if sales is None or sales.empty:
+        return 0
+    gated = apply_upload_report_day_gate(sales)
+    clipped = _slice_sales_for_bundle(gated, s, e)
+    if clipped.empty:
+        return 0
+    try:
+        summary = get_sales_summary(clipped, start_date=s, end_date=e)
+        return int(summary.get("total_units") or 0)
+    except Exception:
+        txn_col = "Transaction Type" if "Transaction Type" in clipped.columns else "Transaction_Type"
+        if txn_col not in clipped.columns:
+            return 0
+        ship = clipped[clipped[txn_col].astype(str).str.strip().str.lower() == "shipment"]
+        return int(pd.to_numeric(ship.get("Quantity", ship.get("Units_Effective", 0)), errors="coerce").fillna(0).sum())
+
+
+_PLATFORM_ROW_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("mtr_df", "mtr_rows", "amazon"),
+    ("myntra_df", "myntra_rows", "myntra"),
+    ("meesho_df", "meesho_rows", "meesho"),
+    ("flipkart_df", "flipkart_rows", "flipkart"),
+    ("snapdeal_df", "snapdeal_rows", "snapdeal"),
+)
+
+_disk_row_count_cache: dict[str, int] = {}
+
+
+def _disk_parquet_row_count(frame_key: str) -> int:
+    if frame_key in _disk_row_count_cache:
+        return _disk_row_count_cache[frame_key]
+    try:
+        import os
+
+        import pyarrow.parquet as pq
+
+        import backend.main as _main
+
+        path = os.path.join(_main._DISK_CACHE_DIR, f"{frame_key}.parquet")
+        if os.path.isfile(path):
+            n = int(pq.read_metadata(path).num_rows)
+            _disk_row_count_cache[frame_key] = n
+            return n
+    except Exception:
+        pass
+    return 0
+
+
+def _tier3_platform_row_count(platform: str) -> int:
+    try:
+        from ..services.daily_store import get_summary
+
+        summary = get_summary() or {}
+        plat = summary.get(platform) or {}
+        return int(plat.get("total_rows") or 0)
+    except Exception:
+        return 0
+
+
+def _coverage_platform_row_count(sess: AppSession, frame_key: str, platform: str) -> int:
+    """Row count for Upload/coverage UI — session frame, warm RAM, disk, or Tier-3 summary."""
+    from ..services.shared_frames import frame_row_count
+
+    rows = int(frame_row_count(frame_key, sess))
+    if rows > 0:
+        return rows
+    disk_rows = _disk_parquet_row_count(frame_key)
+    if disk_rows > 0:
+        return disk_rows
+    tier3_rows = _tier3_platform_row_count(platform)
+    if tier3_rows > 0:
+        return tier3_rows
+    return 0
+
+
 def _session_has_platform_data(sess: AppSession) -> bool:
     from ..services.shared_frames import frame_row_count
 
+    if any(
+        _coverage_platform_row_count(sess, fk, plat) > 0
+        for fk, _, plat in _PLATFORM_ROW_SPECS
+    ):
+        return True
     return any(
         frame_row_count(attr, sess) > 0
         for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
@@ -2578,6 +2675,8 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
 
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_if_empty()
+        else:
+            _main._top_up_warm_cache_from_disk()
         if not _main._warm_cache:
             return
         _main.try_attach_shared_frames_fast(sess)
@@ -2710,12 +2809,12 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         manual_intransit_sheet=not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty,
         po_raise_ledger=bool(_po_ledger_ok),
         return_sheet=bool(_ret_ok),
-        mtr_rows=frame_row_count("mtr_df", sess),
-        sales_rows=frame_row_count("sales_df", sess),
-        myntra_rows=frame_row_count("myntra_df", sess),
-        meesho_rows=frame_row_count("meesho_df", sess),
-        flipkart_rows=frame_row_count("flipkart_df", sess),
-        snapdeal_rows=frame_row_count("snapdeal_df", sess),
+        mtr_rows=_coverage_platform_row_count(sess, "mtr_df", "amazon"),
+        sales_rows=frame_row_count("sales_df", sess) or _disk_parquet_row_count("sales_df"),
+        myntra_rows=_coverage_platform_row_count(sess, "myntra_df", "myntra"),
+        meesho_rows=_coverage_platform_row_count(sess, "meesho_df", "meesho"),
+        flipkart_rows=_coverage_platform_row_count(sess, "flipkart_df", "flipkart"),
+        snapdeal_rows=_coverage_platform_row_count(sess, "snapdeal_df", "snapdeal"),
         inventory_rows=int(len(_inv)),
         sku_status_lead_rows=int(len(sess.sku_status_lead_df)),
         daily_inventory_history_rows=int(len(sess.daily_inventory_history_df)),

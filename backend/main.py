@@ -157,6 +157,7 @@ def bootstrap_warm_cache_if_empty() -> bool:
         if _warm_cache:
             return True
         if _try_bootstrap_warm_cache_from_pg():
+            _top_up_warm_cache_from_disk()
             return True
         disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
         if not disk_ok or not disk_data:
@@ -945,6 +946,49 @@ def _persist_shared_snapshot_if_ready() -> None:
         persist_shared_snapshot(_warm_cache)
     except Exception:
         log.exception("PostgreSQL shared snapshot persist failed")
+
+
+def _top_up_warm_cache_from_disk() -> None:
+    """Merge missing or shrunken warm-cache keys from on-disk parquets (PG partial restore)."""
+    global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
+    disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
+    if not disk_ok or not disk_data:
+        return
+    if not _warm_cache:
+        _warm_cache = {}
+    topped = 0
+    for key, val in disk_data.items():
+        if key in (
+            "sku_mapping",
+            _INVENTORY_META_WARM_KEY,
+            _EXISTING_PO_META_WARM_KEY,
+            _RETURN_OVERLAY_META_WARM_KEY,
+        ):
+            cur = _warm_cache.get(key)
+            if (not cur or (isinstance(cur, dict) and not cur)) and val:
+                _warm_cache[key] = val
+                topped += 1
+            continue
+        if not hasattr(val, "__len__"):
+            continue
+        disk_rows = int(len(val))
+        if disk_rows <= 0:
+            continue
+        cur = _warm_cache.get(key)
+        cur_rows = int(len(cur)) if cur is not None and hasattr(cur, "__len__") else 0
+        if cur_rows <= 0 or cur_rows < int(disk_rows * 0.9):
+            _warm_cache[key] = val
+            topped += 1
+            log.info(
+                "Warm cache topped up %s from disk (%d -> %d rows)",
+                key,
+                cur_rows,
+                disk_rows,
+            )
+    if topped:
+        _warm_cache_loaded_at = datetime.now(IST)
+        _warm_cache_generation = max(_warm_cache_generation, 1) + 1
+        _warm_cache_ready.set()
 
 
 def _try_bootstrap_warm_cache_from_pg() -> bool:
