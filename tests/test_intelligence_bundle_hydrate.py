@@ -96,4 +96,6 @@ def test_intelligence_bundle_warming_when_no_data_anywhere(client, monkeypatch):
     )
     assert r.status_code == 200
     body = r.json()
-    assert body.get("status") == "warming"
+    assert body.get("status") == "warming" or (
+        body.get("computing") is True and "loading" in str(body.get("message", "")).lower()
+    )

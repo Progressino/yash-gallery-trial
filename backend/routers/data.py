@@ -3605,9 +3605,23 @@ def intelligence_bundle(
 
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
-    if not sess or (hasattr(sess, 'sales_df') and sess.sales_df.empty):
-        return {"ok": False, "computing": True, "message": "Session data still loading"}
     has_dates = bool(start_date or end_date)
+    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
+    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
+    if not sess:
+        return {"ok": False, "computing": True, "message": "Session data still loading"}
+    sales_empty = hasattr(sess, "sales_df") and sess.sales_df.empty
+    if sales_empty:
+        tier3_can_serve = False
+        if has_dates and len(s_win) == 10 and len(e_win) == 10:
+            try:
+                from ..services.daily_store import platforms_with_uploads_in_range
+
+                tier3_can_serve = bool(platforms_with_uploads_in_range(s_win, e_win))
+            except Exception:
+                tier3_can_serve = False
+        if not tier3_can_serve and not _session_has_platform_data(sess):
+            return {"ok": False, "computing": True, "message": "Session data still loading"}
     try:
         from ..routers.upload import clear_stale_background_jobs
 
@@ -3617,8 +3631,6 @@ def intelligence_bundle(
     _ensure_sku_mapping_for_dashboard(sess)
 
     span_days = _report_span_days(start_date, end_date)
-    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
-    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
 
     cache_key = (
         str(start_date or ""),
