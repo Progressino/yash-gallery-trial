@@ -60,9 +60,14 @@ def _connection_url() -> Optional[str]:
 
 
 def ops_pg_enabled() -> bool:
+    global _table_ready
     if os.environ.get("FORECAST_OPS_PG", "1").strip().lower() in ("0", "false", "no", "off"):
         return False
-    return bool(_connection_url()) and _table_ready
+    if not _connection_url():
+        return False
+    if not _table_ready:
+        init_db()
+    return _table_ready
 
 
 def daily_uploads_pg_read() -> bool:

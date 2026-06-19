@@ -155,13 +155,11 @@ def dashboard_gate_ready(sess, cov: CoverageResponse, *, session_id: str = "") -
     """Dashboard may fetch aggregates — 8/8 + platform history (PG/Tier-3 or session)."""
     from .po_readiness import operational_data_complete
 
-    if hydration_inflight(session_id, sess):
-        return False
     if not operational_data_complete(cov):
         return False
     if not platform_frames_available(sess, cov) or not sales_available(sess, cov):
         return False
-    # Charts use Tier-3 / PG aggregates — do not block on full session warm copy.
+    # Charts use Tier-3 / PG aggregates — never block on session hydrate lock.
     return True
 
 

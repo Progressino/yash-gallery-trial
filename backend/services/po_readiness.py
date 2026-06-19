@@ -89,9 +89,41 @@ def _pg_row_floors() -> tuple[int, int]:
         return 0, 0
 
 
-def compute_data_ready(cov: CoverageResponse) -> bool:
+def _warm_row_floors() -> tuple[int, int]:
+    try:
+        import backend.main as _main
+
+        wc = _main._warm_cache or {}
+        sales_df = wc.get("sales_df")
+        inv_df = wc.get("inventory_df_variant")
+        sales = int(len(sales_df)) if sales_df is not None and hasattr(sales_df, "__len__") else 0
+        inv = int(len(inv_df)) if inv_df is not None and hasattr(inv_df, "__len__") else 0
+        return sales, inv
+    except Exception:
+        return 0, 0
+
+
+def _effective_row_floors(cov: CoverageResponse, sess) -> tuple[int, int]:
+    from .shared_frames import frame_row_count
+
+    sales = int(cov.sales_rows or frame_row_count("sales_df", sess))
+    inv = int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess))
+    pg_sales, pg_inv = _pg_row_floors()
+    warm_sales, warm_inv = _warm_row_floors()
+    return max(sales, pg_sales, warm_sales), max(inv, pg_inv, warm_inv)
+
+
+def compute_data_ready(cov: CoverageResponse, sess=None) -> bool:
     """Session holds PO essentials (8/8 flags + row floors) — ignores background jobs."""
-    if operational_data_complete(cov) and data_row_floors_met(cov):
+    sales_rows, inv_rows = _effective_row_floors(cov, sess) if sess is not None else (
+        int(cov.sales_rows or 0),
+        int(cov.inventory_rows or 0),
+    )
+    floors_ok = (
+        sales_rows >= PO_MIN_SALES_ROWS
+        and inv_rows >= PO_MIN_INVENTORY_ROWS
+    )
+    if operational_data_complete(cov) and floors_ok:
         return True
     pg_sales, pg_inv = _pg_row_floors()
     if pg_sales >= PO_MIN_SALES_ROWS and pg_inv >= PO_MIN_INVENTORY_ROWS:
@@ -103,10 +135,10 @@ def compute_po_ready(sess, cov: CoverageResponse) -> bool:
     """PO Engine may mount — data ready and no critical restore replacing inventory/session."""
     if critical_restore_running(sess):
         return False
-    if compute_data_ready(cov):
+    if compute_data_ready(cov, sess):
         return True
-    pg_sales, pg_inv = _pg_row_floors()
-    return pg_sales >= PO_MIN_SALES_ROWS and pg_inv >= PO_MIN_INVENTORY_ROWS
+    sales_rows, inv_rows = _effective_row_floors(cov, sess)
+    return sales_rows >= PO_MIN_SALES_ROWS and inv_rows >= PO_MIN_INVENTORY_ROWS
 
 
 def _resolve_data_source(sess) -> str:
@@ -133,21 +165,14 @@ def _hydration_label(sess, session_id: str = "") -> str:
 
 
 def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:
-    from .shared_frames import frame_row_count
-
     pg_sales, pg_inv = _pg_row_floors()
-    sales_rows = int(cov.sales_rows or frame_row_count("sales_df", sess))
-    inventory_rows = int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess))
-    if sales_rows < PO_MIN_SALES_ROWS and pg_sales > sales_rows:
-        sales_rows = pg_sales
-    if inventory_rows < PO_MIN_INVENTORY_ROWS and pg_inv > inventory_rows:
-        inventory_rows = pg_inv
+    sales_rows, inventory_rows = _effective_row_floors(cov, sess)
     data_source = _resolve_data_source(sess)
     if pg_sales >= PO_MIN_SALES_ROWS and data_source == "warm_cache":
         data_source = "postgres_normalized"
     return {
         "po_ready": compute_po_ready(sess, cov),
-        "data_ready": compute_data_ready(cov),
+        "data_ready": compute_data_ready(cov, sess),
         "sales_rows": sales_rows,
         "inventory_rows": inventory_rows,
         "data_source": data_source,
@@ -168,7 +193,7 @@ def augment_coverage(sess, cov: CoverageResponse) -> CoverageResponse:
     )
 
     data = cov.model_dump()
-    data["data_ready"] = compute_data_ready(cov)
+    data["data_ready"] = compute_data_ready(cov, sess)
     data["po_ready"] = compute_po_ready(sess, cov)
     data["background_tasks"] = background_tasks_running(sess)
     data["critical_restore_running"] = critical_restore_running(sess)
