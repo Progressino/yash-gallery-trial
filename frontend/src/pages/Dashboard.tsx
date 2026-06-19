@@ -872,8 +872,9 @@ export default function Dashboard() {
   })
 
   const dashboardReady =
-    dashboardGateReady(coverageSnapshot) ||
-    intelligenceReadiness?.dashboard_ready === true
+    intelligenceReadiness?.dashboard_ready === true ||
+    intelligenceReadiness?.platforms_loaded === true ||
+    dashboardGateReady(coverageSnapshot)
 
   useEffect(() => {
     if (dashboardReady || hydrateRequested.current) return
@@ -963,7 +964,7 @@ export default function Dashboard() {
     staleTime: 120_000,
     retry: 2,
     retryDelay: attempt => Math.min(8_000, 2_000 * (attempt + 1)),
-    enabled: dashboardReady,
+    enabled: true,
     placeholderData: previousData => {
       const prev = previousData as IntelligenceBundle | undefined
       if (prev && bundleHasDisplayData(prev)) return prev
@@ -1009,9 +1010,8 @@ export default function Dashboard() {
   const hasDisplayData = bundleHasDisplayData(intelligenceBundle)
   const hasCachedDisplay = Boolean(cachedBundleHint && bundleHasDisplayData(cachedBundleHint))
 
-  const awaitingDashboardReady = !dashboardReady
+  const awaitingDashboardReady = false
   const awaitingFirstBundle =
-    !awaitingDashboardReady &&
     !hasDisplayData &&
     !hasCachedDisplay &&
     (bundleWarming ||

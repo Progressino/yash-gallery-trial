@@ -2534,6 +2534,34 @@ def full_restore_session(
     return missing, steps, msg
 
 
+def _apply_light_coverage_hydrate(sess: AppSession) -> None:
+    """Attach warm-cache / shared frames for fast coverage & readiness polls."""
+    try:
+        import backend.main as _main
+        from ..services.shared_frames import attach_shared_frames, shared_frames_enabled
+
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_if_empty()
+        if not _main._warm_cache:
+            return
+        gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
+        if shared_frames_enabled():
+            attach_shared_frames(sess, warm_cache_generation=gen)
+        else:
+            from ..local_dev import hydrate_session_from_warm_local, local_dev_mode
+
+            if local_dev_mode():
+                hydrate_session_from_warm_local(sess, _main._warm_cache, gen)
+            else:
+                _main.try_fast_warm_cache_hydrate(sess)
+        if not getattr(sess, "sku_mapping", None):
+            sm = (_main._warm_cache or {}).get("sku_mapping")
+            if isinstance(sm, dict) and sm:
+                sess.sku_mapping = sm
+    except Exception:
+        pass
+
+
 def _build_coverage_response(sess: AppSession, *, light: bool = False) -> CoverageResponse:
     """Build coverage flags from current session state (no restore side effects)."""
     import pandas as pd
@@ -2544,8 +2572,10 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         session_sales_df,
     )
 
+    if light:
+        _apply_light_coverage_hydrate(sess)
+
     paused = getattr(sess, "pause_auto_data_restore", False)
-    from ..services.daily_store import get_summary
     from ..services.existing_po import (
         count_per_size_pipeline_skus,
         existing_po_looks_aggregated_bundled_only,
@@ -2553,18 +2583,27 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     )
 
     if not light:
+        from ..services.daily_store import get_summary
         from ..services.existing_po import ensure_existing_po_hydrated
 
         try:
             ensure_existing_po_hydrated(sess)
         except Exception:
             pass
+        tier3_any = bool(get_summary())
+    else:
+        tier3_any = False
+        try:
+            from ..services.intelligence_readiness import _tier3_all_platforms_have_uploads
 
-    tier3_any = bool(get_summary())
+            tier3_any = _tier3_all_platforms_have_uploads()
+        except Exception:
+            pass
+
     _po_ledger = getattr(sess, "po_raise_ledger_df", None)
     _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
     _ret_ov = getattr(sess, "po_return_overlay_df", None)
-    _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True)
+    _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True) and not light
     _ret_agg = None
     _ret_sources: list[dict] = []
     _ret_by_platform: list[dict] = []
@@ -2590,21 +2629,34 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     _has_ingest = bool(_ingest)
     try:
         import backend.main as _main
+        from ..services.intelligence_readiness import _tier3_all_platforms_have_uploads
 
-        _po_only = _main.warm_cache_po_session_only() and not session_sales_df(sess).empty
+        _po_only = _main.warm_cache_po_session_only() and frame_row_count("sales_df", sess) > 0
+        if not _po_only and frame_row_count("sales_df", sess) >= 100_000:
+            _po_only = True
+        if not _po_only and _tier3_all_platforms_have_uploads() and frame_row_count("sales_df", sess) > 0:
+            _po_only = True
     except Exception:
         _po_only = False
     _plat_ok = _po_only or None  # when True, all marketplace flags count as loaded
     _inv = session_inventory_variant(sess)
+    _has_sku_map = bool(sess.sku_mapping)
+    if not _has_sku_map:
+        try:
+            import backend.main as _main
+
+            _has_sku_map = bool((_main._warm_cache or {}).get("sku_mapping"))
+        except Exception:
+            pass
     cov = CoverageResponse(
-        sku_mapping=bool(sess.sku_mapping),
+        sku_mapping=_has_sku_map,
         mtr=_plat_ok or frame_row_count("mtr_df", sess) > 0,
         sales=_coverage_sales_ready(sess),
         myntra=_plat_ok or frame_row_count("myntra_df", sess) > 0,
         meesho=_plat_ok or frame_row_count("meesho_df", sess) > 0,
         flipkart=_plat_ok or frame_row_count("flipkart_df", sess) > 0,
         snapdeal=_plat_ok or frame_row_count("snapdeal_df", sess) > 0,
-        inventory=not _inv.empty,
+        inventory=not _inv.empty or frame_row_count("inventory_df_variant", sess) > 0,
         daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
         existing_po=not sess.existing_po_df.empty,
         sku_status_lead=not sess.sku_status_lead_df.empty,

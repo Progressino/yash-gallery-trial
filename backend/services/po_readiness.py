@@ -114,21 +114,18 @@ def _effective_row_floors(cov: CoverageResponse, sess) -> tuple[int, int]:
 
 
 def compute_data_ready(cov: CoverageResponse, sess=None) -> bool:
-    """Session holds PO essentials (8/8 flags + row floors) — ignores background jobs."""
-    sales_rows, inv_rows = _effective_row_floors(cov, sess) if sess is not None else (
-        int(cov.sales_rows or 0),
-        int(cov.inventory_rows or 0),
+    """Session holds PO essentials — warm cache / PG row floors, not 8/8 session flags alone."""
+    sales_rows, inv_rows = (
+        _effective_row_floors(cov, sess)
+        if sess is not None
+        else (int(cov.sales_rows or 0), int(cov.inventory_rows or 0))
     )
-    floors_ok = (
-        sales_rows >= PO_MIN_SALES_ROWS
-        and inv_rows >= PO_MIN_INVENTORY_ROWS
-    )
-    if operational_data_complete(cov) and floors_ok:
+    if sales_rows >= PO_MIN_SALES_ROWS and inv_rows >= PO_MIN_INVENTORY_ROWS:
         return True
     pg_sales, pg_inv = _pg_row_floors()
     if pg_sales >= PO_MIN_SALES_ROWS and pg_inv >= PO_MIN_INVENTORY_ROWS:
-        return operational_data_complete(cov)
-    return False
+        return True
+    return operational_data_complete(cov) and data_row_floors_met(cov)
 
 
 def compute_po_ready(sess, cov: CoverageResponse) -> bool:

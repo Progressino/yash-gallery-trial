@@ -152,15 +152,8 @@ def intelligence_ready(sess, cov: CoverageResponse, *, session_id: str = "") -> 
 
 
 def dashboard_gate_ready(sess, cov: CoverageResponse, *, session_id: str = "") -> bool:
-    """Dashboard may fetch aggregates — 8/8 + platform history (PG/Tier-3 or session)."""
-    from .po_readiness import operational_data_complete
-
-    if not operational_data_complete(cov):
-        return False
-    if not platform_frames_available(sess, cov) or not sales_available(sess, cov):
-        return False
-    # Charts use Tier-3 / PG aggregates — never block on session hydrate lock.
-    return True
+    """Dashboard may fetch aggregates — platform history via Tier-3 / PG / warm cache."""
+    return platform_frames_available(sess, cov) and sales_available(sess, cov)
 
 
 def build_intelligence_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:

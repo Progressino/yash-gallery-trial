@@ -2193,6 +2193,8 @@ def _session_coverage_light(path: str, method: str, query: str) -> bool:
         "/api/po/readiness",
         "/api/data/intelligence/readiness",
         "/api/data/dashboard/summary",
+        "/api/data/intelligence-bundle",
+        "/api/data/parity",
     ):
         return True
     if path != "/api/data/coverage":

@@ -10,7 +10,7 @@ import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
 import PoHydrationGate from './components/PoHydrationGate'
-import { canSkipHeavyServerRestore, poOperationalReady, poOperationalLoaded, PO_OPERATIONAL_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
+import { canSkipHeavyServerRestore, poOperationalReady, poOperationalLoaded, poPageHydrationReady, PO_OPERATIONAL_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
@@ -208,7 +208,9 @@ function ProtectedRoute() {
   })
 
   const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
-  const dataStillLoading = useSession(s => !poOperationalReady(s))
+  const dataStillLoading = useSession(
+    s => !poPageHydrationReady(s) && (s.sales_rows ?? 0) < 100_000,
+  )
   const dataLoadLoaded = useSession(s => poOperationalLoaded(s))
   const dataLoadTotal = PO_OPERATIONAL_TOTAL
 

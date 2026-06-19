@@ -7,6 +7,7 @@ import { Outlet } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { cacheHydrateWarm, getPoReadiness, type PoReadinessResponse } from '../api/client'
 import { PageLoadingStripe } from './LoadingProgressBar'
+import { useSession } from '../store/session'
 
 function hydrationLabel(r: PoReadinessResponse | undefined): string {
   if (!r) return 'Connecting to server…'
@@ -73,15 +74,16 @@ function LoadingDataScreen({ readiness }: { readiness: PoReadinessResponse | und
 
 export default function PoHydrationGate() {
   const hydrateRequested = useRef(false)
+  const coveragePoReady = useSession(s => s.po_ready === true)
 
   const { data: readiness } = useQuery({
     queryKey: ['po-readiness-gate'],
-    queryFn: () => getPoReadiness({ timeout: 45_000 }),
-    refetchInterval: q => (q.state.data?.po_ready ? false : 2_000),
+    queryFn: () => getPoReadiness({ timeout: 20_000 }),
+    refetchInterval: q => (q.state.data?.po_ready || coveragePoReady ? false : 2_000),
     staleTime: 0,
   })
 
-  const ready = readiness?.po_ready === true
+  const ready = readiness?.po_ready === true || coveragePoReady
 
   useEffect(() => {
     if (ready || hydrateRequested.current) return
