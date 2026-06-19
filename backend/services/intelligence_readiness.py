@@ -14,6 +14,8 @@ PLATFORM_SPECS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 _PLATFORM_PG_KEYS = tuple(p[0] for p in PLATFORM_SPECS)
+# PO / Intelligence essentials — Snapdeal is optional in production.
+_CORE_PLATFORM_PG_KEYS = ("amazon", "myntra", "meesho", "flipkart")
 _SOURCE_ALIASES: dict[str, frozenset[str]] = {
     "amazon": frozenset({"amazon", "mtr", "amz"}),
     "myntra": frozenset({"myntra", "myn"}),
@@ -93,7 +95,7 @@ def _tier3_all_platforms_have_uploads() -> bool:
         summary = get_summary() or {}
         return all(
             int((summary.get(plat) or {}).get("file_count") or 0) > 0
-            for plat in _PLATFORM_PG_KEYS
+            for plat in _CORE_PLATFORM_PG_KEYS
         )
     except Exception:
         return False

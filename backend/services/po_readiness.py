@@ -204,7 +204,7 @@ def _augment_coverage_light(sess, cov: CoverageResponse) -> CoverageResponse:
     tier3 = _tier3_all_platforms_have_uploads()
     flags_ok = _platform_flags_ready(cov)
     sales_rows, inv_rows = _effective_row_floors_light(cov, sess)
-    sales_ok = bool(cov.sales) and (sales_rows > 0 or tier3)
+    sales_ok = bool(cov.sales) and (sales_rows > 0 or tier3 or bool(cov.mtr))
     inv_ok = bool(cov.inventory) and inv_rows > 0
     platforms = flags_ok and (sales_rows > 0 or tier3)
     hydrate_inflight = hydration_inflight(sid, sess)

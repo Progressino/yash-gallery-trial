@@ -2678,7 +2678,9 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         _po_only = _main.warm_cache_po_session_only() and frame_row_count("sales_df", sess) > 0
         if not _po_only and frame_row_count("sales_df", sess) >= 100_000:
             _po_only = True
-        if not _po_only and _tier3_all_platforms_have_uploads() and frame_row_count("sales_df", sess) > 0:
+        if not _po_only and _tier3_all_platforms_have_uploads() and (
+            frame_row_count("sales_df", sess) > 0 or _session_has_platform_data(sess)
+        ):
             _po_only = True
     except Exception:
         _po_only = False
