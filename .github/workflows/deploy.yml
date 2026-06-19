@@ -55,6 +55,9 @@ jobs:
           else
             echo 'SESSION_PG_PERSIST=0' >> .env
           fi
+          # Production must load full platform frames (mtr/myntra/meesho/flipkart/snapdeal)
+          # into warm cache. PO_SESSION_ONLY is for local Mac dev only.
+          sed -i '/^WARM_CACHE_PO_SESSION_ONLY=/d' .env 2>/dev/null || true
 
       # Never block deploy on diagnostics (docker/python quirks on self-hosted).
       - name: Tooling snapshot (debug)
