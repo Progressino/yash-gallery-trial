@@ -1722,7 +1722,7 @@ export default function POEngine() {
                     type="button"
                     disabled={ledgerImportBusy}
                     onClick={() => ledgerCsvRef.current?.click()}
-                    title="Record SKUs from a saved PO export (CSV or Excel). Export CSV also records the ledger for the Raise date."
+                    title="Record SKUs from a saved PO export (CSV or Excel). Use Raise PO → Export & Confirm to record new raises."
                     className="text-xs px-3 py-1.5 rounded border border-sky-300 text-sky-800 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {ledgerImportBusy ? '…' : '📥 Import raises (CSV / Excel)'}
@@ -1749,9 +1749,9 @@ export default function POEngine() {
                   <button
                     onClick={() => exportPOCsv(rows, editedQty, quarterCols, quarterMap, ledgerImportDate)}
                     className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
-                    title="Downloads CSV and records quantities in the raise ledger for the Raise date (uses PO Qty column)."
+                    title="Download CSV for review — does not record raises (use Raise PO → Export & Confirm when ready)."
                   >
-                    ⬇ Export CSV
+                    ⬇ Export CSV (test)
                   </button>
                   {raiseLedgerRows > 0 && (
                     <button
@@ -1825,7 +1825,7 @@ export default function POEngine() {
                   <strong>Raise ledger is empty.</strong> Import yesterday&apos;s PO file (e.g.{' '}
                   <strong>Po Requirement 14-May-26.xlsx</strong>) via{' '}
                   <strong>Import raises (CSV / Excel)</strong> for the raise date (e.g. Saturday&apos;s file), then{' '}
-                  <strong>Calculate PO</strong>. New exports via <strong>Export CSV</strong> or <strong>Export &amp; Confirm</strong> are recorded automatically.
+                  <strong>Calculate PO</strong>. Use <strong>Raise PO</strong> → <strong>Export &amp; Confirm</strong> to record raises — plain <strong>Export CSV (test)</strong> does not update the ledger.
                 </p>
               )}
 
@@ -1873,7 +1873,7 @@ export default function POEngine() {
                 <span>
                   <strong className="text-blue-700">🏭 In Production</strong> = units already ordered (from your PO sheet). {' '}
                   <strong>Gross PO Qty</strong> − <strong>In Production</strong> = <strong className="text-orange-600">PO Qty</strong> (net new order). {' '}
-                  Edit <strong className="text-orange-600">PO Qty</strong> cells directly; <strong className="text-sky-800">Post-PO cover</strong> updates with your edited qty. Select SKUs and use <strong className="text-green-700">Raise PO</strong> → <strong>Export & Confirm</strong> to record raises in the ledger.
+                  Edit <strong className="text-orange-600">PO Qty</strong> cells directly. <strong>Export CSV (test)</strong> downloads only — use <strong>Raise PO</strong> → <strong>Export &amp; Confirm</strong> to record raises in the ledger.
                   {' '}Plain <strong>Export CSV</strong> does not — use <strong>Import raises (CSV)</strong> for an older file.{' '}
                   <strong className="text-sky-800">Raise ledger:</strong> {raiseLedgerRows.toLocaleString()} SKU-day row(s) — confirmed qty feeds <strong>eff. pipeline</strong> and the PO Dashboard so SKUs are not double-released.
                 </span>
@@ -3144,7 +3144,6 @@ function exportPOCsv(
   const csv = header + '\n' + body
   const day = raisedDate || calendarDateIST()
   trigger(csv, `po_recommendation ${day}.csv`)
-  void archivePoExportOnServer(csv, day)
 }
 
 function exportRaisePO(rows: Array<PORow & { Final_PO_Qty: number }>, poNumber: string) {

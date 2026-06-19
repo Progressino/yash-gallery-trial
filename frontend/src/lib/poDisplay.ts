@@ -195,12 +195,23 @@ export function downloadCsvBlob(csv: string, filename: string) {
   a.click()
 }
 
+export function finalPoQtyForSku(
+  row: Record<string, unknown>,
+  editedQty: Record<string, number> | undefined,
+): number {
+  const sku = String(row.OMS_SKU ?? '')
+  if (editedQty && editedQty[sku] !== undefined) return editedQty[sku]
+  const n = Number(row.PO_Qty ?? 0)
+  return Number.isFinite(n) ? n : 0
+}
+
 export function exportPoCsv(
   rows: Record<string, unknown>[],
   poCols: string[],
   quarterCols: string[],
   quarterMap: Record<string, Record<string, number | string>>,
   filename: string,
+  editedQty?: Record<string, number>,
 ) {
   const all = [...poCols, ...quarterCols]
   const header = all.join(',')
@@ -210,6 +221,7 @@ export function exportPoCsv(
       const qRow = quarterMap[sku] ?? {}
       return all
         .map(c => {
+          if (c === 'PO_Qty') return JSON.stringify(finalPoQtyForSku(r, editedQty))
           if (quarterCols.includes(c)) return JSON.stringify(qRow[c] ?? 0)
           return JSON.stringify(r[c] ?? '')
         })

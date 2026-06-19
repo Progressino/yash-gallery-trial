@@ -27,6 +27,7 @@ import {
   countQuarterColumns,
   EXPECTED_QUARTER_COLS,
   exportPoCsv,
+  finalPoQtyForSku,
   formatPoCell,
   poCellClass,
   poColHeaderLabel,
@@ -36,8 +37,9 @@ import {
   quarterColumnsFromApi,
   visiblePoColumns,
 } from '../lib/poDisplay'
-import { archivePoExportOnServer } from '../lib/archivePoExport'
+import { confirmPoRaiseOnServer, exportRaisePoCsv, type PoRaiseRow } from '../lib/poRaiseActions'
 import { buildPoClientReportHtml, downloadPoClientReport } from '../utils/poClientReport'
+import { PoQtyInput } from '../components/PoQtyInput'
 import { PODashboardPanel } from '../components/PODashboardPanel'
 import { mayResetSharedData, useAuth } from '../store/auth'
 import {
@@ -177,6 +179,11 @@ function POFreshInner() {
   const [serverEngineVersion, setServerEngineVersion] = useState<number | null>(null)
   const [sharedCacheHint, setSharedCacheHint] = useState<PoSharedCacheAvailability | null>(null)
   const [parityReport, setParityReport] = useState<DataParityReport | null>(null)
+  const [editedQty, setEditedQty] = useState<Record<string, number>>({})
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [raiseModal, setRaiseModal] = useState(false)
+  const [raiseConfirmBusy, setRaiseConfirmBusy] = useState(false)
+  const [raiseConfirmErr, setRaiseConfirmErr] = useState<string | null>(null)
 
   const quarterCols = useMemo(
     () => quarterColumnsFromApi(quarterly?.columns),
@@ -399,6 +406,8 @@ function POFreshInner() {
           : 'Starting fresh PO calculation on server…',
         pct: 5,
       })
+      setEditedQty({})
+      setSelected(new Set())
       const out = await startPoCalculate(
         buildBody(params, { useSharedCache }),
         (msg, pct) => {
@@ -497,23 +506,97 @@ function POFreshInner() {
 
   const pageCount = Math.max(1, Math.ceil(allRows.length / PAGE_SIZE))
 
+  const visibleSkus = useMemo(() => pageRows.map(r => String(r.OMS_SKU ?? '')), [pageRows])
+  const allVisibleSelected =
+    visibleSkus.length > 0 && visibleSkus.every(s => selected.has(s))
+  const someSelected = selected.size > 0
+
+  const toggleRowSelect = useCallback((sku: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(sku)) next.delete(sku)
+      else next.add(sku)
+      return next
+    })
+  }, [])
+
+  const toggleAllVisible = useCallback(() => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (visibleSkus.length > 0 && visibleSkus.every(s => next.has(s))) {
+        visibleSkus.forEach(s => next.delete(s))
+      } else {
+        visibleSkus.forEach(s => next.add(s))
+      }
+      return next
+    })
+  }, [visibleSkus])
+
+  const selectedRows = useMemo((): PoRaiseRow[] => {
+    return allRows
+      .filter(r => selected.has(String(r.OMS_SKU ?? '')))
+      .map(r => ({ ...r, Final_PO_Qty: finalPoQtyForSku(r, editedQty) }))
+      .filter(r => r.Final_PO_Qty > 0)
+  }, [allRows, selected, editedQty])
+
+  const totalRaiseUnits = useMemo(
+    () => selectedRows.reduce((s, r) => s + r.Final_PO_Qty, 0),
+    [selectedRows],
+  )
+
   const exportCsv = useCallback(() => {
     const poCols = visiblePoColumns(result?.columns, [])
     const day = calendarDateIST()
     const fname = `po_recommendation ${day}.csv`
-    exportPoCsv(allRows, poCols, quarterCols, quarterMap, fname)
-    const header = [...poCols, ...quarterCols].join(',')
-    const body = allRows
-      .map(r => {
-        const sku = poSkuKey(String(r.OMS_SKU))
-        const q = quarterMap[sku] ?? {}
-        return [...poCols, ...quarterCols]
-          .map(c => JSON.stringify(quarterCols.includes(c) ? (q[c] ?? 0) : (r[c] ?? '')))
-          .join(',')
+    exportPoCsv(allRows, poCols, quarterCols, quarterMap, fname, editedQty)
+  }, [allRows, editedQty, quarterCols, quarterMap, result?.columns])
+
+  const confirmRaiseAndExport = useCallback(async () => {
+    setRaiseConfirmErr(null)
+    setRaiseConfirmBusy(true)
+    try {
+      const raisedDate = params.raise_view_date.trim() || calendarDateIST()
+      const res = await confirmPoRaiseOnServer({
+        rows: selectedRows,
+        raisedDate,
+        groupByParent: params.group_by_parent,
       })
-      .join('\n')
-    void archivePoExportOnServer('\ufeff' + header + '\n' + body, day)
-  }, [allRows, quarterCols, quarterMap, result?.columns])
+      if (!res.ok) {
+        setRaiseConfirmErr(res.message || 'Could not save raise ledger.')
+        return
+      }
+      const poNumber = res.poNumber || `PO-${raisedDate}`
+      exportRaisePoCsv(selectedRows, poNumber)
+      const { buildPoRaiseReportHtml, downloadPoRaiseReport } = await import('../utils/poRaiseReport')
+      const reportRows = selectedRows.map(r => ({
+        OMS_SKU: String(r.OMS_SKU ?? ''),
+        Priority: r.Priority as string | undefined,
+        Days_Left: Number(r.Days_Left ?? 0),
+        ADS: Number(r.ADS ?? 0),
+        Gross_PO_Qty: Number(r.Gross_PO_Qty ?? 0),
+        PO_Pipeline_Total: Number(r.PO_Pipeline_Total ?? 0),
+        Final_PO_Qty: r.Final_PO_Qty,
+      }))
+      downloadPoRaiseReport(
+        buildPoRaiseReportHtml({
+          poNumber,
+          raisedDate: res.raisedDate || raisedDate,
+          rows: reportRows,
+          totalQty: res.totalQty ?? totalRaiseUnits,
+        }),
+        poNumber,
+      )
+      setRaiseModal(false)
+      setSelected(new Set())
+      setActionMsg('Raise recorded — recalculating PO with updated ledger…')
+      await runCalculate({ force: true })
+      setActionMsg(null)
+    } catch (e: unknown) {
+      setRaiseConfirmErr(e instanceof Error ? e.message : 'Raise ledger save failed')
+    } finally {
+      setRaiseConfirmBusy(false)
+    }
+  }, [params.group_by_parent, params.raise_view_date, runCalculate, selectedRows, totalRaiseUnits])
 
   const exportClientReport = useCallback(() => {
     const day = calendarDateIST()
@@ -564,6 +647,18 @@ function POFreshInner() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {someSelected && (
+              <button
+                type="button"
+                onClick={() => {
+                  setRaiseConfirmErr(null)
+                  setRaiseModal(true)
+                }}
+                className="px-6 py-2.5 text-sm font-semibold rounded-xl text-white bg-green-600 hover:bg-green-700 shadow-sm"
+              >
+                Raise PO ({selected.size} SKU{selected.size === 1 ? '' : 's'}, {totalRaiseUnits.toLocaleString()} units)
+              </button>
+            )}
             <button
               type="button"
               disabled={!result?.ok || allRows.length === 0}
@@ -577,8 +672,9 @@ function POFreshInner() {
               disabled={!result?.ok || allRows.length === 0}
               onClick={exportCsv}
               className="po-fresh-btn-secondary px-6 py-2.5 text-sm disabled:opacity-40"
+              title="Download CSV for review — does not record raises (use Raise PO → Export & Confirm when ready)."
             >
-              Export CSV
+              Export CSV (test)
             </button>
           </div>
         </div>
@@ -949,7 +1045,8 @@ function POFreshInner() {
           {tab === 'po' && result?.ok && (result?.rows?.length ?? 0) > 0 && (
             <div className="px-6 pt-4 pb-2 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--po-outline-ghost)]">
               <p className="text-xs text-[var(--po-outline)]">
-                New PO Qty is net of sheet pipeline and confirmed raises. Click any row for the full calculation breakdown.
+                Edit <strong>PO Qty</strong> inline; <strong>Export CSV (test)</strong> downloads only.
+                Select rows and use <strong>Raise PO</strong> → <strong>Export &amp; Confirm</strong> to record the ledger.
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 {(
@@ -987,6 +1084,19 @@ function POFreshInner() {
                 periodDays={params.period_days}
                 targetDays={params.target_days}
                 enteredLeadDays={params.lead_time}
+                editedQty={editedQty}
+                onEditedQtyChange={(sku, qty) => setEditedQty(prev => ({ ...prev, [sku]: qty }))}
+                onEditedQtyReset={sku =>
+                  setEditedQty(prev => {
+                    const next = { ...prev }
+                    delete next[sku]
+                    return next
+                  })
+                }
+                selected={selected}
+                onToggleRow={toggleRowSelect}
+                allVisibleSelected={allVisibleSelected}
+                onToggleAllVisible={toggleAllVisible}
               />
               <TableFooter
                 page={page}
@@ -1053,6 +1163,86 @@ function POFreshInner() {
           )}
         </div>
       </div>
+
+      {raiseModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col">
+            <div className="p-5 border-b border-gray-200 flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-[var(--po-secondary)]">Raise Purchase Order</h3>
+                <p className="text-sm text-[var(--po-outline)] mt-0.5">
+                  {selectedRows.length} SKU{selectedRows.length === 1 ? '' : 's'} · {totalRaiseUnits.toLocaleString()} units
+                </p>
+                <p className="text-[11px] text-sky-900 bg-sky-50 border border-sky-200 rounded px-2 py-1.5 mt-2 leading-snug">
+                  <strong>Export &amp; Confirm</strong> downloads the raise CSV and records quantities in the raise ledger for{' '}
+                  <strong>{params.raise_view_date || calendarDateIST()}</strong>. The next Calculate PO treats them as confirmed pipeline.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRaiseModal(false)}
+                className="text-gray-400 hover:text-gray-600 text-2xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+            <div className="overflow-auto flex-1 p-4">
+              {selectedRows.length === 0 ? (
+                <p className="text-center text-[var(--po-outline)] py-8 text-sm">
+                  No SKUs with PO Qty &gt; 0 in selection. Edit quantities or select other rows.
+                </p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="text-left px-3 py-2 font-semibold text-gray-600">SKU</th>
+                      <th className="text-left px-3 py-2 font-semibold text-gray-600">Priority</th>
+                      <th className="text-right px-3 py-2 font-semibold text-orange-600">PO Qty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedRows.map(r => (
+                      <tr key={String(r.OMS_SKU)} className="border-b border-gray-100">
+                        <td className="px-3 py-2 font-medium">{String(r.OMS_SKU)}</td>
+                        <td className="px-3 py-2">
+                          <PriorityPill priority={r.Priority} />
+                        </td>
+                        <td className="px-3 py-2 text-right font-bold text-orange-600">
+                          {r.Final_PO_Qty.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {raiseConfirmErr && (
+              <div className="px-4 py-2 mx-4 text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded">
+                {raiseConfirmErr}
+              </div>
+            )}
+            <div className="p-4 border-t border-gray-200 flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setRaiseModal(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              {selectedRows.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void confirmRaiseAndExport()}
+                  disabled={raiseConfirmBusy}
+                  className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+                >
+                  {raiseConfirmBusy ? 'Saving…' : 'Export & Confirm PO'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1073,6 +1263,13 @@ function PoTable({
   periodDays,
   targetDays = 180,
   enteredLeadDays = 60,
+  editedQty,
+  onEditedQtyChange,
+  onEditedQtyReset,
+  selected,
+  onToggleRow,
+  allVisibleSelected,
+  onToggleAllVisible,
 }: {
   cols: string[]
   rows: Row[]
@@ -1081,8 +1278,16 @@ function PoTable({
   periodDays: number
   targetDays?: number
   enteredLeadDays?: number
+  editedQty?: Record<string, number>
+  onEditedQtyChange?: (sku: string, qty: number) => void
+  onEditedQtyReset?: (sku: string) => void
+  selected?: Set<string>
+  onToggleRow?: (sku: string) => void
+  allVisibleSelected?: boolean
+  onToggleAllVisible?: () => void
 }) {
   const [selectedRow, setSelectedRow] = useState<Row | null>(null)
+  const selectable = Boolean(selected && onToggleRow && onToggleAllVisible)
 
   return (
     <>
@@ -1090,6 +1295,16 @@ function PoTable({
         <table className="po-fresh-table min-w-max w-full">
           <thead className="sticky top-0 z-10">
             <tr>
+              {selectable && (
+                <th className="w-10 text-center">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(allVisibleSelected)}
+                    onChange={onToggleAllVisible}
+                    title="Select all on this page"
+                  />
+                </th>
+              )}
               {cols.map(c => (
                 <th key={c} className="text-left">
                   <div className="flex items-center gap-2">
@@ -1102,20 +1317,32 @@ function PoTable({
           </thead>
           <tbody>
             {rows.map(r => {
+              const sku = String(r.OMS_SKU ?? '')
               const isSelected = selectedRow?.OMS_SKU === r.OMS_SKU
               const isUrgent = String(r.Priority ?? '').includes('URGENT')
+              const computedQty = num(r.PO_Qty)
+              const finalQty = finalPoQtyForSku(r, editedQty)
               return (
               <tr
-                key={String(r.OMS_SKU)}
+                key={sku}
                 onClick={() => setSelectedRow(isSelected ? null : r)}
                 className={[
                   isSelected ? 'po-row-selected' : '',
                   isUrgent ? 'po-row-urgent' : '',
                 ].filter(Boolean).join(' ')}
               >
+                {selectable && (
+                  <td className="text-center" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selected?.has(sku) ?? false}
+                      onChange={() => onToggleRow?.(sku)}
+                    />
+                  </td>
+                )}
                 {cols.map(c => {
-                  const sku = poSkuKey(String(r.OMS_SKU))
-                  const v = quarterCols.includes(c) ? quarterMap[sku]?.[c] : r[c]
+                  const qsku = poSkuKey(sku)
+                  const v = quarterCols.includes(c) ? quarterMap[qsku]?.[c] : r[c]
                   if (c === 'Priority') {
                     return (
                       <td key={c}>
@@ -1140,7 +1367,19 @@ function PoTable({
                       </td>
                     )
                   }
-                  if (c === 'PO_Qty' && num(v) > 0) {
+                  if (c === 'PO_Qty' && onEditedQtyChange && onEditedQtyReset) {
+                    return (
+                      <td key={c} onClick={e => e.stopPropagation()}>
+                        <PoQtyInput
+                          value={finalQty}
+                          computed={computedQty}
+                          onChange={v => onEditedQtyChange(sku, v)}
+                          onReset={() => onEditedQtyReset(sku)}
+                        />
+                      </td>
+                    )
+                  }
+                  if (c === 'PO_Qty' && finalQty > 0) {
                     return (
                       <td key={c} className="font-bold text-[var(--po-primary)]">
                         {formatPoCell(c, v)}
