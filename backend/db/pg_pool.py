@@ -97,39 +97,60 @@ def close_all_pools() -> None:
 class PooledConnectionLease:
     """Deferred checkout — supports ``conn = lease(); with conn: ...`` and ``lease.execute()``."""
 
-    __slots__ = ("_pool", "_backend", "_cm", "_timed_factory")
+    __slots__ = ("_pool", "_backend", "_cm", "_timed_factory", "_active")
 
     def __init__(self, pool: Any, *, backend: str, timed_factory: Any) -> None:
         self._pool = pool
         self._backend = backend
         self._cm = None
         self._timed_factory = timed_factory
+        self._active = None
 
     def __enter__(self) -> Any:
         self._cm = self._pool.connection()
         raw = self._cm.__enter__()
-        return self._timed_factory(raw, backend=self._backend)
+        self._active = self._timed_factory(raw, backend=self._backend)
+        return self._active
 
     def __exit__(self, *exc: Any) -> Any:
-        if self._cm is not None:
-            return self._cm.__exit__(*exc)
-        return False
+        try:
+            if self._cm is not None:
+                return self._cm.__exit__(*exc)
+            return False
+        finally:
+            self._active = None
+            self._cm = None
+
+    def _use_conn(self):
+        if self._active is not None:
+            return self._active
+        return self.__enter__()
 
     def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
-        with self as conn:
+        nested = self._active is not None
+        conn = self._use_conn()
+        try:
             if params is None:
                 return conn.execute(query, **kwargs)
             return conn.execute(query, params, **kwargs)
+        finally:
+            if not nested:
+                self.__exit__(None, None, None)
 
     def cursor(self, *args: Any, **kwargs: Any) -> Any:
-        with self as conn:
+        nested = self._active is not None
+        conn = self._use_conn()
+        try:
             return conn.cursor(*args, **kwargs)
+        finally:
+            if not nested:
+                self.__exit__(None, None, None)
 
 
 class DirectConnectionLease:
     """Single connection (tests / DB_POOL_ENABLED=0)."""
 
-    __slots__ = ("_url", "_kwargs", "_backend", "_timed_factory", "_conn", "_wrapped")
+    __slots__ = ("_url", "_kwargs", "_backend", "_timed_factory", "_conn", "_wrapped", "_active")
 
     def __init__(self, url: str, *, backend: str, timed_factory: Any, **kwargs: Any) -> None:
         self._url = url
@@ -138,25 +159,44 @@ class DirectConnectionLease:
         self._timed_factory = timed_factory
         self._conn = None
         self._wrapped = None
+        self._active = None
 
     def __enter__(self) -> Any:
         import psycopg
 
         self._conn = psycopg.connect(self._url, **self._kwargs)
         self._wrapped = self._timed_factory(self._conn, backend=self._backend)
+        self._active = self._wrapped
         return self._wrapped
 
     def __exit__(self, *exc: Any) -> Any:
-        if self._conn is not None:
-            return self._conn.__exit__(*exc)
-        return False
+        try:
+            if self._conn is not None:
+                return self._conn.__exit__(*exc)
+            return False
+        finally:
+            self._active = None
+            self._conn = None
+            self._wrapped = None
 
     def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
-        with self as conn:
+        nested = self._active is not None
+        if not nested:
+            self.__enter__()
+        try:
             if params is None:
-                return conn.execute(query, **kwargs)
-            return conn.execute(query, params, **kwargs)
+                return self._active.execute(query, **kwargs)
+            return self._active.execute(query, params, **kwargs)
+        finally:
+            if not nested:
+                self.__exit__(None, None, None)
 
     def cursor(self, *args: Any, **kwargs: Any) -> Any:
-        with self as conn:
-            return conn.cursor(*args, **kwargs)
+        nested = self._active is not None
+        if not nested:
+            self.__enter__()
+        try:
+            return self._active.cursor(*args, **kwargs)
+        finally:
+            if not nested:
+                self.__exit__(None, None, None)
