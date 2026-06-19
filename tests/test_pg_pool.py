@@ -34,3 +34,15 @@ def test_connect_psycopg_uses_direct_lease_when_pool_disabled(monkeypatch):
 
     lease = connect_psycopg("postgresql://u:p@127.0.0.1:5432/forecast", autocommit=True)
     assert isinstance(lease, DirectConnectionLease)
+
+
+def test_pool_kwargs_open_on_create(monkeypatch):
+    """Regression: pool must open on create — open=False without pool.open() broke ops_pg."""
+    import types
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "psycopg_pool",
+        types.SimpleNamespace(ConnectionPool=type("CP", (), {"check_connection": None})),
+    )
+    assert pg_pool._pool_kwargs({})["open"] is True

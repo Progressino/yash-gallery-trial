@@ -1,0 +1,48 @@
+---
+description: Mandatory Plan→Fix→Test→Deploy workflow for forecast/VPS tasks
+alwaysApply: true
+---
+
+# Forecast VPS workflow (mandatory)
+
+For **every** user task in this repo, follow these steps in order. Do not skip unless the user explicitly asks for local-only or a subset.
+
+## 1. Plan
+- State the problem, root cause hypothesis, and intended fix.
+- List files/endpoints to touch.
+
+## 2. Fix
+- Minimal, focused diff — match existing conventions.
+
+## 3. Test
+- Targeted verification of the change (script, curl, or focused pytest for the touched area).
+
+## 4. Local Test
+- Start stack: `bash scripts/start-local-dev.sh` (backend `:8000`, frontend `:5173`).
+- Open http://127.0.0.1:5173/ and exercise the affected flow (e.g. Intelligence `/`, PO `/po-fresh`).
+- For API checks after login: `http://127.0.0.1:8000/api/...`
+
+## 5. pytest
+- Run from repo root with `.venv/bin/python -m pytest` (pytest already installed).
+- Before deploy: `SKIP_E2E=1 DEPLOY_FAST=1 bash scripts/predeploy_sanity.sh` (same as CI).
+- Intelligence-related: `tests/test_intelligence_*.py`.
+
+## 6. Production Deploy
+- **Preferred:** commit → `git push origin main` (triggers `.github/workflows/deploy.yml` on self-hosted runner).
+- **Manual on VPS:** `ssh root@187.124.97.194` then `bash /root/app/scripts/vps_deploy_now.sh`
+- App path on VPS: `/root/app` · public URL: https://app.progressino.com
+- Never force-push `main`. Never commit `.env` secrets.
+
+## 7. Test Deploy
+- Health: `curl -sf https://app.progressino.com/api/health`
+- Intelligence smoke (needs auth): `AUTH_USERNAME=... AUTH_PASSWORD=... python scripts/verify_prod_tier3.py`
+- Or SSH: `ssh root@187.124.97.194 'curl -sf http://127.0.0.1:8000/api/health'`
+- Confirm `git_sha` in `/api/health` matches the deployed commit.
+
+## VPS quick reference
+```
+ssh root@187.124.97.194
+cd /root/app
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs --tail=50 backend
+```

@@ -1047,6 +1047,46 @@ def _repair_platform_loaded_flags(payload: dict) -> dict:
     return payload
 
 
+def _intelligence_session_build_unsafe(sess: AppSession) -> bool:
+    """Unified sales builds on the request thread can OOM small VPS hosts (~8 GB RAM)."""
+    try:
+        cap = int((os.environ.get("INTELLIGENCE_SESSION_BUILD_MAX_ROWS") or "750000").strip())
+    except ValueError:
+        cap = 750_000
+    sales = getattr(sess, "sales_df", None)
+    if sales is None or not hasattr(sales, "__len__"):
+        return False
+    return len(sales) >= cap
+
+
+def _try_serve_tier3_intelligence_bundle(
+    sess: AppSession,
+    cache_key: tuple,
+    bundle_cache: dict,
+    s_win: str,
+    e_win: str,
+    limit: int,
+    basis: Optional[str],
+    include_extras: bool,
+    *,
+    ts: float | None = None,
+) -> dict | None:
+    """Tier-3 direct bundle — memory-safe on production VPS."""
+    tier3 = _build_intelligence_bundle_payload_from_tier3(
+        sess, s_win, e_win, limit, basis, include_extras
+    )
+    if not tier3:
+        return None
+    tier3 = _repair_platform_loaded_flags(tier3)
+    if not _bundle_payload_has_display_data(tier3):
+        units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
+        if units <= 0:
+            return None
+    tier3["status"] = "ready"
+    _bundle_cache_store(cache_key, bundle_cache, tier3, ts=ts if ts is not None else time.time())
+    return tier3
+
+
 def _bundle_payload_has_display_data(payload: dict) -> bool:
     _repair_platform_loaded_flags(payload)
     platforms = payload.get("platform_summary") or []
@@ -3601,13 +3641,17 @@ def intelligence_bundle(
 
     # Tier-3 daily uploads are source of truth for the window — before stale session cache.
     if prefer_tier3 and has_dates and len(s_win) == 10 and len(e_win) == 10:
-        tier3_immediate = _build_intelligence_bundle_payload_from_tier3(
-            sess, s_win, e_win, limit, basis, include_extras
+        tier3_immediate = _try_serve_tier3_intelligence_bundle(
+            sess,
+            cache_key,
+            bundle_cache,
+            s_win,
+            e_win,
+            limit,
+            basis,
+            include_extras,
         )
-        if tier3_immediate and _bundle_payload_has_display_data(tier3_immediate):
-            _bundle_cache_store(
-                cache_key, bundle_cache, tier3_immediate, ts=time.time()
-            )
+        if tier3_immediate is not None:
             _maybe_queue_tier3_sales_sync(sess, sid or None)
             return tier3_immediate
 
@@ -3626,13 +3670,17 @@ def intelligence_bundle(
 
     # Tier-3 direct when no cache hit and Upload tab has blobs for this window.
     if tier3_window and has_dates and len(s_win) == 10 and len(e_win) == 10:
-        tier3_immediate = _build_intelligence_bundle_payload_from_tier3(
-            sess, s_win, e_win, limit, basis, include_extras
+        tier3_immediate = _try_serve_tier3_intelligence_bundle(
+            sess,
+            cache_key,
+            bundle_cache,
+            s_win,
+            e_win,
+            limit,
+            basis,
+            include_extras,
         )
-        if tier3_immediate and _bundle_payload_has_display_data(tier3_immediate):
-            _bundle_cache_store(
-                cache_key, bundle_cache, tier3_immediate, ts=time.time()
-            )
+        if tier3_immediate is not None:
             _maybe_queue_tier3_sales_sync(sess, sid or None)
             return tier3_immediate
 
@@ -3653,35 +3701,50 @@ def intelligence_bundle(
     _schedule_intelligence_refresh_async(sid or None)
 
     session_payload: dict | None = None
+    session_build_unsafe = _intelligence_session_build_unsafe(sess)
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
-        # PG restore often times out → empty session shell; Tier-3 direct is faster than
-        # rebuilding unified sales on the request thread.
-        if not _session_has_units_in_window(sess, s_win, e_win):
-            tier3_first = _build_intelligence_bundle_payload_from_tier3(
-                sess, s_win, e_win, limit, basis, include_extras
+        # Tier-3 before session unified build — session path OOMs on 1M+ row catalogs.
+        if tier3_window or not _session_has_units_in_window(sess, s_win, e_win) or session_build_unsafe:
+            tier3_first = _try_serve_tier3_intelligence_bundle(
+                sess,
+                cache_key,
+                bundle_cache,
+                s_win,
+                e_win,
+                limit,
+                basis,
+                include_extras,
+                ts=now,
             )
-            if tier3_first and _bundle_payload_has_display_data(tier3_first):
-                _bundle_cache_store(cache_key, bundle_cache, tier3_first, ts=now)
+            if tier3_first is not None:
                 return tier3_first
 
-        session_payload = _build_intelligence_bundle_payload_from_session(
-            sess, s_win, e_win, limit, basis, include_extras
-        )
-        if session_payload and _bundle_payload_has_display_data(session_payload):
-            _bundle_cache_store(cache_key, bundle_cache, session_payload, ts=now)
-            return session_payload
-
-        if fast_window:
-            tier3_payload = _build_intelligence_bundle_payload_from_tier3(
+        if not session_build_unsafe:
+            session_payload = _build_intelligence_bundle_payload_from_session(
                 sess, s_win, e_win, limit, basis, include_extras
             )
-            if tier3_payload and _bundle_payload_has_display_data(tier3_payload):
+            if session_payload and _bundle_payload_has_display_data(session_payload):
+                _bundle_cache_store(cache_key, bundle_cache, session_payload, ts=now)
+                return session_payload
+
+        if fast_window or session_build_unsafe:
+            tier3_payload = _try_serve_tier3_intelligence_bundle(
+                sess,
+                cache_key,
+                bundle_cache,
+                s_win,
+                e_win,
+                limit,
+                basis,
+                include_extras,
+                ts=now,
+            )
+            if tier3_payload is not None:
                 from ..services.daily_store import platforms_with_uploads_in_range
 
                 need_persist = platforms_with_uploads_in_range(s_win, e_win)
                 if need_persist:
                     _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
-                _bundle_cache_store(cache_key, bundle_cache, tier3_payload, ts=now)
                 return tier3_payload
 
         from ..services.daily_store import platforms_with_uploads_in_range
@@ -3690,7 +3753,7 @@ def intelligence_bundle(
         if need_persist:
             _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
 
-    elif _session_has_operational_frames(sess):
+    elif _session_has_operational_frames(sess) and not session_build_unsafe:
         session_payload = _build_intelligence_bundle_payload_from_session(
             sess,
             s_win or str(start_date or "")[:10],
@@ -3704,11 +3767,18 @@ def intelligence_bundle(
             return session_payload
 
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
-        tier3_any = _build_intelligence_bundle_payload_from_tier3(
-            sess, s_win, e_win, limit, basis, include_extras
+        tier3_any = _try_serve_tier3_intelligence_bundle(
+            sess,
+            cache_key,
+            bundle_cache,
+            s_win,
+            e_win,
+            limit,
+            basis,
+            include_extras,
+            ts=now,
         )
-        if tier3_any and _bundle_payload_has_display_data(tier3_any):
-            _bundle_cache_store(cache_key, bundle_cache, tier3_any, ts=now)
+        if tier3_any is not None:
             return tier3_any
 
     if not _session_has_operational_frames(sess):

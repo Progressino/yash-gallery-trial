@@ -58,7 +58,7 @@ def _pool_kwargs(connect_kwargs: dict[str, Any]) -> dict[str, Any]:
         "max_size": pool_max_size(),
         "max_lifetime": float(pool_recycle_sec()),
         "kwargs": dict(connect_kwargs),
-        "open": False,
+        "open": True,
     }
     if pool_pre_ping():
         kw["check"] = ConnectionPool.check_connection
