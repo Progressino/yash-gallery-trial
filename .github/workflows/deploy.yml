@@ -148,14 +148,13 @@ jobs:
           _prune_stale_compose_containers autoheal
           _prune_ghost_recreate_containers
           docker container prune -f 2>/dev/null || true
-          # Nuclear cleanup: clear Docker Compose project state + all containers.
-          # OOM crashes leave ghost container IDs in compose's internal tracking
-          # that cause "No such container" on recreate.
-          _dc -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true
-          _dc -f docker-compose.prod.yml rm -f -s 2>/dev/null || true
-          docker rm -f $(docker ps -aq --filter "name=app-") 2>/dev/null || true
-          docker rm -f $(docker ps -aq --filter "name=18d1277b5518") 2>/dev/null || true
+          # Ghost container 18d1277b5518 is stuck in compose's internal tracking.
+          # Kill everything and nuke compose's state so it starts clean.
+          _dc -f docker-compose.prod.yml kill 2>/dev/null || true
+          docker rm -f $(docker ps -aq) 2>/dev/null || true
           docker container prune -f 2>/dev/null || true
+          # Remove compose project config from Docker to clear ghost references
+          docker compose -f docker-compose.prod.yml down --volumes=false --remove-orphans 2>/dev/null || true
 
           _NO_CACHE=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.no_cache }}" = "true" ]; then
@@ -163,13 +162,13 @@ jobs:
           fi
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          # Fresh up — all containers were removed above, no recreate needed.
-          _dc -f docker-compose.prod.yml up -d --remove-orphans 2>&1 || {
-            echo "First up failed — nuclear cleanup and retry"
+          # Fresh up with new project name if ghost containers block the default.
+          if ! _dc -f docker-compose.prod.yml up -d --remove-orphans 2>&1; then
+            echo "Compose up failed — trying with fresh project name to bypass ghost state"
             docker rm -f $(docker ps -aq) 2>/dev/null || true
             docker container prune -f 2>/dev/null || true
-            _dc -f docker-compose.prod.yml up -d --remove-orphans
-          }
+            docker compose -p yg -f docker-compose.prod.yml up -d --remove-orphans
+          fi
           docker image prune -f || true
 
       - name: Enable PostgreSQL query analytics (pg_stat_statements)
