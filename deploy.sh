@@ -30,9 +30,16 @@ fi
 mkdir -p "$APP_DATA_DIR/postgres" "$APP_DATA_DIR/finance"
 
 # 4. Build and (re)start containers
+# Avoid --no-cache on the 8 GB VPS — full rebuild (node tsc + pip) pegs CPU/RAM and
+# triggers Hostinger CPU throttling. GitHub Actions uses cached builds by default too.
 echo ""
 echo "📦 Building containers…"
-$COMPOSE build --no-cache
+_NO_CACHE=""
+if [ "${DEPLOY_NO_CACHE:-0}" = "1" ]; then
+  _NO_CACHE="--no-cache"
+  echo "   (DEPLOY_NO_CACHE=1 — full rebuild)"
+fi
+$COMPOSE build ${_NO_CACHE} backend stitching-backend frontend
 
 echo ""
 echo "▶  Starting containers…"
