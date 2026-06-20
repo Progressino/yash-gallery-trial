@@ -68,10 +68,15 @@ jobs:
           command -v python3 && python3 --version || true
           command -v bash && bash -c 'printf "bash OK (BASH_VERSION=%s)\n" "${BASH_VERSION:-?}"' || true
 
-      # Tests run locally before push — never stop the live app for pytest.
-      # The VPS has only 7.8 GB RAM; pytest + app together OOM and leave prod down.
-      - name: Skip sanity tests (run locally)
-        run: echo "Sanity tests skipped on VPS — run locally before pushing to main."
+      # Lightweight syntax check — app stays running, no heavy pytest.
+      # Full test suite runs locally before push (VPS can't afford pytest + app together).
+      - name: Quick import check (no stop)
+        continue-on-error: true
+        timeout-minutes: 1
+        run: |
+          cd /root/app
+          python3 -c "import backend.main; print('backend.main imports OK')" 2>&1 || true
+          python3 -c "import backend.routers.data; print('routers.data imports OK')" 2>&1 || true
 
       - name: Ensure firewall allows web traffic
         run: |
