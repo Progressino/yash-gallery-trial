@@ -160,15 +160,17 @@ jobs:
           fi
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          # Start containers. Ghost container errors (18d1277b5518) are non-fatal —
-          # the affected service still starts, compose just can't reconcile the old ID.
+          # Start containers. Ghost container errors (18d1277b5518) are non-fatal.
           _dc -f docker-compose.prod.yml up -d --remove-orphans 2>&1 || true
-          # Verify critical containers are running
+          # The ghost error can leave frontend in "Created" state (ports not bound).
+          # Force-recreate frontend+backend individually to guarantee port bindings.
+          sleep 2
+          _dc -f docker-compose.prod.yml up -d --force-recreate --no-deps backend 2>&1 || true
+          _dc -f docker-compose.prod.yml up -d --force-recreate --no-deps frontend 2>&1 || true
+          # Verify
           sleep 3
-          docker ps --format '{{.Names}} {{.Status}}' | grep -q "backend.*Up" || {
-            echo "Backend not running — starting individually"
-            _dc -f docker-compose.prod.yml up -d backend frontend postgres
-          }
+          echo "Running containers:"
+          docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | head -10
           docker image prune -f || true
 
       - name: Enable PostgreSQL query analytics (pg_stat_statements)
