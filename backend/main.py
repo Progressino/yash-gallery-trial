@@ -143,11 +143,12 @@ def clear_warm_cache() -> None:
 
 
 def bootstrap_warm_cache_if_empty() -> bool:
-    """Reload in-memory warm cache when empty: PostgreSQL first, disk acceleration second."""
-    global _warm_cache, _warm_cache_loaded_at
+    """Reload in-memory warm cache when empty: disk first (fast), PostgreSQL fallback."""
+    global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
     if _warm_cache:
         return True
     import threading
+    from pathlib import Path
 
     lock = getattr(bootstrap_warm_cache_if_empty, "_lock", None)
     if lock is None:
@@ -156,17 +157,28 @@ def bootstrap_warm_cache_if_empty() -> bool:
     with lock:
         if _warm_cache:
             return True
+        disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
+        if disk_ok and disk_data:
+            loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
+            for key, val in loose.items():
+                cur = disk_data.get(key)
+                if cur is None or (
+                    hasattr(val, "__len__")
+                    and hasattr(cur, "__len__")
+                    and len(val) > len(cur)
+                ):
+                    disk_data[key] = val
+            _warm_cache = disk_data
+            _warm_cache_loaded_at = datetime.now(IST)
+            if _warm_cache_generation < 1:
+                _warm_cache_generation = 1
+            _warm_cache_ready.set()
+            log.info("Warm cache bootstrapped from disk (%d keys)", len(_warm_cache))
+            return True
         if _try_bootstrap_warm_cache_from_pg():
             _top_up_warm_cache_from_disk()
             return True
-        disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
-        if not disk_ok or not disk_data:
-            return False
-        _warm_cache = disk_data
-        _warm_cache_loaded_at = datetime.now(IST)
-        _warm_cache_ready.set()
-        log.info("Warm cache bootstrapped from disk (%d keys)", len(_warm_cache))
-        return True
+        return False
 
 
 # Backward-compatible alias — prefer bootstrap_warm_cache_if_empty().
@@ -1269,8 +1281,9 @@ def _do_load_warm_cache() -> bool:
                 _warm_cache_ready.set()
                 return True
 
-        # ── Phase PG: PostgreSQL normalized tables (production source of truth) ──
-        if not _warm_cache and _try_bootstrap_warm_cache_from_pg():
+        # ── Phase PG: PostgreSQL (skip when disk cache exists — PG COPY OOMs on 4M+ rows) ──
+        _disk_manifest = _os_main.path.join(_DISK_CACHE_DIR, "_manifest.json")
+        if not _warm_cache and not _os_main.path.exists(_disk_manifest) and _try_bootstrap_warm_cache_from_pg():
             if warm_cache_po_session_only():
                 _pg_n = warm_cache_sales_rows(_warm_cache)
                 _pg_min = 100_000
@@ -1294,6 +1307,18 @@ def _do_load_warm_cache() -> bool:
         # immediately and still run Phase 1+2 in the same thread to pick up any
         # new uploads that arrived since the last deploy.
         disk_ok, disk_data = _load_warm_cache_from_disk()
+        if disk_ok and disk_data:
+            from pathlib import Path
+
+            loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
+            for key, val in loose.items():
+                cur = disk_data.get(key)
+                if cur is None or (
+                    hasattr(val, "__len__")
+                    and hasattr(cur, "__len__")
+                    and len(val) > len(cur)
+                ):
+                    disk_data[key] = val
         # ── Fast-path: if disk is fresh AND healthy, skip all of Phase 1+2 ──────
         # Phase 1+2 causes 6-7 GB memory spikes (session DataFrames + GitHub DL)
         # that trigger health-check failures and autoheal restarts.  When the disk
