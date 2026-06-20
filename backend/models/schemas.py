@@ -155,6 +155,7 @@ class CoverageResponse(BaseModel):
 class IntelligenceReadinessResponse(BaseModel):
     intelligence_ready: bool
     dashboard_ready: bool = False
+    precomputed_bundle_ready: bool = False
     data_ready: bool = False
     platforms_loaded: bool = False
     hydration_complete: bool = False
