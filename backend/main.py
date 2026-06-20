@@ -2610,8 +2610,8 @@ def health():
 
 def _ops_pg_health() -> dict:
     try:
-        from .db.forecast_ops_pg import shared_snapshot_status
+        from .db.forecast_ops_pg import ops_pg_light_health
 
-        return shared_snapshot_status()
+        return ops_pg_light_health()
     except Exception:
         return {"enabled": False}

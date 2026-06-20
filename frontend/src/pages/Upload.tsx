@@ -9,6 +9,7 @@ import {
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadFinishingReceipt, uploadDailyAuto, uploadPoReturnsImport,
   uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, uploadPoManualIntransitSheet,
+  getCoverageResilient,
   type ManualIntransitParseReport,
   waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, waitForTier1Bulk, verifyDailyUpload,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
@@ -1148,7 +1149,50 @@ export default function Upload() {
                       })
                     }
                   })
-                  if (res.ok) {
+                  if (res.ingest_async) {
+                    setExistingPoProgress({
+                      pct: 35,
+                      msg: res.message || `Parsing ${file.name} on server…`,
+                      phase: 'parse',
+                      startedAt,
+                    })
+                    const deadline = Date.now() + 5 * 60_000
+                    while (Date.now() < deadline) {
+                      await new Promise(r => setTimeout(r, 2500))
+                      const cov = await getCoverageResilient({ light: true, timeout: 60_000 })
+                      const st = cov.existing_po_upload_status ?? 'idle'
+                      if (st === 'running') {
+                        setExistingPoProgress({
+                          pct: Math.min(92, cov.existing_po_upload_progress ?? 45),
+                          msg: cov.existing_po_upload_message || `Parsing ${file.name}…`,
+                          phase: 'parse',
+                          startedAt,
+                        })
+                        continue
+                      }
+                      if (st === 'error') {
+                        throw new Error(cov.existing_po_upload_message || 'Existing PO parse failed')
+                      }
+                      if (st === 'done' || cov.existing_po) {
+                        captureUploadAlerts('existingpo', res)
+                        usePOStore.getState().setResult(null)
+                        usePOStore.getState().setSkipSharedCacheOnce(true)
+                        showToast(
+                          'success',
+                          cov.existing_po_upload_message || res.message || 'Existing PO loaded.',
+                          8000,
+                        )
+                        setExistingPoProgress({
+                          pct: 96,
+                          msg: 'Refreshing coverage…',
+                          phase: 'refresh',
+                          startedAt,
+                        })
+                        await refresh()
+                        break
+                      }
+                    }
+                  } else if (res.ok) {
                     captureUploadAlerts('existingpo', res)
                     usePOStore.getState().setResult(null)
                     usePOStore.getState().setSkipSharedCacheOnce(true)

@@ -644,8 +644,8 @@ def cache_clear(request: Request, include_warm: bool = False):
     """Clear this browser session (all platforms, inventory, PO sheet, sales). Optional: server warm cache."""
     from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
 
-    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
-    if not may_delete_upload_data(username):
+    auth = getattr(request.state, "auth", None) or {}
+    if not may_delete_upload_data(str(auth.get("role") or ""), str(auth.get("sub") or "")):
         return CacheStatusResponse(ok=False, message=_DELETE_DENIED_MSG)
     sess = request.state.session
     if sess is None:
@@ -667,8 +667,8 @@ def cache_reset_all(request: Request, body: ResetAllBody = ResetAllBody()):
     """
     from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
 
-    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
-    if not may_delete_upload_data(username):
+    auth = getattr(request.state, "auth", None) or {}
+    if not may_delete_upload_data(str(auth.get("role") or ""), str(auth.get("sub") or "")):
         return ResetAllResponse(ok=False, message=_DELETE_DENIED_MSG, tier3_deleted=0)
     sess = request.state.session
     if sess is None:

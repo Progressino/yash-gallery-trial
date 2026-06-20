@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { resetErpModuleData } from '../api/client'
-import { mayAccessErpAdmin, useAuth } from '../store/auth'
+import { mayAccessErpAdmin, mayDeleteUploadData, useAuth } from '../store/auth'
 
 type Tab = 'dashboard' | 'demands' | 'orders' | 'reports' | 'tracker' | 'settings'
 type ReportView = 'sku-pending' | 'delivery-due' | 'buyer' | 'source' | 'demand-coverage'
@@ -1373,10 +1373,10 @@ export default function SalesOrders() {
       {/* ── Settings ── */}
       {tab === 'settings' && (
         <div className="space-y-4">
-          {mayAccessErpAdmin(authUser) && (
+          {mayAccessErpAdmin(authUser) && mayDeleteUploadData(authUser) && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
               <div>
-                <p className="text-sm font-semibold text-amber-800">Admin Data Reset (Convenience)</p>
+                <p className="text-sm font-semibold text-amber-800">Super Admin Data Reset</p>
                 <p className="text-xs text-amber-700">Quick remove of testing data from ERP modules.</p>
               </div>
               <div className="flex flex-wrap gap-2">

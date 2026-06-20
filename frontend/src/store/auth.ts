@@ -119,7 +119,7 @@ export function mayDeleteUploadData(user: AuthUser | null | undefined): boolean 
   if (user.may_delete_daily_upload === true || user.may_reset_all === true) return true
   if (user.may_delete_daily_upload === false || user.may_reset_all === false) return false
   if (user.upload_delete_locked === true) return false
-  return false
+  return user.role === 'Super Admin'
 }
 
 export function mayResetSharedData(user: AuthUser | null | undefined): boolean {

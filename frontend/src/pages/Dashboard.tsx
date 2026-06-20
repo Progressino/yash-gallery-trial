@@ -866,7 +866,7 @@ export default function Dashboard() {
 
   const { data: intelligenceReadiness } = useQuery({
     queryKey: ['intelligence-readiness'],
-    queryFn: () => getIntelligenceReadiness({ timeout: 45_000 }),
+    queryFn: () => getIntelligenceReadiness({ timeout: 90_000 }),
     refetchInterval: q => (q.state.data?.dashboard_ready ? false : 2_000),
     staleTime: 0,
   })

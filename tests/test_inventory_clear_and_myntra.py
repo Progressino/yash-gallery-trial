@@ -58,7 +58,7 @@ def test_clear_inventory_platform_endpoint(client, session_for_client, monkeypat
     monkeypatch.setattr(main_mod, "merge_inventory_into_warm_cache", lambda _s: None)
     monkeypatch.setattr(
         "backend.services.upload_policy.may_delete_upload_data",
-        lambda _username: True,
+        lambda _role, _username=None: True,
     )
 
     _, sess = session_for_client

@@ -3160,6 +3160,9 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         existing_po_looks_aggregated=existing_po_looks_aggregated_bundled_only(
             getattr(sess, "existing_po_df", None)
         ),
+        existing_po_upload_status=getattr(sess, "existing_po_upload_status", "idle") or "idle",
+        existing_po_upload_message=getattr(sess, "existing_po_upload_message", "") or "",
+        existing_po_upload_progress=int(getattr(sess, "existing_po_upload_progress", 0) or 0),
         daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
         daily_inventory_upload_message=getattr(sess, "daily_inventory_upload_message", "") or "",
         session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
@@ -5294,8 +5297,8 @@ def daily_uploads(_request: Request):
 def delete_daily_upload(upload_id: int, request: Request):
     from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
 
-    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
-    if not may_delete_upload_data(username):
+    auth = getattr(request.state, "auth", None) or {}
+    if not may_delete_upload_data(str(auth.get("role") or ""), str(auth.get("sub") or "")):
         raise HTTPException(status_code=403, detail=_DELETE_DENIED_MSG)
     ok = delete_upload(upload_id)
     if not ok:

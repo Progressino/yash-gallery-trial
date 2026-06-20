@@ -528,8 +528,8 @@ def po_get_daily_inventory_history_for_sku(
 def po_clear_daily_inventory_history(request: Request):
     from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
 
-    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
-    if not may_delete_upload_data(username):
+    auth = getattr(request.state, "auth", None) or {}
+    if not may_delete_upload_data(str(auth.get("role") or ""), str(auth.get("sub") or "")):
         return {"ok": False, "message": _DELETE_DENIED_MSG}
     sess = request.state.session
     if sess is None:
@@ -935,8 +935,8 @@ async def po_returns_import_file(
 def po_clear_returns_overlay(request: Request):
     from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
 
-    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
-    if not may_delete_upload_data(username):
+    auth = getattr(request.state, "auth", None) or {}
+    if not may_delete_upload_data(str(auth.get("role") or ""), str(auth.get("sub") or "")):
         return {"ok": False, "message": _DELETE_DENIED_MSG}
     sess = request.state.session
     if sess is None:

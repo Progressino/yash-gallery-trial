@@ -130,6 +130,13 @@ class AppSession:
     inventory_upload_started: float = 0.0
     inventory_upload_result: dict = field(default_factory=dict)
 
+    # Async existing PO sheet parse (large Excel can take minutes).
+    existing_po_upload_status: str = "idle"  # idle | running | done | error
+    existing_po_upload_message: str = ""
+    existing_po_upload_progress: int = 0
+    existing_po_upload_started: float = 0.0
+    existing_po_upload_result: dict = field(default_factory=dict)
+
     # Async Tier-1 bulk ZIP/RAR (MTR / Myntra / etc.) — avoids gateway timeout on large archives.
     tier1_bulk_status: str = "idle"  # idle | running | done | error
     tier1_bulk_message: str = ""

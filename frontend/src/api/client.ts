@@ -155,6 +155,9 @@ export interface CoverageResponse {
   existing_po_needs_recalc?: boolean
   existing_po_per_size_skus?: number
   existing_po_looks_aggregated?: boolean
+  existing_po_upload_status?: 'idle' | 'running' | 'done' | 'error'
+  existing_po_upload_message?: string
+  existing_po_upload_progress?: number
   daily_inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   daily_inventory_upload_message?: string
   /** Session holds PO essentials (8/8 + row floors) — ignores background jobs. */
@@ -354,7 +357,7 @@ export const uploadAmazonB2B  = (file: File) => uploadFile('/upload/amazon-b2b',
 export async function uploadExistingPO(
   file: File,
   onProgress?: (pct: number, phase: 'upload' | 'server') => void,
-): Promise<UploadResponse> {
+): Promise<UploadResponse & { ingest_async?: boolean }> {
   const fd = new FormData()
   fd.append('file', file)
   try {
@@ -523,7 +526,12 @@ async function getCoverageResilient(opts?: {
       return await getCoverage(opts)
     } catch (e) {
       lastErr = e
-      if (isUploadGateway502(e) || (axios.isAxiosError(e) && !e.response)) {
+      const retryable =
+        isUploadGateway502(e)
+        || (axios.isAxiosError(e) && !e.response)
+        || (axios.isAxiosError(e) && e.code === 'ECONNABORTED')
+        || (e instanceof Error && /timed out|timeout/i.test(e.message))
+      if (retryable) {
         await new Promise(r => setTimeout(r, 1500 * (attempt + 1)))
         continue
       }
@@ -532,6 +540,8 @@ async function getCoverageResilient(opts?: {
   }
   throw lastErr instanceof Error ? lastErr : new Error('Coverage refresh failed')
 }
+
+export { getCoverageResilient }
 
 function dailyUploadPendingAfter502(fileCount: number): {
   ok: boolean
@@ -1527,7 +1537,7 @@ export async function getIntelligenceReadiness(opts?: {
   timeout?: number
 }): Promise<IntelligenceReadinessResponse> {
   const { data } = await api.get<IntelligenceReadinessResponse>('/data/intelligence/readiness', {
-    timeout: opts?.timeout ?? 45_000,
+    timeout: opts?.timeout ?? 90_000,
   })
   return data
 }

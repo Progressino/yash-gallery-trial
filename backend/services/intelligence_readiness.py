@@ -1,6 +1,7 @@
 """Intelligence dashboard readiness — stronger than operational 8/8 alone."""
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from ..models.schemas import CoverageResponse
@@ -62,18 +63,44 @@ def inventory_available(sess, cov: CoverageResponse) -> bool:
     from .shared_frames import frame_row_count, session_inventory_variant
 
     rows = int(cov.inventory_rows or frame_row_count("inventory_df_variant", sess))
-    if rows <= 0:
-        try:
-            from ..db.forecast_ops_tables import load_inventory_dataframe
+    if bool(cov.inventory) and rows > 0:
+        return True
+    if rows > 0:
+        inv = session_inventory_variant(sess)
+        return not inv.empty or rows > 0
+    try:
+        from ..db.forecast_ops_tables import normalized_tables_enabled, tables_status
 
-            inv = load_inventory_dataframe()
-            if inv is not None and not inv.empty:
+        if normalized_tables_enabled():
+            st = tables_status()
+            if int(st.get("inventory_lines") or 0) > 0:
                 return True
-        except Exception:
-            pass
+    except Exception:
+        pass
+    return False
+
+
+_tier3_uploads_cache: tuple[float, bool] | None = None
+
+
+def _tier3_all_platforms_have_uploads() -> bool:
+    global _tier3_uploads_cache
+    ttl = 60.0
+    now = time.monotonic()
+    if _tier3_uploads_cache is not None and now - _tier3_uploads_cache[0] < ttl:
+        return _tier3_uploads_cache[1]
+    try:
+        from .daily_store import get_summary
+
+        summary = get_summary() or {}
+        result = all(
+            int((summary.get(plat) or {}).get("file_count") or 0) > 0
+            for plat in _CORE_PLATFORM_PG_KEYS
+        )
+        _tier3_uploads_cache = (now, result)
+        return result
+    except Exception:
         return False
-    inv = session_inventory_variant(sess)
-    return bool(cov.inventory) and (not inv.empty or rows > 0)
 
 
 def _pg_platform_sales_counts() -> dict[str, int]:
@@ -86,19 +113,6 @@ def _pg_platform_sales_counts() -> dict[str, int]:
         return dict(st.get("sales_by_platform") or {})
     except Exception:
         return {}
-
-
-def _tier3_all_platforms_have_uploads() -> bool:
-    try:
-        from .daily_store import get_summary
-
-        summary = get_summary() or {}
-        return all(
-            int((summary.get(plat) or {}).get("file_count") or 0) > 0
-            for plat in _CORE_PLATFORM_PG_KEYS
-        )
-    except Exception:
-        return False
 
 
 _unified_covers_cache: tuple[int, int, bool] | None = None

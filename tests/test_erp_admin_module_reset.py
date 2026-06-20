@@ -11,8 +11,15 @@ def _sales_counts(db_path: str) -> tuple[int, int]:
         conn.close()
 
 
-def test_admin_can_reset_sales_orders_module(client, tmp_path, monkeypatch):
+def test_super_admin_can_reset_sales_orders_module(client, tmp_path, monkeypatch):
     from backend.db import sales_db
+
+    def _decode(token: str | None):
+        if token == "test-token":
+            return {"sub": "admin", "role": "Super Admin", "permissions": []}
+        return None
+
+    monkeypatch.setattr("backend.main.decode_token", _decode)
 
     db_path = str(tmp_path / "sales_reset_test.db")
     monkeypatch.setattr(sales_db, "_DB", db_path)
@@ -35,6 +42,11 @@ def test_admin_can_reset_sales_orders_module(client, tmp_path, monkeypatch):
 
     after = _sales_counts(db_path)
     assert after == (0, 0)
+
+
+def test_admin_cannot_reset_module_data(client, monkeypatch):
+    r = client.post("/api/erp-admin/reset-module-data", json={"module": "sales_orders"})
+    assert r.status_code == 403, r.text
 
 
 def test_non_admin_cannot_reset_module_data(client, monkeypatch):

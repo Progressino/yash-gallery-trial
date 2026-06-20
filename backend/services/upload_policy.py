@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 
+from .rbac import ROLE_SUPER_ADMIN
+
 # Roles allowed to replace bulk history (upload POST — not delete).
 _HISTORICAL_UPLOAD_ROLES = frozenset({"Super Admin", "Admin", "Manager"})
 _RESET_DATA_ROLES = frozenset({"Super Admin", "Admin"})
@@ -56,30 +58,14 @@ _PO_ADMIN_BASELINE_PREFIXES = (
 )
 
 _DELETE_DENIED_MSG = (
-    "Uploaded data is locked. Only the designated owner account may delete "
-    "saved uploads, clear platforms, or reset shared cache."
+    "Only Super Admin may delete uploaded data, clear platforms, or reset shared cache."
 )
 
 
-def _delete_allowed_usernames() -> frozenset[str]:
-    """Usernames allowed to delete uploaded / shared ERP sales data (case-insensitive)."""
-    raw = (os.environ.get("UPLOAD_DELETE_ALLOWED_USERS") or "").strip()
-    if raw:
-        return frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
-    defaults: list[str] = []
-    for key in ("SUPER_ADMIN_USERNAME", "AUTH_USERNAME"):
-        v = (os.environ.get(key) or "").strip()
-        if v:
-            defaults.append(v.lower())
-    if not defaults:
-        defaults.append("admin")
-    return frozenset(defaults)
-
-
-def may_delete_upload_data(username: str | None) -> bool:
-    """True only for usernames listed in UPLOAD_DELETE_ALLOWED_USERS (or super-admin env default)."""
-    u = (username or "").strip().lower()
-    return bool(u) and u in _delete_allowed_usernames()
+def may_delete_upload_data(role: str | None, username: str | None = None) -> bool:
+    """True only for Super Admin role — Admin and all other roles cannot delete data."""
+    _ = username
+    return (role or "").strip() == ROLE_SUPER_ADMIN
 
 
 def historical_upload_locked() -> bool:
@@ -98,20 +84,17 @@ def may_upload_historical(role: str) -> bool:
 
 
 def may_reset_shared_data(role: str, username: str | None = None) -> bool:
-    """Session wipe, reset-all, Tier-3 purge — owner username only."""
-    _ = role
-    return may_delete_upload_data(username)
+    """Session wipe, reset-all, Tier-3 purge — Super Admin only."""
+    return may_delete_upload_data(role, username)
 
 
 def may_clear_platform_data(role: str, username: str | None = None) -> bool:
-    _ = role
-    return may_delete_upload_data(username)
+    return may_delete_upload_data(role, username)
 
 
 def may_delete_daily_upload_file(role: str, username: str | None = None) -> bool:
-    """Deleting a saved Tier-3 file removes history — owner only."""
-    _ = role
-    return may_delete_upload_data(username)
+    """Deleting a saved Tier-3 file removes history — Super Admin only."""
+    return may_delete_upload_data(role, username)
 
 
 def may_admin_po_session_edits(role: str) -> bool:
@@ -128,7 +111,7 @@ def may_upload_po_baseline(role: str) -> bool:
 
 def upload_policy_for_role(role: str, username: str | None = None) -> dict:
     locked = historical_upload_locked()
-    can_delete = may_delete_upload_data(username)
+    can_delete = may_delete_upload_data(role, username)
     hist = may_upload_historical(role)
     return {
         "historical_upload_locked": locked,
@@ -177,7 +160,7 @@ def check_upload_api_access(
     p = path.rstrip("/") or path
 
     if _path_deletes_upload_data(m, p):
-        if not may_delete_upload_data(username):
+        if not may_delete_upload_data(role, username):
             return _DELETE_DENIED_MSG
         return None
 

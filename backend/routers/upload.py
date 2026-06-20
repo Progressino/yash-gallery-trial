@@ -2648,6 +2648,88 @@ def _persist_existing_po_after_upload(sess, session_id: str | None) -> None:
         _log.exception("auto-save after existing PO upload")
 
 
+def _parse_existing_po_into_session(sess, file_bytes: bytes, orig_fn: str) -> UploadResponse:
+    from ..services.existing_po import audit_existing_po_upload
+
+    df = parse_existing_po(file_bytes, orig_fn)
+    audit = audit_existing_po_upload(file_bytes, orig_fn, df)
+    sess.existing_po_df = df
+    sess.existing_po_filename = orig_fn
+    sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1
+    try:
+        import datetime as _dt
+
+        sess.existing_po_uploaded_at = _dt.datetime.now(tz=_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        sess.existing_po_uploaded_at = ""
+    from ..services.po_raise_remove import invalidate_po_calculate_result
+    from ..services.po_shared_cache import invalidate_all_shared_caches
+
+    invalidate_po_calculate_result(sess)
+    invalidate_all_shared_caches()
+    from ..services.existing_po import persist_existing_po_to_disk
+
+    persist_existing_po_to_disk(sess)
+    _session_data_changed(sess)
+    active = 0
+    if "PO_Pipeline_Total" in df.columns:
+        active = int((pd.to_numeric(df["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0).sum())
+    pipe = int(audit.get("pipeline_units") or 0)
+    msg = (
+        f"Existing PO loaded: {len(df):,} SKUs ({active:,} with pipeline, "
+        f"{pipe:,} total balance units). "
+        "Click Calculate PO on PO Engine to refresh pipeline columns."
+    )
+    warnings = list(audit.get("warnings") or [])
+    if audit.get("sheet_total_row"):
+        st = audit["sheet_total_row"]
+        msg += (
+            f" Sheet Total row: {st.get('total_balance_units', st.get('pipeline_units', 0)):,} balance"
+        )
+        if st.get("pending_cutting_units") is not None:
+            msg += f", {st['pending_cutting_units']:,} pending cutting"
+        if st.get("balance_to_dispatch_units") is not None:
+            msg += f", {st['balance_to_dispatch_units']:,} balance to dispatch"
+        msg += "."
+    if not audit.get("totals_match", True):
+        msg += " ⚠ Parsed totals differ from sheet Total row — review before Calculate PO."
+    return UploadResponse(
+        ok=True,
+        message=msg,
+        rows=len(df),
+        existing_po_uploaded_at=sess.existing_po_uploaded_at or None,
+        existing_po_generation=sess.existing_po_generation,
+        validation_warnings=warnings or None,
+    )
+
+
+def _run_existing_po_parse_worker(session_id: str, file_bytes: bytes, orig_fn: str) -> None:
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    sess.existing_po_upload_status = "running"
+    sess.existing_po_upload_message = f"Parsing {orig_fn}…"
+    sess.existing_po_upload_progress = 15
+    sess.existing_po_upload_started = time.time()
+    try:
+        with sess._daily_restore_lock:
+            resp = _parse_existing_po_into_session(sess, file_bytes, orig_fn)
+        sess.existing_po_upload_status = "done"
+        sess.existing_po_upload_progress = 100
+        sess.existing_po_upload_message = resp.message
+        sess.existing_po_upload_result = resp.model_dump()
+    except Exception as e:
+        _log.warning("existing-po parse failed: %s", e, exc_info=True)
+        msg = f"Failed to parse Existing PO: {e}"
+        sess.existing_po_upload_status = "error"
+        sess.existing_po_upload_progress = 0
+        sess.existing_po_upload_message = msg
+        sess.existing_po_upload_result = {"ok": False, "message": msg}
+    finally:
+        sess.existing_po_upload_started = 0.0
+        _persist_existing_po_after_upload(sess, session_id)
+
+
 @router.post("/existing-po", response_model=UploadResponse)
 async def upload_existing_po(
     request: Request,
@@ -2656,61 +2738,33 @@ async def upload_existing_po(
 ):
     sess = _get_session(request)
     try:
+        if getattr(sess, "existing_po_upload_status", "idle") == "running":
+            return UploadResponse(
+                ok=False,
+                message="Existing PO upload already in progress — wait for parsing to finish.",
+            )
         file_bytes = await file.read()
         orig_fn = file.filename or "existing_po.xlsx"
+        sid = getattr(request.state, "session_id", None)
+        if sid:
+            sess.existing_po_upload_status = "running"
+            sess.existing_po_upload_message = f"Upload received — parsing {orig_fn}…"
+            sess.existing_po_upload_progress = 5
+            sess.existing_po_upload_started = time.time()
+            HEAVY_EXECUTOR.submit(_run_existing_po_parse_worker, sid, file_bytes, orig_fn)
+            return JSONResponse(
+                content={
+                    "ok": True,
+                    "ingest_async": True,
+                    "message": (
+                        "Upload accepted — parsing existing PO on the server. "
+                        "Status updates below; large sheets may take 1–3 minutes."
+                    ),
+                }
+            )
 
         def work():
-            from ..services.existing_po import audit_existing_po_upload
-
-            df = parse_existing_po(file_bytes, orig_fn)
-            audit = audit_existing_po_upload(file_bytes, orig_fn, df)
-            sess.existing_po_df = df
-            sess.existing_po_filename = orig_fn
-            sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1
-            try:
-                import datetime as _dt
-                sess.existing_po_uploaded_at = _dt.datetime.now(tz=_dt.timezone.utc).isoformat().replace("+00:00", "Z")
-            except Exception:
-                sess.existing_po_uploaded_at = ""
-            from ..services.po_raise_remove import invalidate_po_calculate_result
-            from ..services.po_shared_cache import invalidate_all_shared_caches
-
-            invalidate_po_calculate_result(sess)
-            invalidate_all_shared_caches()
-            from ..services.existing_po import persist_existing_po_to_disk
-
-            persist_existing_po_to_disk(sess)
-            _session_data_changed(sess)
-            active = 0
-            if "PO_Pipeline_Total" in df.columns:
-                active = int((pd.to_numeric(df["PO_Pipeline_Total"], errors="coerce").fillna(0) > 0).sum())
-            pipe = int(audit.get("pipeline_units") or 0)
-            msg = (
-                f"Existing PO loaded: {len(df):,} SKUs ({active:,} with pipeline, "
-                f"{pipe:,} total balance units). "
-                "Click Calculate PO on PO Engine to refresh pipeline columns."
-            )
-            warnings = list(audit.get("warnings") or [])
-            if audit.get("sheet_total_row"):
-                st = audit["sheet_total_row"]
-                msg += (
-                    f" Sheet Total row: {st.get('total_balance_units', st.get('pipeline_units', 0)):,} balance"
-                )
-                if st.get("pending_cutting_units") is not None:
-                    msg += f", {st['pending_cutting_units']:,} pending cutting"
-                if st.get("balance_to_dispatch_units") is not None:
-                    msg += f", {st['balance_to_dispatch_units']:,} balance to dispatch"
-                msg += "."
-            if not audit.get("totals_match", True):
-                msg += " ⚠ Parsed totals differ from sheet Total row — review before Calculate PO."
-            return UploadResponse(
-                ok=True,
-                message=msg,
-                rows=len(df),
-                existing_po_uploaded_at=sess.existing_po_uploaded_at or None,
-                existing_po_generation=sess.existing_po_generation,
-                validation_warnings=warnings or None,
-            )
+            return _parse_existing_po_into_session(sess, file_bytes, orig_fn)
 
         resp = await _session_lock_apply(sess, work)
         if resp.ok:
@@ -3903,8 +3957,8 @@ async def clear_platform(platform: str, request: Request):
     """Clear a specific platform's data from the session."""
     from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data
 
-    username = str((getattr(request.state, "auth", None) or {}).get("sub") or "")
-    if not may_delete_upload_data(username):
+    auth = getattr(request.state, "auth", None) or {}
+    if not may_delete_upload_data(str(auth.get("role") or ""), str(auth.get("sub") or "")):
         return JSONResponse(
             content={"ok": False, "message": _DELETE_DENIED_MSG},
             status_code=403,

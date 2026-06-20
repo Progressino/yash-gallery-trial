@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterator
 
@@ -642,6 +643,11 @@ def load_warm_cache_tables() -> dict | None:
 def tables_status() -> dict[str, Any]:
     if not normalized_tables_enabled():
         return {"enabled": False}
+    global _tables_status_cache
+    ttl = float(os.environ.get("TABLES_STATUS_CACHE_TTL_SEC", "120"))
+    now = time.monotonic()
+    if _tables_status_cache is not None and now - _tables_status_cache[0] < ttl:
+        return _tables_status_cache[1]
     conn = _require_conn()
     if conn is None:
         return {"enabled": False}
@@ -664,13 +670,18 @@ def tables_status() -> dict[str, Any]:
                 GROUP BY platform ORDER BY platform
                 """
             ).fetchall()
-        return {
+        result = {
             "enabled": True,
             "inventory_snapshots": int(inv_snap[0] or 0),
             "inventory_lines": int(inv_lines[0] or 0),
             "sku_mapping": int(sku_n[0] or 0),
             "sales_by_platform": {str(r[0]): int(r[1]) for r in sales},
         }
+        _tables_status_cache = (now, result)
+        return result
     except Exception:
         _log.exception("tables_status failed")
         return {"enabled": True, "error": True}
+
+
+_tables_status_cache: tuple[float, dict[str, Any]] | None = None

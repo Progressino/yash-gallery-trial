@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import time
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
@@ -324,6 +325,24 @@ def load_shared_snapshot() -> dict | None:
         return None
 
 
+def ops_pg_light_health() -> dict[str, Any]:
+    """Fast health probe — no heavy table COUNT(*) scans."""
+    if not ops_pg_enabled():
+        return {"enabled": False}
+    conn = _require_conn()
+    if conn is None:
+        return {"enabled": False}
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT 1 FROM forecast_shared_snapshot WHERE snapshot_id = %s LIMIT 1",
+                (_SNAPSHOT_ID,),
+            ).fetchone()
+        return {"enabled": True, "present": row is not None}
+    except Exception:
+        return {"enabled": True, "present": False, "error": True}
+
+
 def shared_snapshot_status() -> dict[str, Any]:
     if not ops_pg_enabled():
         return {"enabled": False}
@@ -338,44 +357,65 @@ def shared_snapshot_status() -> dict[str, Any]:
             ).fetchone()
             upload_count = conn.execute("SELECT COUNT(*) FROM forecast_daily_uploads").fetchone()
         if row is None:
-            try:
-                from .forecast_ops_tables import tables_status
-
-                tbl = tables_status()
-            except Exception:
-                tbl = {}
-            has_tables = bool(
-                tbl.get("inventory_lines")
-                or tbl.get("sku_mapping")
-                or tbl.get("sales_by_platform")
-            )
             return {
                 "enabled": True,
-                "present": has_tables,
+                "present": False,
                 "daily_uploads": int(upload_count[0] or 0),
-                "tables": tbl,
             }
         manifest = row[0] if isinstance(row[0], dict) else {}
-        try:
-            from .forecast_ops_tables import tables_status
-
-            tbl = tables_status()
-        except Exception:
-            tbl = {}
         return {
             "enabled": True,
             "present": True,
             "updated_at": row[1].isoformat() if row[1] else None,
             "keys": manifest.get("keys") or [],
             "daily_uploads": int(upload_count[0] or 0),
-            "tables": tbl,
         }
     except Exception:
         _log.exception("shared_snapshot_status failed")
         return {"enabled": True, "present": False, "error": True}
 
 
-# ── Tier-3 daily uploads (PostgreSQL) ─────────────────────────────────────────
+_pg_summary_cache: tuple[float, dict] | None = None
+
+
+def pg_get_summary() -> dict:
+    if not ops_pg_enabled():
+        return {}
+    global _pg_summary_cache
+    ttl = float(os.environ.get("PG_SUMMARY_CACHE_TTL_SEC", "60"))
+    now = time.monotonic()
+    if _pg_summary_cache is not None and now - _pg_summary_cache[0] < ttl:
+        return _pg_summary_cache[1]
+    conn = _require_conn()
+    if conn is None:
+        return {}
+    try:
+        with conn:
+            rows = conn.execute(
+                """
+                SELECT platform,
+                       COUNT(*) AS file_count,
+                       COALESCE(SUM(rows), 0) AS total_rows,
+                       MAX(COALESCE(date_to, file_date)) AS max_date,
+                       MIN(COALESCE(date_from, file_date)) AS min_date
+                FROM forecast_daily_uploads
+                GROUP BY platform
+                """
+            ).fetchall()
+        result = {
+            str(r[0]): {
+                "file_count": int(r[1] or 0),
+                "total_rows": int(r[2] or 0),
+                "max_date": str(r[3]) if r[3] else "",
+                "min_date": str(r[4]) if r[4] else "",
+            }
+            for r in rows
+        }
+        _pg_summary_cache = (now, result)
+        return result
+    except Exception:
+        _log.exception("pg_get_summary failed")
+        return {}
 
 def pg_save_daily_file(
     platform: str,
@@ -468,39 +508,6 @@ def pg_load_platform_rows(
     except Exception:
         _log.exception("pg_load_platform_rows failed platform=%s", platform)
         return []
-
-
-def pg_get_summary() -> dict:
-    if not ops_pg_enabled():
-        return {}
-    conn = _require_conn()
-    if conn is None:
-        return {}
-    try:
-        with conn:
-            rows = conn.execute(
-                """
-                SELECT platform,
-                       COUNT(*) AS file_count,
-                       COALESCE(SUM(rows), 0) AS total_rows,
-                       MAX(COALESCE(date_to, file_date)) AS max_date,
-                       MIN(COALESCE(date_from, file_date)) AS min_date
-                FROM forecast_daily_uploads
-                GROUP BY platform
-                """
-            ).fetchall()
-        return {
-            str(r[0]): {
-                "file_count": int(r[1] or 0),
-                "total_rows": int(r[2] or 0),
-                "max_date": str(r[3]) if r[3] else "",
-                "min_date": str(r[4]) if r[4] else "",
-            }
-            for r in rows
-        }
-    except Exception:
-        _log.exception("pg_get_summary failed")
-        return {}
 
 
 def _pg_tier3_window_clause() -> str:

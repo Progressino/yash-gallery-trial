@@ -6,6 +6,7 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState, type Reac
 import { createPortal } from 'react-dom'
 import api, {
   getCoverage,
+  getCoverageResilient,
   getDataParity,
   getPoSharedCacheAvailability,
   loadPoCalculateResultFromSession,
@@ -168,6 +169,7 @@ function POFreshInner() {
   )
   const [coverageDetail, setCoverageDetail] = useState<CoverageResponse | null>(null)
   const [checkingData, setCheckingData] = useState(false)
+  const [coverageError, setCoverageError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState<{ msg: string; pct: number | null } | null>(null)
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
@@ -202,8 +204,9 @@ function POFreshInner() {
 
   const refreshDataStatus = useCallback(async () => {
     setCheckingData(true)
+    setCoverageError(null)
     try {
-      const c = await getCoverage({ light: true, timeout: 45_000 })
+      const c = await getCoverageResilient({ light: true, timeout: 90_000 })
       setCoverageDetail(c)
       setDataStatus(countLoaded(c))
       try {
@@ -213,10 +216,7 @@ function POFreshInner() {
         setParityReport(null)
       }
     } catch (e: unknown) {
-      setResult({
-        ok: false,
-        message: e instanceof Error ? e.message : 'Failed to read data coverage',
-      })
+      setCoverageError(e instanceof Error ? e.message : 'Failed to read data coverage')
     } finally {
       setCheckingData(false)
     }
@@ -708,6 +708,9 @@ function POFreshInner() {
           >
             {checkingData ? 'Checking…' : 'Refresh status'}
           </button>
+          {coverageError && (
+            <span className="text-xs font-semibold text-amber-700">{coverageError}</span>
+          )}
           {coverageDetail?.existing_po ? (
             <span className="inline-flex items-center gap-2 rounded-full bg-[var(--po-surface-container)] px-3 py-1.5 text-xs font-semibold text-[var(--po-on-primary-container)]">
               Existing PO: {(coverageDetail.existing_po_rows ?? 0).toLocaleString()} SKUs

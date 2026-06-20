@@ -5,7 +5,7 @@ import axios from 'axios'
 import api from '../api/client'
 import { resetErpModuleData, clearPlatform } from '../api/client'
 import { ALL_MODULE_KEYS, MODULE_LABELS } from '../lib/modules'
-import { mayAccessErpAdmin, mayClearPlatformData, useAuth } from '../store/auth'
+import { mayAccessErpAdmin, mayClearPlatformData, mayDeleteUploadData, useAuth } from '../store/auth'
 
 type Tab = 'dashboard' | 'users' | 'roles' | 'activity' | 'data-reset'
 
@@ -71,6 +71,7 @@ export default function Admin() {
   const [clearInventoryBusy, setClearInventoryBusy] = useState(false)
   const [clearInventoryMsg, setClearInventoryMsg] = useState<string | null>(null)
   const mayClearPlatform = mayClearPlatformData(authUser)
+  const mayDeleteData = mayDeleteUploadData(authUser)
 
   const payloadFromUserForm = (form: typeof EMPTY_USER_FORM, modules: string[]) => {
     const body: Record<string, unknown> = {
@@ -574,12 +575,17 @@ export default function Admin() {
       {tab === 'data-reset' && (
         <div className="space-y-4">
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-            <p className="text-sm font-semibold text-amber-800">Admin-only dangerous action</p>
+            <p className="text-sm font-semibold text-amber-800">Super Admin only — dangerous action</p>
             <p className="text-xs text-amber-700 mt-1">
               Use only to remove testing data in production. Each action permanently deletes one module&apos;s records.
             </p>
           </div>
-          {mayClearPlatform && (
+          {!mayDeleteData && (
+            <p className="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-xl p-4">
+              Only Super Admin can delete or reset module data. Admin and other roles can upload but not remove saved data.
+            </p>
+          )}
+          {mayDeleteData && mayClearPlatform && (
             <div className="bg-white rounded-xl border border-red-200 p-4">
               <p className="text-sm font-semibold text-gray-800">Snapshot inventory (Upload Data)</p>
               <p className="text-xs text-gray-500 mt-1">
@@ -599,6 +605,7 @@ export default function Admin() {
               )}
             </div>
           )}
+          {mayDeleteData && (
           <div className="grid md:grid-cols-2 gap-3">
             {RESET_MODULES.map(m => (
               <div key={m.key} className="bg-white rounded-xl border p-4">
@@ -615,6 +622,7 @@ export default function Admin() {
               </div>
             ))}
           </div>
+          )}
           {resetModuleMut.isSuccess && (
             <p className="text-sm text-green-700">
               {resetModuleMut.data?.message} ({resetModuleMut.data?.rows_deleted ?? 0} rows deleted)

@@ -279,8 +279,10 @@ def post_activity(body: ActivityIn):
 @router.post("/reset-module-data")
 def reset_module_data(request: Request, body: ModuleDataResetIn):
     role = _request_role(request)
-    if not may_admin_po_session_edits(role):
-        raise HTTPException(status_code=403, detail="Only Admin can remove ERP module data.")
+    from ..services.upload_policy import may_delete_upload_data
+
+    if not may_delete_upload_data(role):
+        raise HTTPException(status_code=403, detail="Only Super Admin can remove ERP module data.")
 
     module = (body.module or "").strip().lower()
     if module not in _ALLOWED_RESET_MODULES:

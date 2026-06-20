@@ -1,4 +1,4 @@
-"""HTTP enforcement of owner-only upload delete."""
+"""HTTP enforcement of Super Admin-only upload delete."""
 
 import pytest
 
@@ -11,8 +11,7 @@ import pytest
         ("POST", "/api/cache/reset-all"),
     ],
 )
-def test_non_owner_cannot_delete_upload_data(client, monkeypatch, method, path):
-    monkeypatch.setenv("UPLOAD_DELETE_ALLOWED_USERS", "owner_only")
+def test_non_super_admin_cannot_delete_upload_data(client, monkeypatch, method, path):
     monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
     if method == "DELETE":
         r = client.delete(path)
@@ -21,13 +20,12 @@ def test_non_owner_cannot_delete_upload_data(client, monkeypatch, method, path):
     assert r.status_code == 403
 
 
-def test_owner_username_may_call_clear_when_listed(client, monkeypatch):
-    monkeypatch.setenv("UPLOAD_DELETE_ALLOWED_USERS", "tester")
+def test_super_admin_may_call_clear(client, monkeypatch):
     monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
 
     def _decode(token: str | None):
         if token == "test-token":
-            return {"sub": "tester", "role": "Clerk", "permissions": []}
+            return {"sub": "admin", "role": "Super Admin", "permissions": []}
         return None
 
     monkeypatch.setattr("backend.main.decode_token", _decode)
