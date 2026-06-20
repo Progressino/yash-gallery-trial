@@ -67,7 +67,7 @@ services:
       # Disable MTR row-count guard so accounts with <500K rows use fast-path from disk cache.
       - WARM_CACHE_MIN_MTR_ROWS=0
       - SESSION_SHARED_FRAMES=1
-      - SESSION_MAX_ACTIVE=4
+      - SESSION_MAX_ACTIVE=8
       - DB_POOL_SIZE=2
       - DB_POOL_MAX_OVERFLOW=3
       - FINANCE_DB_PATH=/data/finance.db
@@ -99,6 +99,8 @@ services:
         condition: service_healthy
     mem_limit: 7.5g
     memswap_limit: 9g   # raised from 7g/8g: kernel OOM-killed uvicorn at ~7.3 GB RSS during warm-cache phase 2 + first session copy (2026-05-13). Host has 7.8 GiB RAM + 2 GiB swap; postgres capped at 2 GiB leaves headroom for backend + OS.
+    # Single worker on 7.5 GB VPS — dual workers OOM during parallel warm-cache boot.
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     restart: unless-stopped
     labels:
       - autoheal=true
