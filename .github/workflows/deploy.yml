@@ -148,13 +148,11 @@ jobs:
           _prune_stale_compose_containers autoheal
           _prune_ghost_recreate_containers
           docker container prune -f 2>/dev/null || true
-          # Ghost container 18d1277b5518 is stuck in compose's internal tracking.
-          # Kill everything and nuke compose's state so it starts clean.
-          _dc -f docker-compose.prod.yml kill 2>/dev/null || true
+          # Clean slate: stop and remove ALL containers (including from other project names).
+          # This clears ghost container IDs stuck in compose's internal state.
+          docker stop $(docker ps -q) 2>/dev/null || true
           docker rm -f $(docker ps -aq) 2>/dev/null || true
           docker container prune -f 2>/dev/null || true
-          # Remove compose project config from Docker to clear ghost references
-          docker compose -f docker-compose.prod.yml down --volumes=false --remove-orphans 2>/dev/null || true
 
           _NO_CACHE=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.no_cache }}" = "true" ]; then
@@ -162,13 +160,8 @@ jobs:
           fi
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          # Fresh up with new project name if ghost containers block the default.
-          if ! _dc -f docker-compose.prod.yml up -d --remove-orphans 2>&1; then
-            echo "Compose up failed — trying with fresh project name to bypass ghost state"
-            docker rm -f $(docker ps -aq) 2>/dev/null || true
-            docker container prune -f 2>/dev/null || true
-            docker compose -p yg -f docker-compose.prod.yml up -d --remove-orphans
-          fi
+          # All containers were removed above — fresh compose up with default project name.
+          _dc -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
 
       - name: Enable PostgreSQL query analytics (pg_stat_statements)
