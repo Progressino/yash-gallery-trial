@@ -1,0 +1,30 @@
+name: Remote recover (SSH)
+
+# Boot services on a reachable VPS: ssh, docker, runner, app stack.
+on:
+  workflow_dispatch:
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Recover host services
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 10m
+          script: |
+            set -eu
+            systemctl start ssh docker 2>/dev/null || true
+            systemctl enable ssh docker 2>/dev/null || true
+            systemctl restart 'actions.runner.*' 2>/dev/null || true
+            cd /root/app
+            _dc() {
+              if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi
+            }
+            _dc -f docker-compose.prod.yml up -d --remove-orphans
+            _dc -f docker-compose.prod.yml ps
+            curl -sf --max-time 8 http://127.0.0.1:8000/api/health || echo "backend not ready yet"

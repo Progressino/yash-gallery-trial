@@ -1,0 +1,90 @@
+name: Remote deploy (SSH)
+
+# Emergency deploy from GitHub-hosted runners when the self-hosted runner is offline
+# but SSH to the VPS works. Uses repo secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Skip predeploy sanity (faster recovery)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: remote-deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 40m
+          script: |
+            set -eu
+            cd /root/app
+            git fetch origin main
+            git checkout -f main
+            git reset --hard origin/main
+            git log -1 --oneline
+            _sha="$(git rev-parse --short HEAD)"
+            _built="$(date -u +%Y-%m-%dT%H:%MZ)"
+            for _KV in "APP_GIT_SHA=${_sha}" "APP_BUILT_AT=${_built}"; do
+              _K="${_KV%%=*}"
+              _V="${_KV#*=}"
+              if grep -q "^${_K}=" .env 2>/dev/null; then
+                sed -i "s|^${_K}=.*|${_K}=${_V}|" .env
+              else
+                echo "${_K}=${_V}" >> .env
+              fi
+            done
+            sed -i '/^WARM_CACHE_PO_SESSION_ONLY=/d' .env 2>/dev/null || true
+            if grep -q '^SESSION_PG_PERSIST=' .env 2>/dev/null; then
+              sed -i 's/^SESSION_PG_PERSIST=.*/SESSION_PG_PERSIST=0/' .env
+            else
+              echo 'SESSION_PG_PERSIST=0' >> .env
+            fi
+            _dc() {
+              if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi
+            }
+            systemctl start ssh docker 2>/dev/null || true
+            systemctl restart 'actions.runner.*' 2>/dev/null || true
+            if [ "${{ inputs.skip_tests }}" != "true" ]; then
+              _dc -f docker-compose.prod.yml stop backend stitching-backend 2>/dev/null || true
+              SKIP_E2E=1 DEPLOY_FAST=1 bash scripts/predeploy_sanity.sh
+            fi
+            _dc -f docker-compose.prod.yml build backend stitching-backend frontend
+            docker rm -f app-backend-1 app-stitching-backend-1 app-frontend-1 app-autoheal-1 2>/dev/null || true
+            _dc -f docker-compose.prod.yml up -d --remove-orphans
+            for i in $(seq 1 30); do
+              if curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health; then
+                echo ""
+                echo "OK: remote deploy healthy — ${_sha}"
+                exit 0
+              fi
+              echo "… waiting for /api/health ($i/30)"
+              sleep 10
+            done
+            _dc -f docker-compose.prod.yml logs --tail=60 backend 2>&1 || true
+            exit 1
+
+      - name: Verify public health
+        run: |
+          set -eu
+          for i in $(seq 1 12); do
+            if curl -sf --connect-timeout 10 --max-time 20 https://app.progressino.com/api/health; then
+              echo ""
+              echo "OK: public health"
+              exit 0
+            fi
+            echo "… public health attempt $i/12"
+            sleep 10
+          done
+          exit 1
