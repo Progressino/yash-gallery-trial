@@ -4035,6 +4035,11 @@ def intelligence_bundle(
                 return tier3_first
 
         if not session_build_unsafe or _disk_bulk_history_available():
+            from ..services.shared_frames import frame_row_count
+            _sales_n = frame_row_count("sales_df", sess)
+            if _sales_n > 500_000:
+                return {"ok": False, "computing": True, "status": "warming",
+                        "message": f"Analytics warming up — aggregating {_sales_n:,} sales rows…"}
             session_payload = _build_intelligence_bundle_payload_from_session(
                 sess, s_win, e_win, limit, basis, include_extras
             )
