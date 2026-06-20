@@ -160,7 +160,12 @@ jobs:
           fi
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
           _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          _dc -f docker-compose.prod.yml up -d --remove-orphans
+          # --force-recreate ignores stale container IDs from previous OOM crashes.
+          _dc -f docker-compose.prod.yml up -d --force-recreate --remove-orphans 2>&1 || {
+            echo "First up failed — removing ALL containers and retrying"
+            docker rm -f $(docker ps -aq) 2>/dev/null || true
+            _dc -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
+          }
           docker image prune -f || true
 
       - name: Enable PostgreSQL query analytics (pg_stat_statements)
