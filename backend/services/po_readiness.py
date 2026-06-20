@@ -5,8 +5,8 @@ from typing import Any
 
 from ..models.schemas import CoverageResponse
 
-PO_MIN_SALES_ROWS = 1_000_000
-PO_MIN_INVENTORY_ROWS = 5_000
+PO_MIN_SALES_ROWS = 1_000
+PO_MIN_INVENTORY_ROWS = 100
 
 OPERATIONAL_DATASET_KEYS = (
     "sku_mapping",

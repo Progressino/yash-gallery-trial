@@ -153,11 +153,11 @@ export function intelligenceReady(c: CoverageResponse): boolean {
   return dashboardGateReady(c)
 }
 
-/** Minimum unified sales rows before PO page mounts (prod catalog ~1.56M). */
-export const PO_MIN_SALES_ROWS = 1_000_000
+/** Minimum unified sales rows before PO page mounts — low threshold so page renders during hydration. */
+export const PO_MIN_SALES_ROWS = 1_000
 
 /** Minimum inventory SKUs before PO page mounts (prod ~6.7k). */
-export const PO_MIN_INVENTORY_ROWS = 5_000
+export const PO_MIN_INVENTORY_ROWS = 100
 
 /** True when PO routes may mount — uses po_ready semantics (see GET /api/po/readiness). */
 export function poPageHydrationReady(c: CoverageResponse): boolean {
