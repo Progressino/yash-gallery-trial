@@ -107,17 +107,23 @@ def _load_intelligence_bundle_cache_from_disk() -> None:
             try:
                 with open(os.path.join(_INTEL_BUNDLE_DISK_DIR, name)) as f:
                     data = json.load(f)
-                global_key = tuple(
-                    tuple(x) if isinstance(x, list) else x for x in data.get("key") or []
-                )
+                raw_key = data.get("key") or []
                 entry = data.get("entry")
-                if global_key and isinstance(entry, dict):
-                    # Refresh _ts so a bundle written before the last restart is
-                    # still served for one TTL period. Staleness from uploads is
-                    # handled by _invalidate_intelligence_bundle_cache(), which
-                    # deletes disk files before writing fresh ones.
-                    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[global_key] = {**entry, "_ts": now}
-                    loaded += 1
+                if not (raw_key and isinstance(entry, dict)):
+                    continue
+                # The stored key = (*cache_key, cache_gen, tier3_tokens).
+                # cache_key is the first 5 elements: (start, end, basis, limit, extras).
+                # Re-key with current Tier-3 tokens so _bundle_cache_lookup (which
+                # regenerates the global key from the cache_key + current tokens) finds the hit.
+                cache_key = tuple(raw_key[:5])
+                if len(cache_key) != 5:
+                    continue
+                current_global_key = _bundle_cache_global_key(cache_key)
+                # Refresh _ts so the entry is fresh for one TTL period after restart.
+                # Staleness from uploads is handled by _invalidate_intelligence_bundle_cache(),
+                # which deletes disk files before writing fresh ones.
+                _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[current_global_key] = {**entry, "_ts": now}
+                loaded += 1
             except Exception:
                 continue
         if loaded:
