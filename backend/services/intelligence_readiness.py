@@ -204,15 +204,25 @@ def build_intelligence_readiness(sess, cov: CoverageResponse, *, session_id: str
     from .shared_frames import frame_row_count
 
     bg = background_tasks_running(sess)
-    platforms_loaded = platform_frames_available(sess, cov)
-    sales_ok = sales_available(sess, cov)
+    precomputed = False
+    try:
+        from ..routers.data import _default_intelligence_date_window, global_intelligence_bundle_ready
+
+        ds, de = _default_intelligence_date_window()
+        precomputed = global_intelligence_bundle_ready(ds, de, limit=10, basis="gross", include_extras=False)
+    except Exception:
+        precomputed = False
+
+    platforms_loaded = platform_frames_available(sess, cov) or precomputed
+    sales_ok = sales_available(sess, cov) or precomputed
     inv_ok = inventory_available(sess, cov)
     hydrate_inflight = hydration_inflight(session_id, sess)
     return {
         "intelligence_ready": (
             not hydrate_inflight and sales_ok and inv_ok and platforms_loaded
         ),
-        "dashboard_ready": platforms_loaded and sales_ok,
+        "dashboard_ready": (platforms_loaded and sales_ok) or precomputed,
+        "precomputed_bundle_ready": precomputed,
         "data_ready": bool(getattr(cov, "data_ready", False)),
         "platforms_loaded": platforms_loaded,
         "hydration_complete": hydration_complete(sess, session_id),

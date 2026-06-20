@@ -873,16 +873,18 @@ export default function Dashboard() {
 
   const dashboardReady =
     intelligenceReadiness?.dashboard_ready === true ||
+    intelligenceReadiness?.precomputed_bundle_ready === true ||
     intelligenceReadiness?.platforms_loaded === true ||
     dashboardGateReady(coverageSnapshot)
 
   useEffect(() => {
     if (dashboardReady || hydrateRequested.current) return
+    if (intelligenceReadiness?.precomputed_bundle_ready) return
     hydrateRequested.current = true
     void cacheHydrateWarm().catch(() => {
       hydrateRequested.current = false
     })
-  }, [dashboardReady])
+  }, [dashboardReady, intelligenceReadiness?.precomputed_bundle_ready])
 
   useEffect(() => {
     if (dashboardReady) hydrateRequested.current = false

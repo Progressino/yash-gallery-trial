@@ -185,10 +185,7 @@ def precompute_default_intelligence_bundles() -> None:
         _log.warning("intelligence precompute: warm cache empty")
         return
 
-    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-    today = datetime.datetime.now(ist).date()
-    end_date = today.isoformat()
-    start_date = (today - datetime.timedelta(days=30)).isoformat()
+    start_date, end_date = _default_intelligence_date_window()
 
     sess = AppSession()
     try:
@@ -199,55 +196,63 @@ def precompute_default_intelligence_bundles() -> None:
 
     bundle_cache: dict = {}
     now = time.time()
-    cache_key = (start_date, end_date, "gross", 10, False)
 
-    if _bundle_cache_lookup(
-        cache_key,
-        bundle_cache,
-        start_date=start_date,
-        end_date=end_date,
-        allow_sparse=True,
-        sess=sess,
-    ):
-        _log.info("intelligence precompute: cache hit for %s..%s", start_date, end_date)
-        return
-
-    session_build_unsafe = _intelligence_session_build_unsafe(sess)
-    if not session_build_unsafe or _disk_bulk_history_available():
-        payload = _build_intelligence_bundle_payload_from_session(
-            sess, start_date, end_date, 10, "gross", False
-        )
-        if payload and _bundle_payload_has_display_data(payload):
-            payload["status"] = "ready"
-            _bundle_cache_store(cache_key, bundle_cache, payload, ts=now)
-            units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
-            _log.warning(
-                "intelligence precompute: stored session bundle %s..%s (%d units)",
+    for include_extras in (False, True):
+        cache_key = (start_date, end_date, "gross", 10, include_extras)
+        if _bundle_cache_lookup(
+            cache_key,
+            bundle_cache,
+            start_date=start_date,
+            end_date=end_date,
+            allow_sparse=True,
+            sess=sess,
+        ):
+            _log.info(
+                "intelligence precompute: cache hit for %s..%s extras=%s",
                 start_date,
                 end_date,
-                units,
+                include_extras,
             )
-            return
+            continue
 
-    tier3_payload = _try_serve_tier3_intelligence_bundle(
-        sess,
-        cache_key,
-        bundle_cache,
-        start_date,
-        end_date,
-        10,
-        "gross",
-        False,
-        ts=now,
-    )
-    if tier3_payload is not None:
-        units = int((tier3_payload.get("sales_summary") or {}).get("total_units") or 0)
-        _log.warning(
-            "intelligence precompute: stored tier3 bundle %s..%s (%d units)",
+        session_build_unsafe = _intelligence_session_build_unsafe(sess)
+        if not session_build_unsafe or _disk_bulk_history_available():
+            payload = _build_intelligence_bundle_payload_from_session(
+                sess, start_date, end_date, 10, "gross", include_extras
+            )
+            if payload and _bundle_payload_has_display_data(payload):
+                payload["status"] = "ready"
+                _bundle_cache_store(cache_key, bundle_cache, payload, ts=now)
+                units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
+                _log.warning(
+                    "intelligence precompute: stored session bundle %s..%s extras=%s (%d units)",
+                    start_date,
+                    end_date,
+                    include_extras,
+                    units,
+                )
+                continue
+
+        tier3_payload = _try_serve_tier3_intelligence_bundle(
+            sess,
+            cache_key,
+            bundle_cache,
             start_date,
             end_date,
-            units,
+            10,
+            "gross",
+            include_extras,
+            ts=now,
         )
+        if tier3_payload is not None:
+            units = int((tier3_payload.get("sales_summary") or {}).get("total_units") or 0)
+            _log.warning(
+                "intelligence precompute: stored tier3 bundle %s..%s extras=%s (%d units)",
+                start_date,
+                end_date,
+                include_extras,
+                units,
+            )
 
 
 def _sku_deepdive_aliases(raw: str) -> Set[str]:
@@ -255,6 +260,37 @@ def _sku_deepdive_aliases(raw: str) -> Set[str]:
     from ..services.sku_deepdive_data import deepdive_sku_alias_tokens
 
     return deepdive_sku_alias_tokens(raw)
+
+
+def _default_intelligence_date_window() -> tuple[str, str]:
+    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    today = datetime.datetime.now(ist).date()
+    end_date = today.isoformat()
+    start_date = (today - datetime.timedelta(days=30)).isoformat()
+    return start_date, end_date
+
+
+def global_intelligence_bundle_ready(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    *,
+    limit: int = 10,
+    basis: str = "gross",
+    include_extras: bool = False,
+) -> bool:
+    """True when a precomputed global/disk Intelligence bundle can serve instantly."""
+    s = str(start_date or "")
+    e = str(end_date or "")
+    cache_key = (s, e, str(basis or "gross"), int(limit), bool(include_extras))
+    hit = _bundle_cache_lookup(
+        cache_key,
+        {},
+        start_date=start_date,
+        end_date=end_date,
+        allow_sparse=True,
+        sess=None,
+    )
+    return hit is not None and _bundle_payload_has_display_data(hit)
 
 
 def _sess(request: Request):
@@ -3914,6 +3950,35 @@ def intelligence_bundle(
 
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
+
+    has_dates = bool(start_date or end_date)
+    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
+    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
+    cache_key = (
+        str(start_date or ""),
+        str(end_date or ""),
+        str(basis or "gross"),
+        int(limit),
+        bool(include_extras),
+    )
+    bundle_cache = getattr(sess, "_intelligence_bundle_cache", None)
+    if bundle_cache is None:
+        bundle_cache = {}
+        sess._intelligence_bundle_cache = bundle_cache
+
+    # Precomputed global/disk bundle — return before warm-cache bootstrap (prod hard refresh).
+    cached_early = _bundle_cache_lookup(
+        cache_key,
+        bundle_cache,
+        start_date=start_date,
+        end_date=end_date,
+        allow_sparse=True,
+        sess=sess,
+    )
+    if cached_early is not None:
+        _maybe_queue_light_session_hydrate(sess, sid or None)
+        return cached_early
+
     try:
         import backend.main as _main
 
@@ -3924,9 +3989,6 @@ def intelligence_bundle(
         _main.try_attach_shared_frames_fast(sess)
     except Exception:
         pass
-    has_dates = bool(start_date or end_date)
-    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
-    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
     if not sess:
         return {"ok": False, "computing": True, "message": "Session data still loading"}
     sales_empty = hasattr(sess, "sales_df") and sess.sales_df.empty
@@ -3950,18 +4012,6 @@ def intelligence_bundle(
     _ensure_sku_mapping_for_dashboard(sess)
 
     span_days = _report_span_days(start_date, end_date)
-
-    cache_key = (
-        str(start_date or ""),
-        str(end_date or ""),
-        str(basis or "gross"),
-        int(limit),
-        bool(include_extras),
-    )
-    bundle_cache = getattr(sess, "_intelligence_bundle_cache", None)
-    if bundle_cache is None:
-        bundle_cache = {}
-        sess._intelligence_bundle_cache = bundle_cache
 
     tier3_window = False
     if has_dates and len(s_win) == 10 and len(e_win) == 10:

@@ -17,6 +17,8 @@ def test_intelligence_bundle_uses_cache_without_refresh(client, monkeypatch):
 
     monkeypatch.setattr("backend.routers.data._ensure_intelligence_session_fresh", _track_refresh)
     monkeypatch.setattr("backend.routers.data._schedule_intelligence_refresh_async", lambda _sid: None)
+    monkeypatch.setattr("backend.main.bootstrap_warm_cache_if_empty", lambda: None)
+    monkeypatch.setattr("backend.main.try_attach_shared_frames_fast", lambda _s: None)
     monkeypatch.setattr(
         "backend.services.daily_store.get_tier3_sync_token",
         lambda: {},
@@ -72,6 +74,8 @@ def test_short_window_bundle_does_not_block_full_refresh(client, monkeypatch):
 
     monkeypatch.setattr("backend.routers.data._ensure_intelligence_session_fresh", _track_refresh)
     monkeypatch.setattr("backend.routers.data._schedule_intelligence_refresh_async", lambda _sid: None)
+    monkeypatch.setattr("backend.main.bootstrap_warm_cache_if_empty", lambda: None)
+    monkeypatch.setattr("backend.main.try_attach_shared_frames_fast", lambda _s: None)
     monkeypatch.setattr(
         "backend.services.daily_store.get_upload_report_day_coverage",
         lambda: {},

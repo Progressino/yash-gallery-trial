@@ -1,6 +1,8 @@
 """Precomputed intelligence disk cache must win over Tier-3 rebuild."""
 from __future__ import annotations
 
+import time
+
 from backend.routers import data as data_router
 from backend.session import AppSession
 
@@ -58,7 +60,7 @@ def test_global_cache_hit_before_tier3_rebuild(monkeypatch):
     cache_key = ("2026-05-21", "2026-06-20", "gross", 10, False)
     global_key = data_router._bundle_cache_global_key(cache_key)
     data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE[global_key] = {
-        "_ts": 1.0,
+        "_ts": time.time(),
         "payload": {
             "sales_summary": {"total_units": 50419},
             "platform_summary": [{"platform": "Amazon", "loaded": True, "total_units": 27000}],
@@ -80,3 +82,39 @@ def test_global_cache_hit_before_tier3_rebuild(monkeypatch):
     assert tier3_calls["n"] == 0
 
     data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.pop(global_key, None)
+
+
+def test_intelligence_bundle_skips_warm_bootstrap_on_global_cache(client, monkeypatch):
+    """Hard refresh: serve precomputed bundle without blocking warm-cache bootstrap."""
+    bootstrap_calls = {"n": 0}
+
+    def _bootstrap():
+        bootstrap_calls["n"] += 1
+
+    monkeypatch.setattr("backend.main.bootstrap_warm_cache_if_empty", _bootstrap)
+    monkeypatch.setattr("backend.main.try_attach_shared_frames_fast", lambda _s: None)
+    monkeypatch.setattr(data_router, "_cached_bundle_stale_vs_tier3_uploads", lambda *a, **k: False)
+    monkeypatch.setattr("backend.routers.data._maybe_queue_light_session_hydrate", lambda *_a, **_k: None)
+
+    cache_key = ("2026-06-01", "2026-06-03", "gross", 10, False)
+    global_key = data_router._bundle_cache_global_key(cache_key)
+    data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE[global_key] = {
+        "_ts": time.time(),
+        "payload": {
+            "sales_summary": {"total_units": 9000},
+            "platform_summary": [{"platform": "Amazon", "loaded": True, "total_units": 9000}],
+            "status": "ready",
+        },
+    }
+
+    try:
+        r = client.get(
+            "/api/data/intelligence-bundle",
+            params={"start_date": "2026-06-01", "end_date": "2026-06-03", "include_extras": False},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["sales_summary"]["total_units"] == 9000
+        assert bootstrap_calls["n"] == 0
+    finally:
+        data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.pop(global_key, None)

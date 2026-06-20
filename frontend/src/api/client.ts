@@ -180,6 +180,7 @@ export interface CoverageResponse {
 export interface IntelligenceReadinessResponse {
   intelligence_ready: boolean
   dashboard_ready: boolean
+  precomputed_bundle_ready?: boolean
   data_ready?: boolean
   platforms_loaded: boolean
   hydration_complete: boolean

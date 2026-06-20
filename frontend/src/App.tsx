@@ -7,7 +7,7 @@ import KarigarLayout from './components/KarigarLayout'
 import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuards'
 import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
-import api, { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
+import api, { cacheHydrateWarm, cacheLoad, getCoverage, getJobStatus, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
 import CoverageProvider from './components/CoverageProvider'
 import PoHydrationGate from './components/PoHydrationGate'
 import { canSkipHeavyServerRestore, poOperationalReady, poOperationalLoaded, poPageHydrationReady, PO_OPERATIONAL_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
@@ -166,12 +166,23 @@ function ProtectedRoute() {
         if (coverageJobsRunning(coverage)) {
           return true
         }
+        let serverWarmCacheReady = false
+        try {
+          const js = await getJobStatus()
+          serverWarmCacheReady = js.warm_cache && js.warm_cache_generation >= 1
+        } catch {
+          /* job-status optional during startup */
+        }
         const hasAnyPlatform =
           coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart || coverage.snapdeal
         if (!poOperationalReady(coverage)) {
           try {
-            await waitForWarmCacheReady({ maxWaitMs: 45_000, pollMs: 2_000 })
-            await withTimeout(cacheHydrateWarm(), 30_000)
+            if (!serverWarmCacheReady) {
+              await waitForWarmCacheReady({ maxWaitMs: 45_000, pollMs: 2_000 })
+            }
+            if (!serverWarmCacheReady) {
+              await withTimeout(cacheHydrateWarm(), 30_000)
+            }
             coverage = await getCoverage({ light: true, timeout: 45_000 })
             setCoverage(coverage)
             if (poOperationalReady(coverage)) {
