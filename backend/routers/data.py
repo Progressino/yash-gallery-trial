@@ -67,9 +67,9 @@ _GLOBAL_INTELLIGENCE_BUNDLE_CACHE: dict = {}
 # invalidate this cache directly (see _invalidate_intelligence_bundle_cache),
 # so this TTL only needs to bound staleness from sources that don't trigger
 # invalidation (e.g. anomaly/DSR drift over time) — keep it generous.
-_INTELLIGENCE_BUNDLE_TTL_SEC = 1800.0
+_INTELLIGENCE_BUNDLE_TTL_SEC = 7200.0   # 2h; explicit invalidation via _invalidate_intelligence_bundle_cache() handles upload-driven staleness
 
-_INTEL_BUNDLE_DISK_DIR = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+_INTEL_BUNDLE_DISK_DIR = os.environ.get("WARM_CACHE_DIR") or "/data/warm_cache"
 
 
 def _intel_bundle_disk_path(global_key: tuple) -> str:
@@ -96,9 +96,11 @@ def _save_intelligence_bundle_to_disk(global_key: tuple, entry: dict) -> None:
 def _load_intelligence_bundle_cache_from_disk() -> None:
     """Populate _GLOBAL_INTELLIGENCE_BUNDLE_CACHE from persisted entries at
     startup so the first request after a restart doesn't recompute."""
+    now = time.time()
     try:
         if not os.path.isdir(_INTEL_BUNDLE_DISK_DIR):
             return
+        loaded = 0
         for name in os.listdir(_INTEL_BUNDLE_DISK_DIR):
             if not (name.startswith("intel_bundle_") and name.endswith(".json")):
                 continue
@@ -110,9 +112,19 @@ def _load_intelligence_bundle_cache_from_disk() -> None:
                 )
                 entry = data.get("entry")
                 if global_key and isinstance(entry, dict):
-                    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[global_key] = entry
+                    # Refresh _ts so a bundle written before the last restart is
+                    # still served for one TTL period. Staleness from uploads is
+                    # handled by _invalidate_intelligence_bundle_cache(), which
+                    # deletes disk files before writing fresh ones.
+                    _GLOBAL_INTELLIGENCE_BUNDLE_CACHE[global_key] = {**entry, "_ts": now}
+                    loaded += 1
             except Exception:
                 continue
+        if loaded:
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "intelligence bundle cache: loaded %d entry/entries from disk", loaded
+            )
     except Exception:
         pass
 
