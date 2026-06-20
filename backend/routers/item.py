@@ -101,6 +101,7 @@ class ItemUpdate(BaseModel):
     gst_rate:           Optional[float] = None
     procurement_type:   Optional[str]   = None
     routing_step_ids:   Optional[List[int]] = None
+    add_sizes:          Optional[List[str]] = None   # new sizes to append (existing are skipped)
 
 class BOMCreate(BaseModel):
     bom_name:   str = "Default"
@@ -319,12 +320,15 @@ def get_item_detail(item_id: int):
 @router.put("/{item_id}")
 def edit_item(item_id: int, body: ItemUpdate):
     fields = {k: v for k, v in body.model_dump().items()
-              if v is not None and k != "routing_step_ids"}
+              if v is not None and k not in ("routing_step_ids", "add_sizes")}
     if fields:
         update_item(item_id, **fields)
     if body.routing_step_ids is not None:
         set_item_routing(item_id, body.routing_step_ids)
-    return {"ok": True}
+    new_variant_ids: list[int] = []
+    if body.add_sizes:
+        new_variant_ids = create_size_variants(item_id, body.add_sizes)
+    return {"ok": True, "added_variants": len(new_variant_ids)}
 
 
 @router.delete("/{item_id}")

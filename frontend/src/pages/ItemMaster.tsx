@@ -139,6 +139,7 @@ export default function ItemMaster() {
     hsn_code: string; season: string; merchant_code: string
     selling_price: string; purchase_price: string; launch_date: string; uom: string
     procurement_type: string; routing_step_ids: number[]
+    existing_sizes: string[]; add_sizes: string[]; edit_custom_size: string
   }>(null)
   const [editItemErr,  setEditItemErr]  = useState('')
 
@@ -248,6 +249,9 @@ export default function ItemMaster() {
         uom: item.uom || 'PCS',
         procurement_type: item.procurement_type ?? '',
         routing_step_ids: routingIds,
+        existing_sizes: (data.variants || []).map((v: { size_label: string }) => v.size_label).filter(Boolean),
+        add_sizes: [],
+        edit_custom_size: '',
       })
       setShowEditItem(true)
       setEditItemErr('')
@@ -1203,6 +1207,66 @@ const totalCost = useMemo(() =>
                     </div>
 
                     <div className="space-y-2">
+                      <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Add New Sizes</label>
+                      {editItem.existing_sizes.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-1">
+                          {editItem.existing_sizes.map(sz => (
+                            <span key={sz} className="px-2 py-0.5 rounded bg-[#002B5B]/10 border border-[#002B5B]/20 text-xs font-semibold text-[#002B5B]">{sz}</span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex flex-wrap gap-1">
+                        {sizeGroups.flatMap(g => g.sizes).filter((s, i, arr) => arr.indexOf(s) === i)
+                          .filter(s => !editItem.existing_sizes.includes(s))
+                          .map(sz => {
+                            const selected = editItem.add_sizes.includes(sz)
+                            return (
+                              <button key={sz} type="button"
+                                onClick={() => setEditItem(p => p ? { ...p, add_sizes: selected ? p.add_sizes.filter(x => x !== sz) : [...p.add_sizes, sz] } : p)}
+                                className={`px-2 py-0.5 rounded border text-xs font-medium transition-colors ${selected ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'bg-white text-gray-600 border-gray-200 hover:border-[#002B5B] hover:text-[#002B5B]'}`}>
+                                {sz}
+                              </button>
+                            )
+                          })}
+                      </div>
+                      <div className="flex gap-2 mt-1">
+                        <input
+                          type="text"
+                          placeholder="Custom size (e.g. 5XL)"
+                          value={editItem.edit_custom_size}
+                          onChange={e => setEditItem(p => p ? { ...p, edit_custom_size: e.target.value.toUpperCase() } : p)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault()
+                              const s = editItem.edit_custom_size.trim().toUpperCase()
+                              if (s && !editItem.existing_sizes.includes(s) && !editItem.add_sizes.includes(s))
+                                setEditItem(p => p ? { ...p, add_sizes: [...p.add_sizes, s], edit_custom_size: '' } : p)
+                            }
+                          }}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]" />
+                        <button type="button"
+                          onClick={() => {
+                            const s = editItem.edit_custom_size.trim().toUpperCase()
+                            if (s && !editItem.existing_sizes.includes(s) && !editItem.add_sizes.includes(s))
+                              setEditItem(p => p ? { ...p, add_sizes: [...p.add_sizes, s], edit_custom_size: '' } : p)
+                          }}
+                          className="px-3 py-2 rounded-lg bg-[#002B5B] text-white text-xs font-semibold hover:bg-[#003d7a]">
+                          + Add
+                        </button>
+                      </div>
+                      {editItem.add_sizes.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {editItem.add_sizes.map(sz => (
+                            <span key={sz} className="flex items-center gap-1 px-2 py-0.5 rounded bg-green-50 border border-green-300 text-xs font-semibold text-green-700">
+                              {sz}
+                              <button type="button" onClick={() => setEditItem(p => p ? { ...p, add_sizes: p.add_sizes.filter(x => x !== sz) } : p)} className="text-green-500 hover:text-red-500 leading-none">✕</button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
                       <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">Production Routing (in order)</label>
                       <div className="flex flex-wrap gap-1">
                         {routingSteps
@@ -1255,6 +1319,7 @@ const totalCost = useMemo(() =>
                           uom:            editItem.uom,
                           procurement_type: editItem.procurement_type || '',
                           routing_step_ids: editItem.routing_step_ids,
+                          add_sizes:      editItem.add_sizes.length > 0 ? editItem.add_sizes : undefined,
                         }
                       })}
                       disabled={updateItemMut.isPending}
