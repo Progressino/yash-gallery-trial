@@ -62,6 +62,45 @@ _QTY_CANDS = (
 )
 
 
+def _is_last_days_return_filename(filename: str) -> bool:
+    """e.g. LAST 30 DAYS RETURN 1.xlsx — all-platform SKU return summary."""
+    low = (filename or "").lower()
+    if re.search(r"last\s*\d+\s*days?\s*return", low):
+        return True
+    return "last" in low and "return" in low and ("day" in low or "days" in low)
+
+
+def _looks_like_simple_sku_qty_return_summary(df: pd.DataFrame) -> bool:
+    """Two-column SKU + quantity sheet (no marketplace-specific columns)."""
+    if df is None or df.empty:
+        return False
+    col_low = {str(c).strip().lower() for c in df.columns}
+    complex_markers = {
+        "transaction type",
+        "return_created_date",
+        "event type",
+        "sub_order_num",
+        "seller_sku_code",
+        "myntra_sku_code",
+        "return-date",
+        "units refunded",
+        "return_id",
+        "return approval",
+    }
+    if col_low & complex_markers:
+        return False
+    sku_col = pick_csv_column(list(df.columns), _SKU_CANDS)
+    qty_col = pick_csv_column(list(df.columns), _QTY_CANDS)
+    if not sku_col or not qty_col:
+        return False
+    named_cols = [
+        c
+        for c in df.columns
+        if str(c).strip() and not str(c).lower().startswith("unnamed")
+    ]
+    return len(named_cols) <= 2
+
+
 def _strip_flipkart_sku(val: str) -> str:
     from .helpers import clean_sku
 
@@ -715,6 +754,8 @@ def _parse_amazon_fba_returns(
 def _infer_return_platform_from_filename(filename: str) -> str:
     """Map return export filename to Tier-3 platform key (amazon, myntra, …)."""
     low = (filename or "").lower()
+    if _is_last_days_return_filename(filename):
+        return "combined"
     if "amazon" in low or "businessreport" in low.replace(" ", ""):
         return "amazon"
     if "myntra" in low:
@@ -927,6 +968,20 @@ def _parse_single_return_file(
             return finished, ferr, stats
         return pd.DataFrame(), err, stats
 
+    if low.endswith((".xlsx", ".xls", ".xlsb")) and (
+        _is_last_days_return_filename(filename)
+    ):
+        df, read_err = _read_tabular(raw, filename)
+        if read_err:
+            return pd.DataFrame(), f"Could not read file: {read_err}", {}
+        if df is None or df.empty:
+            return pd.DataFrame(), "No rows in file.", {}
+        part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
+        if part is not None and not part.empty:
+            finished, ferr, _ = _finish(part)
+            return finished, ferr, {}
+        return pd.DataFrame(), err or "No return rows found in LAST DAYS RETURN sheet.", {}
+
     if low.endswith((".xlsx", ".xls", ".xlsb")):
         try:
             xl = pd.ExcelFile(BytesIO(raw))
@@ -1032,6 +1087,9 @@ def _parse_single_return_file(
     part, err = _parse_generic_return_table(df, sku_mapping=sku_mapping)
     if err:
         return pd.DataFrame(), err, {}
+    if _looks_like_simple_sku_qty_return_summary(df):
+        part = part.copy()
+        part["Return_Platform"] = "combined"
     return _finish(part)
 
 
@@ -1195,6 +1253,11 @@ def _return_report_date_from_filename(filename: str) -> str:
     if not fn:
         return ""
     low = fn.lower()
+    if _is_last_days_return_filename(fn):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        return (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)).isoformat()
     iso_dates = re.findall(r"(20\d{2}-\d{2}-\d{2})", fn)
     if "seller_returns" in low or "seller returns" in low:
         # Period export (…_2026-03-01_2026-03-31.csv) — use per-row Return_Date instead.

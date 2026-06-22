@@ -1926,7 +1926,7 @@ export default function Upload() {
           subtitle={
             coverage.return_sheet_skus && coverage.return_sheet_skus > 0
               ? `${coverage.return_sheet_skus.toLocaleString()} SKUs · ${(coverage.return_sheet_units ?? 0).toLocaleString()} return units combined — upload more files for other brands/platforms below`
-              : 'Upload return files per platform — Flipkart: monthly Sales Report XLSX (Return rows), Amazon/MTR, Myntra, Meesho, etc. Each file is merged; re-uploading the same filename replaces that file only.'
+              : 'Upload return files per platform — Flipkart Sales Report, Amazon/MTR, Myntra, Meesho, or simple SKU+QTY sheets (e.g. LAST 30 DAYS RETURN.xlsx). Each file is merged; re-uploading the same filename replaces that file only.'
           }
           loaded={!!coverage.return_sheet}
           rows={coverage.return_sheet_skus}
@@ -2399,6 +2399,7 @@ const _RETURN_PLATFORM_LABEL: Record<string, string> = {
   myntra: 'Myntra',
   meesho: 'Meesho',
   snapdeal: 'Snapdeal',
+  combined: 'All platforms',
   unknown: 'Other',
 }
 
@@ -2561,6 +2562,9 @@ function ReturnsUploadPanel({
             <p className="text-sm text-gray-500">
               Drag & drop one or more files or{' '}
               <span className="text-blue-600 underline">browse</span>
+              <span className="block text-[11px] text-gray-400 mt-1">
+                Supports platform return exports and simple SKU + QTY sheets (LAST 30 DAYS RETURN.xlsx).
+              </span>
             </p>
           )}
         </div>

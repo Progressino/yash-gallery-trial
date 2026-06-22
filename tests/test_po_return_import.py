@@ -380,3 +380,36 @@ def test_meesho_jan_jun_rar_tcs_units_with_sales_lookup(rar_name, min_units):
     assert err is None, err
     assert int(df["Return_Units"].sum()) >= min_units
     assert (df["Return_Platform"] == "meesho").all()
+
+
+def test_parse_last_30_days_return_sku_qty_xlsx():
+    """Simple all-platform return summary: SKU + QTY columns only."""
+    openpyxl = pytest.importorskip("openpyxl")
+    raw_xlsx = BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["SKU", "QTY"])
+    ws.append(["6018SKDYELLOW-XL", 1])
+    ws.append(["165YK251MUSTRAD-L", 2])
+    ws.append(["165YK251MUSTRAD-L", 1])
+    wb.save(raw_xlsx)
+    raw_xlsx.seek(0)
+    body = raw_xlsx.read()
+    df, err, _warn = parse_return_upload_bytes(body, "LAST 30 DAYS RETURN 1.xlsx")
+    assert err is None, err
+    assert not df.empty
+    assert int(df["Return_Units"].sum()) == 4
+    assert df.iloc[0]["Return_Platform"] == "combined"
+    assert int(df.loc[df["OMS_SKU"] == "165YK251MUSTRAD-L", "Return_Units"].iloc[0]) == 3
+
+
+def test_parse_last_30_days_return_fixture_file():
+    fixture = Path("/Users/samraisinghani/Downloads/LAST 30 DAYS RETURN 1.xlsx")
+    if not fixture.is_file():
+        pytest.skip("fixture not on disk")
+    df, err, _warn = parse_return_upload_bytes(fixture.read_bytes(), fixture.name)
+    assert err is None, err
+    assert len(df) >= 3000
+    assert int(df["Return_Units"].sum()) >= 10000
+    assert (df["Return_Platform"] == "combined").all()
