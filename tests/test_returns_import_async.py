@@ -88,6 +88,61 @@ def test_returns_import_worker_persists_overlay(monkeypatch, tmp_path):
     assert followup == [sid]
 
 
+def test_returns_import_followup_returns_before_slow_sales_patch(monkeypatch, tmp_path):
+    import time
+
+    import pandas as pd
+
+    from backend.session import AppSession, store
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path / "warm"))
+    started = {"slow": False}
+
+    def _slow_patch(*args, **kwargs):
+        started["slow"] = True
+        time.sleep(2)
+        return args[0]
+
+    monkeypatch.setattr(
+        "backend.services.sales.patch_sales_df_return_overlay",
+        _slow_patch,
+    )
+    monkeypatch.setattr(
+        "backend.db.forecast_session_pg.pg_session_persist_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "backend.routers.upload._schedule_sales_cache_save",
+        lambda *a, **k: None,
+    )
+
+    sid, sess = store.get_or_create(None)
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["A"],
+            "TxnDate": pd.to_datetime(["2026-06-01"]),
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1],
+            "Units_Effective": [1],
+            "Source": ["Amazon"],
+            "OrderId": ["1"],
+        }
+    )
+    sess.po_return_overlay_df = pd.DataFrame(
+        {"OMS_SKU": ["A"], "Return_Platform": ["combined"], "Return_Units": [1]}
+    )
+    store._sessions[sid] = sess
+
+    from backend.routers.upload import _run_returns_import_followup
+
+    t0 = time.time()
+    _run_returns_import_followup(sid)
+    elapsed = time.time() - t0
+    assert elapsed < 0.5, f"followup blocked for {elapsed:.1f}s"
+    time.sleep(2.5)
+    assert started["slow"] is True
+
+
 def test_light_coverage_restores_return_overlay_from_disk(client, monkeypatch, tmp_path):
     import pandas as pd
 

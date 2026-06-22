@@ -678,73 +678,65 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
 
 
 def _run_returns_import_followup(session_id: str) -> None:
-    """After return overlay import: fast net-sales patch, warm cache, durable PO sidecars."""
+    """After return overlay import: invalidate PO caches; patch sales + persist in background."""
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
+
     try:
-        sess.returns_import_progress = 85
-        sess.returns_import_message = "Applying returns to net sales…"
+        from ..services.po_shared_cache import invalidate_po_after_sales_or_returns_change
+
+        invalidate_po_after_sales_or_returns_change(sess)
     except Exception:
-        pass
+        _log.exception("PO cache invalidation after return import")
 
-    sales_df = getattr(sess, "sales_df", None)
-    if sales_df is not None and not getattr(sales_df, "empty", True):
+    def _background_sales_patch_and_persist() -> None:
+        s = _resolve_upload_session(session_id)
+        if s is None:
+            return
+        sales_df = getattr(s, "sales_df", None)
+        if sales_df is not None and not getattr(sales_df, "empty", True):
+            try:
+                from ..services.sales import patch_sales_df_return_overlay
+
+                as_of = getattr(s, "return_overlay_as_of", None)
+                s.sales_df = patch_sales_df_return_overlay(
+                    sales_df,
+                    _sess_return_overlay(s),
+                    dict(s.sku_mapping or {}),
+                    return_overlay_as_of=str(as_of).strip()[:10] if as_of else None,
+                )
+                s._quarterly_cache.clear()
+                _session_data_changed(s)
+                _finalize_sales_data_refresh(s)
+            except Exception:
+                _log.exception("background return overlay sales patch failed")
         try:
-            from ..services.sales import patch_sales_df_return_overlay
+            import backend.main as _main
 
-            as_of = getattr(sess, "return_overlay_as_of", None)
-            sess.sales_df = patch_sales_df_return_overlay(
-                sales_df,
-                _sess_return_overlay(sess),
-                dict(sess.sku_mapping or {}),
-                return_overlay_as_of=str(as_of).strip()[:10] if as_of else None,
+            _main.merge_po_optional_sheets_into_warm_cache(s)
+        except Exception:
+            _log.exception("warm cache sidecar merge after return import (background)")
+        try:
+            _schedule_sales_cache_save(s)
+        except Exception:
+            _log.exception("background sales cache save after return import failed")
+        try:
+            from ..db.forecast_session_pg import (
+                persist_session_bundle_thread_safe,
+                pg_session_persist_enabled,
             )
-            sess._quarterly_cache.clear()
-            _session_data_changed(sess)
-            _finalize_sales_data_refresh(sess)
-            _schedule_sales_cache_save(sess)
+
+            if pg_session_persist_enabled():
+                persist_session_bundle_thread_safe(session_id, s)
         except Exception:
-            _log.exception("fast return overlay patch failed; falling back to full sales rebuild")
-            _run_sales_rebuild_worker(session_id, refresh_sqlite=False)
-    else:
-        try:
-            from ..services.po_shared_cache import invalidate_po_after_sales_or_returns_change
+            _log.exception("PostgreSQL persist after return import (background)")
 
-            invalidate_po_after_sales_or_returns_change(sess)
-        except Exception:
-            _log.exception("PO cache invalidation after return import (no sales_df)")
-        _session_data_changed(sess)
-
-    sess = _resolve_upload_session(session_id)
-    if sess is None:
-        return
-    try:
-        sess.returns_import_progress = 95
-        sess.returns_import_message = "Saving return data…"
-    except Exception:
-        pass
-    try:
-        import backend.main as _main
-
-        _main.merge_po_optional_sheets_into_warm_cache(sess)
-        _main.publish_warm_cache_from_session(sess)
-    except Exception:
-        _log.exception("warm cache after return import")
-    try:
-        from ..db.forecast_session_pg import (
-            persist_session_bundle_thread_safe,
-            pg_session_persist_enabled,
-        )
-
-        if pg_session_persist_enabled():
-            persist_session_bundle_thread_safe(session_id, sess)
-    except Exception:
-        _log.exception("PostgreSQL persist after return import")
-    try:
-        _auto_save_cache(sess)
-    except Exception:
-        _log.exception("auto-save after return import")
+    threading.Thread(
+        target=_background_sales_patch_and_persist,
+        name="return-import-followup",
+        daemon=True,
+    ).start()
 
 
 @router.post("/daily-auto/reset-stuck")

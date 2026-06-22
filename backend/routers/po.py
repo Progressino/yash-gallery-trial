@@ -838,22 +838,6 @@ def _run_returns_import_worker(
             _main.merge_po_optional_sheets_into_warm_cache(sess)
         except Exception:
             logging.getLogger(__name__).exception("merge return overlay into warm cache failed")
-        try:
-            from ..db.forecast_session_pg import (
-                persist_session_bundle_thread_safe,
-                pg_session_persist_enabled,
-            )
-
-            if pg_session_persist_enabled():
-                persist_session_bundle_thread_safe(session_id, sess)
-        except Exception:
-            logging.getLogger(__name__).exception("PostgreSQL persist after return import failed")
-        sess.returns_import_progress = 75
-        sess.returns_import_message = "Updating net sales…"
-        from ..routers.upload import _run_returns_import_followup
-
-        _run_returns_import_followup(session_id)
-        sess.returns_import_status = "done"
         done_msg = str(out.get("message") or "Return sheet imported.")
         if import_warnings:
             preview = "; ".join(import_warnings[:4])
@@ -861,8 +845,12 @@ def _run_returns_import_worker(
             if extra > 0:
                 preview += f" (+{extra} more)"
             done_msg = f"{done_msg} ⚠ {preview}"
+        sess.returns_import_status = "done"
         sess.returns_import_message = done_msg
         sess.returns_import_progress = 100
+        from ..routers.upload import _run_returns_import_followup
+
+        _run_returns_import_followup(session_id)
     except Exception as e:
         logging.getLogger(__name__).exception("return import worker failed")
         sess.returns_import_status = "error"

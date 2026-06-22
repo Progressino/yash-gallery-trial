@@ -794,18 +794,29 @@ def patch_sales_df_return_overlay(
     Replace synthetic return-sheet refund rows in unified sales without rebuilding
     all platform history (fast path after Returns upload).
     """
-    base = existing.copy() if existing is not None and not getattr(existing, "empty", True) else pd.DataFrame()
-
-    if not base.empty:
+    if existing is None or getattr(existing, "empty", True):
+        base = pd.DataFrame()
+        removed_overlay = False
+    else:
+        base = existing
+        removed_overlay = False
         if "OrderId" in base.columns:
             oid = base["OrderId"].astype(str).str.strip()
-            base = base.loc[oid != RETURN_SHEET_ORDER_PLACEHOLDER].copy()
+            overlay_mask = oid == RETURN_SHEET_ORDER_PLACEHOLDER
+            if overlay_mask.any():
+                base = base.loc[~overlay_mask]
+                removed_overlay = True
         elif "LineKey" in base.columns:
             lk = base["LineKey"].astype(str)
-            base = base.loc[~lk.str.startswith("RETURN_SHEET|")].copy()
+            overlay_mask = lk.str.startswith("RETURN_SHEET|")
+            if overlay_mask.any():
+                base = base.loc[~overlay_mask]
+                removed_overlay = True
 
     if return_overlay_df is None or return_overlay_df.empty:
-        return _downcast_sales(base) if not base.empty else pd.DataFrame()
+        if removed_overlay:
+            return _downcast_sales(base)
+        return existing if existing is not None else pd.DataFrame()
 
     if return_overlay_as_of and str(return_overlay_as_of).strip():
         try:
@@ -821,22 +832,24 @@ def patch_sales_df_return_overlay(
         return_overlay_df, sku_mapping or {}, ref_txn_date=ref_dt
     )
     if synth.empty:
-        return _downcast_sales(base) if not base.empty else pd.DataFrame()
+        if removed_overlay:
+            return _downcast_sales(base)
+        return existing if existing is not None else pd.DataFrame()
 
-    if not base.empty:
-        if "DSR_Segment" in base.columns and "DSR_Segment" not in synth.columns:
-            synth = synth.copy()
-            synth["DSR_Segment"] = ""
-        for col in base.columns:
-            if col not in synth.columns:
-                synth[col] = ""
-        for col in synth.columns:
-            if col not in base.columns:
-                base[col] = ""
-        result = pd.concat([base, synth], ignore_index=True)
-    else:
-        result = synth
+    if base.empty:
+        return _downcast_sales(synth)
 
+    if "DSR_Segment" in base.columns and "DSR_Segment" not in synth.columns:
+        synth = synth.copy()
+        synth["DSR_Segment"] = ""
+    for col in base.columns:
+        if col not in synth.columns:
+            synth[col] = ""
+    for col in synth.columns:
+        if col not in base.columns:
+            base = base.copy()
+            base[col] = ""
+    result = pd.concat([base, synth], ignore_index=True)
     return _downcast_sales(result)
 
 
