@@ -3033,14 +3033,16 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         existing_po_needs_recalc as _existing_po_needs_recalc,
     )
 
+    from ..services.existing_po import ensure_existing_po_hydrated
+
+    try:
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        pass
+
     if not light:
         from ..services.daily_store import get_summary
-        from ..services.existing_po import ensure_existing_po_hydrated
 
-        try:
-            ensure_existing_po_hydrated(sess)
-        except Exception:
-            pass
         tier3_any = bool(get_summary())
     else:
         tier3_any = False
