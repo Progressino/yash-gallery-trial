@@ -804,3 +804,46 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
         message=f"{msg} Saving to GitHub in background…",
         sales_rows=n_sales,
     )
+
+
+@router.post("/sync-tier3", response_model=CacheReloadResponse)
+def cache_sync_tier3(request: Request):
+    """
+    Lightweight Tier-3 merge: sync recent SQLite daily uploads into the current
+    session and rebuild sales_df — NO GitHub download, no full session wipe.
+    Use this when the parity banner shows "Session platform history is shorter
+    than Tier-3 SQLite" and you want to merge recent uploads without the heavy
+    full-reload cost.
+    """
+    from ..routers.upload import _sync_session_platforms_from_sqlite, _rebuild_sales_sync
+    from ..routers.data import _invalidate_intelligence_bundle_cache
+    import backend.main as _main
+
+    sess = request.state.session
+    if sess is None:
+        return CacheReloadResponse(ok=False, message="No session", sales_rows=0)
+
+    try:
+        with sess._daily_restore_lock:
+            _sync_session_platforms_from_sqlite(sess, months=4)
+            ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=False)
+        if not ok:
+            return CacheReloadResponse(ok=False, message=msg, sales_rows=0)
+        n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
+        sess._quarterly_cache.clear()
+        try:
+            _main.publish_warm_cache_from_session(sess)
+        except Exception:
+            pass
+        try:
+            _invalidate_intelligence_bundle_cache()
+        except Exception:
+            pass
+        return CacheReloadResponse(
+            ok=True,
+            message=f"Merged latest daily uploads from Tier-3. {msg}",
+            sales_rows=n_sales,
+        )
+    except Exception as e:
+        _log.exception("sync-tier3 failed")
+        return CacheReloadResponse(ok=False, message=str(e), sales_rows=0)

@@ -7,7 +7,7 @@ import {
 } from 'recharts'
 import api, {
   cacheHydrateWarm,
-  cacheReloadFresh,
+  cacheSyncTier3,
   downloadDailyDsrCsv,
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
@@ -862,7 +862,8 @@ export default function Dashboard() {
   const handleParityReload = async () => {
     setParityReloading(true)
     try {
-      await cacheReloadFresh()
+      // Lightweight: sync Tier-3 SQLite into session + rebuild. No GitHub download.
+      await cacheSyncTier3()
       await getCoverage()
       invalidateDataQueries(qc)
     } catch {

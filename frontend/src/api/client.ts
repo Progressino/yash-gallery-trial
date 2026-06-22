@@ -1861,6 +1861,12 @@ export async function cacheReloadFresh(): Promise<{ ok: boolean; message: string
   return data
 }
 
+/** Lightweight: sync Tier-3 SQLite into session + rebuild sales. No GitHub download. */
+export async function cacheSyncTier3(): Promise<{ ok: boolean; message: string; sales_rows?: number }> {
+  const { data } = await api.post('/cache/sync-tier3', undefined, { timeout: 120_000 })
+  return data
+}
+
 export async function cacheClear(includeWarm = false) {
   const { data } = await api.delete('/cache', { params: includeWarm ? { include_warm: true } : {} })
   return data
