@@ -3595,7 +3595,7 @@ def _run_light_session_hydrate_worker(session_id: str) -> None:
                         getattr(_main, "_warm_cache_generation", 0) or 0
                     )
                     sess._warm_cache_only = True
-                elif _main.session_needs_operational_data(sess):
+                elif _main.session_needs_operational_data(sess) and not _main._warm_cache_ready.is_set():
                     _main.force_restore_session_from_server_cache(
                         sess, _main._warm_cache_generation,
                     )
