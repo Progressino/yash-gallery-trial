@@ -428,18 +428,21 @@ function HeroChart({ series, months, hidden, viewMode, denseLabels }: {
 /* ═══════════════════════════════════════════════════════════
    HERO KPI
    ═══════════════════════════════════════════════════════════ */
-function HeroKPI({ eyebrow, value, unit, delta, deltaDir, caption, spark, color }: {
-  eyebrow: string; value: number; unit?: string
+function HeroKPI({ eyebrow, value, unit, delta, deltaDir, caption, spark, color, decimals = 0 }: {
+  eyebrow: string; value: number; unit?: string; decimals?: number
   delta?: string; deltaDir?: 'up' | 'down'
   caption?: string; spark?: number[]; color?: string
 }) {
   const col = color ?? 'var(--primary)'
+  const fmt = decimals > 0
+    ? (v: number) => v.toFixed(decimals)
+    : undefined
   return (
     <div className="hk">
       <div className="hk-eyebrow">{eyebrow}</div>
       <div className="hk-row">
         <div className="hk-value">
-          <CountUp value={value} />
+          <CountUp value={value} format={fmt} />
           {unit && <span className="hk-unit">{unit}</span>}
         </div>
         {delta && deltaDir && (
@@ -1445,6 +1448,7 @@ export default function Dashboard() {
               eyebrow="RETURN RATE"
               value={parseFloat(returnRate.toFixed(1))}
               unit="%"
+              decimals={1}
               deltaDir={returnRate < 20 ? 'down' : 'up'}
               caption="shipments vs returns"
               spark={allMonthlyTotals.length > 1 ? allMonthlyTotals.map(v => (v > 0 ? (totalReturns / totalUnits * v) : 0)) : undefined}
