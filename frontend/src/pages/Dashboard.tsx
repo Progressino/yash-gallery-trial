@@ -7,6 +7,7 @@ import {
 } from 'recharts'
 import api, {
   cacheHydrateWarm,
+  cacheReloadFresh,
   downloadDailyDsrCsv,
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
@@ -857,6 +858,20 @@ export default function Dashboard() {
     prevReturnsImport.current = returnsImport
   }, [returnsImport, qc])
 
+  const [parityReloading, setParityReloading] = useState(false)
+  const handleParityReload = async () => {
+    setParityReloading(true)
+    try {
+      await cacheReloadFresh()
+      await getCoverage()
+      invalidateDataQueries(qc)
+    } catch {
+      // best-effort; Layout's handler shows full error
+    } finally {
+      setParityReloading(false)
+    }
+  }
+
   const { data: parityReport } = useQuery({
     queryKey: ['data-parity', dateEnd],
     queryFn: () => getDataParity(dateEnd || undefined),
@@ -1326,6 +1341,13 @@ export default function Dashboard() {
           {parityReport.warnings.map((w, i) => (
             <p key={i}>{w}</p>
           ))}
+          <button
+            onClick={handleParityReload}
+            disabled={parityReloading}
+            className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-amber-100 border border-amber-300 px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-200 disabled:opacity-50 transition-colors"
+          >
+            {parityReloading ? '↻ Reloading…' : '↻ Reload data now'}
+          </button>
         </div>
       ) : null}
       {intelligenceBundle?.empty_window && intelligenceBundle.message ? (

@@ -562,6 +562,13 @@ def _run_sales_rebuild_worker(
                 _main.publish_warm_cache_from_session(sess)
             except Exception:
                 _log.exception("warm cache publish after sales rebuild")
+            # Re-invalidate Intelligence bundle AFTER the rebuild so the next
+            # precompute uses the freshly rebuilt sales_df, not the pre-rebuild data.
+            try:
+                from ..routers.data import _invalidate_intelligence_bundle_cache
+                _invalidate_intelligence_bundle_cache()
+            except Exception:
+                _log.exception("Intelligence bundle re-invalidation after sales rebuild")
             try:
                 from ..db.forecast_session_pg import persist_session_bundle_thread_safe
 
@@ -658,14 +665,11 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
     """Background task: rebuild sales after Tier-3 ingest (bounded SQLite, no full re-merge)."""
     sess = _resolve_upload_session(session_id)
     touched = getattr(sess, "_daily_auto_platforms_touched", None) if sess else None
-    refresh_sqlite = False
-    if sess is not None:
-        try:
-            import backend.main as _main
-
-            refresh_sqlite = _main.session_needs_operational_data(sess)
-        except Exception:
-            refresh_sqlite = False
+    # Always sync from SQLite after a daily upload so the session reflects the
+    # freshly-saved files even when warm-cache data is already loaded (otherwise
+    # the incremental buffer path may miss data that was in a prior warm cache
+    # but not included in this ingest session's parsed buffers).
+    refresh_sqlite = True
     _run_sales_rebuild_worker(
         session_id,
         refresh_sqlite=refresh_sqlite,
