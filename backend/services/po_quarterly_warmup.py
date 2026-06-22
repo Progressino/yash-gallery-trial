@@ -372,8 +372,13 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
 
 def schedule_shared_quarterly_prewarm() -> None:
     """Deferred pre-build — wait until warm-cache / restore memory lock is free (OOM-safe)."""
+    import os
     import threading
     import time
+
+    if os.environ.get("PO_QUARTERLY_PREWARM", "1").strip().lower() in ("0", "false", "no", "off"):
+        logger.info("Quarterly prewarm disabled via PO_QUARTERLY_PREWARM=0")
+        return
 
     def _go() -> None:
         try:

@@ -83,6 +83,10 @@ services:
       # 1-2 GB build_sales_df spike while session hydration is also running. The bundle is
       # built on first request (2-3s delay) rather than consuming an extra 1-2 GB at startup.
       - INTELLIGENCE_PRECOMPUTE=0
+      # Disable quarterly PO prewarm on startup. This feature rebuilds a quarterly aggregation
+      # from Tier-3 SQLite (1-2 GB peak) concurrently with session hydration, causing OOM.
+      # The PO quarterly cache is built on first /po/quarterly request instead.
+      - PO_QUARTERLY_PREWARM=0
       - WARM_CACHE_DIR=/data/warm_cache
       - DB_POOL_SIZE=2
       - DB_POOL_MAX_OVERFLOW=3
