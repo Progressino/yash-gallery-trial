@@ -174,11 +174,33 @@ def bootstrap_warm_cache_if_empty() -> bool:
                 _warm_cache_generation = 1
             _warm_cache_ready.set()
             log.info("Warm cache bootstrapped from disk (%d keys)", len(_warm_cache))
+            _deferred_load_mtr_df(Path(_DISK_CACHE_DIR))
             return True
         if _try_bootstrap_warm_cache_from_pg():
             _top_up_warm_cache_from_disk()
             return True
         return False
+
+
+def _deferred_load_mtr_df(disk_dir: "Path") -> None:
+    """Load mtr_df.parquet in background after warm cache is ready."""
+    import pandas as pd
+
+    def _load():
+        global _warm_cache
+        p = disk_dir / "mtr_df.parquet"
+        if not p.is_file():
+            return
+        try:
+            mtr = pd.read_parquet(p)
+            if _warm_cache is not None and "mtr_df" not in _warm_cache:
+                _warm_cache["mtr_df"] = mtr
+                log.info("Deferred mtr_df loaded: %d rows", len(mtr))
+        except Exception as ex:
+            log.warning("Deferred mtr_df load failed: %s", ex)
+
+    import threading
+    threading.Thread(target=_load, daemon=True).start()
 
 
 # Backward-compatible alias — prefer bootstrap_warm_cache_if_empty().
@@ -1119,7 +1141,6 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
     if not disk_dir.is_dir():
         return out
     for key in (
-        "mtr_df",
         "myntra_df",
         "meesho_df",
         "flipkart_df",
