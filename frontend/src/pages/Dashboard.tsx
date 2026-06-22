@@ -964,8 +964,8 @@ export default function Dashboard() {
       return data
     },
     staleTime: 120_000,
-    retry: 2,
-    retryDelay: attempt => Math.min(8_000, 2_000 * (attempt + 1)),
+    retry: 5,
+    retryDelay: attempt => Math.min(10_000, 3_000 * (attempt + 1)),
     enabled: true,
     placeholderData: previousData => {
       const prev = previousData as IntelligenceBundle | undefined
@@ -979,6 +979,7 @@ export default function Dashboard() {
       if (d?.status === 'warming') return 3_000
       if (q.state.fetchStatus === 'fetching') return false
       if (!bundleHasDisplayData(d)) return 3_000
+      if (q.state.status === 'error') return 5_000
       return false
     },
   })
