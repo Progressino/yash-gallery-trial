@@ -488,7 +488,7 @@ export default function Upload() {
         showToast('success', `${v.message} Tap ↻ Rebuild if dashboard is still empty.`, 12_000)
       } else if ((v.tier3_upload_count ?? 0) > 0) {
         // Files exist in Tier-3 but don't cover the exact date — not an error, just informational.
-        showToast('info', v.message, 12_000)
+        showToast('success', v.message, 12_000)
       } else {
         showToast('error', v.message, 12_000)
       }
