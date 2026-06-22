@@ -35,14 +35,21 @@ def _hydrate_warm_worker(session_id: str) -> None:
         import backend.main as _main
 
         _main._copy_warm_cache_to_session(sess)
-        try:
-            from ..routers.data import _merge_disk_warm_into_session
+        # Skip _merge_disk_warm_into_session when _warm_cache is already populated.
+        # That function re-reads every platform parquet from /data/warm_cache, creating
+        # a 2-3 GB second copy of data already in _warm_cache, causing OOM crashes.
+        # The disk merge is only needed when _warm_cache itself was built from GitHub
+        # (Phase 2) and the disk volume has more rows. After a fast disk-cache startup
+        # both sources are identical, so the merge is pure wasted RAM.
+        if not _main._warm_cache:
+            try:
+                from ..routers.data import _merge_disk_warm_into_session
 
-            disk_note = _merge_disk_warm_into_session(sess)
-            if disk_note:
-                _log.info("hydrate-warm disk merge: %s", disk_note)
-        except Exception:
-            _log.exception("hydrate-warm disk top-up failed")
+                disk_note = _merge_disk_warm_into_session(sess)
+                if disk_note:
+                    _log.info("hydrate-warm disk merge: %s", disk_note)
+            except Exception:
+                _log.exception("hydrate-warm disk top-up failed")
         sess._warm_cache_gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
         sess._warm_cache_only = True
         sess._quarterly_cache.clear()
