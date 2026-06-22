@@ -2343,6 +2343,72 @@ def _platforms_needing_tier3_topup(sess: AppSession) -> list[str]:
     return out
 
 
+_BACKGROUND_BUNDLE_BUILD_RUNNING: set = set()
+
+
+def _schedule_background_bundle_build(
+    session_id: str | None,
+    cache_key: tuple,
+    s_win: str,
+    e_win: str,
+    limit: int,
+    basis: str | None,
+    include_extras: bool,
+) -> None:
+    """Build the Intelligence bundle in a background thread and cache it."""
+    if not session_id:
+        return
+    build_key = (session_id, cache_key)
+    if build_key in _BACKGROUND_BUNDLE_BUILD_RUNNING:
+        return
+    _BACKGROUND_BUNDLE_BUILD_RUNNING.add(build_key)
+    try:
+        from ..concurrency import AUX_EXECUTOR
+
+        AUX_EXECUTOR.submit(
+            _background_bundle_build_worker,
+            session_id, cache_key, s_win, e_win, limit, basis, include_extras,
+        )
+    except Exception:
+        _BACKGROUND_BUNDLE_BUILD_RUNNING.discard(build_key)
+
+
+def _background_bundle_build_worker(
+    session_id: str,
+    cache_key: tuple,
+    s_win: str,
+    e_win: str,
+    limit: int,
+    basis: str | None,
+    include_extras: bool,
+) -> None:
+    build_key = (session_id, cache_key)
+    try:
+        from ..session import store
+
+        sess = store.get(session_id)
+        if sess is None:
+            return
+        payload = _build_intelligence_bundle_payload_from_session(
+            sess, s_win, e_win, limit, basis, include_extras
+        )
+        if payload and _bundle_payload_has_display_data(payload):
+            bundle_cache = getattr(sess, "_intelligence_bundle_cache", None) or {}
+            sess._intelligence_bundle_cache = bundle_cache
+            _bundle_cache_store(cache_key, bundle_cache, payload)
+            import logging
+            logging.getLogger(__name__).info(
+                "Background bundle build complete for %s (cached)", session_id[:8]
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Background bundle build failed for %s", session_id[:8], exc_info=True
+        )
+    finally:
+        _BACKGROUND_BUNDLE_BUILD_RUNNING.discard(build_key)
+
+
 def _schedule_intelligence_refresh_async(session_id: str | None) -> None:
     """Tier-3 top-up / sales rebuild without blocking dashboard GET handlers."""
     if not session_id:
@@ -4103,6 +4169,15 @@ def intelligence_bundle(
                 return tier3_first
 
         if not session_build_unsafe or _disk_bulk_history_available():
+            from ..services.shared_frames import frame_row_count
+            _sales_n = frame_row_count("sales_df", sess)
+            if _sales_n > 500_000:
+                _schedule_background_bundle_build(
+                    sid or None, cache_key, s_win, e_win, limit, basis, include_extras
+                )
+                return _intelligence_warming_payload(
+                    f"Analytics warming up — aggregating {_sales_n:,} sales rows (building in background)…"
+                )
             session_payload = _build_intelligence_bundle_payload_from_session(
                 sess, s_win, e_win, limit, basis, include_extras
             )

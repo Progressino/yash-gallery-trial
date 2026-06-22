@@ -976,9 +976,9 @@ export default function Dashboard() {
     refetchInterval: q => {
       if (!dashboardReady) return false
       const d = q.state.data
-      if (d?.status === 'warming') return 4_000
+      if (d?.status === 'warming') return 3_000
       if (q.state.fetchStatus === 'fetching') return false
-      if (!bundleHasDisplayData(d)) return 4_000
+      if (!bundleHasDisplayData(d)) return 3_000
       return false
     },
   })
