@@ -709,8 +709,15 @@ def _run_returns_import_followup(session_id: str) -> None:
 async def reset_stuck_daily_upload(request: Request):
     """Clear a session stuck in daily ingest / sales rebuild (UI “Clear stuck upload”)."""
     sess = _get_session(request)
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
     cleared = _clear_stuck_daily_ingest(sess, force=True)
     _clear_stuck_sales_rebuild(sess, force=True)
+    # Abort any pending chunk uploads so a fresh upload starts cleanly.
+    if sid:
+        try:
+            chunk_store.abort_all(sid)
+        except Exception:
+            pass
     return {
         "ok": True,
         "cleared": cleared,
@@ -4230,24 +4237,11 @@ async def chunk_upload_complete(
     n_files = int(info["file_count"])
 
     if target == "daily-auto":
-        if getattr(sess, "daily_auto_ingest_status", "idle") == "running":
-            if not _clear_stuck_daily_ingest(sess, force=False):
-                return JSONResponse(
-                    content={
-                        "ok": False,
-                        "stuck": True,
-                        "message": (
-                            "A daily upload is still processing. Wait for it to finish, "
-                            "or use “Clear stuck upload” below, then try again."
-                        ),
-                        "detected_platforms": [],
-                        "warnings": [],
-                        "processed_files": n_files,
-                        "detected_files": 0,
-                        "unknown_files": 0,
-                    }
-                )
-            _log.info("Cleared stuck daily ingest before new chunk upload session=%s", sid[:8])
+        # Do NOT block here on daily_auto_ingest_status == "running":
+        # chunk/init already checked and set status="running" for this very upload.
+        # Re-checking causes every chunked upload to fail with "still processing"
+        # if all chunks arrive within the 3-minute auto-clear window (self-deadlock).
+        pass
     elif getattr(sess, "inventory_upload_status", "idle") == "running":
         if not _clear_stuck_inventory_upload(sess, force=False):
             return JSONResponse(

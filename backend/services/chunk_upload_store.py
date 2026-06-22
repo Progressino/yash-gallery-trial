@@ -229,5 +229,20 @@ class ChunkUploadStore:
         if root.is_dir():
             shutil.rmtree(root, ignore_errors=True)
 
+    def abort_all(self, session_id: str) -> int:
+        """Remove all pending chunk upload dirs for a session. Returns count aborted."""
+        sess_root = self._session_root(session_id)
+        if not sess_root.is_dir():
+            return 0
+        removed = 0
+        for up_dir in sess_root.iterdir():
+            if up_dir.is_dir():
+                try:
+                    shutil.rmtree(up_dir, ignore_errors=True)
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
 
 chunk_store = ChunkUploadStore()
