@@ -486,6 +486,9 @@ export default function Upload() {
         await refresh({ light: true })
       } else if (v.ok) {
         showToast('success', `${v.message} Tap ↻ Rebuild if dashboard is still empty.`, 12_000)
+      } else if ((v.tier3_upload_count ?? 0) > 0) {
+        // Files exist in Tier-3 but don't cover the exact date — not an error, just informational.
+        showToast('info', v.message, 12_000)
       } else {
         showToast('error', v.message, 12_000)
       }
@@ -582,11 +585,22 @@ export default function Upload() {
               })
               setBuildingMsg('')
               finalizeDailyAutoUpload('daily', cov, res)
-              const dateFromName = files
+              // Extract the most-recent date from uploaded filenames.
+              // Try ISO (YYYY-MM-DD) first; fall back to DD-MM-YY(YY) only if no ISO date found.
+              const isoMatch = files
+                .flatMap(f => [...f.name.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)])
+                .map(m => `${m[1]}-${m[2]}-${m[3]}`)
+                .filter(d => d >= '2020-01-01' && d <= '2099-12-31')
+                .sort()
+                .pop()
+              const legacyMatch = !isoMatch && files
                 .map(f => f.name.match(/(\d{1,2})[-_./](\d{1,2})[-_./](\d{2,4})/))
                 .find(Boolean)
-              if (dateFromName) {
-                const [, d, m, y] = dateFromName
+              if (isoMatch) {
+                setVerifyDate(isoMatch)
+                void runUploadVerify(isoMatch)
+              } else if (legacyMatch) {
+                const [, d, m, y] = legacyMatch
                 const yr = y.length === 2 ? `20${y}` : y
                 const iso = `${yr}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
                 setVerifyDate(iso)

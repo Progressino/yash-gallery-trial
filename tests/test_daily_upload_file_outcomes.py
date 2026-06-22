@@ -38,6 +38,9 @@ def test_save_daily_file_tracked_records_skip():
 
 
 def test_build_sales_returns_pending(client, auth_token, monkeypatch):
+    from backend.session import store
+    from tests.conftest import bootstrap_test_session
+
     submitted: list[tuple] = []
 
     def _fake_submit(fn, *args, **kwargs):
@@ -45,10 +48,16 @@ def test_build_sales_returns_pending(client, auth_token, monkeypatch):
 
     monkeypatch.setattr(upload_router.DAILY_UPLOAD_EXECUTOR, "submit", _fake_submit)
 
+    # Activate session and set sku_mapping so the endpoint doesn't block on that gate.
+    sid = bootstrap_test_session(client)
+    sess = store.get(sid)
+    assert sess is not None
+    sess.sku_mapping = {"TEST-SKU": "test-sku"}
+
     r = client.post("/api/upload/build-sales")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["ok"] is True
+    assert body["ok"] is True, f"Expected ok=True but got: {body}"
     assert body.get("sales_rebuild") == "pending"
     assert len(submitted) == 1
     assert submitted[0][0] is upload_router._run_sales_rebuild_worker

@@ -781,18 +781,39 @@ def verify_daily_upload(request: Request, date: str = ""):
         if getattr(sess, attr, None) is not None and hasattr(getattr(sess, attr), "empty")
     )
     ok = bool(tier3_platforms)
+    # If no files cover the exact date but nearby files exist (e.g. a range report
+    # uploaded for Jun 18–21 when verifying Jun 22), treat as OK and surface which
+    # platforms are actually present in the database so the user is not alarmed.
+    nearby_platforms: list[str] = []
+    nearby_range_str = ""
+    if not ok and recent:
+        nearby_platforms = sorted({str(u.get("platform") or "").lower() for u in recent if u.get("platform")})
+        date_froms = [str(u.get("date_from") or "")[:10] for u in recent if u.get("date_from")]
+        date_tos = [str(u.get("date_to") or "")[:10] for u in recent if u.get("date_to")]
+        if date_froms and date_tos:
+            nearby_range_str = f"{min(date_froms)} → {max(date_tos)}"
+        if nearby_platforms:
+            ok = True  # Files exist, just not specifically for this exact calendar date
+
     hint = ""
-    if not ok and sales_ready:
+    if ok and not tier3_platforms and nearby_platforms:
+        plat_str = ", ".join(nearby_platforms)
         hint = (
-            " Session has unified sales (warm cache or prior import) but no Tier-3 daily file "
-            f"covers {day}. Check Saved Daily Uploads below or upload today's files."
+            f" Uploads found for {plat_str}"
+            + (f" covering {nearby_range_str}" if nearby_range_str else "")
+            + f" (no file dated exactly {day} — this is normal for multi-day reports)."
+        )
+    elif not ok and sales_ready:
+        hint = (
+            " Session has sales data but no Tier-3 daily uploads found. "
+            f"Upload files that cover {day} to persist them."
         )
     elif ok and not sales_ready:
         hint = " Tier-3 saved — wait for sales rebuild or tap ↻ Rebuild on this page."
     return {
         "ok": ok,
         "date": day,
-        "tier3_platforms": tier3_platforms,
+        "tier3_platforms": tier3_platforms or nearby_platforms,
         "tier3_upload_count": len(recent),
         "tier3_summary": tier3_summary,
         "recent_uploads": recent[:12],
@@ -804,7 +825,11 @@ def verify_daily_upload(request: Request, date: str = ""):
         "sales_rebuild_status": getattr(sess, "sales_rebuild_status", "idle"),
         "last_ingest_message": str(ingest.get("message") or ""),
         "message": (
-            f"Tier-3 has {len(tier3_platforms)} platform(s) for {day}: {', '.join(tier3_platforms) or 'none'}."
+            (
+                f"Tier-3 has {len(tier3_platforms)} platform(s) for {day}: {', '.join(tier3_platforms)}."
+                if tier3_platforms
+                else f"Uploads saved for {', '.join(nearby_platforms) or 'none'}."
+            )
             + (f" Session sales: {sales_rows:,} rows." if sales_ready else " Sales not rebuilt yet — wait or tap ↻ Rebuild.")
             + hint
         ),
