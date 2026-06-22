@@ -1141,6 +1141,7 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
     if not disk_dir.is_dir():
         return out
     for key in (
+        "mtr_df",
         "myntra_df",
         "meesho_df",
         "flipkart_df",

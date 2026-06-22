@@ -123,7 +123,10 @@ def warm_cache_stale_vs_tier3(cache: dict) -> str | None:
         summary = get_summary()
         if not summary:
             return None
+        skip_mtr = int(os.environ.get("WARM_CACHE_MIN_MTR_ROWS", "500000")) == 0
         for plat, key in _WARM_PLATFORM_PAIRS:
+            if skip_mtr and key == "mtr_df":
+                continue
             want = int((summary.get(plat) or {}).get("total_rows") or 0)
             if want < 1_000:
                 continue
