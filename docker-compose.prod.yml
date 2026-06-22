@@ -74,7 +74,11 @@ services:
       # Disable MTR row-count guard so accounts with <500K rows use fast-path from disk cache.
       - WARM_CACHE_MIN_MTR_ROWS=0
       - SESSION_SHARED_FRAMES=1
-      - SESSION_MAX_ACTIVE=8
+      # Limit Tier-3 SQLite restore to the last 2 months to avoid loading 12 months of
+      # platform DataFrames into memory on every session restore (prevents OOM on 5.5 GB VPS).
+      # The warm cache disk already contains full bulk history; only recent deltas are needed.
+      - AUTO_RESTORE_MONTHS=2
+      - SESSION_MAX_ACTIVE=4
       - WARM_CACHE_DIR=/data/warm_cache
       - DB_POOL_SIZE=2
       - DB_POOL_MAX_OVERFLOW=3
