@@ -783,6 +783,63 @@ def patch_sales_df_after_daily_upload(
     return _downcast_sales(out)
 
 
+def patch_sales_df_return_overlay(
+    existing: pd.DataFrame,
+    return_overlay_df: pd.DataFrame | None,
+    sku_mapping: Dict[str, str],
+    *,
+    return_overlay_as_of: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Replace synthetic return-sheet refund rows in unified sales without rebuilding
+    all platform history (fast path after Returns upload).
+    """
+    base = existing.copy() if existing is not None and not getattr(existing, "empty", True) else pd.DataFrame()
+
+    if not base.empty:
+        if "OrderId" in base.columns:
+            oid = base["OrderId"].astype(str).str.strip()
+            base = base.loc[oid != RETURN_SHEET_ORDER_PLACEHOLDER].copy()
+        elif "LineKey" in base.columns:
+            lk = base["LineKey"].astype(str)
+            base = base.loc[~lk.str.startswith("RETURN_SHEET|")].copy()
+
+    if return_overlay_df is None or return_overlay_df.empty:
+        return _downcast_sales(base) if not base.empty else pd.DataFrame()
+
+    if return_overlay_as_of and str(return_overlay_as_of).strip():
+        try:
+            ref_dt = pd.Timestamp(str(return_overlay_as_of).strip()[:10]).normalize()
+        except Exception:
+            ref_dt = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+    elif not base.empty and "TxnDate" in base.columns:
+        ref_dt = txn_reporting_naive_ist(base["TxnDate"]).max()
+    else:
+        ref_dt = pd.Timestamp.now(tz=_REPORTING_TZ).tz_localize(None).normalize()
+
+    synth = return_sheet_refund_rows_from_overlay(
+        return_overlay_df, sku_mapping or {}, ref_txn_date=ref_dt
+    )
+    if synth.empty:
+        return _downcast_sales(base) if not base.empty else pd.DataFrame()
+
+    if not base.empty:
+        if "DSR_Segment" in base.columns and "DSR_Segment" not in synth.columns:
+            synth = synth.copy()
+            synth["DSR_Segment"] = ""
+        for col in base.columns:
+            if col not in synth.columns:
+                synth[col] = ""
+        for col in synth.columns:
+            if col not in base.columns:
+                base[col] = ""
+        result = pd.concat([base, synth], ignore_index=True)
+    else:
+        result = synth
+
+    return _downcast_sales(result)
+
+
 def get_sales_summary(
     sales_df: pd.DataFrame,
     months: int = 3,
