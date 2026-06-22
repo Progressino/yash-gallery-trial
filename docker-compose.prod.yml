@@ -66,6 +66,11 @@ services:
       # Off by default — multi-GB session ZIP writes duplicate warm cache and OOM the host.
       - SESSION_PG_PERSIST=${SESSION_PG_PERSIST:-0}
       - SESSION_PG_MAX_BUNDLE_MB=${SESSION_PG_MAX_BUNDLE_MB:-200}
+      # Disable PostgreSQL normalized tables (load_warm_cache_tables / load_shared_snapshot).
+      # This feature reads ALL platform rows from forecast_sales_transactions on every restart
+      # (58-84s unbounded SELECT), consuming 2-3 GB extra RAM and causing OOM crashes.
+      # The disk warm cache (/data/warm_cache) serves the same data faster and without OOM risk.
+      - FORECAST_OPS_PG=0
       # Disable MTR row-count guard so accounts with <500K rows use fast-path from disk cache.
       - WARM_CACHE_MIN_MTR_ROWS=0
       - SESSION_SHARED_FRAMES=1
