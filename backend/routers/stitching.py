@@ -554,6 +554,24 @@ def karigar_hourly_pl(date_from: str = "", date_to: str = "", days: int = 0):
     return svc.karigar_hourly_pl_report(date_from, date_to)
 
 
+@router.get("/reports/karigar-salary")
+def karigar_salary(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.karigar_salary_report(date_from, date_to)
+
+
+@router.get("/reports/challan-wise")
+def challan_wise_report(date_from: str = "", date_to: str = ""):
+    if not date_from:
+        date_from = str(date.today() - timedelta(days=6))
+    if not date_to:
+        date_to = str(date.today())
+    return svc.challan_wise_summary_report(date_from, date_to)
+
+
 @router.get("/reports/daily-variance")
 def daily_variance_report(date: str = "", karigar_id: str = ""):
     if not date:
@@ -679,6 +697,49 @@ def patch_karigar_attendance(body: AttendancePatchBody):
         )
     except Exception as e:
         raise HTTPException(400, str(e)) from e
+
+
+class EarlyUpdateBody(BaseModel):
+    Date: str
+    E_Code: str
+    In_Punch: str
+
+
+@router.patch("/attendance/karigar/early-update")
+def update_early_arrival(body: EarlyUpdateBody):
+    """Update a karigar's punch-in time (e.g. record actual early arrival)."""
+    from ..services import karigar_attendance as att_svc
+
+    att = get_sheet_df("karigar_attendance")
+    if att.empty:
+        raise HTTPException(404, "No attendance records")
+    mask = (att["Date"].astype(str).str.strip() == body.Date.strip()) & (
+        att["E_Code"].astype(str).str.strip() == body.E_Code.strip()
+    )
+    if not mask.any():
+        raise HTTPException(404, f"No attendance row for {body.E_Code} on {body.Date}")
+    idx = att[mask].index[0]
+    row = att.loc[idx]
+    daily_rate = float(row.get("Daily_Rate_Rs", 0) or 0)
+    if daily_rate <= 0:
+        daily_rate = svc.get_daily_rate_for_date(body.E_Code, body.Date)
+    pairs = att_svc.deserialize_punch_pairs(row.get("Punch_Pairs"))
+    new_in = att_svc._parse_clock(body.In_Punch)
+    if new_in is None:
+        raise HTTPException(400, "Invalid In_Punch time")
+    if pairs:
+        pairs[0] = (new_in, pairs[0][1])
+    else:
+        pairs = [(new_in, None)]
+    result = att_svc.calc_salary_from_punches(
+        pairs, daily_rate, on_date=body.Date,
+        status=str(row.get("Status", "P")),
+    )
+    for k, v in result.items():
+        att.at[idx, k] = v
+    att.at[idx, "In_Punch"] = body.In_Punch
+    save_sheet_df("karigar_attendance", att)
+    return {"ok": True, "message": f"Updated {body.E_Code} punch-in to {body.In_Punch} on {body.Date}"}
 
 
 @router.post("/attendance/karigar/recalculate")
@@ -875,6 +936,11 @@ def delete_master_rows(body: MasterDeleteBody):
     if not out.get("ok"):
         raise HTTPException(400, out.get("message", "Delete failed"))
     return out
+
+
+@router.get("/master/karigar/archived")
+def list_archived_karigars():
+    return {"rows": svc.list_archived_karigars()}
 
 
 @router.get("/master/karigar/{karigar_id}/rate-history")

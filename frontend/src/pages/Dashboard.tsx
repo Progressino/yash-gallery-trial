@@ -940,9 +940,9 @@ export default function Dashboard() {
 
   const bundleTimeoutMs = useMemo(() => {
     const span = bundleSpanDays ?? 999
-    if (span <= 7) return 45_000
-    if (span <= 45) return 90_000
-    return 120_000
+    if (span <= 7) return 60_000
+    if (span <= 45) return 120_000
+    return 200_000
   }, [bundleSpanDays])
 
   const fetchBundleExtras = (bundleSpanDays ?? 999) <= 45
@@ -1056,7 +1056,7 @@ export default function Dashboard() {
       bundleKickedRef.current = false
       return
     }
-    if (bundleLoadElapsedMs < 75_000 || bundleKickedRef.current) return
+    if (bundleLoadElapsedMs < 150_000 || bundleKickedRef.current) return
     bundleKickedRef.current = true
     ;(async () => {
       try {
@@ -1073,8 +1073,8 @@ export default function Dashboard() {
   const bundleLoadPercent = useMemo(() => {
     if (!awaitingFirstBundle) return null
     const raw = (bundleLoadElapsedMs / estimatedBundleMs) * 100
-    if (bundleWarming) return Math.min(92, Math.max(8, raw))
-    return Math.min(96, Math.max(5, raw))
+    if (bundleWarming) return Math.min(95, Math.max(8, raw))
+    return Math.min(99, Math.max(5, raw))
   }, [awaitingFirstBundle, bundleLoadElapsedMs, estimatedBundleMs, bundleWarming])
 
   const bundlePollNote =

@@ -2800,6 +2800,69 @@ function StitchingReportsTab() {
               downloadName={`performance_${from}_${to}`}
             />
           )}
+          {data.karigar_salary?.rows?.length ? (
+            <>
+              <ReportTableSection
+                title="Karigar salary judgment — P&L per karigar with operations worked"
+                rows={(data.karigar_salary.rows ?? []) as Record<string, unknown>[]}
+                cols={[
+                  'Karigar_Name',
+                  'Daily_Rate_Rs',
+                  'Days_Worked',
+                  'Total_Payroll_Paid',
+                  'Total_Piece_Value',
+                  'Pieces',
+                  'Operations_Count',
+                  'Operations_List',
+                  'Profit_Loss_Rs',
+                  'Status',
+                  'Avg_Daily_Output_Rs',
+                ]}
+                downloadName={`karigar_salary_${from}_${to}`}
+              />
+              {data.karigar_salary.summary && (
+                <p className="text-xs text-gray-500">
+                  Karigars: {data.karigar_salary.summary.karigar_count} · Profitable:{' '}
+                  {data.karigar_salary.summary.profitable_count} · Loss: {data.karigar_salary.summary.loss_count} · Net
+                  P&amp;L: ₹{Number(data.karigar_salary.summary.total_profit_loss).toLocaleString()}
+                </p>
+              )}
+            </>
+          ) : null}
+          {data.challan_wise?.rows?.length ? (
+            <>
+              <ReportTableSection
+                title="Challan-wise P&L — party value vs labour + expenses"
+                rows={(data.challan_wise.rows ?? []) as Record<string, unknown>[]}
+                cols={[
+                  'Challan_No',
+                  'Style',
+                  'Party',
+                  'Total_Qty',
+                  'Rate_Per_Pc',
+                  'Party_Value_Rs',
+                  'Actual_Labour_Rs',
+                  'Other_Expenses_Rs',
+                  'Total_Cost_Rs',
+                  'PL_Rs',
+                  'Margin_Pct',
+                  'Pieces_Produced',
+                  'Karigars_Involved',
+                  'Operations_Count',
+                ]}
+                downloadName={`challan_wise_${from}_${to}`}
+              />
+              {data.challan_wise.summary && (
+                <p className="text-xs text-gray-500">
+                  Challans: {data.challan_wise.summary.challan_count} · Total party value: ₹
+                  {Number(data.challan_wise.summary.total_party_value).toLocaleString()} · Total cost: ₹
+                  {Number(data.challan_wise.summary.total_cost).toLocaleString()} · Net P&amp;L: ₹
+                  {Number(data.challan_wise.summary.total_pl).toLocaleString()} · Margin:{' '}
+                  {data.challan_wise.summary.overall_margin_pct}%
+                </p>
+              )}
+            </>
+          ) : null}
         </>
       )}
     </div>
@@ -3799,11 +3862,14 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
       },
     }))
   }
+  const [earlyEdit, setEarlyEdit] = useState<{ Date: string; E_Code: string; In_Punch: string } | null>(null)
+  const [earlyBusy, setEarlyBusy] = useState(false)
   const karigarCols = [
     'Date',
     'E_Code',
     'Name',
     'Status',
+    'Early_Arrival',
     'Needs_Miss_Punch',
     'Punch_Count',
     'In_Punch',
@@ -4075,8 +4141,55 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
             </>
           )}
         </div>
+        {earlyEdit && (
+          <div className="text-xs border border-sky-200 bg-sky-50 rounded-xl p-3 mb-3 flex flex-wrap items-end gap-3">
+            <p className="font-semibold text-sky-900 w-full">
+              Update early punch-in for {earlyEdit.E_Code} on {earlyEdit.Date}
+            </p>
+            <label>
+              New In Punch
+              <input
+                type="time"
+                className="block border rounded mt-1 px-2 py-1"
+                value={earlyEdit.In_Punch}
+                onChange={e => setEarlyEdit(prev => prev ? { ...prev, In_Punch: e.target.value } : null)}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={earlyBusy}
+              onClick={async () => {
+                if (!earlyEdit) return
+                setEarlyBusy(true)
+                try {
+                  await api.patch('/stitching/attendance/karigar/early-update', earlyEdit)
+                  qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
+                  qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
+                  await refetch()
+                  setEarlyEdit(null)
+                } finally {
+                  setEarlyBusy(false)
+                }
+              }}
+              className="px-3 py-2 bg-sky-700 text-white rounded-lg font-semibold disabled:opacity-50"
+            >
+              {earlyBusy ? 'Saving...' : 'Save'}
+            </button>
+            <button type="button" onClick={() => setEarlyEdit(null)} className="px-3 py-2 border rounded-lg">
+              Cancel
+            </button>
+          </div>
+        )}
         {type === 'karigar' ? (
-          <AttendanceRecordsTable rows={filteredRows} cols={karigarCols} />
+          <AttendanceRecordsTable
+            rows={filteredRows}
+            cols={karigarCols}
+            onEarlyUpdate={(r) => setEarlyEdit({
+              Date: String(r.Date ?? ''),
+              E_Code: String(r.E_Code ?? ''),
+              In_Punch: String(r.In_Punch ?? '09:00'),
+            })}
+          />
         ) : (
           <DataTable
             rows={recordsDate ? filteredRows : filteredRows.slice(0, 250)}
@@ -4620,6 +4733,12 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
   const [editKarigar, setEditKarigar] = useState<Record<string, unknown> | null>(null)
   const [editEmployee, setEditEmployee] = useState<Record<string, unknown> | null>(null)
   const [editStyleRow, setEditStyleRow] = useState<Record<string, unknown> | null>(null)
+  const [showArchived, setShowArchived] = useState(false)
+  const { data: archivedData, refetch: refetchArchived } = useQuery({
+    queryKey: ['stitching-archived-karigars'],
+    queryFn: () => api.get('/stitching/master/karigar/archived').then(r => r.data),
+    enabled: active === 'karigar_master' && showArchived,
+  })
   const [karEdit, setKarEdit] = useState({
     Name: '',
     Skill: '',
@@ -4931,6 +5050,71 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
       )}
       {active === 'karigar_master' && (
         <>
+          <div className="flex gap-2 mb-3">
+            <button
+              type="button"
+              onClick={() => setShowArchived(false)}
+              className={`text-xs px-3 py-1.5 rounded-lg font-semibold ${!showArchived ? 'bg-green-700 text-white' : 'border text-gray-600'}`}
+            >
+              Active Karigars
+            </button>
+            <button
+              type="button"
+              onClick={() => { setShowArchived(true); void refetchArchived() }}
+              className={`text-xs px-3 py-1.5 rounded-lg font-semibold ${showArchived ? 'bg-orange-700 text-white' : 'border text-gray-600'}`}
+            >
+              Archived (Resigned)
+            </button>
+          </div>
+          {showArchived ? (
+            <div className="space-y-2">
+              <p className="text-xs text-gray-600 bg-orange-50 border border-orange-200 rounded-lg px-3 py-2">
+                Resigned karigars are hidden from search and production dropdowns. Click <strong>Reactivate</strong> to restore.
+              </p>
+              {archivedData?.rows?.length ? (
+                <div className="overflow-x-auto max-h-[min(480px,55vh)] border rounded-lg">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-gray-50 border-b z-10">
+                      <tr>
+                        {['Karigar ID', 'Name', 'Skill', 'Daily Rate', 'Resign Date', 'Actions'].map(h => (
+                          <th key={h} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(archivedData.rows as Record<string, unknown>[]).map((r, i) => (
+                        <tr key={String(r.Karigar_ID) || i} className="border-b border-gray-50 hover:bg-gray-50/80">
+                          <td className="px-2 py-1.5 font-mono">{String(r.Karigar_ID)}</td>
+                          <td className="px-2 py-1.5">{String(r.Name)}</td>
+                          <td className="px-2 py-1.5">{String(r.Skill)}</td>
+                          <td className="px-2 py-1.5">{Number(r.Daily_Rate_Rs).toLocaleString()}</td>
+                          <td className="px-2 py-1.5">{String(r.Resign_Date || '—')}</td>
+                          <td className="px-2 py-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setKarigarActiveMut.mutate(
+                                  { karigar_id: String(r.Karigar_ID), active: true },
+                                  { onSuccess: () => void refetchArchived() },
+                                )
+                              }}
+                              disabled={setKarigarActiveMut.isPending}
+                              className="text-green-700 hover:underline font-semibold"
+                            >
+                              {setKarigarActiveMut.isPending ? 'Restoring…' : 'Reactivate'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400 text-center py-4">No resigned karigars</p>
+              )}
+            </div>
+          ) : (
+          <>
           <div className="grid sm:grid-cols-2 lg:grid-cols-6 gap-2 text-xs mb-3">
             {(['Karigar_ID', 'Name', 'Skill'] as const).map(k => (
               <label key={k}>
@@ -4993,13 +5177,13 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
                     onClick={() =>
                       setKarigarActiveMut.mutate({
                         karigar_id: String(editKarigar?.Karigar_ID ?? ''),
-                        active: String((editKarigar as any)?.Active ?? 'true').toLowerCase() === 'true' ? false : true,
+                        active: false,
                       })
                     }
                     disabled={setKarigarActiveMut.isPending}
-                    className="px-3 py-2 border rounded-lg"
+                    className="px-3 py-2 border border-red-300 text-red-700 rounded-lg hover:bg-red-50"
                   >
-                    {setKarigarActiveMut.isPending ? 'Updating…' : 'Toggle Active'}
+                    {setKarigarActiveMut.isPending ? 'Updating…' : 'Mark as Resigned'}
                   </button>
                   <button type="button" onClick={() => setEditKarigar(null)} className="px-3 py-2 border rounded-lg">
                     Cancel
@@ -5007,6 +5191,8 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
                 </div>
               </div>
             </div>
+          )}
+          </>
           )}
         </>
       )}
@@ -5645,7 +5831,15 @@ function ReportTableSection({
   )
 }
 
-function AttendanceRecordsTable({ rows, cols }: { rows: Record<string, unknown>[]; cols: string[] }) {
+function AttendanceRecordsTable({
+  rows,
+  cols,
+  onEarlyUpdate,
+}: {
+  rows: Record<string, unknown>[]
+  cols: string[]
+  onEarlyUpdate?: (row: Record<string, unknown>) => void
+}) {
   if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No rows for this date</p>
   return (
     <div className="overflow-x-auto max-h-[min(420px,50vh)]">
@@ -5657,11 +5851,14 @@ function AttendanceRecordsTable({ rows, cols }: { rows: Record<string, unknown>[
                 {c.replace(/_/g, ' ')}
               </th>
             ))}
+            {onEarlyUpdate && <th className="px-2 py-2 w-20" />}
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => {
             const status = String(r.Status ?? '').toUpperCase()
+            const isEarly = r.Early_Arrival === true || r.Early_Arrival === 'true' || r.Early_Arrival === 'True'
+            const earlyMin = Number(r.Early_Arrival_Minutes ?? 0)
             const rowClass =
               status === 'A'
                 ? 'bg-rose-50/60 text-rose-950'
@@ -5684,6 +5881,14 @@ function AttendanceRecordsTable({ rows, cols }: { rows: Record<string, unknown>[
                       >
                         {String(r[c] ?? '')}
                       </span>
+                    ) : c === 'Early_Arrival' ? (
+                      isEarly ? (
+                        <span className="inline-block px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 font-semibold">
+                          Early {earlyMin > 0 ? `(${earlyMin}m)` : ''}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )
                     ) : r[c] === 0 || r[c] === '0' ? (
                       '0'
                     ) : (
@@ -5691,6 +5896,19 @@ function AttendanceRecordsTable({ rows, cols }: { rows: Record<string, unknown>[
                     )}
                   </td>
                 ))}
+                {onEarlyUpdate && (
+                  <td className="px-2 py-1.5 whitespace-nowrap">
+                    {isEarly && (
+                      <button
+                        type="button"
+                        onClick={() => onEarlyUpdate(r)}
+                        className="text-sky-700 hover:underline text-[11px]"
+                      >
+                        Update time
+                      </button>
+                    )}
+                  </td>
+                )}
               </tr>
             )
           })}

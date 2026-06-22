@@ -77,10 +77,10 @@ export function PageLoadingStripe({
 /** Estimated first Intelligence bundle build time (ms) by reporting window length. */
 export function estimateIntelligenceBundleLoadMs(spanDays: number | null | undefined): number {
   const span = spanDays ?? 999
-  if (span <= 7) return 28_000
-  if (span <= 45) return 48_000
-  if (span <= 120) return 75_000
-  return 100_000
+  if (span <= 7) return 35_000
+  if (span <= 45) return 75_000
+  if (span <= 120) return 120_000
+  return 180_000
 }
 
 function bundleLoadPhaseLabel(

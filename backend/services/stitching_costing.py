@@ -311,6 +311,7 @@ def set_karigar_active(karigar_id: str, active: bool) -> dict:
     if not kid:
         return {"ok": False, "message": "Karigar ID is required"}
 
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
     changed = 0
     km = get_sheet_df("karigar_master")
     if not km.empty and "Karigar_ID" in km.columns:
@@ -318,6 +319,10 @@ def set_karigar_active(karigar_id: str, active: bool) -> dict:
         if mask.any():
             idx = km[mask].index[0]
             km.at[idx, "Active"] = bool(active)
+            if not active:
+                km.at[idx, "Resign_Date"] = today_str
+            else:
+                km.at[idx, "Resign_Date"] = ""
             save_sheet_df("karigar_master", km)
             changed += 1
 
@@ -332,8 +337,27 @@ def set_karigar_active(karigar_id: str, active: bool) -> dict:
 
     if changed <= 0:
         return {"ok": False, "message": f"Karigar {kid} not found in masters"}
-    state = "active" if active else "inactive"
+    state = "active" if active else "resigned"
     return {"ok": True, "message": f"Marked {kid} as {state}.", "karigar_id": kid, "active": bool(active)}
+
+
+def list_archived_karigars() -> list[dict]:
+    """Return karigars marked inactive/resigned."""
+    km = get_sheet_df("karigar_master")
+    if km.empty or "Karigar_ID" not in km.columns:
+        return []
+    rows = []
+    for _, row in km.iterrows():
+        active_val = str(row.get("Active", "")).strip().lower()
+        if active_val in ("0", "false", "no", "inactive"):
+            rows.append({
+                "Karigar_ID": str(row.get("Karigar_ID", "")).strip(),
+                "Name": str(row.get("Name", "")).strip(),
+                "Skill": str(row.get("Skill", "")).strip(),
+                "Daily_Rate_Rs": float(row.get("Daily_Rate_Rs", 0) or 0),
+                "Resign_Date": str(row.get("Resign_Date", "") or ""),
+            })
+    return sorted(rows, key=lambda r: r["Name"].lower())
 
 
 def delete_production_entries(
@@ -2136,8 +2160,9 @@ def payroll_report(date_from: str, date_to: str) -> dict:
         ap = ap[(ap["Date_dt"] >= pd.Timestamp(date_from)) & (ap["Date_dt"] <= pd.Timestamp(date_to))]
         if not ap.empty:
             for c in ["Payable_Hrs", "Normal_Pay", "OT_Hours", "OT_Pay", "Total_Pay"]:
-                if c in ap.columns:
-                    ap[c] = safe_num(ap[c])
+                if c not in ap.columns:
+                    ap[c] = 0
+                ap[c] = safe_num(ap[c])
             pr = (
                 ap.groupby("E_Code")
                 .agg(
@@ -3547,6 +3572,173 @@ def karigar_hourly_pl_report(date_from: str, date_to: str) -> dict:
     }
 
 
+def karigar_salary_report(date_from: str, date_to: str) -> dict:
+    """Karigar salary judgment: P&L per karigar with operations worked."""
+    payroll = payroll_report(date_from, date_to)
+    pr_by_id = {str(r.get("Karigar_ID", "")): r for r in payroll.get("rows", [])}
+
+    work = _production_log_in_range(date_from, date_to)
+    prod_by_k: dict[str, dict[str, Any]] = {}
+    if not work.empty:
+        for c in ("Total_Pieces", "Piece_Value_Rs"):
+            if c in work.columns:
+                work[c] = safe_num(work[c])
+        if "Karigar_ID" in work.columns:
+            for kid, grp in work.groupby(work["Karigar_ID"].apply(clean_key)):
+                if not kid:
+                    continue
+                ops = set()
+                if "Operation" in grp.columns:
+                    ops = {str(o).strip() for o in grp["Operation"].dropna().unique() if str(o).strip()}
+                piece_val = float(safe_num(grp.get("Piece_Value_Rs", 0)).sum()) if "Piece_Value_Rs" in grp.columns else 0.0
+                pieces = int(safe_num(grp.get("Total_Pieces", 0)).sum()) if "Total_Pieces" in grp.columns else 0
+                prod_by_k[kid] = {
+                    "Piece_Value_Rs": round(piece_val, 2),
+                    "Pieces": pieces,
+                    "Operations": sorted(ops),
+                }
+
+    km = get_sheet_df("karigar_master")
+    rate_by_id: dict[str, float] = {}
+    if not km.empty and "Karigar_ID" in km.columns:
+        for _, row in km.iterrows():
+            kid = clean_key(row.get("Karigar_ID"))
+            if kid:
+                rate_by_id[kid] = float(row.get("Daily_Rate_Rs", 0) or 0)
+
+    all_kids = set(pr_by_id.keys()) | set(prod_by_k.keys())
+    rows: list[dict[str, Any]] = []
+    for kid in sorted(all_kids):
+        prow = pr_by_id.get(kid, {})
+        prod = prod_by_k.get(kid, {})
+        days = int(prow.get("Days", 0) or 0)
+        paid = float(prow.get("Total", 0) or 0)
+        piece_val = float(prod.get("Piece_Value_Rs", 0))
+        pl = round(piece_val - paid, 2)
+        ops = prod.get("Operations", [])
+        rows.append({
+            "Karigar_ID": kid,
+            "Karigar_Name": str(prow.get("Name", kid)),
+            "Daily_Rate_Rs": rate_by_id.get(kid, 0),
+            "Days_Worked": days,
+            "Total_Payroll_Paid": round(paid, 2),
+            "Total_Piece_Value": round(piece_val, 2),
+            "Pieces": int(prod.get("Pieces", 0)),
+            "Operations_Count": len(ops),
+            "Operations_List": ", ".join(ops),
+            "Profit_Loss_Rs": pl,
+            "Status": "Profit" if pl > 0.01 else ("Loss" if pl < -0.01 else "Break-even"),
+            "Avg_Daily_Output_Rs": round(piece_val / days, 2) if days > 0 else 0.0,
+        })
+    rows.sort(key=lambda r: float(r["Profit_Loss_Rs"]))
+    total_paid = sum(float(r["Total_Payroll_Paid"]) for r in rows)
+    total_piece = sum(float(r["Total_Piece_Value"]) for r in rows)
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "summary": {
+            "karigar_count": len(rows),
+            "total_payroll_paid": round(total_paid, 2),
+            "total_piece_value": round(total_piece, 2),
+            "total_profit_loss": round(total_piece - total_paid, 2),
+            "profitable_count": sum(1 for r in rows if r["Status"] == "Profit"),
+            "loss_count": sum(1 for r in rows if r["Status"] == "Loss"),
+        },
+    }
+
+
+def challan_wise_summary_report(date_from: str, date_to: str) -> dict:
+    """Challan-wise P&L: party value vs actual labour + expenses."""
+    cm = get_sheet_df("challan_master")
+    if cm.empty:
+        return {"date_from": date_from, "date_to": date_to, "rows": [], "summary": {}}
+
+    work = _production_log_in_range(date_from, date_to)
+    hourly = _collect_hourly_financial_rows(work)
+
+    labour_by_challan: dict[str, dict[str, Any]] = {}
+    if hourly:
+        hdf = pd.DataFrame(hourly)
+        for cn, grp in hdf.groupby(hdf["Challan_No"].astype(str).str.strip()):
+            cn = str(cn).strip()
+            if not cn:
+                continue
+            karigars = set()
+            ops = set()
+            if "Karigar_ID" in grp.columns:
+                karigars = {str(k).strip() for k in grp["Karigar_ID"].dropna().unique() if str(k).strip()}
+            if "Operation" in grp.columns:
+                ops = {str(o).strip() for o in grp["Operation"].dropna().unique() if str(o).strip()}
+            labour_by_challan[cn] = {
+                "Actual_Labour_Rs": round(float(safe_num(grp["Hourly_Salary_Rs"]).sum()), 2),
+                "Pieces_Produced": int(safe_num(grp["Pieces_Done"]).sum()),
+                "Karigars_Involved": len(karigars),
+                "Operations_Count": len(ops),
+            }
+
+    exp = get_sheet_df("karigar_expenses")
+    exp_by_challan: dict[str, float] = {}
+    if not exp.empty:
+        ex = exp.copy()
+        ex["Date_dt"] = pd.to_datetime(ex["Date"], errors="coerce")
+        d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+        ex = ex[(ex["Date_dt"] >= d0) & (ex["Date_dt"] <= d1)]
+        if not ex.empty and "Amount_Rs" in ex.columns:
+            ex["Amount_Rs"] = safe_num(ex["Amount_Rs"])
+            for _, er in ex.iterrows():
+                cn = str(er.get("Challan_No", "") or "").strip()
+                if cn:
+                    exp_by_challan[cn] = exp_by_challan.get(cn, 0.0) + float(er.get("Amount_Rs", 0) or 0)
+
+    rows: list[dict[str, Any]] = []
+    for _, crow in cm.iterrows():
+        cn = str(crow.get("Challan_No", "")).strip()
+        if not cn:
+            continue
+        total_qty = int(crow.get("Total_Qty", 0) or 0)
+        rate = float(crow.get("Rate_Per_Pc", 0) or 0)
+        party_value = round(total_qty * rate, 2)
+        lab = labour_by_challan.get(cn, {})
+        actual_labour = float(lab.get("Actual_Labour_Rs", 0))
+        other_exp = exp_by_challan.get(cn, 0.0)
+        total_cost = round(actual_labour + other_exp, 2)
+        pl = round(party_value - total_cost, 2)
+        margin = round((pl / party_value) * 100, 1) if party_value > 0 else 0.0
+        rows.append({
+            "Challan_No": cn,
+            "Style": str(crow.get("Style", "")).strip(),
+            "Party": str(crow.get("Party", "")).strip(),
+            "Total_Qty": total_qty,
+            "Received_Qty": int(crow.get("Received_Qty", 0) or 0),
+            "Rate_Per_Pc": rate,
+            "Party_Value_Rs": party_value,
+            "Actual_Labour_Rs": round(actual_labour, 2),
+            "Other_Expenses_Rs": round(other_exp, 2),
+            "Total_Cost_Rs": total_cost,
+            "PL_Rs": pl,
+            "Margin_Pct": margin,
+            "Pieces_Produced": int(lab.get("Pieces_Produced", 0)),
+            "Karigars_Involved": int(lab.get("Karigars_Involved", 0)),
+            "Operations_Count": int(lab.get("Operations_Count", 0)),
+        })
+    rows.sort(key=lambda r: float(r["PL_Rs"]))
+    total_party = sum(float(r["Party_Value_Rs"]) for r in rows)
+    total_cost = sum(float(r["Total_Cost_Rs"]) for r in rows)
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "summary": {
+            "challan_count": len(rows),
+            "total_party_value": round(total_party, 2),
+            "total_cost": round(total_cost, 2),
+            "total_pl": round(total_party - total_cost, 2),
+            "overall_margin_pct": round(((total_party - total_cost) / total_party) * 100, 1) if total_party > 0 else 0.0,
+        },
+    }
+
+
 def stitching_reports_hub(date_from: str, date_to: str) -> dict:
     """Dynamics-style report pack: payroll, performance, P&L compare, karigar profit, challan labour."""
     return {
@@ -3561,6 +3753,8 @@ def stitching_reports_hub(date_from: str, date_to: str) -> dict:
         "other_tasks": other_tasks_report(date_from, date_to),
         "style_challan_expense": style_challan_expense_report(date_from, date_to),
         "karigar_hourly_pl": karigar_hourly_pl_report(date_from, date_to),
+        "karigar_salary": karigar_salary_report(date_from, date_to),
+        "challan_wise": challan_wise_summary_report(date_from, date_to),
     }
 
 

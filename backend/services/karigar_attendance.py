@@ -515,6 +515,13 @@ def calc_salary_from_punches(
     late_deduction_rs = round((late_for_money / 60.0) * hourly, 2)
     early_deduction_rs = round((early_min_payable / 60.0) * hourly, 2)
 
+    early_arrival = raw_first_in < WORK_START
+    early_arrival_minutes = 0
+    if early_arrival:
+        early_arrival_minutes = int(
+            (datetime.combine(base, WORK_START) - datetime.combine(base, raw_first_in)).total_seconds() / 60.0
+        )
+
     return {
         "Status": status,
         "Total_Presence_Hrs": round(total_presence_min / 60.0, 2),
@@ -537,6 +544,8 @@ def calc_salary_from_punches(
         "Punch_Pairs": punch_pairs_json,
         "Punch_Count": len(punch_pairs),
         "Needs_Miss_Punch": needs_miss_punch(punch_pairs),
+        "Early_Arrival": early_arrival,
+        "Early_Arrival_Minutes": early_arrival_minutes,
     }
 
 
