@@ -1258,6 +1258,16 @@ export default function POFresh() {
   )
 }
 
+/** Mirror of backend ``(Total_Inventory + PO_Pipeline_Effective + PO_Qty) / ADS``. */
+function computePostPoCover(row: Row, finalQty: number): number {
+  const ads = Number(row['ADS'] ?? 0)
+  if (!Number.isFinite(ads) || ads <= 0) return 999
+  const inv = Number(row['Total_Inventory'] ?? 0)
+  const pipeEff = Number(row['PO_Pipeline_Effective'] ?? row['PO_Pipeline_Total'] ?? 0)
+  const q = Math.max(0, Math.floor(finalQty))
+  return Math.round(((inv + pipeEff + q) / ads) * 10) / 10
+}
+
 function PoTable({
   cols,
   rows,
@@ -1389,6 +1399,15 @@ function PoTable({
                       </td>
                     )
                   }
+                  if (c === 'Post_PO_Cover_Days_Capped' && editedQty?.[poSkuKey(sku)] !== undefined) {
+                    const live = computePostPoCover(r, finalQty)
+                    const display = live >= 999 ? '—' : live.toFixed(1)
+                    return (
+                      <td key={c} className={`${poCellClass(c, live)} font-semibold`} title="Recalculated from your edited qty">
+                        {display} <span className="text-[10px] opacity-60">↺</span>
+                      </td>
+                    )
+                  }
                   if (c === 'PO_Block_Reason' && v) {
                     return (
                       <td key={c} className="max-w-[12rem] truncate text-xs text-[var(--po-outline)]" title={String(v)}>
@@ -1413,6 +1432,7 @@ function PoTable({
           periodDays={periodDays}
           targetDays={targetDays}
           enteredLeadDays={enteredLeadDays}
+          editedQty={editedQty?.[poSkuKey(String(selectedRow.OMS_SKU ?? ''))]}
           onClose={() => setSelectedRow(null)}
         />
       )}
@@ -1426,12 +1446,14 @@ function SkuDetailDrawer({
   periodDays,
   targetDays,
   enteredLeadDays,
+  editedQty,
   onClose,
 }: {
   row: Row
   periodDays: number
   targetDays: number
   enteredLeadDays: number
+  editedQty?: number
   onClose: () => void
 }) {
   const n = (k: string) => Number(row[k] ?? 0)
@@ -1454,8 +1476,11 @@ function SkuDetailDrawer({
   const projDays = n('Projected_Running_Days')
   const daysLeft = n('Days_Left')
   const grossPo = n('Gross_PO_Qty')
-  const poQty = n('PO_Qty')
-  const postCover = n('Post_PO_Cover_Days_Capped')
+  const poQtyBase = n('PO_Qty')
+  const poQty = editedQty !== undefined ? editedQty : poQtyBase
+  const postCoverBase = n('Post_PO_Cover_Days_Capped')
+  const postCover = editedQty !== undefined ? computePostPoCover(row, editedQty) : postCoverBase
+  const drawerQtyEdited = editedQty !== undefined && editedQty !== poQtyBase
   const sheetLeadDays = n('Lead_Time_Days') || 0
   const gateLeadDays = enteredLeadDays > 0 ? enteredLeadDays : sheetLeadDays
   const gateLeadLabel = enteredLeadDays > 0 ? 'entered lead gate' : 'sheet lead gate'
@@ -1516,14 +1541,16 @@ function SkuDetailDrawer({
       highlight: grossPo > 0,
     },
     {
-      label: '⑦ Final PO Qty',
+      label: drawerQtyEdited ? '⑦ Final PO Qty ✏️ (edited)' : '⑦ Final PO Qty',
       formula: overlay > 0 ? `Gross PO − Return Overlay` : `= Gross PO`,
       result: overlay > 0
         ? `${fmtInt(grossPo)} − ${fmtInt(overlay)} = ${fmtInt(poQty)} units`
         : `${fmtInt(poQty)} units`,
       note: blockReason && blockReason !== '—'
         ? `🚫 Blocked: ${blockReason}`
-        : postCover < 999 ? `Post-PO cover: ${fmt(postCover, 0)} days` : undefined,
+        : postCover < 999
+          ? `Post-PO cover: ${fmt(postCover, 0)} days${drawerQtyEdited ? ' (updated from your edit)' : ''}`
+          : undefined,
       highlight: true,
     },
   ]

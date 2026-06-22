@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState, useEffect } from 'react'
 
 export const PoQtyInput = memo(function PoQtyInput({
   value,
@@ -11,6 +11,23 @@ export const PoQtyInput = memo(function PoQtyInput({
   onChange: (v: number) => void
   onReset: () => void
 }) {
+  // Local raw string lets the user type freely; we only round+commit on blur or Enter
+  const [raw, setRaw] = useState(String(value))
+
+  // Sync display when the external value changes (e.g. reset or recalc from parent)
+  useEffect(() => {
+    setRaw(String(value))
+  }, [value])
+
+  const commit = (s: string) => {
+    const n = parseFloat(s)
+    if (!isNaN(n)) {
+      onChange(Math.max(0, Math.round(n / 5) * 5))
+    } else {
+      setRaw(String(value)) // restore on invalid input
+    }
+  }
+
   const isEdited = value !== computed
   return (
     <div
@@ -19,10 +36,17 @@ export const PoQtyInput = memo(function PoQtyInput({
     >
       <input
         type="number"
-        value={value}
+        value={raw}
         min={0}
         step={5}
-        onChange={e => onChange(Math.max(0, Math.round(+e.target.value / 5) * 5))}
+        onChange={e => setRaw(e.target.value)}
+        onBlur={e => commit(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter') {
+            commit((e.target as HTMLInputElement).value)
+            ;(e.target as HTMLInputElement).blur()
+          }
+        }}
         className={`w-20 border rounded px-2 py-1 text-xs text-right font-bold focus:outline-none focus:ring-1
           ${isEdited
             ? 'border-orange-400 bg-orange-50 text-orange-700 ring-orange-300 focus:ring-orange-400'

@@ -1177,12 +1177,36 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
             "meesho inventory", "meesho_inventory", "meesho other warehouse", "meesho",
         ]),
     ]
+    # Return columns — units currently in return-transit back from each platform
+    _RETURNS = [
+        ("Amazon_Returns", [
+            "amazon returns", "amazon return", "amazon returns processing",
+            "amazon return processing", "amz returns", "amz return",
+        ]),
+        ("Flipkart_Returns", [
+            "flipkart returns", "flipkart return", "flipkart returns processing",
+            "flipkart return processing",
+        ]),
+        ("Myntra_Returns", [
+            "myntra returns", "myntra return", "myntra returns processing",
+            "myntra return processing",
+        ]),
+        ("Meesho_Returns", [
+            "meesho returns", "meesho return", "meesho returns processing",
+            "meesho return processing",
+        ]),
+    ]
 
     # Build numeric columns to aggregate
     agg_cols = {"OMS_Inventory": ("Inventory", "sum")}
     if buf_col:
         agg_cols["Buffer_Stock"] = (buf_col, "sum")
     for out_col, keywords in _MKTPLACE:
+        for kw in keywords:
+            if kw in col_lower:
+                agg_cols[out_col] = (col_lower[kw], "sum")
+                break
+    for out_col, keywords in _RETURNS:
         for kw in keywords:
             if kw in col_lower:
                 agg_cols[out_col] = (col_lower[kw], "sum")
@@ -1505,11 +1529,15 @@ _EXTRA_MKT_COLS = frozenset({"Manual_InTransit", "Not_In_Inventory_Qty"})
 
 
 def inventory_source_columns(df: pd.DataFrame) -> list[str]:
-    """Physical stock columns (excludes computed totals like Total_Inventory)."""
+    """Physical stock columns (excludes computed totals like Total_Inventory).
+    Return columns (_Returns) are intentionally excluded — they are tracked
+    separately and must not inflate the inventory total."""
     cols: list[str] = []
     for c in df.columns:
         if c in _COMPUTED_COLS or c == "OMS_SKU":
             continue
+        if c.endswith("_Returns"):
+            continue  # returns in transit are not sellable inventory
         if (
             c in _EXTRA_MKT_COLS
             or c.endswith("_Live")
@@ -1521,6 +1549,11 @@ def inventory_source_columns(df: pd.DataFrame) -> list[str]:
     return cols
 
 
+def oms_return_columns(df: pd.DataFrame) -> list[str]:
+    """Columns from OMS snapshot that represent units in return transit per platform."""
+    return [c for c in df.columns if c.endswith("_Returns")]
+
+
 def marketplace_total_columns(df: pd.DataFrame) -> list[str]:
     """Columns summed into Marketplace_Total (OMS warehouse + buffer are excluded)."""
     return [
@@ -1528,6 +1561,56 @@ def marketplace_total_columns(df: pd.DataFrame) -> list[str]:
         for c in inventory_source_columns(df)
         if c != "Buffer_Stock" and "oms" not in c.lower()
     ]
+
+
+# Maps the OMS _Returns column name to the platform string used by the return overlay.
+_OMS_RETURN_PLATFORM_MAP: dict[str, str] = {
+    "Amazon_Returns":   "amazon",
+    "Flipkart_Returns": "flipkart",
+    "Myntra_Returns":   "myntra",
+    "Meesho_Returns":   "meesho",
+}
+
+
+def oms_returns_to_overlay(
+    inventory_df: pd.DataFrame,
+    snapshot_date: str | None = None,
+) -> pd.DataFrame:
+    """
+    Convert OMS inventory snapshot return columns into a return overlay dataframe
+    compatible with ``sess.po_return_overlay_df``.
+
+    Each ``*_Returns`` column (units in return-transit per platform) is pivoted into
+    rows with (OMS_SKU, Return_Platform, Return_Date, Return_Units).
+
+    Args:
+        inventory_df: Inventory dataframe that may contain ``Amazon_Returns``,
+                      ``Flipkart_Returns``, ``Myntra_Returns``, or ``Meesho_Returns``.
+        snapshot_date: ISO date string (YYYY-MM-DD) used as the return date.
+                       Falls back to today if not provided.
+    """
+    import datetime as _dt
+    if inventory_df is None or inventory_df.empty:
+        return pd.DataFrame()
+
+    date = snapshot_date or _dt.date.today().isoformat()
+    parts: list[pd.DataFrame] = []
+    for col, platform in _OMS_RETURN_PLATFORM_MAP.items():
+        if col not in inventory_df.columns:
+            continue
+        sub = inventory_df[["OMS_SKU", col]].copy()
+        sub[col] = pd.to_numeric(sub[col], errors="coerce").fillna(0)
+        sub = sub[sub[col] > 0].copy()
+        if sub.empty:
+            continue
+        sub = sub.rename(columns={col: "Return_Units"})
+        sub["Return_Platform"] = platform
+        sub["Return_Date"] = date
+        parts.append(sub[["OMS_SKU", "Return_Platform", "Return_Date", "Return_Units"]])
+
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
 
 
 def recompute_inventory_totals(df: pd.DataFrame) -> pd.DataFrame:

@@ -2242,6 +2242,40 @@ def _inventory_apply_parse_result(
             apply_manual_intransit_overlay_to_inventory(sess)
     except Exception:
         _log.exception("re-apply manual in-transit overlay after inventory snapshot failed")
+
+    # Auto-apply any return columns found in the OMS snapshot as a return overlay.
+    # Columns like "Amazon Returns Processing" / "Flipkart Returns" represent units
+    # currently in return transit; they reduce net demand and adjust PO qty accordingly.
+    try:
+        from ..services.inventory import oms_returns_to_overlay
+
+        snapshot_date = getattr(sess, "inventory_snapshot_date", None) or None
+        oms_ov = oms_returns_to_overlay(df_variant, snapshot_date)
+        if not oms_ov.empty:
+            import pandas as _pd
+            existing_ov = getattr(sess, "po_return_overlay_df", None)
+            if existing_ov is not None and not existing_ov.empty:
+                # Remove any previous OMS-sourced rows (keyed by source "oms") to avoid
+                # double-counting when the inventory snapshot is re-uploaded.
+                keep = existing_ov[
+                    existing_ov.get("Return_Source", _pd.Series("", index=existing_ov.index)) != "oms"
+                ] if "Return_Source" in existing_ov.columns else existing_ov
+                oms_ov["Return_Source"] = "oms"
+                sess.po_return_overlay_df = _pd.concat([keep, oms_ov], ignore_index=True)
+            else:
+                oms_ov["Return_Source"] = "oms"
+                sess.po_return_overlay_df = oms_ov
+            sess.return_overlay_as_of = snapshot_date or __import__("datetime").date.today().isoformat()
+            total_return_units = int(oms_ov["Return_Units"].sum())
+            _log.info(
+                "OMS returns auto-applied as return overlay: %d SKUs / %d units across %s",
+                oms_ov["OMS_SKU"].nunique(),
+                total_return_units,
+                oms_ov["Return_Platform"].unique().tolist(),
+            )
+    except Exception:
+        _log.exception("OMS returns-to-overlay failed; inventory still saved")
+
     apply_inventory_snapshot_metadata(sess, file_parts, debug)
     refresh_inventory_api_cache(sess)
     try:
