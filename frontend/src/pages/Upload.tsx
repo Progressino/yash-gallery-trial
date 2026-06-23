@@ -16,8 +16,8 @@ import {
   type DailyUploadVerifyResponse,
   type CoverageResponse,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
-  resetAllAppData, getDataQuality, invalidateDataQueries,
-  type DailyUpload, type DailySummary, type UploadResponse,
+  resetAllAppData, getDataQuality, getUploadReconciliation, invalidateDataQueries,
+  type DailyUpload, type DailySummary, type UploadResponse, type UploadReconciliationReport,
 } from '../api/client'
 import { useSession } from '../store/session'
 import { usePOStore } from '../store/po'
@@ -466,6 +466,7 @@ export default function Upload() {
   const [showImportCompleteness, setShowImportCompleteness] = useState(true)
   const [inventoryAmzDisclaimer, setInventoryAmzDisclaimer] = useState<InventoryAmazonDisclaimer | null>(null)
   const [qualityReport, setQualityReport] = useState<Awaited<ReturnType<typeof getDataQuality>> | null>(null)
+  const [reconcileReport, setReconcileReport] = useState<UploadReconciliationReport | null>(null)
   const [verifyDate, setVerifyDate] = useState(() => {
     const d = new Date()
     d.setDate(d.getDate() - 1)
@@ -753,6 +754,25 @@ export default function Upload() {
       showToast('error', e instanceof Error ? e.message : 'Could not load report')
     } finally {
       setL('quality', false)
+    }
+  }
+
+  const handleUploadReconciliation = async () => {
+    setL('reconcile', true)
+    try {
+      const r = await getUploadReconciliation()
+      setReconcileReport(r)
+      const n = r.mismatch_count ?? 0
+      showToast(
+        n > 0 ? 'error' : 'success',
+        n > 0
+          ? `Reconciliation: ${n} daily vs monthly mismatch(es) — review below.`
+          : 'Reconciliation: no daily vs monthly mismatches in overlapping months.',
+      )
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Could not load reconciliation')
+    } finally {
+      setL('reconcile', false)
     }
   }
 
@@ -2023,6 +2043,26 @@ export default function Upload() {
               </div>
             )}
           </div>
+          <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-5 space-y-3">
+            <h4 className="font-semibold text-blue-900 text-sm">Daily vs monthly reconciliation</h4>
+            <p className="text-xs text-blue-900/80 leading-relaxed">
+              Compares daily sales uploads against monthly archives per company and month. Highlights shipment,
+              cancel, and amount differences. Dedup stats show rows collapsed so the app never double-counts.
+            </p>
+            <button
+              type="button"
+              onClick={() => void handleUploadReconciliation()}
+              disabled={loading['reconcile']}
+              className="w-full py-2 rounded-lg text-sm font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:opacity-50"
+            >
+              {loading['reconcile'] ? 'Running…' : '📊 Run daily vs monthly report'}
+            </button>
+            {reconcileReport && (
+              <div className="mt-3 rounded-lg border border-blue-200 bg-white p-3 text-xs space-y-2 max-h-80 overflow-y-auto">
+                <ReconciliationReportView report={reconcileReport} />
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -2102,6 +2142,83 @@ function QualityReportView({ report }: { report: Awaited<ReturnType<typeof getDa
           </ul>
         </div>
       )}
+    </div>
+  )
+}
+
+function ReconciliationReportView({ report }: { report: UploadReconciliationReport }) {
+  return (
+    <div className="space-y-3 text-gray-800">
+      <p className="text-gray-600">
+        {report.file_count} Tier‑3 file(s) tracked ·{' '}
+        <span className={report.mismatch_count > 0 ? 'text-amber-700 font-medium' : 'text-green-700'}>
+          {report.mismatch_count} mismatch(es)
+        </span>
+        {' · '}
+        {(report.total_collapsible_rows ?? 0).toLocaleString()} rows deduped (not double-counted)
+      </p>
+      {report.return_overlay?.units ? (
+        <p className="text-gray-600">
+          Return overlay: {(report.return_overlay.units ?? 0).toLocaleString()} units on{' '}
+          {(report.return_overlay.skus ?? 0).toLocaleString()} SKUs
+        </p>
+      ) : null}
+      {report.mismatches.length > 0 ? (
+        <div className="border-t border-gray-100 pt-2">
+          <p className="font-semibold text-[#002B5B] mb-1">Daily vs monthly differences</p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] border-collapse">
+              <thead>
+                <tr className="text-left text-gray-500 border-b">
+                  <th className="py-1 pr-2">Month</th>
+                  <th className="py-1 pr-2">Company</th>
+                  <th className="py-1 pr-2">Type</th>
+                  <th className="py-1 pr-2">Daily</th>
+                  <th className="py-1 pr-2">Monthly</th>
+                  <th className="py-1">Δ units</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.mismatches.slice(0, 40).map((m, i) => (
+                  <tr key={i} className="border-b border-gray-50">
+                    <td className="py-1 pr-2">{m.month}</td>
+                    <td className="py-1 pr-2">{m.segment}</td>
+                    <td className="py-1 pr-2">{m.txn}</td>
+                    <td className="py-1 pr-2">{m.daily_units.toLocaleString()}</td>
+                    <td className="py-1 pr-2">{m.monthly_units.toLocaleString()}</td>
+                    <td className={`py-1 ${m.unit_diff !== 0 ? 'text-amber-700 font-medium' : ''}`}>
+                      {m.unit_diff > 0 ? '+' : ''}
+                      {m.unit_diff.toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {report.mismatches.length > 40 ? (
+            <p className="text-gray-500 mt-1">…and {report.mismatches.length - 40} more</p>
+          ) : null}
+        </div>
+      ) : (
+        <p className="text-green-700 border-t border-gray-100 pt-2">
+          No unit mismatches where both daily and monthly files cover the same month.
+        </p>
+      )}
+      {Object.entries(report.dedup_by_platform ?? {}).some(([, v]) => (v.collapsible_rows ?? 0) > 0) ? (
+        <div className="border-t border-gray-100 pt-2">
+          <p className="font-semibold text-[#002B5B] mb-1">Dedup by platform</p>
+          <ul className="text-gray-600">
+            {Object.entries(report.dedup_by_platform).map(([plat, v]) =>
+              (v.collapsible_rows ?? 0) > 0 ? (
+                <li key={plat}>
+                  {plat}: {v.collapsible_rows.toLocaleString()} overlapping rows collapsed →{' '}
+                  {v.deduped_rows.toLocaleString()} kept
+                </li>
+              ) : null,
+            )}
+          </ul>
+        </div>
+      ) : null}
     </div>
   )
 }

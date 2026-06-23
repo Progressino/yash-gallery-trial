@@ -1906,6 +1906,43 @@ export async function getDataQuality(): Promise<{
   return data
 }
 
+export type UploadReconciliationReport = {
+  ok: boolean
+  file_count: number
+  files: {
+    platform: string
+    filename: string
+    upload_kind: string
+    rows: number
+    date_from?: string
+    date_to?: string
+    uploaded_at?: string
+  }[]
+  mismatches: {
+    month: string
+    segment: string
+    txn: string
+    daily_units: number
+    monthly_units: number
+    unit_diff: number
+    daily_amount: number
+    monthly_amount: number
+    amount_diff: number
+  }[]
+  mismatch_count: number
+  dedup_by_platform: Record<string, { raw_rows: number; deduped_rows: number; collapsible_rows: number }>
+  total_collapsible_rows: number
+  return_overlay: { skus?: number; units?: number }
+  hints: string[]
+}
+
+export async function getUploadReconciliation(): Promise<UploadReconciliationReport> {
+  const { data } = await api.get<UploadReconciliationReport>('/data/upload-reconciliation', {
+    timeout: 120_000,
+  })
+  return data
+}
+
 // ── 401 interceptor — only hard-logout when token is truly invalid ─────────────
 api.interceptors.response.use(
   res => res,

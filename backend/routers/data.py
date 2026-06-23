@@ -4230,6 +4230,16 @@ def data_quality_report(request: Request):
     }
 
 
+@router.get("/upload-reconciliation")
+def upload_reconciliation_report(request: Request):
+    """Daily vs monthly upload mismatches and dedup savings (read-only)."""
+    from ..services.upload_reconciliation import build_upload_reconciliation_report
+
+    sess = _sess(request)
+    _restore_daily_if_needed(sess)
+    return build_upload_reconciliation_report(sess)
+
+
 # ── Sales Dashboard KPIs ──────────────────────────────────────
 
 @router.get("/sales-summary")
