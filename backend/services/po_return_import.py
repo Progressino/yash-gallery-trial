@@ -776,6 +776,10 @@ def _infer_return_brand_from_filename(filename: str) -> str:
     low = (filename or "").lower().replace("_", " ")
     if "akiko" in low:
         return "Akiko"
+    if "ikrass" in low or "ikraas" in low:
+        return "Ikrass"
+    if "other brand" in low:
+        return "Other Brand"
     if "yash gallery" in low or re.search(r"\byg\b", low):
         return "YG"
     if "raisinghani" in low:
@@ -1301,9 +1305,9 @@ def infer_return_overlay_as_of(filename: str, overlay_df: pd.DataFrame | None = 
 def return_overlay_meta_bundle(sess) -> dict:
     ov = getattr(sess, "po_return_overlay_df", None)
     skus, units = _overlay_aggregate_totals(ov)
-    sources = list(getattr(sess, "return_overlay_sources", None) or [])
-    if not sources and ov is not None and not getattr(ov, "empty", True):
-        sources = rebuild_return_overlay_sources(sess)
+    sources = rebuild_return_overlay_sources(sess) if ov is not None and not getattr(ov, "empty", True) else []
+    if not sources:
+        sources = list(getattr(sess, "return_overlay_sources", None) or [])
     return {
         "return_overlay_uploaded_at": str(getattr(sess, "return_overlay_uploaded_at", "") or ""),
         "return_overlay_filename": str(getattr(sess, "return_overlay_filename", "") or ""),

@@ -3248,6 +3248,12 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
 
     if light:
         _apply_light_coverage_hydrate(sess)
+        try:
+            from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
+
+            ensure_po_return_overlay_from_server(sess)
+        except Exception:
+            pass
 
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.existing_po import (
@@ -3279,7 +3285,7 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     _po_ledger = getattr(sess, "po_raise_ledger_df", None)
     _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
     _ret_ov = getattr(sess, "po_return_overlay_df", None)
-    _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True) and not light
+    _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True)
     _ret_agg = None
     _ret_sources: list[dict] = []
     _ret_by_platform: list[dict] = []
@@ -3294,10 +3300,10 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
 
             ensure_return_overlay_meta_hydrated(sess)
             _ret_agg = aggregate_return_overlay_for_use(_ret_ov)
-            _ret_sources = list(getattr(sess, "return_overlay_sources", None) or [])
+            _ret_sources = rebuild_return_overlay_sources(sess)
             if not _ret_sources:
-                _ret_sources = rebuild_return_overlay_sources(sess)
-                sess.return_overlay_sources = _ret_sources
+                _ret_sources = list(getattr(sess, "return_overlay_sources", None) or [])
+            sess.return_overlay_sources = _ret_sources
             _ret_by_platform = summarize_return_overlay_by_platform(_ret_ov)
         except Exception:
             _ret_agg = _ret_ov
