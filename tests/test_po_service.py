@@ -417,7 +417,7 @@ def test_sibling_cut_suggested_when_overstock_has_pending_cutting():
     assert int(need["PO_Qty"]) > 0
     assert float(donor["Projected_Running_Days"]) > 180
     assert int(donor["Pending_Cutting"]) == 110
-    assert "BAAKI SIZE SE ADJUST" in str(need["PO_Cutting_Note"])
+    assert "ADJUST FROM OTHER SIZES" in str(need["PO_Cutting_Note"])
     assert "L" in str(need["Cut_From_Siblings"])
     assert "Donor" in str(donor["Cutting_Source"])
 

@@ -827,7 +827,7 @@ def _apply_sibling_cut_from_pending(po_df: pd.DataFrame, target_cover_days: floa
                 f"({int(pending.at[idx])} pending cut, {float(proj.at[idx]):.0f}d cover)"
             )
         donor_text = "; ".join(donor_parts)
-        note = "BAAKI SIZE SE ADJUST — cut from sibling pending stock before new fabric"
+        note = "ADJUST FROM OTHER SIZES — use sibling pending cutting before ordering new fabric"
 
         for idx in po_df.index[need_mask]:
             po_df.at[idx, "Cutting_Source"] = "Adjust from siblings (pending cutting)"

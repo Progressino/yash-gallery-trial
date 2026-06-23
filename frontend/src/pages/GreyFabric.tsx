@@ -1111,7 +1111,7 @@ export default function GreyFabric() {
               <div className="px-4 py-3 border-b bg-green-50 flex justify-between items-center">
                 <div>
                   <p className="text-sm font-semibold text-gray-700">📦 Checked Printed Fabric Stock</p>
-                  <p className="text-xs text-gray-500">QC pass hua fabric — Ready to Cut ke liye available</p>
+                  <p className="text-xs text-gray-500">QC-passed fabric — available for Ready to Cut</p>
                 </div>
                 <p className="text-xs text-gray-500 font-semibold">
                   Total: {(printedFabricChecked as any[]).reduce((a: number, c: any) => a + (c.available_qty || 0), 0).toFixed(1)}m available
@@ -1134,7 +1134,7 @@ export default function GreyFabric() {
                   ))}
                 </tbody>
               </table>
-              {printedFabricChecked.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No checked fabric yet. QC submit karo pehle.</p>}
+              {printedFabricChecked.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No checked fabric yet. Submit QC first.</p>}
             </div>
           )}
 
@@ -1144,7 +1144,7 @@ export default function GreyFabric() {
               <div className="flex justify-between items-center">
                 <div>
                   <p className="text-sm font-semibold text-gray-700">✂️ Ready to Cut</p>
-                  <p className="text-xs text-gray-500">Checked printed fabric — SO ke against reserve karke cutting ke liye bhejo</p>
+                  <p className="text-xs text-gray-500">Checked printed fabric — reserve against SO and send for cutting</p>
                 </div>
                 <button
                   onClick={() => {
@@ -1315,7 +1315,7 @@ export default function GreyFabric() {
                     ))}
                   </tbody>
                 </table>
-                {printedReadyToCut.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No reservations yet. Checked Stock mein fabric reserve karo.</p>}
+                {printedReadyToCut.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No reservations yet. Reserve fabric from Checked Stock.</p>}
               </div>
             </div>
           )}

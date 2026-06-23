@@ -587,7 +587,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                     <tr key={`${code}-breakdown`}>
                       <td colSpan={8} className="px-4 py-0 bg-blue-50">
                         <div className="py-2 space-y-1">
-                          <p className="text-xs font-semibold text-gray-500 uppercase mb-1">Breakdown — Kahan lag raha hai:</p>
+                          <p className="text-xs font-semibold text-gray-500 uppercase mb-1">Breakdown — quantity allocation:</p>
                           <table className="w-full text-xs">
                             <thead>
                               <tr className="text-gray-400">
