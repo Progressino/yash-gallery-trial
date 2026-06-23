@@ -1009,9 +1009,10 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
         if "LineKey" in meesho_df.columns
         else pd.Series("", index=meesho_df.index, dtype=str)
     )
+    date_col = "TxnDate" if "TxnDate" in meesho_df.columns else "Date"
     out = pd.DataFrame({
         "Sku":              sku_series,
-        "TxnDate":          meesho_df["Date"],
+        "TxnDate":          meesho_df[date_col],
         "Transaction Type": meesho_df["TxnType"],
         "Quantity":         meesho_df["Quantity"],
         "Units_Effective":  np.where(meesho_df["TxnType"] == "Refund", -meesho_df["Quantity"],
