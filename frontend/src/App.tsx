@@ -1,5 +1,5 @@
 import { Component, lazy, Suspense, type ReactNode } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import axios from 'axios'
 import Layout from './components/Layout'
@@ -106,6 +106,8 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 function ProtectedRoute() {
+  const location = useLocation()
+  const onIntelligenceHome = location.pathname === '/' || location.pathname === ''
   const setCoverage = useSession(s => s.setCoverage)
   const invUploadRunning = useSession(s => s.inventory_upload_status === 'running')
   const setUser = useAuth(s => s.setUser)
@@ -223,6 +225,7 @@ function ProtectedRoute() {
     const loaded = poOperationalLoaded(s)
     // Avoid flashing 0/7 before the first coverage poll returns.
     if (loaded === 0) return false
+    if (onIntelligenceHome && s.dashboard_ready) return false
     if (s.dashboard_ready || s.intelligence_ready) return false
     if (loaded >= PO_OPERATIONAL_TOTAL) return false
     return !poPageHydrationReady(s) && (s.sales_rows ?? 0) < 100_000

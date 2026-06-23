@@ -249,6 +249,12 @@ jobs:
           set -eu
           bash scripts/run-po-warmup-production.sh
 
+      - name: Warm Intelligence bundle (default 30D window)
+        continue-on-error: true
+        run: |
+          set -eu
+          bash scripts/run-intelligence-warmup-production.sh
+
       - name: Backend logs (on failure)
         if: failure()
         run: |

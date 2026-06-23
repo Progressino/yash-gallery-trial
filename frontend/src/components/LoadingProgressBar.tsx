@@ -1,5 +1,7 @@
 /** Slim indeterminate bar for route-level and long async work. */
 
+import type { PlatformSummaryItem } from '../lib/intelligenceCache'
+
 export function DeterminateBar({
   percent,
   className = '',
@@ -92,6 +94,54 @@ function bundleLoadPhaseLabel(
   if (percent < 45) return 'Loading Amazon, Myntra, Meesho, Flipkart, Snapdeal from saved data…'
   if (percent < 78) return 'Aggregating shipments and returns — first load can take up to a minute'
   return 'Finalizing charts and platform cards…'
+}
+
+/** Platform readiness checklist for Intelligence loading (replaces fake % progress). */
+export function IntelligencePlatformChecklist({
+  platforms,
+  tier3Platforms,
+  backgroundJobs,
+  className = '',
+}: {
+  platforms: PlatformSummaryItem[]
+  tier3Platforms?: string[]
+  backgroundJobs?: string[]
+  className?: string
+}) {
+  const specs: { key: string; label: string }[] = [
+    { key: 'amazon', label: 'Amazon' },
+    { key: 'myntra', label: 'Myntra' },
+    { key: 'meesho', label: 'Meesho' },
+    { key: 'flipkart', label: 'Flipkart' },
+    { key: 'snapdeal', label: 'Snapdeal' },
+  ]
+  const tier3 = new Set((tier3Platforms ?? []).map(p => p.toLowerCase()))
+  const busy = (backgroundJobs ?? []).length > 0
+
+  return (
+    <div className={`intel-platform-checklist ${className}`} role="status" aria-live="polite">
+      <p className="intel-platform-checklist-title">Loading marketplace channels</p>
+      <div className="intel-platform-checklist-row">
+        {specs.map(({ key, label }) => {
+          const card = platforms.find(p => p.platform.toLowerCase() === label.toLowerCase())
+          const hasUnits = Boolean(card?.loaded && ((card?.total_units ?? 0) > 0 || (card?.total_returns ?? 0) > 0))
+          const inTier3 = tier3.has(key)
+          const state = hasUnits
+            ? 'ready'
+            : card?.loaded
+              ? 'empty'
+              : inTier3 || busy
+                ? 'loading'
+                : 'offline'
+          return (
+            <span key={key} className={`intel-platform-chip intel-platform-chip--${state}`}>
+              {state === 'ready' ? '✓' : state === 'loading' ? '…' : '○'} {label}
+            </span>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 /** Full-width banner while the first Intelligence bundle is building on the server. */

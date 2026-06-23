@@ -209,6 +209,23 @@ def test_long_window_uses_session_without_tier3_parquet_load(client, monkeypatch
         "_platform_df_for_intelligence_bundle",
         lambda sess, pk, attr, start_date, end_date: pd.DataFrame(),
     )
+    monkeypatch.setattr(
+        "backend.services.shared_frames.frame_row_count",
+        lambda attr, _sess: 2 if attr == "sales_df" else 0,
+    )
+    monkeypatch.setattr(
+        data_router,
+        "_resolve_bundle_platform_frames",
+        lambda sess, s, e: (
+            sess.mtr_df,
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        ),
+    )
+    monkeypatch.setattr(data_router, "_tier3_direct_has_units", lambda *a, **k: None)
+    monkeypatch.setattr(data_router, "_load_tier3_frames_for_platforms", lambda *a, **k: {})
 
     data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
     bootstrap_test_session(client)
@@ -238,6 +255,7 @@ def test_long_window_uses_session_without_tier3_parquet_load(client, monkeypatch
             "start_date": "2026-03-06",
             "end_date": "2026-06-04",
             "include_extras": "0",
+            "mode": "full",
         },
     )
     assert r.status_code == 200, r.text
@@ -285,6 +303,7 @@ def test_stale_session_cache_defers_to_tier3_when_uploads_in_window(client, monk
         "get_tier3_sync_token",
         lambda: {"amazon": "2:150:2026-06-02"},
     )
+    monkeypatch.setattr(data_router, "_tier3_token_mismatch", lambda _s: True)
 
     data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
     bootstrap_test_session(client)

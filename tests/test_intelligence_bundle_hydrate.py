@@ -87,12 +87,13 @@ def test_intelligence_bundle_warming_when_no_data_anywhere(client, monkeypatch):
     monkeypatch.setattr(data_router, "_session_has_operational_frames", lambda _s: False)
     monkeypatch.setattr(data_router, "_build_intelligence_bundle_payload_from_session", lambda *a, **k: None)
     monkeypatch.setattr(data_router, "_build_intelligence_bundle_payload_from_tier3", lambda *a, **k: None)
+    monkeypatch.setattr(data_router, "_serve_intelligence_bundle_fast", lambda *a, **k: None)
     # Skip the global cache lookup so no previous test's result is reused.
     monkeypatch.setattr(data_router, "_bundle_cache_lookup", lambda *a, **k: None)
 
     r = client.get(
         "/api/data/intelligence-bundle",
-        params={"start_date": "2026-05-05", "end_date": "2026-06-04"},
+        params={"start_date": "2026-05-05", "end_date": "2026-06-04", "mode": "full"},
     )
     assert r.status_code == 200
     body = r.json()

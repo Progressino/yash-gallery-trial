@@ -61,6 +61,7 @@ export interface TopSku {
 
 export type IntelligenceBundle = {
   status?: 'warming' | 'ready'
+  data_completeness?: 'partial' | 'full'
   message?: string
   busy?: boolean
   empty_window?: boolean
@@ -112,6 +113,24 @@ export function readIntelligenceCache(
     if (!parsed?.cached_at || !parsed.platform_summary) return null
     if (Date.now() - parsed.cached_at > ttlMs()) return null
     return parsed
+  } catch {
+    return null
+  }
+}
+
+/** Stale-while-revalidate: return cached bundle even past TTL for instant first paint. */
+export function readIntelligenceCacheStale(
+  start: string,
+  end: string,
+  basis: 'gross' | 'net',
+): { bundle: CachedIntelligenceBundle; expired: boolean } | null {
+  try {
+    const raw = localStorage.getItem(storageKey(start, end, basis))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as CachedIntelligenceBundle
+    if (!parsed?.cached_at || !parsed.platform_summary) return null
+    const expired = Date.now() - parsed.cached_at > ttlMs()
+    return { bundle: parsed, expired }
   } catch {
     return null
   }
@@ -169,12 +188,12 @@ function hasLoadedPlatformUnits(bundle: IntelligenceBundle): boolean {
 export function bundleHasDisplayData(bundle: IntelligenceBundle | null | undefined): boolean {
   if (!bundle) return false
   if (bundle.status === 'warming') return false
-  // Server finished — stop the loading stripe even for empty windows or sparse charts.
   if (bundle.status === 'ready') return true
+  if (bundle.data_completeness === 'partial' && hasLoadedPlatformUnits(bundle)) return true
   const platforms = bundle.platform_summary ?? []
   if (platforms.length > 0) {
     if (hasLoadedPlatformUnits(bundle)) return true
-    if ((bundle.sales_summary?.total_units ?? 0) > 0) return false
+    if ((bundle.sales_summary?.total_units ?? 0) > 0) return true
     return false
   }
   return (bundle.sales_summary?.total_units ?? 0) > 0

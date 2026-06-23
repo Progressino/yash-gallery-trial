@@ -156,14 +156,24 @@ _intel_precompute_lock = threading.Lock()
 _intel_precompute_running = False
 
 
-def schedule_intelligence_bundle_precompute() -> None:
-    """Queue background precompute of default Intelligence bundles (one at a time)."""
+def _intelligence_precompute_mode() -> str:
+    """off | full | tier3_gapfill — tier3_gapfill is memory-safe for production VPS."""
+    mode = os.environ.get("INTELLIGENCE_PRECOMPUTE_MODE", "").strip().lower()
+    if mode in ("off", "full", "tier3_gapfill"):
+        return mode
     if os.environ.get("INTELLIGENCE_PRECOMPUTE", "1").strip().lower() in (
         "0",
         "false",
         "no",
         "off",
     ):
+        return "off"
+    return "full"
+
+
+def schedule_intelligence_bundle_precompute() -> None:
+    """Queue background precompute of default Intelligence bundles (one at a time)."""
+    if _intelligence_precompute_mode() == "off":
         return
     global _intel_precompute_running
     with _intel_precompute_lock:
@@ -183,12 +193,97 @@ def _precompute_intelligence_bundles_worker() -> None:
     global _intel_precompute_running
     _log = logging.getLogger(__name__)
     try:
-        precompute_default_intelligence_bundles()
+        if _intelligence_precompute_mode() == "tier3_gapfill":
+            precompute_tier3_gapfill_intelligence_bundles()
+        else:
+            precompute_default_intelligence_bundles()
     except Exception:
         _log.exception("intelligence bundle precompute failed")
     finally:
         with _intel_precompute_lock:
             _intel_precompute_running = False
+
+
+def precompute_tier3_gapfill_intelligence_bundles() -> None:
+    """Memory-safe precompute: Tier-3 + gap-filled platform frames only (no unified sales scan)."""
+    import backend.main as _main
+
+    _log = logging.getLogger(__name__)
+    if not _main._warm_cache_ready.wait(timeout=600.0):
+        _log.warning("intelligence tier3_gapfill precompute: warm cache not ready after 600s")
+        return
+    if not _main._warm_cache:
+        _log.warning("intelligence tier3_gapfill precompute: warm cache empty")
+        return
+
+    start_date, end_date = _default_intelligence_date_window()
+    sess = AppSession()
+    try:
+        _main.try_attach_shared_frames_fast(sess)
+    except Exception:
+        _log.exception("intelligence tier3_gapfill precompute: attach shared frames failed")
+        return
+
+    bundle_cache: dict = {}
+    now = time.time()
+    for include_extras in (False, True):
+        cache_key = (start_date, end_date, "gross", 10, include_extras)
+        if _bundle_cache_lookup(
+            cache_key,
+            bundle_cache,
+            start_date=start_date,
+            end_date=end_date,
+            allow_sparse=True,
+            sess=sess,
+        ):
+            _log.info(
+                "intelligence tier3_gapfill precompute: cache hit for %s..%s extras=%s",
+                start_date,
+                end_date,
+                include_extras,
+            )
+            continue
+
+        payload = _build_intelligence_gapfill_bundle_payload(
+            sess, start_date, end_date, 10, "gross", include_extras
+        )
+        if payload is None or not _bundle_payload_has_display_data(payload):
+            tier3_payload = _try_serve_tier3_intelligence_bundle(
+                sess,
+                cache_key,
+                bundle_cache,
+                start_date,
+                end_date,
+                10,
+                "gross",
+                include_extras,
+                ts=now,
+                allow_undercount=True,
+                store_cache=True,
+            )
+            if tier3_payload is not None:
+                tier3_payload["data_completeness"] = "partial"
+                units = int((tier3_payload.get("sales_summary") or {}).get("total_units") or 0)
+                _log.warning(
+                    "intelligence tier3_gapfill precompute: stored tier3 partial %s..%s extras=%s (%d units)",
+                    start_date,
+                    end_date,
+                    include_extras,
+                    units,
+                )
+            continue
+
+        units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
+        payload["status"] = "ready"
+        _bundle_cache_store(cache_key, bundle_cache, payload, ts=now)
+        _log.warning(
+            "intelligence tier3_gapfill precompute: stored gapfill bundle %s..%s extras=%s (%d units, %s)",
+            start_date,
+            end_date,
+            include_extras,
+            units,
+            payload.get("data_completeness", "full"),
+        )
 
 
 def precompute_default_intelligence_bundles() -> None:
@@ -1243,6 +1338,8 @@ def _try_serve_tier3_intelligence_bundle(
     include_extras: bool,
     *,
     ts: float | None = None,
+    allow_undercount: bool = False,
+    store_cache: bool = True,
 ) -> dict | None:
     """Tier-3 direct bundle — memory-safe on production VPS."""
     tier3 = _build_intelligence_bundle_payload_from_tier3(
@@ -1256,10 +1353,16 @@ def _try_serve_tier3_intelligence_bundle(
         if units <= 0:
             return None
     tier3_units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
-    if _tier3_only_undercounts_bulk(tier3_units, s_win, e_win):
+    is_partial = _tier3_only_undercounts_bulk(tier3_units, s_win, e_win)
+    if is_partial and not allow_undercount:
         return None
     tier3["status"] = "ready"
-    _bundle_cache_store(cache_key, bundle_cache, tier3, ts=ts if ts is not None else time.time())
+    if is_partial:
+        tier3["data_completeness"] = "partial"
+    else:
+        tier3["data_completeness"] = tier3.get("data_completeness") or "full"
+    if store_cache:
+        _bundle_cache_store(cache_key, bundle_cache, tier3, ts=ts if ts is not None else time.time())
     return tier3
 
 
@@ -1801,13 +1904,15 @@ def _cached_bundle_stale_vs_tier3_uploads(
         return False
     if not platforms_with_uploads_in_range(s, e):
         return False
-    applied = getattr(sess, "_tier3_sync_token_applied", None) if sess else None
-    if not applied:
-        # Global / precomputed disk cache — key already embeds get_tier3_sync_token().
-        return False
     if payload.get("tier3_auto_pull"):
         return bool(sess and _tier3_token_mismatch(sess))
-    return bool(sess and _tier3_token_mismatch(sess))
+    applied = getattr(sess, "_tier3_sync_token_applied", None) if sess else None
+    if applied is None:
+        # Global / precomputed disk cache — key already embeds get_tier3_sync_token().
+        return False
+    if sess and _tier3_token_mismatch(sess):
+        return True
+    return False
 
 
 def _tier3_direct_has_units(
@@ -2061,6 +2166,124 @@ def _build_intelligence_bundle_payload_from_session(
     if not _bundle_payload_has_display_data(payload):
         return None
     return payload
+
+
+def _build_intelligence_gapfill_bundle_payload(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+    limit: int,
+    basis: Optional[str],
+    include_extras: bool,
+) -> dict | None:
+    """Gap-filled platform frames — no unified sales_df scan (memory-safe fast path)."""
+    import pandas as pd
+    from ..services.sales import (
+        get_anomalies,
+        get_dsr_brand_monthly_comparison,
+        get_top_skus,
+    )
+
+    _ensure_return_overlay_hydrated(sess)
+    s = str(start_date)[:10]
+    e = str(end_date)[:10]
+    if len(s) != 10 or len(e) != 10:
+        return None
+
+    mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b = _resolve_bundle_platform_frames(sess, s, e)
+    platform_summary = _build_platform_summary_for_bundle(
+        sess, mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b, s, e
+    )
+    if not _platform_summary_has_units(platform_summary):
+        return None
+
+    platform_summary, sales_summary = _apply_return_overlay_to_intelligence_bundle(
+        sess,
+        list(platform_summary),
+        None,
+        s,
+        e,
+    )
+    shipped = int(sales_summary.get("total_units") or 0)
+    completeness = "full"
+    if _tier3_only_undercounts_bulk(shipped, s, e):
+        completeness = "partial"
+    elif _best_non_tier3_window_units(sess, s, e) > shipped * 1.15:
+        completeness = "partial"
+
+    payload: dict = {
+        "sales_summary": sales_summary,
+        "platform_summary": platform_summary,
+        "top_skus": [],
+        "status": "ready",
+        "data_completeness": completeness,
+        "gapfill_fast_path": True,
+        "anomalies": [],
+        "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
+    }
+    if include_extras:
+        _empty_plat = pd.DataFrame()
+        payload["anomalies"] = get_anomalies(
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            sess.inventory_df_variant,
+            pd.DataFrame(),
+            start_date=None,
+            end_date=None,
+        )
+        payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
+            pd.DataFrame(), start_date=None, end_date=None
+        )
+    if not _bundle_payload_has_display_data(payload):
+        return None
+    return payload
+
+
+def _serve_intelligence_bundle_fast(
+    sess: AppSession,
+    cache_key: tuple,
+    bundle_cache: dict,
+    s_win: str,
+    e_win: str,
+    limit: int,
+    basis: Optional[str],
+    include_extras: bool,
+    *,
+    sid: str | None = None,
+    ts: float | None = None,
+) -> dict | None:
+    """Synchronous fast path: Tier-3 partial, then gap-fill (target under ~3s)."""
+    now = ts if ts is not None else time.time()
+
+    tier3 = _try_serve_tier3_intelligence_bundle(
+        sess,
+        cache_key,
+        bundle_cache,
+        s_win,
+        e_win,
+        limit,
+        basis,
+        include_extras,
+        ts=now,
+        allow_undercount=True,
+        store_cache=False,
+    )
+    if tier3 is not None:
+        if tier3.get("data_completeness") == "partial" and sid:
+            _schedule_intelligence_refresh_async(sid)
+        return tier3
+
+    gapfill = _build_intelligence_gapfill_bundle_payload(
+        sess, s_win, e_win, limit, basis, include_extras
+    )
+    if gapfill is not None and _bundle_payload_has_display_data(gapfill):
+        if gapfill.get("data_completeness") == "partial" and sid:
+            _schedule_intelligence_refresh_async(sid)
+        return gapfill
+    return None
 
 
 def _build_intelligence_bundle_payload_from_tier3(
@@ -4023,6 +4246,7 @@ def intelligence_bundle(
     limit: int = 10,
     basis: Optional[str] = None,
     include_extras: bool = False,
+    mode: Optional[str] = None,
 ):
     """
     One round-trip for the Intelligence dashboard (summary + platforms + top SKUs + anomalies + DSR brands).
@@ -4098,6 +4322,12 @@ def intelligence_bundle(
     _ensure_sku_mapping_for_dashboard(sess)
 
     span_days = _report_span_days(start_date, end_date)
+    fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
+    mode_norm = (mode or "").strip().lower()
+    if not mode_norm:
+        use_fast = span_days is None or span_days <= 90
+    else:
+        use_fast = mode_norm == "fast"
 
     tier3_window = False
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
@@ -4119,6 +4349,24 @@ def intelligence_bundle(
         _maybe_queue_light_session_hydrate(sess, sid or None)
         return cached_instant
 
+    _hydrate_session_for_intelligence(sess)
+
+    if use_fast and has_dates and len(s_win) == 10 and len(e_win) == 10:
+        fast_payload = _serve_intelligence_bundle_fast(
+            sess,
+            cache_key,
+            bundle_cache,
+            s_win,
+            e_win,
+            limit,
+            basis,
+            include_extras,
+            sid=sid or None,
+        )
+        if fast_payload is not None:
+            _maybe_queue_light_session_hydrate(sess, sid or None)
+            return fast_payload
+
     # Tier-3 daily uploads when cache miss and window has fresh Tier-3 blobs.
     if prefer_tier3 and has_dates and len(s_win) == 10 and len(e_win) == 10:
         tier3_immediate = _try_serve_tier3_intelligence_bundle(
@@ -4135,7 +4383,8 @@ def intelligence_bundle(
             _maybe_queue_tier3_sales_sync(sess, sid or None)
             return tier3_immediate
 
-    _hydrate_session_for_intelligence(sess)
+    if not use_fast:
+        _hydrate_session_for_intelligence(sess)
     _maybe_queue_light_session_hydrate(sess, sid or None)
 
     now = time.time()
@@ -4146,8 +4395,6 @@ def intelligence_bundle(
         if _tier3_token_mismatch(sess):
             _schedule_intelligence_refresh_async(sid or None)
         return cached_payload
-
-    fast_window = span_days is not None and span_days <= _intelligence_fast_window_days()
 
     _schedule_intelligence_refresh_async(sid or None)
 
@@ -4173,13 +4420,28 @@ def intelligence_bundle(
         if not session_build_unsafe or _disk_bulk_history_available():
             from ..services.shared_frames import frame_row_count
             _sales_n = frame_row_count("sales_df", sess)
-            if _sales_n > 500_000:
+            if _sales_n > 500_000 and not fast_window:
                 _schedule_background_bundle_build(
                     sid or None, cache_key, s_win, e_win, limit, basis, include_extras
                 )
                 return _intelligence_warming_payload(
                     f"Analytics warming up — aggregating {_sales_n:,} sales rows (building in background)…"
                 )
+            if _sales_n > 500_000 and fast_window:
+                fast_fallback = _serve_intelligence_bundle_fast(
+                    sess,
+                    cache_key,
+                    bundle_cache,
+                    s_win,
+                    e_win,
+                    limit,
+                    basis,
+                    include_extras,
+                    sid=sid or None,
+                    ts=now,
+                )
+                if fast_fallback is not None:
+                    return fast_fallback
             session_payload = _build_intelligence_bundle_payload_from_session(
                 sess, s_win, e_win, limit, basis, include_extras
             )

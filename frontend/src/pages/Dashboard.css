@@ -816,6 +816,62 @@
   letter-spacing: 0.08em;
 }
 
+.hero-total-approx {
+  font-size: 0.55em;
+  font-weight: 600;
+  color: var(--muted);
+  margin-right: 0.12em;
+  vertical-align: super;
+}
+
+.intel-platform-checklist {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.intel-platform-checklist-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.intel-platform-checklist-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.intel-platform-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--muted);
+}
+
+.intel-platform-chip--ready {
+  border-color: color-mix(in oklch, var(--success) 40%, var(--border));
+  color: var(--success);
+  background: color-mix(in oklch, var(--success) 8%, var(--surface));
+}
+
+.intel-platform-chip--loading {
+  border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+  color: var(--primary);
+}
+
+.intel-platform-chip--empty {
+  color: var(--warn);
+}
+
 .chart-load-placeholder {
   height: 240px;
   display: flex;

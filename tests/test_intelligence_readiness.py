@@ -101,6 +101,14 @@ def test_dashboard_not_ready_when_platform_rows_zero(monkeypatch):
         "backend.services.intelligence_readiness.hydration_complete",
         lambda _s, _sid="": True,
     )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness._tier3_uploads_in_window",
+        lambda _s, _e: [],
+    )
+    monkeypatch.setattr(
+        "backend.services.shared_frames.frame_row_count",
+        lambda _attr, _sess: 0,
+    )
     assert platform_frames_available(sess, cov) is False
     assert dashboard_gate_ready(sess, cov) is False
 
