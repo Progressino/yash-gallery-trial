@@ -153,6 +153,8 @@ def calculate_mrp(so_numbers):
         warnings.append(f"Item Master DB unreachable: {e}. Verify ITEM_DB_PATH on the server.")
         return {"materials": materials, "warnings": warnings, "matched_sos": [], "missing_sos": missing_sos}
 
+    stock_consumed: dict[str, float] = {}
+
     def explode(item_code, qty, so_no, sku, depth=0):
         if depth > 10 or qty <= 0:
             return
@@ -198,7 +200,12 @@ def calculate_mrp(so_numbers):
                     l for l in _get_bom_lines(conn, sub['id'])
                     if (l.get('component_type') or 'RM').upper() not in ('SVC', 'SERVICE', 'PROCESS')
                 ]:
-                    explode(comp['item_code'], total, so_no, sku, depth + 1)
+                    comp_stock = float(comp.get('stock') or 0)
+                    already_used = stock_consumed.get(code, 0.)
+                    remaining_stock = max(0., comp_stock - already_used)
+                    net_for_sub = max(0., round(total - remaining_stock, 3))
+                    stock_consumed[code] = already_used + min(remaining_stock, total)
+                    explode(comp['item_code'], net_for_sub, so_no, sku, depth + 1)
 
     for line in selected:
         so_no = line.get('so_number', '') or ''

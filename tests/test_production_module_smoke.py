@@ -564,6 +564,109 @@ def _seed_parent_with_bom(item_db_path: str, parent_code: str = "STYLE-1"):
     return parent_id
 
 
+def _seed_printed_grey_bom_chain(
+    item_db_path: str,
+    *,
+    printed_stock: float = 0.0,
+    grey_bom_qty: float = 1.0,
+    parent_code: str = "STYLE-PRT",
+):
+    """FG → Printed Fabric (SFG, optional stock) → Grey Fabric (GF) via nested BOM."""
+    import sqlite3
+
+    conn = sqlite3.connect(item_db_path)
+    conn.row_factory = sqlite3.Row
+
+    def _type_id(code: str, name: str) -> int:
+        row = conn.execute("SELECT id FROM item_types WHERE code=? LIMIT 1", (code,)).fetchone()
+        if row:
+            return int(row[0])
+        cur = conn.execute("INSERT INTO item_types (name, code) VALUES (?, ?)", (name, code))
+        return int(cur.lastrowid)
+
+    fg_id = _type_id("FG", "Finished Good")
+    sfg_id = _type_id("SFG", "Semi-Finished Goods")
+    gf_id = _type_id("GF", "Grey Fabric")
+
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        (parent_code, f"{parent_code} style", fg_id),
+    )
+    style_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id, stock) VALUES (?, ?, ?, ?)",
+        ("PRINTED-FAB", "Printed Fabric", sfg_id, printed_stock),
+    )
+    printed_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        ("GREY-FAB", "Grey Fabric", gf_id),
+    )
+    grey_id = cur.lastrowid
+
+    cur = conn.execute(
+        "INSERT INTO bom_headers (item_id, bom_name, applies_to, is_default) VALUES (?, 'Default', 'all', 1)",
+        (printed_id,),
+    )
+    printed_bom_id = cur.lastrowid
+    conn.execute(
+        """INSERT INTO bom_lines
+           (bom_id, component_item_id, component_name, component_type, quantity, unit)
+           VALUES (?, ?, 'Grey Fabric', 'GF', ?, 'MTR')""",
+        (printed_bom_id, grey_id, grey_bom_qty),
+    )
+
+    cur = conn.execute(
+        "INSERT INTO bom_headers (item_id, bom_name, applies_to, is_default) VALUES (?, 'Default', 'all', 1)",
+        (style_id,),
+    )
+    style_bom_id = cur.lastrowid
+    conn.execute(
+        """INSERT INTO bom_lines
+           (bom_id, component_item_id, component_name, component_type, quantity, unit)
+           VALUES (?, ?, 'Printed Fabric', 'SFG', 1, 'MTR')""",
+        (style_bom_id, printed_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_mrp_sub_bom_uses_parent_net_after_printed_stock(isolated_module_dbs, client):
+    """Grey requirement = (printed gross − printed stock) × BOM ratio."""
+    _seed_printed_grey_bom_chain(
+        isolated_module_dbs["ITEM_DB_PATH"],
+        printed_stock=100.0,
+        grey_bom_qty=1.0,
+    )
+    so = _create_so_with_sku(client, "STYLE-PRT-M", qty=1000)
+
+    r = client.post("/api/production/mrp/run", json={"so_numbers": [so]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    printed = body["result"]["PRINTED-FAB"]
+    grey = body["result"]["GREY-FAB"]
+    assert printed["total_req"] == 1000.0
+    assert printed["net_req"] == 900.0
+    assert grey["total_req"] == 900.0
+    assert grey["net_req"] == 900.0
+
+
+def test_mrp_sub_bom_applies_grey_bom_ratio(isolated_module_dbs, client):
+    """BOM 1:1.05 → grey = net printed × 1.05."""
+    _seed_printed_grey_bom_chain(
+        isolated_module_dbs["ITEM_DB_PATH"],
+        printed_stock=100.0,
+        grey_bom_qty=1.05,
+    )
+    so = _create_so_with_sku(client, "STYLE-PRT-L", qty=1000)
+
+    r = client.post("/api/production/mrp/run", json={"so_numbers": [so]})
+    assert r.status_code == 200, r.text
+    grey = r.json()["result"]["GREY-FAB"]
+    assert grey["total_req"] == 945.0
+    assert grey["net_req"] == 945.0
+
+
 def _create_so_with_sku(client, sku: str, qty: int = 5):
     r = client.post(
         "/api/sales/orders",

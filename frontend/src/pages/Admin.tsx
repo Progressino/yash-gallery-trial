@@ -154,7 +154,7 @@ export default function Admin() {
     { key: 'item_master', label: 'Item Master', detail: 'Items, BOMs, buyers, merchants' },
     { key: 'purchase', label: 'Purchase', detail: 'PR/PO/JWO/GRN + suppliers/processors' },
     { key: 'tna', label: 'TNA', detail: 'TNA list + activity lines' },
-    { key: 'production', label: 'Production', detail: 'JOs, process stock, MRP reservations' },
+    { key: 'production', label: 'Production', detail: 'JOs, process stock, material requirement planning' },
     { key: 'grey_fabric', label: 'Grey Fabric', detail: 'Tracker, ledger, checked/printed stock' },
   ]
 

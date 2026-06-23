@@ -46,6 +46,22 @@ def test_rbac_modules_by_role():
     assert "sales" in mods and "hrm" in mods
 
 
+def test_ensure_user_has_modules_grants_hrm():
+    import json
+
+    roles = list_roles()
+    karigar_id = next(r["id"] for r in roles if r["role_name"] == "Karigar")
+    create_user({"username": "harsh", "password": "secret", "role_id": karigar_id})
+    conn = users_db._connect()
+    users_db.ensure_user_has_modules(conn, "harsh", ["hrm"])
+    conn.commit()
+    conn.close()
+    harsh = next(u for u in users_db.list_users() if u["username"] == "harsh")
+    mods = json.loads(harsh["module_access"] or "[]")
+    assert "hrm" in mods
+    assert "stitching" in mods
+
+
 def test_hrm_scope_levels():
     assert build_hrm_scope(_profile("Admin")).level == "all"
     assert build_hrm_scope(_profile("Sir")).level == "all"

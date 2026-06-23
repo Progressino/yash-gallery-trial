@@ -456,7 +456,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
       const res = await api.post('/production/mrp/run', { so_numbers: selectedSOs })
       setMrpResult(res.data)
       qc.invalidateQueries({ queryKey: ['mrp-last'] })
-    } catch (e) { alert('MRP run failed') }
+    } catch (e) { alert('Material requirement planning run failed') }
     setRunning(false)
   }
 
@@ -473,13 +473,13 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
       {/* SO Selection */}
       <div className="bg-white rounded-xl border p-4">
         <div className="flex justify-between items-center mb-3">
-          <h3 className="font-semibold text-gray-700">🔢 MRP — Material Requirement Planning</h3>
+          <h3 className="font-semibold text-gray-700">📐 Material Requirement Planning</h3>
           <button onClick={runMRP} disabled={running || !selectedSOs.length}
             className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
-            {running ? '⏳ Running…' : '▶️ Run MRP'}
+            {running ? '⏳ Running…' : '▶️ Run planning'}
           </button>
         </div>
-        <p className="text-xs text-gray-500 mb-3">Select SOs for MRP calculation:</p>
+        <p className="text-xs text-gray-500 mb-3">Select SOs for material requirement calculation:</p>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
           {(openSOs as any[]).map((so: any) => (
             <button key={so.so_number} onClick={() => toggleSO(so.so_number)}
@@ -500,7 +500,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
       {/* Warnings — show when SOs/SKUs couldn't be exploded so the user knows what to fix. */}
       {showWarnings && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-          <p className="text-sm font-semibold text-amber-900 mb-2">⚠️ MRP could not generate rows for some lines</p>
+          <p className="text-sm font-semibold text-amber-900 mb-2">⚠️ Planning could not generate rows for some lines</p>
           {matchedSOs.length > 0 && (
             <p className="text-xs text-amber-800 mb-2">
               Materials below cover SOs: <span className="font-mono">{matchedSOs.join(', ')}</span>.
@@ -511,7 +511,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
             {warnings.length > 12 && <li className="text-amber-700">…and {warnings.length - 12} more</li>}
           </ul>
           <p className="text-xs text-amber-800 mt-2">
-            Add the missing SKU/parent style in <strong>Item Master</strong> with a default <strong>BOM</strong>, then re-run MRP.
+            Add the missing SKU/parent style in <strong>Item Master</strong> with a default <strong>BOM</strong>, then re-run planning.
           </p>
         </div>
       )}
@@ -520,7 +520,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
       {materials.length > 0 && (
         <div className="bg-white rounded-xl border overflow-hidden">
           <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between items-center">
-            <span className="font-semibold">MRP Results — {materials.length} materials</span>
+            <span className="font-semibold">Material requirements — {materials.length} materials</span>
             <span className="text-blue-200 text-xs">{mrpResult?.run_time || lastMRP?.run_time}</span>
           </div>
           <table className="w-full text-sm">
@@ -569,7 +569,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                         <button
                           type="button"
                           disabled={!canJO}
-                          title={remaining <= 0 ? 'MRP qty fully committed — no remaining fabric' : `Create Cutting JO for ${firstSo}`}
+                          title={remaining <= 0 ? 'Requirement fully committed — no remaining fabric' : `Create Cutting JO for ${firstSo}`}
                           onClick={() => onCreateJO({
                             so_number: firstSo,
                             fabric_code: code,
@@ -1105,7 +1105,7 @@ export default function Production() {
 
       {/* Main tabs */}
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
-        {([['process','⚙️ Process'], ['tracker','📋 All JOs'], ['issue-notes','📋 Issue Notes'], ['reports','📊 Reports'], ['mrp','🔢 MRP']] as const).map(([key, label]) => (
+        {([['process','⚙️ Process'], ['tracker','📋 All JOs'], ['issue-notes','📋 Issue Notes'], ['reports','📊 Reports'], ['mrp','📐 Material Req. Planning']] as const).map(([key, label]) => (
           <button key={key} onClick={() => { setTab(key); setExpanded(null) }}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}

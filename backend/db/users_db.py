@@ -107,6 +107,7 @@ def init_db():
     except Exception:
         pass
     ensure_super_admin(conn)
+    ensure_user_has_modules(conn, "harsh", ["hrm"])
     conn.commit(); conn.close()
 
 # ── Super Admin bootstrap ─────────────────────────────────────────────────────
@@ -163,9 +164,36 @@ def ensure_super_admin(conn=None):
                 phone,
             ),
         )
-    if close:
-        conn.commit()
-        conn.close()
+        if close:
+            conn.commit()
+            conn.close()
+
+
+def ensure_user_has_modules(conn, username: str, modules: list[str]) -> None:
+    """Merge module keys into a user's module_access (e.g. grant HRM to an existing ERP user)."""
+    import json
+
+    from ..services.rbac import resolve_module_access
+
+    uname = (username or "").strip()
+    if not uname or not modules:
+        return
+    row = conn.execute(
+        """SELECT u.id, u.module_access, r.role_name
+           FROM erp_users u LEFT JOIN roles r ON r.id = u.role_id
+           WHERE lower(u.username) = lower(?) AND u.active = 1""",
+        (uname,),
+    ).fetchone()
+    if not row:
+        return
+    current = resolve_module_access(row["role_name"] or "", row["module_access"])
+    if all(m in current for m in modules):
+        return
+    merged = sorted(set(current) | set(modules))
+    conn.execute(
+        "UPDATE erp_users SET module_access=?, updated_at=? WHERE id=?",
+        (json.dumps(merged), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row["id"]),
+    )
 
 
 def get_role_id(role_name: str) -> int | None:
