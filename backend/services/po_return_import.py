@@ -780,6 +780,8 @@ def _infer_return_brand_from_filename(filename: str) -> str:
         return "Ikrass"
     if "other brand" in low:
         return "Other Brand"
+    if "ashirwad" in low:
+        return "Ashirwad"
     if "yash gallery" in low or re.search(r"\byg\b", low):
         return "YG"
     if "raisinghani" in low:

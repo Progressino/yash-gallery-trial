@@ -1289,7 +1289,7 @@ def _run_tier1_mtr_worker(session_id: str, raw: bytes, orig_name: str) -> None:
                 )
 
             pre_total = len(sess.mtr_df)
-            _fd, saved_rows = save_daily_file("amazon", orig_name or "mtr-upload.zip", df)
+            _fd, saved_rows, _block = save_daily_file("amazon", orig_name or "mtr-upload.zip", df)
             sess.mtr_df = _merge_platform_data(
                 sess.mtr_df, df, "amazon", source_filename=orig_name or None,
             )
@@ -1355,7 +1355,7 @@ def _run_tier1_myntra_worker(session_id: str, zip_bytes: bytes, orig_fn: str) ->
                     message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
             pre_total = len(sess.myntra_df)
-            _fd, saved_rows = save_daily_file("myntra", orig_fn or "myntra-upload.zip", df)
+            _fd, saved_rows, _block = save_daily_file("myntra", orig_fn or "myntra-upload.zip", df)
             sess.myntra_df = _merge_platform_data(
                 sess.myntra_df, df, "myntra", source_filename=orig_fn or None,
             )
@@ -1447,7 +1447,7 @@ def _run_tier1_meesho_worker(session_id: str, raw_bytes: bytes, fname: str, disp
                 if not df.empty:
                     df = apply_dsr_segment_from_upload_filename(df, display_name or None, "Meesho")
                     pre_total = len(sess.meesho_df)
-                    _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-order.xlsx", df)
+                    _fd, saved_rows, _block = save_daily_file("meesho", display_name or "meesho-order.xlsx", df)
                     sess.meesho_df = _merge_platform_data(
                         sess.meesho_df, df, "meesho", source_filename=display_name or None,
                     )
@@ -1489,7 +1489,7 @@ def _run_tier1_meesho_worker(session_id: str, raw_bytes: bytes, fname: str, disp
                     return UploadResponse(ok=False, message=f"Meesho CSV parse error: {msg}")
                 df = apply_dsr_segment_from_upload_filename(df, display_name or None, "Meesho")
                 pre_total = len(sess.meesho_df)
-                _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-orders.csv", df)
+                _fd, saved_rows, _block = save_daily_file("meesho", display_name or "meesho-orders.csv", df)
                 sess.meesho_df = _merge_platform_data(
                     sess.meesho_df, df, "meesho", source_filename=display_name or None,
                 )
@@ -1521,7 +1521,7 @@ def _run_tier1_meesho_worker(session_id: str, raw_bytes: bytes, fname: str, disp
                     ok=False, message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
             pre_total = len(sess.meesho_df)
-            _fd, saved_rows = save_daily_file("meesho", display_name or "meesho-upload.zip", df)
+            _fd, saved_rows, _block = save_daily_file("meesho", display_name or "meesho-upload.zip", df)
             sess.meesho_df = _merge_platform_data(
                 sess.meesho_df, df, "meesho", source_filename=display_name or None,
             )
@@ -1579,7 +1579,7 @@ def _run_tier1_flipkart_worker(session_id: str, tmp_path: str, orig_fn: str) -> 
                     ok=False, message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
             pre_total = len(sess.flipkart_df)
-            _fd2, saved_rows = save_daily_file("flipkart", orig_fn or "flipkart-upload.zip", df)
+            _fd2, saved_rows, _block = save_daily_file("flipkart", orig_fn or "flipkart-upload.zip", df)
             sess.flipkart_df = _merge_platform_data(
                 sess.flipkart_df, df, "flipkart", source_filename=orig_fn or None,
             )
@@ -1632,7 +1632,7 @@ def _run_tier1_snapdeal_worker(session_id: str, zip_bytes: bytes, display: str, 
                     ok=False, message=f"No data extracted. Issues: {'; '.join(skipped[:5])}",
                 )
             pre_total = len(sess.snapdeal_df)
-            _fd, saved_rows = save_daily_file("snapdeal", snap_fn or "snapdeal-upload.zip", df)
+            _fd, saved_rows, _block = save_daily_file("snapdeal", snap_fn or "snapdeal-upload.zip", df)
             if sess.snapdeal_df.empty:
                 sess.snapdeal_df = df
             else:
