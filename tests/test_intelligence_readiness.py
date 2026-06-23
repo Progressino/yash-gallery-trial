@@ -55,6 +55,34 @@ class _Sess:
     inventory_df_variant = None
 
 
+def test_dashboard_ready_when_tier3_has_window_uploads(monkeypatch):
+    sess = _Sess()
+    cov = _cov(
+        mtr=False, myntra=False, meesho=False, flipkart=False, snapdeal=False,
+        mtr_rows=0, myntra_rows=0, meesho_rows=0, flipkart_rows=0, snapdeal_rows=0,
+        sales=False, sales_rows=0,
+    )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness._pg_platform_sales_counts",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness._tier3_all_platforms_have_uploads",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness._tier3_uploads_in_window",
+        lambda _s, _e: ["amazon", "myntra", "meesho"],
+    )
+    monkeypatch.setattr(
+        "backend.services.intelligence_readiness.hydration_complete",
+        lambda _s, _sid="": True,
+    )
+    payload = build_intelligence_readiness(sess, cov)
+    assert payload["dashboard_ready"] is True
+    assert "meesho" in payload["tier3_platforms_in_window"]
+
+
 def test_dashboard_not_ready_when_platform_rows_zero(monkeypatch):
     sess = _Sess()
     cov = _cov(

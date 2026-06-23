@@ -4076,7 +4076,7 @@ def intelligence_bundle(
     except Exception:
         pass
     if not sess:
-        return {"ok": False, "computing": True, "message": "Session data still loading"}
+        return _intelligence_warming_payload("Session data still loading")
     sales_empty = hasattr(sess, "sales_df") and sess.sales_df.empty
     if sales_empty:
         tier3_can_serve = False
@@ -4088,7 +4088,7 @@ def intelligence_bundle(
             except Exception:
                 tier3_can_serve = False
         if not tier3_can_serve and not _session_has_platform_data(sess):
-            return {"ok": False, "computing": True, "message": "Session data still loading"}
+            return _intelligence_warming_payload("Session data still loading")
     try:
         from ..routers.upload import clear_stale_background_jobs
 

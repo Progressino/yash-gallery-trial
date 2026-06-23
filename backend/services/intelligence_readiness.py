@@ -198,6 +198,15 @@ def dashboard_gate_ready(sess, cov: CoverageResponse, *, session_id: str = "") -
     return platform_frames_available(sess, cov) and sales_available(sess, cov)
 
 
+def _tier3_uploads_in_window(start_date: str, end_date: str) -> list[str]:
+    try:
+        from .daily_store import platforms_with_uploads_in_range
+
+        return list(platforms_with_uploads_in_range(str(start_date)[:10], str(end_date)[:10]))
+    except Exception:
+        return []
+
+
 def build_intelligence_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:
     from .coverage_debug import _resolve_sales_source
     from .po_readiness import background_job_names, background_tasks_running
@@ -205,24 +214,28 @@ def build_intelligence_readiness(sess, cov: CoverageResponse, *, session_id: str
 
     bg = background_tasks_running(sess)
     precomputed = False
+    tier3_platforms: list[str] = []
     try:
         from ..routers.data import _default_intelligence_date_window, global_intelligence_bundle_ready
 
         ds, de = _default_intelligence_date_window()
+        tier3_platforms = _tier3_uploads_in_window(ds, de)
         precomputed = global_intelligence_bundle_ready(ds, de, limit=10, basis="gross", include_extras=False)
     except Exception:
         precomputed = False
 
-    platforms_loaded = platform_frames_available(sess, cov) or precomputed
-    sales_ok = sales_available(sess, cov) or precomputed
+    tier3_window_ok = bool(tier3_platforms)
+    platforms_loaded = platform_frames_available(sess, cov) or precomputed or tier3_window_ok
+    sales_ok = sales_available(sess, cov) or precomputed or tier3_window_ok
     inv_ok = inventory_available(sess, cov)
     hydrate_inflight = hydration_inflight(session_id, sess)
     return {
         "intelligence_ready": (
             not hydrate_inflight and sales_ok and inv_ok and platforms_loaded
         ),
-        "dashboard_ready": (platforms_loaded and sales_ok) or precomputed,
+        "dashboard_ready": (platforms_loaded and sales_ok) or precomputed or tier3_window_ok,
         "precomputed_bundle_ready": precomputed,
+        "tier3_platforms_in_window": tier3_platforms,
         "data_ready": bool(getattr(cov, "data_ready", False)),
         "platforms_loaded": platforms_loaded,
         "hydration_complete": hydration_complete(sess, session_id),

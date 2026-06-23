@@ -573,7 +573,13 @@ function PlatformTile({ p, salesViewNet, onClick }: {
         <div className="ptile-2-logo">{short}</div>
         <div className="ptile-2-name">
           <div className="ptile-2-brand">{p.platform}</div>
-          <div className="ptile-2-sub">{p.loaded ? 'loaded' : 'not loaded'}</div>
+          <div className="ptile-2-sub">
+            {p.loaded
+              ? units > 0 || p.total_returns > 0
+                ? 'loaded'
+                : 'no data in range'
+              : 'no uploads'}
+          </div>
         </div>
         {p.loaded && (
           <div className={`trend-pill ${tDir}`}>
@@ -973,14 +979,18 @@ export default function Dashboard() {
   } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis, 'core'],
     queryFn: async () => {
-      const { data } = await api.get<IntelligenceBundle & { status?: string }>(
+      const { data } = await api.get<IntelligenceBundle & { status?: string; computing?: boolean }>(
         `/data/intelligence-bundle?${bundleCoreParams}`,
         { timeout: bundleTimeoutMs },
       )
-      if (data?.status !== 'warming' && bundleHasDisplayData(data)) {
-        writeIntelligenceCache(dateStart, dateEnd, salesBasis, data)
+      const normalized: IntelligenceBundle =
+        data?.computing && data.status !== 'warming'
+          ? { ...data, status: 'warming' }
+          : data
+      if (normalized?.status !== 'warming' && bundleHasDisplayData(normalized)) {
+        writeIntelligenceCache(dateStart, dateEnd, salesBasis, normalized)
       }
-      return data
+      return normalized
     },
     staleTime: 120_000,
     retry: 5,
@@ -993,9 +1003,9 @@ export default function Dashboard() {
       return undefined
     },
     refetchInterval: q => {
-      if (!dashboardReady) return false
       const d = q.state.data
-      if (d?.status === 'warming') return 3_000
+      // Never stall: poll while warming or until display data exists (do not gate on dashboard_ready).
+      if (d?.status === 'warming' || (d as { computing?: boolean })?.computing) return 3_000
       if (q.state.fetchStatus === 'fetching') return false
       if (!bundleHasDisplayData(d)) return 3_000
       if (q.state.status === 'error') return 5_000
@@ -1068,22 +1078,22 @@ export default function Dashboard() {
     : 0
   void bundleLoadTick
 
-  /** Watchdog: if the dashboard is still "loading marketplace data" after 75s,
-   *  ask the server to clear any orphaned/stuck background jobs and re-queue
-   *  the hydrate, then force a fresh fetch — so a stuck load self-heals. */
+  /** Watchdog: if the dashboard is still loading after 60s, kick hydrate + refetch. */
   useEffect(() => {
     if (!awaitingFirstBundle) {
       bundleKickedRef.current = false
       return
     }
-    if (bundleLoadElapsedMs < 150_000 || bundleKickedRef.current) return
+    if (bundleLoadElapsedMs < 60_000 || bundleKickedRef.current) return
     bundleKickedRef.current = true
     ;(async () => {
       try {
+        await cacheHydrateWarm()
         await getCoverage({ light: true })
       } catch {
-        /* best-effort kick — fall through to refetch regardless */
+        /* best-effort */
       }
+      void qc.invalidateQueries({ queryKey: ['intelligence-readiness'] })
       void qc.invalidateQueries({
         queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis, 'core'],
       })
@@ -1127,6 +1137,10 @@ export default function Dashboard() {
   const salesLoaded = sessionSales || hasDisplayData || hasCachedDisplay
   const platforms = platformSummary ?? []
   const loadedPlatforms = platforms.filter(p => p.loaded)
+  const meeshoInBundle = platforms.some(
+    p => p.platform === 'Meesho' && p.loaded && (p.total_units > 0 || p.total_returns > 0),
+  )
+  const meeshoInTier3 = (intelligenceReadiness?.tier3_platforms_in_window ?? []).includes('meesho')
 
   const useDailyChart = useMemo(
     () => (reportingSpanDays(dateStart, dateEnd) ?? 999) <= 45,
@@ -1215,6 +1229,8 @@ export default function Dashboard() {
   const totalReturns= salesSummary?.total_returns ?? 0
   const netUnits    = salesSummary?.net_units     ?? 0
   const returnRate  = salesSummary?.return_rate   ?? 0
+  const returnSheetUnits = salesSummary?.return_sheet_units ?? coverageReturnUnits
+  const marketplaceReturnUnits = salesSummary?.marketplace_return_units
   const displayUnits= salesViewNet ? netUnits : totalUnits
 
   const heatmapData = useMemo(() => {
@@ -1354,6 +1370,16 @@ export default function Dashboard() {
           </button>
         </div>
       ) : null}
+      {hasDisplayData && meeshoInTier3 && !meeshoInBundle ? (
+        <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          Meesho uploads exist for this date range but show no shipment units yet — check Upload → Meesho or widen the date range.
+        </div>
+      ) : null}
+      {hasDisplayData && !(intelligenceReadiness?.tier3_platforms_in_window ?? []).includes('meesho') && !meeshoInBundle ? (
+        <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          No Meesho daily uploads found for {dateStart} → {dateEnd}. Upload Meesho order files on the Upload tab to include them here.
+        </div>
+      ) : null}
       {intelligenceBundle?.empty_window && intelligenceBundle.message ? (
         <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           {intelligenceBundle.message}
@@ -1426,10 +1452,16 @@ export default function Dashboard() {
               </span>
               <span className="sep">·</span>
               <span>{totalReturns.toLocaleString()} returns</span>
-              {coverageReturnLoaded && (
+              {(returnSheetUnits > 0 || coverageReturnLoaded) && (
                 <>
                   <span className="sep">·</span>
-                  <span>Return sheet: {coverageReturnUnits.toLocaleString()} units</span>
+                  <span>Return sheet: {returnSheetUnits.toLocaleString()} units</span>
+                </>
+              )}
+              {marketplaceReturnUnits != null && marketplaceReturnUnits > 0 && (
+                <>
+                  <span className="sep">·</span>
+                  <span>Marketplace: {marketplaceReturnUnits.toLocaleString()} ret</span>
                 </>
               )}
               <span className="sep">·</span>

@@ -156,6 +156,7 @@ class IntelligenceReadinessResponse(BaseModel):
     intelligence_ready: bool
     dashboard_ready: bool = False
     precomputed_bundle_ready: bool = False
+    tier3_platforms_in_window: list[str] = Field(default_factory=list)
     data_ready: bool = False
     platforms_loaded: bool = False
     hydration_complete: bool = False
