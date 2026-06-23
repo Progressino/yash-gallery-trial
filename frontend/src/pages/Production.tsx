@@ -619,7 +619,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
 
       {activeSONumbers.length > 0 && (
         <div className="bg-white rounded-xl border p-4 space-y-3">
-          <h3 className="font-semibold text-gray-700">Document chain audit (MRP → PO → GRN → Grey ledger)</h3>
+          <h3 className="font-semibold text-gray-700">Document chain audit (Material planning → PO → GRN → Grey ledger)</h3>
           <div className="flex flex-wrap gap-2 items-end">
             <div>
               <label className="text-xs text-gray-500">SO number</label>
@@ -639,7 +639,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                 <div key={m.material_code} className="border rounded-lg p-3 text-xs">
                   <p className="font-mono font-bold text-[#002B5B]">{m.material_code}</p>
                   <p className="text-gray-500 mb-2">
-                    MRP {m.mrp_qty} · PO committed {m.po_committed_qty} · JO fabric {m.jo_committed_qty} · Remaining {m.remaining_qty}
+                    Planned {m.mrp_qty} · PO committed {m.po_committed_qty} · JO fabric {m.jo_committed_qty} · Remaining {m.remaining_qty}
                   </p>
                   <div className="grid md:grid-cols-2 gap-2 text-gray-600">
                     <div><span className="font-semibold">POs:</span> {(m.pos || []).map((p: any) => p.po_number).join(', ') || '—'}</div>

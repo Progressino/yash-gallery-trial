@@ -212,7 +212,7 @@ def calculate_mrp(so_numbers):
         sku = line.get('sku', '') or ''
         qty = (line.get('qty') or 0) - (line.get('produced_qty') or 0)
         if not sku:
-            warnings.append(f"{so_no}: line has no SKU — can't compute MRP.")
+            warnings.append(f"{so_no}: line has no SKU — can't compute material requirements.")
             continue
         if qty <= 0:
             continue
@@ -615,7 +615,7 @@ def run_mrp_full(body: MRPRunBody):
             'run_time': datetime.now().isoformat(),
             'so_numbers': [],
             'result': {},
-            'warnings': ['Select at least one SO before running MRP.'],
+            'warnings': ['Select at least one SO before running material requirement planning.'],
             'matched_sos': [],
             'missing_sos': [],
         }
@@ -651,12 +651,12 @@ def get_last_mrp():
 def get_mrp_lines_for_so(so_number: str = ''):
     data = get_last_mrp_result()
     if not data:
-        return {'purchase_items': [], 'sfg_items': [], 'error': 'No MRP result. Run MRP first.'}
+        return {'purchase_items': [], 'sfg_items': [], 'error': 'No planning result. Run material requirement planning first.'}
     norm = _normalize_mrp_payload(data.get('result'))
     result = norm['materials']
     so_numbers = data.get('so_numbers', [])
     if so_number and so_number not in so_numbers:
-        return {'purchase_items': [], 'sfg_items': [], 'warning': f'{so_number} not in last MRP run'}
+        return {'purchase_items': [], 'sfg_items': [], 'warning': f'{so_number} not in last planning run'}
     commitments = {c['material_code']: c for c in get_mrp_commitments_for_so(so_number)} if so_number else {}
     purchase_items, sfg_items = [], []
     for code, mat in result.items():
@@ -698,7 +698,7 @@ def mrp_audit_chain(so_number: str = ''):
 def mrp_soft_reserve_all():
     data = get_last_mrp_result()
     if not data:
-        return {'ok': False, 'message': 'No MRP result. Run MRP first.'}
+        return {'ok': False, 'message': 'No planning result. Run material requirement planning first.'}
     norm = _normalize_mrp_payload(data.get('result'))
     reservations = []
     for mat_code, mat in norm['materials'].items():

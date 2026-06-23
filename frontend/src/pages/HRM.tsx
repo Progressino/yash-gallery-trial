@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useAuth } from '../store/auth'
@@ -7,6 +7,7 @@ type Tab = 'dashboard' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'i
 
 const FREQUENCIES = ['Daily', 'Weekly', 'Monthly']
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected'] as const
+const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'Leave', 'N/A'] as const
 type ItemType = 'responsibility' | 'task'
 const CATEGORIES = ['General', 'Quality', 'Production', 'Accounts', 'Purchase', 'Sales', 'Store', 'HR', 'Other']
 const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviour', 'Task Failure', 'Dependency Missed']
@@ -21,15 +22,9 @@ const statusLabel = (s: string) => {
   if (s === 'Partial') return '⚠️'
   if (s === 'Missed') return '❌'
   if (s === 'Blocked') return '🔴'
+  if (s === 'Leave') return '🏖'
+  if (s === 'N/A') return '—'
   return '○'
-}
-
-const statusNext = (s: string) => {
-  if (s === 'Pending') return 'Done'
-  if (s === 'Done') return 'Partial'
-  if (s === 'Partial') return 'Missed'
-  if (s === 'Missed') return 'Blocked'
-  return 'Pending'
 }
 
 const statusBg = (s: string) => {
@@ -37,6 +32,8 @@ const statusBg = (s: string) => {
   if (s === 'Partial') return 'bg-yellow-400 text-white'
   if (s === 'Missed') return 'bg-red-500 text-white'
   if (s === 'Blocked') return 'bg-purple-600 text-white'
+  if (s === 'Leave') return 'bg-slate-500 text-white'
+  if (s === 'N/A') return 'bg-gray-500 text-white'
   return 'bg-gray-200 text-gray-500'
 }
 
@@ -55,6 +52,13 @@ const fmtDuration = (mins: number) => {
   const h = Math.floor(mins / 60)
   const m = mins % 60
   return m ? `${h}h ${m}m` : `${h}h`
+}
+
+const fmtDate = (iso: string) => {
+  if (!iso) return '—'
+  const d = new Date(iso.replace(' ', 'T'))
+  if (Number.isNaN(d.getTime())) return iso.split(' ')[0] || iso
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
 const fmtDateTime = (iso: string) => {
@@ -82,6 +86,7 @@ export default function HRM() {
   const [selDept, setSelDept] = useState<number | ''>('')
   const [selEmp, setSelEmp] = useState<number | ''>('')
   const [hodDept, setHodDept] = useState<number | ''>('')
+  const [hodEmp, setHodEmp] = useState<number | ''>('')
   const [appraisalEmp, setAppraisalEmp] = useState<number | ''>('')
   const [fromDate, setFromDate] = useState(fmt7Days())
   const [toDate, setToDate] = useState(today())
@@ -111,16 +116,19 @@ export default function HRM() {
   const [deptForm, setDeptForm] = useState({ name: '', description: '', hod_name: '' })
   const [empForm, setEmpForm] = useState({ name: '', department_id: '' as any, designation: '', phone: '', email: '', join_date: '' })
   const [respForm, setRespForm] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
-  const [taskForm, setTaskForm] = useState({ employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '' })
+  const [taskForm, setTaskForm] = useState({ item_type: 'task' as ItemType, employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '' })
   const [issueForm, setIssueForm] = useState({ employee_id: '' as any, issue_type: 'General', severity: 'Minor', title: '', description: '', recorded_by: '', caused_by_employee_id: '' as any })
 
   // Quick resp + voice
-  const [quickResp, setQuickResp] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, department_id: '' as any, title: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
+  const [quickResp, setQuickResp] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, department_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
   const [showQuickResp, setShowQuickResp] = useState(false)
   const [voiceText, setVoiceText] = useState('')
   const [isListening, setIsListening] = useState(false)
   const [aiParsing, setAiParsing] = useState(false)
   const [aiParsed, setAiParsed] = useState<any>(null)
+
+  const respImportRef = useRef<HTMLInputElement>(null)
+  const taskImportRef = useRef<HTMLInputElement>(null)
 
   const parseLocally = (text: string) => {
     setAiParsing(true)
@@ -160,7 +168,7 @@ export default function HRM() {
     if (!title) title = text
     const parsed = { item_type: itemType, employee_id: matchedEmp?.id || null, employee_name: matchedEmp?.name || '', department_id: matchedEmp?.department_id || null, title, frequency, category: 'General', due_date: dueDate }
     setAiParsed(parsed)
-    setQuickResp({ item_type: itemType, employee_id: parsed.employee_id || '', department_id: parsed.department_id || '', title: parsed.title, frequency: parsed.frequency, category: 'General', added_by: '', due_date: dueDate })
+    setQuickResp({ item_type: itemType, employee_id: parsed.employee_id || '', department_id: parsed.department_id || '', title: parsed.title, description: '', frequency: parsed.frequency, category: 'General', added_by: '', due_date: dueDate })
     setShowQuickResp(true)
     setAiParsing(false)
   }
@@ -201,8 +209,8 @@ export default function HRM() {
     queryFn: () => api.get(`/hrm/responsibilities${selDept ? `?department_id=${selDept}` : ''}${selEmp ? `${selDept ? '&' : '?'}employee_id=${selEmp}` : ''}`).then(r => r.data)
   })
   const { data: hodData } = useQuery({
-    queryKey: ['hrm-hod', hodDept, fromDate, toDate],
-    queryFn: () => api.get(`/hrm/hod-dashboard/${hodDept}?from_date=${fromDate}&to_date=${toDate}`).then(r => r.data),
+    queryKey: ['hrm-hod', hodDept, hodEmp, fromDate, toDate],
+    queryFn: () => api.get(`/hrm/hod-dashboard/${hodDept}?from_date=${fromDate}&to_date=${toDate}${hodEmp ? `&employee_id=${hodEmp}` : ''}`).then(r => r.data),
     enabled: !!hodDept,
   })
   const { data: issues = [] } = useQuery({
@@ -249,6 +257,7 @@ export default function HRM() {
   const updateDeptMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/departments/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-depts'] }); setEditDept(null) } })
   const createEmpMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/employees', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setShowEmpForm(false) } })
   const updateEmpMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/employees/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setEditEmp(null) } })
+  const deleteEmpMut = useMutation({ mutationFn: (id: number) => api.delete(`/hrm/employees/${id}`), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }) } })
   const createRespMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/responsibilities', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-resps'] }); qc.invalidateQueries({ queryKey: ['hrm-hod'] }); setShowRespForm(false); setShowQuickResp(false); setAiParsed(null); setVoiceText('') } })
   const updateRespMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/responsibilities/${id}`, data),
@@ -257,7 +266,36 @@ export default function HRM() {
   const deleteRespMut = useMutation({ mutationFn: (id: number) => api.delete(`/hrm/responsibilities/${id}`), onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-resps'] }) })
   const markTaskMut = useMutation({
     mutationFn: (b: object) => api.post('/hrm/tasks/mark', b),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-hod'] }); qc.invalidateQueries({ queryKey: ['hrm-perf'] }); setBlockedModal(null) }
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-hod'] }); qc.invalidateQueries({ queryKey: ['hrm-perf'] }); setBlockedModal(null) },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail
+      if (msg) alert(msg)
+    },
+  })
+  const importRespMut = useMutation({
+    mutationFn: (file: File) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      return api.post('/hrm/import/responsibilities', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    },
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['hrm-resps'] })
+      qc.invalidateQueries({ queryKey: ['hrm-hod'] })
+      const { created, errors } = res.data
+      alert(`Imported ${created} responsibility row(s).${errors?.length ? `\n\nIssues:\n${errors.slice(0, 5).join('\n')}` : ''}`)
+    },
+  })
+  const importTaskMut = useMutation({
+    mutationFn: (file: File) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      return api.post('/hrm/import/one-time-tasks', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    },
+    onSuccess: (res) => {
+      invalidateTaskMetrics()
+      const { created, errors } = res.data
+      alert(`Imported ${created} task row(s).${errors?.length ? `\n\nIssues:\n${errors.slice(0, 5).join('\n')}` : ''}`)
+    },
   })
   const createIssueMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/issues', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-issues'] }); setShowIssueForm(false) } })
   const resolveIssueMut = useMutation({ mutationFn: ({ id, res }: { id: number; res: string }) => api.patch(`/hrm/issues/${id}/resolve`, { resolution: res }), onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-issues'] }) })
@@ -281,7 +319,7 @@ export default function HRM() {
       setShowRespForm(false)
       setAiParsed(null)
       setVoiceText('')
-      setTaskForm({ employee_id: '', title: '', description: '', due_date: '', assigned_by: '' })
+      setTaskForm({ item_type: 'task', employee_id: '', title: '', description: '', due_date: '', assigned_by: '' })
     },
   })
   const startOneTimeTaskMut = useMutation({
@@ -322,7 +360,7 @@ export default function HRM() {
       createOneTimeTaskMut.mutate({
         employee_id: +form.employee_id,
         title: form.title,
-        description: '',
+        description: form.description || '',
         due_date: form.due_date || '',
         assigned_by: form.added_by || '',
       })
@@ -331,11 +369,27 @@ export default function HRM() {
         employee_id: +form.employee_id,
         department_id: form.department_id ? +form.department_id : null,
         title: form.title,
+        description: form.description || '',
         frequency: form.frequency,
         category: form.category,
         added_by: form.added_by || '',
       })
     }
+  }
+
+  const hodDeptEmployees = useMemo(
+    () => (allEmps as any[]).filter((e: any) => !hodDept || e.department_id === hodDept),
+    [allEmps, hodDept],
+  )
+
+  const handleStatusSelect = (respId: number, logDate: string, status: string) => {
+    if (!status) return
+    if (status === 'Blocked') {
+      setBlockedModal({ respId, date: logDate })
+      setBlockedForm({ blocker_employee_id: '', blocker_reason: '', marked_by: '' })
+      return
+    }
+    markTaskMut.mutate({ responsibility_id: respId, log_date: logDate, status })
   }
 
   const deptName = (id: any) => (depts as any[]).find(d => d.id === id)?.name || '—'
@@ -517,6 +571,9 @@ export default function HRM() {
                 <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
                   <input value={quickResp.title} onChange={e => setQuickResp(f => ({ ...f, title: e.target.value }))}
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
+                  <input value={quickResp.description} onChange={e => setQuickResp(f => ({ ...f, description: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1" placeholder="Optional details" /></div>
                 {quickResp.item_type === 'responsibility' ? (
                   <>
                     <div><label className="text-xs text-gray-500">Frequency</label>
@@ -644,22 +701,23 @@ export default function HRM() {
           <div className="bg-white rounded-xl border overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-xs text-gray-400 uppercase">
-                <tr>{['Code','Name','Department','Designation','Phone','Status',''].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
+                <tr>{['Code','Name','Department','Designation','Email','Phone','Status',''].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
               </thead>
               <tbody>
                 {(employees as any[]).map((e: any) => (
                   <tr key={e.id} className="border-t hover:bg-gray-50">
                     {editEmp?.id === e.id ? (
-                      <td colSpan={7} className="px-4 py-3">
-                        <div className="grid grid-cols-4 gap-2">
-                          <input value={editEmp.name} onChange={ev => setEditEmp((x: any) => ({ ...x, name: ev.target.value }))} className="border rounded px-2 py-1 text-sm" />
+                      <td colSpan={8} className="px-4 py-3">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          <input value={editEmp.name} onChange={ev => setEditEmp((x: any) => ({ ...x, name: ev.target.value }))} className="border rounded px-2 py-1 text-sm" placeholder="Name" />
                           <select value={editEmp.department_id || ''} onChange={ev => setEditEmp((x: any) => ({ ...x, department_id: +ev.target.value }))} className="border rounded px-2 py-1 text-sm">
                             <option value="">Dept</option>
                             {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
                           </select>
                           <input value={editEmp.designation} onChange={ev => setEditEmp((x: any) => ({ ...x, designation: ev.target.value }))} className="border rounded px-2 py-1 text-sm" placeholder="Designation" />
-                          <div className="flex gap-1">
-                            <button onClick={() => updateEmpMut.mutate({ id: e.id, data: editEmp })} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                          <input value={editEmp.email || ''} onChange={ev => setEditEmp((x: any) => ({ ...x, email: ev.target.value }))} className="border rounded px-2 py-1 text-sm" placeholder="Email" />
+                          <div className="flex gap-1 col-span-2">
+                            <button onClick={() => updateEmpMut.mutate({ id: e.id, data: { name: editEmp.name, department_id: editEmp.department_id, designation: editEmp.designation, email: editEmp.email } })} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                             <button onClick={() => setEditEmp(null)} className="px-2 py-1 border rounded text-xs">Cancel</button>
                           </div>
                         </div>
@@ -670,11 +728,15 @@ export default function HRM() {
                         <td className="px-4 py-2 font-semibold">{e.name}</td>
                         <td className="px-4 py-2 text-gray-500">{e.department_name || '—'}</td>
                         <td className="px-4 py-2 text-gray-500">{e.designation || '—'}</td>
+                        <td className="px-4 py-2 text-gray-500">{e.email || '—'}</td>
                         <td className="px-4 py-2 text-gray-500">{e.phone || '—'}</td>
                         <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full ${e.status === 'Active' ? 'bg-green-100 text-green-700' : 'bg-gray-100'}`}>{e.status}</span></td>
                         <td className="px-4 py-2">
                           <div className="flex gap-2">
-                            <button onClick={() => setEditEmp({ id: e.id, name: e.name, department_id: e.department_id, designation: e.designation || '' })} className="text-xs text-blue-600">✏️</button>
+                            <button onClick={() => setEditEmp({ id: e.id, name: e.name, department_id: e.department_id, designation: e.designation || '', email: e.email || '' })} className="text-xs text-blue-600">✏️</button>
+                            {canManageOrg && (
+                              <button onClick={() => { if (window.confirm(`Delete employee ${e.name} (${e.emp_code})?`)) deleteEmpMut.mutate(e.id) }} className="text-xs text-red-600">🗑️</button>
+                            )}
                             <button onClick={() => { setAppraisalEmp(e.id); setTab('appraisal') }} className="text-xs text-purple-600">📁 Appraisal</button>
                           </div>
                         </td>
@@ -703,7 +765,19 @@ export default function HRM() {
                 {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
               </select>
             </div>
+            <div className="flex gap-2 flex-wrap">
             <button onClick={() => setShowRespForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Assign Item</button>
+            {canEditAssignments && (
+              <>
+                <input ref={respImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
+                  onChange={e => { const f = e.target.files?.[0]; if (f) importRespMut.mutate(f); e.target.value = '' }} />
+                <button onClick={() => respImportRef.current?.click()} disabled={importRespMut.isPending}
+                  className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium disabled:opacity-50">
+                  {importRespMut.isPending ? 'Importing…' : '📥 Import Sheet'}
+                </button>
+              </>
+            )}
+            </div>
           </div>
           {showRespForm && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
@@ -723,6 +797,8 @@ export default function HRM() {
                 </div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
                   <input value={respForm.title} onChange={e => setRespForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Enter delivery date on bills" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
+                  <input value={respForm.description} onChange={e => setRespForm(f => ({ ...f, description: e.target.value }))} placeholder="Optional details" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 {respForm.item_type === 'responsibility' ? (
                   <>
                     <div><label className="text-xs text-gray-500">Frequency</label>
@@ -760,13 +836,13 @@ export default function HRM() {
                 </div>
                 <table className="w-full text-sm">
                   <thead className="text-gray-400 text-xs uppercase bg-gray-50">
-                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Category</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
+                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Description</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Category</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
                   </thead>
                   <tbody>
                     {resps.map((r: any) => (
                       <tr key={r.id} className="border-t hover:bg-gray-50">
                         {editResp?.id === r.id ? (
-                          <td colSpan={5} className="px-4 py-3">
+                          <td colSpan={6} className="px-4 py-3">
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                               <input value={editResp.title} onChange={e => setEditResp((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Title" />
                               <input value={editResp.description || ''} onChange={e => setEditResp((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
@@ -787,7 +863,8 @@ export default function HRM() {
                           </td>
                         ) : (
                           <>
-                            <td className="px-4 py-2 font-medium">{r.title}{r.description && <p className="text-xs text-gray-400">{r.description}</p>}</td>
+                            <td className="px-4 py-2 font-medium">{r.title}</td>
+                            <td className="px-4 py-2 text-xs text-gray-500">{r.description || '—'}</td>
                             <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}</span></td>
                             <td className="px-4 py-2 text-xs text-gray-500">{r.category}</td>
                             <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
@@ -838,33 +915,65 @@ export default function HRM() {
               </select>
             </div>
             {canAssignTasks && (
-              <button onClick={() => setShowTaskForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Assign Task</button>
+              <div className="flex gap-2 flex-wrap">
+                <button onClick={() => setShowTaskForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Assign Item</button>
+                <input ref={taskImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
+                  onChange={e => { const f = e.target.files?.[0]; if (f) importTaskMut.mutate(f); e.target.value = '' }} />
+                <button onClick={() => taskImportRef.current?.click()} disabled={importTaskMut.isPending}
+                  className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium disabled:opacity-50">
+                  {importTaskMut.isPending ? 'Importing…' : '📥 Import Sheet'}
+                </button>
+              </div>
             )}
           </div>
 
           {showTaskForm && canAssignTasks && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">Assign One-Time Task</h3>
+              <h3 className="font-semibold text-gray-700">Assign Responsibility or Task</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div><label className="text-xs text-gray-500">Item Type *</label>
+                  <select value={taskForm.item_type} onChange={e => setTaskForm(f => ({ ...f, item_type: e.target.value as ItemType }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="responsibility">Responsibility (recurring)</option>
+                    <option value="task">Task (one-time)</option>
+                  </select>
+                </div>
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={taskForm.employee_id} onChange={e => setTaskForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
                     {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
                 </div>
-                <div className="col-span-2"><label className="text-xs text-gray-500">Task Title *</label>
+                <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
                   <input value={taskForm.title} onChange={e => setTaskForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Complete warehouse audit by Friday" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
                   <input value={taskForm.description} onChange={e => setTaskForm(f => ({ ...f, description: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                <div><label className="text-xs text-gray-500">Due Date</label>
-                  <input type="date" value={taskForm.due_date} onChange={e => setTaskForm(f => ({ ...f, due_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                {taskForm.item_type === 'responsibility' ? (
+                  <div><label className="text-xs text-gray-500">Frequency</label>
+                    <select value={respForm.frequency} onChange={e => setRespForm(f => ({ ...f, frequency: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                      {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
+                    </select>
+                  </div>
+                ) : (
+                  <div><label className="text-xs text-gray-500">Due Date</label>
+                    <input type="date" value={taskForm.due_date} onChange={e => setTaskForm(f => ({ ...f, due_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                )}
                 <div><label className="text-xs text-gray-500">Assigned By</label>
                   <input value={taskForm.assigned_by} onChange={e => setTaskForm(f => ({ ...f, assigned_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={() => createOneTimeTaskMut.mutate({ ...taskForm, employee_id: +taskForm.employee_id })}
-                  disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
+                  onClick={() => submitAssign({
+                    item_type: taskForm.item_type,
+                    employee_id: taskForm.employee_id,
+                    department_id: '',
+                    title: taskForm.title,
+                    description: taskForm.description,
+                    frequency: respForm.frequency,
+                    category: respForm.category,
+                    added_by: taskForm.assigned_by,
+                    due_date: taskForm.due_date,
+                  })}
+                  disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending || createRespMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
                   Assign
                 </button>
@@ -879,6 +988,7 @@ export default function HRM() {
                 <tr>
                   <th className="text-left px-4 py-2">Task</th>
                   <th className="text-left px-4 py-2">Employee</th>
+                  <th className="text-left px-4 py-2">Assigned</th>
                   <th className="text-left px-4 py-2">Due</th>
                   <th className="text-left px-4 py-2">Status</th>
                   <th className="text-left px-4 py-2">Time</th>
@@ -889,7 +999,7 @@ export default function HRM() {
                 {(oneTimeTasks as any[]).map((t: any) => (
                   <tr key={t.id} className="border-t hover:bg-gray-50 align-top">
                     {editTask?.id === t.id ? (
-                      <td colSpan={6} className="px-4 py-3">
+                      <td colSpan={7} className="px-4 py-3">
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                           <input value={editTask.title} onChange={e => setEditTask((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Task title" />
                           <input value={editTask.description || ''} onChange={e => setEditTask((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
@@ -916,6 +1026,7 @@ export default function HRM() {
                           <p className="text-xs text-gray-400">{t.department_name || '—'}</p>
                           {t.assigned_by && <p className="text-xs text-gray-400 mt-0.5">By {t.assigned_by}</p>}
                         </td>
+                        <td className="px-4 py-3 text-gray-600">{fmtDate(t.created_at)}</td>
                         <td className="px-4 py-3 text-gray-600">{t.due_date || '—'}</td>
                         <td className="px-4 py-3">
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
@@ -969,10 +1080,16 @@ export default function HRM() {
       {tab === 'hod' && (
         <div className="space-y-4">
           <div className="flex items-center gap-3 flex-wrap">
-            <select value={hodDept} onChange={e => setHodDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+            <select value={hodDept} onChange={e => { setHodDept(e.target.value ? +e.target.value : ''); setHodEmp('') }} className="border rounded-lg px-3 py-1.5 text-sm">
               <option value="">Select Department</option>
               {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
+            {hodDept && (
+              <select value={hodEmp} onChange={e => setHodEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                <option value="">All Employees</option>
+                {hodDeptEmployees.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            )}
             {hodSubTab === 'responsibilities' && (
               <>
                 <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
@@ -1040,8 +1157,8 @@ export default function HRM() {
             <div className="bg-white rounded-xl border overflow-hidden">
               <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between">
                 <span className="font-semibold">{deptName(hodDept)} — Task Dashboard</span>
-                <div className="flex gap-3 text-xs text-blue-200">
-                  <span>○ Pending</span><span>✅ Done</span><span>⚠️ Partial</span><span>❌ Missed</span><span>🔴 Blocked</span>
+                <div className="flex gap-3 text-xs text-blue-200 flex-wrap">
+                  <span>○ Pending</span><span>✅ Done</span><span>⚠️ Partial</span><span>❌ Missed</span><span>🔴 Blocked</span><span>🏖 Leave</span><span>— N/A</span>
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -1067,24 +1184,27 @@ export default function HRM() {
                         </td>
                         <td className="px-3 py-2 text-gray-400">{r.frequency}</td>
                         {(hodData.dates || []).map((d: string) => {
-                          const dayData = r.dates?.[d] || { status: 'Pending' }
+                          const dayData = r.dates?.[d] || { status: 'Pending', marked: false }
                           const s = dayData.status
+                          const locked = !!dayData.marked
                           return (
                             <td key={d} className="px-1 py-2 text-center">
-                              <button
-                                onClick={() => {
-                                  const next = statusNext(s)
-                                  if (next === 'Blocked') {
-                                    setBlockedModal({ respId: r.id, date: d })
-                                    setBlockedForm({ blocker_employee_id: '', blocker_reason: '', marked_by: '' })
-                                  } else {
-                                    markTaskMut.mutate({ responsibility_id: r.id, log_date: d, status: next })
-                                  }
-                                }}
-                                title={`${s}${dayData.blocker_name ? ` — Blocked by ${dayData.blocker_name}` : ''}`}
-                                className={`w-7 h-7 rounded-full text-xs font-bold transition-all hover:scale-110 ${statusBg(s)}`}>
-                                {statusLabel(s)}
-                              </button>
+                              {locked ? (
+                                <span
+                                  title={`${s} (locked)${dayData.blocker_name ? ` — Blocked by ${dayData.blocker_name}` : ''}`}
+                                  className={`inline-flex w-7 h-7 items-center justify-center rounded-full text-xs font-bold ${statusBg(s)}`}>
+                                  {statusLabel(s)}
+                                </span>
+                              ) : (
+                                <select
+                                  defaultValue=""
+                                  onChange={e => { const val = e.target.value; handleStatusSelect(r.id, d, val); e.target.value = '' }}
+                                  className="text-[10px] border rounded px-0.5 py-0.5 max-w-[4.5rem] bg-white"
+                                  title="Select status (cannot change after saving)">
+                                  <option value="">Set</option>
+                                  {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
+                                </select>
+                              )}
                               {dayData.blocker_name && <p className="text-xs text-purple-600 mt-0.5">{dayData.blocker_name}</p>}
                             </td>
                           )
@@ -1095,7 +1215,7 @@ export default function HRM() {
                 </table>
               </div>
               <div className="px-4 py-2 border-t bg-gray-50 text-xs text-gray-500">
-                Click to cycle: ○ → ✅ Done → ⚠️ Partial → ❌ Missed → 🔴 Blocked (cross-dept issue auto-create)
+                Select a status from the dropdown for each day. Once saved, the status is locked and cannot be changed. Use Leave or N/A for absent employees.
               </div>
             </div>
           )}

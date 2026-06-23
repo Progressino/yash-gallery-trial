@@ -408,7 +408,7 @@ export default function GreyFabric() {
     ['dashboard', '📊 Dashboard'],
     ['locations', '📍 Locations'],
     ['tracker', '🚛 Tracker'],
-    ['mrp', '📐 MRP / SO'],
+    ['mrp', '📐 Material Req. Planning / SO'],
     ['jobwork', '🖨 Job work'],
     ['qc', '✅ QC'],
     ['ledger', '📜 Ledger'],
@@ -847,11 +847,11 @@ export default function GreyFabric() {
         </div>
       )}
 
-      {/* MRP */}
+      {/* Material requirement planning */}
       {tab === 'mrp' && (
         <div className="space-y-4">
           <div className="bg-white rounded-xl border p-4 space-y-3">
-            <h3 className="font-semibold text-[#002B5B] text-sm">Add MRP requirement line</h3>
+            <h3 className="font-semibold text-[#002B5B] text-sm">Add material requirement line</h3>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               {(['run_label','material_code','material_name','so_number','sku','notes'] as const).map(k => (
                 <div key={k}><label className="text-xs text-gray-500">{k}</label>

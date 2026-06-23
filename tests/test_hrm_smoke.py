@@ -44,7 +44,8 @@ def test_hrm_department_employee_task_flow(hrm_db):
     rid = resps[0]["id"]
 
     today = date.today().isoformat()
-    assert hrm_db.mark_task(rid, today, "Done", marked_by="HOD")
+    assert hrm_db.mark_task(rid, today, "Done", marked_by="HOD") is True
+    assert hrm_db.mark_task(rid, today, "Partial") == "locked"
 
     dash = hrm_db.get_hod_dashboard(dept_id, today, today)
     assert len(dash["responsibilities"]) == 1
@@ -56,6 +57,46 @@ def test_hrm_department_employee_task_flow(hrm_db):
     perf = hrm_db.get_performance(dept_id, today, today)
     assert len(perf) == 1
     assert perf[0]["done_tasks"] >= 1
+
+
+def test_hrm_leave_status_excluded_from_performance(hrm_db):
+    import uuid
+
+    hrm_db.create_department({"name": f"Ops-{uuid.uuid4().hex[:8]}", "hod_name": "HOD"})
+    dept_id = hrm_db.list_departments()[0]["id"]
+    hrm_db.create_employee({"name": "Absent", "department_id": dept_id})
+    emp_id = hrm_db.list_employees()[0]["id"]
+    hrm_db.create_responsibility({"employee_id": emp_id, "title": "Daily check"})
+    rid = hrm_db.list_responsibilities(employee_id=emp_id)[0]["id"]
+    today = date.today().isoformat()
+    assert hrm_db.mark_task(rid, today, "Leave") is True
+    appraisal = hrm_db.get_appraisal(emp_id, today, today)
+    assert appraisal["task_summary"]["leave"] == 1
+    assert appraisal["task_summary"]["total"] == 0
+
+
+def test_hrm_import_responsibilities(hrm_db):
+    import uuid
+
+    hrm_db.create_department({"name": f"Import-{uuid.uuid4().hex[:8]}"})
+    dept_id = hrm_db.list_departments()[0]["id"]
+    code = hrm_db.create_employee({"name": "Importer", "department_id": dept_id})
+    result = hrm_db.import_responsibilities(
+        [{"employee_code": code, "title": "Stock check", "description": "Morning count", "frequency": "Daily"}]
+    )
+    assert result["created"] == 1
+    assert len(hrm_db.list_responsibilities()) == 1
+
+
+def test_hrm_delete_employee(hrm_db):
+    import uuid
+
+    hrm_db.create_department({"name": f"Del-{uuid.uuid4().hex[:8]}"})
+    dept_id = hrm_db.list_departments()[0]["id"]
+    hrm_db.create_employee({"name": "Temp", "department_id": dept_id})
+    emp_id = hrm_db.list_employees()[0]["id"]
+    assert hrm_db.delete_employee(emp_id) is True
+    assert hrm_db.list_employees() == []
 
 
 def test_hrm_router_import():

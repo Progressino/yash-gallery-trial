@@ -1,5 +1,8 @@
 """HRM Module Router — task tracking, issues, appraisal (RBAC-scoped)."""
-from fastapi import APIRouter, HTTPException, Request
+import io
+
+import pandas as pd
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from typing import Optional
 
@@ -10,6 +13,9 @@ from ..db.hrm_db import (
     list_employees,
     create_employee,
     update_employee,
+    delete_employee,
+    import_responsibilities,
+    import_one_time_tasks,
     list_responsibilities,
     create_responsibility,
     update_responsibility,
@@ -236,6 +242,52 @@ def patch_employee(eid: int, body: EmployeeUpdate, request: Request):
     return {"ok": True}
 
 
+@router.delete("/employees/{eid}")
+def del_employee(eid: int, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_manage_org:
+        raise HTTPException(403, "Only Admin can delete employees")
+    assert_employee_in_scope(scope, eid)
+    if not delete_employee(eid):
+        raise HTTPException(404, "Employee not found")
+    return {"ok": True}
+
+
+def _parse_import_rows(content: bytes, filename: str) -> list[dict]:
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(content))
+    elif name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(content))
+    else:
+        raise HTTPException(400, "Upload .csv, .xlsx, or .xls")
+    if df.empty:
+        return []
+    return df.fillna("").to_dict(orient="records")
+
+
+@router.post("/import/responsibilities")
+async def post_import_responsibilities(request: Request, file: UploadFile = File(...)):
+    scope = _scope_from_request(request)
+    if not scope.can_edit_assignments:
+        raise HTTPException(403, "Not allowed to import responsibilities")
+    content = await file.read()
+    rows = _parse_import_rows(content, file.filename or "")
+    result = import_responsibilities(rows)
+    return {"ok": True, **result}
+
+
+@router.post("/import/one-time-tasks")
+async def post_import_one_time_tasks(request: Request, file: UploadFile = File(...)):
+    scope = _scope_from_request(request)
+    if scope.is_employee:
+        raise HTTPException(403, "Not allowed to import tasks")
+    content = await file.read()
+    rows = _parse_import_rows(content, file.filename or "")
+    result = import_one_time_tasks(rows)
+    return {"ok": True, **result}
+
+
 @router.get("/responsibilities")
 def get_responsibilities(
     request: Request,
@@ -304,9 +356,13 @@ def post_mark_task(body: TaskMarkIn, request: Request):
         body.blocker_employee_id,
         body.blocker_reason or "",
     )
-    if not ok:
-        raise HTTPException(404, "Responsibility not found")
-    return {"ok": True}
+    if ok is True:
+        return {"ok": True}
+    if ok == "locked":
+        raise HTTPException(409, "Status already set and cannot be changed")
+    if ok == "invalid_status":
+        raise HTTPException(400, "Invalid status")
+    raise HTTPException(404, "Responsibility not found")
 
 
 @router.get("/tasks/logs")
@@ -368,10 +424,13 @@ def hod_dashboard(
     request: Request,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    employee_id: Optional[int] = None,
 ):
     scope = _scope_from_request(request)
     assert_department_in_scope(scope, department_id)
-    return get_hod_dashboard(department_id, from_date, to_date)
+    if employee_id is not None:
+        assert_employee_in_scope(scope, employee_id)
+    return get_hod_dashboard(department_id, from_date, to_date, employee_id=employee_id)
 
 
 @router.get("/appraisal/{employee_id}")

@@ -656,7 +656,7 @@ export default function Purchase() {
       setSelectedPurchaseItems(new Set(d.purchase_items.map(i => i.material_code)))
       setSelectedSFGItems(new Set(d.sfg_items.map(i => i.material_code)))
     } catch {
-      setMrpLinesData({ so_number: mrpSO, purchase_items: [], sfg_items: [], error: 'Failed to load MRP lines.' })
+      setMrpLinesData({ so_number: mrpSO, purchase_items: [], sfg_items: [], error: 'Failed to load material planning lines.' })
     }
     setMrpLoadingLines(false)
   }
@@ -1026,7 +1026,7 @@ export default function Purchase() {
         <div className="space-y-4">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
-              {([['list', 'PR List'], ['new', '+ Create PR'], ['from-mrp', 'From MRP']] as [PRSubTab, string][]).map(([st, lbl]) => (
+              {([['list', 'PR List'], ['new', '+ Create PR'], ['from-mrp', 'From Material Planning']] as [PRSubTab, string][]).map(([st, lbl]) => (
                 <button key={st} onClick={() => { setPRSubTab(st); setGeneratedPRs([]) }}
                   className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${prSubTab === st ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                   {lbl}
@@ -1056,7 +1056,7 @@ export default function Purchase() {
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${pr.pr_type === 'Job Work' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
                             {pr.pr_type === 'Job Work' ? '✏️ Job Work' : '🛒 Purchase'}
                           </span>
-                          {pr.source === 'MRP' && <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-medium">From MRP</span>}
+                          {pr.source === 'MRP' && <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-medium">From Material Planning</span>}
                         </div>
                         <p className="text-xs text-gray-500 mt-0.5">SO: {pr.so_reference || '—'} · {pr.lines.length} items · Pending: {Math.round(totalPending)}</p>
                       </div>
@@ -1082,7 +1082,7 @@ export default function Purchase() {
                           </div>
                           <div><p className="text-xs text-gray-400 uppercase font-semibold mb-1">Source</p>
                             <p className="text-xs text-gray-700">SO: {pr.so_reference || '—'}</p>
-                            <p className="text-xs text-gray-700">From: {pr.source || 'Manual'}</p>
+                            <p className="text-xs text-gray-700">From: {pr.source === 'MRP' ? 'Material Planning' : (pr.source || 'Manual')}</p>
                           </div>
                           <div><p className="text-xs text-gray-400 uppercase font-semibold mb-1">Status</p>
                             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(pr.status)}`}>{pr.status}</span>
@@ -1274,11 +1274,11 @@ export default function Purchase() {
             </div>
           )}
 
-          {/* From MRP */}
+          {/* From material planning */}
           {prSubTab === 'from-mrp' && (
             <div className="space-y-4">
               <div className="bg-white rounded-xl border p-4 space-y-4">
-                <h3 className="font-semibold text-gray-700">Generate PR from MRP</h3>
+                <h3 className="font-semibold text-gray-700">Generate PR from Material Planning</h3>
                 <div className="grid grid-cols-3 gap-3 items-end">
                   <div><label className="text-xs text-gray-500">SO Reference</label>
                     <input value={mrpSO} onChange={e => setMrpSO(e.target.value)} placeholder="SO-0001"
@@ -1287,7 +1287,7 @@ export default function Purchase() {
                     <input type="date" value={mrpReqDate} onChange={e => setMrpReqDate(e.target.value)} className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
                   <button onClick={loadMRPLines} disabled={!mrpSO.trim() || mrpLoadingLines}
                     className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800 disabled:opacity-50">
-                    {mrpLoadingLines ? 'Loading…' : 'Load MRP'}
+                    {mrpLoadingLines ? 'Loading…' : 'Load planning lines'}
                   </button>
                 </div>
                 {mrpLinesData?.error && <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">{mrpLinesData.error}</p>}
@@ -1308,7 +1308,7 @@ export default function Purchase() {
                                     onChange={e => setSelectedPurchaseItems(e.target.checked ? new Set(mrpLinesData.purchase_items.map(i => i.material_code)) : new Set())} />
                                 </th>
                                 <th className="px-3 py-2 text-left">Code</th><th className="px-3 py-2 text-left">Name</th>
-                                <th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-right">MRP Qty</th><th className="px-3 py-2 text-right">Committed</th><th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2 text-right">Unit</th>
+                                <th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-right">Planned Qty</th><th className="px-3 py-2 text-right">Committed</th><th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2 text-right">Unit</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -2007,7 +2007,7 @@ export default function Purchase() {
       {tab === 'audit' && (
         <div className="bg-white rounded-xl border p-4 space-y-4 max-w-4xl">
           <h3 className="font-semibold text-gray-800">Document chain audit</h3>
-          <p className="text-xs text-gray-500">Trace MRP commitments → PO / JWO → GRN → grey fabric ledger for one sales order.</p>
+          <p className="text-xs text-gray-500">Trace material planning commitments → PO / JWO → GRN → grey fabric ledger for one sales order.</p>
           <div className="flex flex-wrap gap-2 items-end">
             <div>
               <label className="text-xs text-gray-500">SO number</label>
@@ -2047,7 +2047,7 @@ export default function Purchase() {
             <div key={m.material_code} className="border rounded-lg p-3 text-sm">
               <p className="font-mono font-bold text-[#002B5B]">{m.material_code}</p>
               <p className="text-xs text-gray-500 mb-2">
-                MRP {m.mrp_qty} · PO {m.po_committed_qty} · JO fabric {m.jo_committed_qty} · Remaining {m.remaining_qty}
+                Planned {m.mrp_qty} · PO {m.po_committed_qty} · JO fabric {m.jo_committed_qty} · Remaining {m.remaining_qty}
               </p>
               <ul className="text-xs text-gray-600 space-y-0.5">
                 <li><b>POs:</b> {(m.pos || []).map(p => `${p.po_number} (${p.status})`).join(', ') || '—'}</li>

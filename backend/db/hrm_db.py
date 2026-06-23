@@ -15,6 +15,9 @@ def _default_db_path() -> str:
 
 _DB = os.environ.get("HRM_DB_PATH", _default_db_path())
 
+TASK_LOG_STATUSES = frozenset({"Done", "Partial", "Missed", "Blocked", "Leave", "N/A"})
+NEUTRAL_TASK_STATUSES = frozenset({"Leave", "N/A"})
+
 
 def _connect():
     conn = sqlite3.connect(_DB)
@@ -277,6 +280,108 @@ def update_employee(eid: int, data: dict):
     conn.close()
 
 
+def delete_employee(eid: int) -> bool:
+    conn = _connect()
+    row = conn.execute("SELECT id FROM employees WHERE id=?", (eid,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    conn.execute("UPDATE employees SET status='Inactive' WHERE id=?", (eid,))
+    conn.execute("UPDATE responsibilities SET active=0 WHERE employee_id=?", (eid,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def _normalize_import_row(row: dict) -> dict:
+    out: dict = {}
+    for k, v in row.items():
+        key = str(k).strip().lower().replace(" ", "_")
+        out[key] = "" if v is None else str(v).strip()
+    return out
+
+
+def _resolve_employee_id(conn, row: dict) -> int | None:
+    code = row.get("employee_code") or row.get("emp_code") or ""
+    name = row.get("employee_name") or row.get("employee") or row.get("name") or ""
+    if code:
+        found = conn.execute(
+            "SELECT id FROM employees WHERE emp_code=? AND status='Active'",
+            (code,),
+        ).fetchone()
+        if found:
+            return int(found["id"])
+    if name:
+        found = conn.execute(
+            "SELECT id FROM employees WHERE LOWER(name)=LOWER(?) AND status='Active'",
+            (name,),
+        ).fetchone()
+        if found:
+            return int(found["id"])
+    return None
+
+
+def import_responsibilities(rows: list[dict]) -> dict:
+    created = 0
+    errors: list[str] = []
+    conn = _connect()
+    try:
+        for idx, raw in enumerate(rows, start=1):
+            row = _normalize_import_row(raw)
+            title = row.get("title") or row.get("task") or row.get("responsibility") or ""
+            if not title:
+                errors.append(f"Row {idx}: missing title")
+                continue
+            emp_id = _resolve_employee_id(conn, row)
+            if not emp_id:
+                errors.append(f"Row {idx}: employee not found ({row.get('employee_name') or row.get('emp_code') or '?'})")
+                continue
+            create_responsibility(
+                {
+                    "employee_id": emp_id,
+                    "title": title,
+                    "description": row.get("description", ""),
+                    "frequency": row.get("frequency") or "Daily",
+                    "category": row.get("category") or "General",
+                    "added_by": row.get("added_by") or row.get("assigned_by") or "",
+                }
+            )
+            created += 1
+    finally:
+        conn.close()
+    return {"created": created, "errors": errors}
+
+
+def import_one_time_tasks(rows: list[dict]) -> dict:
+    created = 0
+    errors: list[str] = []
+    conn = _connect()
+    try:
+        for idx, raw in enumerate(rows, start=1):
+            row = _normalize_import_row(raw)
+            title = row.get("title") or row.get("task") or ""
+            if not title:
+                errors.append(f"Row {idx}: missing title")
+                continue
+            emp_id = _resolve_employee_id(conn, row)
+            if not emp_id:
+                errors.append(f"Row {idx}: employee not found ({row.get('employee_name') or row.get('emp_code') or '?'})")
+                continue
+            create_one_time_task(
+                {
+                    "employee_id": emp_id,
+                    "title": title,
+                    "description": row.get("description", ""),
+                    "due_date": row.get("due_date") or row.get("due") or "",
+                    "assigned_by": row.get("assigned_by") or row.get("added_by") or "",
+                }
+            )
+            created += 1
+    finally:
+        conn.close()
+    return {"created": created, "errors": errors}
+
+
 def list_responsibilities(employee_id=None, department_id=None, active_only=True):
     conn = _connect()
     conditions = []
@@ -360,6 +465,9 @@ def mark_task(
     blocker_employee_id: int = None,
     blocker_reason: str = "",
 ):
+    if status not in TASK_LOG_STATUSES:
+        return "invalid_status"
+
     conn = _connect()
     resp = conn.execute(
         "SELECT employee_id, department_id FROM responsibilities WHERE id=?",
@@ -369,14 +477,18 @@ def mark_task(
         conn.close()
         return False
 
+    existing = conn.execute(
+        "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (responsibility_id, log_date),
+    ).fetchone()
+    if existing:
+        conn.close()
+        return "locked"
+
     conn.execute(
         """INSERT INTO task_logs(responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,blocker_employee_id,blocker_reason)
         VALUES(?,?,?,?,?,?,datetime('now'),?,?)
-        ON CONFLICT(responsibility_id,log_date) DO UPDATE SET
-        status=excluded.status, remarks=excluded.remarks,
-        marked_by=excluded.marked_by, marked_at=datetime('now'),
-        blocker_employee_id=excluded.blocker_employee_id,
-        blocker_reason=excluded.blocker_reason
+        ON CONFLICT(responsibility_id,log_date) DO NOTHING
     """,
         (
             responsibility_id,
@@ -555,7 +667,12 @@ def resolve_issue(issue_id: int, resolution: str):
     conn.close()
 
 
-def get_hod_dashboard(department_id: int, from_date: str = None, to_date: str = None):
+def get_hod_dashboard(
+    department_id: int,
+    from_date: str = None,
+    to_date: str = None,
+    employee_id: int | None = None,
+):
     today = date.today().isoformat()
     fd = from_date or today
     td = to_date or today
@@ -568,16 +685,18 @@ def get_hod_dashboard(department_id: int, from_date: str = None, to_date: str = 
         cur += timedelta(days=1)
 
     conn = _connect()
-    resps = conn.execute(
-        """
+    resp_sql = """
         SELECT r.*, e.name as employee_name
         FROM responsibilities r
         JOIN employees e ON e.id=r.employee_id
         WHERE r.department_id=? AND r.active=1
-        ORDER BY e.name, r.frequency, r.title
-    """,
-        (department_id,),
-    ).fetchall()
+    """
+    resp_params: list = [department_id]
+    if employee_id:
+        resp_sql += " AND r.employee_id=?"
+        resp_params.append(employee_id)
+    resp_sql += " ORDER BY e.name, r.frequency, r.title"
+    resps = conn.execute(resp_sql, resp_params).fetchall()
 
     logs = conn.execute(
         """
@@ -602,6 +721,7 @@ def get_hod_dashboard(department_id: int, from_date: str = None, to_date: str = 
             "marked_by": l["marked_by"],
             "blocker_name": l["blocker_name"] or "",
             "blocker_reason": l["blocker_reason"] or "",
+            "marked": True,
         }
 
     result = []
@@ -618,6 +738,7 @@ def get_hod_dashboard(department_id: int, from_date: str = None, to_date: str = 
                     "marked_by": "",
                     "blocker_name": "",
                     "blocker_reason": "",
+                    "marked": False,
                 },
             )
         result.append(rd)
@@ -690,11 +811,14 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
 
     conn.close()
 
-    total = len(task_logs)
-    done = sum(1 for t in task_logs if t["status"] == "Done")
-    partial = sum(1 for t in task_logs if t["status"] == "Partial")
-    missed = sum(1 for t in task_logs if t["status"] == "Missed")
-    blocked = sum(1 for t in task_logs if t["status"] == "Blocked")
+    counted_logs = [t for t in task_logs if t["status"] not in NEUTRAL_TASK_STATUSES]
+    total = len(counted_logs)
+    done = sum(1 for t in counted_logs if t["status"] == "Done")
+    partial = sum(1 for t in counted_logs if t["status"] == "Partial")
+    missed = sum(1 for t in counted_logs if t["status"] == "Missed")
+    blocked = sum(1 for t in counted_logs if t["status"] == "Blocked")
+    leave = sum(1 for t in task_logs if t["status"] == "Leave")
+    na = sum(1 for t in task_logs if t["status"] == "N/A")
     resp_pct = round((done + partial * 0.5) / total * 100, 1) if total > 0 else 0
 
     ot_summary, ot_period = _summarize_one_time_tasks(
@@ -711,6 +835,8 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
             "partial": partial,
             "missed": missed,
             "blocked": blocked,
+            "leave": leave,
+            "na": na,
             "responsibility_performance_pct": resp_pct,
             "one_time_performance_pct": ot_summary["performance_pct"],
             "performance_pct": combined_pct,

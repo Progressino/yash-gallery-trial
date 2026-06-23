@@ -1116,8 +1116,8 @@ def check_mrp_commitment(so_number: str, material_code: str, qty: float) -> None
     remaining = mrp - committed
     if float(qty or 0) > remaining + 1e-9:
         raise ValueError(
-            f"MRP limit for {material_code} on {so_number}: need {qty}, only {max(0, remaining):.3f} remaining "
-            f"(MRP {mrp:.3f}, already committed PO+JO {committed:.3f})"
+            f"Material planning limit for {material_code} on {so_number}: need {qty}, only {max(0, remaining):.3f} remaining "
+            f"(planned {mrp:.3f}, already committed PO+JO {committed:.3f})"
         )
 
 
