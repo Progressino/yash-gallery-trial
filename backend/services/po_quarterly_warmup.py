@@ -370,6 +370,48 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
     return False
 
 
+def attach_quarterly_columns_to_po_df(
+    po_df: pd.DataFrame,
+    sess,
+    *,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+) -> pd.DataFrame:
+    """Merge quarterly shipment history columns into PO result rows (inline in Calculate PO)."""
+    if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
+        return po_df
+
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+    payload = (getattr(sess, "_quarterly_cache", None) or {}).get(cache_key)
+    if not payload or not payload.get("loaded"):
+        payload = try_build_quarterly_payload_sync(
+            sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+        )
+    if payload:
+        payload = normalize_quarterly_payload(payload, n_quarters=n_quarters)
+        if not hasattr(sess, "_quarterly_cache"):
+            sess._quarterly_cache = {}
+        sess._quarterly_cache[cache_key] = payload
+
+    if not payload or not payload.get("loaded") or not payload.get("rows"):
+        return po_df
+
+    q_df = pd.DataFrame(payload["rows"])
+    if q_df.empty or "OMS_SKU" not in q_df.columns:
+        return po_df
+
+    expected = expected_quarter_columns(n_quarters)
+    merge_cols = [c for c in expected if c in q_df.columns and c not in po_df.columns]
+    if not merge_cols:
+        return po_df
+
+    q_sub = q_df[["OMS_SKU"] + merge_cols].drop_duplicates(subset=["OMS_SKU"], keep="last")
+    out = po_df.merge(q_sub, on="OMS_SKU", how="left")
+    for c in merge_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
+    return out
+
+
 def schedule_shared_quarterly_prewarm() -> None:
     """Deferred pre-build — wait until warm-cache / restore memory lock is free (OOM-safe)."""
     import os

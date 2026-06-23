@@ -372,6 +372,56 @@ def test_cutting_ratio_two_gross_sizes_uses_demand_split():
     assert abs(float(row_l["Cutting_Ratio"]) + float(row_xl["Cutting_Ratio"]) - 1.0) < 0.02
 
 
+def test_sibling_cut_suggested_when_overstock_has_pending_cutting():
+    """1061YK-style: PO sizes with low cover; siblings >target days with pending cut → adjust note."""
+    days = pd.date_range("2026-05-01", periods=30, freq="D")
+    sales_rows = []
+    for d in days:
+        sales_rows.append(
+            {"Sku": "1061YKBLUE-3XL", "TxnDate": d, "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1}
+        )
+        sales_rows.append(
+            {"Sku": "1061YKBLUE-L", "TxnDate": d, "Transaction Type": "Shipment", "Quantity": 1, "Units_Effective": 1}
+        )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1061YKBLUE-3XL", "1061YKBLUE-L"],
+            "Total_Inventory": [5, 200],
+        }
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1061YKBLUE-3XL", "1061YKBLUE-L"],
+            "PO_Pipeline_Total": [0, 110],
+            "Pending_Cutting": [0, 110],
+            "Balance_to_Dispatch": [0, 0],
+            "PO_Qty_Ordered": [0, 0],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        grace_days=0,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        enforce_two_size_minimum=False,
+        enforce_lead_time_release_gate=False,
+        existing_po_df=existing_po,
+    )
+    need = po[po["OMS_SKU"] == "1061YKBLUE-3XL"].iloc[0]
+    donor = po[po["OMS_SKU"] == "1061YKBLUE-L"].iloc[0]
+    assert int(need["PO_Qty"]) > 0
+    assert float(donor["Projected_Running_Days"]) > 180
+    assert int(donor["Pending_Cutting"]) == 110
+    assert "BAAKI SIZE SE ADJUST" in str(need["PO_Cutting_Note"])
+    assert "L" in str(need["Cut_From_Siblings"])
+    assert "Donor" in str(donor["Cutting_Source"])
+
+
 def test_sku_status_pick_lead_time_days_column_name():
     from backend.services.sku_status_lead import parse_sku_status_lead_dataframe
 

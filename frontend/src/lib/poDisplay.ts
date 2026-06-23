@@ -42,6 +42,9 @@ export const PO_DISPLAY_COLS = [
   'PO_Qty',
   'PO_Block_Reason',
   'Suggest_Close_SKU',
+  'Cutting_Source',
+  'Cut_From_Siblings',
+  'PO_Cutting_Note',
 ] as const
 
 export const COL_LABEL: Record<string, string> = {
@@ -75,6 +78,9 @@ export const COL_LABEL: Record<string, string> = {
   Projected_Running_Days: '📅 Proj. run (Tot inv + pipe) / ADS',
   Post_PO_Cover_Days_Capped: '📏 Post-PO cover (actual)',
   Cutting_Ratio: '✂️ Cut Ratio',
+  Cutting_Source: '✂️ Cutting source',
+  Cut_From_Siblings: '✂️ Cut from siblings',
+  PO_Cutting_Note: '📋 Cutting note',
   Lead_Time_Days: '📅 Lead (d)',
   SKU_Sheet_Status: '📋 Sheet status',
   Ship_Units_150d: '📉 Ship ~5mo',

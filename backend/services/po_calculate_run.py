@@ -421,6 +421,16 @@ def execute_po_calculate(
     finally:
         _hb_stop.set()
 
+    if po_df is not None and not po_df.empty:
+        try:
+            from .po_quarterly_warmup import attach_quarterly_columns_to_po_df
+
+            po_df = attach_quarterly_columns_to_po_df(
+                po_df, sess, group_by_parent=group_by_parent, n_quarters=8
+            )
+        except Exception:
+            logger.exception("attach_quarterly_columns_to_po_df failed (non-fatal)")
+
     if po_df is None or po_df.empty:
         return {"ok": False, "message": "PO result is empty."}
 

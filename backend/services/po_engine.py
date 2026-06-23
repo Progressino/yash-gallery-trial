@@ -781,6 +781,72 @@ def _fallback_parent_key(sku: str) -> str:
     return _SIZE_SUFFIX_RE.sub("", s).strip("-_")
 
 
+def _size_suffix_label(oms_sku: str) -> str:
+    s = str(oms_sku or "").strip()
+    if "-" in s:
+        return s.rsplit("-", 1)[-1]
+    return s
+
+
+def _apply_sibling_cut_from_pending(po_df: pd.DataFrame, target_cover_days: float) -> pd.DataFrame:
+    """When some sizes need a PO and siblings are over-covered with pending cutting, suggest cutting
+    from those sizes instead of ordering new fabric (saves grey-fabric cost)."""
+    if po_df is None or po_df.empty or "Parent_SKU" not in po_df.columns:
+        return po_df
+
+    po_df = po_df.copy()
+    for col in ("Cutting_Source", "Cut_From_Siblings", "PO_Cutting_Note"):
+        if col not in po_df.columns:
+            po_df[col] = ""
+
+    proj = pd.to_numeric(po_df.get("Projected_Running_Days"), errors="coerce").fillna(999.0)
+    if "Pending_Cutting" in po_df.columns:
+        pending = pd.to_numeric(po_df["Pending_Cutting"], errors="coerce").fillna(0).astype(int)
+    else:
+        pending = pd.Series(0, index=po_df.index, dtype=int)
+    po_qty = pd.to_numeric(po_df.get("PO_Qty"), errors="coerce").fillna(0).astype(int)
+    par = po_df["Parent_SKU"].astype(str)
+    sku = po_df["OMS_SKU"].astype(str)
+    threshold = float(max(1.0, target_cover_days))
+
+    is_donor = (proj > threshold) & (pending > 0)
+    needs_po = po_qty > 0
+
+    for parent in par.loc[needs_po].dropna().unique():
+        if not str(parent).strip():
+            continue
+        donor_mask = is_donor & (par == parent)
+        need_mask = needs_po & (par == parent)
+        if not donor_mask.any():
+            continue
+
+        donor_parts: list[str] = []
+        for idx in po_df.index[donor_mask]:
+            donor_parts.append(
+                f"{_size_suffix_label(sku.at[idx])} "
+                f"({int(pending.at[idx])} pending cut, {float(proj.at[idx]):.0f}d cover)"
+            )
+        donor_text = "; ".join(donor_parts)
+        note = "BAAKI SIZE SE ADJUST — cut from sibling pending stock before new fabric"
+
+        for idx in po_df.index[need_mask]:
+            po_df.at[idx, "Cutting_Source"] = "Adjust from siblings (pending cutting)"
+            po_df.at[idx, "Cut_From_Siblings"] = donor_text
+            po_df.at[idx, "PO_Cutting_Note"] = note
+
+        for idx in po_df.index[donor_mask]:
+            po_df.at[idx, "Cutting_Source"] = "Donor — cut for sibling PO"
+            hint = (
+                f"Cut pending stock for sibling PO — {int(pending.at[idx])} units "
+                f"({float(proj.at[idx]):.0f}d cover vs {threshold:.0f}d target)"
+            )
+            if "Suggest_Close_SKU" in po_df.columns:
+                old = str(po_df.at[idx, "Suggest_Close_SKU"] or "").strip()
+                po_df.at[idx, "Suggest_Close_SKU"] = hint if not old else f"{old}; {hint}"
+
+    return po_df
+
+
 def calculate_po_base(
     sales_df: pd.DataFrame,
     inv_df: pd.DataFrame,
@@ -2734,5 +2800,7 @@ def calculate_po_base(
 
     if stage_timer is not None:
         stage_timer.mark("po logic")
+
+    po_df = _apply_sibling_cut_from_pending(po_df, target_cover_days)
 
     return dedupe_po_rows_by_sku(po_df)
