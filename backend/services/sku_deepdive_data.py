@@ -115,8 +115,8 @@ def _merge_platform_and_sales(plat: pd.DataFrame, sales: pd.DataFrame) -> pd.Dat
     plat_keys = plat[["_skukey", "_day"]].drop_duplicates()
     plat_keys["_in_plat"] = True
     merged = sales.merge(plat_keys, on=["_skukey", "_day"], how="left")
-    extra = sales.loc[merged["_in_plat"].isna()].drop(
-        columns=["_day", "_skukey"], errors="ignore"
+    extra = merged[merged["_in_plat"].isna()].drop(
+        columns=["_day", "_skukey", "_in_plat"], errors="ignore"
     )
     return pd.concat(
         [plat.drop(columns=["_day", "_skukey"], errors="ignore"), extra],
