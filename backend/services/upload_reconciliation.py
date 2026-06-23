@@ -114,7 +114,7 @@ def _metrics_for_df(df: pd.DataFrame, platform: str) -> dict[str, dict[str, floa
     work["_amt"] = _amount_series(work)
     work["_seg"] = _segment_series(work)
     out: dict[str, dict[str, float]] = {}
-    for (month, seg, txn), g in work.groupby(["_month", "_seg", "_txn"], sort=True):
+    for (month, seg, txn), g in work.groupby(["_month", "_seg", "_txn"], sort=True, observed=True):
         key = f"{month}|{seg}|{txn}"
         out[key] = {
             "month": month,
@@ -146,7 +146,21 @@ def _load_upload_df(platform: str, filename: str) -> pd.DataFrame:
 
 
 def _dedup_stats(platform: str) -> dict[str, int]:
-    from .daily_store import _dedup_platform_df, load_platform_data
+    from .daily_store import _dedup_platform_df, get_summary
+
+    summary = get_summary() or {}
+    plat_sum = summary.get(platform) if isinstance(summary.get(platform), dict) else {}
+    est_rows = int(plat_sum.get("total_rows") or 0)
+    # Full concat+dedup on multi-million-row Amazon history blocks the API for minutes.
+    if est_rows > 150_000:
+        return {
+            "raw_rows": est_rows,
+            "deduped_rows": est_rows,
+            "collapsible_rows": 0,
+            "note": "skipped_full_scan",
+        }
+
+    from .daily_store import load_platform_data
 
     raw = load_platform_data(platform, months=None, dedup=False)
     if raw.empty:
