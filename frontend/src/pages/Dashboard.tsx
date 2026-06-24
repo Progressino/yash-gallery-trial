@@ -1115,12 +1115,14 @@ export default function Dashboard() {
     setActivePreset(label)
     void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
     void qc.invalidateQueries({ queryKey: ['intelligence-bundle-full'] })
+    void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
   }
   function onDateStartChange(value: string) {
     beginRangeRefresh()
     setDateStart(value)
     setActivePreset('')
     void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
+    void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
     if (value && value === dateEnd) {
       setShowDsr(true)
       setDsrDate(value)
@@ -1131,6 +1133,7 @@ export default function Dashboard() {
     setDateEnd(value)
     setActivePreset('')
     void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
+    void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
     if (value && value === dateStart) {
       setShowDsr(true)
       setDsrDate(value)
@@ -1173,7 +1176,7 @@ export default function Dashboard() {
         setParitySyncError(res.message || 'Tier-3 sync failed')
         return
       }
-      beginRangeRefresh()
+      void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
       void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
       void qc.invalidateQueries({ queryKey: ['data-parity'] })
     } catch (e) {
@@ -1286,18 +1289,21 @@ export default function Dashboard() {
     if (dashboardReady || hydrateRequested.current) return
     if (dashboardGateReady(coverageSnapshot)) return
     if (intelligenceReadiness?.precomputed_bundle_ready) return
+    if (fetchingSummary) return
     hydrateRequested.current = true
     void cacheHydrateWarm().catch(() => {
       hydrateRequested.current = false
     })
-  }, [dashboardReady, intelligenceReadiness?.precomputed_bundle_ready, coverageSnapshot])
+  }, [dashboardReady, intelligenceReadiness?.precomputed_bundle_ready, coverageSnapshot, fetchingSummary])
 
   useEffect(() => {
     if (dashboardReady) hydrateRequested.current = false
   }, [dashboardReady])
 
   useEffect(() => {
-    if (parityReport && !parityReport.ok) {
+    if (!parityReport?.tier3_sync_mismatch && parityReport?.ok !== false) return
+    // Parity warnings alone must not wipe cached totals — user still needs a fast hero while sync runs.
+    if (parityReport?.tier3_file_count === 0) {
       clearIntelligenceCache()
     }
   }, [parityReport?.ok, parityReport?.tier3_file_count, parityReport?.tier3_sync_mismatch])
@@ -1307,9 +1313,8 @@ export default function Dashboard() {
     if (fresh && bundleHasDisplayData(fresh)) return { bundle: fresh, expired: false }
     const stale = readIntelligenceCacheStale(dateStart, dateEnd, salesBasis)
     if (stale && bundleHasDisplayData(stale.bundle)) return stale
-    if (parityReport && !parityReport.ok) return null
     return null
-  }, [dateStart, dateEnd, salesBasis, parityReport?.ok])
+  }, [dateStart, dateEnd, salesBasis, parityReport?.tier3_file_count])
 
   const cacheExpired = cachedBundleHint?.expired === true
 
@@ -1520,9 +1525,10 @@ export default function Dashboard() {
       (fetchingBundle && !intelligenceCore))
   const bundleLoadActive =
     !hasDisplayData &&
+    !hasSummaryData &&
+    !hasDsrData &&
     ((awaitingFirstBundle && !hasSummaryData && !hasDsrData) ||
-      (rangeRefreshing && (fetchingBundle || loadingBundle)) ||
-      salesRebuildRunning)
+      (rangeRefreshing && (fetchingBundle || loadingBundle)))
 
   useEffect(() => {
     if (!bundleLoadActive) {
@@ -1589,12 +1595,12 @@ export default function Dashboard() {
     bundleKickedRef.current = true
     ;(async () => {
       try {
-        await cacheHydrateWarm()
         await getCoverage({ light: true })
       } catch {
         /* best-effort */
       }
       void qc.invalidateQueries({ queryKey: ['intelligence-readiness'] })
+      void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
       void qc.invalidateQueries({
         queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis, 'core'],
       })

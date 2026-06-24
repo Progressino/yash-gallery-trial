@@ -4055,17 +4055,24 @@ def intelligence_readiness(request: Request):
 
 
 @router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
-def dashboard_summary(
+async def dashboard_summary(
     request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 10,
 ):
     """Compact dashboard aggregates from Tier-3 / PostgreSQL (no session platform copies)."""
+    from ..concurrency import run_aux
     from ..services.dashboard_summary import build_dashboard_summary
 
     sess = _sess(request)
-    payload = build_dashboard_summary(sess, start_date=start_date, end_date=end_date, limit=limit)
+    payload = await run_aux(
+        build_dashboard_summary,
+        sess,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
     return DashboardSummaryResponse(**payload)
 
 
