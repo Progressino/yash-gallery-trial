@@ -4,12 +4,14 @@
 set -euo pipefail
 
 BRANCH=${1:-main}
-COMPOSE="docker compose -f docker-compose.prod.yml"
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
+COMPOSE="docker compose -p ${COMPOSE_PROJECT} -f docker-compose.prod.yml"
 APP_DATA_DIR=${APP_DATA_DIR:-/root/app-data}
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " 🚀 Yash Gallery ERP — Deploy"
 echo "    Branch: $BRANCH"
+echo "    Project: $COMPOSE_PROJECT"
 echo "    APP_DATA_DIR: $APP_DATA_DIR"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 

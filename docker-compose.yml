@@ -1,4 +1,5 @@
 version: "3.9"
+name: progressino-dev
 
 services:
   postgres:

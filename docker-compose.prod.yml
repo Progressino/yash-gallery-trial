@@ -1,11 +1,12 @@
 version: "3.9"
+name: progressino
 
-# Production compose — used on the VPS.
-# Cloudflare sits in front and handles HTTPS → this server serves HTTP on port 80.
+# Production compose — isolated stack (project name: progressino).
+# Does not clash with local dev (progressino-dev) or other compose projects on the VPS.
 #
 # Usage:
 #   cp .env.example .env   # fill in secrets
-#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -p progressino -f docker-compose.prod.yml up -d --build
 
 services:
 

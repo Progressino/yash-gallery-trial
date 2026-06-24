@@ -1,7 +1,11 @@
 """Compact dashboard aggregates from Tier-3 / PostgreSQL (no session frame copy)."""
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
+
+_SUMMARY_CACHE: dict[tuple, dict[str, Any]] = {}
+_SUMMARY_CACHE_TTL_SEC = int(__import__("os").environ.get("DASHBOARD_SUMMARY_CACHE_TTL", "180"))
 
 
 def _compact_platforms(platform_summary: list[dict]) -> dict[str, dict[str, Any]]:
@@ -24,6 +28,16 @@ def _compact_platforms(platform_summary: list[dict]) -> dict[str, dict[str, Any]
             "loaded": bool(row.get("loaded")),
         }
     return out
+
+
+def _summary_cache_key(s: str, e: str, limit: int) -> tuple:
+    try:
+        from ..services.daily_store import get_tier3_sync_token
+
+        tok = tuple(sorted((get_tier3_sync_token() or {}).items()))
+    except Exception:
+        tok = ()
+    return (s, e, int(limit), tok)
 
 
 def _summary_from_pg(start_date: str, end_date: str, limit: int) -> dict[str, Any] | None:
@@ -101,32 +115,47 @@ def build_dashboard_summary(
 ) -> dict[str, Any]:
     """
     Lightweight dashboard aggregates — Tier-3 / PG first, never requires session platform copies.
+    Uses headline-only Tier-3 path (totals + daily chart points, no monthly/state rollup).
     """
     s = str(start_date or "")[:10]
     e = str(end_date or "")[:10]
     has_window = len(s) == 10 and len(e) == 10
 
     if has_window:
+        cache_key = _summary_cache_key(s, e, limit)
+        hit = _SUMMARY_CACHE.get(cache_key)
+        if hit and (time.time() - float(hit.get("_ts", 0))) < _SUMMARY_CACHE_TTL_SEC:
+            return {k: v for k, v in hit.items() if k != "_ts"}
+
         try:
             from ..routers.data import _build_intelligence_bundle_payload_from_tier3
 
             tier3 = _build_intelligence_bundle_payload_from_tier3(
-                sess, s, e, int(limit), "gross", include_extras=False
+                sess,
+                s,
+                e,
+                int(limit),
+                "gross",
+                include_extras=False,
+                headline_only=True,
             )
             if tier3 and tier3.get("platform_summary"):
-                return {
+                payload = {
                     "source": "tier3_sqlite",
                     "platforms": _compact_platforms(tier3.get("platform_summary") or []),
                     "platform_summary": tier3.get("platform_summary") or [],
                     "top_skus": tier3.get("top_skus") or [],
                     "sales_summary": tier3.get("sales_summary") or {},
-                    "data_completeness": tier3.get("data_completeness") or "full",
+                    "data_completeness": "partial",
                 }
+                _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
+                return payload
         except Exception:
             pass
 
         pg = _summary_from_pg(s, e, limit)
         if pg:
+            _SUMMARY_CACHE[cache_key] = {**pg, "_ts": time.time()}
             return pg
 
     pg_counts = {}

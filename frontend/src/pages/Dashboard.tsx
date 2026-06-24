@@ -1232,6 +1232,13 @@ export default function Dashboard() {
   }, [summaryBundle])
 
   useEffect(() => {
+    if (summaryFetched && !fetchingSummary) {
+      rangeRefreshingRef.current = false
+      setRangeRefreshing(false)
+    }
+  }, [summaryFetched, fetchingSummary])
+
+  useEffect(() => {
     if (isSingleDay && dateStart) {
       setShowDsr(true)
       setDsrDate(dateStart)
@@ -1265,8 +1272,8 @@ export default function Dashboard() {
   const { data: intelligenceReadiness } = useQuery({
     queryKey: ['intelligence-readiness'],
     queryFn: () => getIntelligenceReadiness({ timeout: 90_000 }),
-    refetchInterval: q => (q.state.data?.dashboard_ready ? false : 2_000),
-    staleTime: 0,
+    refetchInterval: q => (q.state.data?.dashboard_ready ? false : 8_000),
+    staleTime: 30_000,
   })
 
   const dashboardReady =
@@ -1277,12 +1284,13 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (dashboardReady || hydrateRequested.current) return
+    if (dashboardGateReady(coverageSnapshot)) return
     if (intelligenceReadiness?.precomputed_bundle_ready) return
     hydrateRequested.current = true
     void cacheHydrateWarm().catch(() => {
       hydrateRequested.current = false
     })
-  }, [dashboardReady, intelligenceReadiness?.precomputed_bundle_ready])
+  }, [dashboardReady, intelligenceReadiness?.precomputed_bundle_ready, coverageSnapshot])
 
   useEffect(() => {
     if (dashboardReady) hydrateRequested.current = false
@@ -1471,11 +1479,22 @@ export default function Dashboard() {
     if (merged && bundleHasDisplayData(merged) && merged.data_completeness !== 'partial') {
       return merged
     }
-    if (merged && bundleHasDisplayData(merged)) return merged
-    if (isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle)) return dsrBundle
     if (summaryBundle && bundleHasDisplayData(summaryBundle)) return summaryBundle
+    if (isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle)) return dsrBundle
+    if (merged && bundleHasDisplayData(merged)) return merged
+    if (cachedBundleHint && bundleHasDisplayData(cachedBundleHint.bundle)) {
+      return cachedBundleHint.bundle
+    }
     return merged ?? dsrBundle ?? summaryBundle
-  }, [intelligenceCore, intelligenceFull, intelligenceExtras, summaryBundle, dsrBundle, isSingleDay])
+  }, [
+    intelligenceCore,
+    intelligenceFull,
+    intelligenceExtras,
+    summaryBundle,
+    dsrBundle,
+    isSingleDay,
+    cachedBundleHint,
+  ])
 
   const bundleWarming = intelligenceBundle?.status === 'warming'
   const bundlePartial = intelligenceBundle?.data_completeness === 'partial'
@@ -1527,10 +1546,12 @@ export default function Dashboard() {
   const bundleLoadPercent = bundleLoadActive
     ? hasDisplayData && !fetchingBundle && !loadingBundle
       ? 100
-      : (fetchingBundle || loadingBundle) && bundleLoadElapsedMs > estimateIntelligenceBundleLoadMs(bundleSpanDays)
+      : fetchingSummary
+        ? Math.min(95, ((bundleLoadElapsedMs / Math.max(summaryTimeoutMs, 1)) * 100))
+        : (fetchingBundle || loadingBundle) && bundleLoadElapsedMs > estimateIntelligenceBundleLoadMs(bundleSpanDays)
         ? 99
         : Math.min(
-            fetchingBundle || loadingBundle ? 98 : 100,
+            fetchingBundle || loadingBundle || fetchingSummary ? 98 : 100,
             (bundleLoadElapsedMs / estimateIntelligenceBundleLoadMs(bundleSpanDays)) * 100,
           )
     : 100

@@ -1306,6 +1306,8 @@ def _compute_platform_metrics(
     refund_val: str = "Refund",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    *,
+    headline_only: bool = False,
 ) -> dict:
     """Shared computation for a single platform DataFrame."""
     stub = {
@@ -1341,6 +1343,26 @@ def _compute_platform_metrics(
         total_units   = int(qty[shipped_mask].sum())
         total_returns = int(qty[refund_mask].sum())
         return_rate   = round(total_returns / total_units * 100, 1) if total_units > 0 else 0.0
+        net_units = total_units - total_returns
+
+        if headline_only:
+            daily: List[dict] = []
+            if intelligence_daily_chart_enabled(start_date, end_date):
+                daily = _daily_shipment_records(d["_Date"], qty, shipped_mask, refund_mask)
+            return {
+                "platform": platform_name,
+                "loaded": True,
+                "total_units": total_units,
+                "total_returns": total_returns,
+                "net_units": net_units,
+                "return_rate": return_rate,
+                "top_sku": "",
+                "trend_direction": "flat",
+                "trend_direction_net": "flat",
+                "monthly": [],
+                "daily": daily,
+                "by_state": [],
+            }
 
         # Top SKU
         top_grp = d[shipped_mask].copy()

@@ -1747,6 +1747,7 @@ def _intelligence_payload_from_tier3_direct(
     basis: Optional[str],
     *,
     platforms: Optional[list[str]] = None,
+    headline_only: bool = False,
 ) -> tuple:
     """
     Build dashboard metrics straight from Tier-3 SQLite (Upload tab source of truth).
@@ -1796,6 +1797,7 @@ def _intelligence_payload_from_tier3_direct(
                     txn_col,
                     start_date=s,
                     end_date=e,
+                    headline_only=headline_only,
                 )
             )
         except Exception:
@@ -1817,27 +1819,29 @@ def _intelligence_payload_from_tier3_direct(
     }
 
     sales_for_bundle = pd.DataFrame()
-    _ensure_sku_mapping_for_dashboard(sess)
-    span = _report_span_days(s, e) or 999
-    if span <= _intelligence_fast_window_days() and all_frames and sess.sku_mapping:
-        try:
-            built = _build_sales_from_tier3_frames(sess, all_frames)
-            sales_for_bundle = _slice_sales_for_bundle(built, s, e)
-        except Exception:
-            _log.exception("tier3 direct sales build failed for %s..%s", s, e)
-            sales_for_bundle = pd.DataFrame()
+    top_skus: list = []
+    if not headline_only:
+        _ensure_sku_mapping_for_dashboard(sess)
+        span = _report_span_days(s, e) or 999
+        if span <= _intelligence_fast_window_days() and all_frames and sess.sku_mapping:
+            try:
+                built = _build_sales_from_tier3_frames(sess, all_frames)
+                sales_for_bundle = _slice_sales_for_bundle(built, s, e)
+            except Exception:
+                _log.exception("tier3 direct sales build failed for %s..%s", s, e)
+                sales_for_bundle = pd.DataFrame()
 
-    top_skus = (
-        get_top_skus(
-            sales_for_bundle,
-            limit=limit,
-            start_date=None,
-            end_date=None,
-            basis=basis or "gross",
+        top_skus = (
+            get_top_skus(
+                sales_for_bundle,
+                limit=limit,
+                start_date=None,
+                end_date=None,
+                basis=basis or "gross",
+            )
+            if not sales_for_bundle.empty
+            else []
         )
-        if not sales_for_bundle.empty
-        else []
-    )
 
     mtr, myntra, meesho, flipkart, snapdeal = _bundle_platform_frames(sess, all_frames)
     return (
@@ -1912,6 +1916,8 @@ def _tier3_direct_has_units(
     sess: AppSession,
     limit: int,
     basis: Optional[str],
+    *,
+    headline_only: bool = False,
 ) -> tuple | None:
     """
     If Tier-3 has shipment units for the window, return the direct payload tuple; else None.
@@ -1924,7 +1930,9 @@ def _tier3_direct_has_units(
     if not uploaded:
         # Metadata overlap query can lag; still attempt all channels for the window.
         uploaded = ["amazon", "myntra", "meesho", "flipkart", "snapdeal"]
-    out = _intelligence_payload_from_tier3_direct(sess, s, e, limit, basis, platforms=uploaded)
+    out = _intelligence_payload_from_tier3_direct(
+        sess, s, e, limit, basis, platforms=uploaded, headline_only=headline_only
+    )
     if int(out[0].get("total_units") or 0) <= 0:
         return None
     return out
@@ -2284,11 +2292,15 @@ def _build_intelligence_bundle_payload_from_tier3(
     limit: int,
     basis: Optional[str],
     include_extras: bool,
+    *,
+    headline_only: bool = False,
 ) -> dict | None:
     """Fast path: full Intelligence bundle JSON from Tier-3 only (no session sales scan)."""
     import pandas as pd
 
-    t3 = _tier3_direct_has_units(start_date, end_date, sess, limit, basis)
+    t3 = _tier3_direct_has_units(
+        start_date, end_date, sess, limit, basis, headline_only=headline_only
+    )
     if t3 is None:
         return None
     (
