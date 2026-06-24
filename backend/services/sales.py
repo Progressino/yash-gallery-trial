@@ -5,7 +5,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Literal, Optional, Set
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -1297,6 +1297,82 @@ def get_top_skus(
 
 # ── AI Dashboard helpers ───────────────────────────────────────────────────────
 
+def _refund_units_in_frame(
+    df: pd.DataFrame,
+    txn_col: str,
+    refund_val: str = "Refund",
+) -> int:
+    if df is None or df.empty or txn_col not in df.columns:
+        return 0
+    txn = df[txn_col].astype(str).str.strip()
+    qty = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+    return int(qty[txn == refund_val].sum())
+
+
+def _native_refunds_from_unified_sales(
+    sales_df: Optional[pd.DataFrame],
+    platform_name: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> int:
+    """Marketplace Refund rows from unified sales (excludes PO return-sheet injection)."""
+    if sales_df is None or sales_df.empty:
+        return 0
+    if not {"Source", "Transaction Type", "Quantity", "TxnDate"}.issubset(sales_df.columns):
+        return 0
+    prep = sales_df.copy()
+    prep["TxnDate"] = txn_reporting_naive_ist(prep["TxnDate"])
+    prep = prep.dropna(subset=["TxnDate"])
+    if start_date or end_date:
+        prep = _filter_by_reporting_days(prep, "TxnDate", start_date, end_date)
+    if prep.empty:
+        return 0
+    src = prep["Source"].astype(str).str.strip() == platform_name
+    txn = prep["Transaction Type"].astype(str).str.strip() == "Refund"
+    oid = (
+        prep["OrderId"].astype(str).str.strip()
+        if "OrderId" in prep.columns
+        else pd.Series("", index=prep.index, dtype=str)
+    )
+    native = src & txn & ~oid.eq(RETURN_SHEET_ORDER_PLACEHOLDER)
+    return int(pd.to_numeric(prep.loc[native, "Quantity"], errors="coerce").fillna(0).sum())
+
+
+def _apply_return_totals_to_platform_card(card: dict, total_returns: int) -> dict:
+    out = dict(card)
+    ship = int(out.get("total_units") or 0)
+    ret = max(int(out.get("total_returns") or 0), int(total_returns or 0))
+    if ret <= int(out.get("total_returns") or 0):
+        return out
+    out["total_returns"] = ret
+    out["net_units"] = ship - ret
+    out["return_rate"] = round(ret / ship * 100, 1) if ship > 0 else 0.0
+    return out
+
+
+def enrich_platform_summaries_with_all_returns(
+    summaries: List[dict],
+    sales_df: Optional[pd.DataFrame],
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> List[dict]:
+    """
+    Raise platform return counts using unified sales refunds when uploads already
+    contain them but the active platform frame under-counted (no double-count:
+    takes max of card vs unified native refunds per platform).
+    """
+    if not summaries:
+        return summaries
+    out: List[dict] = []
+    for card in summaries:
+        name = str(card.get("platform") or "")
+        unified_ret = _native_refunds_from_unified_sales(
+            sales_df, name, start_date, end_date
+        )
+        out.append(_apply_return_totals_to_platform_card(card, unified_ret))
+    return out
+
+
 def _compute_platform_metrics(
     df: pd.DataFrame,
     platform_name: str,
@@ -1308,6 +1384,7 @@ def _compute_platform_metrics(
     end_date: Optional[str] = None,
     *,
     headline_only: bool = False,
+    refund_scope: Literal["calendar", "upload_blob"] = "calendar",
 ) -> dict:
     """Shared computation for a single platform DataFrame."""
     stub = {
@@ -1329,26 +1406,36 @@ def _compute_platform_metrics(
         if d.empty:
             return stub
 
+        d_blob = d
         if start_date or end_date:
-            d = _filter_by_reporting_days(d, "_Date", start_date, end_date)
-        if d.empty:
-            # Platform IS loaded but has no data in this date window — show as loaded with 0
+            d_win = _filter_by_reporting_days(d, "_Date", start_date, end_date)
+        else:
+            d_win = d
+
+        if d_win.empty and _refund_units_in_frame(d_blob, txn_col, refund_val) <= 0:
             stub["loaded"] = True
             return stub
 
-        shipped_mask  = d[txn_col].astype(str).str.strip() == ship_val
-        refund_mask   = d[txn_col].astype(str).str.strip() == refund_val
-        qty           = pd.to_numeric(d["Quantity"], errors="coerce").fillna(0)
+        ref_df = d_blob if refund_scope == "upload_blob" else d_win
+        ship_df = d_win if not d_win.empty else d_blob
 
-        total_units   = int(qty[shipped_mask].sum())
-        total_returns = int(qty[refund_mask].sum())
+        shipped_mask  = ship_df[txn_col].astype(str).str.strip() == ship_val
+        refund_mask   = ref_df[txn_col].astype(str).str.strip() == refund_val
+        qty_ship      = pd.to_numeric(ship_df["Quantity"], errors="coerce").fillna(0)
+        qty_ref       = pd.to_numeric(ref_df["Quantity"], errors="coerce").fillna(0)
+
+        total_units   = int(qty_ship[shipped_mask].sum())
+        total_returns = int(qty_ref[refund_mask].sum())
         return_rate   = round(total_returns / total_units * 100, 1) if total_units > 0 else 0.0
         net_units = total_units - total_returns
 
         if headline_only:
             daily: List[dict] = []
-            if intelligence_daily_chart_enabled(start_date, end_date):
-                daily = _daily_shipment_records(d["_Date"], qty, shipped_mask, refund_mask)
+            if intelligence_daily_chart_enabled(start_date, end_date) and not d_win.empty:
+                q_win = pd.to_numeric(d_win["Quantity"], errors="coerce").fillna(0)
+                sm = d_win[txn_col].astype(str).str.strip() == ship_val
+                rm = d_win[txn_col].astype(str).str.strip() == refund_val
+                daily = _daily_shipment_records(d_win["_Date"], q_win, sm, rm)
             return {
                 "platform": platform_name,
                 "loaded": True,
@@ -1363,6 +1450,12 @@ def _compute_platform_metrics(
                 "daily": daily,
                 "by_state": [],
             }
+
+        # Full analytics path — shipments/monthly/daily use the calendar window.
+        d = d_win if not d_win.empty else ship_df
+        qty = qty_ship
+        shipped_mask = d[txn_col].astype(str).str.strip() == ship_val
+        refund_mask_win = d[txn_col].astype(str).str.strip() == refund_val
 
         # Top SKU
         top_grp = d[shipped_mask].copy()
@@ -1434,8 +1527,8 @@ def _compute_platform_metrics(
                 .groupby("State")["_qty"].sum()
             )
             ret_st = (
-                d[refund_mask].copy()
-                .assign(_qty=qty[refund_mask].values)
+                d[refund_mask_win].copy()
+                .assign(_qty=qty[refund_mask_win].values)
                 .groupby("State")["_qty"].sum()
             )
             for stname in ship_st.index.union(ret_st.index):
@@ -1446,7 +1539,7 @@ def _compute_platform_metrics(
 
         daily: List[dict] = []
         if intelligence_daily_chart_enabled(start_date, end_date):
-            daily = _daily_shipment_records(d["_Date"], qty, shipped_mask, refund_mask)
+            daily = _daily_shipment_records(d["_Date"], qty, shipped_mask, refund_mask_win)
 
         return {
             "platform": platform_name, "loaded": True,
@@ -1501,9 +1594,11 @@ def _platform_summary_from_raw_frame(
     raw_df: pd.DataFrame,
     start_date: Optional[str],
     end_date: Optional[str],
+    *,
+    refund_scope: Literal["calendar", "upload_blob"] = "calendar",
 ) -> dict:
     """Platform card from session/Tier-3 frame (used when unified sales lag uploads)."""
-    kwargs = dict(start_date=start_date, end_date=end_date)
+    kwargs = dict(start_date=start_date, end_date=end_date, refund_scope=refund_scope)
     if platform_name == "Amazon":
         mtr = raw_df.copy()
         if not mtr.empty and "Date" in mtr.columns:
@@ -2073,13 +2168,15 @@ def get_platform_summary(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     sales_df: Optional[pd.DataFrame] = None,
+    *,
+    refund_scope: Literal["calendar", "upload_blob"] = "calendar",
 ) -> List[dict]:
     """Returns 5 platform summary dicts (always 5, even for unloaded platforms)."""
     _snapdeal = snapdeal_df if snapdeal_df is not None else pd.DataFrame()
 
     if sales_df is not None and not sales_df.empty:
         sales_df = apply_upload_report_day_gate(sales_df)
-        return _platform_summaries_from_unified_bulk(
+        summaries = _platform_summaries_from_unified_bulk(
             sales_df,
             mtr_df,
             myntra_df,
@@ -2089,13 +2186,16 @@ def get_platform_summary(
             start_date,
             end_date,
         )
+        return enrich_platform_summaries_with_all_returns(
+            summaries, sales_df, start_date, end_date
+        )
 
     # Legacy: raw platform frames only (differs from unified export when dedup/mapping changes rows)
     mtr = mtr_df.copy() if not mtr_df.empty else mtr_df
     if not mtr.empty and "Date" in mtr.columns:
         mtr["_Date"] = mtr["Date"]
 
-    kwargs = dict(start_date=start_date, end_date=end_date)
+    kwargs = dict(start_date=start_date, end_date=end_date, refund_scope=refund_scope)
     return [
         _compute_platform_metrics(mtr,        "Amazon",   "SKU",     "Transaction_Type", **kwargs),
         _compute_platform_metrics(myntra_df,   "Myntra",   "OMS_SKU", "TxnType",          **kwargs),

@@ -1271,6 +1271,8 @@ def _platform_df_for_intelligence_bundle(
         merged = t3
     else:
         merged = merge_platform_data(raw, t3, platform_key)
+    txn_col = "Transaction_Type" if platform_key == "amazon" else "TxnType"
+    merged = _merge_missing_refund_rows(merged, raw, txn_col)
     if _filter_platform_df_by_window(merged, s, e).empty and not in_w.empty:
         return raw
     return merged if not merged.empty else raw
@@ -1439,6 +1441,48 @@ def _ensure_return_overlay_hydrated(sess: AppSession) -> None:
         pass
 
 
+def _merge_missing_refund_rows(
+    primary: "pd.DataFrame",
+    secondary: "pd.DataFrame",
+    txn_col: str = "TxnType",
+) -> "pd.DataFrame":
+    """When Tier-3 gap-fill has shipments only, pull Refund rows from session bulk uploads."""
+    import pandas as pd
+
+    if primary is None or (hasattr(primary, "empty") and primary.empty):
+        return secondary if secondary is not None else pd.DataFrame()
+    if secondary is None or not hasattr(secondary, "empty") or secondary.empty:
+        return primary
+    if txn_col not in primary.columns or txn_col not in secondary.columns:
+        return primary
+    prim_txn = primary[txn_col].astype(str).str.strip()
+    if (prim_txn == "Refund").any():
+        return primary
+    extra = secondary[secondary[txn_col].astype(str).str.strip().isin(["Refund", "ReturnCancel"])]
+    if extra.empty:
+        return primary
+    return pd.concat([primary, extra], ignore_index=True)
+
+
+def _sales_slice_for_intelligence_returns(
+    sess: AppSession,
+    start_date: str,
+    end_date: str,
+) -> "pd.DataFrame | None":
+    """Light unified-sales slice for return enrichment (no full session copy)."""
+    import pandas as pd
+
+    from ..services.sales import apply_upload_report_day_gate
+
+    sales = getattr(sess, "sales_df", None)
+    if sales is None or not hasattr(sales, "empty") or sales.empty:
+        return None
+    gated = apply_upload_report_day_gate(sales)
+    if gated is None or gated.empty:
+        return None
+    return _slice_sales_for_bundle(gated, start_date, end_date)
+
+
 def _apply_return_overlay_to_intelligence_bundle(
     sess: AppSession,
     platform_summary: list,
@@ -1452,6 +1496,7 @@ def _apply_return_overlay_to_intelligence_bundle(
     from ..services.po_return_import import aggregate_return_overlay_for_use
     from ..services.sales import (
         RETURN_SHEET_SOURCE,
+        enrich_platform_summaries_with_all_returns,
         merge_return_data_into_platform_summaries,
     )
 
@@ -1463,7 +1508,10 @@ def _apply_return_overlay_to_intelligence_bundle(
         if sales_for_returns is not None
         and hasattr(sales_for_returns, "empty")
         and not sales_for_returns.empty
-        else None
+        else _sales_slice_for_intelligence_returns(sess, s, e)
+    )
+    platform_summary = enrich_platform_summaries_with_all_returns(
+        platform_summary, sales_slice, s, e
     )
     platform_summary = merge_return_data_into_platform_summaries(
         platform_summary,
@@ -1612,7 +1660,7 @@ def _build_platform_summary_for_bundle(
 
     s = str(start_date)[:10]
     e = str(end_date)[:10]
-    kwargs = dict(start_date=s, end_date=e)
+    kwargs = dict(start_date=s, end_date=e, refund_scope="upload_blob")
     platform_summary = get_platform_summary(
         mtr_b,
         myntra_b,
@@ -1811,6 +1859,7 @@ def _intelligence_payload_from_tier3_direct(
                     start_date=s,
                     end_date=e,
                     headline_only=headline_only,
+                    refund_scope="upload_blob",
                 )
             )
         except Exception:
