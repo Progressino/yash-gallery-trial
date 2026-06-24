@@ -78,7 +78,7 @@ services:
       # platform DataFrames into memory on every session restore (prevents OOM on 5.5 GB VPS).
       # The warm cache disk already contains full bulk history; only recent deltas are needed.
       - AUTO_RESTORE_MONTHS=1
-      - SESSION_MAX_ACTIVE=4
+      - SESSION_MAX_ACTIVE=12
       # Disable background Intelligence bundle precompute on startup to prevent a concurrent
       # 1-2 GB build_sales_df spike while session hydration is also running. The bundle is
       # built on first request (2-3s delay) rather than consuming an extra 1-2 GB at startup.
